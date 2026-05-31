@@ -3018,17 +3018,25 @@ const stress{i} = 'init'
         });
     }
 
-    let done = Arc::new(AtomicBool::new(false));
-    let mut handles = Vec::new();
+    // Each writer performs a FIXED number of edits then exits. This
+    // bounds the stress workload deterministically (file_count *
+    // EDITS_PER_WRITER edits interleaved with the readers) instead of
+    // running for a fixed 500ms wall-clock window whose actual work
+    // count varied with machine speed. A real deadlock still surfaces:
+    // a stuck writer never finishes and trips the 10s join watchdog.
+    const EDITS_PER_WRITER: i32 = 50;
 
-    // Spawn writer threads: each edits its assigned file in a loop
+    let done = Arc::new(AtomicBool::new(false));
+    let mut writer_handles = Vec::new();
+    let mut reader_handles = Vec::new();
+
+    // Spawn writer threads: each edits its assigned file EDITS_PER_WRITER
+    // times, then exits.
     for (i, uri) in uris.iter().enumerate() {
         let reg = Arc::clone(&registry);
         let uri = uri.clone();
-        let done = Arc::clone(&done);
-        handles.push(std::thread::spawn(move || {
-            let mut version = 2i32;
-            while !done.load(Ordering::Relaxed) {
+        writer_handles.push(std::thread::spawn(move || {
+            for version in 2..(2 + EDITS_PER_WRITER) {
                 let source = format!(
                     r#"<script setup lang="ts">
 const stress{i} = 'v{version}'
@@ -3045,17 +3053,17 @@ const stress{i} = 'v{version}'
                         text: source,
                     }],
                 );
-                version += 1;
             }
         }));
     }
 
     // Spawn reader threads: continuously read TSX/analysis from all files
+    // until the writers have finished.
     for _ in 0..4 {
         let reg = Arc::clone(&registry);
         let uris = uris.clone();
         let done = Arc::clone(&done);
-        handles.push(std::thread::spawn(move || {
+        reader_handles.push(std::thread::spawn(move || {
             while !done.load(Ordering::Relaxed) {
                 for uri in &uris {
                     let _ = reg.get_ide(uri);
@@ -3066,21 +3074,26 @@ const stress{i} = 'v{version}'
         }));
     }
 
-    // Let the stress test run for 500ms
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    done.store(true, Ordering::Relaxed);
-
-    // All threads must join without deadlock — 10s hard timeout per thread
-    for (i, handle) in handles.into_iter().enumerate() {
-        // Use a watchdog: if join doesn't return in 10s, it's a deadlock
+    // Join the writers first (they self-terminate after their fixed edit
+    // count), then signal readers to stop. All threads must join without
+    // deadlock — a 10s hard watchdog per thread turns any deadlock into a
+    // loud panic rather than a silent hang.
+    let join_with_watchdog = |handle: std::thread::JoinHandle<()>, idx: usize| {
         let watchdog = std::thread::spawn(move || {
             handle
                 .join()
-                .unwrap_or_else(|_| panic!("thread {i} panicked"));
+                .unwrap_or_else(|_| panic!("thread {idx} panicked"));
         });
-        // If this times out, there's a deadlock in the host locking
         let result = watchdog.join();
-        assert!(result.is_ok(), "thread {i} deadlocked or panicked");
+        assert!(result.is_ok(), "thread {idx} deadlocked or panicked");
+    };
+
+    for (i, handle) in writer_handles.into_iter().enumerate() {
+        join_with_watchdog(handle, i);
+    }
+    done.store(true, Ordering::Relaxed);
+    for (i, handle) in reader_handles.into_iter().enumerate() {
+        join_with_watchdog(handle, i);
     }
 
     // Verify all files are in a consistent state
@@ -3598,6 +3611,7 @@ async fn debounced_sync_only_syncs_latest() {
     let tsx_path = "C:/project/src/App.vue.tsx".to_string();
 
     // Simulate 5 rapid "changes" — each increments gen and spawns a debounced task
+    let mut handles = Vec::new();
     for i in 0..5u64 {
         needs_sync.insert(canonical_id.clone());
         let gen = {
@@ -3611,18 +3625,24 @@ async fn debounced_sync_only_syncs_latest() {
         let cid = canonical_id.clone();
         let path = tsx_path.clone();
         let content = format!("version {i}");
-        tokio::spawn(async move {
+        handles.push(tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             if gen_map.get(&cid).map(|v| *v) != Some(gen) {
                 return; // Stale
             }
             let _ = sync_clone.sync_tsx(&path, &content).await;
             needs_clone.remove(&cid);
-        });
+        }));
     }
 
-    // Wait for debounce to complete
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Deterministically wait for every debounced task to run to
+    // completion (its debounce delay + the supersession check + any
+    // sync), then assert on the settled call set. Joining the spawned
+    // tasks replaces a fixed 300ms "hope they're done" sleep — under
+    // load a task could outlast the window and the call count would race.
+    for h in handles {
+        h.await.expect("debounced task joined");
+    }
 
     let calls = mock.file_sync_calls();
     assert_eq!(
@@ -3661,13 +3681,17 @@ async fn debounced_sync_skipped_when_superseded() {
     // Spawn debounced task with gen=1
     needs_sync.insert(canonical_id.clone());
     sync_gen.insert(canonical_id.clone(), 1);
-    {
+    // Immediately bump gen to 2 (simulating another keystroke) BEFORE
+    // the task's debounce delay elapses, so the gen=1 task observes the
+    // supersession and skips its sync. The bump happens before the
+    // spawn yields, guaranteeing the ordering deterministically.
+    let handle = {
         let sync_clone = sync.clone();
         let needs_clone = Arc::clone(&needs_sync);
         let gen_map = Arc::clone(&sync_gen);
         let cid = canonical_id.clone();
         let path = tsx_path.clone();
-        tokio::spawn(async move {
+        let h = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             if gen_map.get(&cid).map(|v| *v) != Some(1) {
                 return; // Stale
@@ -3675,13 +3699,14 @@ async fn debounced_sync_skipped_when_superseded() {
             let _ = sync_clone.sync_tsx(&path, "stale").await;
             needs_clone.remove(&cid);
         });
-    }
+        sync_gen.insert(canonical_id.clone(), 2);
+        h
+    };
 
-    // Immediately bump gen to 2 (simulating another keystroke), but don't spawn a task
-    sync_gen.insert(canonical_id.clone(), 2);
-
-    // Wait for debounce window to pass
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Deterministically wait for the superseded task to run to
+    // completion, then assert no sync fired. Joining the task replaces a
+    // fixed 300ms sleep that could race the task under load.
+    handle.await.expect("debounced task joined");
 
     let calls = mock.file_sync_calls();
     assert!(
@@ -3764,6 +3789,7 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
     let tsx_path = "C:/project/src/App.vue.tsx".to_string();
 
     // Simulate 5 rapid changes (each marks dirty + increments gen + spawns debounced task)
+    let mut handles = Vec::new();
     for i in 0..5u64 {
         needs_sync.insert(canonical_id.clone());
         let gen = {
@@ -3777,24 +3803,29 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
         let cid = canonical_id.clone();
         let path = tsx_path.clone();
         let content = format!("version {i}");
-        tokio::spawn(async move {
+        handles.push(tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             if gen_map.get(&cid).map(|v| *v) != Some(gen) {
                 return;
             }
             let _ = sync_clone.sync_tsx(&path, &content).await;
             needs_clone.remove(&cid);
-        });
+        }));
     }
 
     // Immediately after the 5th change, simulate the completion flush
-    // (ensure_provider_synced equivalent)
+    // (ensure_provider_synced equivalent). This runs before any
+    // debounced task's delay elapses, so it is the first sync call.
     if needs_sync.remove(&canonical_id).is_some() {
         let _ = sync.sync_tsx(&tsx_path, "latest for completion").await;
     }
 
-    // Wait for debounce tasks to resolve (they should all be skipped since dirty flag is cleared)
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Deterministically wait for every debounced task to resolve, then
+    // assert on the settled call set. Joining the tasks replaces a fixed
+    // 300ms sleep that could race the tasks under load.
+    for h in handles {
+        h.await.expect("debounced task joined");
+    }
 
     let calls = mock.file_sync_calls();
     // The flush sync + possibly the last debounced task that sees gen=5
@@ -3967,7 +3998,7 @@ fn consecutive_failure_counter_tracks_correctly() {
 #[test]
 fn rwlock_contention_starves_runtime() {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -3995,9 +4026,15 @@ fn rwlock_contention_starves_runtime() {
         });
     }
 
-    // Wait until both worker threads are blocked on the lock.
+    // Wait (bounded) until both worker threads are blocked on the lock.
+    // Panics on a real stall instead of spinning forever.
+    let block_deadline = Instant::now() + Duration::from_secs(10);
     while started.load(Ordering::SeqCst) < 2 {
-        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            Instant::now() < block_deadline,
+            "timed out waiting for both worker tasks to reach the blocking lock"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
     // Both workers have reached lock.lock() and are now blocked.
 
@@ -4008,9 +4045,14 @@ fn rwlock_contention_starves_runtime() {
         canary_flag.store(true, Ordering::SeqCst);
     });
 
-    // Give the canary plenty of time to run (500ms).
-    // If a worker thread were free, it would run in microseconds.
-    std::thread::sleep(Duration::from_millis(500));
+    // Negative-evidence window: the test thread holds `guard`, so BOTH
+    // worker tasks are permanently parked on `lock.lock()` and no worker
+    // can pick up the canary. The canary therefore cannot run for as
+    // long as the guard is held — this is a deterministic outcome, not a
+    // timing gamble. A short bounded window gives the runtime a fair
+    // scheduling opportunity to (fail to) run the canary before we
+    // assert.
+    std::thread::sleep(Duration::from_millis(100));
 
     // ASSERT: canary did NOT run — all worker threads are blocked → runtime starved.
     assert!(
@@ -4021,14 +4063,19 @@ fn rwlock_contention_starves_runtime() {
          handlers → all workers blocked → server completely unresponsive."
     );
 
-    // Cleanup: release the lock → workers unblock → canary runs → runtime recovers.
+    // Cleanup: release the lock → workers unblock → canary runs → runtime
+    // recovers. Poll for the canary deterministically instead of sleeping
+    // a fixed window; panic on a real hang.
     drop(guard);
-    std::thread::sleep(Duration::from_millis(200));
-
-    assert!(
-        canary_ran.load(Ordering::SeqCst),
-        "canary should run after the blocking lock is released"
-    );
+    let recover_deadline = Instant::now() + Duration::from_secs(10);
+    while !canary_ran.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < recover_deadline,
+            "canary should run after the blocking lock is released, but it \
+             never did within the recovery window"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// Proves the fix: serializing `did_change` handlers with `tokio::sync::Mutex`
@@ -4044,7 +4091,7 @@ fn rwlock_contention_starves_runtime() {
 #[test]
 fn serialized_handlers_prevent_runtime_starvation() {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -4074,9 +4121,15 @@ fn serialized_handlers_prevent_runtime_starvation() {
         });
     }
 
-    // Wait for exactly 1 task to reach the blocking lock (the other is yielded).
+    // Wait (bounded) for exactly 1 task to reach the blocking lock (the
+    // other is yielded). Panics on a real stall instead of spinning.
+    let start_deadline = Instant::now() + Duration::from_secs(10);
     while started.load(Ordering::SeqCst) < 1 {
-        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            Instant::now() < start_deadline,
+            "timed out waiting for the first task to reach the blocking lock"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
     // Task 1: blocked on lock (worker 1 blocked)
     // Task 2: awaiting tokio_mutex (worker 2 FREE — yielded back to scheduler)
@@ -4087,15 +4140,19 @@ fn serialized_handlers_prevent_runtime_starvation() {
         canary_flag.store(true, Ordering::SeqCst);
     });
 
-    std::thread::sleep(Duration::from_millis(500));
-
-    // ASSERT: canary DID run — worker 2 is free because tokio::sync::Mutex yields.
-    assert!(
-        canary_ran.load(Ordering::SeqCst),
-        "FIX VERIFIED: canary task ran because tokio::sync::Mutex serialization \
-         ensures only 1 worker thread is blocked at a time, leaving the other \
-         free for canary tasks (completions, timers, heartbeats)."
-    );
+    // ASSERT: canary DID run — worker 2 is free because tokio::sync::Mutex
+    // yields. Poll for the canary deterministically (panic on a real
+    // hang) instead of sleeping a fixed window and hoping.
+    let canary_deadline = Instant::now() + Duration::from_secs(10);
+    while !canary_ran.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < canary_deadline,
+            "FIX VERIFIED expectation FAILED: canary task should have run \
+             because tokio::sync::Mutex serialization keeps one worker thread \
+             free, but it never ran within the window."
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 
     drop(guard);
 }
@@ -4254,7 +4311,7 @@ function reset() {{ count.value = 0 }}
 #[test]
 fn runtime_liveness_under_blocking_host_operations() {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -4310,9 +4367,15 @@ const msg = ref('hello')
         });
     }
 
-    // Wait until both worker threads are blocked
+    // Wait (bounded) until both worker threads are blocked. Panics on a
+    // real stall instead of spinning forever.
+    let block_deadline = Instant::now() + Duration::from_secs(10);
     while started.load(Ordering::SeqCst) < 2 {
-        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            Instant::now() < block_deadline,
+            "timed out waiting for both worker tasks to block on the gate"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
 
     // Canary: a timer task that should fire if any worker thread is available.
@@ -4324,8 +4387,13 @@ const msg = ref('hello')
         canary_flag.store(true, Ordering::SeqCst);
     });
 
-    // Give the canary time to run (if a worker were free, it'd run in µs).
-    std::thread::sleep(Duration::from_millis(500));
+    // Negative-evidence window: the test thread holds `gate_guard`, so
+    // both worker tasks are permanently parked on `gate.lock()` and no
+    // worker can run the canary. The canary cannot fire while the guard
+    // is held — a deterministic outcome, not a timing gamble. A short
+    // bounded window gives the runtime a fair scheduling opportunity to
+    // (fail to) run the canary before we assert.
+    std::thread::sleep(Duration::from_millis(100));
 
     // ASSERT: canary did NOT run — runtime is starved.
     // This proves that blocking host operations without block_in_place() is unsafe.
@@ -4336,14 +4404,18 @@ const msg = ref('hello')
          without block_in_place() causes runtime starvation"
     );
 
-    // Cleanup: release gate → workers unblock → canary runs
+    // Cleanup: release gate → workers unblock → canary runs. Poll for the
+    // canary deterministically (panic on a real hang) instead of sleeping.
     drop(gate_guard);
-    std::thread::sleep(Duration::from_millis(200));
-
-    assert!(
-        canary_ran.load(Ordering::SeqCst),
-        "canary should run after the blocking gate is released"
-    );
+    let recover_deadline = Instant::now() + Duration::from_secs(10);
+    while !canary_ran.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < recover_deadline,
+            "canary should run after the blocking gate is released, but it \
+             never did within the recovery window"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// Prove the fix: wrapping blocking host operations in `block_in_place()` prevents
@@ -4355,7 +4427,7 @@ const msg = ref('hello')
 #[test]
 fn block_in_place_prevents_runtime_starvation() {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -4406,12 +4478,16 @@ const msg = ref('hello')
         });
     }
 
-    // Wait until both tasks have started (and called block_in_place)
+    // Wait (bounded) until both tasks have started (and called
+    // block_in_place). Panics on a real stall instead of spinning.
+    let start_deadline = Instant::now() + Duration::from_secs(10);
     while started.load(Ordering::SeqCst) < 2 {
-        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            Instant::now() < start_deadline,
+            "timed out waiting for both tasks to start and call block_in_place"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
-    // Give block_in_place time to spawn replacement workers
-    std::thread::sleep(Duration::from_millis(100));
 
     // Canary: should run because block_in_place() freed up worker threads.
     let canary_ran = Arc::new(AtomicBool::new(false));
@@ -4420,14 +4496,20 @@ const msg = ref('hello')
         canary_flag.store(true, Ordering::SeqCst);
     });
 
-    std::thread::sleep(Duration::from_millis(500));
-
-    // ASSERT: canary DID run — block_in_place() prevented starvation.
-    assert!(
-        canary_ran.load(Ordering::SeqCst),
-        "canary SHOULD run because block_in_place() allows tokio to spawn \
-         replacement workers while the original threads are blocked"
-    );
+    // ASSERT: canary DID run — block_in_place() prevented starvation. Poll
+    // for the canary deterministically: this also subsumes the wait for
+    // tokio to provision a replacement worker. Panics on a real hang
+    // instead of sleeping a fixed window and hoping.
+    let canary_deadline = Instant::now() + Duration::from_secs(10);
+    while !canary_ran.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < canary_deadline,
+            "canary SHOULD run because block_in_place() allows tokio to spawn \
+             replacement workers while the original threads are blocked, but it \
+             never ran within the window."
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 
     // Cleanup
     drop(gate_guard);
@@ -4508,18 +4590,27 @@ const msg = "hello"
 
     let completion_done = Arc::new(AtomicBool::new(false));
     let change_done = Arc::new(AtomicBool::new(false));
+    // Set by task A once it has extracted its context AND dropped every
+    // DashMap guard — i.e. the moment it enters its `.await`. Task B
+    // waits for this so its write provably overlaps task A's await
+    // window (where a guard leaked across `.await` would deadlock),
+    // replacing a 50ms "hope task A started" sleep.
+    let task_a_at_await = Arc::new(AtomicBool::new(false));
 
     // Task A: simulates a handler that extracted context, then awaits a type provider call
     let reg_a = Arc::clone(&registry);
     let uri_a = uri.clone();
     let mock_a = mock.clone();
     let comp_flag = Arc::clone(&completion_done);
+    let at_await_a = Arc::clone(&task_a_at_await);
     let task_a = tokio::spawn(async move {
         // Extract context synchronously (mirrors type_provider_context pattern)
         let _tsx_resp = reg_a.get_ide(&uri_a).unwrap();
         let _mapper = reg_a.get_position_mapper(&uri_a).unwrap();
         let _vue_li = reg_a.get(&uri_a).unwrap().line_index.clone();
-        // Guards dropped here ^
+        // Guards dropped here ^ — signal task B that it may now race its
+        // write against task A's await window.
+        at_await_a.store(true, Ordering::SeqCst);
 
         // Simulate slow type provider call (the await point where deadlock happened)
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -4534,9 +4625,19 @@ const msg = "hello"
     let reg_b = Arc::clone(&registry);
     let uri_b = uri.clone();
     let change_flag = Arc::clone(&change_done);
+    let at_await_b = Arc::clone(&task_a_at_await);
     let task_b = tokio::spawn(async move {
-        // Small delay to ensure task A has started
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Wait (bounded) until task A has dropped its guards and entered
+        // its await, so this write overlaps that window deterministically
+        // instead of guessing with a fixed delay.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !at_await_b.load(Ordering::SeqCst) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "task A never reached its await window"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
 
         // Simulate did_change: update the document (needs write lock)
         let new_source = r#"<script setup lang="ts">

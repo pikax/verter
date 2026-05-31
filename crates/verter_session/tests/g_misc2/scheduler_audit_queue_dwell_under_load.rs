@@ -3,10 +3,12 @@
 //!
 //! Drives 16 concurrent submissions through the real scheduler with
 //! a session-side [`verter_session::request_context::RequestContext`]
-//! attached to each. Under contention some entries SIT in the
-//! priority queue between enqueue and dispatch; the dispatch site
-//! captures `(dequeue_at - entry.enqueue_time)` and publishes it via
-//! `AuditObserver::record_scheduler_dispatch`. At least one
+//! attached to each. A source-stage gate ([`SourceGate`]) holds all
+//! source-capable workers until the surplus requests are provably
+//! parked in the priority queue, so those entries SIT between enqueue
+//! and dispatch deterministically (not by timing luck). The dispatch
+//! site captures `(dequeue_at - entry.enqueue_time)` and publishes it
+//! via `AuditObserver::record_scheduler_dispatch`. At least one
 //! captured `queue_dwell_ms` must be strictly positive.
 //!
 //! Discriminating: pre-Slice-2.3 the `record_scheduler_dispatch`
@@ -17,8 +19,10 @@
 //! strictly-positive.
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use verter_scheduler::executor::{StageError, StageExecutor};
 use verter_scheduler::node::{
@@ -31,14 +35,87 @@ use verter_scheduler::stage::{Priority, TargetStage};
 use verter_session::request_context::RequestContext;
 
 const REQUESTS: usize = 16;
+/// Both scheduler pools are sized to this in the test, so at most this
+/// many source-stage jobs can run concurrently. Once this many workers
+/// have entered the gated source stage, every remaining submitted
+/// request is provably parked in the priority queue.
+const POOL_THREADS: usize = 2;
 
-/// Slow-on-purpose executor: every stage sleeps a few millis so the
-/// driver's dispatch loop has to enqueue multiple jobs before the
-/// pool drains them. That guarantees at least one entry observes a
-/// non-zero queue dwell.
-struct SlowExecutor;
+/// Deterministic rendezvous between the test driver and the
+/// source-stage workers. Replaces the old fixed per-stage `sleep`s,
+/// which only *probabilistically* created queue contention.
+///
+/// Each source execution increments `entered` and then blocks until the
+/// driver flips `released`. The driver holds the gate closed until
+/// [`POOL_THREADS`] workers are parked inside it — at which point all
+/// source-capable workers are occupied and the surplus requests
+/// ([`REQUESTS`] − [`POOL_THREADS`]) are guaranteed to be sitting in the
+/// queue, accumulating real dwell. Releasing the gate then dispatches
+/// the queued entries whose first-dispatch (source-stage) `queue_dwell_ms`
+/// is therefore strictly positive *by construction*, not by timing luck.
+struct SourceGate {
+    entered: AtomicUsize,
+    released: Mutex<bool>,
+    release_cv: Condvar,
+}
 
-impl StageExecutor for SlowExecutor {
+impl SourceGate {
+    fn new() -> Self {
+        Self {
+            entered: AtomicUsize::new(0),
+            released: Mutex::new(false),
+            release_cv: Condvar::new(),
+        }
+    }
+
+    /// Worker side: record arrival, then block until the driver
+    /// releases the gate.
+    fn enter_and_wait(&self) {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        let mut released = self.released.lock().expect("source gate mutex");
+        while !*released {
+            released = self
+                .release_cv
+                .wait(released)
+                .expect("source gate condvar wait");
+        }
+    }
+
+    /// Driver side: block (bounded) until at least `n` workers have
+    /// entered the gated source stage. Panics on timeout so a genuine
+    /// stall fails loudly instead of hanging the suite.
+    fn wait_until_entered(&self, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.entered.load(Ordering::SeqCst) < n {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {n} source-stage workers to enter the \
+                 gate (only {} entered); the surplus requests cannot queue",
+                self.entered.load(Ordering::SeqCst),
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Driver side: release every parked (and future) source execution.
+    fn release(&self) {
+        let mut released = self.released.lock().expect("source gate mutex");
+        *released = true;
+        self.release_cv.notify_all();
+    }
+}
+
+/// Executor that gates the source stage on a [`SourceGate`] so the
+/// driver can deterministically force a queue-dwell window. Analysis
+/// and artifact stages are pass-through (they run after the gate opens
+/// and are not the stage whose dwell the test inspects — the
+/// per-request `scheduler_audit` slot captures the *first* dispatch,
+/// which is the source stage).
+struct GatedSourceExecutor {
+    gate: Arc<SourceGate>,
+}
+
+impl StageExecutor for GatedSourceExecutor {
     fn execute_source(
         &self,
         _canonical_id: &str,
@@ -46,7 +123,7 @@ impl StageExecutor for SlowExecutor {
         content: Arc<str>,
         generation: u64,
     ) -> Result<SourceSnapshot, StageError> {
-        std::thread::sleep(std::time::Duration::from_millis(15));
+        self.gate.enter_and_wait();
         Ok(SourceSnapshot::new_empty(content, generation))
     }
     fn execute_analysis(
@@ -55,7 +132,6 @@ impl StageExecutor for SlowExecutor {
         _source: &SourceSnapshot,
         generation: u64,
     ) -> Result<AnalysisSnapshot, StageError> {
-        std::thread::sleep(std::time::Duration::from_millis(5));
         Ok(AnalysisSnapshot::new_empty(generation))
     }
     fn execute_artifact(
@@ -66,7 +142,6 @@ impl StageExecutor for SlowExecutor {
         profile_hash: u64,
         generation: u64,
     ) -> Result<ArtifactSnapshot, StageError> {
-        std::thread::sleep(std::time::Duration::from_millis(2));
         Ok(ArtifactSnapshot {
             generation,
             profile_hash,
@@ -81,13 +156,17 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
     for i in 0..REQUESTS {
         loader.insert(format!("/file{i}.vue"), Arc::from("<template>x</template>"));
     }
-    let executor: Arc<dyn StageExecutor> = Arc::new(SlowExecutor);
+    let gate = Arc::new(SourceGate::new());
+    let executor: Arc<dyn StageExecutor> = Arc::new(GatedSourceExecutor {
+        gate: Arc::clone(&gate),
+    });
     // Build a constrained scheduler so contention is high — small
     // pools mean entries queue up before the workers can pick them
-    // up.
+    // up. Both pools are sized to POOL_THREADS so source-stage
+    // concurrency is capped at POOL_THREADS regardless of pool routing.
     let config = SchedulerConfig {
-        cpu_threads: 2,
-        io_threads: 2,
+        cpu_threads: POOL_THREADS,
+        io_threads: POOL_THREADS,
         ..SchedulerConfig::default()
     };
     let sched = Scheduler::with_executor(config, loader as Arc<dyn SourceLoader>, executor);
@@ -126,6 +205,16 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
         })
         .collect();
 
+    // Deterministically force the queue-dwell window: block until
+    // POOL_THREADS source workers are parked inside the gate. At that
+    // point every source-capable worker is occupied, so the remaining
+    // REQUESTS - POOL_THREADS submissions are provably sitting in the
+    // priority queue, accumulating real dwell. Only then release the
+    // gate so those queued entries dispatch with a strictly-positive
+    // source-stage `queue_dwell_ms`.
+    gate.wait_until_entered(POOL_THREADS);
+    gate.release();
+
     for h in handles {
         h.join().expect("worker joined");
     }
@@ -141,9 +230,10 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
         );
     }
 
-    // At LEAST ONE captured dwell must be strictly positive. With a
-    // 2-thread CPU pool and 16 requests sleeping 15ms in source +
-    // 5ms in analysis, contention is guaranteed.
+    // At LEAST ONE captured dwell must be strictly positive. The gate
+    // held all source-capable workers until the surplus requests were
+    // provably queued, so their first-dispatch (source-stage)
+    // queue_dwell_ms is positive by construction — not by timing luck.
     let max_dwell = contexts
         .iter()
         .filter_map(|ctx| ctx.scheduler_audit.lock().clone())
