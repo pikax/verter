@@ -1181,22 +1181,25 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
         }
     }
 
-    /// Collect every `use`-alias (`... as Alias`) whose ORIGINAL last segment is
-    /// `forbidden` from the file's `use` items. An `use crate::…::forbidden as
+    /// Collect every `use`-alias (`... as Alias`) in `file` whose ORIGINAL last
+    /// segment is one of `forbidden_originals`. An `use crate::…::forbidden as
     /// reroute;` import lets `reroute(...)` call the retired symbol without the
-    /// body scan ever seeing `forbidden` — so the aliases are added to the
-    /// forbidden set AND their mere existence is itself reported.
-    fn use_aliases_of(file: &syn::File, forbidden: &str) -> Vec<String> {
-        fn walk(tree: &UseTree, forbidden: &str, out: &mut Vec<String>) {
+    /// body scan ever seeing `forbidden`. `forbidden_originals` is the canonical
+    /// symbol PLUS every transitive crate re-export alias of it (so a re-export
+    /// chain `pub(crate) use …forbidden as r0;` elsewhere + `use …::r0 as
+    /// reroute;` here is caught: `r0` is in `forbidden_originals`). The local
+    /// renames are added to the forbidden set AND their mere existence reported.
+    fn use_aliases_of(file: &syn::File, forbidden_originals: &[String]) -> Vec<String> {
+        fn walk(tree: &UseTree, forbidden_originals: &[String], out: &mut Vec<String>) {
             match tree {
-                UseTree::Path(p) => walk(&p.tree, forbidden, out),
+                UseTree::Path(p) => walk(&p.tree, forbidden_originals, out),
                 UseTree::Group(g) => {
                     for t in &g.items {
-                        walk(t, forbidden, out);
+                        walk(t, forbidden_originals, out);
                     }
                 }
                 UseTree::Rename(r) => {
-                    if r.ident == forbidden {
+                    if forbidden_originals.iter().any(|f| r.ident == f.as_str()) {
                         out.push(r.rename.to_string());
                     }
                 }
@@ -1206,7 +1209,140 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
         let mut out = Vec::new();
         for item in &file.items {
             if let Item::Use(u) = item {
-                walk(&u.tree, forbidden, &mut out);
+                walk(&u.tree, forbidden_originals, &mut out);
+            }
+        }
+        out
+    }
+
+    /// Transitively collect every crate-internal re-export ALIAS of
+    /// `canonical_forbidden`. Walks every `.rs` under `crates/verter_session/src`
+    /// and gathers `pub use …X as ALIAS;` / `pub(crate) use …X as ALIAS;`
+    /// renames where `X` is already known-forbidden, iterating to a fixpoint so a
+    /// chain (`forbidden as r0`, then `r0 as r1`, …) is fully resolved. The
+    /// returned aliases let the guard treat an aliased re-import of a re-export
+    /// (`use crate::reexport_home::r0 as reroute;` in the guarded file) as an
+    /// import of the forbidden symbol. Only re-exports (`pub`/`pub(crate) use …
+    /// as`) count — a private `use … as` inside an unrelated module does not make
+    /// the alias importable elsewhere.
+    fn crate_reexport_aliases_of(canonical_forbidden: &str) -> Vec<String> {
+        fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rs_files(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+        /// Pull `pub`/`pub(crate)` re-export renames whose original ident is in
+        /// `known` from one parsed file.
+        fn reexport_renames_in_file(
+            file: &syn::File,
+            known: &[String],
+            out: &mut Vec<String>,
+        ) {
+            fn walk(tree: &UseTree, known: &[String], out: &mut Vec<String>) {
+                match tree {
+                    UseTree::Path(p) => walk(&p.tree, known, out),
+                    UseTree::Group(g) => {
+                        for t in &g.items {
+                            walk(t, known, out);
+                        }
+                    }
+                    UseTree::Rename(r) => {
+                        if known.iter().any(|k| r.ident == k.as_str()) {
+                            out.push(r.rename.to_string());
+                        }
+                    }
+                    UseTree::Name(_) | UseTree::Glob(_) => {}
+                }
+            }
+            for item in &file.items {
+                if let Item::Use(u) = item {
+                    // Only RE-EXPORTS (`pub` / `pub(crate)`) make the alias
+                    // importable from another module; a private `use … as` does
+                    // not propagate.
+                    let is_reexport = matches!(
+                        u.vis,
+                        syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
+                    );
+                    if is_reexport {
+                        walk(&u.tree, known, out);
+                    }
+                }
+            }
+        }
+
+        let src_dir = workspace_root().join("crates/verter_session/src");
+        let mut rs_files = Vec::new();
+        collect_rs_files(&src_dir, &mut rs_files);
+        let parsed: Vec<syn::File> = rs_files
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .filter_map(|src| syn::parse_file(&src).ok())
+            .collect();
+
+        let mut known = vec![canonical_forbidden.to_string()];
+        // Fixpoint: each pass may discover aliases of aliases.
+        loop {
+            let mut discovered = Vec::new();
+            for file in &parsed {
+                reexport_renames_in_file(file, &known, &mut discovered);
+            }
+            let mut grew = false;
+            for alias in discovered {
+                if !known.iter().any(|k| k == &alias) {
+                    known.push(alias);
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        // Drop the canonical name itself; return only the discovered aliases.
+        known.into_iter().skip(1).collect()
+    }
+
+    /// Collect module-scope `const` / `static` items in `file` whose initializer
+    /// expression references any name in `forbidden`. A function-pointer const
+    /// (`const REROUTE: fn(...) -> _ = produce_macro_object_shapes_for_purpose;`)
+    /// at module scope lets `REROUTE(...)` inside a guarded body call the retired
+    /// symbol while the body-only path scan never sees `produce_…` (the
+    /// initializer lives outside the fn). The const/static NAMES become reroute
+    /// aliases (added to the forbidden body-scan set) and are themselves reported.
+    fn const_static_fn_pointer_aliases_of(file: &syn::File, forbidden: &[String]) -> Vec<String> {
+        struct InitRefCounter<'a> {
+            forbidden: &'a [String],
+            hit: bool,
+        }
+        impl<'ast, 'a> Visit<'ast> for InitRefCounter<'a> {
+            fn visit_path_segment(&mut self, seg: &'ast syn::PathSegment) {
+                if self.forbidden.iter().any(|f| seg.ident == f.as_str()) {
+                    self.hit = true;
+                }
+                syn::visit::visit_path_segment(self, seg);
+            }
+        }
+        let mut out = Vec::new();
+        for item in &file.items {
+            let (name, expr): (String, &syn::Expr) = match item {
+                Item::Const(c) => (c.ident.to_string(), &c.expr),
+                Item::Static(s) => (s.ident.to_string(), &s.expr),
+                _ => continue,
+            };
+            let mut counter = InitRefCounter {
+                forbidden,
+                hit: false,
+            };
+            counter.visit_expr(expr);
+            if counter.hit {
+                out.push(name);
             }
         }
         out
@@ -1223,20 +1359,57 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
         canonical_forbidden: &str,
         message: &str,
     ) {
-        // An aliased import of the forbidden symbol is itself the evasion —
-        // report it before the body scan even runs.
-        let aliases = use_aliases_of(file, canonical_forbidden);
+        // Transitive crate re-export aliases of the forbidden symbol. A
+        // re-export chain (`pub(crate) use …forbidden as r0;` in another module,
+        // then `use crate::…::r0 as reroute;` in THIS file) hides the forbidden
+        // name from a direct-alias scan: the guarded file's rename original is
+        // `r0`, not `forbidden`. Treat every transitive re-export alias as a
+        // forbidden ORIGINAL so the local re-import is caught.
+        let reexport_aliases = crate_reexport_aliases_of(canonical_forbidden);
+
+        // Forbidden ORIGINAL names a guarded-file `use … as …` could rename:
+        // the canonical symbol plus its crate re-export aliases.
+        let forbidden_originals: Vec<String> = std::iter::once(canonical_forbidden.to_string())
+            .chain(reexport_aliases.iter().cloned())
+            .collect();
+
+        // (1) An aliased import (`use …forbidden as reroute;`, OR
+        //     `use …::r0 as reroute;` for a re-export alias `r0`) is itself the
+        //     evasion — report it before the body scan even runs.
+        let aliases = use_aliases_of(file, &forbidden_originals);
         assert!(
             aliases.is_empty(),
             "Stage 4a guard: the file declaring `{fn_name}` imports the retired \
-             symbol `{canonical_forbidden}` under alias(es) {aliases:?} \
-             (`use … as …`). An aliased import is an import-alias evasion of the \
-             materializer/fallback retirement. Remove the alias import. {message}"
+             symbol `{canonical_forbidden}` (or a crate re-export alias of it: \
+             {reexport_aliases:?}) under local alias(es) {aliases:?} (`use … as \
+             …`). An aliased import — direct OR via a `pub use … as` re-export \
+             chain — is an import-alias evasion of the materializer/fallback \
+             retirement. Remove the alias import. {message}"
         );
 
-        let forbidden: Vec<String> = std::iter::once(canonical_forbidden.to_string())
-            .chain(aliases)
-            .collect();
+        // The full set the body scan treats as forbidden: the canonical name,
+        // its crate re-export aliases, and any local renames of either.
+        let mut forbidden: Vec<String> = forbidden_originals.clone();
+        forbidden.extend(aliases);
+
+        // (2) A module-scope function-pointer const/static whose INITIALIZER
+        //     references a forbidden name (`const REROUTE: fn(...) = forbidden;`)
+        //     lets `REROUTE(...)` in the body call the retired symbol while the
+        //     body-only scan never sees `forbidden` (the initializer is outside
+        //     the fn). Report the const/static, and add its NAME to the forbidden
+        //     body-scan set so the `REROUTE(...)` call site is also caught.
+        let const_aliases = const_static_fn_pointer_aliases_of(file, &forbidden);
+        assert!(
+            const_aliases.is_empty(),
+            "Stage 4a guard: the file declaring `{fn_name}` binds the retired \
+             symbol `{canonical_forbidden}` (or an alias of it) to module-scope \
+             function-pointer const/static(s) {const_aliases:?} (`const NAME: \
+             fn(...) = forbidden;`). A fn-pointer const lets `NAME(...)` call the \
+             retired symbol while the body-only path scan never sees `forbidden`. \
+             Remove the const/static binding. {message}"
+        );
+        forbidden.extend(const_aliases);
+
         let mut counter = ForbiddenSymbolCounter {
             forbidden: &forbidden,
             hits: 0,
