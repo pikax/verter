@@ -12090,6 +12090,125 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
     );
 }
 
+/// Overlay/base `defineModel` isolation through context-aware `vue_macro_dtos`.
+///
+/// The `defineModel` model prop is synthesized from the owner SFC's
+/// `IndexedReady` macro facts (`props_from_typeinfo_surface` →
+/// `model_prop_fields`), NOT a macro-T object surface. That snapshot fetch MUST
+/// flow through the active `ResolverContext` (`ctx.ensure_indexed_ready`,
+/// overlay-aware), not the base `VerterHost`. An overlay session that rewrites
+/// `defineModel<string>('old')` to `defineModel<number>('fresh')` MUST see the
+/// model prop `fresh`; a base-view read MUST see only `old`, and the overlay
+/// model prop MUST NOT leak into the base read.
+///
+/// Discrimination: the pre-fix `model_prop_fields(host, …)` read the base
+/// `host.ensure_indexed_ready`, so the overlay session's model prop resolved
+/// against the BASE macro facts and surfaced `old`, not `fresh`. Routing the
+/// snapshot read through `ctx.ensure_indexed_ready` fixes the leak. Verified by
+/// mutation (reverting `model_prop_fields` to the base host read surfaces `old`
+/// for the overlay session — the `fresh` assertion fails).
+#[test]
+fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_base() {
+    use crate::resolver_core::ResolverContext;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    }));
+
+    const SFC: &str = "/Model.vue";
+    // Base SFC: `defineModel<string>('old')` → model prop named `old`.
+    let base_src = "<script setup lang=\"ts\">\n\
+         defineModel<string>('old')\n\
+         </script>";
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: None,
+            input_id: SFC.to_string(),
+            source: Arc::from(base_src),
+            file_kind: crate::FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+    // Locate the `defineModel` macro index from the authoritative snapshot.
+    let indexed = host
+        .ensure_indexed_ready(SFC)
+        .expect("SFC must index ready");
+    let define_model_index = indexed
+        .snapshot
+        .macros
+        .iter()
+        .position(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+        .expect("the SFC declares a defineModel macro");
+
+    let request_for = |root_identity: [u8; 16]| crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from(SFC),
+        macro_index: define_model_index,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineModel,
+        root_identity,
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    };
+    let prop_names =
+        |dtos: &crate::typeinfo::adapters::vue::store::VueMacroDtos| -> Vec<String> {
+            dtos.props.iter().map(|p| p.name.clone()).collect()
+        };
+
+    // Base-view read (no overlay): only the base model prop `old`.
+    let base_dtos =
+        host.vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    assert_eq!(
+        prop_names(&base_dtos),
+        vec!["old".to_string()],
+        "base-view defineModel surface must be exactly [old]"
+    );
+
+    // Overlay session: overlay the SFC rewriting the model name + type.
+    let overlay_src = "<script setup lang=\"ts\">\n\
+         defineModel<number>('fresh')\n\
+         </script>";
+    let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> = rustc_hash::FxHashMap::default();
+    overlays.insert(SFC.to_string(), Arc::from(overlay_src));
+    let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+    let store_view = host.resolver_store_view().with_session_overlay(&host, &view);
+    let session_ctx = crate::resolver_core::SessionResolverContext::new(
+        &host,
+        &view,
+        &store_view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+
+    let overlay_hash = ResolverContext::get_whole_hash(&session_ctx, SFC).unwrap_or([0u8; 16]);
+    let overlay_dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+        &session_ctx,
+        &request_for(overlay_hash),
+    );
+    let overlay_props = prop_names(&overlay_dtos);
+    assert!(
+        overlay_props.contains(&"fresh".to_string()),
+        "overlay defineModel surface MUST reflect the overlay's \
+         `defineModel<number>('fresh')` model prop — `model_prop_fields` must fetch \
+         the owner SFC IndexedReady through the active overlay ctx, not the base \
+         host view: {overlay_props:?}"
+    );
+    assert!(
+        !overlay_props.contains(&"old".to_string()),
+        "the overlay session MUST NOT leak the base `defineModel<string>('old')` \
+         model prop: {overlay_props:?}"
+    );
+
+    // No leak: a fresh base-view read still sees only `[old]`.
+    let base_dtos_after =
+        host.vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    assert_eq!(
+        prop_names(&base_dtos_after),
+        vec!["old".to_string()],
+        "the overlay session's `fresh` model prop must NOT leak into the base-view \
+         defineModel surface: {:?}",
+        prop_names(&base_dtos_after)
+    );
+}
+
 /// Overlay/base SLOT-BINDING isolation through context-aware `vue_macro_dtos`.
 ///
 /// The slot binding object lives in a CROSS-FILE carrier (`/slots.ts`). An
