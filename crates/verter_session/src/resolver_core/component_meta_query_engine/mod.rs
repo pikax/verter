@@ -634,6 +634,39 @@ pub(crate) fn prepared_structural_substitution_slow_lane_forbidden_for_current_t
     FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE.with(|depth| depth.get() > 0)
 }
 
+/// Trip-wire for the live prepared-structural-substitution slow lane.
+///
+/// `apply_type_param_substitutions` (`surface.rs`) calls this immediately
+/// before whole-body `substitute_type_expr`, AFTER the empty/no-reference
+/// fast-return — so it only fires when a real substitution is about to run.
+/// When the body being substituted is a structural shape
+/// (`Object`/`Intersection`/`Union`/`Function`/`Parenthesized`) and a test
+/// has armed `forbid_prepared_structural_substitution_slow_lane_for_tests()`,
+/// this panics: such routes are expected to be satisfied by the dispatch
+/// fast lane via shallow member-local projection rather than by cloning and
+/// whole-substituting the structural body.
+#[cfg(test)]
+pub(super) fn assert_prepared_structural_substitution_slow_lane_allowed(expr: &TypeExpr) {
+    if matches!(
+        expr,
+        TypeExpr::Object(..)
+            | TypeExpr::Intersection(..)
+            | TypeExpr::Union(..)
+            | TypeExpr::Function(..)
+            | TypeExpr::Parenthesized(..)
+    ) {
+        assert!(
+            !prepared_structural_substitution_slow_lane_forbidden_for_current_thread(),
+            "prepared generic projection should not whole-substitute structural bodies when \
+             shallow member-local substitution can satisfy the route",
+        );
+    }
+}
+
+#[cfg(not(test))]
+#[inline]
+pub(super) fn assert_prepared_structural_substitution_slow_lane_allowed(_expr: &TypeExpr) {}
+
 #[cfg(test)]
 thread_local! {
     /// Counts how many times `resolve_imported_registry_symbol`'s

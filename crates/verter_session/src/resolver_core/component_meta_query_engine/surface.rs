@@ -387,6 +387,10 @@ pub(super) fn apply_type_param_substitutions(
     if substitutions.is_empty() || !type_expr_references_substitutions(expr, substitutions) {
         expr.clone()
     } else {
+        // Live slow-lane trip-wire: a real substitution is about to run.
+        // Placed after the empty/no-reference fast-return so it never trips
+        // when no substitution would occur.
+        super::assert_prepared_structural_substitution_slow_lane_allowed(expr);
         substitute_type_expr(expr, substitutions)
     }
 }
