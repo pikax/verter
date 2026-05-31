@@ -4625,44 +4625,102 @@ const msg = "hello"
 
     let completion_done = Arc::new(AtomicBool::new(false));
     let change_done = Arc::new(AtomicBool::new(false));
-    // READY+RELEASE handshake that makes task B's write provably overlap
-    // task A's actual await window. A flag set *before* an `.await` does
-    // NOT prove A is suspended at the await — A could be pre-empted before
-    // reaching it, letting B's write complete before the await even
-    // begins. Instead:
-    //   * `task_a_ready` (A → B): A drops every DashMap guard, signals
-    //     READY, then `await`s `task_a_release` — A is now genuinely
-    //     suspended at the await (the point where a guard leaked across
-    //     `.await` would deadlock).
-    //   * `task_a_release` (B → A): B waits for READY, performs its
-    //     `did_change` write *while A is suspended at the await*, then
-    //     signals RELEASE to wake A.
-    // The write therefore happens strictly inside A's await window.
-    let task_a_ready = Arc::new(tokio::sync::Notify::new());
-    let task_a_release = Arc::new(tokio::sync::Notify::new());
+
+    // To PROVE task B's write overlaps task A's *actual* await window we
+    // cannot signal READY from task A's body before an `.await`: a flag set
+    // before `.await` does not prove A is suspended — A could be pre-empted
+    // before reaching the suspension point, so B's write might land before
+    // the await even begins. Instead we instrument the future A awaits so
+    // that READY is emitted from INSIDE its first `poll`, at the exact
+    // moment the future returns `Poll::Pending` (i.e. A is now parked at the
+    // await). READY therefore *provably* means "A is suspended in the await".
+    //
+    // `PollGate` is that instrumented future:
+    //   * first `poll`  → stores A's waker, flips `entered` (→ notify READY),
+    //                     returns `Poll::Pending` (A parks here — exactly the
+    //                     point a guard leaked across `.await` would deadlock).
+    //   * `release()`   → flips `released`, wakes the stored waker.
+    //   * later `poll`  → returns `Poll::Ready(())` once `released` is set.
+    struct GateState {
+        entered: bool,
+        released: bool,
+        waker: Option<std::task::Waker>,
+    }
+    #[derive(Clone)]
+    struct PollGate {
+        state: Arc<std::sync::Mutex<GateState>>,
+        // Notifies waiters (task B) the instant the gate's first poll parks A.
+        entered_signal: Arc<tokio::sync::Notify>,
+    }
+    impl PollGate {
+        fn new() -> Self {
+            Self {
+                state: Arc::new(std::sync::Mutex::new(GateState {
+                    entered: false,
+                    released: false,
+                    waker: None,
+                })),
+                entered_signal: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+        /// Wake A out of its parked await. Called by task B *after* it has
+        /// performed the overlapping `did_change` write.
+        fn release(&self) {
+            let waker = {
+                let mut st = self.state.lock().unwrap();
+                st.released = true;
+                st.waker.take()
+            };
+            if let Some(w) = waker {
+                w.wake();
+            }
+        }
+    }
+    impl std::future::Future for PollGate {
+        type Output = ();
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            let mut st = self.state.lock().unwrap();
+            if st.released {
+                return std::task::Poll::Ready(());
+            }
+            // First poll: A is about to park here. Record the waker so
+            // `release()` can resume A, mark the gate entered, and emit READY
+            // ONLY now — from inside poll, as we return Pending — so an
+            // observer of READY knows A is genuinely suspended at this await.
+            st.waker = Some(cx.waker().clone());
+            if !st.entered {
+                st.entered = true;
+                self.entered_signal.notify_one();
+            }
+            std::task::Poll::Pending
+        }
+    }
+
+    let gate = PollGate::new();
 
     // Task A: simulates a handler that extracted context, then awaits a type provider call
     let reg_a = Arc::clone(&registry);
     let uri_a = uri.clone();
     let mock_a = mock.clone();
     let comp_flag = Arc::clone(&completion_done);
-    let ready_a = Arc::clone(&task_a_ready);
-    let release_a = Arc::clone(&task_a_release);
+    let gate_a = gate.clone();
     let task_a = tokio::spawn(async move {
-        // Extract context synchronously (mirrors type_provider_context pattern)
+        // Extract context synchronously (mirrors type_provider_context pattern).
         let _tsx_resp = reg_a.get_ide(&uri_a).unwrap();
         let _mapper = reg_a.get_position_mapper(&uri_a).unwrap();
         let _vue_li = reg_a.get(&uri_a).unwrap().line_index.clone();
-        // Guards dropped here ^ — signal task B that A is about to enter
-        // (and remain suspended at) its await window.
-        ready_a.notify_one();
+        // Guards dropped here ^.
 
         // Suspend at the await window where the deadlock historically
-        // happened. A guard leaked across THIS `.await` would block task
-        // B's `get_mut` write below and deadlock. A stays parked here
-        // until task B has performed its overlapping write and signalled
-        // RELEASE, so the overlap is guaranteed rather than timed.
-        release_a.notified().await;
+        // happened. The gate signals READY from inside its first poll (as it
+        // returns Pending), so the instant task B observes READY, A is
+        // PROVABLY parked at this `.await` — the exact point where a guard
+        // leaked across it would block B's write and deadlock. A stays parked
+        // until B's overlapping write completes and calls `release()`.
+        gate_a.await;
 
         // Use mock type provider (would deadlock if guards were still held)
         let result = mock_a.get_completions("test", 0, None).await;
@@ -4674,18 +4732,23 @@ const msg = "hello"
     let reg_b = Arc::clone(&registry);
     let uri_b = uri.clone();
     let change_flag = Arc::clone(&change_done);
-    let ready_b = Arc::clone(&task_a_ready);
-    let release_b = Arc::clone(&task_a_release);
+    let gate_b = gate.clone();
+    let entered_b = Arc::clone(&gate.entered_signal);
     let task_b = tokio::spawn(async move {
-        // Wait for task A's READY signal: A has dropped its guards and is
-        // now suspended at its await window. This write therefore lands
-        // strictly inside that window (where a guard leaked across A's
-        // `.await` would deadlock) — a guaranteed overlap, not a timed
-        // guess. `Notify` stores a permit if A signalled first, so this
-        // cannot miss the wakeup.
-        ready_b.notified().await;
+        // Wait until the gate's first poll has parked A at the await (READY is
+        // emitted from inside that poll). This write therefore lands strictly
+        // inside A's pending await window — a guaranteed overlap, not a timed
+        // guess. `Notify` stores a permit if A parked first, so the wakeup
+        // cannot be missed.
+        entered_b.notified().await;
+        // A is provably suspended in the await right now.
+        debug_assert!(
+            gate_b.state.lock().unwrap().entered,
+            "task A must be parked in its await before B writes"
+        );
 
-        // Simulate did_change: update the document (needs write lock)
+        // Simulate did_change: update the document (needs write lock).
+        // This executes WHILE A is suspended in its await above.
         let new_source = r#"<script setup lang="ts">
 const msg = "world"
 </script>
@@ -4699,7 +4762,7 @@ const msg = "world"
 
         // Release task A from its await window now that the overlapping
         // write has completed.
-        release_b.notify_one();
+        gate_b.release();
     });
 
     // Both tasks must complete within 2 seconds — timeout indicates deadlock
