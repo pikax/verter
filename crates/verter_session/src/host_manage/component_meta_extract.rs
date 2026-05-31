@@ -1506,8 +1506,13 @@ pub(crate) fn extract_component_meta_from_resolved(
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
 ) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+    // The macro-DTO surface read (`vue_macro_dtos_with_ctx` ->
+    // `ctx.store_view()`) MUST run under the request-bound `ctx`, not the
+    // bare `&VerterHost` rail (whose `store_view()` panics in a
+    // `debug_assertions`-off build). See
+    // `tests/session_meta_store_view_regression.rs`.
     let resolved_macros = resolver_component_meta_resolved_macros(
-        host,
+        ctx,
         canonical.as_str(),
         resolved.snapshot.macros.as_ref(),
         &resolved.resolved_macros,
@@ -1588,8 +1593,11 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     Option<Vec<crate::resolver_core::FactVersionRef>>,
 ) {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+    // Macro-DTO surface read runs under the request-bound `ctx` (not the
+    // bare host) — see the sibling `extract_component_meta_from_resolved`
+    // and `tests/session_meta_store_view_regression.rs`.
     let resolved_macros = resolver_component_meta_resolved_macros(
-        host,
+        ctx,
         canonical.as_str(),
         resolved.snapshot.macros.as_ref(),
         &resolved.resolved_macros,

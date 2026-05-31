@@ -8121,3 +8121,174 @@ fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
          (the retired MacroSurfaceView reader dropped it on the carrier path)"
     );
 }
+
+/// Characterizes `Omit<A | B, K>` over a UNION source. TypeScript's `Omit`
+/// is NON-distributive: `Omit<A | B, K>` first computes `keyof (A | B)` =
+/// the COMMON keys across both arms (a property access on a union only sees
+/// members present in every arm), then removes `K`. The result is therefore
+/// `common-keys-minus-K`, NOT the union of each arm's `Omit`.
+///
+/// Here `A = { shared: string; onlyA: number }` and
+/// `B = { shared: string; onlyB: boolean }`. The common keyspace is
+/// `{ shared }`; `Omit<A | B, 'shared'>` removes `shared` and yields an
+/// EMPTY surface. Critically `onlyA` / `onlyB` must NOT appear — a
+/// distributive (per-arm) Omit would surface them.
+///
+/// Discrimination: a reader that distributes Omit over the union arms (or
+/// that takes the UNION of keys instead of the intersection) surfaces
+/// `onlyA` and `onlyB`, failing the negative asserts below. The
+/// union-common-member synthesis in the empty-path Shallow reader keeps the
+/// surface to the common key `shared`, which Omit then removes.
+#[test]
+fn omit_over_union_source_is_common_keys_minus_k_not_distributive() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/union_omit.ts",
+        "type A = { shared: string; onlyA: number };\n\
+         type B = { shared: string; onlyB: boolean };\n\
+         export type R = Omit<A | B, 'shared'>;\n\
+         export type RKeep = Omit<A | B, 'onlyA'>",
+    );
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let surface_of = |name: &str| {
+        let node = match dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+            "/union_omit.ts",
+            name,
+        ))) {
+            QueryResult::Value(node) => node,
+            other => panic!("ResolveDecl({name}) failed: {other:?}"),
+        };
+        dispatch
+            .resolve_typeinfo_surface_view(
+                node,
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Shallow,
+                ),
+            )
+            .unwrap_or_else(|| panic!("{name} projects to an Object surface"))
+    };
+
+    let surface = surface_of("R");
+    let member_names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+
+    // TS-correct non-distributive Omit: the only common key `shared` is the
+    // one removed, so the surface is EMPTY.
+    assert!(
+        !member_names.contains(&"shared"),
+        "the omitted common key `shared` must be absent: {member_names:?}"
+    );
+    assert!(
+        !member_names.contains(&"onlyA"),
+        "arm-exclusive key `onlyA` must NOT surface — Omit over a union is \
+         non-distributive (common-keys-minus-K), not per-arm: {member_names:?}"
+    );
+    assert!(
+        !member_names.contains(&"onlyB"),
+        "arm-exclusive key `onlyB` must NOT surface — Omit over a union is \
+         non-distributive (common-keys-minus-K), not per-arm: {member_names:?}"
+    );
+    assert!(
+        member_names.is_empty(),
+        "Omit<A | B, 'shared'> removes the sole common key, leaving an empty \
+         surface: {member_names:?}"
+    );
+
+    // CONTROL: omitting an ARM-EXCLUSIVE key (`onlyA`, present in A only) is a
+    // no-op on the common keyspace `{ shared }` — the common key `shared`
+    // SURVIVES. This proves the union-common-member synthesis is genuinely
+    // active (the surface is NOT trivially empty / a blanket miss): a
+    // distributive Omit would here surface `onlyB` (B's arm, where `onlyA`
+    // is absent), and a whole-union-miss would surface nothing.
+    let keep = surface_of("RKeep");
+    let keep_names: Vec<&str> = keep.members.iter().map(|m| m.name.as_ref()).collect();
+    assert_eq!(
+        keep_names,
+        vec!["shared"],
+        "Omit<A | B, 'onlyA'> keeps exactly the common key `shared` (omitting an \
+         arm-exclusive key is a no-op on the common keyspace): {keep_names:?}"
+    );
+}
+
+/// Characterizes multi-level heritage carriers: `Omit` over a chain
+/// `interface A extends Omit<B, K1>`, `interface B extends Omit<C, K2>` must
+/// compose the inherited members through ALL levels. `A`'s shallow surface
+/// inherits `C`'s members (minus the omitted keys) transitively through `B`.
+///
+/// `C = { c1; c2; c3 }`; `B extends Omit<C, 'c1'> { b: number }` (so B's
+/// surface = { c2, c3, b }); `A extends Omit<B, 'c2'> { a: number }` (so A's
+/// surface = { c3, b, a }). Each heritage arm reaches the parent through
+/// `object_filter_source_surface`'s CARRIER branch (a cross-file `DeclRef` /
+/// `InstantiationRef`, NOT an inline `Object`).
+///
+/// Discrimination: a reader that resolves only ONE heritage level (or that
+/// collapses a carrier-sourced heritage `Omit` to `Opaque(Miss)`) loses the
+/// transitively-inherited `c3` and/or fails to remove `c1`/`c2` at the right
+/// level. The compound-carrier merge in `object_filter_source_surface` plus
+/// the empty-path Shallow reader compose every level.
+#[test]
+fn multi_level_omit_heritage_carriers_compose_through_all_levels() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/c.ts",
+        "export interface C { c1: string; c2: number; c3: boolean }",
+    );
+    upsert_ts(
+        &host,
+        "/b.ts",
+        "import type { C } from './c';\n\
+         export interface B extends Omit<C, 'c1'> { b: number }",
+    );
+    upsert_ts(
+        &host,
+        "/a.ts",
+        "import type { B } from './b';\n\
+         export interface A extends Omit<B, 'c2'> { a: number }",
+    );
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let a = match dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key("/a.ts", "A"))) {
+        QueryResult::Value(node) => node,
+        other => panic!("ResolveDecl(A) failed: {other:?}"),
+    };
+
+    let surface = dispatch
+        .resolve_typeinfo_surface_view(
+            a,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
+        )
+        .expect("A projects to an Object surface");
+
+    let member_names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+
+    // A's own member.
+    assert!(
+        member_names.contains(&"a"),
+        "A's own member `a` must be present: {member_names:?}"
+    );
+    // B's own member, inherited one level up.
+    assert!(
+        member_names.contains(&"b"),
+        "A inherits B's own member `b` through `extends Omit<B, 'c2'>`: {member_names:?}"
+    );
+    // C's member, inherited TWO levels up — survives both Omit filters.
+    assert!(
+        member_names.contains(&"c3"),
+        "A transitively inherits C's `c3` through B (multi-level heritage \
+         carriers must compose): {member_names:?}"
+    );
+    // `c1` removed at the B-level Omit; never reaches A.
+    assert!(
+        !member_names.contains(&"c1"),
+        "`c1` was omitted at the B<-C level and must not reach A: {member_names:?}"
+    );
+    // `c2` removed at the A-level Omit.
+    assert!(
+        !member_names.contains(&"c2"),
+        "`c2` was omitted at the A<-B level and must not be inherited: {member_names:?}"
+    );
+}

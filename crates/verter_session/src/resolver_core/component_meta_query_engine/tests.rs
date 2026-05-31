@@ -1477,7 +1477,16 @@ export type IdentityProps<T> = RootProps<T>
 }
 
 #[test]
-fn project_route_surface_expr_pick_reuses_request_local_member_cache() {
+fn project_route_surface_expr_pick_reuses_request_local_routed_expr_cache() {
+    // `Props extends Pick<BaseProps, ...>` is a compound (Intersection)
+    // dispatch root. `dispatch_projected_surface` composes that compound
+    // root through the shared shallow walker, so the `RouteDemand::Pick`
+    // route is dispatch-resolved (it does not fall to the
+    // prepared-member-projection path). Reuse for the dispatch-resolved
+    // route is provided by the request-local routed-expr cache (consulted at
+    // the top of `project_routed_expr_surface_expr`), so this test
+    // characterizes that cache rather than the now-bypassed prepared-member
+    // cache.
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -1522,11 +1531,25 @@ export interface Props extends Pick<BaseProps, 'open' | 'defaultOpen' | 'disable
         "Props",
         &route,
     )
-    .expect("prepared pick route should project");
-    let member_cache_after_first = query_engine.debug_prepared_member_cache_len();
+    .expect("pick route over a Pick-heritage interface should project");
+
+    // The picked surface keeps exactly the three requested members and drops
+    // the heritage-excluded (`name`) and own-body (`label`) members.
+    let picked = projected_object_member_names(&first);
+    assert_eq!(
+        picked,
+        vec![
+            "defaultOpen".to_string(),
+            "disabled".to_string(),
+            "open".to_string()
+        ],
+        "pick route must keep only the requested members; got {picked:?}",
+    );
+
+    let routed_cache_after_first = query_engine.debug_routed_expr_surface_cache_len();
     assert!(
-        member_cache_after_first > 0,
-        "first prepared pick projection should populate the request-local member cache",
+        routed_cache_after_first > 0,
+        "first pick projection should populate the request-local routed-expr cache",
     );
 
     let second = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
@@ -1535,13 +1558,13 @@ export interface Props extends Pick<BaseProps, 'open' | 'defaultOpen' | 'disable
         "Props",
         &route,
     )
-    .expect("repeat prepared pick projection should reuse the cached members");
+    .expect("repeat pick projection should reuse the cached routed expr");
 
     assert_eq!(first, second);
     assert_eq!(
-        query_engine.debug_prepared_member_cache_len(),
-        member_cache_after_first,
-        "repeat prepared pick projection should reuse the existing request-local member entries",
+        query_engine.debug_routed_expr_surface_cache_len(),
+        routed_cache_after_first,
+        "repeat pick projection should reuse the existing request-local routed-expr entry",
     );
 }
 
@@ -4247,6 +4270,25 @@ fn resolve_imported_registry_symbol_surfaces_concurrently_published_value() {
 ///    BOTH configurations: it removes the timing window in which an
 ///    early publisher could let a late worker warm-hit `peek` and skip
 ///    its resolution.
+///  - The process-global winner-park gate is armed for the same keyed
+///    canonical. It closes the SECOND timing window the post-peek
+///    barrier does not bound: the race INSIDE
+///    `cooperative_admit_with_post_publish` between a worker's loop-top
+///    `map.get` miss and its claim of the in-flight slot. Under load a
+///    worker descheduled there can wake to a retired slot (the winner
+///    already published AND retired it), fork a fresh slot, and become a
+///    SECOND cold winner that ticks the wildcard-route fuse again. The
+///    gate parks the cold winner inside its compute closure — after the
+///    slot is claimed (`claimed == true` is published, forcing every
+///    later arrival onto the joiner branch), before the resolution runs.
+///    The main thread releases the winner only once it has PROVEN, via
+///    the slot's `Arc` strong count (`3 + (WORKERS - 1) == WORKERS + 2`
+///    while the winner is parked), that every joiner has coalesced onto
+///    the winner's slot. No worker is then mid-flight between its miss
+///    and its claim, so no second winner can form — `total_fuse_consumed`
+///    is deterministically 1 even under the oversubscribed
+///    `cargo test --workspace` gate. This rendezvous is the means;
+///    weakening the exactly-once assertion is not.
 ///  - Each worker owns an independent `ComponentMetaQueryEngine` (hence
 ///    an independent wildcard-route fuse). After the join the test sums
 ///    each engine's observed fuse consumption.
@@ -4304,10 +4346,36 @@ fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
         }],
     );
 
-    // Arm the post-peek rendezvous so all WORKERS workers pass `peek`
-    // (all missing) before any enters cooperative admission.
-    let (_barrier, _guard) =
+    // Two-part deterministic singleflight rendezvous.
+    //
+    // First, the post-peek barrier: all WORKERS workers pass their `peek`
+    // miss (nothing is published yet) before any enters cooperative
+    // admission, so the test genuinely exercises WORKERS concurrent cold
+    // misses on one key.
+    //
+    // Then, the winner park: the cold winner blocks inside the
+    // cooperative-admission compute closure (after it claims the
+    // in-flight slot, before it runs the fuse-consuming resolution). The
+    // main thread releases it only once it has PROVEN — via the slot's
+    // `Arc` strong count — that every other worker has coalesced onto the
+    // winner's slot as a joiner. This closes the load-only window in
+    // which a worker descheduled between its `map.get` miss and its slot
+    // claim wakes to find the slot retired, forks a fresh slot, and
+    // becomes a SECOND cold winner that ticks the wildcard-route fuse
+    // again (the redundant-compute property the singleflight primitive
+    // permits but this exactly-once discriminator must not observe).
+    let (_barrier, _barrier_guard) =
         super::arm_imported_registry_post_peek_barrier_for_tests("/singleflight/index.ts", WORKERS);
+    let (winner_release, _winner_park_guard) =
+        super::arm_imported_registry_winner_park_for_tests("/singleflight/index.ts");
+
+    // The keyed canonical the WORKERS cold misses contend on — used to
+    // observe the in-flight slot's `Arc` strong count during the
+    // coalescing rendezvous.
+    let inflight_key: crate::component_meta_caches::ImportedRegistryKey = (
+        std::sync::Arc::<str>::from("/singleflight/index.ts"),
+        std::sync::Arc::<str>::from("Wide"),
+    );
 
     let results: Vec<(usize, Option<super::ResolvedImportedRegistrySymbol>)> =
         std::thread::scope(|scope| {
@@ -4330,6 +4398,45 @@ fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
                     })
                 })
                 .collect();
+
+            // Winner-park rendezvous — prove every joiner has coalesced
+            // onto the winner's in-flight slot BEFORE releasing the winner.
+            // While the winner is parked the substrate holds exactly
+            // three `Arc`s on the slot (the in-flight table entry, the
+            // winner's `slot` local, and the winner's `panic_guard.slot`);
+            // each of the WORKERS-1 joiners bumps the count by one the
+            // instant it clones its own `Arc` via the slot-acquisition
+            // `table.entry(key).or_insert_with(..).clone()`, past which it
+            // deterministically reaches the cooperative joiner wait branch
+            // (the winner has already published `claimed == true`). The
+            // target strong count is therefore 3 + (WORKERS - 1) ==
+            // WORKERS + 2. `yield_now` (not a busy spin) keeps the main
+            // thread from starving the very workers it is waiting on under
+            // the oversubscribed gate.
+            let db = host.project_type_store().imported_registry_db();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut coalesced = false;
+            while std::time::Instant::now() < deadline {
+                if db
+                    .slot_strong_count_for_test(&inflight_key)
+                    .is_some_and(|count| count >= WORKERS + 2)
+                {
+                    coalesced = true;
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            // Release the winner BEFORE joining so a coalescing timeout can
+            // never deadlock the scope's thread join on the parked winner;
+            // the `_winner_park_guard` is a drop-time backstop.
+            winner_release.release();
+            assert!(
+                coalesced,
+                "the {WORKERS} concurrent cold-miss workers failed to coalesce onto ONE \
+                 in-flight slot within 30s — the deterministic singleflight rendezvous is \
+                 broken (the winner-park / slot-strong-count contract no longer holds)",
+            );
+
             handles
                 .into_iter()
                 .map(|h| h.join().expect("worker thread joined"))
@@ -4456,5 +4563,243 @@ fn projected_member_declaration_origin_points_at_cross_file_declaration() {
         comp_slice,
         Some("x"),
         "pairing the declaration offsets with the WRONG (importing) file must not yield `x`"
+    );
+}
+
+// ── Dispatch-authoritative compound-root surfaces ──────────────────
+//
+// These tests drive the REAL root-surface bridge
+// (`project_type_surface_expr_via_host_threaded`). The bridge carries NO
+// prepared-decl root-surface rescue — dispatch is the sole root-surface
+// authority — so each test proves the dispatch surface composition
+// (`dispatch_projected_surface`, which composes compound roots from the
+// decl anchor through the shared empty-path Shallow walker) produces a
+// COMPLETE shallow surface for `Union` / `Intersection` (heritage) /
+// `InstantiationRef` roots.
+//
+// Discrimination: with no fallback present, if dispatch fails to compose
+// the compound root the bridge returns `None` and the `.expect` panics —
+// the test FAILS. The member presence/absence assertions further pin the
+// composed surface to the exact expected member set.
+
+/// Collect property + method member names from a projected object surface
+/// `TypeExpr`. Panics if `expr` is not an `Object` so a mis-shaped
+/// projection fails loudly rather than silently asserting an empty set.
+#[cfg(test)]
+fn projected_object_member_names(expr: &TypeExpr) -> Vec<String> {
+    let object = match expr {
+        TypeExpr::Object(object) => object,
+        other => panic!("expected projected Object surface, got {other:?}"),
+    };
+    let mut names = object
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.clone()),
+            ObjectMember::Method(method) => Some(method.name.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+#[test]
+fn dispatch_authoritative_union_alias_surface_without_prepared_fallback() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    // Generic union alias: each arm shares `shared` and carries one
+    // branch-only member. The dispatch compound-root composition drives
+    // the shared shallow walker under the `MacroObjectSurface` context,
+    // whose union merge enumerates the UNION of arm members — so all three
+    // members appear, with branch-only members optional. A common-member
+    // INTERSECTION merge would keep only `shared`; asserting the
+    // branch-only members present discriminates union-of-members from
+    // common-member-only.
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+export interface ArmA {
+  shared?: string
+  onlyA?: number
+}
+export interface ArmB {
+  shared?: string
+  onlyB?: boolean
+}
+export type UnionAlias<T = ArmA> = ArmA | ArmB
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/src/App.vue",
+        "UnionAlias",
+    )
+    .expect(
+        "dispatch must compose the union-alias root surface (no prepared-decl fallback exists)",
+    );
+
+    let names = projected_object_member_names(&projected);
+    assert!(
+        names.iter().any(|name| name == "shared"),
+        "union surface keeps the shared base member; got {names:?}",
+    );
+    assert!(
+        names.iter().any(|name| name == "onlyA"),
+        "union surface keeps ArmA's branch-only member (union-of-members, not common-member-only); got {names:?}",
+    );
+    assert!(
+        names.iter().any(|name| name == "onlyB"),
+        "union surface keeps ArmB's branch-only member (union-of-members, not common-member-only); got {names:?}",
+    );
+}
+
+#[test]
+fn dispatch_authoritative_generic_omit_heritage_surface_without_prepared_fallback() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/base.ts".to_string(),
+        Arc::from(
+            r#"
+export interface RootProps<T> {
+  open?: boolean
+  defaultOpen?: boolean
+  disabled?: boolean
+  modelValue?: T
+}
+"#,
+        ),
+    );
+    // `ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'>`
+    // where `SelectMenuProps<T> extends Pick<RootProps<T>, 'open' |
+    // 'defaultOpen' | 'disabled'> { items?: T }`. The dispatch root is an
+    // Intersection (heritage overlay over the `Omit<...>` carrier). The
+    // dispatch compound-root composition must compose `open` / `defaultOpen`
+    // / `disabled` (inherited via Pick) and OMIT `items`.
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { RootProps } from './base'
+
+type Item = { label?: string }
+
+export interface SelectMenuProps<T = Item[]> extends Pick<RootProps<T>, 'open' | 'defaultOpen' | 'disabled'> {
+  items?: T
+}
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/src/App.vue",
+        "ColorModeSelectProps",
+    )
+    .expect(
+        "dispatch must compose the generic Omit-heritage root surface (no prepared-decl fallback exists)",
+    );
+
+    let names = projected_object_member_names(&projected);
+    for kept in ["open", "defaultOpen", "disabled"] {
+        assert!(
+            names.iter().any(|name| name == kept),
+            "Omit-heritage surface keeps inherited `{kept}` (via Pick<RootProps>); got {names:?}",
+        );
+    }
+    assert!(
+        !names.iter().any(|name| name == "items"),
+        "Omit<SelectMenuProps, 'items'> must drop `items` from the surface; got {names:?}",
+    );
+}
+
+#[test]
+fn dispatch_authoritative_ordinary_heritage_surface_without_prepared_fallback() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    // Ordinary (non-generic) heritage: `Derived extends ButtonProps`.
+    // The dispatch root is an Intersection (heritage overlay). The
+    // dispatch compound-root composition must compose the inherited
+    // `disabled` and the derived own-body `extra`.
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+export interface ButtonProps {
+  disabled?: boolean
+  label?: string
+}
+export interface Derived extends ButtonProps {
+  extra?: number
+}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/src/App.vue",
+        "Derived",
+    )
+    .expect(
+        "dispatch must compose the ordinary heritage root surface (no prepared-decl fallback exists)",
+    );
+
+    let names = projected_object_member_names(&projected);
+    assert!(
+        names.iter().any(|name| name == "disabled"),
+        "ordinary heritage surface keeps inherited `disabled` from ButtonProps; got {names:?}",
+    );
+    assert!(
+        names.iter().any(|name| name == "extra"),
+        "ordinary heritage surface keeps the derived own-body `extra`; got {names:?}",
     );
 }

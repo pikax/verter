@@ -842,12 +842,13 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
         let callsite_count = count_callsites(&src, class_b_callsite_patterns);
         if rel == BRIDGE_FILE_REL {
             bridge_file_seen = true;
-            // The bridge file is the single allowed home. The
-            // current 5l implementation composes surviving
-            // pub(crate) helpers (`dispatch_projected_surface` +
-            // `cached_prepared_root_surface`) instead of calling the
-            // deleted Class B engine methods, so callsite_count is
-            // 0 today. The test does NOT require non-zero here —
+            // The bridge file is the single allowed home. The bridge
+            // bodies compose surviving pub(crate) helpers (the
+            // root-surface bridges resolve through `dispatch_projected_surface`
+            // ALONE after Stage 4-disp; the explicit prepared-surface
+            // callers still use `cached_prepared_root_surface`) instead of
+            // calling the deleted Class B engine methods, so callsite_count
+            // is 0 today. The test does NOT require non-zero here —
             // the discriminating signal is "zero outside, allowed
             // inside" — so a future bridge body that re-uses the
             // legacy engine names would still pass this guard
@@ -902,6 +903,639 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
          be ZERO (the JSX.IntrinsicElements site migrated through the \
          bridge helper); found {host_manage_b}"
     );
+}
+
+/// The two root-surface bridges
+/// (`project_type_surface_expr_via_host_threaded` /
+/// `project_type_surface_shape_via_host_threaded`) resolve a root symbol's
+/// surface through the shared dispatch surface projector ALONE. Stage 4-disp
+/// removed their prepared-decl root-surface rescue
+/// (`.or_else(cached_prepared_root_surface)`) — dispatch composes Object /
+/// Alias roots directly and compound roots from the decl anchor through the
+/// shared empty-path Shallow walker. This guard asserts the rescue stays
+/// absent: neither bridge body may reference `cached_prepared_root_surface`.
+///
+/// (The prepared-decl helper itself survives for explicit prepared-surface
+/// callers — `project_prepared_type_surface_*_via_host_threaded` — so this
+/// guard scopes to the two ROOT-surface bridge bodies, not the whole file.)
+#[test]
+fn root_surface_bridges_carry_no_prepared_decl_fallback() {
+    use syn::visit::Visit;
+    use syn::{Expr, ExprCall, ExprMethodCall, Item, ItemFn};
+
+    const BRIDGE_FNS: [&str; 2] = [
+        "project_type_surface_expr_via_host_threaded",
+        "project_type_surface_shape_via_host_threaded",
+    ];
+    // The ONLY method calls a bridge body may make. `dispatch_projected_surface`
+    // is the sole root-surface authority (asserted to appear exactly once);
+    // `projection_op_budget_exhausted` is the cooperative budget guard. Any
+    // OTHER method call (`.or_else(...)`, `engine.cached_prepared_root_surface(...)`,
+    // an `engine.<other>()` rescue, …) is a structural deviation and FAILS.
+    const ALLOWED_METHOD_CALLS: [&str; 2] =
+        ["dispatch_projected_surface", "projection_op_budget_exhausted"];
+    // The ONLY free-function / variant-constructor calls a bridge body may
+    // make: the two thin surface→shape/expr converters, plus the std enum
+    // constructors (`Some` / `Ok` / `Err`) that wrap the converter result.
+    // Variant constructors are structurally inert — they cannot hide a rescue —
+    // so they are approved. Any OTHER free-fn call (including a local helper
+    // introduced to hide a `cached_prepared_root_surface` rescue behind an
+    // indirection) is a structural deviation and FAILS.
+    const ALLOWED_FREE_CALLS: [&str; 5] = [
+        "projected_surface_to_type_expr",
+        "projected_surface_to_expanded_shape",
+        "Some",
+        "Ok",
+        "Err",
+    ];
+    const FORBIDDEN_TOKEN: &str = "cached_prepared_root_surface";
+
+    let src = read_workspace_file("crates/verter_session/src/meta_resolve/dispatch_helpers.rs");
+    let file = syn::parse_file(&src).expect("parse dispatch_helpers.rs");
+
+    // Index every free `fn` in the file by name so a body's one-level local
+    // callees can be inspected (approach (b): a helper reachable from a bridge
+    // body must not itself reference the forbidden rescue).
+    let mut free_fns: std::collections::HashMap<String, &ItemFn> =
+        std::collections::HashMap::new();
+    for item in &file.items {
+        if let Item::Fn(f) = item {
+            free_fns.insert(f.sig.ident.to_string(), f);
+        }
+    }
+
+    /// Collects every method-call name, free-function-call name, and any
+    /// path segment equal to a forbidden token, within one fn body.
+    struct CallCollector {
+        method_calls: Vec<String>,
+        free_calls: Vec<String>,
+        forbidden_hits: usize,
+    }
+    impl<'ast> Visit<'ast> for CallCollector {
+        fn visit_expr_method_call(&mut self, mc: &'ast ExprMethodCall) {
+            self.method_calls.push(mc.method.to_string());
+            syn::visit::visit_expr_method_call(self, mc);
+        }
+        fn visit_expr_call(&mut self, call: &'ast ExprCall) {
+            // Record the terminal path segment of a free / associated call
+            // (`foo(...)`, `module::foo(...)`, `Type::assoc(...)`).
+            if let Expr::Path(p) = call.func.as_ref() {
+                if let Some(last) = p.path.segments.last() {
+                    self.free_calls.push(last.ident.to_string());
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+        fn visit_path_segment(&mut self, seg: &'ast syn::PathSegment) {
+            if seg.ident == FORBIDDEN_TOKEN {
+                self.forbidden_hits += 1;
+            }
+            syn::visit::visit_path_segment(self, seg);
+        }
+    }
+
+    for bridge_name in BRIDGE_FNS {
+        let bridge = free_fns.get(bridge_name).unwrap_or_else(|| {
+            panic!(
+                "bridge fn `{bridge_name}` not found in dispatch_helpers.rs — \
+                 the guard's anchor moved"
+            )
+        });
+
+        let mut collector = CallCollector {
+            method_calls: Vec::new(),
+            free_calls: Vec::new(),
+            forbidden_hits: 0,
+        };
+        collector.visit_block(&bridge.block);
+
+        // (1) The forbidden rescue must not appear anywhere in the body.
+        assert_eq!(
+            collector.forbidden_hits, 0,
+            "Stage 4-disp: `{bridge_name}` references `{FORBIDDEN_TOKEN}` — the \
+             prepared-decl root-surface rescue was removed and must stay dead. \
+             Fix any compound-root composition gap in the shared walker (the \
+             merge / heritage / Omit functions), NOT by re-adding the rescue."
+        );
+
+        // (2) Exactly one `dispatch_projected_surface` call — dispatch is the
+        //     sole root-surface authority. Zero would mean the bridge stopped
+        //     resolving through dispatch; more than one is an unexpected shape.
+        let dispatch_calls = collector
+            .method_calls
+            .iter()
+            .filter(|m| m.as_str() == "dispatch_projected_surface")
+            .count();
+        assert_eq!(
+            dispatch_calls, 1,
+            "Stage 4-disp: `{bridge_name}` must call `dispatch_projected_surface` \
+             EXACTLY once (the sole root-surface authority); found \
+             {dispatch_calls}. Method calls observed: {:?}",
+            collector.method_calls
+        );
+
+        // (3) STRUCTURAL no-evasion gate: every method call in the body must be
+        //     on the approved list. A `.or_else(...)` fallback (direct OR behind
+        //     a helper), a re-added `engine.cached_prepared_root_surface(...)`,
+        //     or any other engine-method rescue introduces a non-approved
+        //     method call here and FAILS — closing the indirection evasion the
+        //     prior literal-only scan allowed.
+        for method in &collector.method_calls {
+            assert!(
+                ALLOWED_METHOD_CALLS.contains(&method.as_str()),
+                "Stage 4-disp: `{bridge_name}` makes a non-approved method call \
+                 `.{method}(...)`. The bridge body must resolve the root surface \
+                 through `dispatch_projected_surface` ALONE — no `.or_else(...)` \
+                 fallback, no `cached_prepared_root_surface` rescue, no other \
+                 engine-method escape hatch. Approved: {ALLOWED_METHOD_CALLS:?}."
+            );
+        }
+
+        // (4) STRUCTURAL no-evasion gate: every free / associated function call
+        //     must be on the approved converter list. A helper-indirection
+        //     evasion (`fn h(){ cached_prepared_root_surface } ;
+        //     dispatch_projected_surface(...).or_else(|| h(...))`, or a
+        //     `let s = h(...)?;` form) introduces a non-approved free call here
+        //     and FAILS even if the helper avoids `.or_else`.
+        for call in &collector.free_calls {
+            assert!(
+                ALLOWED_FREE_CALLS.contains(&call.as_str()),
+                "Stage 4-disp: `{bridge_name}` calls non-approved free function \
+                 `{call}(...)`. The bridge body must call ONLY \
+                 `dispatch_projected_surface` (method) + a surface converter \
+                 ({ALLOWED_FREE_CALLS:?}); routing through any other helper can \
+                 hide a `cached_prepared_root_surface` rescue. Inline the work \
+                 or fix the shared walker instead."
+            );
+
+            // (b) Defense in depth: even an approved-named call is re-checked,
+            //     and any LOCAL helper reachable from the body must not itself
+            //     reference the forbidden rescue. (The approved converters are
+            //     not local fns here, so this loop is normally a no-op; it
+            //     future-proofs against an approved-list entry that later
+            //     becomes a local fn.)
+            if let Some(helper) = free_fns.get(call) {
+                let mut helper_collector = CallCollector {
+                    method_calls: Vec::new(),
+                    free_calls: Vec::new(),
+                    forbidden_hits: 0,
+                };
+                helper_collector.visit_block(&helper.block);
+                assert_eq!(
+                    helper_collector.forbidden_hits, 0,
+                    "Stage 4-disp: `{bridge_name}` calls local helper `{call}`, \
+                     whose body references `{FORBIDDEN_TOKEN}` — the rescue cannot \
+                     be re-introduced through a one-level helper indirection."
+                );
+            }
+        }
+    }
+}
+
+/// The component-meta RESOLUTION PATH never re-introduces the retired eager
+/// macro-object materialiser nor the prepared-decl member rescue.
+///
+/// Stage 4a routed `define_props` / `define_emits` / `define_slots` through the
+/// dispatch projector (`projectors::define_shapes::project_define_macro_shapes`)
+/// and deleted both the eager materialiser call and the root-symbol member
+/// fallback. This guard asserts they STAY deleted from the production resolution
+/// entry points, by SYMBOL USAGE (any path reference — direct, qualified, OR
+/// expanded from a `macro_rules!` — to the forbidden symbol within the named
+/// function body trips the guard, closing the textual-`.or_else`-spelling
+/// evasion the older string scan allowed):
+///
+/// - `compute_component_meta_state_inner` (the cold resolution orchestrator)
+///   must NOT reference `produce_macro_object_shapes_for_purpose` — macro shapes
+///   are owned by `project_define_macro_shapes` now.
+/// - `dispatch_member_for_root_symbol` (the routed single-member projector) must
+///   NOT reference `project_prepared_requested_member_from_symbol` — a dispatch
+///   miss is an authoritative miss; the prepared-decl rescue is gone. (The
+///   symbol survives for the prepared-surface engine's OWN recursive member
+///   projection in `prepared_surface.rs`; this guard scopes to the routed-member
+///   body, not the whole crate.)
+#[test]
+fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback() {
+    use syn::visit::Visit;
+    use syn::{ImplItemFn, Item, ItemFn, ItemImpl, UseTree};
+
+    /// Macros that may legitimately appear inside the guarded function bodies.
+    /// ANY other macro invocation is rejected: a `macro_rules!` wrapper whose
+    /// expansion contains the forbidden symbol would be invisible to the path /
+    /// method-call scanners (its body is an unparsed token stream), so an
+    /// unknown macro in the body is a potential re-introduction vector. Adding a
+    /// new macro to a guarded body requires consciously extending this list
+    /// (after confirming the macro cannot expand to the forbidden symbol).
+    const APPROVED_MACROS: &[&str] = &[
+        "component_meta_trace_custom",
+        "format",
+        "matches",
+        "vec",
+        "assert",
+        "assert_eq",
+        "debug_assert",
+        "debug_assert_eq",
+        "write",
+        "writeln",
+        "panic",
+        "todo",
+        "unreachable",
+    ];
+
+    /// Walks one function body counting references to a forbidden symbol via
+    /// ANY path segment (direct call, qualified path, or a segment produced by
+    /// macro expansion that `syn` parses as a path) AND any method-call name
+    /// (`receiver.forbidden(...)`). Method calls are `ExprMethodCall`, NOT path
+    /// segments, so both visitors are required — a `.or_else(|| engine.
+    /// project_prepared_requested_member_from_symbol(...))` rescue is a method
+    /// call and would be invisible to a path-only scan. Macro INVOCATIONS in the
+    /// body are collected by name so the caller can reject any non-approved
+    /// macro (a `macro_rules!` wrapper that expands to the forbidden symbol).
+    struct ForbiddenSymbolCounter<'a> {
+        /// The forbidden symbols (the canonical name plus any `use`-alias of it).
+        forbidden: &'a [String],
+        hits: usize,
+        /// Macro invocation names (last path segment) seen in the body.
+        macros_used: Vec<String>,
+    }
+    impl<'ast, 'a> Visit<'ast> for ForbiddenSymbolCounter<'a> {
+        fn visit_path_segment(&mut self, seg: &'ast syn::PathSegment) {
+            if self.forbidden.iter().any(|f| seg.ident == f.as_str()) {
+                self.hits += 1;
+            }
+            syn::visit::visit_path_segment(self, seg);
+        }
+        fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+            if self.forbidden.iter().any(|f| mc.method == f.as_str()) {
+                self.hits += 1;
+            }
+            syn::visit::visit_expr_method_call(self, mc);
+        }
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            if let Some(seg) = mac.path.segments.last() {
+                self.macros_used.push(seg.ident.to_string());
+            }
+            // Do NOT recurse into the macro token stream — it is unparsed
+            // tokens, not a path/expr tree. The allow-list check on the macro
+            // NAME is the guard; an approved macro cannot expand to the
+            // forbidden symbol, an unapproved macro is rejected outright.
+        }
+    }
+
+    /// Collect every `use`-alias (`... as Alias`) in `file` whose ORIGINAL last
+    /// segment is one of `forbidden_originals`. An `use crate::…::forbidden as
+    /// reroute;` import lets `reroute(...)` call the retired symbol without the
+    /// body scan ever seeing `forbidden`. `forbidden_originals` is the canonical
+    /// symbol PLUS every transitive crate re-export alias of it (so a re-export
+    /// chain `pub(crate) use …forbidden as r0;` elsewhere + `use …::r0 as
+    /// reroute;` here is caught: `r0` is in `forbidden_originals`). The local
+    /// renames are added to the forbidden set AND their mere existence reported.
+    fn use_aliases_of(file: &syn::File, forbidden_originals: &[String]) -> Vec<String> {
+        fn walk(tree: &UseTree, forbidden_originals: &[String], out: &mut Vec<String>) {
+            match tree {
+                UseTree::Path(p) => walk(&p.tree, forbidden_originals, out),
+                UseTree::Group(g) => {
+                    for t in &g.items {
+                        walk(t, forbidden_originals, out);
+                    }
+                }
+                UseTree::Rename(r) => {
+                    if forbidden_originals.iter().any(|f| r.ident == f.as_str()) {
+                        out.push(r.rename.to_string());
+                    }
+                }
+                UseTree::Name(_) | UseTree::Glob(_) => {}
+            }
+        }
+        let mut out = Vec::new();
+        for item in &file.items {
+            if let Item::Use(u) = item {
+                walk(&u.tree, forbidden_originals, &mut out);
+            }
+        }
+        out
+    }
+
+    /// Transitively collect every crate-internal re-export ALIAS of
+    /// `canonical_forbidden`. Walks every `.rs` under `crates/verter_session/src`
+    /// and gathers `pub use …X as ALIAS;` / `pub(crate) use …X as ALIAS;`
+    /// renames where `X` is already known-forbidden, iterating to a fixpoint so a
+    /// chain (`forbidden as r0`, then `r0 as r1`, …) is fully resolved. The
+    /// returned aliases let the guard treat an aliased re-import of a re-export
+    /// (`use crate::reexport_home::r0 as reroute;` in the guarded file) as an
+    /// import of the forbidden symbol. Only re-exports (`pub`/`pub(crate) use …
+    /// as`) count — a private `use … as` inside an unrelated module does not make
+    /// the alias importable elsewhere.
+    fn crate_reexport_aliases_of(canonical_forbidden: &str) -> Vec<String> {
+        fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rs_files(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+        /// Pull `pub`/`pub(crate)` re-export renames whose original ident is in
+        /// `known` from one parsed file.
+        fn reexport_renames_in_file(
+            file: &syn::File,
+            known: &[String],
+            out: &mut Vec<String>,
+        ) {
+            fn walk(tree: &UseTree, known: &[String], out: &mut Vec<String>) {
+                match tree {
+                    UseTree::Path(p) => walk(&p.tree, known, out),
+                    UseTree::Group(g) => {
+                        for t in &g.items {
+                            walk(t, known, out);
+                        }
+                    }
+                    UseTree::Rename(r) => {
+                        if known.iter().any(|k| r.ident == k.as_str()) {
+                            out.push(r.rename.to_string());
+                        }
+                    }
+                    UseTree::Name(_) | UseTree::Glob(_) => {}
+                }
+            }
+            for item in &file.items {
+                if let Item::Use(u) = item {
+                    // Only RE-EXPORTS (`pub` / `pub(crate)`) make the alias
+                    // importable from another module; a private `use … as` does
+                    // not propagate.
+                    let is_reexport = matches!(
+                        u.vis,
+                        syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
+                    );
+                    if is_reexport {
+                        walk(&u.tree, known, out);
+                    }
+                }
+            }
+        }
+
+        let src_dir = workspace_root().join("crates/verter_session/src");
+        let mut rs_files = Vec::new();
+        collect_rs_files(&src_dir, &mut rs_files);
+        let parsed: Vec<syn::File> = rs_files
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .filter_map(|src| syn::parse_file(&src).ok())
+            .collect();
+
+        let mut known = vec![canonical_forbidden.to_string()];
+        // Fixpoint: each pass may discover aliases of aliases.
+        loop {
+            let mut discovered = Vec::new();
+            for file in &parsed {
+                reexport_renames_in_file(file, &known, &mut discovered);
+            }
+            let mut grew = false;
+            for alias in discovered {
+                if !known.iter().any(|k| k == &alias) {
+                    known.push(alias);
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        // Drop the canonical name itself; return only the discovered aliases.
+        known.into_iter().skip(1).collect()
+    }
+
+    /// Collect module-scope `const` / `static` items in `file` whose initializer
+    /// expression references any name in `forbidden`. A function-pointer const
+    /// (`const REROUTE: fn(...) -> _ = produce_macro_object_shapes_for_purpose;`)
+    /// at module scope lets `REROUTE(...)` inside a guarded body call the retired
+    /// symbol while the body-only path scan never sees `produce_…` (the
+    /// initializer lives outside the fn). The const/static NAMES become reroute
+    /// aliases (added to the forbidden body-scan set) and are themselves reported.
+    fn const_static_fn_pointer_aliases_of(file: &syn::File, forbidden: &[String]) -> Vec<String> {
+        struct InitRefCounter<'a> {
+            forbidden: &'a [String],
+            hit: bool,
+        }
+        impl<'ast, 'a> Visit<'ast> for InitRefCounter<'a> {
+            fn visit_path_segment(&mut self, seg: &'ast syn::PathSegment) {
+                if self.forbidden.iter().any(|f| seg.ident == f.as_str()) {
+                    self.hit = true;
+                }
+                syn::visit::visit_path_segment(self, seg);
+            }
+        }
+        let mut out = Vec::new();
+        for item in &file.items {
+            let (name, expr): (String, &syn::Expr) = match item {
+                Item::Const(c) => (c.ident.to_string(), &c.expr),
+                Item::Static(s) => (s.ident.to_string(), &s.expr),
+                _ => continue,
+            };
+            let mut counter = InitRefCounter {
+                forbidden,
+                hit: false,
+            };
+            counter.visit_expr(expr);
+            if counter.hit {
+                out.push(name);
+            }
+        }
+        out
+    }
+
+    /// Find a free fn OR an impl method named `fn_name` in `file` and count
+    /// `forbidden`-symbol references (canonical name + `use`-aliases) in its
+    /// body. Also asserts every macro invocation in the body is on
+    /// `APPROVED_MACROS`. Panics if the function is not found (the guard's
+    /// anchor moved).
+    fn assert_fn_free_of_symbol(
+        file: &syn::File,
+        fn_name: &str,
+        canonical_forbidden: &str,
+        message: &str,
+    ) {
+        // Transitive crate re-export aliases of the forbidden symbol. A
+        // re-export chain (`pub(crate) use …forbidden as r0;` in another module,
+        // then `use crate::…::r0 as reroute;` in THIS file) hides the forbidden
+        // name from a direct-alias scan: the guarded file's rename original is
+        // `r0`, not `forbidden`. Treat every transitive re-export alias as a
+        // forbidden ORIGINAL so the local re-import is caught.
+        let reexport_aliases = crate_reexport_aliases_of(canonical_forbidden);
+
+        // Forbidden ORIGINAL names a guarded-file `use … as …` could rename:
+        // the canonical symbol plus its crate re-export aliases.
+        let forbidden_originals: Vec<String> = std::iter::once(canonical_forbidden.to_string())
+            .chain(reexport_aliases.iter().cloned())
+            .collect();
+
+        // (1) An aliased import (`use …forbidden as reroute;`, OR
+        //     `use …::r0 as reroute;` for a re-export alias `r0`) is itself the
+        //     evasion — report it before the body scan even runs.
+        let aliases = use_aliases_of(file, &forbidden_originals);
+        assert!(
+            aliases.is_empty(),
+            "Stage 4a guard: the file declaring `{fn_name}` imports the retired \
+             symbol `{canonical_forbidden}` (or a crate re-export alias of it: \
+             {reexport_aliases:?}) under local alias(es) {aliases:?} (`use … as \
+             …`). An aliased import — direct OR via a `pub use … as` re-export \
+             chain — is an import-alias evasion of the materializer/fallback \
+             retirement. Remove the alias import. {message}"
+        );
+
+        // The full set the body scan treats as forbidden: the canonical name,
+        // its crate re-export aliases, and any local renames of either.
+        let mut forbidden: Vec<String> = forbidden_originals.clone();
+        forbidden.extend(aliases);
+
+        // (2) A module-scope function-pointer const/static whose INITIALIZER
+        //     references a forbidden name (`const REROUTE: fn(...) = forbidden;`)
+        //     lets `REROUTE(...)` in the body call the retired symbol while the
+        //     body-only scan never sees `forbidden` (the initializer is outside
+        //     the fn). Report the const/static, and add its NAME to the forbidden
+        //     body-scan set so the `REROUTE(...)` call site is also caught.
+        let const_aliases = const_static_fn_pointer_aliases_of(file, &forbidden);
+        assert!(
+            const_aliases.is_empty(),
+            "Stage 4a guard: the file declaring `{fn_name}` binds the retired \
+             symbol `{canonical_forbidden}` (or an alias of it) to module-scope \
+             function-pointer const/static(s) {const_aliases:?} (`const NAME: \
+             fn(...) = forbidden;`). A fn-pointer const lets `NAME(...)` call the \
+             retired symbol while the body-only path scan never sees `forbidden`. \
+             Remove the const/static binding. {message}"
+        );
+        forbidden.extend(const_aliases);
+
+        let mut counter = ForbiddenSymbolCounter {
+            forbidden: &forbidden,
+            hits: 0,
+            macros_used: Vec::new(),
+        };
+        let mut found = false;
+        for item in &file.items {
+            match item {
+                Item::Fn(ItemFn { sig, block, .. }) if sig.ident == fn_name => {
+                    counter.visit_block(block);
+                    found = true;
+                }
+                Item::Impl(ItemImpl { items, .. }) => {
+                    for impl_item in items {
+                        if let syn::ImplItem::Fn(ImplItemFn { sig, block, .. }) = impl_item {
+                            if sig.ident == fn_name {
+                                counter.visit_block(block);
+                                found = true;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            found,
+            "guard anchor moved: fn `{fn_name}` not found — re-point the guard at \
+             the renamed component-meta resolution entry point"
+        );
+        assert_eq!(counter.hits, 0, "{message}");
+        // Reject any macro invocation in the body that is not on the approved
+        // list — an unapproved `macro_rules!` wrapper could expand to the
+        // forbidden symbol (its expansion is invisible to the symbol scan).
+        let unapproved: Vec<&String> = counter
+            .macros_used
+            .iter()
+            .filter(|m| !APPROVED_MACROS.contains(&m.as_str()))
+            .collect();
+        assert!(
+            unapproved.is_empty(),
+            "Stage 4a guard: `{fn_name}` invokes non-approved macro(s) \
+             {unapproved:?}. A `macro_rules!` wrapper can expand to the retired \
+             materializer/fallback symbol, evading the path/method-call scan. \
+             Either remove the macro or, if it provably cannot expand to the \
+             forbidden symbol, add its name to APPROVED_MACROS. {message}"
+        );
+    }
+
+    let methods_src =
+        read_workspace_file("crates/verter_session/src/host_manage/component_meta_methods.rs");
+    let methods_file = syn::parse_file(&methods_src).expect("parse component_meta_methods.rs");
+    assert_fn_free_of_symbol(
+        &methods_file,
+        "compute_component_meta_state_inner",
+        "produce_macro_object_shapes_for_purpose",
+        "Stage 4a: `compute_component_meta_state_inner` references \
+         `produce_macro_object_shapes_for_purpose` — the eager macro-object \
+         materialiser was retired from the production resolution path. Macro \
+         shapes are owned by `projectors::define_shapes::project_define_macro_shapes`; \
+         do NOT re-introduce the materialiser (directly, via a `use`-alias, OR \
+         through a macro).",
+    );
+
+    let engine_src = read_workspace_file(
+        "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
+    );
+    let engine_file = syn::parse_file(&engine_src).expect("parse component_meta_query_engine/mod.rs");
+    assert_fn_free_of_symbol(
+        &engine_file,
+        "dispatch_member_for_root_symbol",
+        "project_prepared_requested_member_from_symbol",
+        "Stage 4a: `dispatch_member_for_root_symbol` references \
+         `project_prepared_requested_member_from_symbol` — the prepared-decl \
+         member rescue was removed; a dispatch miss is an authoritative miss. Do \
+         NOT re-add the `.or_else(...)` fallback (directly, via a `use`-alias, OR \
+         through a macro).",
+    );
+
+    // Owner-local dispatch-seal guard: BOTH owner-local macro-root entry points
+    // in jsdoc_resolve.rs resolve their root surface through the SOLE query-time
+    // resolver (the shared dispatch surface projector
+    // `project_expr_surface_shape_via_host_threaded`), NOT the retired
+    // prepared-decl walker (`cached_prepared_root_surface` via
+    // `project_prepared_type_surface_*`):
+    //
+    // - `owner_local_macro_root_has_surface` is the cold resolver's owner-local
+    //   AUTHORITY gate (presence check).
+    // - `projectable_owner_local_macro_roots` is the upstream projectable-roots
+    //   PRE-FILTER. It runs BEFORE the authority gate and decides whether a
+    //   macro root is considered projectable at all, so a surviving prepared
+    //   walker there is still a production walker path — it MUST route through
+    //   dispatch too (one-engine / no-production-walker seal).
+    //
+    // Re-introducing the prepared-decl walker in EITHER function is a
+    // second-resolver (Typed-IR-Only) violation.
+    let jsdoc_src =
+        read_workspace_file("crates/verter_session/src/host_manage/jsdoc_resolve.rs");
+    let jsdoc_file = syn::parse_file(&jsdoc_src).expect("parse jsdoc_resolve.rs");
+    for owner_local_fn in [
+        "owner_local_macro_root_has_surface",
+        "projectable_owner_local_macro_roots",
+    ] {
+        for prepared_walker_symbol in [
+            "cached_prepared_root_surface",
+            "project_prepared_type_surface_shape_via_host_threaded",
+            "project_prepared_type_surface_expr_via_host_threaded",
+            "project_prepared_requested_member_from_symbol",
+        ] {
+            assert_fn_free_of_symbol(
+                &jsdoc_file,
+                owner_local_fn,
+                prepared_walker_symbol,
+                &format!(
+                    "Stage 4a: the owner-local entry point `{owner_local_fn}` \
+                     references the prepared-decl walker `{prepared_walker_symbol}` \
+                     — both owner-local macro-root entry points were retargeted to \
+                     the shared dispatch surface projector \
+                     `project_expr_surface_shape_via_host_threaded` and must stay \
+                     there (one resolver). Do NOT route the owner-local \
+                     projectable/authority decision back through the prepared-surface \
+                     walker."
+                ),
+            );
+        }
+    }
 }
 
 // ===========================================================================
@@ -12786,7 +13420,7 @@ mod single_resolution_engine_guards {
     const READ_SURFACE_MEMBERS_DEF_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
             "crates/verter_session/src/meta_resolve/projectors/mod.rs",
-            428,
+            430,
             "fn read_surface_members(",
         ),
         (

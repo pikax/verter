@@ -216,9 +216,82 @@ fn realize_callable_member_inner(
             realize_callable_member_inner(dispatch, resolved, context, depth + 1)
         }
 
-        // Any other shape (Object, Union, Intersection, Primitive,
-        // Mapped, KeyOf, IndexedAccess, TypeOf, TypeParam, Literal,
-        // Tuple, Array, TemplateLiteral, Opaque) — not callable.
+        // (5b) DeclPlaceholder — the shallow ResolveDecl of an alias / interface
+        // declaration returns this carrier rather than the eagerly-resolved
+        // body (a `type SlotA = (props) => any` resolves to
+        // `Opaque(DeclPlaceholder { name: "SlotA" })` under Navigate). Instantiate
+        // the placeholder to obtain the declaration body (the Function), then
+        // recurse. Without this arm a slot member typed as an ALIAS to a function
+        // (`default: SlotFn` / a `Union` / `Intersection` of such aliases) never
+        // realizes to a callable. Mirrors the `expand_empty_path_terminal`
+        // DeclPlaceholder expansion in the dispatch walker.
+        SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
+            canonical_id,
+            name,
+            whole_hash: _,
+        }) => {
+            let key = crate::semantic_query::DeclKey {
+                canonical_id: Arc::clone(canonical_id),
+                decl_name: Arc::clone(name),
+            };
+            drop(data);
+            let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
+                base: key,
+                args: Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+                context: ProjectionReductionContext::structural_transit_with_mode(
+                    ProjectionMode::Navigate,
+                ),
+            });
+            emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
+            let body = match read.value {
+                QueryResult::Value(id) if id != node => id,
+                // `Value(id) where id == node` means the instantiate returned the
+                // placeholder unchanged (unresolved declaration) — nothing to
+                // realize.
+                _ => return None,
+            };
+            realize_callable_member_inner(dispatch, body, context, depth + 1)
+        }
+
+        // (6) Union / Intersection — a composite of slot-callable arms
+        // (`default: SlotA | SlotB` raises to `Union(Ref(SlotA), Ref(SlotB))`;
+        // `(SlotA & SlotB)['default']` to an `Intersection`). Realize EACH arm
+        // to its callable Function and rebuild the composite of realized arms,
+        // so the slot normalizer's `slot_callable_param_and_return` sees
+        // `Union(Function, Function)` / `Intersection(Function, Function)`
+        // rather than a composite of unresolved alias `Ref`s. If ANY arm does
+        // not realize to a callable the whole composite is not slot-callable
+        // (`None`) — the slot normalizer then classifies the member non-slot.
+        SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            let is_union = matches!(data.as_ref(), SemanticNodeData::Union(_));
+            let arms = Arc::clone(arms);
+            drop(data);
+            let mut realized_arms: Vec<crate::semantic_query::SemanticNodeId> =
+                Vec::with_capacity(arms.len());
+            for arm in arms.iter() {
+                let realized = realize_callable_member_inner(dispatch, *arm, context, depth + 1)?;
+                realized_arms.push(realized);
+            }
+            if realized_arms.is_empty() {
+                return None;
+            }
+            // If realization left every arm unchanged, return the original node
+            // (avoid interning an identical composite).
+            if realized_arms.iter().zip(arms.iter()).all(|(a, b)| a == b) {
+                return Some(node);
+            }
+            let boxed = Arc::from(realized_arms.into_boxed_slice());
+            let rebuilt = if is_union {
+                SemanticNodeData::Union(boxed)
+            } else {
+                SemanticNodeData::Intersection(boxed)
+            };
+            Some(dispatch.ctx.project_type_store().semantic_graph().intern_node(rebuilt))
+        }
+
+        // Any other shape (Object, Primitive, Mapped, KeyOf, IndexedAccess,
+        // TypeOf, TypeParam, Literal, Tuple, Array, TemplateLiteral, Opaque) —
+        // not callable.
         _ => None,
     }
 }
@@ -614,7 +687,19 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
 /// Walks Parenthesized wrappers transparently. Stops decomposition at
 /// the first non-string-literal index (returns the partial chain as
 /// path with the partial-chain root as base).
-fn decompose_indexed_access_chain(
+/// Decompose a string-literal-indexed access chain
+/// (`Root['a']['b']['c']`) into its `(base, [a, b, c])` path-precise
+/// form. The base is the innermost non-`IndexedAccess` carrier (a `Ref`,
+/// a generic instantiation, etc.) and the path is the ordered list of
+/// string-literal index hops. A non-string-literal index stops the
+/// descent (the whole expression becomes the base, empty path).
+///
+/// Shared by the transit-shallow Class-A projector and the Vue macro
+/// surface adapter so the deep-indexed-access macro type argument
+/// (`defineProps<DeepConfig['ui']['header']>()`) walks the SAME
+/// path-precise `ProjectPath` both paths use — intermediate hops in
+/// `Navigate`, terminal hop in the caller's mode (one engine).
+pub(crate) fn decompose_indexed_access_chain(
     expr: &verter_type_expr::TypeExpr,
 ) -> (
     &verter_type_expr::TypeExpr,
@@ -957,6 +1042,16 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
 // is gated `#[cfg(test)]` because tests are its only consumer.
 // =============================================================================
 
+// The root-surface bridges resolve a root symbol's surface through the
+// shared dispatch surface projector ALONE — `dispatch_projected_surface`
+// composes Object / Alias roots directly and compound (Union /
+// Intersection / InstantiationRef) roots from the decl anchor through the
+// shared empty-path Shallow walker. Dispatch is the sole root-surface
+// authority here; there is no prepared-decl root-surface rescue
+// (`.or_else(cached_prepared_root_surface)`) behind dispatch. (The
+// prepared-decl path itself survives only for explicit prepared-surface
+// callers.) The `root_surface_bridges_carry_no_prepared_decl_fallback`
+// architecture guard enforces this absence.
 pub(crate) fn project_type_surface_expr_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
@@ -966,9 +1061,7 @@ pub(crate) fn project_type_surface_expr_via_host_threaded<'ctx>(
     if engine.projection_op_budget_exhausted() {
         return None;
     }
-    let surface = engine
-        .dispatch_projected_surface(scope_canonical_id, symbol_name)
-        .or_else(|| engine.cached_prepared_root_surface(scope_canonical_id, symbol_name))?;
+    let surface = engine.dispatch_projected_surface(scope_canonical_id, symbol_name)?;
     projected_surface_to_type_expr(&surface)
 }
 
@@ -981,9 +1074,7 @@ pub(crate) fn project_type_surface_shape_via_host_threaded<'ctx>(
     if engine.projection_op_budget_exhausted() {
         return None;
     }
-    let surface = engine
-        .dispatch_projected_surface(scope_canonical_id, symbol_name)
-        .or_else(|| engine.cached_prepared_root_surface(scope_canonical_id, symbol_name))?;
+    let surface = engine.dispatch_projected_surface(scope_canonical_id, symbol_name)?;
     Some(projected_surface_to_expanded_shape(&surface))
 }
 
@@ -1107,7 +1198,15 @@ pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
     };
     let surface = projected_surface_from_semantic_node(ctx, node)?;
     let shape = projected_surface_to_expanded_shape(&surface);
-    (!shape.properties.is_empty() || !shape.call_signatures.is_empty()).then_some(shape)
+    // An index-signature-only surface (`{ [k: string]: string }`) is a
+    // genuine props surface — `defineProps<{ [k: string]: string }>()` admits
+    // every string key. Admitting it here lets the owner-local root gate (which
+    // already counts index signatures) see a non-empty shape; gating on
+    // properties / call-signatures alone would drop an index-sig-only root.
+    (!shape.properties.is_empty()
+        || !shape.call_signatures.is_empty()
+        || !shape.index_signatures.is_empty())
+    .then_some(shape)
 }
 
 pub(crate) fn project_route_surface_expr_via_host_threaded<'ctx>(

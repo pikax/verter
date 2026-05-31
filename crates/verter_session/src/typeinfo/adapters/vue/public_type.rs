@@ -30,7 +30,8 @@ use std::sync::Arc;
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    ProjectionMode, ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
+    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticQueryApi,
+    SemanticQueryKey,
 };
 use crate::typeinfo::surface::TypeInfoSurface;
 use crate::typeinfo::types::TypeInfoQueryLevel;
@@ -128,6 +129,7 @@ impl VerterHost {
             &host_ctx,
             &dispatch,
             base,
+            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
             ProjectionReductionContext::published(ProjectionMode::Shallow),
         )
     }

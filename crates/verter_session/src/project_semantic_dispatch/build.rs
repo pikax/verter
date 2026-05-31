@@ -1526,7 +1526,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn object_filter_source_surface(&self, source_resolved: SemanticNodeId) -> Option<SurfaceView> {
         match self.graph().node_data(source_resolved).as_deref() {
             Some(SemanticNodeData::Object(view)) => Some(view.clone()),
-            Some(SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. }) => {
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
+                // Compound carriers — an `Intersection` / `Union` source arises
+                // when the Pick/Omit source is itself a HERITAGE-bearing
+                // declaration: `Omit<SelectMenuProps<T>, K>` where
+                // `interface SelectMenuProps<T> extends Pick<RootProps<T>, …> { … }`
+                // resolves its instantiated body to
+                // `Intersection([<extends-Pick arm>, <own body>])`, NOT a flat
+                // `Object`. Reading that compound surface through the SAME
+                // shared empty-path Shallow reader merges the heritage arm(s)
+                // with the own body into one `SurfaceView`, so the inherited
+                // members survive the outer `Omit`/`Pick`. Without this arm the
+                // utility collapses the heritage-bearing source to
+                // `Opaque(Miss)` and every inherited member is lost (the
+                // generic-Omit-of-Pick-of-generic heritage collapse).
+                | SemanticNodeData::Intersection(_)
+                | SemanticNodeData::Union(_),
+            ) => {
                 // A Pick/Omit source is never the macro-T own body — read it
                 // under the structural `published(Shallow)` context.
                 self.resolve_typeinfo_surface_view(

@@ -32,7 +32,7 @@ pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 // `crate::meta_resolve::*` paths keep working without callsite churn.
 mod dep_signature;
 pub(crate) mod diagnostic_convert;
-mod dispatch_helpers;
+pub(crate) mod dispatch_helpers;
 pub(crate) mod exactness;
 mod graph_predicates;
 mod macro_member_walk;
@@ -75,15 +75,19 @@ pub(crate) use dispatch_helpers::{
     instantiate_local_generic_ref_via_dispatch, lower_and_project_to_expanded_via_host_threaded,
     pick_via_dispatch_pick_helper, project_expr_class_a_via_dispatch,
     project_expr_class_a_via_dispatch_threaded, project_expr_surface_expr_via_host_threaded,
-    project_expr_surface_shape_via_host_threaded,
-    project_prepared_type_surface_shape_via_host_threaded,
-    project_type_surface_expr_via_host_threaded,
+    project_expr_surface_shape_via_host_threaded, project_type_surface_expr_via_host_threaded,
 };
 // Test-only re-exports — exercised by parity tests for the
-// dispatch-route-helper coverage matrix.
+// dispatch-route-helper coverage matrix. The prepared-decl surface
+// projector is no longer a PRODUCTION re-export here: the owner-local
+// macro-root entry points were retargeted to the shared dispatch surface
+// projector (`project_expr_surface_shape_via_host_threaded`), so the
+// prepared walker survives only for its own materialiser-module callers
+// (which import it directly from `dispatch_helpers`) and these parity tests.
 #[cfg(test)]
 pub(crate) use dispatch_helpers::{
     project_prepared_type_surface_expr_via_host_threaded,
+    project_prepared_type_surface_shape_via_host_threaded,
     project_route_surface_expr_via_host_threaded,
 };
 pub(crate) use graph_predicates::{
@@ -123,7 +127,7 @@ pub(crate) use macro_member_walk::{
 };
 pub(crate) use materialize::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
-    materialize_component_meta_type_expr_until_stable, produce_macro_object_shapes_for_purpose,
+    materialize_component_meta_type_expr_until_stable,
 };
 // Test-only re-export — `meta_resolve_tests.rs` exercises this helper
 // via `super::*` glob to characterise the BFS cycle-guard's effect on

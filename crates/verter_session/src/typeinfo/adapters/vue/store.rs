@@ -27,6 +27,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use verter_semantic::analysis::type_expand::ExpandedIndexSignature;
 use verter_semantic::analysis::types::{
     AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField, Hash16,
 };
@@ -99,6 +100,22 @@ pub struct VueMacroDtos {
     pub emits: Vec<AnalyzedEmitField>,
     /// Slot fields (`DefineSlots`).
     pub slots: Vec<AnalyzedSlotField>,
+    /// Index signatures on the props macro's type-argument surface
+    /// (`defineProps<{ [k: string]: string }>()`). A props member is
+    /// `properties + index signatures` per the props-surface rule, so the
+    /// normalizer captures the surface's index signatures (key/value types
+    /// raised through the active `ResolverContext`) here for
+    /// `define_props_shape` to publish. Empty for emits / slots and for a props
+    /// surface with no index signature.
+    pub prop_index_signatures: Vec<ExpandedIndexSignature>,
+    /// Index signatures on the emits macro's type-argument surface
+    /// (`defineEmits<{ [event: string]: [v: number] }>()`). The emits object is
+    /// `properties (events) + index signatures`; an index-signature-only emits
+    /// surface has no named events but still carries its index signature, which
+    /// `define_emits_shape` publishes (the retired materialiser surfaced it, so
+    /// dropping it on the dispatch path was a regression). Empty for props /
+    /// slots and for an emits surface with no index signature.
+    pub emit_index_signatures: Vec<ExpandedIndexSignature>,
 }
 
 /// A cached [`VueMacroDtos`] bundle plus the cross-file dependency facts the

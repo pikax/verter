@@ -418,7 +418,15 @@ fn read_surface_members(
 /// directly enumerable by the empty-path Shallow walker.
 ///
 /// Depth-fused at 256 to bound recursion on adversarial inputs.
-fn slot_param_root_is_symbolic_only(
+///
+/// `pub(crate)` so the DTO slot-binding extractor
+/// (`typeinfo::adapters::vue::surface::binding_fields_from_param_ty` via
+/// `navigate_param_to_object_surface`) can apply the SAME open-vs-concrete gate
+/// before materialising a slot-param object surface — otherwise an open generic
+/// slot param (`SlotProps<M>` in a `generic="M"` component) would reduce to a
+/// committed branch and the DTO path would invent a phantom binding that the
+/// graph-native path correctly declined.
+pub(crate) fn slot_param_root_is_symbolic_only(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
     depth: u32,
@@ -433,24 +441,84 @@ fn slot_param_root_is_symbolic_only(
         SemanticNodeData::Alias(inner) => {
             slot_param_root_is_symbolic_only(dispatch, *inner, depth + 1)
         }
-        SemanticNodeData::Conditional { .. }
-        | SemanticNodeData::IndexedAccess { .. }
+        // A Conditional is symbolic-only ONLY when it is genuinely OPEN — i.e.
+        // its CHECK still contains a free `TypeParam` / `Infer` shell, so the
+        // branch identity is undetermined. The distinction:
+        //
+        // - FREE generic (`[M] extends ['hover']` in a `generic="M extends Mode"`
+        //   component): the check carries the free `TypeParam` `M`, so the
+        //   conditional is OPEN. Neither branch's bindings are authoritative —
+        //   classify symbolic. (A `Published(Shallow)` reduction WOULD commit to
+        //   a branch here via `M`'s constraint, inventing a phantom binding —
+        //   which is exactly the bug this guard prevents.)
+        // - CONCRETE substitution (`{ id: string } extends { id: infer U }`): the
+        //   check is fully concrete (no free `TypeParam`), so the conditional is
+        //   DECIDABLE. Reduce it through an empty-path `Published(Shallow)`
+        //   `ProjectPath` (the projection walker applies inference-binding +
+        //   decidable-conditional reduction that a bare `SemanticQueryKey::
+        //   Conditional` dispatch leaves deferred for an `infer`-bearing extends
+        //   clause) and classify the reduced terminal.
+        SemanticNodeData::Conditional { check, .. } => {
+            use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
+            let check = *check;
+            drop(data);
+            // Open check (free TypeParam / Infer) → genuinely symbolic.
+            if node_contains_free_type_param(dispatch, check, 0) {
+                return true;
+            }
+            // Concrete check → reduce the conditional and classify the result.
+            let empty_path: Arc<[crate::semantic_query::PathSegment]> =
+                Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice());
+            let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+                base: node,
+                path: empty_path,
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Shallow,
+                ),
+            });
+            // Dual-emit: legacy accumulator + fact-tracer fan-out.
+            emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &read.dep_signature);
+            match read.value {
+                // Decidable: reduced to a concrete terminal — classify it (a
+                // concrete branch root is enumerable, not symbolic).
+                QueryResult::Value(reduced) if reduced != node => {
+                    slot_param_root_is_symbolic_only(dispatch, reduced, depth + 1)
+                }
+                // Stayed the deferred conditional shell (open / undecidable) —
+                // genuinely symbolic-only.
+                _ => true,
+            }
+        }
+        SemanticNodeData::IndexedAccess { .. }
         | SemanticNodeData::Mapped { .. }
         | SemanticNodeData::KeyOf { .. }
         | SemanticNodeData::TemplateLiteral { .. }
         | SemanticNodeData::TypeParam { .. }
         | SemanticNodeData::Infer { .. } => true,
-        SemanticNodeData::InstantiationRef { base, .. } => {
-            // Resolve the body via Skeleton-instantiation so unbound
-            // type parameters become TypeParam shells (preserving
-            // Conditional branches that would otherwise collapse to
-            // `never`). This predicate only inspects symbolic shape,
-            // so use StructuralTransit demand rather than publishing
-            // mapped/keyof members while walking the skeleton.
+        SemanticNodeData::InstantiationRef { base, args } => {
+            // Skeleton-instantiate the carrier under its OWN `(base, args)` so the
+            // substitution actually binds — but unbound parameters become
+            // `TypeParam` SHELLS, never their declared DEFAULT. This is the
+            // distinction the generic slot-param gate turns on:
+            //
+            // - CONCRETE substitution (`SlotProps<{ id: string }>`): the args
+            //   bind, so the body's Conditional / Mapped check is concrete and
+            //   the Conditional arm below reduces it to a concrete root (bindings
+            //   enumerated). The earlier EMPTY-args instantiation erased the
+            //   substitution and left every such body an OPEN Conditional, so the
+            //   rows were silently dropped.
+            // - FREE generic (`SlotProps<M>` in a `generic="M extends Mode"`
+            //   component): `M` stays a `TypeParam` shell (Skeleton does NOT
+            //   apply the `= Mode` default), so the body's Conditional check is
+            //   open and the recursion classifies it symbolic — declining to
+            //   invent bindings from an undetermined generic context. (A
+            //   `Published(Shallow)` projection of the carrier WOULD apply the
+            //   default and wrongly commit to a branch — hence Skeleton, not
+            //   ProjectPath, on the carrier.)
             use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
             let key = SemanticQueryKey::Instantiate {
                 base: base.to_decl_key(),
-                args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                args: Arc::clone(args),
                 context:
                     crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Skeleton,
@@ -460,12 +528,70 @@ fn slot_param_root_is_symbolic_only(
             // Dual-emit: legacy accumulator + fact-tracer fan-out.
             emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &read.dep_signature);
             match read.value {
-                QueryResult::Value(body_id) => {
+                QueryResult::Value(body_id) if body_id != node => {
                     slot_param_root_is_symbolic_only(dispatch, body_id, depth + 1)
                 }
-                _ => false,
+                // Did not instantiate past the carrier shell (or errored) —
+                // an unresolvable carrier has no concrete enumerable root.
+                _ => true,
             }
         }
+        _ => false,
+    }
+}
+
+/// Returns `true` when `node`'s structure still contains a FREE `TypeParam` or
+/// `Infer` shell — i.e. the type is NOT fully concrete. Used by the slot-param
+/// gate to decide whether a Conditional's check is decidable: a check carrying
+/// a free type parameter (`[M] extends ['hover']` in a generic component) is
+/// OPEN and must stay symbolic, while a fully-concrete check
+/// (`{ id: string } extends { id: infer U }`) is decidable and may reduce.
+///
+/// Walks the compound shapes a substituted check can take (Tuple / Array /
+/// Union / Intersection / Object members / KeyOf / IndexedAccess), resolving
+/// one-level `Alias` hops. `Infer` shells inside the conditional's EXTENDS
+/// clause are intentionally NOT inspected here (this predicate is applied to the
+/// CHECK only) — an `infer U` in `extends` is the binding mechanism, not an open
+/// check parameter. Carrier shells (`DeclRef` / `InstantiationRef`) are treated
+/// as NOT-free (they are concrete declaration references, resolved elsewhere).
+/// Depth-fused at 256.
+fn node_contains_free_type_param(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    depth: u32,
+) -> bool {
+    if depth > 256 {
+        return false;
+    }
+    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
+        return false;
+    };
+    match data.as_ref() {
+        SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. } => true,
+        SemanticNodeData::Alias(inner) => {
+            node_contains_free_type_param(dispatch, *inner, depth + 1)
+        }
+        SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => members
+            .iter()
+            .any(|m| node_contains_free_type_param(dispatch, *m, depth + 1)),
+        SemanticNodeData::Array { element, .. } => {
+            node_contains_free_type_param(dispatch, *element, depth + 1)
+        }
+        SemanticNodeData::Tuple { elements, .. } => elements
+            .iter()
+            .any(|e| node_contains_free_type_param(dispatch, e.value, depth + 1)),
+        SemanticNodeData::Object(view) => view
+            .members
+            .iter()
+            .any(|m| node_contains_free_type_param(dispatch, m.value, depth + 1)),
+        SemanticNodeData::KeyOf { base } => {
+            node_contains_free_type_param(dispatch, *base, depth + 1)
+        }
+        SemanticNodeData::IndexedAccess { object, .. } => {
+            node_contains_free_type_param(dispatch, *object, depth + 1)
+        }
+        // Primitives, literals, functions, carriers, opaque, etc. carry no free
+        // open parameter on the check path.
         _ => false,
     }
 }

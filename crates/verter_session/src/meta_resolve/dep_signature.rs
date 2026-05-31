@@ -90,6 +90,19 @@ pub(crate) fn accumulate_dispatch_dep_signature(sig: &crate::semantic_query::Dep
     use crate::resolver_core::FactVersionRef;
     use crate::semantic_query::DepVersion;
 
+    // Audit counters — re-homed onto the SHARED dispatch fan-in (this helper is
+    // the sole drain of `emit_dispatch_dep_signature_facts`). Each call folds one
+    // memoised dispatch read's `DepSignature` into the per-request accumulator,
+    // so it bumps `dep_signature_merges` once; an incoming entry already present
+    // (a fact re-observed through a second import route — the diamond intern-hit)
+    // is the `dep_signature_intern_hits` redundant-merge-avoided signal. The
+    // counters previously lived on the materialiser's per-frame local fence
+    // (`merge_dep_signature_into_local_fence`); the fan-in is the path that
+    // survives the materialiser retirement, so the audit signals stay live.
+    if !sig.is_empty() {
+        crate::host_manage::record_dep_signature_merge();
+    }
+
     DISPATCH_DEP_SIGNATURE_ACCUMULATOR.with(|cell| {
         let mut accumulator = cell.borrow_mut();
         for (canonical, version) in sig.iter() {
@@ -107,7 +120,12 @@ pub(crate) fn accumulate_dispatch_dep_signature(sig: &crate::semantic_query::Dep
                     continue;
                 }
             };
-            if !accumulator.iter().any(|existing| existing == &fact) {
+            if accumulator.iter().any(|existing| existing == &fact) {
+                // Redundant merge avoided — the fact was already observed (e.g.
+                // a shared base reached through a second import route). This is
+                // the intern-hit the diamond fixture characterises.
+                crate::host_manage::record_dep_signature_intern_hit();
+            } else {
                 accumulator.push(fact);
             }
         }

@@ -257,6 +257,28 @@ where
     }
 }
 
+#[cfg(test)]
+impl<K> InflightTable<super::node::QueryFlightKey<K>>
+where
+    K: Hash + Eq + Clone,
+{
+    /// Test-only strong-count lookup that ignores the
+    /// [`StoreViewCompatToken`](super::node::QueryFlightKey::compat_token)
+    /// half of the flight identity and matches solely on the inner cache
+    /// key. Tests that drive the singleflight rendezvous have only the
+    /// bare cache key in hand and every contending worker shares the
+    /// same store view, so exactly one flight lane is keyed by the bare
+    /// key. Returns `None` when no slot is currently registered for the
+    /// inner key.
+    pub fn slot_strong_count_by_inner_key(&self, inner: &K) -> Option<usize> {
+        let table = self.table.lock();
+        table
+            .iter()
+            .find(|(flight_key, _)| &flight_key.key == inner)
+            .map(|(_, slot)| Arc::strong_count(slot))
+    }
+}
+
 /// RAII guard that fails the in-flight slot if the cold build panics or
 /// returns early. Without this, a panic inside `compute()` would leave
 /// `claimed = true, completed = false` forever — joiners would block on

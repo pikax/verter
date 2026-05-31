@@ -41,31 +41,39 @@ use crate::host_manage::component_meta_request_impl::{
 };
 
 /// Resolve a `.vue` macro's normalized component-meta DTOs through the shared
-/// typeinfo Vue surface path (`VerterHost::vue_macro_dtos`, FullMetadata) — the
+/// typeinfo Vue surface path (`vue_macro_dtos_with_ctx`, FullMetadata) — the
 /// SOLE props/emits/slots authority.
 ///
 /// `owner_canonical` is the SFC the macro CALL lives in; `macro_index` indexes
 /// that SFC's `FileAnalysisSnapshot::macros`. The host-cached, request-validated
-/// `vue_macro_dtos` re-derives `whole_hash` + `macro_kind` from the live
-/// snapshot, so `root_identity` here is only a hint (the real key is validated
-/// inside). The returned bundle populates exactly the field matching
+/// surface path re-derives `whole_hash` + `macro_kind` from the live (overlay-
+/// aware) snapshot, so `root_identity` here is only a hint (the real key is
+/// validated inside). The returned bundle populates exactly the field matching
 /// `macro_kind` (`props` for `DefineProps` / `DefineModel`, `emits` for
 /// `DefineEmits`, `slots` for `DefineSlots`); the others stay empty.
+///
+/// EVERY view-sensitive read flows through `ctx`: routing through
+/// `vue_macro_dtos_with_ctx` (NOT the base-view `VerterHost::vue_macro_dtos`)
+/// means an overlay session resolves the macro surface against its OVERLAY
+/// content — a `publish_merged_bindings` slot read in an overlay session no
+/// longer leaks the base host's slot bindings.
 pub(crate) fn typeinfo_macro_dtos(
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner_canonical: &str,
     macro_index: usize,
     macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
 ) -> std::sync::Arc<crate::typeinfo::adapters::vue::store::VueMacroDtos> {
-    let host = ctx.host_for_fact_tracer_install();
     let root_identity = ctx.get_whole_hash(owner_canonical).unwrap_or([0u8; 16]);
-    host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
-        owner_canonical: std::sync::Arc::from(owner_canonical),
-        macro_index,
-        macro_kind,
-        root_identity,
-        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
-    })
+    crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+        ctx,
+        &crate::typeinfo::types::VueMacroSurfaceRequest {
+            owner_canonical: std::sync::Arc::from(owner_canonical),
+            macro_index,
+            macro_kind,
+            root_identity,
+            level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+        },
+    )
 }
 
 /// Emit `MemberEdgeProvenance::PublishedField` origin edges for the
@@ -159,6 +167,68 @@ fn record_published_field_edges_for_macro_shape(
         let name_arc: std::sync::Arc<str> = std::sync::Arc::from(property.name.as_str());
         dispatch.record_published_field_edge(&owner, surface_node, surface_node, &name_arc);
     }
+}
+
+/// Synthesize a macro object shape from the shared macro-object Shallow
+/// surface — the Vue macro convention that enumerates the UNION of a
+/// compound root's member contributions.
+///
+/// This routes through the SAME dispatch primitives the props/emits/slots
+/// projector pipeline and `vue_macro_dtos` use
+/// ([`resolve_macro_payload`](crate::meta_resolve::projectors::resolve_macro_payload)
+/// and [`resolve_payload_surface`](crate::meta_resolve::projectors::resolve_payload_surface)),
+/// so the materialised shape collides path-independently with the dispatch
+/// surface in the shared content-addressed cache.
+///
+/// It is the materialiser's bridge for a macro payload root whose surface
+/// the ordinary `produce_one_macro_object_shape` projection cannot
+/// enumerate WITHOUT the macro-object union rule — concretely an OPEN
+/// `Conditional` props root (`defineProps<Props<T>>()` where
+/// `Props<T> = T extends 'a' ? { a? } : { b? }`). The macro-object Shallow
+/// surface distributes both conditional branches' members (each optional)
+/// via `merge_union_surfaces_for_macro`; the legacy `Published(Shallow)` /
+/// `Published(Expanded)` carrier projection used by
+/// `produce_one_macro_object_shape` keeps the open conditional empty (no
+/// branch-merge exists for props the way `PayloadSurfaceScope::EmitClassMacroObject`
+/// branch-merges emits).
+///
+/// Returns `None` when the surface cannot be resolved or carries no
+/// members (a genuinely empty macro surface stays empty — the caller falls
+/// through to its other producers).
+fn synthesize_macro_object_surface_shape(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    owner_canonical: &str,
+    macro_index: usize,
+    mac: &AnalyzedMacro,
+    macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+    expansion_kind: verter_semantic::analysis::component_meta::MacroExpansionKind,
+) -> Option<ShapeResult> {
+    let owner = crate::meta_resolve::projectors::build_owner_decl_identity(ctx, owner_canonical);
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let mut discard_diag = Vec::new();
+    let payload_node = crate::meta_resolve::projectors::resolve_macro_payload(
+        &dispatch,
+        &owner,
+        owner_canonical,
+        macro_index,
+        mac,
+        macro_kind,
+        expansion_kind.clone(),
+        &mut discard_diag,
+    )?;
+    let surface_node = crate::meta_resolve::projectors::resolve_payload_surface(
+        &dispatch,
+        payload_node,
+        macro_index,
+        expansion_kind,
+        crate::meta_resolve::projectors::macro_payload_surface_provenance(macro_kind),
+        &mut discard_diag,
+    )?;
+    let surface =
+        crate::resolver_core::projected_surface_from_semantic_node(ctx, surface_node)?;
+    let shape = crate::resolver_core::projected_surface_to_expanded_shape(&surface);
+    (!shape.properties.is_empty() || !shape.call_signatures.is_empty())
+        .then(|| verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape))
 }
 
 /// Sole-authority producer for type-based macro object shapes.
@@ -624,6 +694,65 @@ pub(crate) fn produce_macro_object_shapes_for_purpose(
                                 },
                             );
                         }
+                    }
+                }
+                // Macro-object-surface fallback for a props payload whose
+                // legacy producers above yielded NOTHING. The empty-path
+                // `Published(Shallow)` / `Published(Expanded)` projections
+                // those producers use cannot enumerate an OPEN conditional
+                // props root (`defineProps<Props<T>>()` where
+                // `Props<T> = T extends 'a' ? { a? } : { b? }` and `T` is
+                // unbound) — there is no props branch-merge the way
+                // `PayloadSurfaceScope::EmitClassMacroObject` branch-merges
+                // emits, so the open conditional contributes an empty
+                // carrier surface. The shared macro-object Shallow surface
+                // (the SAME dispatch surface `vue_macro_dtos` reads) DOES
+                // enumerate both branches' members, each optional, via
+                // `merge_union_surfaces_for_macro`.
+                //
+                // Gated on the legacy producers having published nothing for
+                // this `macro_index`, so it is a pure ADDITION that cannot
+                // regress any non-empty shape the legacy producers already
+                // built. A genuinely empty / unresolvable macro surface
+                // stays empty (`synthesize_macro_object_surface_shape`
+                // returns `None`).
+                if !evaluated_types
+                    .define_props
+                    .iter()
+                    .any(|entry| entry.macro_index == macro_index)
+                {
+                    if let Some(shape) = synthesize_macro_object_surface_shape(
+                        query_engine.ctx,
+                        owner_canonical,
+                        macro_index,
+                        mac,
+                        verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+                        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineProps,
+                    ) {
+                        projection_hits += 1;
+                        let count = shape.value.properties.len();
+                        component_meta_trace_custom!(
+                            "macro_object_shape",
+                            format!(
+                                "owner={} macro_index={} kind=define_props source=macro_object_surface props={}",
+                                owner_canonical, macro_index, count,
+                            ),
+                        );
+                        record_published_field_edges_for_macro_shape(
+                            query_engine.ctx,
+                            owner_canonical,
+                            macro_index,
+                            mac,
+                            verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+                            verter_semantic::analysis::component_meta::MacroExpansionKind::DefineProps,
+                            &shape,
+                        );
+                        evaluated_types.define_props.push(
+                            verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                macro_index,
+                                result: shape,
+                            },
+                        );
                     }
                 }
                 define_props_index += 1;

@@ -94,7 +94,7 @@ fn define_props_normalizer_produces_fields_with_surface_readonly_and_jsdoc() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineProps<Props>() must resolve a macro surface");
-    let props = props_from_typeinfo_surface(&host, &surface);
+    let props = props_from_typeinfo_surface(&*host, &surface);
 
     let mut names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
     names.sort_unstable();
@@ -198,7 +198,7 @@ fn define_emits_normalizer_extracts_call_signature_events_and_strips_event_param
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineEmits must resolve a macro surface");
-    let emits = emits_from_typeinfo_surface(&host, &surface);
+    let emits = emits_from_typeinfo_surface(&*host, &surface);
 
     let mut names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
     names.sort_unstable();
@@ -276,7 +276,7 @@ fn define_emits_normalizer_property_style_fallback() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("property-style defineEmits must resolve a surface");
-    let emits = emits_from_typeinfo_surface(&host, &surface);
+    let emits = emits_from_typeinfo_surface(&*host, &surface);
 
     let mut names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
     names.sort_unstable();
@@ -316,7 +316,7 @@ fn define_emits_normalizer_mixed_callsig_excludes_property_members() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("mixed defineEmits resolves a surface");
-    let emits = emits_from_typeinfo_surface(&host, &surface);
+    let emits = emits_from_typeinfo_surface(&*host, &surface);
 
     let names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(
@@ -396,7 +396,7 @@ fn cross_file_emit_call_signature_payload_scope_is_base_file() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("imported emit interface resolves a surface");
-    let emits = emits_from_typeinfo_surface(&host, &surface);
+    let emits = emits_from_typeinfo_surface(&*host, &surface);
 
     assert_eq!(
         emits.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
@@ -441,7 +441,7 @@ fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
     let local_emits = {
         let request = props_request(&host, LOCAL, AnalyzedMacroKind::DefineEmits);
         let surface = host.resolve_vue_macro_surface(&request).expect("surface");
-        emits_from_typeinfo_surface(&host, &surface)
+        emits_from_typeinfo_surface(&*host, &surface)
     };
     let change = local_emits.iter().find(|e| e.name == "change").unwrap();
     // The display is the bracketed payload tuple (event-name param stripped),
@@ -472,7 +472,7 @@ fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
     let cross_emits = {
         let request = props_request(&host, CROSS, AnalyzedMacroKind::DefineEmits);
         let surface = host.resolve_vue_macro_surface(&request).expect("surface");
-        emits_from_typeinfo_surface(&host, &surface)
+        emits_from_typeinfo_surface(&*host, &surface)
     };
     let cross_change = cross_emits.iter().find(|e| e.name == "change").unwrap();
     assert_eq!(
@@ -515,7 +515,7 @@ fn define_slots_normalizer_filters_to_functions_and_extracts_bindings() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let slots = slots_from_typeinfo_surface(&host, &surface);
+    let slots = slots_from_typeinfo_surface(&*host, &surface);
 
     let mut names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
     names.sort_unstable();
@@ -576,7 +576,7 @@ fn define_slots_normalizer_filters_non_function_members_and_preserves_return() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let slots = slots_from_typeinfo_surface(&host, &surface);
+    let slots = slots_from_typeinfo_surface(&*host, &surface);
 
     let names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
@@ -607,6 +607,140 @@ fn define_slots_normalizer_filters_non_function_members_and_preserves_return() {
         body.return_type.as_deref(),
         Some("string"),
         "the display return_type renders the typed return"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (4a-union) defineSlots normalizer — a slot typed as a UNION of function
+//      aliases (`default: SlotA | SlotB`). The slot member resolves to a
+//      `Union` of two `Function` carriers; the normalizer must publish it as a
+//      slot. Vue invokes `$slots.default`, whose type is `SlotA | SlotB`, so the
+//      child must pass an argument assignable to BOTH arms' params — i.e.
+//      `PA & PB`. As object types `{ shared, a } & { shared, b }` carries all
+//      three members, so the consumer's template can destructure `shared`, `a`,
+//      AND `b`. The param is therefore the INTERSECTION of the arms' first
+//      params (TS-correct contravariant merge) and the return is the UNION of
+//      the arms' returns.
+//
+//      Discriminating: pre-fix `slot_callable_param_and_return` matched only
+//      `Function` + `Intersection` (and `realize_callable_member` did not
+//      descend `Union` arms or unwrap an alias `DeclPlaceholder`), so a `Union`
+//      of function-alias slots returned `None` and the slot was DROPPED
+//      entirely. Post-fix the slot publishes and its bindings surface.
+// ---------------------------------------------------------------------------
+
+const VUE_SLOTS_UNION: &str = r#"<script setup lang="ts">
+type SlotA = (props: { shared: string; a: string }) => any;
+type SlotB = (props: { shared: string; b: number }) => any;
+type Slots = { default: SlotA | SlotB };
+defineSlots<Slots>();
+</script>
+"#;
+
+#[test]
+fn define_slots_normalizer_publishes_union_of_function_slots() {
+    const FILE: &str = "/w/SlotsUnion.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_SLOTS_UNION);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineSlots must resolve a surface");
+    let slots = slots_from_typeinfo_surface(&*host, &surface);
+
+    // The union-of-functions slot must be PUBLISHED (pre-fix it was dropped).
+    let names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["default"],
+        "a `default: SlotA | SlotB` union-of-functions slot must publish \
+         (pre-fix the union arm was unhandled and the slot was dropped)"
+    );
+
+    let default_slot = slots.iter().find(|s| s.name == "default").unwrap();
+    let binding_names: std::collections::BTreeSet<&str> = default_slot
+        .bindings
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect();
+    // Param = `PA & PB` (the contravariant intersection of the arms' first
+    // params). As object types that carries every member, so `shared`, `a`, and
+    // `b` all surface as bindings the consumer's template can destructure.
+    assert_eq!(
+        binding_names,
+        std::collections::BTreeSet::from(["a", "b", "shared"]),
+        "a union slot's bindings are the intersection of the arms' params \
+         (`PA & PB`), which carries every member; got {binding_names:?}"
+    );
+    assert!(
+        default_slot
+            .bindings
+            .iter()
+            .all(|b| b.binding_expr.is_some()),
+        "each union-slot binding carries its typed binding_expr"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (4a-union-noparam) defineSlots normalizer — a UNION slot where one arm is a
+//      NO-PARAM callable (`default: A | B`, `A = () => any`, `B = (props: { a })
+//      => any`). The slot still PUBLISHES (a union of callables is slot-like),
+//      but a template destructuring `<template #default="{ a }">` runs for
+//      WHICHEVER arm the slot is — and when it is the `A` arm there are no slot
+//      props. So `a` is NOT a guaranteed binding: the published `bindings` set
+//      must be EMPTY (a no-param arm guarantees nothing).
+//
+//      Discriminating: pre-fix `slot_callable_param_and_return_from_arms` pushed
+//      only the first params of arms that HAD one, then intersected the present
+//      params — so `B`'s `{ a }` became the slot param and `a` was wrongly
+//      published. Post-fix `all_arms_have_first_param` is false (the `A` arm has
+//      no param), so the param drops to `None` and no binding surfaces.
+// ---------------------------------------------------------------------------
+
+const VUE_SLOTS_UNION_NOPARAM: &str = r#"<script setup lang="ts">
+type A = () => any;
+type B = (props: { a: string }) => any;
+type Slots = { default: A | B };
+defineSlots<Slots>();
+</script>
+"#;
+
+#[test]
+fn define_slots_normalizer_drops_union_bindings_when_an_arm_has_no_param() {
+    const FILE: &str = "/w/SlotsUnionNoParam.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_SLOTS_UNION_NOPARAM);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineSlots must resolve a surface");
+    let slots = slots_from_typeinfo_surface(&*host, &surface);
+
+    // The union-of-callables slot is still PUBLISHED (positive): one arm having
+    // no param does not make the member non-slot-like.
+    let default_slot = slots
+        .iter()
+        .find(|s| s.name == "default")
+        .expect("a `default: A | B` union slot must still publish");
+
+    // SOUNDNESS (the fix): `a` comes only from the `B` arm; the `A` arm is a
+    // no-param callable, so `a` is NOT guaranteed and must NOT be published.
+    let binding_names: Vec<&str> = default_slot
+        .bindings
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect();
+    assert!(
+        !default_slot.bindings.iter().any(|b| b.name == "a"),
+        "a no-param union arm guarantees no bindings: `a` (present only in the \
+         `(props: {{ a }}) => any` arm) MUST NOT be published, got {binding_names:?}"
+    );
+    assert!(
+        default_slot.bindings.is_empty(),
+        "a union slot with a no-param arm publishes NO guaranteed bindings, got \
+         {binding_names:?}"
     );
 }
 
@@ -644,7 +778,7 @@ fn define_slots_normalizer_extracts_pick_bindings() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with a Pick first-param resolves a surface");
-    let slots = slots_from_typeinfo_surface(&host, &surface);
+    let slots = slots_from_typeinfo_surface(&*host, &surface);
 
     let row = slots
         .iter()
@@ -701,7 +835,7 @@ fn define_model_normalizer_produces_synthesized_model_prop_from_analyzer_facts()
         "defineModel macro surface carries no object members"
     );
 
-    let props = props_from_typeinfo_surface(&host, &surface);
+    let props = props_from_typeinfo_surface(&*host, &surface);
     assert_eq!(props.len(), 1, "defineModel synthesizes exactly one prop");
     let model = &props[0];
     assert_eq!(
@@ -766,7 +900,7 @@ fn with_defaults_normalizer_uses_inner_props_surface_with_raw_optionality() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("withDefaults' inner defineProps resolves a surface");
-    let props = props_from_typeinfo_surface(&host, &surface);
+    let props = props_from_typeinfo_surface(&*host, &surface);
 
     let mut names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
     names.sort_unstable();
@@ -879,7 +1013,7 @@ fn cross_file_heritage_props_surface_with_own_body_vs_heritage_provenance() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("cross-file heritage defineProps resolves a surface");
-    let props = props_from_typeinfo_surface(&host, &surface);
+    let props = props_from_typeinfo_surface(&*host, &surface);
 
     let mut names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
     names.sort_unstable();
@@ -962,7 +1096,7 @@ fn generic_inherited_member_type_expr_scope_is_deriving_file() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("generic heritage defineProps resolves a surface");
-    let props = props_from_typeinfo_surface(&host, &surface);
+    let props = props_from_typeinfo_surface(&*host, &surface);
 
     let val = props
         .iter()

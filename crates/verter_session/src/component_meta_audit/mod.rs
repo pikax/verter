@@ -897,23 +897,20 @@ pub fn emit_json(record: &RequestAuditRecord) -> String {
 }
 
 /// Merge the `dep_signature` entries from a `CacheRead` (or any
-/// `&[(Arc<str>, DepVersion)]` slice) into the materialiser's
-/// per-frame `local_fence` while recording audit counters in lock
-/// step.
+/// `&[(Arc<str>, DepVersion)]` slice) into a per-frame `local_fence`.
+///
+/// The `dep_signature_merges` / `dep_signature_intern_hits` audit
+/// counters are NOT bumped here — they are re-homed onto the shared
+/// dispatch fan-in
+/// ([`crate::meta_resolve::dep_signature::accumulate_dispatch_dep_signature`]),
+/// the path that survives the macro-object materialiser retirement.
+/// This helper is now a pure fence merge for its remaining
+/// non-dispatch-fan-in callers.
 pub fn merge_dep_signature_into_local_fence(
     local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
     incoming: &[(Arc<str>, crate::semantic_query::DepVersion)],
 ) {
-    crate::host_manage::record_dep_signature_merge();
-    let pre_existing_count = local_fence.len();
     for entry in incoming {
-        let is_hit = local_fence
-            .iter()
-            .take(pre_existing_count)
-            .any(|existing| Arc::ptr_eq(&existing.0, &entry.0) && existing.1 == entry.1);
-        if is_hit {
-            crate::host_manage::record_dep_signature_intern_hit();
-        }
         local_fence.push(entry.clone());
     }
 }

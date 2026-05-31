@@ -610,6 +610,27 @@ impl ImportedRegistryDb {
             .reverse_index_contains_key_for_test(key.0.as_ref(), key)
     }
 
+    /// Test-only strong-count probe of the in-flight slot currently
+    /// registered for `key`, regardless of which store-view compat token
+    /// keys the flight lane. Drives the deterministic singleflight
+    /// rendezvous discriminator: a worker is a confirmed cooperative
+    /// joiner once it has cloned its own `Arc` to the winner's
+    /// in-flight slot, observable as a step up in this count.
+    ///
+    /// The local cache substrate keys the inflight table by
+    /// [`QueryFlightKey<ImportedRegistryKey>`] (bare key + compat
+    /// token), but the test only knows the bare key — and every
+    /// contending worker in the rendezvous runs under the SAME store
+    /// view, so exactly one flight lane is registered. This accessor
+    /// scans the inflight table for the slot whose inner key matches
+    /// `key` and returns the `Arc`'s strong count; on no registered
+    /// slot, returns `None`. Reading through the table's lock does not
+    /// itself bump the count.
+    #[cfg(test)]
+    pub(crate) fn slot_strong_count_for_test(&self, key: &ImportedRegistryKey) -> Option<usize> {
+        self.inflight.slot_strong_count_by_inner_key(key)
+    }
+
     /// Test-only direct insertion entry point used by the
     /// invalidation-perf regression test
     /// (`crates/verter_session/tests/invalidation_perf.rs`). Bypasses the

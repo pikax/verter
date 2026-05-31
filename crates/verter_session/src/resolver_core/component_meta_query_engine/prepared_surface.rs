@@ -131,10 +131,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         symbol_name: &str,
     ) -> Option<std::sync::Arc<ProjectedSurface>> {
-        #[cfg(test)]
-        {
-            self.prepared_root_surface_projection_count += 1;
-        }
         let mut active = FxHashSet::default();
         // Top-level entry through `cached_prepared_root_surface`
         // enters the requested symbol AT THE BODY POSITION of the macro

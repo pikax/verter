@@ -138,13 +138,16 @@ pub enum ComponentMetaResolutionPurpose {
 /// multiple `ResolvedMacroMeta` entries per index (imported + owner-local) are
 /// gating/provenance facts, not distinct field authorities.
 ///
-/// Host state is reached through `&dyn ResolverContext` (the §10a resolver-tier
-/// seal): `ctx.host_for_fact_tracer_install()` is the same bridge the
-/// materialiser's `typeinfo_macro_dtos` helper uses, so this stays inside the
-/// single resolution engine. `vue_macro_dtos` validates its own cached entry and
-/// bubbles the entry's fact signature into any active outer fact tracer (so an
-/// outer component-meta cold trace inherits the DTO's cross-file carrier facts on
-/// a warm DTO hit), keeping the outer component-meta cache entry correctly keyed.
+/// Host state is reached through `&dyn ResolverContext` (the resolver-tier
+/// seal): `vue_macro_dtos_with_ctx(ctx, …)` resolves the macro surface through
+/// the ACTIVE context, so an overlay session reads its overlay content (an
+/// overlay-added prop surfaces here; it never leaks into a base-view read,
+/// which keys a distinct `whole_hash`). The DTO core validates its own cached
+/// entry against `ctx.store_view()` and bubbles the entry's fact signature into
+/// any active outer fact tracer (so an outer component-meta cold trace inherits
+/// the DTO's cross-file carrier facts on a warm DTO hit), keeping the outer
+/// component-meta cache entry correctly keyed — all inside the single
+/// resolution engine.
 pub(crate) fn component_meta_resolved_macros(
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner_canonical: &str,
@@ -166,7 +169,8 @@ pub(crate) fn component_meta_resolved_macros(
         let Some(mac) = snapshot_macros.get(resolved.macro_index) else {
             continue;
         };
-        let dtos = ctx.host_for_fact_tracer_install().vue_macro_dtos(
+        let dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+            ctx,
             &crate::typeinfo::types::VueMacroSurfaceRequest {
                 owner_canonical: std::sync::Arc::from(owner_canonical),
                 macro_index: resolved.macro_index,

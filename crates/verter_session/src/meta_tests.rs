@@ -2411,6 +2411,392 @@ defineProps<Props<T>>()
     }
 }
 
+/// `defineProps<{ [k: string]: string }>()` — a props type argument that is an
+/// index-signature-only object literal. A props member is `properties + index
+/// signatures`, so the published `define_props` shape MUST carry the index
+/// signature even though there is NO named property member.
+///
+/// Discriminating: the pre-fix `define_props_shape` hardcoded
+/// `index_signatures: Vec::new()`, so the published shape dropped the
+/// signature and this test FAILS (empty `index_signatures`); the fix preserves
+/// the DTO's `prop_index_signatures` so the `[k: string]: string` signature
+/// surfaces. (The `properties` list legitimately stays empty — the surface has
+/// no named member.)
+#[test]
+fn evaluate_types_define_props_preserves_index_signature_only_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/IndexProps.vue",
+            r#"<script setup lang="ts">
+defineProps<{ [key: string]: string }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/IndexProps.vue").unwrap().unwrap();
+
+    let shape = evaluated
+        .define_props
+        .iter()
+        .map(|entry| &entry.result.value)
+        .next()
+        .expect("an index-signature-only defineProps must still publish a define_props shape");
+
+    assert_eq!(
+        shape.index_signatures.len(),
+        1,
+        "defineProps<{{ [k: string]: string }}> must publish exactly its index \
+         signature, got {} index signatures (a `Vec::new()` here means the \
+         index signature was dropped — props = properties + index signatures)",
+        shape.index_signatures.len(),
+    );
+    let sig = &shape.index_signatures[0];
+    assert!(
+        matches!(sig.key_type, TypeExpr::Primitive(PrimitiveName::String)),
+        "index signature key type is `string`, got {:?}",
+        sig.key_type,
+    );
+    assert!(
+        matches!(sig.value_type, TypeExpr::Primitive(PrimitiveName::String)),
+        "index signature value type is `string`, got {:?}",
+        sig.value_type,
+    );
+    assert!(
+        !sig.readonly,
+        "the `[key: string]: string` signature is not readonly",
+    );
+}
+
+/// `defineEmits<{ [event: string]: [v: number] }>()` — an emits type argument
+/// that is an index-signature-only object literal. The emits object is `events +
+/// index signatures`, so the published `define_emits` shape MUST carry the index
+/// signature even though there is NO named event.
+///
+/// PARITY: the retired materialiser surfaced this index signature; the dispatch
+/// `define_emits_shape` hardcoded `index_signatures: Vec::new()`, dropping it —
+/// a reroute REGRESSION.
+///
+/// Discriminating: reverting `define_emits_shape` to `index_signatures:
+/// Vec::new()` (or dropping the DTO `emit_index_signatures` capture) makes the
+/// published shape carry zero index signatures and this test FAILS; the fix
+/// publishes the DTO's `emit_index_signatures` so the `[event: string]: [v:
+/// number]` signature surfaces. (The `properties` list legitimately stays empty
+/// — the surface has no named event.)
+#[test]
+fn evaluate_types_define_emits_preserves_index_signature_only_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/IndexEmits.vue",
+            r#"<script setup lang="ts">
+defineEmits<{ [event: string]: [v: number] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/IndexEmits.vue").unwrap().unwrap();
+
+    let shape = evaluated
+        .define_emits
+        .iter()
+        .map(|entry| &entry.result.value)
+        .next()
+        .expect("an index-signature-only defineEmits must still publish a define_emits shape");
+
+    assert_eq!(
+        shape.index_signatures.len(),
+        1,
+        "defineEmits<{{ [event: string]: [v: number] }}> must publish exactly its \
+         index signature, got {} index signatures (a `Vec::new()` here means the \
+         emit index signature was dropped — emits = events + index signatures; the \
+         retired materialiser surfaced it)",
+        shape.index_signatures.len(),
+    );
+    let sig = &shape.index_signatures[0];
+    assert!(
+        matches!(sig.key_type, TypeExpr::Primitive(PrimitiveName::String)),
+        "emit index signature key type is `string`, got {:?}",
+        sig.key_type,
+    );
+    // The value `[v: number]` is the emit payload tuple — a concrete typed form,
+    // not an opaque/unknown carrier.
+    assert!(
+        matches!(sig.value_type, TypeExpr::Tuple { .. }),
+        "emit index signature value type is the `[v: number]` payload tuple, got {:?}",
+        sig.value_type,
+    );
+}
+
+/// `type Props = { [k: string]: string }; defineProps<Props>()` — an
+/// OWNER-LOCAL NAMED props root whose body is index-signature-only. This
+/// exercises a DISTINCT lowering from the inline-literal case
+/// (`evaluate_types_define_props_preserves_index_signature_only_surface`): the
+/// macro type argument is a `Ref` to a named alias resolved through
+/// `ResolveDecl`, not an inline `Object`. The published `define_props` shape
+/// MUST still carry the named root's index signature.
+///
+/// Discriminating: pre-fix `define_props_shape` hardcoded `index_signatures:
+/// Vec::new()`, dropping the named root's index signature too; post-fix the
+/// DTO's `prop_index_signatures` (raised from the resolved-alias surface)
+/// surfaces. Proves the index-sig publication is not specific to the inline
+/// object shape.
+#[test]
+fn evaluate_types_owner_local_index_signature_only_props_root_resolves() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/OwnerLocalIndex.vue",
+            r#"<script setup lang="ts">
+type Props = { [key: string]: number }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session
+        .evaluate_types("/OwnerLocalIndex.vue")
+        .unwrap()
+        .unwrap();
+
+    let shape = evaluated
+        .define_props
+        .iter()
+        .map(|entry| &entry.result.value)
+        .next()
+        .expect("an owner-local index-signature-only props root must publish a define_props shape");
+
+    assert_eq!(
+        shape.index_signatures.len(),
+        1,
+        "owner-local `type Props = {{ [k: string]: number }}` must publish its \
+         index signature, got {} (a dropped index-sig-only root means the \
+         surface-shape projector gated it out before the owner-local gate)",
+        shape.index_signatures.len(),
+    );
+    let sig = &shape.index_signatures[0];
+    assert!(
+        matches!(sig.value_type, TypeExpr::Primitive(PrimitiveName::Number)),
+        "index signature value type is `number`, got {:?}",
+        sig.value_type,
+    );
+}
+
+/// Directly discriminates the surface-shape projector gate fix: the cold
+/// resolver's owner-local authority gate (`owner_local_macro_root_has_surface`)
+/// resolves the named root through `project_expr_surface_shape_via_host_threaded`
+/// and returns `false` when that projector yields no shape. The projector
+/// previously gated on `properties / call_signatures` only and returned `None`
+/// for an index-signature-only surface, so the gate reported "no surface" for
+/// an index-sig-only owner-local props root — dropping its authoritative
+/// `ResolvedMacroMeta` entry (slot-binding / Rule-5 PublishedField provenance).
+///
+/// Discriminating: with the projector gating on index signatures too, the gate
+/// returns `true` for `type Props = { [k: string]: string }`; reverting that
+/// `|| !shape.index_signatures.is_empty()` admission makes this assertion fail
+/// (the gate reports no surface and the authoritative entry is skipped).
+#[test]
+fn owner_local_index_signature_only_props_root_passes_authority_gate() {
+    use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
+    use crate::resolver_core::component_meta::ComponentMetaResolverHost;
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/GateIndex.vue",
+            r#"<script setup lang="ts">
+type Props = { [key: string]: string }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    // Prime the SFC's IndexedReady so the owner-local lowering can resolve the
+    // local `Props` alias.
+    let _ = project
+        .open_session_batch()
+        .unwrap()
+        .evaluate_types("/GateIndex.vue")
+        .unwrap()
+        .unwrap();
+
+    let host = project.host();
+    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    assert!(
+        resolver_host.owner_local_macro_root_has_surface(
+            "/GateIndex.vue",
+            "Props",
+            AnalyzedMacroKind::DefineProps,
+        ),
+        "the owner-local authority gate MUST report a surface for an \
+         index-signature-only props root `type Props = {{ [k: string]: string }}`; \
+         a `false` here means the surface-shape projector dropped the \
+         index-sig-only shape before the gate counted its index signatures",
+    );
+}
+
+/// The owner-local projectable-roots PRE-FILTER
+/// (`projectable_owner_local_macro_roots`) resolves each candidate root through
+/// the SOLE query-time resolver — the shared dispatch surface projector
+/// `project_expr_surface_shape_via_host_threaded` — NOT the retired prepared-decl
+/// walker. This pass runs UPSTREAM of the owner-local authority gate, so it is a
+/// production resolution path in its own right; it must agree with the authority
+/// gate on what "projectable" means.
+///
+/// An index-signature-only owner-local props root (`type Props = { [k: string]:
+/// string }`) projects through dispatch to a shape whose only surface is an index
+/// signature. The pre-filter MUST return `Props` as projectable.
+///
+/// Discriminating: the retargeted per-kind predicate admits props/model/slots
+/// roots whose dispatch shape has members OR call-signatures OR index-signatures
+/// (`|| !shape.index_signatures.is_empty()`). Reverting that index-signature
+/// admission clause drops this index-sig-only root, so the pre-filter returns
+/// `[]` and this assertion fails. (Proven by mutation: removing the
+/// `index_signatures` clause makes the returned roots empty.)
+#[test]
+fn projectable_owner_local_pre_filter_admits_index_signature_only_props_root() {
+    use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
+    use crate::resolver_core::component_meta::ComponentMetaResolverHost;
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/PreFilterIndex.vue",
+            r#"<script setup lang="ts">
+type Props = { [key: string]: string }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    // Prime the SFC's IndexedReady (and pull the resolved `AnalyzedMacro` the
+    // production cold resolver feeds the pre-filter) through a real session.
+    let session = project.open_session_batch().unwrap();
+    let _ = session.evaluate_types("/PreFilterIndex.vue").unwrap().unwrap();
+    let analysis = session
+        .get_analysis("/PreFilterIndex.vue")
+        .unwrap()
+        .expect("analysis should exist");
+    let define_props = analysis
+        .macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+        .expect("defineProps macro should exist");
+
+    let host = project.host();
+    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    let roots =
+        resolver_host.projectable_owner_local_macro_roots("/PreFilterIndex.vue", define_props);
+    assert_eq!(
+        roots,
+        vec!["Props".to_string()],
+        "the owner-local projectable pre-filter MUST admit an index-signature-only \
+         props root `type Props = {{ [k: string]: string }}` through the dispatch \
+         surface route; an empty result means the retargeted predicate dropped the \
+         index-sig-only dispatch shape (the `|| !shape.index_signatures.is_empty()` \
+         admission was removed) or the pre-filter regressed to the prepared walker, \
+         got {roots:?}",
+    );
+}
+
+/// `define_props_shape` distinguishes a RESOLVED-but-empty surface from a
+/// genuinely UNRESOLVED macro via `macro_surface_resolves`
+/// (`resolve_vue_macro_surface_with_ctx().is_some()`):
+///
+/// - (a) A call-signature-only `defineProps<{ (): void }>()` RESOLVES to an
+///   object surface that has a call signature but no property members. The
+///   helper publishes a `define_props` shape with empty `properties` — present,
+///   not absent — preserving the "macro resolved to no props" behavior.
+/// - (b) The "unresolved" discriminator (`resolve_vue_macro_surface` returns
+///   `None`) is a REAL signal — an out-of-range macro index yields `None` while
+///   a valid in-range index yields `Some`. The gate keys on exactly this, so a
+///   genuinely-unresolved macro yields `None` (no shape) rather than a spurious
+///   `Some(empty)`.
+///
+/// Discriminating: part (a) FAILS if `define_props_shape` is gated to drop a
+/// resolved-but-empty (call-signature-only) surface; part (b) asserts the gate's
+/// `Some`/`None` discriminator branches on a real input.
+///
+/// NOTE (empirical): within the production driver `project_define_macro_shapes`
+/// every macro fed to the helpers is an in-range, type-based macro, and the
+/// shared resolver synthesises at least an EMPTY object surface for ANY such
+/// type argument (`number[]` / `() => void` / `string | number` / a tuple / an
+/// unresolved name all resolve to `Some((0,0,0))`). So the gate's `None` path
+/// fires only for the out-of-range / not-loaded cases the driver never passes;
+/// the gate is the contract-correct discriminator (and future-proofs a resolver
+/// change that could return `None`), exercised here at the surface-resolution
+/// level where the `None` input is reachable.
+#[test]
+fn evaluate_types_define_props_distinguishes_resolved_empty_from_unresolved() {
+    // (a) Call-signature-only props: RESOLVED but empty → shape PRESENT, empty.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/CallSigProps.vue",
+            r#"<script setup lang="ts">
+defineProps<{ (): void }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let evaluated = project
+        .open_session_batch()
+        .unwrap()
+        .evaluate_types("/CallSigProps.vue")
+        .unwrap()
+        .unwrap();
+    let shape = evaluated
+        .define_props
+        .iter()
+        .map(|e| &e.result.value)
+        .next()
+        .expect(
+            "a call-signature-only defineProps RESOLVES (object surface with a call \
+             signature) and must publish a define_props shape — Some(empty), not None",
+        );
+    assert!(
+        shape.properties.is_empty(),
+        "a call-signature-only props surface has no property members, got {:?}",
+        shape.properties,
+    );
+
+    // (b) The gate's resolved-vs-unresolved discriminator is a real signal: a
+    // valid in-range macro index resolves to `Some`; an out-of-range index
+    // (the genuinely-no-surface case the gate returns `None` for) resolves to
+    // `None`.
+    let host = project.host();
+    let wh = host.get_whole_hash("/CallSigProps.vue").unwrap_or([0u8; 16]);
+    let valid = crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from("/CallSigProps.vue"),
+        macro_index: 0,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        root_identity: wh,
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    };
+    assert!(
+        host.resolve_vue_macro_surface(&valid).is_some(),
+        "a valid in-range defineProps macro resolves its surface (gate admits it)"
+    );
+    let out_of_range = crate::typeinfo::types::VueMacroSurfaceRequest {
+        macro_index: 99,
+        ..valid
+    };
+    assert!(
+        host.resolve_vue_macro_surface(&out_of_range).is_none(),
+        "an out-of-range macro index does NOT resolve a surface — the gate's \
+         `None` path (no shape published) keys on exactly this real signal"
+    );
+}
+
 #[test]
 fn get_component_meta_uses_default_type_parameters_when_generic_args_are_omitted() {
     let project = make_project();

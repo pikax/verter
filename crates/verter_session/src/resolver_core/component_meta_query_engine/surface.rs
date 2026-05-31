@@ -45,8 +45,51 @@ fn projected_surface_from_semantic_node_inner(
             result
         }
         SemanticNodeData::Object(surface) => Some(surface_view_to_projected_surface(ctx, surface)),
+        // Compound roots (`A | B`, `A & B` / heritage overlay, `Foo<Bar>`)
+        // carry no single `Object` surface on the post-`Published(Expanded)`
+        // instantiated node, and that node can collapse a generic heritage /
+        // `Omit` carrier arm to `Opaque(Miss)`. So this projector returns
+        // `None` here; the seam (`dispatch_projected_surface`) composes the
+        // compound root via `projected_compound_root_surface_via_dispatch`
+        // driven from the decl anchor (carrier intact).
         _ => None,
     }
+}
+
+/// Compose the shallow surface of a compound root node (`Union` /
+/// `Intersection` / `InstantiationRef`) through the shared empty-path
+/// Shallow surface walker: drives `ProjectPath { base: node, path: [],
+/// macro_object_surface(Shallow, Structural) }` via
+/// `resolve_typeinfo_surface_view`, then reconstructs the terminal
+/// `SurfaceView` into a `ProjectedSurface`.
+///
+/// `node` is the decl-anchor base the seam supplies — NOT the
+/// post-`Published(Expanded)` instantiated root, which can collapse a
+/// generic heritage / `Omit` carrier arm to `Opaque(Miss)` (the shared
+/// walker cannot re-resolve an already-collapsed node, whereas the decl
+/// anchor still carries the carrier intact). Returns `None` when the walker
+/// resolves no `Object` terminal OR the composed surface is empty (an empty
+/// surface is never a COMPLETE compound-root projection).
+pub(super) fn projected_compound_root_surface_via_dispatch(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+) -> Option<ProjectedSurface> {
+    use crate::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext,
+    };
+
+    let surface = ctx.dispatch().resolve_typeinfo_surface_view(
+        node,
+        ProjectionReductionContext::macro_object_surface(
+            ProjectionMode::Shallow,
+            SurfaceProvenanceContext::Structural,
+        ),
+    )?;
+    let projected = surface_view_to_projected_surface(ctx, &surface);
+    if projected_surface_is_empty(&projected) {
+        return None;
+    }
+    Some(projected)
 }
 
 pub(crate) fn surface_view_to_projected_surface(

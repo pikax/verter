@@ -3872,6 +3872,9 @@ export interface HTMLAttributes {
 
     let _store_view = project.host().resolver_store_view();
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(project.host());
+    // The bridge carries NO prepared-decl root-surface rescue, so this
+    // proves the re-exported intrinsic shape is resolved by the DISPATCH
+    // surface ALONE.
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
         "/jsx_runtime.ts",
@@ -3892,6 +3895,135 @@ export interface HTMLAttributes {
         "the projected re-exported `HTMLAttributes` surface MUST \
          enumerate the declared attribute members (`id` / `class` / `role`) \
          through dispatch. Got: {projected_debug}"
+    );
+}
+
+/// Registry-materialization caller rail: the registry decl materializer
+/// projects a root symbol through `project_type_surface_expr_via_host_threaded`
+/// (a root-surface bridge that carries NO prepared-decl rescue). A
+/// CROSS-FILE generic `Omit`-heritage interface
+/// (`ButtonProps extends Omit<LinkProps, 'href'>`) is the hard case: its
+/// dispatch root is an Intersection whose generic-Omit carrier arm can
+/// collapse to `Opaque(Miss)` under the root `Published(Expanded)`
+/// instantiation, so this proves the registry rail resolves the compound
+/// root through the dispatch surface alone (composed from the decl anchor).
+#[test]
+fn registry_materialization_compound_omit_heritage_is_dispatch_authoritative() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/types.ts".to_string(),
+        Arc::from(
+            r#"
+export interface LinkProps {
+  as?: string
+  href?: string
+  target?: string
+  active?: boolean
+}
+
+export type LinkPropsKeys = 'href' | 'target'
+
+export interface ButtonProps extends Omit<LinkProps, 'href'> {
+  label?: string
+  color?: string
+}
+"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    let _ = host
+        .ensure_indexed_ready("/src/types.ts")
+        .expect("types dependency should seed module facts");
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
+
+    let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/src/types.ts",
+        "ButtonProps",
+    )
+    .expect(
+        "the registry rail must materialize the compound Omit-heritage \
+         `ButtonProps` through the dispatch surface alone (composed from the \
+         decl anchor); no prepared-decl root-surface fallback exists",
+    );
+
+    let TypeExpr::Object(object) = &projected else {
+        panic!("projected ButtonProps surface should be an object type, got {projected:?}");
+    };
+    let names: Vec<&str> = object
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(property) => Some(property.name.as_str()),
+            verter_type_expr::ObjectMember::Method(method) => Some(method.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        names.contains(&"active") && names.contains(&"label") && names.contains(&"color"),
+        "compound Omit-heritage surface keeps inherited `active` + own-body \
+         `label`/`color`; got {names:?}",
+    );
+    assert!(
+        !names.contains(&"href"),
+        "Omit<LinkProps, 'href'> must drop `href` from the inherited surface; got {names:?}",
+    );
+}
+
+/// Slot-deepening caller rail: `defineSlots<T>` lowers its slot surface
+/// through `project_type_surface_shape_via_host_threaded` (the second
+/// root-surface bridge that carries NO prepared-decl rescue). A slot type
+/// that is a compound intersection of an imported
+/// mapped/record slot branch and a named-slot literal is the hard case;
+/// this proves the slot rail composes the compound slot surface through
+/// dispatch alone, so `default` survives to final meta.
+#[test]
+fn slot_deepening_compound_surface_is_dispatch_authoritative() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/slots.ts",
+            r#"
+export type DynamicSlots = Record<string, (props: { value: string }) => any>
+export interface NamedSlots {
+  default(props: { row: string }): any
+}
+export type ComponentSlots = NamedSlots & DynamicSlots
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { ComponentSlots } from './slots'
+defineSlots<ComponentSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("should return component meta (no prepared-decl root-surface fallback exists)");
+
+    let slot_names: Vec<&str> = meta.slots.iter().map(|slot| slot.name.as_str()).collect();
+    assert!(
+        slot_names.contains(&"default"),
+        "the named-slot branch of the compound imported slot type must survive \
+         to final meta through the dispatch slot surface alone: {slot_names:?}",
     );
 }
 
@@ -11838,4 +11970,516 @@ defineProps<{ a: LocalLeaf; b: FromPkg }>()
              (e.g., local refs misclassified as package-backed)"
         );
     }
+}
+
+/// Overlay/base prop isolation through context-aware `vue_macro_dtos`.
+///
+/// `vue_macro_dtos_with_ctx(ctx, …)` resolves the macro surface through the
+/// active `ResolverContext`. An overlay session that adds `overlay_prop` to the
+/// SFC's own `interface Props { a }` MUST see `[a, overlay_prop]` — the surface
+/// is resolved against the OVERLAY `IndexedReady`, not the base host view. A
+/// base-view read MUST see only `[a]`, and the overlay surface MUST NOT leak
+/// into the base read (the two key on distinct `whole_hash`es).
+///
+/// Discrimination: a `vue_macro_dtos_with_ctx` that ignores `ctx` and reads the
+/// base host view (the pre-step-2 `vue_macro_dtos` behaviour) returns `[a]` for
+/// the overlay session too, failing the `overlay_prop` assertion. Verified by
+/// mutation (binding the cold path to a base `HostResolverContext` drops
+/// `overlay_prop`).
+#[test]
+fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
+    use crate::resolver_core::ResolverContext;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    }));
+
+    const SFC: &str = "/Comp.vue";
+    let base_src = "<script setup lang=\"ts\">\n\
+         interface Props { a: string }\n\
+         defineProps<Props>()\n\
+         </script>";
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: None,
+            input_id: SFC.to_string(),
+            source: Arc::from(base_src),
+            file_kind: crate::FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+    // Locate the `defineProps` macro index from the authoritative snapshot.
+    let indexed = host
+        .ensure_indexed_ready(SFC)
+        .expect("SFC must index ready");
+    let define_props_index = indexed
+        .snapshot
+        .macros
+        .iter()
+        .position(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .expect("the SFC declares a defineProps macro");
+
+    let request_for = |root_identity: [u8; 16]| crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from(SFC),
+        macro_index: define_props_index,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        root_identity,
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    };
+    let prop_names =
+        |dtos: &crate::typeinfo::adapters::vue::store::VueMacroDtos| -> Vec<String> {
+            dtos.props.iter().map(|p| p.name.clone()).collect()
+        };
+
+    // Base-view read (no overlay): only the base prop `a`.
+    let base_dtos =
+        host.vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    assert_eq!(
+        prop_names(&base_dtos),
+        vec!["a".to_string()],
+        "base-view defineProps surface must be exactly [a]"
+    );
+
+    // Overlay session: overlay the SFC adding `overlay_prop` to `Props`.
+    let overlay_src = "<script setup lang=\"ts\">\n\
+         interface Props { a: string; overlay_prop: number }\n\
+         defineProps<Props>()\n\
+         </script>";
+    let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> = rustc_hash::FxHashMap::default();
+    overlays.insert(SFC.to_string(), Arc::from(overlay_src));
+    let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+    let store_view = host.resolver_store_view().with_session_overlay(&host, &view);
+    let session_ctx = crate::resolver_core::SessionResolverContext::new(
+        &host,
+        &view,
+        &store_view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+
+    // The overlay session's own whole-hash hint (resolved through the session
+    // ctx) keys the overlay DTO slot; the core re-derives + validates it.
+    let overlay_hash = ResolverContext::get_whole_hash(&session_ctx, SFC).unwrap_or([0u8; 16]);
+    let overlay_dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+        &session_ctx,
+        &request_for(overlay_hash),
+    );
+    let overlay_props = prop_names(&overlay_dtos);
+    assert!(
+        overlay_props.contains(&"a".to_string()),
+        "overlay defineProps surface keeps the base prop `a`: {overlay_props:?}"
+    );
+    assert!(
+        overlay_props.contains(&"overlay_prop".to_string()),
+        "overlay defineProps surface MUST include the overlay-added `overlay_prop` \
+         — the surface is resolved against the overlay IndexedReady, not the base \
+         host view: {overlay_props:?}"
+    );
+
+    // No leak: a fresh base-view read still sees only `[a]`. The overlay surface
+    // was keyed on a distinct `whole_hash`, so the base slot is untouched.
+    let base_dtos_after =
+        host.vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    assert_eq!(
+        prop_names(&base_dtos_after),
+        vec!["a".to_string()],
+        "the overlay session's `overlay_prop` must NOT leak into the base-view \
+         defineProps surface: {:?}",
+        prop_names(&base_dtos_after)
+    );
+}
+
+/// Overlay/base `defineModel` isolation through context-aware `vue_macro_dtos`.
+///
+/// The `defineModel` model prop is synthesized from the owner SFC's
+/// `IndexedReady` macro facts (`props_from_typeinfo_surface` →
+/// `model_prop_fields`), NOT a macro-T object surface. That snapshot fetch MUST
+/// flow through the active `ResolverContext` (`ctx.ensure_indexed_ready`,
+/// overlay-aware), not the base `VerterHost`. An overlay session that rewrites
+/// `defineModel<string>('old')` to `defineModel<number>('fresh')` MUST see the
+/// model prop `fresh`; a base-view read MUST see only `old`, and the overlay
+/// model prop MUST NOT leak into the base read.
+///
+/// Discrimination: the pre-fix `model_prop_fields(host, …)` read the base
+/// `host.ensure_indexed_ready`, so the overlay session's model prop resolved
+/// against the BASE macro facts and surfaced `old`, not `fresh`. Routing the
+/// snapshot read through `ctx.ensure_indexed_ready` fixes the leak. Verified by
+/// mutation (reverting `model_prop_fields` to the base host read surfaces `old`
+/// for the overlay session — the `fresh` assertion fails).
+#[test]
+fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_base() {
+    use crate::resolver_core::ResolverContext;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    }));
+
+    const SFC: &str = "/Model.vue";
+    // Base SFC: `defineModel<string>('old')` → model prop named `old`.
+    let base_src = "<script setup lang=\"ts\">\n\
+         defineModel<string>('old')\n\
+         </script>";
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: None,
+            input_id: SFC.to_string(),
+            source: Arc::from(base_src),
+            file_kind: crate::FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+    // Locate the `defineModel` macro index from the authoritative snapshot.
+    let indexed = host
+        .ensure_indexed_ready(SFC)
+        .expect("SFC must index ready");
+    let define_model_index = indexed
+        .snapshot
+        .macros
+        .iter()
+        .position(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+        .expect("the SFC declares a defineModel macro");
+
+    let request_for = |root_identity: [u8; 16]| crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from(SFC),
+        macro_index: define_model_index,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineModel,
+        root_identity,
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    };
+    let prop_names =
+        |dtos: &crate::typeinfo::adapters::vue::store::VueMacroDtos| -> Vec<String> {
+            dtos.props.iter().map(|p| p.name.clone()).collect()
+        };
+
+    // Base-view read (no overlay): only the base model prop `old`.
+    let base_dtos =
+        host.vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    assert_eq!(
+        prop_names(&base_dtos),
+        vec!["old".to_string()],
+        "base-view defineModel surface must be exactly [old]"
+    );
+
+    // Overlay session: overlay the SFC rewriting the model name + type.
+    let overlay_src = "<script setup lang=\"ts\">\n\
+         defineModel<number>('fresh')\n\
+         </script>";
+    let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> = rustc_hash::FxHashMap::default();
+    overlays.insert(SFC.to_string(), Arc::from(overlay_src));
+    let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+    let store_view = host.resolver_store_view().with_session_overlay(&host, &view);
+    let session_ctx = crate::resolver_core::SessionResolverContext::new(
+        &host,
+        &view,
+        &store_view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+
+    let overlay_hash = ResolverContext::get_whole_hash(&session_ctx, SFC).unwrap_or([0u8; 16]);
+    let overlay_dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+        &session_ctx,
+        &request_for(overlay_hash),
+    );
+    let overlay_props = prop_names(&overlay_dtos);
+    assert!(
+        overlay_props.contains(&"fresh".to_string()),
+        "overlay defineModel surface MUST reflect the overlay's \
+         `defineModel<number>('fresh')` model prop — `model_prop_fields` must fetch \
+         the owner SFC IndexedReady through the active overlay ctx, not the base \
+         host view: {overlay_props:?}"
+    );
+    assert!(
+        !overlay_props.contains(&"old".to_string()),
+        "the overlay session MUST NOT leak the base `defineModel<string>('old')` \
+         model prop: {overlay_props:?}"
+    );
+
+    // No leak: a fresh base-view read still sees only `[old]`.
+    let base_dtos_after =
+        host.vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    assert_eq!(
+        prop_names(&base_dtos_after),
+        vec!["old".to_string()],
+        "the overlay session's `fresh` model prop must NOT leak into the base-view \
+         defineModel surface: {:?}",
+        prop_names(&base_dtos_after)
+    );
+}
+
+/// Overlay/base SLOT-BINDING isolation through context-aware `vue_macro_dtos`.
+///
+/// The slot binding object lives in a CROSS-FILE carrier (`/slots.ts`). An
+/// overlay session that rewrites `/slots.ts`'s slot-prop object from `{ old }`
+/// to `{ fresh }` MUST see the slot binding `fresh` — the slot normalizer's
+/// callable realization + first-parameter object navigation
+/// (`slots_from_typeinfo_surface` → `navigate_param_to_object_surface`) flow
+/// through the active session `ctx`, so they read the OVERLAY `/slots.ts`, not
+/// the base host view. A base-view read MUST see only `old`, and the overlay
+/// binding MUST NOT leak into the base read.
+///
+/// Discrimination: the pre-fix slot path built a FRESH base `HostResolverContext`
+/// inside `raise_realized_callable_member_value` / `navigate_param_to_object_surface`,
+/// so the overlay session's slot bindings were resolved against the BASE
+/// `/slots.ts` and surfaced `old`, not `fresh`. Routing those reads through
+/// `ctx.dispatch()` fixes the leak. Verified by mutation (reverting the slot
+/// helpers to a base context surfaces `old` for the overlay session).
+#[test]
+fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_to_base() {
+    use crate::resolver_core::ResolverContext;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    }));
+
+    const SFC: &str = "/Comp.vue";
+    const SLOTS_TS: &str = "/slots.ts";
+    // Base `/slots.ts`: the slot-prop object carries `old`.
+    let base_slots = "export type SlotProps = { old: string };\n\
+         export type SlotFn = (props: SlotProps) => any;\n\
+         export type Slots = { default: SlotFn };\n";
+    let sfc_src = "<script setup lang=\"ts\">\n\
+         import type { Slots } from './slots';\n\
+         defineSlots<Slots>()\n\
+         </script>";
+    for (id, src) in [(SLOTS_TS, base_slots), (SFC, sfc_src)] {
+        let kind = if id.ends_with(".vue") {
+            crate::FileKind::VueSfc
+        } else {
+            crate::FileKind::NonSfc
+        };
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: None,
+                input_id: id.to_string(),
+                source: Arc::from(src),
+                file_kind: kind,
+                aliases: Vec::new(),
+            })
+            .expect("upsert succeeds");
+    }
+
+    let indexed = host.ensure_indexed_ready(SFC).expect("SFC must index ready");
+    let define_slots_index = indexed
+        .snapshot
+        .macros
+        .iter()
+        .position(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+        .expect("the SFC declares a defineSlots macro");
+
+    let request_for = |root_identity: [u8; 16]| crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from(SFC),
+        macro_index: define_slots_index,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
+        root_identity,
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    };
+    // Binding names on the `default` slot.
+    let default_binding_names =
+        |dtos: &crate::typeinfo::adapters::vue::store::VueMacroDtos| -> Vec<String> {
+            dtos.slots
+                .iter()
+                .find(|s| s.name == "default")
+                .map(|s| s.bindings.iter().map(|b| b.name.clone()).collect())
+                .unwrap_or_default()
+        };
+
+    // Base-view read: the slot binding is `old`.
+    let base_dtos = host
+        .vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    assert_eq!(
+        default_binding_names(&base_dtos),
+        vec!["old".to_string()],
+        "base-view defineSlots `default` binding must be exactly [old]"
+    );
+
+    // Overlay session: rewrite `/slots.ts`'s slot-prop object to `{ fresh }`.
+    let overlay_slots = "export type SlotProps = { fresh: boolean };\n\
+         export type SlotFn = (props: SlotProps) => any;\n\
+         export type Slots = { default: SlotFn };\n";
+    let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> = rustc_hash::FxHashMap::default();
+    overlays.insert(SLOTS_TS.to_string(), Arc::from(overlay_slots));
+    let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+    let store_view = host.resolver_store_view().with_session_overlay(&host, &view);
+    let session_ctx = crate::resolver_core::SessionResolverContext::new(
+        &host,
+        &view,
+        &store_view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+
+    // The SFC's own whole-hash is UNCHANGED (only the carrier `/slots.ts` was
+    // overlaid), so the overlay read keys on the same SFC hash — the binding
+    // must still reflect the OVERLAY carrier through the ctx-bound resolution.
+    let overlay_hash = ResolverContext::get_whole_hash(&session_ctx, SFC).unwrap_or([0u8; 16]);
+    let overlay_dtos = crate::typeinfo::adapters::vue::surface::vue_macro_dtos_with_ctx(
+        &session_ctx,
+        &request_for(overlay_hash),
+    );
+    let overlay_bindings = default_binding_names(&overlay_dtos);
+    assert_eq!(
+        overlay_bindings,
+        vec!["fresh".to_string()],
+        "the overlay session's defineSlots `default` binding MUST reflect the \
+         OVERLAY `/slots.ts` (`fresh`), NOT the base carrier (`old`) — the slot \
+         callable realization + first-param navigation read through the session \
+         ctx: {overlay_bindings:?}"
+    );
+
+    // No leak: a fresh base-view read still sees only `old`.
+    let base_dtos_after = host
+        .vue_macro_dtos(&request_for(host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16])));
+    assert_eq!(
+        default_binding_names(&base_dtos_after),
+        vec!["old".to_string()],
+        "the overlay session's `fresh` slot binding must NOT leak into the \
+         base-view defineSlots surface: {:?}",
+        default_binding_names(&base_dtos_after)
+    );
+}
+
+/// Graph-native generic slot-alias bindings under a CONCRETE substitution.
+///
+/// `defineSlots<TabsSlots<{ id: string }>>()` where the slot's binding
+/// parameter is a generic alias whose BODY ROOT is a Conditional that is OPEN
+/// when the type parameter is unbound but REDUCES to a concrete object once the
+/// parameter is substituted:
+/// `type SlotProps<T> = T extends { id: infer U } ? { row: U } : { row: never }`.
+/// At `T = { id: string }` the conditional reduces to `{ row: string }`, so the
+/// graph-native synthesis MUST realize the callable slot member under the
+/// substitution, find the first parameter, and publish the binding row `row`.
+///
+/// Discrimination: the pre-fix `slot_param_root_is_symbolic_only` instantiated
+/// the `InstantiationRef` carrier with EMPTY args, so `SlotProps<T>`'s body
+/// stayed an OPEN Conditional (`T` an unbound `TypeParam`) and the predicate
+/// returned `true` (symbolic-only) — the synthesis SKIPPED the slot and
+/// published NO binding row. With `(base, args, context)` preserved, the body
+/// reduces to the concrete `{ row: string }` object (non-symbolic) and the
+/// `default.row` binding is published. Verified pre-fail / post-pass.
+#[test]
+fn graph_native_generic_slot_alias_publishes_bindings_under_concrete_substitution() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/slots.ts",
+            r#"
+export type SlotProps<T> = T extends { id: infer U } ? { row: U } : { row: never }
+export type SlotFn<T> = (props: SlotProps<T>) => any
+export type TabsSlots<T> = { default: SlotFn<T> }
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { TabsSlots } from './slots'
+
+defineSlots<TabsSlots<{ id: string }>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("should resolve expanded component meta");
+    let evaluated = resolved
+        .evaluated_types
+        .as_ref()
+        .expect("expanded component meta should carry evaluated types");
+
+    let slot_names: std::collections::BTreeSet<_> = evaluated
+        .define_slots
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .map(|slot| slot.name.as_str())
+        .collect();
+    assert!(
+        slot_names.contains("default"),
+        "the `default` slot must be present on the resolved slot shape: {slot_names:?}"
+    );
+
+    let default_bindings: std::collections::BTreeSet<_> = evaluated
+        .slot_bindings
+        .iter()
+        .filter_map(|binding| binding.name.strip_prefix("default.").map(str::to_string))
+        .collect();
+    assert!(
+        default_bindings.contains("row"),
+        "the generic slot alias `SlotProps<{{ id: string }}>` must publish the \
+         binding row `row` under the concrete substitution T = {{ id: string }} \
+         (the pre-fix empty-args InstantiationRef instantiation dropped it): \
+         {default_bindings:?}"
+    );
+}
+
+/// Graph-native OPEN generic slot alias does NOT invent bindings.
+///
+/// When the slot parameter's root shape stays SYMBOLIC (here an
+/// `IndexedAccess` `T['missing']` that never resolves to a concrete object),
+/// the synthesis must DECLINE to publish a binding row — preserving the
+/// shallow-until-resolved contract. Inventing a row here would materialise a
+/// guess from an undetermined generic context.
+///
+/// Discrimination: a synthesis that enumerates the symbolic param root anyway
+/// (e.g. committing to a mapped/indexed surface) would publish a phantom
+/// binding; the `slot_param_root_is_symbolic_only` gate keeps `IndexedAccess`
+/// roots symbolic so NO binding is published. (Paired with the positive test
+/// above: the fix must publish for the CONCRETE case while still declining the
+/// OPEN case — preserving an empty-args instantiation would fail the positive
+/// test; removing the symbolic gate entirely would fail this one.)
+#[test]
+fn graph_native_open_generic_slot_alias_does_not_invent_bindings() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/slots.ts",
+            r#"
+// The slot param root is an indexed access on an open type parameter; it
+// never resolves to a concrete object surface, so it stays symbolic.
+export type OpenSlots<T> = { default: (props: T['missing']) => any }
+export type Wrapper<T> = OpenSlots<T>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Wrapper } from './slots'
+
+defineSlots<Wrapper<{ id: string }>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("should resolve expanded component meta");
+    let evaluated = resolved
+        .evaluated_types
+        .as_ref()
+        .expect("expanded component meta should carry evaluated types");
+
+    // `{ id: string }['missing']` is an indexed access whose key is not present;
+    // the param root never resolves to a concrete object, so NO `default.*`
+    // binding row is invented.
+    let default_bindings: Vec<&str> = evaluated
+        .slot_bindings
+        .iter()
+        .filter(|binding| binding.name.starts_with("default."))
+        .map(|binding| binding.name.as_str())
+        .collect();
+    assert!(
+        default_bindings.is_empty(),
+        "an open / unresolved indexed-access slot param root must NOT invent \
+         binding rows: {default_bindings:?}"
+    );
 }

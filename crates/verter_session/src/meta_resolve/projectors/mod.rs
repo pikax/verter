@@ -60,6 +60,7 @@ use super::dep_signature::emit_dispatch_dep_signature_facts;
 use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
 use super::exactness::classify_node;
 
+pub(crate) mod define_shapes;
 pub(crate) mod emits;
 pub(crate) mod exposed;
 pub(crate) mod macro_payload_substrate;
@@ -83,6 +84,7 @@ pub(crate) use macro_payload_substrate::{
     resolve_payload_surface_with_scope, MemberValueRole, PayloadSurfaceScope,
 };
 
+pub(crate) use define_shapes::project_define_macro_shapes;
 pub(crate) use emits::project_emits;
 pub(crate) use exposed::project_exposed;
 pub(crate) use model::project_model;
@@ -1256,6 +1258,22 @@ pub(crate) fn surface_member_to_expanded_field(
         "ExpandedField (surface member `{}`) shallow_type_expr/shallow_type_expr_scope pairing violated",
         member.name.as_ref(),
     );
+    // Gap3 provenance downgrade through transparent carriers: a member reached
+    // ONLY via REAL heritage (`extends PlainProps` / `extends Vendor`) is NOT an
+    // own-body member of the macro type argument, so it MUST carry
+    // `declared_in_macro_type_arg = false` even though the macro-T own-body
+    // synthesis can over-stamp the raw bit `true` on a heritage-reached member.
+    // The `merge_role` is INDEPENDENTLY baked per arm (`Heritage` for
+    // `extends`-reached, `OwnBody` for the declaration's own body), so it is the
+    // authoritative discriminator. This is the SAME downgrade
+    // `props_from_typeinfo_surface` applies on the DTO path — applying it here
+    // keeps the flat `evaluated_types.props` field (which `define_props_shape`
+    // reads first) in agreement, so an own-body member keeps `true` and a
+    // heritage-reached member downgrades to `false`. NOT
+    // `source_field.unwrap_or(false)`: that would also strip own-body members
+    // (the cross-file-simple discriminating positive test rejects that accident).
+    let declared_in_macro_type_arg = member.declared_in_macro_type_arg
+        && member.merge_role != crate::semantic_query::MemberMergeRole::Heritage;
     ExpandedField {
         name: member.name.as_ref().to_string(),
         r#type,
@@ -1266,7 +1284,7 @@ pub(crate) fn surface_member_to_expanded_field(
         diagnostics: Vec::new(),
         shallow_type_expr,
         shallow_type_expr_scope,
-        declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+        declared_in_macro_type_arg,
     }
 }
 

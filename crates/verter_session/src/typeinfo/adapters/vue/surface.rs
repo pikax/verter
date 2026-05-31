@@ -49,9 +49,10 @@ use verter_semantic::analysis::types::{
 };
 use verter_type_expr::{LiteralValue, TypeExpr, TypeExprScope};
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::surface_projector::render_type_expr_display;
-use crate::semantic_query::{ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext};
+use crate::semantic_query::{
+    PathSegment, ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext,
+};
 use crate::typeinfo::adapters::vue::store::{VueMacroDtoKey, VueMacroDtos};
 use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurface, TypeInfoSurfaceMember};
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
@@ -198,13 +199,40 @@ impl VerterHost {
         &self,
         request: &VueMacroSurfaceRequest,
     ) -> Option<VueMacroSurface> {
+        // Base-view entry point (tests, the host-method `vue_macro_dtos`
+        // wrapper). Builds a bare `HostResolverContext` over the base host view
+        // and routes the single resolution core through it. Overlay-bearing
+        // production callers MUST use `resolve_vue_macro_surface_with_ctx` with
+        // their active session context so the surface reads overlay content.
+        let store_view = self.resolver_store_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+        self.resolve_vue_macro_surface_with_ctx(&host_ctx, request)
+    }
+
+    /// Context-bound resolution core for [`Self::resolve_vue_macro_surface`].
+    ///
+    /// Every view-sensitive read — the owner SFC's `IndexedReady`, the type
+    /// argument lowering, the cross-file carrier projection, the carrier-file
+    /// JSDoc source — flows through `ctx`, so an overlay session
+    /// ([`crate::resolver_core::session_resolver_context::SessionResolverContext`])
+    /// resolves the macro surface against its overlay content rather than the
+    /// base host view. The dispatcher is `ctx.dispatch()` (the sealed
+    /// `ProjectSemanticDispatch::new(ctx)`), keeping the surface inside the
+    /// single resolution engine.
+    #[must_use]
+    pub(crate) fn resolve_vue_macro_surface_with_ctx(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        request: &VueMacroSurfaceRequest,
+    ) -> Option<VueMacroSurface> {
         debug_assert_eq!(
             request.level,
             TypeInfoQueryLevel::FullMetadata,
             "resolve_vue_macro_surface serves the FullMetadata level"
         );
 
-        let indexed = self.ensure_indexed_ready(request.owner_canonical.as_ref())?;
+        let indexed = ctx.ensure_indexed_ready(request.owner_canonical.as_ref())?;
         let mac = indexed.snapshot.macros.get(request.macro_index)?;
         if !mac.is_type_based {
             return None;
@@ -258,23 +286,39 @@ impl VerterHost {
             ),
         };
 
-        let store_view = self.resolver_store_view();
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
-        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        // Dispatch is bound to the active `ctx`: an overlay session threads its
+        // session view through every dispatch-tier read, so the type-argument
+        // lowering and cross-file carrier projection below read overlay content.
+        let dispatch = ctx.dispatch();
 
-        // Lower the macro type argument in the SFC scope. `Navigate` /
+        // Path-precise decomposition of a deep indexed-access type argument
+        // (`defineProps<DeepConfig['ui']['header']>()`). The SAME decomposition
+        // the transit-shallow Class-A projector uses: the base
+        // (`DeepConfig` / `WrappedConfig<Theme>`) is lowered as the carrier and
+        // the string-literal hops (`['ui']`, `['header']`) become the
+        // `ProjectPath` selector. The shared path walker then runs the
+        // intermediate hops in `Navigate` and the TERMINAL hop under
+        // `terminal_context` (Shallow), so the leaf object's members surface
+        // WITHOUT the intermediate siblings leaking. Lowering the WHOLE chain as
+        // a single node and projecting the empty path would instead leave an
+        // unreduced `IndexedAccess` carrier whose one-level surface is empty —
+        // the leaf would be lost. A non-indexed type argument decomposes to
+        // `(type_arg, [])`, preserving the prior empty-path behaviour exactly.
+        let (base_expr, path) =
+            crate::meta_resolve::dispatch_helpers::decompose_indexed_access_chain(type_arg);
+
+        // Lower the carrier base in the SFC scope. `Navigate` /
         // structural-transit lowering keeps member values shallow; the
-        // empty-path `Shallow` projection then synthesises the one-level surface
-        // under `terminal_context`.
+        // path-precise `Shallow` projection then synthesises the one-level
+        // surface of the terminal hop under `terminal_context`.
         let base = dispatch.lower_type_expr_in_scope_with_context(
             request.owner_canonical.as_ref(),
-            type_arg,
+            base_expr,
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
         )?;
 
         let surface =
-            self.project_shallow_surface_from_base(&host_ctx, &dispatch, base, terminal_context)?;
+            self.project_shallow_surface_from_base(ctx, &dispatch, base, path, terminal_context)?;
 
         Some(VueMacroSurface {
             surface,
@@ -303,159 +347,74 @@ impl VerterHost {
     /// not re-attempt the cold resolution.
     #[must_use]
     pub fn vue_macro_dtos(&self, request: &VueMacroSurfaceRequest) -> Arc<VueMacroDtos> {
-        // Load the CURRENT `IndexedReady` BEFORE touching the cache. The
-        // request's `root_identity` (a `whole_hash` hint) and `macro_kind` are
-        // caller-supplied and may be STALE (a `whole_hash` captured before an
-        // edit) or WRONG (a kind that disagrees with the snapshot's macro at
-        // this index). Deriving both from the authoritative snapshot here means
-        // a stale `root_identity` can never read an old entry (the live
-        // `whole_hash` keys a fresh slot) and a wrong `macro_kind` can never
-        // read or poison the sibling kind's entry (the derived kind keys the
-        // slot and drives the normalizer dispatch).
-        let Some(indexed) = self.ensure_indexed_ready(request.owner_canonical.as_ref()) else {
-            // SFC not loaded — no surface, no cache entry. Returning the default
-            // bundle WITHOUT publishing (we have no validated key) keeps the
-            // cache free of entries keyed on an unvalidated identity.
-            return Arc::new(VueMacroDtos::default());
-        };
-        let Some(mac) = indexed.snapshot.macros.get(request.macro_index) else {
-            return Arc::new(VueMacroDtos::default());
-        };
-        let whole_hash = indexed.whole_hash;
-        let macro_kind = mac.kind;
-
-        let key = VueMacroDtoKey::new(
-            Arc::clone(&request.owner_canonical),
-            whole_hash,
-            request.macro_index,
-            macro_kind,
-            request.level,
-        );
-        // Warm read: the content-addressed key covers the SFC's OWN content,
-        // but the resolved DTOs read CROSS-FILE carrier types. Validate the
-        // recorded fact signature + project generation against the live view
-        // so a carrier edit (which leaves the SFC's `whole_hash` unchanged)
-        // invalidates the entry lazily.
-        let store_view = self.resolver_store_view();
-        let generation = self.project_type_store().current_project_generation();
-        if let Some(cached) =
-            self.vue_shallow_metadata_store()
-                .get_with_view(&key, &store_view, generation)
-        {
-            // Bubble the cached entry's cross-file carrier fact signature into
-            // any active outer fact tracer. An outer component-meta cold trace
-            // (e.g. `component_meta_resolved_macros` consuming these DTOs)
-            // inherits the DTO's carrier facts on this warm hit; without the
-            // bubble a prewarmed DTO would under-key the outer cache entry (a
-            // carrier edit that invalidates this DTO entry must also invalidate
-            // the component-meta entry that read it). Cold misses bubble
-            // automatically: the `install_fact_tracer` scope below nests under
-            // the outer tracer and `observe_fan_out` reaches every active cell.
-            cached.read_set_signature.bubble_via_tls();
-            return std::sync::Arc::clone(&cached.dtos);
-        }
-
-        // Resolve the surface through a request carrying the VALIDATED identity
-        // (live `whole_hash`) and the AUTHORITATIVE kind, so the surface
-        // resolution + normalizer dispatch never trust the caller's hint. The
-        // whole cold resolution runs under an installed fact tracer so the
-        // CROSS-FILE carrier facts it reads are captured into the entry's
-        // `ReadSetSignature` (the warm-read invalidation rail above).
-        let validated_request = VueMacroSurfaceRequest {
-            owner_canonical: Arc::clone(&request.owner_canonical),
-            macro_index: request.macro_index,
-            macro_kind,
-            root_identity: whole_hash,
-            level: request.level,
-        };
-        let (dtos, finalise) = crate::fact_signature_helpers::install_fact_tracer(self, || {
-            match self.resolve_vue_macro_surface(&validated_request) {
-                Some(macro_surface) => match macro_kind {
-                    AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineModel => {
-                        VueMacroDtos {
-                            props: props_from_typeinfo_surface(self, &macro_surface),
-                            ..VueMacroDtos::default()
-                        }
-                    }
-                    AnalyzedMacroKind::DefineEmits => VueMacroDtos {
-                        emits: emits_from_typeinfo_surface(self, &macro_surface),
-                        ..VueMacroDtos::default()
-                    },
-                    AnalyzedMacroKind::DefineSlots => VueMacroDtos {
-                        slots: slots_from_typeinfo_surface(self, &macro_surface),
-                        ..VueMacroDtos::default()
-                    },
-                    // `WithDefaults` is not a props-surface source on this path:
-                    // the outer `withDefaults` macro carries no type argument (it
-                    // is not `is_type_based`), so `resolve_vue_macro_surface`
-                    // returns `None` for it and this arm is unreachable. The
-                    // props come from the SEPARATELY-routed inner `DefineProps`
-                    // macro. Options / expose are separate subsystems. None of
-                    // these contribute a DTO bundle.
-                    AnalyzedMacroKind::WithDefaults
-                    | AnalyzedMacroKind::DefineOptions
-                    | AnalyzedMacroKind::DefineExpose => VueMacroDtos::default(),
-                },
-                None => VueMacroDtos::default(),
-            }
-        });
-
-        match finalise {
-            crate::resolver_core::FactReadSetFinalise::Ok(facts) => {
-                let entry = crate::typeinfo::adapters::vue::store::VueMacroDtosEntry {
-                    dtos: std::sync::Arc::new(dtos),
-                    read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
-                    validated_at_generation: generation,
-                };
-                std::sync::Arc::clone(&self.vue_shallow_metadata_store().insert(key, entry).dtos)
-            }
-            // Tracer overflowed: the DTOs are valid but cannot be admitted
-            // safely (the observation set was truncated, so warm-read
-            // validation could falsely pass against a changed carrier). Return
-            // the freshly-computed bundle WITHOUT caching — a repeat request
-            // recomputes, never serves an under-validated entry.
-            crate::resolver_core::FactReadSetFinalise::Overflow => std::sync::Arc::new(dtos),
-        }
-    }
-
-    /// Navigate a `TypeExpr` to its one-level object [`TypeInfoSurface`] through
-    /// the SHARED resolver, lowering it in `scope_canonical` then projecting the
-    /// empty-path `Shallow` surface — the SAME machinery
-    /// [`Self::resolve_shallow_surface_for`] uses for a named declaration.
-    ///
-    /// Used by the slot-binding extractor to resolve a slot's first-parameter
-    /// type (`Pick<RowApi, 'name'>` / a named alias / a parenthesized form) to
-    /// the binding object WITHOUT a nominal shape-sniff: `Pick` is navigated,
-    /// `Parenthesized` is unwrapped, and an alias `Ref` is resolved by the one
-    /// shared resolver rather than a per-utility special case. Returns `None`
-    /// when the scope file is not loaded or the type does not project to an
-    /// object surface (a primitive / union first param has no binding object).
-    #[must_use]
-    pub(crate) fn navigate_param_to_object_surface(
-        &self,
-        scope_canonical: &str,
-        param_ty: &TypeExpr,
-    ) -> Option<TypeInfoSurface> {
+        // Base-view entry point (tests + the materialiser's `typeinfo_macro_dtos`
+        // helper, until the materialiser is retired). Routes the single DTO
+        // resolution core through a bare `HostResolverContext` over the base
+        // host view. Overlay-bearing production callers
+        // (`component_meta_resolved_macros`) MUST call `vue_macro_dtos_with_ctx`
+        // with their active session context so the surface reads overlay content.
         let store_view = self.resolver_store_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
-        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-
-        // Lower the parameter type in its scope under structural-transit
-        // Navigate (member values stay shallow); the empty-path Shallow
-        // projection then synthesises the one-level object surface.
-        let base = dispatch.lower_type_expr_in_scope_with_context(
-            scope_canonical,
-            param_ty,
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-        )?;
-        self.project_shallow_surface_from_base(
-            &host_ctx,
-            &dispatch,
-            base,
-            ProjectionReductionContext::published(ProjectionMode::Shallow),
-        )
+        vue_macro_dtos_with_ctx(&host_ctx, request)
     }
+
+}
+
+/// Navigate a `TypeExpr` to its one-level object [`TypeInfoSurface`] through the
+/// SHARED resolver bound to the ACTIVE `ctx`, lowering it in `scope_canonical`
+/// then projecting the empty-path `Shallow` surface — the SAME machinery
+/// [`VerterHost::resolve_shallow_surface_for`] uses for a named declaration.
+///
+/// Used by the slot-binding extractor to resolve a slot's first-parameter type
+/// (`Pick<RowApi, 'name'>` / a named alias / a parenthesized form) to the
+/// binding object WITHOUT a nominal shape-sniff: `Pick` is navigated,
+/// `Parenthesized` is unwrapped, and an alias `Ref` is resolved by the one
+/// shared resolver rather than a per-utility special case. Returns `None` when
+/// the scope file is not loaded or the type does not project to an object
+/// surface (a primitive / union first param has no binding object).
+///
+/// Bound to `ctx` (`ctx.dispatch()`), NOT a fresh base `HostResolverContext`, so
+/// an overlay session resolves the slot-param object against its OVERLAY content
+/// — a `defineSlots<Slots>()` whose `Slots` alias is overlaid reads the overlay
+/// bindings, not the base.
+#[must_use]
+pub(crate) fn navigate_param_to_object_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    scope_canonical: &str,
+    param_ty: &TypeExpr,
+) -> Option<TypeInfoSurface> {
+    let dispatch = ctx.dispatch();
+
+    // Lower the parameter type in its scope under structural-transit
+    // Navigate (member values stay shallow); the empty-path Shallow
+    // projection then synthesises the one-level object surface.
+    let base = dispatch.lower_type_expr_in_scope_with_context(
+        scope_canonical,
+        param_ty,
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+    )?;
+    // Open-generic gate: a slot-param root that is symbolic-only (an open
+    // Conditional whose check carries a free `TypeParam`, an unresolved
+    // `IndexedAccess` / `Mapped`, …) must NOT be materialised into a
+    // committed object surface — doing so would invent phantom bindings from
+    // an undetermined generic context. This is the SAME gate the
+    // graph-native slot-binding synthesis applies; routing both binding
+    // paths through it keeps them in agreement (a `generic="M"` component's
+    // `(props: SlotProps<M>)` slot resolves to NO bindings on both paths,
+    // not a branch-committed guess).
+    if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(
+        &dispatch, base, 0,
+    ) {
+        return None;
+    }
+    ctx.host_for_fact_tracer_install().project_shallow_surface_from_base(
+        ctx,
+        &dispatch,
+        base,
+        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        ProjectionReductionContext::published(ProjectionMode::Shallow),
+    )
 }
 
 /// Slice a member's leading-JSDoc DESCRIPTION + TAG spans into owned text for
@@ -576,14 +535,194 @@ fn signature_jsdoc_from_spans(
 }
 
 /// Raise a member's value node to a [`TypeExpr`] through the shared structural
-/// raiser. `None` when the node has no raisable shape (the caller substitutes
-/// the eager rail's missing-`type_expr` fallback).
-fn raise_member_value(host: &VerterHost, member: &TypeInfoSurfaceMember) -> Option<TypeExpr> {
-    let store_view = host.resolver_store_view();
-    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
-    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-    dispatch.raise_node_to_type_expr(member.value)
+/// raiser bound to the ACTIVE `ctx` (`ctx.dispatch()`), so an overlay session
+/// raises against overlay content rather than a fresh base host view. `None`
+/// when the node has no raisable shape (the caller substitutes the eager rail's
+/// missing-`type_expr` fallback).
+fn raise_member_value(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    member: &TypeInfoSurfaceMember,
+) -> Option<TypeExpr> {
+    ctx.dispatch().raise_node_to_type_expr(member.value)
+}
+
+/// Realize a slot member's value to its underlying callable through the SHARED
+/// `realize_callable_member` substrate (Alias / Conditional / InstantiationRef /
+/// DeclRef carrier normalization), then raise the realized node to a
+/// [`TypeExpr`]. Falls back to the un-realized value when realization finds no
+/// callable (the member is then classified non-function by the caller). This
+/// keeps the DTO slot surface in agreement with
+/// `slot_binding_graph::compute_bindings_via_graph`, which realizes the same
+/// member value before reading `Function.params`.
+fn raise_realized_callable_member_value(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    member: &TypeInfoSurfaceMember,
+) -> Option<TypeExpr> {
+    let dispatch = ctx.dispatch();
+    let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
+        &dispatch,
+        member.value,
+        crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Shallow,
+        ),
+    )
+    .unwrap_or(member.value);
+    dispatch.raise_node_to_type_expr(realized)
+}
+
+/// Resolve a `.vue` macro's NORMALIZED component-meta DTOs
+/// ([`VueMacroDtos`]) through the active [`crate::resolver_core::ResolverContext`].
+///
+/// This is the SINGLE DTO resolution core: it materializes the macro surface
+/// ONCE per `(canonical, content, macro, level)` (resolving the surface through
+/// `ctx` and running the appropriate normalizer), publishes the immutable owned
+/// DTO bundle into the host-owned
+/// [`crate::typeinfo::adapters::vue::store::VueShallowMetadataStore`], and
+/// serves subsequent calls from the content-addressed cache.
+///
+/// EVERY view-sensitive step flows through `ctx`:
+/// - the owner SFC's `IndexedReady` ([`ctx.ensure_indexed_ready`]) — so an
+///   overlay session keys on its OVERLAY `whole_hash`, never the base hash, and
+///   a base session can never read or poison an overlay entry (or vice-versa);
+/// - the cold surface resolution
+///   ([`crate::VerterHost::resolve_vue_macro_surface_with_ctx`], whose dispatch
+///   is `ctx.dispatch()`) — so the type-argument lowering and cross-file
+///   carrier projection read overlay content;
+/// - warm validation ([`ctx.store_view`]) — so a carrier edit (which leaves the
+///   SFC's own `whole_hash` unchanged) invalidates the entry lazily against the
+///   SAME view the surface was resolved under.
+///
+/// The DTO bundle is generation-independent (owned `TypeExpr` + scope +
+/// `String`), so caching it across requests is safe. Returns an empty (default)
+/// bundle when the macro surface cannot be resolved.
+///
+/// [`ctx.ensure_indexed_ready`]: crate::resolver_core::ResolverContext::ensure_indexed_ready
+/// [`ctx.dispatch()`]: crate::resolver_core::ResolverContext::dispatch
+/// [`ctx.store_view`]: crate::resolver_core::ResolverContext::store_view
+#[must_use]
+pub(crate) fn vue_macro_dtos_with_ctx(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    request: &VueMacroSurfaceRequest,
+) -> Arc<VueMacroDtos> {
+    let host = ctx.host_for_fact_tracer_install();
+
+    // Load the CURRENT (overlay-aware) `IndexedReady` BEFORE touching the
+    // cache. The request's `root_identity` (a `whole_hash` hint) and
+    // `macro_kind` are caller-supplied and may be STALE or WRONG; deriving both
+    // from the authoritative `ctx`-resolved snapshot here means a stale
+    // `root_identity` can never read an old entry (the live `whole_hash` keys a
+    // fresh slot) and a wrong `macro_kind` can never read or poison the sibling
+    // kind's entry.
+    let Some(indexed) = ctx.ensure_indexed_ready(request.owner_canonical.as_ref()) else {
+        // SFC not loaded — no surface, no cache entry. Returning the default
+        // bundle WITHOUT publishing (we have no validated key) keeps the cache
+        // free of entries keyed on an unvalidated identity.
+        return Arc::new(VueMacroDtos::default());
+    };
+    let Some(mac) = indexed.snapshot.macros.get(request.macro_index) else {
+        return Arc::new(VueMacroDtos::default());
+    };
+    let whole_hash = indexed.whole_hash;
+    let macro_kind = mac.kind;
+
+    let key = VueMacroDtoKey::new(
+        Arc::clone(&request.owner_canonical),
+        whole_hash,
+        request.macro_index,
+        macro_kind,
+        request.level,
+    );
+    // Warm read against the SAME `ctx` view the surface resolves under. The
+    // content-addressed key covers the SFC's OWN content, but the resolved DTOs
+    // read CROSS-FILE carrier types; validating the recorded fact signature +
+    // project generation against the live view invalidates the entry lazily on
+    // a carrier edit.
+    let generation = ctx.project_type_store().current_project_generation();
+    if let Some(cached) =
+        host.vue_shallow_metadata_store()
+            .get_with_view(&key, ctx.store_view(), generation)
+    {
+        // Bubble the cached entry's cross-file carrier fact signature into any
+        // active outer fact tracer so an outer component-meta cold trace
+        // inherits the DTO's carrier facts on this warm hit (a carrier edit that
+        // invalidates this DTO entry must also invalidate the component-meta
+        // entry that read it).
+        cached.read_set_signature.bubble_via_tls();
+        return std::sync::Arc::clone(&cached.dtos);
+    }
+
+    // Resolve the surface through a request carrying the VALIDATED identity
+    // (live `whole_hash`) and the AUTHORITATIVE kind, so the surface resolution
+    // + normalizer dispatch never trust the caller's hint. The whole cold
+    // resolution runs under an installed fact tracer so the CROSS-FILE carrier
+    // facts it reads are captured into the entry's `ReadSetSignature`.
+    let validated_request = VueMacroSurfaceRequest {
+        owner_canonical: Arc::clone(&request.owner_canonical),
+        macro_index: request.macro_index,
+        macro_kind,
+        root_identity: whole_hash,
+        level: request.level,
+    };
+    let (dtos, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
+        match host.resolve_vue_macro_surface_with_ctx(ctx, &validated_request) {
+            Some(macro_surface) => match macro_kind {
+                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineModel => VueMacroDtos {
+                    props: props_from_typeinfo_surface(ctx, &macro_surface),
+                    // A props member is `properties + index signatures`: a
+                    // `defineProps<{ [k: string]: string }>()` surface carries an
+                    // index signature with no named property, so capture the
+                    // surface's index signatures (key/value raised through `ctx`)
+                    // for `define_props_shape` to publish. `DefineModel`'s surface
+                    // is empty, so this is an empty vec for it.
+                    prop_index_signatures: index_signatures_from_surface(ctx, &macro_surface),
+                    ..VueMacroDtos::default()
+                },
+                AnalyzedMacroKind::DefineEmits => VueMacroDtos {
+                    emits: emits_from_typeinfo_surface(ctx, &macro_surface),
+                    // The emits object is `events + index signatures`: a
+                    // `defineEmits<{ [event: string]: [v: number] }>()` surface
+                    // carries an index signature with no named event, so capture
+                    // it (key/value raised through `ctx`) for `define_emits_shape`
+                    // to publish — the retired materialiser surfaced this, so
+                    // dropping it on the dispatch path was a regression.
+                    emit_index_signatures: index_signatures_from_surface(ctx, &macro_surface),
+                    ..VueMacroDtos::default()
+                },
+                AnalyzedMacroKind::DefineSlots => VueMacroDtos {
+                    slots: slots_from_typeinfo_surface(ctx, &macro_surface),
+                    ..VueMacroDtos::default()
+                },
+                // `WithDefaults` is not a props-surface source on this path: the
+                // outer `withDefaults` macro carries no type argument (it is not
+                // `is_type_based`), so `resolve_vue_macro_surface_with_ctx`
+                // returns `None` for it and this arm is unreachable. The props
+                // come from the SEPARATELY-routed inner `DefineProps` macro.
+                // Options / expose are separate subsystems. None of these
+                // contribute a DTO bundle.
+                AnalyzedMacroKind::WithDefaults
+                | AnalyzedMacroKind::DefineOptions
+                | AnalyzedMacroKind::DefineExpose => VueMacroDtos::default(),
+            },
+            None => VueMacroDtos::default(),
+        }
+    });
+
+    match finalise {
+        crate::resolver_core::FactReadSetFinalise::Ok(facts) => {
+            let entry = crate::typeinfo::adapters::vue::store::VueMacroDtosEntry {
+                dtos: std::sync::Arc::new(dtos),
+                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
+                validated_at_generation: generation,
+            };
+            std::sync::Arc::clone(&host.vue_shallow_metadata_store().insert(key, entry).dtos)
+        }
+        // Tracer overflowed: the DTOs are valid but cannot be admitted safely
+        // (the observation set was truncated, so warm-read validation could
+        // falsely pass against a changed carrier). Return the freshly-computed
+        // bundle WITHOUT caching — a repeat request recomputes, never serves an
+        // under-validated entry.
+        crate::resolver_core::FactReadSetFinalise::Overflow => std::sync::Arc::new(dtos),
+    }
 }
 
 /// Normalize a `.vue` props macro surface into the published
@@ -610,17 +749,22 @@ fn raise_member_value(host: &VerterHost, member: &TypeInfoSurfaceMember) -> Opti
 /// `has_default`), NOT on `AnalyzedPropField`, so the field's `is_optional`
 /// here stays the RAW type-argument optionality — matching the eager rail.
 #[must_use]
-pub fn props_from_typeinfo_surface(
-    host: &VerterHost,
+pub(crate) fn props_from_typeinfo_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
     macro_surface: &VueMacroSurface,
 ) -> Vec<AnalyzedPropField> {
+    // Host-level reads (graph node scope, JSDoc source slicing) go through the
+    // host the active `ctx` is installed against; the view-sensitive type
+    // resolution (`raise_member_value`) flows through `ctx` so an overlay
+    // session raises member values against overlay content.
+    let host = ctx.host_for_fact_tracer_install();
     // `defineModel` contributes its synthesized model prop directly from the
     // analyzer facts (the type argument is the model VALUE type, not a props
     // object). Source from `AnalyzedMacro.prop_fields` (populated by the
     // analyzer's `extract_define_model_type`) — the model prop is genuinely
     // analyzer-derived, not a macro-T object surface member.
     if macro_surface.macro_kind == AnalyzedMacroKind::DefineModel {
-        return model_prop_fields(host, macro_surface);
+        return model_prop_fields(ctx, macro_surface);
     }
 
     macro_surface
@@ -628,7 +772,7 @@ pub fn props_from_typeinfo_surface(
         .members
         .iter()
         .map(|member| {
-            let type_expr = raise_member_value(host, member);
+            let type_expr = raise_member_value(ctx, member);
             let type_expr_scope = type_expr
                 .as_ref()
                 .map(|_| macro_surface.member_expr_scope(host, member));
@@ -667,13 +811,51 @@ pub fn props_from_typeinfo_surface(
         .collect()
 }
 
+/// Normalize a macro surface's INDEX SIGNATURES into the published
+/// [`ExpandedIndexSignature`] set. A props member is `properties + index
+/// signatures` and an emits object is `events + index signatures`, so
+/// `defineProps<{ [k: string]: string }>()` / `defineEmits<{ [event: string]:
+/// [v: number] }>()` (which have NO named member) still contribute their index
+/// signature to the published surface. Kind-neutral: it raises whatever index
+/// signatures the surface carries. Each signature's `key_type` / `value_type`
+/// graph node is raised to a `TypeExpr` through the ACTIVE `ctx` (overlay-aware);
+/// a node that does not raise is skipped (no phantom signature).
+fn index_signatures_from_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    macro_surface: &VueMacroSurface,
+) -> Vec<verter_semantic::analysis::type_expand::ExpandedIndexSignature> {
+    let dispatch = ctx.dispatch();
+    macro_surface
+        .surface
+        .index_signatures
+        .iter()
+        .filter_map(|sig| {
+            let key_type = dispatch.raise_node_to_type_expr(sig.key_type)?;
+            let value_type = dispatch.raise_node_to_type_expr(sig.value_type)?;
+            Some(verter_semantic::analysis::type_expand::ExpandedIndexSignature {
+                key_type,
+                value_type,
+                readonly: sig.readonly,
+            })
+        })
+        .collect()
+}
+
 /// Build the `defineModel` synthesized prop field from the analyzer facts.
 /// `defineModel<T>('name', { … })` synthesizes a prop named `name`
 /// (default `modelValue`) typed `T`; the analyzer already captured this as the
 /// macro's single `prop_fields` entry. Re-scope the typed form to the SFC owner
 /// so nested `Ref`s resolve in the SFC.
-fn model_prop_fields(host: &VerterHost, macro_surface: &VueMacroSurface) -> Vec<AnalyzedPropField> {
-    let Some(indexed) = host.ensure_indexed_ready(macro_surface.owner_canonical.as_ref()) else {
+///
+/// The owner SFC's `IndexedReady` is fetched through the ACTIVE `ctx`
+/// (`ctx.ensure_indexed_ready`), NOT the base `VerterHost`, so an overlay
+/// session reads the OVERLAY `defineModel` macro facts — a `defineModel<number>`
+/// edit no longer rereads the base host's `defineModel<string>` snapshot.
+fn model_prop_fields(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    macro_surface: &VueMacroSurface,
+) -> Vec<AnalyzedPropField> {
+    let Some(indexed) = ctx.ensure_indexed_ready(macro_surface.owner_canonical.as_ref()) else {
         return Vec::new();
     };
     let Some(mac) = indexed.snapshot.macros.get(macro_surface.macro_index) else {
@@ -716,14 +898,17 @@ fn model_prop_fields(host: &VerterHost, macro_surface: &VueMacroSurface) -> Vec<
 /// 3. **De-duplicate by event name, first-writer-wins** (matching the eager
 ///    projector's `retain`).
 #[must_use]
-pub fn emits_from_typeinfo_surface(
-    host: &VerterHost,
+pub(crate) fn emits_from_typeinfo_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
     macro_surface: &VueMacroSurface,
 ) -> Vec<AnalyzedEmitField> {
-    let store_view = host.resolver_store_view();
-    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
-    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    // View-sensitive type resolution flows through the active `ctx`
+    // (`ctx.dispatch()`), NOT a fresh base `HostResolverContext`, so an overlay
+    // session raises emit call-signatures / property payloads against overlay
+    // content. Host-level reads (JSDoc source slicing, node scope) use the host
+    // the `ctx` is installed against.
+    let host = ctx.host_for_fact_tracer_install();
+    let dispatch = ctx.dispatch();
 
     let mut emits: Vec<AnalyzedEmitField> = Vec::new();
 
@@ -806,7 +991,7 @@ pub fn emits_from_typeinfo_surface(
     // (2) Property-style emits — fallback only when no call-signature emit fired.
     if emits.is_empty() {
         for member in macro_surface.surface.members.iter() {
-            let payload_expr = raise_member_value(host, member);
+            let payload_expr = raise_member_value(ctx, member);
             let payload_expr_scope = payload_expr
                 .as_ref()
                 .map(|_| macro_surface.member_expr_scope(host, member));
@@ -831,20 +1016,26 @@ pub fn emits_from_typeinfo_surface(
 }
 
 /// Extract a slot callable's first-parameter type + return type from a slot
-/// member value, handling an INTERSECTION of function types.
+/// member value, handling an INTERSECTION or a UNION of function types.
 ///
 /// A slot typed via an intersection of interfaces
 /// (`defineSlots<SlotA & SlotB>()`) has its `default` member resolve to
 /// `SlotA['default'] & SlotB['default']` — an `Intersection` of two function
 /// types (the TS-correct meaning of indexing an intersection), NOT a single
-/// pre-merged `Function`. Returns:
+/// pre-merged `Function`. A slot typed as a union of function aliases
+/// (`defineSlots<{ default: SlotA | SlotB }>()`) resolves its `default` member
+/// to a `Union` of two function types. Both are slot-callable. Returns:
 ///
 /// - `Function(f)` → `f`'s first-param type + return type directly.
-/// - `Intersection(arms)` where EVERY resolvable arm is a function → the
-///   INTERSECTION of the arms' first-param types (so `{ value?: string } &
-///   { value: string }` flows into [`binding_fields_from_param_ty`], whose
-///   resolver-navigation merges it required-wins) plus the intersection of the
-///   arms' return types. A non-function arm makes the member not slot-like.
+/// - `Intersection(arms)` / `Union(arms)` where EVERY resolvable arm is a
+///   function → the INTERSECTION of the arms' first-param types (so
+///   `{ value?: string } & { value: string }` flows into
+///   [`binding_fields_from_param_ty`], whose resolver-navigation merges it
+///   required-wins; for a UNION the param is contravariant, so the bindings a
+///   template can SAFELY destructure are those present across all arms — again
+///   the intersection merge) plus the combined return type (intersection of
+///   returns for an intersection, union of returns for a union). A non-function
+///   arm makes the member not slot-like.
 /// - Anything else → `None` (the member is not a slot).
 fn slot_callable_param_and_return(
     value: &TypeExpr,
@@ -864,45 +1055,108 @@ fn slot_callable_param_and_return(
             // `render_type_expr_display` cannot surface.
             func.spans.return_type,
         )),
+        // Intersection of slot-callable arms: param = intersection of first
+        // params (required-wins merge), return = intersection of returns.
         TypeExpr::Intersection(arms) => {
-            let mut first_params: Vec<TypeExpr> = Vec::new();
-            let mut returns: Vec<TypeExpr> = Vec::new();
-            for arm in arms.iter() {
-                let TypeExpr::Function(func) = arm else {
-                    // A non-function arm means the member is not purely
-                    // slot-callable; fall out (not a slot).
-                    return None;
-                };
-                if let Some(p) = func.parameters.first() {
-                    first_params.push(p.ty.clone());
-                }
-                if let Some(rt) = func.return_type.as_ref() {
-                    returns.push((**rt).clone());
-                }
-            }
-            if first_params.is_empty() && returns.is_empty() {
-                return None;
-            }
-            let first_param = match first_params.len() {
-                0 => None,
-                1 => Some(first_params.into_iter().next().unwrap()),
-                _ => Some(TypeExpr::Intersection(std::sync::Arc::from(
-                    first_params.into_boxed_slice(),
-                ))),
-            };
-            let return_ty = match returns.len() {
-                0 => None,
-                1 => Some(returns.into_iter().next().unwrap()),
-                _ => Some(TypeExpr::Intersection(std::sync::Arc::from(
-                    returns.into_boxed_slice(),
-                ))),
-            };
-            // An intersection of function arms has no single return-type span;
-            // the caller renders the composed return from the typed form.
-            Some((first_param, return_ty, None))
+            slot_callable_param_and_return_from_arms(arms, ArmCombine::Intersection)
+        }
+        // Union of slot-callable arms (`SlotA | SlotB`): param stays the
+        // INTERSECTION of first params (a slot prop the template can rely on
+        // must be present in every arm — contravariant param), but the return
+        // is the UNION of the arms' return types (covariant). Without this arm
+        // a union-of-functions slot was silently dropped.
+        TypeExpr::Union(arms) => {
+            slot_callable_param_and_return_from_arms(arms, ArmCombine::Union)
         }
         _ => None,
     }
+}
+
+/// How to combine the RETURN types of a multi-arm slot callable. The first
+/// params are ALWAYS intersected (the bindings a template can rely on must hold
+/// across every arm); only the return-type combiner differs.
+#[derive(Clone, Copy)]
+enum ArmCombine {
+    Intersection,
+    Union,
+}
+
+/// Shared multi-arm slot-callable extractor for `Intersection` / `Union` of
+/// function types. Every arm MUST be a `Function` (a non-function arm makes the
+/// member not slot-like → `None`). The first params are intersected; the
+/// returns are combined per `combine`.
+///
+/// SOUNDNESS — a slot binding is guaranteed only if EVERY arm supplies a first
+/// parameter. A template destructuring `<template #default="{ x }">` runs for
+/// WHICHEVER arm the slot actually is, so a binding the template can rely on must
+/// be present across all arms. If ANY arm is a no-param callable (`() => any`),
+/// the multi-arm callable can be invoked with no slot props in that branch, so
+/// there are NO guaranteed bindings — the first param is dropped to `None`
+/// (otherwise a union like `(() => any) | ((props: { a }) => any)` would
+/// wrongly publish `a`). The return type still combines across arms.
+fn slot_callable_param_and_return_from_arms(
+    arms: &[TypeExpr],
+    combine: ArmCombine,
+) -> Option<(
+    Option<TypeExpr>,
+    Option<TypeExpr>,
+    Option<verter_span::Span>,
+)> {
+    let mut first_params: Vec<TypeExpr> = Vec::new();
+    let mut returns: Vec<TypeExpr> = Vec::new();
+    // A binding is guaranteed only when EVERY arm contributes a first param.
+    // A single no-param arm makes the slot callable with no props in that
+    // branch, so no binding is sound.
+    let mut all_arms_have_first_param = true;
+    for arm in arms.iter() {
+        let TypeExpr::Function(func) = arm else {
+            // A non-function arm means the member is not purely slot-callable;
+            // fall out (not a slot).
+            return None;
+        };
+        if let Some(p) = func.parameters.first() {
+            first_params.push(p.ty.clone());
+        } else {
+            all_arms_have_first_param = false;
+        }
+        if let Some(rt) = func.return_type.as_ref() {
+            returns.push((**rt).clone());
+        }
+    }
+    if first_params.is_empty() && returns.is_empty() {
+        return None;
+    }
+    // First params: the INTERSECTION (the slot prop object a template can
+    // destructure must be guaranteed across every arm) — but ONLY when every
+    // arm actually supplied a first param. A no-param arm guarantees nothing, so
+    // the bindings are dropped entirely (the return type is still combined).
+    let first_param = if all_arms_have_first_param {
+        match first_params.len() {
+            0 => None,
+            1 => Some(first_params.into_iter().next().unwrap()),
+            _ => Some(TypeExpr::Intersection(std::sync::Arc::from(
+                first_params.into_boxed_slice(),
+            ))),
+        }
+    } else {
+        None
+    };
+    // Returns: combine per the arm kind (intersection of returns for an
+    // intersection of functions; union of returns for a union of functions).
+    let return_ty = match returns.len() {
+        0 => None,
+        1 => Some(returns.into_iter().next().unwrap()),
+        _ => {
+            let boxed = std::sync::Arc::from(returns.into_boxed_slice());
+            Some(match combine {
+                ArmCombine::Intersection => TypeExpr::Intersection(boxed),
+                ArmCombine::Union => TypeExpr::Union(boxed),
+            })
+        }
+    };
+    // A composed multi-arm callable has no single return-type span; the caller
+    // renders the composed return from the typed form.
+    Some((first_param, return_ty, None))
 }
 
 /// Normalize a `.vue` slots macro surface into the published
@@ -917,24 +1171,42 @@ fn slot_callable_param_and_return(
 /// from the function's return type. Bindings + return are scoped to the slot
 /// member's VALUE-NODE file (see [`VueMacroSurface::member_expr_scope`]).
 #[must_use]
-pub fn slots_from_typeinfo_surface(
-    host: &VerterHost,
+pub(crate) fn slots_from_typeinfo_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
     macro_surface: &VueMacroSurface,
 ) -> Vec<AnalyzedSlotField> {
+    // View-sensitive slot type resolution (callable realization, first-param
+    // object navigation) flows through the active `ctx`, NOT a fresh base
+    // `HostResolverContext`, so an overlay session resolves slot bindings
+    // against overlay content. Host-level reads (JSDoc / return-type source
+    // slicing, node scope) use the host the `ctx` is installed against.
+    let host = ctx.host_for_fact_tracer_install();
     macro_surface
         .surface
         .members
         .iter()
         .filter_map(|member| {
-            let value = raise_member_value(host, member)?;
+            // A slot member's value may be a non-`Function` carrier shell under
+            // the transit-shallow macro surface — most notably a generic slot
+            // alias (`default: SlotFn<T>` where `type SlotFn<T> = (props:
+            // SlotProps<T>) => any`) that lowers to an `InstantiationRef` / alias
+            // carrier rather than a reduced `Function`. Realize the value through
+            // the SHARED callable-realization substrate (the SAME primitive
+            // `slot_binding_graph::compute_bindings_via_graph` uses) so a
+            // decidable callable surfaces as a `Function` BEFORE the
+            // function-like filter — otherwise the generic slot is silently
+            // dropped from the published slot surface (a one-engine divergence
+            // between the DTO slot path and the slot-binding-graph).
+            let value = raise_realized_callable_member_value(ctx, member)?;
             // A slot member is function-like: a single `Function`, or an
-            // `Intersection` of functions (`(SlotA & SlotB)['default']`). A
-            // non-callable member is not a slot.
+            // `Intersection` of functions (`(SlotA & SlotB)['default']`), or a
+            // `Union` of functions (`SlotA | SlotB`). A non-callable member is
+            // not a slot.
             let (first_param, return_expr, return_span) = slot_callable_param_and_return(&value)?;
             let scope = macro_surface.member_expr_scope(host, member);
             let bindings = first_param
                 .as_ref()
-                .map(|param_ty| binding_fields_from_param_ty(host, param_ty, &scope))
+                .map(|param_ty| binding_fields_from_param_ty(ctx, param_ty, &scope))
                 .unwrap_or_default();
             let return_expr_scope = return_expr.as_ref().map(|_| scope.clone());
             // Display `return_type`: prefer the EXACT source text sliced from the
@@ -995,10 +1267,13 @@ pub fn slots_from_typeinfo_surface(
 /// A first parameter that does not resolve to an object surface yields no
 /// bindings — matching the eager rail's non-object outcome.
 fn binding_fields_from_param_ty(
-    host: &VerterHost,
+    ctx: &dyn crate::resolver_core::ResolverContext,
     param_ty: &TypeExpr,
     scope: &TypeExprScope,
 ) -> Vec<AnalyzedSlotFieldBinding> {
+    // View-sensitive navigation / raising flows through `ctx`; host-level node
+    // scope reads use the host the `ctx` is installed against.
+    let host = ctx.host_for_fact_tracer_install();
     // Literal object: read its properties directly (structural typed-IR match).
     if let TypeExpr::Object(obj) = param_ty {
         return obj
@@ -1022,7 +1297,7 @@ fn binding_fields_from_param_ty(
     // the resolved members. Each member's `binding_expr` is its raised value
     // type, scoped to that value's own file (so a `Pick<RowApi,'k'>` whose
     // picked member is a cross-file `Ref` resolves in the right file).
-    let Some(surface) = host.navigate_param_to_object_surface(scope.as_str(), param_ty) else {
+    let Some(surface) = navigate_param_to_object_surface(ctx, scope.as_str(), param_ty) else {
         return Vec::new();
     };
     // Shallow-by-default Pick member publication: when the slot param is a
@@ -1055,7 +1330,7 @@ fn binding_fields_from_param_ty(
                     span: verter_span::Span::default(),
                 };
             }
-            let binding_expr = raise_member_value(host, member);
+            let binding_expr = raise_member_value(ctx, member);
             let binding_expr_scope = binding_expr
                 .as_ref()
                 .map(|_| macro_member_value_scope(host, member, scope));

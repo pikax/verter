@@ -791,3 +791,143 @@ export type Wrap<T> = { wrapped: T };
     // Suppress unused warning on the helper.
     let _ = type_arg_ref;
 }
+
+/// Recursively collect member names across `Object` / `Intersection` /
+/// `Union` arms. An `Opaque` arm contributes the sentinel `"<opaque-miss>"`
+/// so a collapsed heritage carrier is observable in the assertion.
+fn collect_surface_member_names(
+    store: &crate::semantic_query_memo::SemanticGraphStore,
+    node: crate::semantic_query::SemanticNodeId,
+    out: &mut Vec<String>,
+) {
+    match store.node_data(node).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            for m in view.members.iter() {
+                out.push(m.name.to_string());
+            }
+        }
+        Some(SemanticNodeData::Intersection(arms) | SemanticNodeData::Union(arms)) => {
+            for arm in arms.iter() {
+                collect_surface_member_names(store, *arm, out);
+            }
+        }
+        Some(SemanticNodeData::Opaque(_)) => out.push("<opaque-miss>".to_string()),
+        _ => {}
+    }
+}
+
+/// Regression — generic-`Omit`-of-`Pick`-of-generic heritage must NOT
+/// collapse the heritage carrier to `Opaque(Miss)` under
+/// `Instantiate(Published(Expanded))`.
+///
+/// `interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'>`
+/// where `SelectMenuProps<T> extends Pick<RootProps<T>, 'open'|'defaultOpen'|'disabled'>`
+/// instantiates to `Intersection([<heritage>, <own body>])`. Before the
+/// `object_filter_source_surface` compound-carrier fix, the outer `Omit`'s
+/// source (`SelectMenuProps<Item[]>`, itself an `Intersection` because it has
+/// heritage) failed `object_filter_source_surface` (which only handled
+/// `Object` / `DeclRef` / `InstantiationRef`), so the heritage arm collapsed to
+/// `Opaque(Miss)` and `open`/`defaultOpen`/`disabled` were LOST.
+///
+/// Discrimination: pre-fix the heritage arm is `Opaque(Miss)` (member set is
+/// `["<opaque-miss>"]`, missing the three inherited props); post-fix it carries
+/// `open`/`defaultOpen`/`disabled` and omits `items`.
+#[test]
+fn generic_omit_pick_heritage_instantiation_preserves_inherited_members() {
+    let host = make_host_with_audit();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        r#"
+export interface Item { label: string }
+export interface RootProps<T> {
+  open?: boolean;
+  defaultOpen?: boolean;
+  disabled?: boolean;
+  modelValue?: T;
+}
+export interface SelectMenuProps<T> extends Pick<RootProps<T>, 'open' | 'defaultOpen' | 'disabled'> {
+  items?: T;
+}
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
+"#,
+    );
+
+    // (1) Direct dispatch: `Instantiate(Published(Expanded))` of the
+    //     non-generic `ColorModeSelectProps`.
+    use crate::semantic_query::SemanticQueryApi;
+    let store = host.project_type_store().semantic_graph();
+    let _shallow = host
+        .shallow_file_state("/types.ts")
+        .expect("shallow state for /types.ts");
+    let key = crate::semantic_query::DeclKey {
+        canonical_id: Arc::from("/types.ts"),
+        decl_name: Arc::from("ColorModeSelectProps"),
+    };
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+    let node = match dispatch.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
+        base: key,
+        args: Arc::from(Vec::new().into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    }) {
+        crate::semantic_query::QueryResult::Value(n)
+        | crate::semantic_query::QueryResult::Recursive(n) => n,
+        crate::semantic_query::QueryResult::Error(e) => {
+            panic!("Instantiate(ColorModeSelectProps, Expanded) errored: {e:?}")
+        }
+    };
+    let mut names = Vec::new();
+    collect_surface_member_names(store, node, &mut names);
+    for inherited in ["open", "defaultOpen", "disabled"] {
+        assert!(
+            names.iter().any(|n| n == inherited),
+            "direct Instantiate(Published(Expanded)) of \
+             `ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'>` \
+             MUST carry inherited member `{inherited}`; the generic-Omit-of-Pick \
+             heritage carrier collapsed. Got members: {names:?}"
+        );
+    }
+    assert!(
+        !names.iter().any(|n| n == "items"),
+        "the outer `Omit<…, 'items'>` MUST exclude `items`. Got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "<opaque-miss>"),
+        "no surface arm may remain `Opaque(Miss)` — the heritage carrier must \
+         resolve, not collapse. Got: {names:?}"
+    );
+
+    // (2) Public consumer: `resolve_named_symbol_with_audit` (defaults to
+    //     Expanded for a non-generic decl) must return a type carrying the
+    //     inherited members.
+    let (resolved, record) = host.resolve_named_symbol_with_audit(
+        "/types.ts",
+        "ColorModeSelectProps",
+        &[],
+        Some(ProjectionMode::Expanded),
+    );
+    let resolved = resolved.expect("ColorModeSelectProps must resolve");
+    let _ = assert_one_typeresolution_record(&record);
+    let mut public_names = Vec::new();
+    collect_surface_member_names(store, resolved, &mut public_names);
+    for inherited in ["open", "defaultOpen", "disabled"] {
+        assert!(
+            public_names.iter().any(|n| n == inherited),
+            "resolve_named_symbol_with_audit(\"ColorModeSelectProps\") MUST \
+             return a type carrying inherited member `{inherited}` — `raise`/the \
+             public path must not drop it through an `Opaque(Miss)`/`Unknown` \
+             heritage arm. Got members: {public_names:?}"
+        );
+    }
+    assert!(
+        !public_names.iter().any(|n| n == "items"),
+        "the public consumer's type MUST exclude omitted `items`. Got: {public_names:?}"
+    );
+    assert!(
+        !public_names.iter().any(|n| n == "<opaque-miss>"),
+        "the public consumer's type MUST NOT carry an `Opaque(Miss)` heritage \
+         arm. Got: {public_names:?}"
+    );
+}
