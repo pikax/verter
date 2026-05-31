@@ -8782,8 +8782,12 @@ defineProps<{
         .expect("Button.ui should keep a gap member");
 
     // NEGATIVE: `ui.gap` is concretely substituted — NOT the unbound
-    // type parameter `T`, NOT a bare `Ref("T")`, and NOT an
-    // unknown/never miss placeholder.
+    // type parameter `T`, NOT a bare `Ref("T")`, and NOT a
+    // miss/unknown placeholder. When substitution is neutralized
+    // (no args bound into `T`), `T['theme']`-style member values
+    // collapse to `TypeExpr::Unknown { raw: "semanticMiss" }` (a
+    // DISTINCT variant from `Primitive(Unknown)`); excluding that
+    // carrier is the load-bearing no-substitution discriminator.
     assert!(
         !matches!(ui_gap, TypeExpr::TypeParameter(param) if param.name == "T"),
         "ui.gap must be the substituted typeof-theme type, not bare TypeParameter(\"T\"), \
@@ -8795,20 +8799,35 @@ defineProps<{
         "ui.gap must be the substituted typeof-theme type, not bare Ref(\"T\"), got {ui_gap:?}",
     );
     assert!(
+        !matches!(ui_gap, TypeExpr::Unknown { .. }),
+        "ui.gap must be the substituted typeof-theme type, not an Unknown/semanticMiss \
+         placeholder, got {ui_gap:?}",
+    );
+    assert!(
         !matches!(
             ui_gap,
             TypeExpr::Primitive(PrimitiveName::Unknown) | TypeExpr::Primitive(PrimitiveName::Never)
         ),
-        "ui.gap must be the substituted typeof-theme type, not an Unknown/Never miss placeholder, \
+        "ui.gap must be the substituted typeof-theme type, not an Unknown/Never primitive, \
          got {ui_gap:?}",
+    );
+
+    // NEGATIVE (mirror the miss exclusion on the variants argument):
+    // the helper ref's substituted argument must likewise be concrete,
+    // never the `semanticMiss` carrier produced when no arg is bound.
+    assert!(
+        !matches!(variants_arg, TypeExpr::Unknown { .. }),
+        "variants arg must be the substituted typeof-theme type, not an Unknown/semanticMiss \
+         placeholder, got {variants_arg:?}",
     );
 
     // POSITIVE (strongest concrete-type assertion): `ui.gap` and the
     // `variants` helper ref's argument are the SAME substituted type —
     // both are the single `typeof theme` argument bound into `T`. This
     // pins the concretely substituted TYPE, not a name string: if the
-    // arg were dropped, both would be bare `T` (already excluded
-    // above); if substitution diverged per-site, they would differ.
+    // arg were dropped, both would be the `semanticMiss` carrier
+    // (excluded above); if substitution diverged per-site, they would
+    // differ.
     assert_eq!(
         ui_gap, variants_arg,
         "ui.gap and the variants helper argument must be the identical substituted \
