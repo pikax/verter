@@ -176,9 +176,7 @@ impl DispatchPauseHook {
             );
             // Park briefly on the condvar; a release wakes us promptly,
             // otherwise we loop to re-drain and re-check the deadline.
-            let _ = self
-                .cv
-                .wait_for(&mut state, Duration::from_millis(2));
+            let _ = self.cv.wait_for(&mut state, Duration::from_millis(2));
         }
     }
 }

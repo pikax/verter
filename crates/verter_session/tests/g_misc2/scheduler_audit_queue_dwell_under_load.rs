@@ -322,7 +322,11 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
     // also what makes the FIX-2 bound provable: with the release removed,
     // the submitters never complete and this join surfaces the stall.
     for (idx, h) in handles.into_iter().enumerate() {
-        join_within(h, std::time::Duration::from_secs(10), &format!("submitter {idx}"));
+        join_within(
+            h,
+            std::time::Duration::from_secs(10),
+            &format!("submitter {idx}"),
+        );
     }
 
     // EVERY context's scheduler_audit slot must be populated.

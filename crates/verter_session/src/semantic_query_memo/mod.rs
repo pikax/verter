@@ -2445,8 +2445,7 @@ impl SemanticGraphStore {
                 // earlier when the joiner merely clones the entry. No
                 // production behaviour change (gated out of release builds).
                 #[cfg(any(test, debug_assertions))]
-                self.joiner_on_condvar_count
-                    .fetch_add(1, Ordering::SeqCst);
+                self.joiner_on_condvar_count.fetch_add(1, Ordering::SeqCst);
                 inflight
                     .ready
                     .wait_while(&mut state, |s| s.completed.is_none() && !s.aborted);
