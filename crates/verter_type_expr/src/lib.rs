@@ -103,7 +103,15 @@ pub struct SyntheticCarrierKey {
 ///
 /// Syntax-preserving — captures TypeScript type annotation structure
 /// without evaluating or normalizing it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// `Hash` is implemented by hand (NOT derived) as a depth-safe
+/// continuation-frame iterative walker — see the `impl Hash for TypeExpr`
+/// below. The derived `Hash` was recursive over the `Arc<TypeExpr>` tree
+/// and overflowed the stack on deeply-nested types (e.g.
+/// `cycle_guard::hash_type_expr` routes a `TypeExpr` through `Hash`). The
+/// manual impl emits a BYTE-IDENTICAL stream to the former derive
+/// (pinned by `tests/hash_byte_stream_contract.rs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeExpr {
     // -- Terminals --
     /// A primitive type name: `string`, `number`, `boolean`, `symbol`,
@@ -441,6 +449,401 @@ fn drain_function_expr(func: FunctionExpr, worklist: &mut Vec<TypeExpr>) {
     for mut tp in func.type_parameters {
         drain_opt_arc(&mut tp.constraint, worklist);
         drain_opt_arc(&mut tp.default, worklist);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Iterative hash — depth-safe, byte-identical to the former derived Hash
+// ---------------------------------------------------------------------------
+//
+// The std `#[derive(Hash)]` for `TypeExpr` is recursive over the
+// `Arc<TypeExpr>` tree, so a deeply-nested type overflows the stack when
+// hashed (`cycle_guard::hash_type_expr` routes a `TypeExpr` through
+// `Hash`). This hand-written impl walks the tree iteratively with an
+// explicit heap work-stack of CONTINUATION FRAMES, emitting the EXACT
+// same `Hasher` call/byte stream as the derive:
+//
+//   discriminant (an `isize`, declaration order 0..) then each field in
+//   declaration order; slices emit `len` (usize) then each element;
+//   `Option<Arc<TypeExpr>>` emits its `isize` discriminant then the
+//   inner subtree; the hand-written `Hash` impls on `LiteralValue` and
+//   `FunctionParam` (the latter excluding `has_ts_annotation`) are
+//   reused verbatim.
+//
+// A simple `Vec<&TypeExpr>` node-stack would NOT suffice: several
+// variants emit leaf bytes AFTER a child subtree (e.g. `Array.readonly`
+// after `element`; `Mapped`'s `optional`/`readonly` between `value` and
+// `name_type`; every aggregate's trailing fields). Continuation frames
+// preserve that exact interleaving — a trailing-leaf frame pushed BELOW
+// a child's `Node` frame is popped only after the child subtree is fully
+// hashed.
+//
+// Byte-identity is pinned by `tests/hash_byte_stream_contract.rs`, which
+// asserts this stream equals a frozen mirror of the former derive across
+// every variant.
+
+/// One unit of hashing work on the iterative `Hash` work-stack.
+///
+/// `Node` (and the struct-decomposition frames) emit a leading
+/// discriminant / leading leaves inline, then push their remaining
+/// sub-steps in REVERSE emission order so the LIFO stack replays them
+/// forward. Leaf frames carry `Copy` payloads emitted on pop AFTER the
+/// child subtree(s) above them have drained.
+enum HashStep<'a> {
+    /// Hash a `TypeExpr` node (discriminant + decomposition).
+    Node(&'a TypeExpr),
+    /// `Option<Arc<TypeExpr>>`: emit the `isize` discriminant, then the
+    /// inner subtree when `Some`.
+    OptNode(Option<&'a TypeExpr>),
+    /// Emit a `usize` (a slice/collection length that follows an earlier
+    /// child block within the same node).
+    Usize(usize),
+    /// Emit a trailing `bool` field.
+    Bool(bool),
+    /// Emit a trailing `MappedModifier` field.
+    Modifier(MappedModifier),
+    /// Emit a trailing `MemberSpans` field.
+    MemberSpans(MemberSpans),
+    /// Emit a trailing `IndexSignatureSpans` field.
+    IndexSpans(IndexSignatureSpans),
+    /// Emit a trailing `FunctionSpans` field.
+    FnSpans(FunctionSpans),
+    /// Emit a trailing `Option<Span>` field (a function parameter's span).
+    OptSpan(Option<Span>),
+    /// Decompose one `ObjectMember`.
+    Member(&'a ObjectMember),
+    /// Decompose one `TupleElement`.
+    TupleElem(&'a TupleElement),
+    /// Decompose one `FunctionParam`.
+    Param(&'a FunctionParam),
+    /// Decompose one `TypeParam`.
+    TyParam(&'a TypeParam),
+    /// Decompose one `RecursiveConditionalFrame`.
+    RecFrame(&'a RecursiveConditionalFrame),
+    /// Decompose one `FunctionExpr` (call/construct signature, method
+    /// body, or the `Function` variant payload).
+    Func(&'a FunctionExpr),
+}
+
+impl Hash for TypeExpr {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let mut stack: Vec<HashStep<'_>> = Vec::with_capacity(16);
+        stack.push(HashStep::Node(self));
+        while let Some(step) = stack.pop() {
+            match step {
+                HashStep::Node(node) => hash_node(node, state, &mut stack),
+                HashStep::OptNode(opt) => match opt {
+                    None => 0isize.hash(state),
+                    Some(inner) => {
+                        1isize.hash(state);
+                        stack.push(HashStep::Node(inner));
+                    }
+                },
+                HashStep::Usize(n) => n.hash(state),
+                HashStep::Bool(b) => b.hash(state),
+                HashStep::Modifier(m) => m.hash(state),
+                HashStep::MemberSpans(s) => s.hash(state),
+                HashStep::IndexSpans(s) => s.hash(state),
+                HashStep::FnSpans(s) => s.hash(state),
+                HashStep::OptSpan(s) => s.hash(state),
+                HashStep::Member(m) => hash_object_member_step(m, state, &mut stack),
+                HashStep::TupleElem(el) => hash_tuple_element_step(el, state, &mut stack),
+                HashStep::Param(p) => hash_param_step(p, state, &mut stack),
+                HashStep::TyParam(tp) => hash_type_param_step(tp, state, &mut stack),
+                HashStep::RecFrame(f) => hash_recursive_frame_step(f, state, &mut stack),
+                HashStep::Func(f) => hash_function_step(f, state, &mut stack),
+            }
+        }
+    }
+}
+
+/// Discriminant index in declaration order (matches the derive's
+/// `discriminant_value`, hashed as `isize`).
+fn type_expr_discriminant(node: &TypeExpr) -> isize {
+    match node {
+        TypeExpr::Primitive(_) => 0,
+        TypeExpr::Literal(_) => 1,
+        TypeExpr::Union(_) => 2,
+        TypeExpr::Intersection(_) => 3,
+        TypeExpr::Array { .. } => 4,
+        TypeExpr::Tuple { .. } => 5,
+        TypeExpr::Object(_) => 6,
+        TypeExpr::Function(_) => 7,
+        TypeExpr::Ref { .. } => 8,
+        TypeExpr::TypeParameter(_) => 9,
+        TypeExpr::KeyOf(_) => 10,
+        TypeExpr::TypeOf(_) => 11,
+        TypeExpr::IndexedAccess { .. } => 12,
+        TypeExpr::Conditional { .. } => 13,
+        TypeExpr::Mapped { .. } => 14,
+        TypeExpr::TemplateLiteral { .. } => 15,
+        TypeExpr::Infer { .. } => 16,
+        TypeExpr::Rest(_) => 17,
+        TypeExpr::Parenthesized(_) => 18,
+        TypeExpr::RecursiveRef { .. } => 19,
+        TypeExpr::SyntheticSlotBinding(_) => 20,
+        TypeExpr::Unknown { .. } => 21,
+    }
+}
+
+/// Hash `node`'s discriminant + leading leaves inline, then push its
+/// remaining sub-steps in REVERSE emission order.
+fn hash_node<'a, H: Hasher>(node: &'a TypeExpr, state: &mut H, stack: &mut Vec<HashStep<'a>>) {
+    type_expr_discriminant(node).hash(state);
+    match node {
+        // -- Leaves (no recursive children) --
+        TypeExpr::Primitive(name) => name.hash(state),
+        TypeExpr::Literal(lit) => lit.hash(state),
+        TypeExpr::TypeOf(value_ref) => value_ref.hash(state),
+        TypeExpr::Infer { name } => name.hash(state),
+        TypeExpr::SyntheticSlotBinding(carrier) => carrier.hash(state),
+        TypeExpr::Unknown { raw } => raw.hash(state),
+
+        // -- `Arc<[TypeExpr]>`: len (usize) then each element --
+        TypeExpr::Union(items) | TypeExpr::Intersection(items) => {
+            items.len().hash(state);
+            push_nodes_reverse(items, stack);
+        }
+
+        // -- Single child then trailing `readonly` --
+        TypeExpr::Array { element, readonly } => {
+            // Emit: element subtree, then readonly. Push readonly BELOW
+            // the child so it pops after the child drains.
+            stack.push(HashStep::Bool(*readonly));
+            stack.push(HashStep::Node(element));
+        }
+
+        // -- Tuple: len, each element, then trailing `readonly` --
+        TypeExpr::Tuple { elements, readonly } => {
+            elements.len().hash(state);
+            stack.push(HashStep::Bool(*readonly));
+            for el in elements.iter().rev() {
+                stack.push(HashStep::TupleElem(el));
+            }
+        }
+
+        // -- Object: len, each member --
+        TypeExpr::Object(obj) => {
+            obj.properties.len().hash(state);
+            for member in obj.properties.iter().rev() {
+                stack.push(HashStep::Member(member));
+            }
+        }
+
+        // -- Function payload --
+        TypeExpr::Function(func) => stack.push(HashStep::Func(func)),
+
+        // -- Ref: name (leaf) then type_arguments slice --
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            name.hash(state);
+            type_arguments.len().hash(state);
+            push_nodes_reverse(type_arguments, stack);
+        }
+
+        // -- TypeParameter --
+        TypeExpr::TypeParameter(tp) => stack.push(HashStep::TyParam(tp)),
+
+        // -- Single child, no trailing leaf --
+        TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) | TypeExpr::Parenthesized(inner) => {
+            stack.push(HashStep::Node(inner));
+        }
+
+        // -- Two children, no trailing leaf --
+        TypeExpr::IndexedAccess { object, index } => {
+            stack.push(HashStep::Node(index));
+            stack.push(HashStep::Node(object));
+        }
+
+        // -- Four children, no trailing leaf --
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            stack.push(HashStep::Node(false_type));
+            stack.push(HashStep::Node(true_type));
+            stack.push(HashStep::Node(extends));
+            stack.push(HashStep::Node(check));
+        }
+
+        // -- Mapped: parameter (leaf), source, value, optional, readonly,
+        //    name_type. The two modifiers are emitted BETWEEN `value` and
+        //    `name_type`. --
+        TypeExpr::Mapped {
+            parameter,
+            source,
+            value,
+            optional,
+            readonly,
+            name_type,
+        } => {
+            parameter.hash(state);
+            // Emission order after parameter: source, value, optional,
+            // readonly, name_type. Push in reverse.
+            stack.push(HashStep::OptNode(name_type.as_deref()));
+            stack.push(HashStep::Modifier(*readonly));
+            stack.push(HashStep::Modifier(*optional));
+            stack.push(HashStep::Node(value));
+            stack.push(HashStep::Node(source));
+        }
+
+        // -- TemplateLiteral: quasis (leaf Vec<String>) then expressions --
+        TypeExpr::TemplateLiteral {
+            quasis,
+            expressions,
+        } => {
+            quasis.hash(state);
+            expressions.len().hash(state);
+            push_nodes_reverse(expressions, stack);
+        }
+
+        // -- RecursiveRef: name (leaf), type_arguments, conditional_context --
+        TypeExpr::RecursiveRef {
+            name,
+            type_arguments,
+            conditional_context,
+        } => {
+            name.hash(state);
+            type_arguments.len().hash(state);
+            // Emission order: ta-len (done), each ta, cc-len, each frame.
+            // Push reverse: frames, cc-len, ta nodes.
+            for frame in conditional_context.iter().rev() {
+                stack.push(HashStep::RecFrame(frame));
+            }
+            stack.push(HashStep::Usize(conditional_context.len()));
+            push_nodes_reverse(type_arguments, stack);
+        }
+    }
+}
+
+/// Push each element of a `TypeExpr` slice as a `Node` step in REVERSE so
+/// they pop (and hash) in forward order.
+fn push_nodes_reverse<'a>(items: &'a [TypeExpr], stack: &mut Vec<HashStep<'a>>) {
+    for item in items.iter().rev() {
+        stack.push(HashStep::Node(item));
+    }
+}
+
+/// `ObjectMember` derive: discriminant (isize) then fields in order.
+fn hash_object_member_step<'a, H: Hasher>(
+    member: &'a ObjectMember,
+    state: &mut H,
+    stack: &mut Vec<HashStep<'a>>,
+) {
+    match member {
+        ObjectMember::Property(p) => {
+            0isize.hash(state);
+            p.name.hash(state);
+            // ty, optional, readonly, spans. Push reverse.
+            stack.push(HashStep::MemberSpans(p.spans));
+            stack.push(HashStep::Bool(p.readonly));
+            stack.push(HashStep::Bool(p.optional));
+            stack.push(HashStep::Node(&p.ty));
+        }
+        ObjectMember::IndexSignature(s) => {
+            1isize.hash(state);
+            s.key_name.hash(state);
+            // key_type, value_type, readonly, spans. Push reverse.
+            stack.push(HashStep::IndexSpans(s.spans));
+            stack.push(HashStep::Bool(s.readonly));
+            stack.push(HashStep::Node(&s.value_type));
+            stack.push(HashStep::Node(&s.key_type));
+        }
+        ObjectMember::CallSignature(f) => {
+            2isize.hash(state);
+            stack.push(HashStep::Func(f));
+        }
+        ObjectMember::ConstructSignature(f) => {
+            3isize.hash(state);
+            stack.push(HashStep::Func(f));
+        }
+        ObjectMember::Method(m) => {
+            4isize.hash(state);
+            m.name.hash(state);
+            // function, optional, spans. Push reverse.
+            stack.push(HashStep::MemberSpans(m.spans));
+            stack.push(HashStep::Bool(m.optional));
+            stack.push(HashStep::Func(&m.function));
+        }
+    }
+}
+
+/// `TupleElement`: label (leaf), ty, optional, rest.
+fn hash_tuple_element_step<'a, H: Hasher>(
+    el: &'a TupleElement,
+    state: &mut H,
+    stack: &mut Vec<HashStep<'a>>,
+) {
+    el.label.hash(state);
+    stack.push(HashStep::Bool(el.rest));
+    stack.push(HashStep::Bool(el.optional));
+    stack.push(HashStep::Node(&el.ty));
+}
+
+/// `FunctionParam` hand-written `Hash`: name, ty, optional, rest, span
+/// (EXCLUDES `has_ts_annotation`, exactly like the hand-written
+/// `Hash for FunctionParam`).
+fn hash_param_step<'a, H: Hasher>(
+    p: &'a FunctionParam,
+    state: &mut H,
+    stack: &mut Vec<HashStep<'a>>,
+) {
+    p.name.hash(state);
+    // Emission order after `name`: ty subtree, optional, rest, span.
+    // Push reverse so the LIFO stack replays them forward.
+    stack.push(HashStep::OptSpan(p.span));
+    stack.push(HashStep::Bool(p.rest));
+    stack.push(HashStep::Bool(p.optional));
+    stack.push(HashStep::Node(&p.ty));
+}
+
+/// `TypeParam` derive: name (leaf), constraint (Option), default (Option).
+fn hash_type_param_step<'a, H: Hasher>(
+    tp: &'a TypeParam,
+    state: &mut H,
+    stack: &mut Vec<HashStep<'a>>,
+) {
+    tp.name.hash(state);
+    // constraint, default. Push reverse.
+    stack.push(HashStep::OptNode(tp.default.as_deref()));
+    stack.push(HashStep::OptNode(tp.constraint.as_deref()));
+}
+
+/// `RecursiveConditionalFrame` derive: branch (leaf), decided (leaf),
+/// check, extends.
+fn hash_recursive_frame_step<'a, H: Hasher>(
+    frame: &'a RecursiveConditionalFrame,
+    state: &mut H,
+    stack: &mut Vec<HashStep<'a>>,
+) {
+    frame.branch.hash(state);
+    frame.decided.hash(state);
+    stack.push(HashStep::Node(&frame.extends));
+    stack.push(HashStep::Node(&frame.check));
+}
+
+/// `FunctionExpr` derive: parameters (len + each), return_type (Option),
+/// type_parameters (len + each), spans.
+fn hash_function_step<'a, H: Hasher>(
+    func: &'a FunctionExpr,
+    state: &mut H,
+    stack: &mut Vec<HashStep<'a>>,
+) {
+    func.parameters.len().hash(state);
+    // Emission order: each param, return_type, tp-len, each tp, spans.
+    // Push reverse: spans, tp frames, tp-len, OptNode(return), param frames.
+    stack.push(HashStep::FnSpans(func.spans));
+    for tp in func.type_parameters.iter().rev() {
+        stack.push(HashStep::TyParam(tp));
+    }
+    stack.push(HashStep::Usize(func.type_parameters.len()));
+    stack.push(HashStep::OptNode(func.return_type.as_deref()));
+    for p in func.parameters.iter().rev() {
+        stack.push(HashStep::Param(p));
     }
 }
 

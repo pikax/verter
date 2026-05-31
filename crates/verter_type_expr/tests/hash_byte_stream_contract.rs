@@ -867,3 +867,35 @@ fn live_hash_stream_is_deterministic() {
         assert_eq!(first, second, "non-deterministic hash stream for `{label}`");
     }
 }
+
+/// Hashing a deeply-nested `TypeExpr` must NOT overflow the stack on a
+/// default thread stack. The former derived `Hash` was recursive over
+/// the `Arc<TypeExpr>` tree and overflowed on a depth this large; the
+/// continuation-frame iterative impl walks it on the heap.
+///
+/// Discrimination: with the manual `impl Hash` reverted to
+/// `#[derive(Hash)]`, this aborts with STATUS_STACK_OVERFLOW on a default
+/// stack (the same hazard class the iterative impl removes).
+#[test]
+fn deeply_nested_type_hashes_without_stack_overflow() {
+    use std::hash::Hasher as _;
+
+    const DEPTH: usize = 200_000;
+    let mut current = arc(TypeExpr::Primitive(PrimitiveName::String));
+    for _ in 0..DEPTH {
+        current = arc(TypeExpr::Array {
+            element: current,
+            readonly: false,
+        });
+    }
+
+    // A real `Hasher` (not the recording one) — proves the production
+    // hashing path is depth-safe end to end.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    current.hash(&mut hasher);
+    // Touch the digest so the hash is not optimised away.
+    assert_ne!(hasher.finish(), 0, "deep hash must produce a digest");
+
+    // The deep `current` also drops here without overflow (iterative
+    // `Drop`), so the whole build/hash/drop cycle is depth-safe.
+}
