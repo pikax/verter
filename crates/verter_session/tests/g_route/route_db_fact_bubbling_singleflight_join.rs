@@ -54,13 +54,48 @@
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use verter_session::for_tests::install_fact_tracer_for_tests;
 use verter_session::resolver_core::{
     FactReadSetFinalise, FactVersionRef, PermissiveStoreView, RouteDb, RouteResult,
 };
 use verter_session::VerterHost;
+
+/// Strong-reference count of the route singleflight in-flight entry
+/// while only the leader is parked inside its resolve closure: the
+/// leader's local `state` binding plus the `flights` map entry. A
+/// follower that has joined and is committed to the condvar wait raises
+/// the count by one (to 3).
+const LEADER_ONLY_INFLIGHT_REFS: usize = 2;
+
+/// Block the calling (driver) thread until a follower has been admitted
+/// onto the route singleflight in-flight entry for `(provider, name)`.
+///
+/// This is the RouteDb analogue of the semantic-graph
+/// `wait_for_joiner_admitted` probe: it observes the in-flight
+/// `FlightState` `Arc` strong count rising above the leader-only
+/// baseline ([`LEADER_ONLY_INFLIGHT_REFS`]) — the deterministic signal
+/// that the follower has cloned the flight entry and entered the
+/// singleflight join — rather than racing the follower with a
+/// wall-clock `sleep`. The poll is bounded: it spins for at most ~10 s,
+/// then panics so a genuine hang fails loudly rather than blocking the
+/// suite forever.
+fn wait_for_route_follower_admitted<V>(db: &RouteDb, provider: &str, name: &str, view: &V)
+where
+    V: verter_session::resolver_core::StoreView + ?Sized,
+{
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while db.test_route_inflight_strong_count(provider, name, view) <= LEADER_ONLY_INFLIGHT_REFS {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the follower to be admitted onto the \
+             route singleflight in-flight entry (strong count never \
+             exceeded {LEADER_ONLY_INFLIGHT_REFS})",
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
 
 /// Build the leader's fact: a `FileWholeHash` with a recognisable
 /// 16-byte pattern. The same fact value re-appears in the follower's
@@ -141,12 +176,16 @@ fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
         (route_result, finalise)
     });
 
-    // Give the follower time to register on the in-flight slot and
-    // block on the singleflight condvar. 50 ms matches the heuristic
-    // in `cross_thread_joiner_bubbles_facts.rs`. If a race ever
-    // surfaces under load, the discriminator below will catch it
-    // (counter stays at zero or follower runs its own resolve).
-    thread::sleep(Duration::from_millis(50));
+    // Block until the follower has registered on the in-flight slot and
+    // is committed to the singleflight condvar wait. Observing the
+    // in-flight `FlightState` strong count rising above the leader-only
+    // baseline is deterministic — unlike a wall-clock sleep it cannot
+    // race the follower's registration under parallel load. The
+    // discriminators below (coalesced counter == 1, follower tracer
+    // contains the leader's fact, follower resolve `unreachable!`) still
+    // prove the join actually happened.
+    let probe_view = PermissiveStoreView;
+    wait_for_route_follower_admitted(&db, "join_provider.ts", "Joined", &probe_view);
 
     // Release the leader. It publishes the result, admits the entry
     // (with the fact signature), notifies the singleflight condvar,

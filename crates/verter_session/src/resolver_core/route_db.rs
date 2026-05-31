@@ -398,6 +398,32 @@ impl RouteDb {
             .ok()
     }
 
+    /// **Test-only.** Strong-reference count of the in-flight route
+    /// singleflight [`FlightState`] for `(provider, name)` under
+    /// `view`'s compat token, or `0` if no flight is registered.
+    ///
+    /// A leader parked inside its resolve closure holds the leader-only
+    /// baseline of 2 (its local `state` + the `flights` map entry); a
+    /// follower that has joined and is committed to the condvar wait
+    /// raises the count to 3. Tests poll this to deterministically
+    /// observe follower admission onto the singleflight before releasing
+    /// the leader — replacing the wall-clock sleep that previously raced
+    /// the follower's registration.
+    ///
+    /// Exposed under `cfg(any(test, debug_assertions))` so integration
+    /// tests in `tests/` (which compile without `cfg(test)`) can call it.
+    #[cfg(any(test, debug_assertions))]
+    pub fn test_route_inflight_strong_count<V: StoreView + ?Sized>(
+        &self,
+        provider_canonical: &str,
+        exported_name: &str,
+        view: &V,
+    ) -> usize {
+        let key = (provider_canonical.to_owned(), exported_name.to_owned());
+        self.route_singleflight
+            .test_flight_strong_count(&key, view.compat_token())
+    }
+
     /// Look up a route and return both the result and its recorded
     /// fact-dep signature. Returns `None` on a cold miss or if the
     /// candidate's signature fails validation against `view`.

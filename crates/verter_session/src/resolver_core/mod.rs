@@ -1374,6 +1374,31 @@ where
     pub fn clear(&self) {
         self.flights.lock().clear();
     }
+
+    /// **Test-only.** Strong-reference count of the in-flight
+    /// [`FlightState`] `Arc` for `(key, token)`, or `0` if no flight is
+    /// currently registered for that lane.
+    ///
+    /// While only the leader is mid-`compute` the count is the
+    /// leader-only baseline (the leader's local `state` binding plus the
+    /// `flights` map entry = 2). Each follower that has cloned the entry
+    /// in [`Self::run`] and is committed to the condvar wait raises the
+    /// count by one. Polling this is a deterministic alternative to a
+    /// wall-clock `sleep` for observing follower admission onto the
+    /// singleflight — it does not race the follower under parallel load.
+    ///
+    /// Exposed under `cfg(any(test, debug_assertions))` so integration
+    /// tests in `tests/` (which compile without `cfg(test)`) can reach it
+    /// transitively through the per-DB test-only accessors.
+    #[cfg(any(test, debug_assertions))]
+    pub fn test_flight_strong_count(&self, key: &K, token: StoreViewCompatToken) -> usize {
+        let lane_key = (key.clone(), token);
+        self.flights
+            .lock()
+            .get(&lane_key)
+            .map(Arc::strong_count)
+            .unwrap_or(0)
+    }
 }
 
 // ---------------------------------------------------------------------------
