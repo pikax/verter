@@ -905,27 +905,31 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
     );
 }
 
-/// The two root-surface bridges
-/// (`project_type_surface_expr_via_host_threaded` /
-/// `project_type_surface_shape_via_host_threaded`) resolve a root symbol's
-/// surface through the shared dispatch surface projector ALONE. Stage 4-disp
-/// removed their prepared-decl root-surface rescue
+/// The surviving root-surface bridge
+/// (`project_type_surface_expr_via_host_threaded`) resolves a root symbol's
+/// surface through the shared dispatch surface projector ALONE. The
+/// walker-cluster deletion removed its prepared-decl root-surface rescue
 /// (`.or_else(cached_prepared_root_surface)`) — dispatch composes Object /
 /// Alias roots directly and compound roots from the decl anchor through the
 /// shared empty-path Shallow walker. This guard asserts the rescue stays
-/// absent: neither bridge body may reference `cached_prepared_root_surface`.
+/// absent: the bridge body may not reference `cached_prepared_root_surface`.
 ///
-/// (The prepared-decl helper itself survives for explicit prepared-surface
-/// callers — `project_prepared_type_surface_*_via_host_threaded` — so this
-/// guard scopes to the two ROOT-surface bridge bodies, not the whole file.)
+/// The walker is retired: `cached_prepared_root_surface` and the deleted
+/// shape/prepared bridges (`project_type_surface_shape_via_host_threaded`,
+/// `project_prepared_type_surface_{expr,shape}_via_host_threaded`) must not
+/// reappear anywhere in `dispatch_helpers.rs` (absence assertion below).
 #[test]
 fn root_surface_bridges_carry_no_prepared_decl_fallback() {
     use syn::visit::Visit;
     use syn::{Expr, ExprCall, ExprMethodCall, Item, ItemFn};
 
-    const BRIDGE_FNS: [&str; 2] = [
-        "project_type_surface_expr_via_host_threaded",
+    const BRIDGE_FNS: [&str; 1] = ["project_type_surface_expr_via_host_threaded"];
+    // The retired bridges + the walker method must stay deleted from the file.
+    const RETIRED_TOKENS: [&str; 4] = [
+        "cached_prepared_root_surface",
         "project_type_surface_shape_via_host_threaded",
+        "project_prepared_type_surface_expr_via_host_threaded",
+        "project_prepared_type_surface_shape_via_host_threaded",
     ];
     // The ONLY method calls a bridge body may make. `dispatch_projected_surface`
     // is the sole root-surface authority (asserted to appear exactly once);
@@ -1083,12 +1087,26 @@ fn root_surface_bridges_carry_no_prepared_decl_fallback() {
                 helper_collector.visit_block(&helper.block);
                 assert_eq!(
                     helper_collector.forbidden_hits, 0,
-                    "Stage 4-disp: `{bridge_name}` calls local helper `{call}`, \
+                    "`{bridge_name}` calls local helper `{call}`, \
                      whose body references `{FORBIDDEN_TOKEN}` — the rescue cannot \
                      be re-introduced through a one-level helper indirection."
                 );
             }
         }
+    }
+
+    // Absence assertion: the retired walker method + deleted shape/prepared
+    // bridges must not reappear anywhere in dispatch_helpers.rs. Re-introducing
+    // any of them would resurrect a walker resolution path the one-engine rule
+    // forbids — route through the shared dispatch surface projector instead.
+    for token in RETIRED_TOKENS {
+        assert!(
+            !src.contains(token),
+            "retired walker symbol `{token}` reappeared in dispatch_helpers.rs — \
+             the prepared-surface/routed walker is deleted; resolve through \
+             `dispatch_projected_surface` / `dispatch_routed_expr_surface_expr`, \
+             never by re-adding the walker bridge."
+        );
     }
 }
 
@@ -1478,15 +1496,18 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
         "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
     );
     let engine_file = syn::parse_file(&engine_src).expect("parse component_meta_query_engine/mod.rs");
-    assert_fn_free_of_symbol(
-        &engine_file,
-        "dispatch_member_for_root_symbol",
-        "project_prepared_requested_member_from_symbol",
-        "Stage 4a: `dispatch_member_for_root_symbol` references \
-         `project_prepared_requested_member_from_symbol` — the prepared-decl \
-         member rescue was removed; a dispatch miss is an authoritative miss. Do \
-         NOT re-add the `.or_else(...)` fallback (directly, via a `use`-alias, OR \
-         through a macro).",
+    // The routed single-member projector `dispatch_member_for_root_symbol` was a
+    // thin wrapper whose only callers were inside the deleted routed walker; it is
+    // retired. ABSENCE guard: it must not reappear in the engine module. A dispatch
+    // miss is an authoritative miss — route members through `dispatch_projected_member`
+    // (the five-mode dispatch), never a re-added prepared-decl member rescue.
+    let _ = &engine_file;
+    assert!(
+        !engine_src.contains("dispatch_member_for_root_symbol"),
+        "retired symbol `dispatch_member_for_root_symbol` reappeared in \
+         component_meta_query_engine/mod.rs — it was the routed walker's single-member \
+         projector; resolve members through `dispatch_projected_member`, never by \
+         re-adding the routed walker wrapper."
     );
 
     // Owner-local dispatch-seal guard: BOTH owner-local macro-root entry points
@@ -1672,71 +1693,26 @@ mod resolver_core_recursion {
             "Phase 5l-supplement: bounded by TypeExpr Parenthesized chain depth.",
         ),
         // -----------------------------------------------------------------
-        // component_meta_query_engine/prepared_surface.rs —
-        // TypeExpr walkers (all marked dead_code for Phase 5g deletion;
-        // still in tree at integration HEAD).
-        // -----------------------------------------------------------------
-        (
-            "prepared_surface",
-            "project_prepared_requested_member_from_expr",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
-        ),
-        (
-            "prepared_surface",
-            "project_prepared_requested_member_from_symbol",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
-        ),
-        (
-            "prepared_surface",
-            "project_prepared_surface_from_expr",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
-        ),
-        (
-            "prepared_surface",
-            "project_prepared_surface_from_symbol",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
-        ),
-        // -----------------------------------------------------------------
         // component_meta_query_engine/route_keys.rs — TypeExpr walkers
+        // for Pick/Omit literal-key enumeration (reachable from the live
+        // `project_direct_utility_surface_shape`) + the dispatch-backed
+        // leaf-stabiliser scope predicate moved here from the deleted
+        // routed walker. All bounded by TypeExpr AST depth.
         // -----------------------------------------------------------------
         (
             "route_keys",
             "enumerate_member_surface_keys_via_route",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
+            "bounded by TypeExpr AST depth.",
         ),
         (
             "route_keys",
             "enumerate_route_literal_keys_inner",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
+            "bounded by TypeExpr AST depth.",
         ),
         (
             "route_keys",
-            "prepared_string_literal_keys",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        // -----------------------------------------------------------------
-        // component_meta_query_engine/routed_expr.rs — TypeExpr walkers
-        // (all marked dead_code for Phase 5g deletion).
-        // -----------------------------------------------------------------
-        (
-            "routed_expr",
             "expr_references_prepared_scope_symbol",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
-        ),
-        (
-            "routed_expr",
-            "project_inherited_member_route_projection_from_expr",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
-        ),
-        (
-            "routed_expr",
-            "project_prepared_member_path_route_projection_from_expr",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
-        ),
-        (
-            "routed_expr",
-            "project_prepared_member_path_route_projection_from_symbol",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth (dead_code, Phase 5g deletion target).",
+            "bounded by TypeExpr AST depth.",
         ),
         // -----------------------------------------------------------------
         // component_meta_query_engine/shallow_preserve.rs — TypeExpr
@@ -4697,7 +4673,6 @@ mod foundations_guards {
             "crates/verter_session/src/project_semantic_dispatch/raise.rs",
             "crates/verter_session/src/project_type_store.rs",
             "crates/verter_session/src/resolver_core/component_meta.rs",
-            "crates/verter_session/src/resolver_core/component_meta_query_engine/routed_expr.rs",
             "crates/verter_session/src/resolver_core/component_meta_registry.rs",
             "crates/verter_session/src/resolver_core/external_type_frontier.rs",
             "crates/verter_session/src/resolver_core/fallthrough.rs",
@@ -13529,24 +13504,11 @@ mod single_resolution_engine_guards {
     // comment-only mention in `component_meta_caches.rs` is stripped by
     // `preprocess`, so it is correctly absent from this ledger.
     // -----------------------------------------------------------------------
-    const PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST: &[(&str, usize)] = &[
-        (
-            "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
-            2,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_query_engine/prepared_surface.rs",
-            41,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_query_engine/routed_expr.rs",
-            2,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta_query_engine/surface.rs",
-            25,
-        ),
-    ];
+    // The walker-cluster deletion removed the `PreparedSurfaceProjection`
+    // enum (surface.rs) and its sole producers/consumers in the deleted
+    // prepared_surface.rs / routed_expr.rs walker modules, so the identifier
+    // is now absent from production source entirely — the allowlist is empty.
+    const PREPARED_SURFACE_PROJECTION_FILE_ALLOWLIST: &[(&str, usize)] = &[];
 
     #[test]
     fn no_new_prepared_surface_projection_production_file() {

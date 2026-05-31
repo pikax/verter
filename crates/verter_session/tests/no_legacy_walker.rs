@@ -309,6 +309,67 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "member_display_jsdoc",
     "declaring_decl_span",
     "project_imported_macro_surfaces",
+    // Walker-cluster deletion: the prepared-surface / routed walker modules
+    // (routed_expr.rs + prepared_surface.rs) and their request-local + host
+    // caches are DELETED. Pick/Omit/member literal-key enumeration resolves
+    // through the dispatch-backed `enumerate_route_literal_keys` chain; macro
+    // surfaces resolve through `dispatch_routed_expr_surface_expr` /
+    // `dispatch_projected_surface`. Re-introducing any of these resurrects a
+    // walker resolution path the one-engine rule forbids.
+    "project_routed_expr_surface_expr",
+    "project_routed_expr_surface_expr_direct",
+    "project_pick_route_surface_expr_via_routed_expr",
+    "project_pick_route_surface_expr_via_members",
+    "cached_prepared_root_surface",
+    "project_prepared_root_surface",
+    "project_prepared_root_surface_inner",
+    "r21_c4_project_prepared_surface_from_symbol_with_flag",
+    "project_prepared_surface_from_symbol",
+    "project_prepared_surface_from_expr",
+    "project_prepared_surface_from_ref",
+    "project_prepared_requested_member_from_symbol",
+    "project_prepared_requested_member_from_expr",
+    "project_prepared_requested_member_surface_from_expr",
+    "project_prepared_member_route_surface_expr",
+    "project_prepared_pick_route_surface_expr",
+    "publish_prepared_surface_to_host_db",
+    "publish_prepared_member_to_host_db",
+    "merge_prepared_intersection_arms",
+    "dispatch_member_for_root_symbol",
+    // The retired macro-object materialiser subgraph (define_* now via the
+    // dispatch projectors `projectors::define_shapes`).
+    "produce_macro_object_shapes",
+    "produce_macro_object_shapes_for_purpose",
+    "produce_one_macro_object_shape",
+    "produce_one_macro_object_shape_for_slots",
+    "synthesize_define_props_shape_from_known_surface_with_authority",
+    "synthesize_define_props_shape_from_registry_root",
+    "synthesize_define_emits_shape_from_known_surface",
+    "synthesize_define_slots_shape_from_known_surface",
+    "synthesize_macro_shape_from_registry_lowered_root",
+    "synthesize_macro_object_surface_shape",
+    "project_named_ref_prepared_surface_shape",
+    "expr_needs_projection_rescue",
+    "MacroShapeSource",
+    // The retired prepared/transit-shallow bridge helpers (the surviving
+    // root-surface bridge is `project_type_surface_expr_via_host_threaded`).
+    "project_type_surface_shape_via_host_threaded",
+    "project_type_surface_shape_transit_shallow_via_host_threaded",
+    "project_prepared_type_surface_expr_via_host_threaded",
+    "project_prepared_type_surface_shape_via_host_threaded",
+    "project_expr_class_a_via_dispatch_transit_shallow",
+    "project_expr_surface_expr_with_compound_objects_transit_shallow_via_host_threaded",
+    // The 4 dead walker host DBs + their producers. PreparedTargetDb is
+    // included per the premise correction: its only producer
+    // (`resolve_prepared_surface_target`, fed only by the walker-only
+    // `prepared_string_literal_keys`) died with the walker.
+    "PreparedSurfaceDb",
+    "PreparedMemberDb",
+    "RoutedExprSurfaceDb",
+    "PreparedTargetDb",
+    "resolve_prepared_surface_target",
+    "prepared_string_literal_keys",
+    "engine_fact_signature_for_prepared_target",
 ];
 
 /// File names whose presence at the head of the path should make us

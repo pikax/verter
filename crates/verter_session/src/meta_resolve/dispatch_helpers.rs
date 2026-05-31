@@ -596,12 +596,11 @@ pub(crate) fn decompose_indexed_access_chain(
 }
 
 
-// Class B helpers (dispatch-only surface projection) bypass the
-// engine's prepared-decl fallback (`cached_prepared_root_surface`)
-// and have regressed in the past on transitive heritage chains and
-// barrel-routed declarations. The trampoline's `project_type_surface`
-// body remains dispatch-first then prepared-decl-second; threading
-// the prepared-decl path through dispatch is not done here.
+// Class B helpers (dispatch-only surface projection) resolve a root
+// symbol's surface through the shared dispatch surface projector. They
+// have regressed in the past on transitive heritage chains and
+// barrel-routed declarations, so the shared walker (the merge / heritage
+// / Omit composition) is the place to fix any compound-root gap.
 
 /// Class D — Pick route-target via dispatch's `execute_pick`
 ///.
@@ -713,25 +712,17 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
 // Class B bridge helpers — Class B engine methods are deleted; these bridges thread `query_engine.ctx` through dispatch.
 //
 // The threaded `_threaded(engine, …)` variants are the production
-// callsite shape (engine threaded through caller). The non-threaded sync
-// variants (`project_type_surface_expr_via_host`,
-// `project_type_surface_shape_via_host`,
-// `project_prepared_type_surface_shape_via_host`) had no caller — neither
-// in production nor in tests — and were removed in the
-// clippy cleanup. The threaded `_via_host_threaded` variants below are
-// the canonical entrypoints; one (`_prepared_type_surface_expr_via_host_threaded`)
-// is gated `#[cfg(test)]` because tests are its only consumer.
+// callsite shape (engine threaded through caller). The `_via_host_threaded`
+// variants below are the canonical entrypoints.
 // =============================================================================
 
-// The root-surface bridges resolve a root symbol's surface through the
+// The root-surface bridge resolves a root symbol's surface through the
 // shared dispatch surface projector ALONE — `dispatch_projected_surface`
 // composes Object / Alias roots directly and compound (Union /
 // Intersection / InstantiationRef) roots from the decl anchor through the
 // shared empty-path Shallow walker. Dispatch is the sole root-surface
-// authority here; there is no prepared-decl root-surface rescue
-// (`.or_else(cached_prepared_root_surface)`) behind dispatch. (The
-// prepared-decl path itself survives only for explicit prepared-surface
-// callers.) The `root_surface_bridges_carry_no_prepared_decl_fallback`
+// authority here; there is no prepared-decl root-surface rescue behind
+// dispatch. The `root_surface_bridges_carry_no_prepared_decl_fallback`
 // architecture guard enforces this absence.
 pub(crate) fn project_type_surface_expr_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
