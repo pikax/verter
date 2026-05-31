@@ -8738,6 +8738,17 @@ defineProps<{
         "Button.variants must NOT be expanded to an object surface, got {variants_member:?}",
     );
 
+    // The `ComponentVariants<T>` ref carries EXACTLY ONE substituted
+    // argument (the single `T` bound to `typeof theme`). Pinning the
+    // arity discriminates a port that fans the carrier ref out to >1
+    // argument (or drops it to 0) — `.first()` alone would silently
+    // accept either.
+    assert_eq!(
+        variants_args.len(),
+        1,
+        "ComponentVariants<T> should carry exactly one substituted type argument, got {variants_args:?}",
+    );
+
     // The substituted argument carried by the `variants` helper ref.
     let variants_arg = variants_args
         .first()
@@ -8821,13 +8832,85 @@ defineProps<{
          placeholder, got {variants_arg:?}",
     );
 
-    // POSITIVE (strongest concrete-type assertion): `ui.gap` and the
-    // `variants` helper ref's argument are the SAME substituted type —
-    // both are the single `typeof theme` argument bound into `T`. This
-    // pins the concretely substituted TYPE, not a name string: if the
-    // arg were dropped, both would be the `semanticMiss` carrier
-    // (excluded above); if substitution diverged per-site, they would
-    // differ.
+    // POSITIVE (strongest CONCRETE-VALUE pin): `ui.gap` is not merely
+    // "some non-miss object" — it is the ACTUAL `typeof theme` surface.
+    // The fixture's `theme` (and ONLY `theme`) has the nested shape
+    // `{ variants: { color: { primary: ''; secondary: '' } } }`. We
+    // walk that exact path and pin every hop + the terminal literal
+    // members. This is the load-bearing discriminator the prior
+    // `assert_eq!(ui_gap, variants_arg)` (consistency only) missed: a
+    // wrong-but-consistent port that bound `T` to a DIFFERENT in-scope
+    // type (a const with a different member shape) would satisfy the
+    // equality below yet FAIL here, because its top-level member is not
+    // `variants → color → {primary, secondary}`.
+    let find_prop = |members: &[ObjectMember], prop_name: &str| -> Option<TypeExpr> {
+        members.iter().find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == prop_name => {
+                Some(property.ty.clone())
+            }
+            _ => None,
+        })
+    };
+    let TypeExpr::Object(ui_gap_obj) = ui_gap else {
+        panic!(
+            "ui.gap must be the concrete `typeof theme` object surface, got {ui_gap:?}",
+        );
+    };
+    let ui_gap_variants = find_prop(&ui_gap_obj.properties, "variants")
+        .expect("`typeof theme` must expose a `variants` member; ui.gap is the theme surface");
+    let TypeExpr::Object(ui_gap_variants_obj) = &ui_gap_variants else {
+        panic!(
+            "`typeof theme`.variants must be an object, got {ui_gap_variants:?}",
+        );
+    };
+    let ui_gap_color = find_prop(&ui_gap_variants_obj.properties, "color")
+        .expect("`typeof theme`.variants must expose a `color` member");
+    let TypeExpr::Object(ui_gap_color_obj) = &ui_gap_color else {
+        panic!(
+            "`typeof theme`.variants.color must be an object, got {ui_gap_color:?}",
+        );
+    };
+    // The terminal `color` members are EXACTLY the fixture's
+    // `primary`/`secondary` const string-literal keys — no more, no
+    // fewer, and each is the `''` literal from `as const`. A different
+    // in-scope const (different member names / values) cannot satisfy
+    // this set.
+    let mut ui_gap_color_keys: Vec<&str> = ui_gap_color_obj
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    ui_gap_color_keys.sort_unstable();
+    assert_eq!(
+        ui_gap_color_keys,
+        ["primary", "secondary"],
+        "`typeof theme`.variants.color must expose exactly the fixture's \
+         primary/secondary keys, got {ui_gap_color_obj:?}",
+    );
+    assert_eq!(
+        find_prop(&ui_gap_color_obj.properties, "primary").as_ref(),
+        Some(&TypeExpr::string_literal("")),
+        "`typeof theme`.variants.color.primary must be the `''` const literal, \
+         got {ui_gap_color_obj:?}",
+    );
+    assert_eq!(
+        find_prop(&ui_gap_color_obj.properties, "secondary").as_ref(),
+        Some(&TypeExpr::string_literal("")),
+        "`typeof theme`.variants.color.secondary must be the `''` const literal, \
+         got {ui_gap_color_obj:?}",
+    );
+
+    // POSITIVE (corroborating): `ui.gap` and the `variants` helper ref's
+    // argument are the SAME substituted type — both are the single
+    // `typeof theme` argument bound into `T`. Now that `ui.gap` is
+    // pinned to the concrete theme surface above, this equality also
+    // pins `variants_arg` to that same concrete surface (not just
+    // "consistent with ui.gap"). If substitution diverged per-site they
+    // would differ; if the arg were dropped both would be the
+    // `semanticMiss` carrier (excluded above).
     assert_eq!(
         ui_gap, variants_arg,
         "ui.gap and the variants helper argument must be the identical substituted \
