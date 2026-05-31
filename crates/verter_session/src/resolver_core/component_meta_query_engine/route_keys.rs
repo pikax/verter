@@ -1118,5 +1118,4 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             | TypeExpr::Unknown { .. } => false,
         }
     }
-
 }

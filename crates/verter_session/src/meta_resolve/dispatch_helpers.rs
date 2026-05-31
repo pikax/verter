@@ -304,7 +304,6 @@ fn realize_callable_member_inner(
     }
 }
 
-
 /// Extract the OUTER utility/identifier name from a route-bearing
 /// `TypeExpr` and return `true` iff the owner scope shadows that name
 /// with a userland declaration.
@@ -602,7 +601,6 @@ pub(crate) fn decompose_indexed_access_chain(
     (base, Arc::from(path.into_boxed_slice()))
 }
 
-
 // Class B helpers (dispatch-only surface projection) resolve a root
 // symbol's surface through the shared dispatch surface projector. They
 // have regressed in the past on transitive heritage chains and
@@ -743,7 +741,6 @@ pub(crate) fn project_type_surface_expr_via_host_threaded<'ctx>(
     let surface = engine.dispatch_projected_surface(scope_canonical_id, symbol_name)?;
     projected_surface_to_type_expr(&surface)
 }
-
 
 pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
@@ -1003,4 +1000,3 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
         }
     }
 }
-

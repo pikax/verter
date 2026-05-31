@@ -128,7 +128,6 @@ pub(crate) const SEMANTIC_MISS: &str = "semanticMiss";
 pub(crate) const SEMANTIC_OBJECT_SURFACE: &str = "semanticObjectSurface";
 pub(crate) const SEMANTIC_SURFACE_MEMBER: &str = "semanticSurfaceMember";
 
-
 /// Build an R28 signature for a cache whose validity depends on the
 /// IDENTITY of a top-level type at `(canonical, type_name)`. Observes
 /// `Export(name)`, `LocalDecl(name)`, and `MemberShape(exporter=name)`
@@ -158,7 +157,6 @@ pub(crate) fn engine_fact_signature_for_exported_type(
         observed_hash,
     )
 }
-
 
 /// A prepared type declaration bundled with the keyed canonical's
 /// observed content version.

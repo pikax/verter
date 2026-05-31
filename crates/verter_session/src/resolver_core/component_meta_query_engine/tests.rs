@@ -684,8 +684,11 @@ export interface LinkProps extends NuxtLinkProps {
 
     let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
         &mut query_engine,
-"/src/Link.vue", "LinkProps", &route)
-        .expect("member-viable inherited pick route should project to the requested members only");
+        "/src/Link.vue",
+        "LinkProps",
+        &route,
+    )
+    .expect("member-viable inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -1120,8 +1123,11 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
 
     let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
         &mut query_engine,
-"/src/Link.vue", "LinkProps", &route)
-        .expect("module-routed inherited pick route should project to the requested members only");
+        "/src/Link.vue",
+        "LinkProps",
+        &route,
+    )
+    .expect("module-routed inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -1421,8 +1427,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
 }
 
 #[test]
-fn project_type_surface_expr_nested_pick_and_omit_generic_interface_keeps_exact_shallow_surface(
-) {
+fn project_type_surface_expr_nested_pick_and_omit_generic_interface_keeps_exact_shallow_surface() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -1504,8 +1509,10 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
 
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
-"/src/App.vue", "ColorModeSelectProps")
-        .expect("nested pick/omit generic interface should project the routed object surface");
+        "/src/App.vue",
+        "ColorModeSelectProps",
+    )
+    .expect("nested pick/omit generic interface should project the routed object surface");
 
     let TypeExpr::Object(object) = projected else {
         panic!("prepared projection should still materialize the routed object surface");
@@ -2616,9 +2623,10 @@ fn prepared_substitution_slow_lane_forbid_guard_is_thread_local() {
         "the prepared-substitution forbid guard must be armed on the arming thread",
     );
 
-    let prepared = std::thread::spawn(prepared_structural_substitution_slow_lane_forbidden_for_current_thread)
-        .join()
-        .expect("thread-local guard probe should join cleanly");
+    let prepared =
+        std::thread::spawn(prepared_structural_substitution_slow_lane_forbidden_for_current_thread)
+            .join()
+            .expect("thread-local guard probe should join cleanly");
 
     assert!(
         !prepared,
@@ -3601,10 +3609,8 @@ type Wrapper<T> = { value: T; label: string }
     // `Wrapper<number>` — generic Ref with a non-identity argument, so the
     // default substitutions are non-empty (`{ T -> number }`) and the
     // structural body references `T`.
-    let generic_ref = TypeExpr::named_with_args(
-        "Wrapper",
-        vec![TypeExpr::Primitive(PrimitiveName::Number)],
-    );
+    let generic_ref =
+        TypeExpr::named_with_args("Wrapper", vec![TypeExpr::Primitive(PrimitiveName::Number)]);
 
     let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
     // Direct call into the slow funnel — bypasses dispatch entirely, so the

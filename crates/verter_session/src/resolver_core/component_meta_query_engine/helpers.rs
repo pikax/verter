@@ -180,4 +180,3 @@ pub(super) fn projected_surface_member_names(expr: &TypeExpr) -> Option<Vec<Stri
         _ => None,
     }
 }
-

@@ -1492,7 +1492,8 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
     let engine_src = read_workspace_file(
         "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
     );
-    let engine_file = syn::parse_file(&engine_src).expect("parse component_meta_query_engine/mod.rs");
+    let engine_file =
+        syn::parse_file(&engine_src).expect("parse component_meta_query_engine/mod.rs");
     // The routed single-member projector `dispatch_member_for_root_symbol` was a
     // thin wrapper whose only callers were inside the deleted routed walker; it is
     // retired. ABSENCE guard: it must not reappear in the engine module. A dispatch

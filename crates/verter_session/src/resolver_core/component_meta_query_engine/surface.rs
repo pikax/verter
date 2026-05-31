@@ -328,22 +328,12 @@ pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
     }
 }
 
-
 pub(super) fn projected_surface_is_empty(surface: &ProjectedSurface) -> bool {
     surface.members.is_empty()
         && surface.call_signatures.is_empty()
         && surface.construct_signatures.is_empty()
         && !surface.has_index_signature
 }
-
-
-
-
-
-
-
-
-
 
 pub(super) fn build_default_type_param_substitutions(
     prepared: &verter_semantic::analysis::type_solver::PreparedTypeDecl,
@@ -394,8 +384,6 @@ pub(super) fn apply_type_param_substitutions(
         substitute_type_expr(expr, substitutions)
     }
 }
-
-
 
 fn substitute_type_expr(expr: &TypeExpr, substitutions: &FxHashMap<String, TypeExpr>) -> TypeExpr {
     use verter_type_expr::{ObjectMember, TypeExpr};
@@ -618,7 +606,6 @@ fn substitute_function_expr(
     }
     function
 }
-
 
 pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Option<TypeExpr> {
     use std::sync::Arc;
