@@ -13,14 +13,22 @@
 //! accumulator; any unpaired direct call would lose coverage on
 //! that deletion).
 //!
-//! The slot-binding-graph traversal has FIVE legitimate dispatch
+//! The slot-binding-graph traversal has SIX legitimate dispatch
 //! sites that must emit dispatch-facts:
 //!
-//! 1. `accumulate_lowered_node_carrier_deps` — site 1 of 5.
-//! 2. `slot_param_root_is_symbolic_only` — site 2 of 5.
-//! 3. `resolve_slot_bindings_graph_native` — site 3 of 5.
-//! 4. `compute_bindings_via_graph` (slot-surface read) — site 4 of 5.
-//! 5. `compute_bindings_via_graph` (param-surface read) — site 5 of 5.
+//! 1. `accumulate_lowered_node_carrier_deps` — site 1 of 6.
+//! 2. `slot_param_root_is_symbolic_only` (open-generic gate, CONCRETE
+//!    Conditional-check reduction `ProjectPath` read) — site 2 of 6.
+//! 3. `slot_param_root_is_symbolic_only` (open-generic gate,
+//!    `InstantiationRef` carrier Skeleton-`Instantiate` read) — site 3 of 6.
+//!    Sites 2 and 3 are the generic slot-alias binding gate: it reduces a
+//!    concrete Conditional check and Skeleton-instantiates an
+//!    `InstantiationRef` carrier through real `execute_read`s, each
+//!    paired-emitted here so a `generic="M"` slot resolves to NO bindings on
+//!    both the DTO and graph-native paths.
+//! 4. `resolve_slot_bindings_graph_native` — site 4 of 6.
+//! 5. `compute_bindings_via_graph` (slot-surface read) — site 5 of 6.
+//! 6. `compute_bindings_via_graph` (param-surface read) — site 6 of 6.
 //!
 //! Each site MUST appear exactly once as a call to
 //! `emit_slot_binding_graph_dispatch_facts`. The legacy
@@ -143,7 +151,7 @@ fn slot_binding_graph_uses_paired_emit_at_every_site() {
     let src = read_workspace_file("crates/verter_session/src/meta_resolve/slot_binding_graph.rs");
 
     // Count `emit_slot_binding_graph_dispatch_facts(` call sites —
-    // there must be exactly 5 (the five dispatch reads in this
+    // there must be exactly 6 (the six dispatch reads in this
     // file). The function declaration itself accounts for the
     // `fn emit_...(` form, not the `emit_...(` call form, so it
     // does not inflate the count.
@@ -154,12 +162,13 @@ fn slot_binding_graph_uses_paired_emit_at_every_site() {
     // Calls = total occurrences − declarations (1).
     let pure_calls = calls.saturating_sub(decl_count);
     assert_eq!(
-        pure_calls, 5,
+        pure_calls, 6,
         "Block 1.C arch guard: `slot_binding_graph.rs` MUST contain \
-         exactly 5 calls to `emit_slot_binding_graph_dispatch_facts` \
-         (one per dispatch-read site as identified by Block 0 \
-         audit: accumulate_lowered_node_carrier_deps, \
-         slot_param_root_is_symbolic_only, \
+         exactly 6 calls to `emit_slot_binding_graph_dispatch_facts` \
+         (one per dispatch-read site: accumulate_lowered_node_carrier_deps, \
+         TWO sites in slot_param_root_is_symbolic_only (the open-generic \
+         gate's concrete-Conditional `ProjectPath` reduction AND the \
+         `InstantiationRef` carrier Skeleton-`Instantiate`), \
          resolve_slot_bindings_graph_native, and two sites inside \
          compute_bindings_via_graph). observed_calls={pure_calls} \
          (total occurrences={calls}, declarations={decl_count})"
