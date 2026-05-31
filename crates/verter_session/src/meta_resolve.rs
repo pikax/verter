@@ -129,23 +129,6 @@ pub(crate) use materialize::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
     materialize_component_meta_type_expr_until_stable,
 };
-// Test-only re-export — `meta_resolve_tests.rs` exercises this helper
-// via `super::*` glob to characterise the BFS cycle-guard's effect on
-// the macro-shape produce stage. Production callers consume the helper
-// directly from `meta_resolve::materialize::macro_shapes`.
-#[cfg(test)]
-pub(crate) use materialize::expr_needs_projection_rescue;
-// Test-only re-exports — exercised by `meta_resolve_tests.rs` via
-// `super::*` glob import from the `meta_resolve_tests` child mod
-// (`#[path = "meta_resolve_tests.rs"] mod meta_resolve_tests;` at the
-// bottom of this file). The symbols are bare-name in the test bodies;
-// removing the re-export breaks compilation of those tests.
-#[cfg(test)]
-pub(crate) use materialize::{
-    define_props_fields_fast_path_allowed, has_prop_shape_surface, produce_macro_object_shapes,
-    produce_one_macro_object_shape, registry_entry_to_expanded_shape,
-    synthesize_define_props_shape_from_known_surface_with_authority, MacroShapeSource,
-};
 pub(crate) use origin_graph::build_origin_graph;
 pub(crate) use registry_materialize::{
     component_meta_registry_prefers_structural_materialization_node,

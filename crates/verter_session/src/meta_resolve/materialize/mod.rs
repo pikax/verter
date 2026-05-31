@@ -6,10 +6,10 @@
 //!   (`materialize_component_meta_type_expr_until_stable` and `_full`)
 //!   + package-backed-root predicate that gates reduction.
 //!
-//! - [`macro_shapes`] — `produce_macro_object_shapes` + `_for_purpose`,
-//!   `MacroShapeSource`, and the macro-shape synthesis / projection /
-//!   penalty helpers that produce `define_props` / `define_emits` /
-//!   `define_slots` shapes for `ExpandedComponentTypes`.
+//! - [`macro_shapes`] — the surviving `collect_type_expr_ref_names`
+//!   `TypeExpr`-reference name collector. The macro-object materialiser
+//!   that previously lived here is retired; `define_*` shapes are produced
+//!   by the dispatch projectors (`crate::meta_resolve::projectors::define_shapes`).
 //!
 //! Both children are private modules; this submodule re-exports their
 //! `pub(crate)` surface to the parent so existing `crate::meta_resolve::*`
@@ -29,23 +29,3 @@ pub(crate) use field_types::{
 };
 
 pub(crate) use macro_shapes::collect_type_expr_ref_names;
-// Test-only re-export — exercised by `meta_resolve_tests.rs` via the
-// `meta_resolve.rs` shell's `#[cfg(test)] pub(crate) use materialize::expr_needs_projection_rescue;`
-// glob hop. Production call sites inside `macro_shapes.rs` reach the
-// function directly without the materialize-level re-export.
-#[cfg(test)]
-pub(crate) use macro_shapes::expr_needs_projection_rescue;
-// Test-only re-exports consumed by `meta_resolve_tests.rs` via the
-// `meta_resolve.rs` shell's `#[cfg(test)] pub(crate) use materialize::{…}` block.
-#[cfg(test)]
-pub(crate) use macro_shapes::has_prop_shape_surface;
-// Test-only macro-shape re-exports — exercised via the `meta_resolve.rs`
-// shell's `#[cfg(test)] pub(crate) use materialize::{…}` block by
-// `meta_resolve_tests.rs` (bare-name `super::*` glob).
-#[cfg(test)]
-pub(crate) use macro_shapes::{
-    define_props_fields_fast_path_allowed, produce_macro_object_shapes,
-    produce_one_macro_object_shape, registry_entry_to_expanded_shape,
-    slot_field_function_type_expr, synthesize_define_props_shape_from_known_surface_with_authority,
-    MacroShapeSource,
-};
