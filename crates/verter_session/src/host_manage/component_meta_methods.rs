@@ -1268,10 +1268,7 @@ impl VerterHost {
 
             // Step 2: require a generic Ref with non-empty type arguments.
             let raw = raw_body?;
-            let TypeExpr::Ref {
-                type_arguments, ..
-            } = raw
-            else {
+            let TypeExpr::Ref { type_arguments, .. } = raw else {
                 return None;
             };
             if type_arguments.is_empty() {
@@ -1290,8 +1287,11 @@ impl VerterHost {
             // (base + lowered/substituted args).
             let navigate_context =
                 ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
-            let lowered =
-                dispatch.lower_type_expr_in_scope_with_context(scope_canonical_id, raw, navigate_context)?;
+            let lowered = dispatch.lower_type_expr_in_scope_with_context(
+                scope_canonical_id,
+                raw,
+                navigate_context,
+            )?;
 
             // Step 4: require an `InstantiationRef`. Anything else (a bare
             // DeclRef, a reduced Object, a miss shell, ...) is NOT an
@@ -1313,8 +1313,8 @@ impl VerterHost {
             // prepared decl here mirrors the slow lane's gate; the
             // dispatch's `Instantiate` substitution operates on the same
             // prepared body.)
-            let prepared =
-                query_engine.prepared_type_decl(base.canonical_id.as_ref(), base.decl_name.as_ref())?;
+            let prepared = query_engine
+                .prepared_type_decl(base.canonical_id.as_ref(), base.decl_name.as_ref())?;
             if prepared.type_parameters.len() < args.len() {
                 return None;
             }
