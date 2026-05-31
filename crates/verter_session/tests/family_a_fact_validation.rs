@@ -131,25 +131,75 @@ fn family_a_producers_call_new_fact_helpers() {
     );
 }
 
-/// The live Family A `fact_dep_signature` caches and their primary
-/// `impl XDb { … }` block anchor. Each cache's primary impl block owns
-/// the cache's `get_or_compute`(`_admit`)/`peek` methods — the warm-hit
-/// validation + post-compute revalidation sites. This is the
-/// authoritative live inventory; the prepared-surface / prepared-member
-/// / prepared-target / routed-expr DBs are DELETED.
-const FAMILY_A_DB_IMPLS: &[&str] = &[
-    "impl ImportedRegistryDb {",
-    "impl DeclarationLookupDb {",
-    "impl ResolvabilityDb {",
-    "impl OwnerCollectionDb {",
-    "impl ShapeCacheDb {",
+/// A single Family A `fact_dep_signature` cache and the exact set of
+/// validation/bubble SITES its live read/compute path carries.
+///
+/// The site set is NOT uniform across caches: `ImportedRegistryDb` and
+/// `ShapeCacheDb` expose a separate compute-once `peek` entry point (an
+/// extra warm-read validator + bubble) on top of the cooperative
+/// `get_or_compute`(`_admit`) closures, whereas
+/// `DeclarationLookupDb` / `ResolvabilityDb` / `OwnerCollectionDb` have
+/// only the cooperative method. The guard asserts EACH cache's ACTUAL
+/// required sites, derived structurally from
+/// `component_meta_caches.rs`, never a uniform `>= N` count.
+struct FamilyACacheSpec {
+    /// The `impl XDb {` anchor that opens the cache's primary impl block.
+    impl_anchor: &'static str,
+    /// `Some("pub(crate) fn peek(")` for the two caches that expose a
+    /// compute-once `peek` entry point; `None` otherwise. When present,
+    /// the `peek` body MUST carry exactly one strict warm-read validator
+    /// and exactly one bubble.
+    peek_sig: Option<&'static str>,
+    /// The cooperative cold-compute method signature
+    /// (`get_or_compute`(`_admit`)). Its body MUST carry exactly two
+    /// strict validators (the warm-hit predicate + the post-compute
+    /// revalidator) and exactly two bubbles (the warm-hit bubble + the
+    /// cold-return bubble), partitioned so dropping ANY single one of
+    /// those four atomic sites flips the guard RED.
+    compute_sig: &'static str,
+}
+
+/// The authoritative live inventory of Family A `fact_dep_signature`
+/// caches and their per-cache validation site sets. The
+/// prepared-surface / prepared-member / prepared-target / routed-expr
+/// DBs are DELETED (their absence is guarded by
+/// `no_legacy_walker.rs::RETIRED_SYMBOLS`).
+const FAMILY_A_CACHES: &[FamilyACacheSpec] = &[
+    FamilyACacheSpec {
+        impl_anchor: "impl ImportedRegistryDb {",
+        peek_sig: Some("pub(crate) fn peek("),
+        compute_sig: "pub(crate) fn get_or_compute_admit<F>(",
+    },
+    FamilyACacheSpec {
+        impl_anchor: "impl DeclarationLookupDb {",
+        peek_sig: None,
+        compute_sig: "pub(crate) fn get_or_compute<F>(",
+    },
+    FamilyACacheSpec {
+        impl_anchor: "impl ResolvabilityDb {",
+        peek_sig: None,
+        compute_sig: "pub(crate) fn get_or_compute<F>(",
+    },
+    FamilyACacheSpec {
+        impl_anchor: "impl OwnerCollectionDb {",
+        peek_sig: None,
+        compute_sig: "pub(crate) fn get_or_compute<F>(",
+    },
+    FamilyACacheSpec {
+        impl_anchor: "impl ShapeCacheDb {",
+        peek_sig: Some("pub(crate) fn peek("),
+        compute_sig: "pub(crate) fn get_or_compute<F>(",
+    },
 ];
+
+const STRICT_VALIDATOR: &str = "validate_fact_signature_with_self_roots(";
+const BUBBLE: &str = "bubble_fact_signature(ctx,";
 
 /// Extract the primary `impl XDb { … }` window — from `anchor` up to
 /// the next top-level `\nimpl ` or `\npub struct ` (whichever comes
 /// first), exclusive. The validation/bubble call sites for a cache all
 /// live in its primary impl block, so this window is the exact scope to
-/// assert structurally over.
+/// resolve the cache's methods within.
 fn extract_db_impl_window<'a>(src: &'a str, anchor: &str) -> &'a str {
     let start = src
         .find(anchor)
@@ -164,47 +214,113 @@ fn extract_db_impl_window<'a>(src: &'a str, anchor: &str) -> &'a str {
     &body[..anchor.len() + rel_end]
 }
 
-/// The legacy `ctx.validate_dep_signature` warm-hit validator is no
-/// longer called for Family A entries. Every live Family A
-/// `fact_dep_signature` cache validates strictly through
-/// `validate_fact_signature_with_self_roots` — the strict self-root
-/// validator: the entry's keyed canonical(s) are passed as the
+/// Byte index (within `haystack`) of the start of the `n`-th (1-based)
+/// occurrence of `needle`, or `None` if there are fewer than `n`.
+fn nth_occurrence(haystack: &str, needle: &str, n: usize) -> Option<usize> {
+    haystack.match_indices(needle).nth(n - 1).map(|(idx, _)| idx)
+}
+
+/// Assert that `region` (a named code site) carries EXACTLY one strict
+/// validator and EXACTLY one bubble — a binary present/absent check at
+/// that single site, not an aggregate `>= N` count. `site` and `cache`
+/// name the failing site in the panic.
+fn assert_one_validator_one_bubble(region: &str, site: &str, cache: &str) {
+    let validators = region.matches(STRICT_VALIDATOR).count();
+    assert_eq!(
+        validators, 1,
+        "{cache} {site} MUST carry EXACTLY one `{STRICT_VALIDATOR}...)` — dropping it leaves a \
+         stale-serve hole, duplicating it signals a mis-split. Observed {validators}. Region:\n{region}"
+    );
+    let bubbles = region.matches(BUBBLE).count();
+    assert_eq!(
+        bubbles, 1,
+        "{cache} {site} MUST carry EXACTLY one `{BUBBLE} ...)` so outer tracers see the inner \
+         observation set at this site. Observed {bubbles}. Region:\n{region}"
+    );
+}
+
+/// Every live Family A `fact_dep_signature` cache validates strictly
+/// through `validate_fact_signature_with_self_roots` — the strict
+/// self-root validator: the entry's keyed canonical(s) are passed as the
 /// self-root set, so the leading self-root `FileWholeHash` is validated
-/// strictly (a same-canonical edit, or a keyed canonical untracked by
-/// the live store view, rejects the entry) while cross-file dependency
-/// facts keep lazy permissiveness.
+/// strictly (a same-canonical edit, or a keyed canonical untracked by the
+/// live store view, rejects the entry) while cross-file dependency facts
+/// keep lazy permissiveness. The legacy lazy `validate_fact_signature`
+/// warm-hit validator is forbidden.
 ///
-/// Structural per-cache guard (not a magic global count): each live
-/// cache's primary `impl XDb` block MUST carry BOTH a warm-hit
-/// validator AND a post-compute revalidator (≥ 2 strict validations),
-/// AND BOTH a warm-hit bubble AND a cold-compute bubble (≥ 2 bubbles).
-/// Removing either site from any single cache flips this guard RED;
-/// adding a stray validator to an unrelated scope cannot mask a cache
-/// that dropped one. The lazy validator is forbidden globally.
+/// BINARY per-named-SITE guard (NOT an aggregate `>= N` count): each
+/// cache's required sites are derived structurally from the source and
+/// asserted individually, so dropping ANY single live site flips the
+/// guard RED — and a stray validator added to an unrelated cache/scope
+/// can never mask a cache that dropped one (the windows are
+/// method/closure-scoped, never file-wide). The required sites are:
+///
+/// - `peek` (only `ImportedRegistryDb` / `ShapeCacheDb`): exactly one
+///   warm-read validator + one bubble in the brace-balanced `peek` body.
+/// - `get_or_compute`(`_admit`) **warm-hit region** — the method body up
+///   to the cold-return bubble (the 2nd bubble token): exactly one
+///   warm-hit validator + one warm-hit bubble.
+/// - `get_or_compute`(`_admit`) **post-compute region** — from the
+///   cold-return bubble to the method end: exactly one post-compute
+///   revalidator + one cold-return bubble.
+///
+/// Because the two `get_or_compute` validators live in two disjoint
+/// regions partitioned at the cold-return bubble, dropping the warm-hit
+/// validator (warm region → 0) is detected INDEPENDENTLY of the
+/// post-compute revalidator (and vice versa); a drop-one-add-one swap
+/// within the method cannot keep the guard green.
 #[test]
 fn family_a_warm_hit_uses_fact_validation() {
     let src = read_session_source("component_meta_caches.rs");
 
-    for anchor in FAMILY_A_DB_IMPLS {
-        let window = extract_db_impl_window(&src, anchor);
+    for spec in FAMILY_A_CACHES {
+        let cache = spec.impl_anchor;
+        let window = extract_db_impl_window(&src, cache);
 
-        let strict_count = window
-            .matches("validate_fact_signature_with_self_roots(")
-            .count();
-        assert!(
-            strict_count >= 2,
-            "{anchor} MUST carry at least 2 `validate_fact_signature_with_self_roots(...)` \
-             sites — the warm-hit predicate AND the post-compute revalidator. A cache that \
-             validates on warm read but not after cold compute (or vice versa) leaves a \
-             stale-serve hole. Observed {strict_count}."
-        );
+        // --- Site 1 (conditional): the compute-once `peek` entry point.
+        // Present only on the two caches that expose it. Exactly one
+        // warm-read validator + one bubble.
+        if let Some(peek_sig) = spec.peek_sig {
+            let peek_body = extract_fn_body(window, peek_sig);
+            assert_one_validator_one_bubble(peek_body, "peek", cache);
+        } else {
+            assert!(
+                !window.contains("pub(crate) fn peek("),
+                "{cache} unexpectedly grew a `peek` method — update FAMILY_A_CACHES to assert its \
+                 warm-read validator + bubble site instead of silently ignoring it."
+            );
+        }
 
-        let bubble_count = window.matches("bubble_fact_signature(ctx,").count();
-        assert!(
-            bubble_count >= 2,
-            "{anchor} MUST carry at least 2 `bubble_fact_signature(ctx, ...)` sites — the \
-             warm-hit bubble AND the cold-compute bubble — so outer tracers see the inner \
-             observation set on both the hit and the miss path. Observed {bubble_count}."
+        // The cooperative cold-compute method body. It carries the
+        // warm-hit closure, the cold-return closure, and the post-compute
+        // revalidator closure (the `compute` builder carries neither
+        // token). Partition the body at the cold-return bubble — the 2nd
+        // `bubble_fact_signature(ctx, ...)` occurrence — so the warm-hit
+        // validator (before) and post-compute revalidator (after) land in
+        // disjoint regions.
+        let compute_body = extract_fn_body(window, spec.compute_sig);
+        let split = nth_occurrence(compute_body, BUBBLE, 2).unwrap_or_else(|| {
+            panic!(
+                "{cache} `{}` MUST carry two `{BUBBLE} ...)` sites (warm-hit + cold-return); fewer \
+                 than two means a bubble site was dropped. Body:\n{compute_body}",
+                spec.compute_sig
+            )
+        });
+        let (warm_region, post_region) = compute_body.split_at(split);
+
+        // --- Site 2: the warm-hit closure (validator + bubble before the
+        // cold-return bubble). The `compute` builder in this region
+        // carries neither token, so the region holds exactly the warm-hit
+        // pair.
+        assert_one_validator_one_bubble(warm_region, "get_or_compute warm-hit closure", cache);
+
+        // --- Sites 3 + 4: the cold-return bubble + the post-compute
+        // revalidator. Exactly one validator (revalidator) + one bubble
+        // (cold-return) from the split point onward.
+        assert_one_validator_one_bubble(
+            post_region,
+            "get_or_compute cold-return bubble + post-compute revalidator",
+            cache,
         );
 
         // The lazy `validate_fact_signature(ctx, …)` is forbidden inside
@@ -213,7 +329,7 @@ fn family_a_warm_hit_uses_fact_validation() {
         // entries. Only the strict self-root variant is permitted.
         assert!(
             !window.contains("validate_fact_signature(ctx,"),
-            "{anchor} MUST NOT call the lazy `validate_fact_signature(ctx, ...)` — the lazy \
+            "{cache} MUST NOT call the lazy `validate_fact_signature(ctx, ...)` — the lazy \
              validator routes a self-root FileWholeHash through the untracked-accept rule \
              and serves stale entries. Use `validate_fact_signature_with_self_roots` with \
              the entry's keyed canonical(s) as the self-root set."
