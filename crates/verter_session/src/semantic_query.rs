@@ -652,6 +652,24 @@ pub enum ReductionDemand {
     /// substitution, cycle BFS). Operators carrier-stop regardless of
     /// `mode`.
     StructuralTransit,
+    /// Vue macro object-surface publication (`defineProps` / `defineSlots`).
+    ///
+    /// Distinct from [`Self::Published`] in EXACTLY ONE behavioural axis:
+    /// the empty-path Shallow terminal-surface synthesis enumerates the
+    /// **UNION of object-arm members** for a `Union` root (a prop / slot
+    /// present in ANY arm is part of the component macro surface — the Vue
+    /// macro convention), instead of the TS property-access **intersection**
+    /// of common members that ordinary `ProjectPath` / `keyof` produces.
+    /// Operators reduce exactly like `Published` ([`may_reduce_operator`]),
+    /// so generic carriers, `Pick`/`Omit`, and mapped slots materialise
+    /// identically — only the union-arm merge rule differs.
+    ///
+    /// Cache-keyed DISTINCTLY from `Published` (a dedicated `ModeSlot`) so a
+    /// macro object-surface read and an ordinary `Published` path read of the
+    /// SAME `(base, path)` never collide on one memo cell. Ordinary
+    /// `ProjectPath` / `keyof` keep `Published` (intersection is correct
+    /// there).
+    MacroObjectSurface,
 }
 
 /// Surface-provenance axis — codex BINDING design.
@@ -804,6 +822,35 @@ impl ProjectionReductionContext {
             provenance: SurfaceProvenanceContext::MacroTypeArgOwnBody,
             merge_role: MemberMergeRole::Authored,
         }
+    }
+
+    /// Construct a Vue macro object-surface publication context
+    /// (`defineProps` / `defineSlots`).
+    ///
+    /// [`ReductionDemand::MacroObjectSurface`] enumerates the UNION of
+    /// object-arm members at the empty-path Shallow terminal surface (the
+    /// Vue macro convention) while reducing operators exactly like
+    /// `Published`. `provenance` carries the supplied macro own-body /
+    /// structural axis (props use `MacroTypeArgOwnBody`; slots / emits use
+    /// `Structural`).
+    pub const fn macro_object_surface(
+        mode: ProjectionMode,
+        provenance: SurfaceProvenanceContext,
+    ) -> Self {
+        Self {
+            mode,
+            demand: ReductionDemand::MacroObjectSurface,
+            provenance,
+            merge_role: MemberMergeRole::Authored,
+        }
+    }
+
+    /// Whether this context publishes a Vue macro object-surface —
+    /// the single predicate the union-arm merge consults to choose
+    /// union-of-members over the common-member intersection.
+    #[must_use]
+    pub const fn is_macro_object_surface(self) -> bool {
+        matches!(self.demand, ReductionDemand::MacroObjectSurface)
     }
 
     /// Construct a `StructuralTransit` context — used by the relation
@@ -964,7 +1011,13 @@ impl ProjectionReductionContext {
 /// follows the same code path as the builtin `Pick<T,K>` and obeys
 /// the SAME predicate.
 pub const fn may_reduce_operator(ctx: ProjectionReductionContext) -> bool {
-    matches!(ctx.demand, ReductionDemand::Published)
+    // `MacroObjectSurface` is a publication demand: operators reduce
+    // exactly like `Published`. The two demands differ ONLY in the
+    // union-arm merge rule at the empty-path Shallow terminal surface.
+    matches!(
+        ctx.demand,
+        ReductionDemand::Published | ReductionDemand::MacroObjectSurface
+    )
 }
 
 /// One hop in a navigation path. Used by [`TypeNavigator::choose_next_hop`]

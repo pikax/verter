@@ -24,7 +24,8 @@ pub(crate) use field_types::{
     materialize_component_meta_type_expr_until_stable,
     materialize_component_meta_type_expr_until_stable_full,
     reduce_member_value_graph_native_with_context, type_expr_has_package_backed_object_like_root,
-    type_expr_has_package_backed_object_like_root_with_fence, type_expr_materializer_context,
+    type_expr_has_package_backed_object_like_root_with_fence,
+    type_expr_materialize_reduction_context, type_expr_materializer_context,
 };
 
 pub(crate) use macro_shapes::{

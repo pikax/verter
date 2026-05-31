@@ -51,7 +51,7 @@ use verter_type_expr::{LiteralValue, TypeExpr, TypeExprScope};
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::surface_projector::render_type_expr_display;
-use crate::semantic_query::{ProjectionMode, ProjectionReductionContext};
+use crate::semantic_query::{ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext};
 use crate::typeinfo::adapters::vue::store::{VueMacroDtoKey, VueMacroDtos};
 use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurface, TypeInfoSurfaceMember};
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
@@ -177,13 +177,22 @@ impl VerterHost {
     /// `required` / `has_default` DOWNSTREAM at the component-meta PropAnalysis
     /// layer, not on this surface.
     ///
-    /// **Provenance:** the props macro (`DefineProps`) lowers its type argument
-    /// under [`ProjectionReductionContext::published_macro_type_arg_body`] so
-    /// the type-argument's OWN-body members surface with
+    /// **Demand + provenance:** macro-object DTO synthesis lowers the type
+    /// argument under the Vue
+    /// [`ProjectionReductionContext::macro_object_surface`] demand
+    /// ([`crate::semantic_query::ReductionDemand::MacroObjectSurface`]), NOT
+    /// ordinary `Published`. For a `Union`-rooted type argument the macro
+    /// surface is the UNION of object-arm members (a member present in ANY arm
+    /// is part of the component macro surface — the Vue macro convention),
+    /// whereas ordinary `Published(Shallow)` would synthesise the TS
+    /// property-access INTERSECTION of common members and drop every
+    /// branch-only prop / event / slot. The props macro (`DefineProps`) keeps
+    /// the [`SurfaceProvenanceContext::MacroTypeArgOwnBody`] provenance so the
+    /// type-argument's OWN-body members surface with
     /// `declared_in_macro_type_arg = true` and heritage-reached members stay
-    /// `false`. Structural macros (`DefineEmits` / `DefineSlots`) lower under
-    /// the structural `published` context (`declared_in_macro_type_arg` is a
-    /// props-axis concern).
+    /// `false`; structural macros (`DefineEmits` / `DefineSlots`) lower under
+    /// [`SurfaceProvenanceContext::Structural`] (`declared_in_macro_type_arg`
+    /// is a props-axis concern).
     #[must_use]
     pub fn resolve_vue_macro_surface(
         &self,
@@ -239,10 +248,14 @@ impl VerterHost {
         // returned its empty surface above. `DefineProps` requests the macro-T
         // own-body provenance; emits / slots are structural.
         let terminal_context = match request.macro_kind {
-            AnalyzedMacroKind::DefineProps => {
-                ProjectionReductionContext::published_macro_type_arg_body(ProjectionMode::Shallow)
-            }
-            _ => ProjectionReductionContext::published(ProjectionMode::Shallow),
+            AnalyzedMacroKind::DefineProps => ProjectionReductionContext::macro_object_surface(
+                ProjectionMode::Shallow,
+                SurfaceProvenanceContext::MacroTypeArgOwnBody,
+            ),
+            _ => ProjectionReductionContext::macro_object_surface(
+                ProjectionMode::Shallow,
+                SurfaceProvenanceContext::Structural,
+            ),
         };
 
         let store_view = self.resolver_store_view();

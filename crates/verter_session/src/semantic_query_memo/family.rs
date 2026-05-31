@@ -240,6 +240,16 @@ pub(super) enum ModeSlot {
     TransitNavigate,
     TransitShallow,
     TransitExpanded,
+    /// Vue macro object-surface publication slot.
+    /// `ReductionDemand::MacroObjectSurface` at the Shallow macro
+    /// publication boundary lands here — the empty-path Shallow surface
+    /// enumerates the UNION of object-arm members (Vue macro convention)
+    /// rather than the common-member intersection. Distinct from the
+    /// `Shallow` publication slot so a macro object-surface read and an
+    /// ordinary `Published(Shallow)` read of the same node never collide.
+    /// Does NOT backfill / is NOT backfilled by any other slot (the union
+    /// surface is a different evaluation).
+    MacroSurfaceShallow,
 }
 
 /// Per-slot candidate cap.
@@ -307,6 +317,9 @@ pub(super) struct FamilySlots {
     transit_navigate: CandidateList,
     transit_shallow: CandidateList,
     transit_expanded: CandidateList,
+    /// Vue macro object-surface publication slot. Independent of
+    /// the publication + transit slots; no backfill in either direction.
+    macro_surface_shallow: CandidateList,
 }
 
 /// Discriminant identity used for in-place replacement on
@@ -336,6 +349,7 @@ impl FamilySlots {
             ModeSlot::TransitNavigate => &self.transit_navigate,
             ModeSlot::TransitShallow => &self.transit_shallow,
             ModeSlot::TransitExpanded => &self.transit_expanded,
+            ModeSlot::MacroSurfaceShallow => &self.macro_surface_shallow,
         }
     }
 
@@ -351,6 +365,7 @@ impl FamilySlots {
             ModeSlot::TransitNavigate => &mut self.transit_navigate,
             ModeSlot::TransitShallow => &mut self.transit_shallow,
             ModeSlot::TransitExpanded => &mut self.transit_expanded,
+            ModeSlot::MacroSurfaceShallow => &mut self.macro_surface_shallow,
         }
     }
 
@@ -507,6 +522,7 @@ impl FamilySlots {
             &self.transit_navigate,
             &self.transit_shallow,
             &self.transit_expanded,
+            &self.macro_surface_shallow,
         ]
         .iter()
         .filter(|list| !list.is_empty())
@@ -561,6 +577,9 @@ impl FamilySlots {
         }
         if let Some(e) = self.transit_expanded.first() {
             out.push(("transit_expanded", e));
+        }
+        if let Some(e) = self.macro_surface_shallow.first() {
+            out.push(("macro_surface_shallow", e));
         }
         out
     }
@@ -625,6 +644,9 @@ impl FamilySlots {
         for e in &self.transit_expanded {
             out.push((ModeSlot::TransitExpanded, e));
         }
+        for e in &self.macro_surface_shallow {
+            out.push((ModeSlot::MacroSurfaceShallow, e));
+        }
         out
     }
 }
@@ -669,6 +691,10 @@ pub(super) fn backfill_targets(slot: ModeSlot) -> &'static [ModeSlot] {
             ModeSlot::TransitNavigate,
             ModeSlot::TransitIdentity,
         ],
+        // The macro object-surface slot is an independent evaluation (union
+        // of arm members) — it does NOT backfill the publication / transit
+        // slots and is not backfilled by them.
+        ModeSlot::MacroSurfaceShallow => &[],
     }
 }
 
@@ -699,6 +725,14 @@ pub(super) fn context_to_slot(ctx: ProjectionReductionContext) -> ModeSlot {
             // outside the reduction-demand axis.
             ProjectionMode::Skeleton => ModeSlot::Skeleton,
         },
+        // Vue macro object-surface publication. The macro
+        // publication boundary always runs at Shallow mode (the
+        // empty-path terminal-surface synthesis is where the union-arm
+        // rule applies), so all modes land in the dedicated
+        // `MacroSurfaceShallow` slot — distinct from the `Published`
+        // slots so the union surface never collides with an ordinary
+        // `Published` read of the same node.
+        ReductionDemand::MacroObjectSurface => ModeSlot::MacroSurfaceShallow,
     }
 }
 
@@ -884,4 +918,5 @@ pub(super) const ALL_MODE_SLOTS: &[ModeSlot] = &[
     ModeSlot::TransitNavigate,
     ModeSlot::TransitShallow,
     ModeSlot::TransitExpanded,
+    ModeSlot::MacroSurfaceShallow,
 ];

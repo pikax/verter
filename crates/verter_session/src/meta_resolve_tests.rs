@@ -3816,6 +3816,85 @@ defineProps<Types.Props>()
     );
 }
 
+/// Re-exported JSX-intrinsic attribute shape resolves through the
+/// dispatch surface alone — no prepared-decl walker fallback.
+///
+/// The JSX-intrinsic consumer (`host_manage/intrinsic_projection.rs`)
+/// resolves the intrinsic attribute shapes (`HTMLAttributes`, the
+/// per-tag bodies, and the re-exported `JSX.IntrinsicElements` surface)
+/// through [`project_type_surface_expr_via_host_threaded`]. That bridge
+/// carries NO `.or_else(cached_prepared_root_surface)` walker fallback,
+/// so the intrinsic-shape symbol MUST resolve through the dispatch
+/// surface alone.
+///
+/// Discrimination: a re-exported intrinsic attribute interface
+/// (`HTMLAttributes`, modelled on Vue's `vue/jsx-runtime` shape, reached
+/// through a barrel re-export) is projected through the bridge by its
+/// plain symbol name; the projected surface MUST carry the declared
+/// attribute members. The dispatch path is the sole resolver and this
+/// test fires loudly if dispatch cannot resolve the re-exported
+/// intrinsic shape. The fix for any miss is in dispatch/typeinfo surface
+/// reading — never a restored walker fallback.
+#[test]
+fn reexported_intrinsic_shape_resolves_via_dispatch_only() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/jsx_dom.ts",
+            r#"
+export interface HTMLAttributes {
+  id?: string
+  class?: string
+  role?: string
+}
+"#,
+        )
+        .unwrap();
+    // Barrel re-export — the JSX-intrinsic consumer reaches the attribute
+    // shape through `vue/jsx`'s re-export chain, so the bridge must
+    // resolve a re-exported symbol (not just an owner-local one) via
+    // dispatch.
+    project
+        .upsert_base(
+            "/jsx_runtime.ts",
+            r#"export type { HTMLAttributes } from './jsx_dom'
+"#,
+        )
+        .unwrap();
+    let _ = project
+        .host()
+        .ensure_indexed_ready("/jsx_dom.ts")
+        .expect("jsx dom should seed module facts");
+    let _ = project
+        .host()
+        .ensure_indexed_ready("/jsx_runtime.ts")
+        .expect("jsx runtime barrel should seed module facts");
+
+    let _store_view = project.host().resolver_store_view();
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(project.host());
+    let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/jsx_runtime.ts",
+        "HTMLAttributes",
+    )
+    .expect(
+        "the re-exported intrinsic attribute shape `HTMLAttributes` \
+         MUST resolve through the dispatch surface (the JSX-intrinsic consumer \
+         resolves intrinsic shapes through this bridge). If this returns None, \
+         the fix is in dispatch/typeinfo \
+         re-export surface reading — NOT a restored walker fallback.",
+    );
+    let projected_debug = format!("{projected:?}");
+    assert!(
+        projected_debug.contains("id")
+            && projected_debug.contains("class")
+            && projected_debug.contains("role"),
+        "the projected re-exported `HTMLAttributes` surface MUST \
+         enumerate the declared attribute members (`id` / `class` / `role`) \
+         through dispatch. Got: {projected_debug}"
+    );
+}
+
 #[test]
 fn imported_typeof_member_paths_reach_final_component_meta() {
     let project = make_project();
@@ -7191,7 +7270,19 @@ withDefaults(defineProps<Props>(), {
     prop_names.sort_unstable();
     assert_eq!(
         prop_names,
-        vec!["editor", "layout", "options", "pluginKey"],
+        // P2a: `vue_macro_dtos` synthesises the macro-object surface under the
+        // Vue `MacroObjectSurface` demand, which enumerates the UNION of the
+        // `Props = (BaseProps & Partial<Omit<BubbleMenuPluginProps,'editor'>> &
+        // {layout:'bubble'}) | (… FloatingMenuPluginProps …)` arms. `shouldShow`
+        // is a `BubbleMenuPluginProps` arm member, so it is part of the macro
+        // surface (a member present in ANY arm is a published prop — the Vue
+        // convention), alongside the pre-seeded authoritative `editor` /
+        // `layout` / `pluginKey` / `options`. Pre-P2a the ordinary
+        // `Published(Shallow)` synthesis produced only the property-access
+        // INTERSECTION and dropped `shouldShow`. The end-to-end union behaviour
+        // is locked by
+        // `meta_tests::get_component_meta_editor_toolbar_union_keeps_base_and_plugin_props`.
+        vec!["editor", "layout", "options", "pluginKey", "shouldShow"],
         "synthesized defineProps shape should reuse the authoritative populated expanded surface, got {prop_names:?}"
     );
 }
@@ -8762,7 +8853,7 @@ defineProps<Props<T>>()
         name: StdArc::from("Props"),
         type_arguments: StdArc::from(vec![TypeExpr::Ref {
             name: StdArc::from("T"),
-            type_arguments: StdArc::from(Vec::<TypeExpr>::new()),
+            type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new()),
         }]),
     };
     let lowered = dispatch
@@ -9262,7 +9353,7 @@ defineProps<Wrapper<Inner>>()
         name: StdArc::from("Wrapper"),
         type_arguments: StdArc::from(vec![TypeExpr::Ref {
             name: StdArc::from("Inner"),
-            type_arguments: StdArc::from(Vec::<TypeExpr>::new()),
+            type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new()),
         }]),
     };
 
@@ -10055,6 +10146,565 @@ defineEmits<Emits>()
         )),
         "payload union should contain number, got {:?}",
         members,
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Transparent-carrier alias-reached-member provenance (dispatch path).
+//
+// A member reached ONLY through a transparent alias / instantiation shell
+// (`NoInfer<Base>`, a utility identity wrapper) whose own body has no
+// declared members is NOT `declared_in_macro_type_arg`. The bit applies
+// only to members directly written in the macro type-argument's own object
+// body (or a directly-referenced declaration's own body when that decl IS
+// the macro argument).
+//
+// These assert the DISPATCH/projector surface directly via
+// `evaluate_types().props` (the `project_props` → shared-resolver path that
+// stamps `declared_in_macro_type_arg` from the dispatch surface member),
+// NOT the materializer-fed `define_props` mirror.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Transparent-carrier discriminating: `defineProps<NoInfer<Base>>()` —
+/// `Base`'s members are reached THROUGH the transparent `NoInfer`
+/// identity carrier, so the dispatch surface MUST stamp
+/// `declared_in_macro_type_arg = false`.
+///
+/// The transparent-carrier crossing downgrades provenance to
+/// `Structural`: propagating `MacroTypeArgOwnBody` through the
+/// `Alias(Base)` carrier and stamping Base's members `true` would be the
+/// bug this guards against.
+#[test]
+fn dispatch_no_infer_alias_member_provenance_is_false() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"export interface Base {
+  label?: string
+  count?: number
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Base } from './base'
+defineProps<NoInfer<Base>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session
+        .evaluate_types("/src/App.vue")
+        .expect("evaluate_types must resolve")
+        .expect("some evaluated types");
+
+    // Sanity: the members are present (the NoInfer identity carrier
+    // resolved through to Base) — discriminates "dropped/never" from the
+    // provenance question.
+    let label = evaluated
+        .props
+        .iter()
+        .find(|p| p.name == "label")
+        .expect("NoInfer<Base> must publish `label` through the dispatch surface");
+    let count = evaluated
+        .props
+        .iter()
+        .find(|p| p.name == "count")
+        .expect("NoInfer<Base> must publish `count` through the dispatch surface");
+
+    assert!(
+        !label.declared_in_macro_type_arg && !count.declared_in_macro_type_arg,
+        "members reached THROUGH the transparent `NoInfer<Base>` carrier \
+         MUST carry `declared_in_macro_type_arg == false` on the dispatch surface \
+         (the carrier's own body has no declared members). Got label={}, count={}",
+        label.declared_in_macro_type_arg,
+        count.declared_in_macro_type_arg,
+    );
+}
+
+/// Transparent-carrier discriminating (alias-shell): `export type Props =
+/// NoInfer<Base>; defineProps<Props>()` — the macro arg is a named alias
+/// whose body is the `NoInfer<Base>` instantiation (no direct own-body
+/// members). All members are reached through the transparent alias +
+/// NoInfer hops → `false`.
+#[test]
+fn dispatch_no_infer_alias_shell_member_provenance_is_false() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"export interface Base {
+  label?: string
+  count?: number
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Base } from './base'
+export type Props = NoInfer<Base>
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session
+        .evaluate_types("/src/App.vue")
+        .expect("evaluate_types must resolve")
+        .expect("some evaluated types");
+    let stamped_true: Vec<&str> = evaluated
+        .props
+        .iter()
+        .filter(|p| p.declared_in_macro_type_arg)
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(
+        stamped_true.is_empty(),
+        "alias-shell `NoInfer<Base>` members are reached through the \
+         transparent alias + NoInfer carriers (the alias `Props`'s own body has \
+         NO direct members), so NONE may carry `declared_in_macro_type_arg == \
+         true` on the dispatch surface. Mis-stamped: {stamped_true:?}",
+    );
+}
+
+/// Transparent-carrier GUARD (must stay correct): a DIRECTLY-referenced
+/// object alias that IS the macro argument keeps
+/// `declared_in_macro_type_arg = true` for its own-body members. The
+/// transparent-carrier downgrade MUST NOT regress this — a direct object
+/// alias is NOT a transparent identity carrier.
+#[test]
+fn dispatch_direct_object_alias_member_provenance_stays_true() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type DirectProps = { title: string; count?: number }
+defineProps<DirectProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session
+        .evaluate_types("/src/App.vue")
+        .expect("evaluate_types must resolve")
+        .expect("some evaluated types");
+    let title = evaluated
+        .props
+        .iter()
+        .find(|p| p.name == "title")
+        .expect("direct alias must publish `title`");
+    assert!(
+        title.declared_in_macro_type_arg,
+        "transparent-carrier GUARD — a DIRECT object alias that IS the macro \
+         argument keeps its \
+         own-body members `declared_in_macro_type_arg == true` (it is not a \
+         transparent identity carrier). The downgrade MUST NOT regress this. Got \
+         title.declared_in_macro_type_arg=false",
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Vue macro object-surface UNION enumeration.
+//
+// `defineProps<FixedProps | BubbleProps>()` publishes the UNION of the
+// arm members (a prop present in ANY arm is part of the macro surface —
+// the Vue macro convention), NOT the TS property-access INTERSECTION of
+// common members. The dispatch macro object-surface demand
+// (`ReductionDemand::MacroObjectSurface`) selects the union-arm rule at
+// the empty-path Shallow terminal surface, cache-keyed distinctly from
+// ordinary `ProjectPath` (which keeps the intersection).
+//
+// Asserts the DISPATCH projector surface via `evaluate_types().props`.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+fn dispatch_macro_props_union_enumerates_all_arm_members() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type FixedProps = { kind: 'fixed'; size: number }
+type BubbleProps = { kind: 'bubble'; color: string }
+defineProps<FixedProps | BubbleProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session
+        .evaluate_types("/src/App.vue")
+        .expect("evaluate_types must resolve")
+        .expect("some evaluated types");
+    let names: Vec<&str> = evaluated.props.iter().map(|p| p.name.as_str()).collect();
+
+    // Common member present in BOTH arms.
+    assert!(
+        names.contains(&"kind"),
+        "common union member `kind` must be on the dispatch macro surface, \
+         got: {names:?}"
+    );
+    // Branch-specific members present in only ONE arm — the union
+    // convention keeps them (the intersection rule would drop them).
+    for required in ["size", "color"] {
+        assert!(
+            names.contains(&required),
+            "the dispatch macro object-surface MUST enumerate the UNION of \
+             object-arm members; branch-specific `{required}` (present in only one \
+             arm) must survive. The intersection rule would drop it. Got: {names:?}"
+        );
+    }
+
+    // Requiredness: a member absent from any arm becomes optional; a
+    // member present in all arms stays required.
+    let size = evaluated.props.iter().find(|p| p.name == "size").unwrap();
+    let kind = evaluated.props.iter().find(|p| p.name == "kind").unwrap();
+    assert!(
+        size.optional,
+        "`size` is declared in only one arm, so it MUST be optional on the \
+         merged macro surface. Got optional={}",
+        size.optional
+    );
+    assert!(
+        !kind.optional,
+        "`kind` is declared in BOTH arms (and required in each), so it MUST \
+         stay required on the merged macro surface. Got optional={}",
+        kind.optional
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Aliased conditional-emits carrier walk (dispatch).
+//
+// `defineEmits<ConditionalEmits>()` where
+// `type ConditionalEmits = Mode extends 'editor' ? EditorEmits : ViewerEmits`
+// lowers (Navigate) to a terminal DeclRef carrier, NOT the Conditional
+// directly. The emits branch-merge (`resolve_payload_surface_with_scope`,
+// EmitClassMacroObject) only fired when the payload node was DIRECTLY a
+// Conditional, so a NAMED conditional-emit alias missed the merge and the
+// inherited emit set collapsed. The carrier walk
+// (`resolve_emit_payload_to_conditional_root`) follows DeclRef /
+// DeclPlaceholder carriers to the Conditional root before the branch
+// projection.
+//
+// This drives `resolve_payload_surface_with_scope` DIRECTLY with the
+// aliased-conditional payload node (the named-alias DeclRef carrier the
+// macro projector resolves it to under Navigate), asserting the shared
+// branch-merge surface enumerates BOTH branches' events. Driving the
+// branch-merge in isolation keeps the test discriminating for the carrier
+// walk specifically, independent of the upstream macro-payload-resolution
+// path's handling of unbound component generics.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+fn dispatch_aliased_conditional_emits_branch_merge() {
+    use crate::meta_resolve::projectors::{
+        resolve_payload_surface_with_scope, PayloadSurfaceScope,
+    };
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeData};
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts" generic="Mode extends 'editor' | 'viewer'">
+type EditorEmits = { itemEdited: [id: number] }
+type ViewerEmits = { itemViewed: [id: number] }
+type ConditionalEmits = Mode extends 'editor' ? EditorEmits : ViewerEmits
+defineEmits<ConditionalEmits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    // Seed the canonical state through the public consumer path.
+    let _ = session.evaluate_types("/src/App.vue").unwrap();
+    let host = project.host();
+
+    let scope = "/src/App.vue";
+    let dispatch = ProjectSemanticDispatch::new(host);
+
+    // The macro projector resolves `defineEmits<ConditionalEmits>()`'s type
+    // argument in Navigate mode, which yields a terminal `DeclRef` carrier
+    // for the NAMED conditional alias (NOT the `Conditional` node). Lower
+    // the alias reference the same way to obtain that carrier payload node.
+    let conditional_ref = TypeExpr::Ref {
+        name: std::sync::Arc::from("ConditionalEmits"),
+        type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
+    };
+    let payload_node = dispatch
+        .lower_type_expr_in_scope_with_mode(scope, &conditional_ref, ProjectionMode::Navigate)
+        .expect("ConditionalEmits must lower to a Navigate carrier node");
+
+    // Pre-condition: the payload is a carrier (NOT a bare Conditional),
+    // exactly the shape that defeated the direct-only branch-merge.
+    assert!(
+        !matches!(
+            crate::project_semantic_dispatch::node_data_for(host, payload_node).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "fixture precondition: the Navigate-lowered named conditional alias must \
+         be a CARRIER (DeclRef/DeclPlaceholder), not a bare Conditional — that is \
+         the shape the carrier walk must follow"
+    );
+
+    let mut diag_sink = Vec::new();
+    let surface = resolve_payload_surface_with_scope(
+        &dispatch,
+        payload_node,
+        0,
+        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineEmits,
+        PayloadSurfaceScope::EmitClassMacroObject,
+        &mut diag_sink,
+    );
+    let surface = surface.expect(
+        "the emits branch-merge must resolve the aliased-conditional \
+         payload surface by following the DeclRef carrier to the Conditional root",
+    );
+    let members = crate::meta_resolve::projectors::read_surface_members(host, surface);
+    let event_names: Vec<String> = members.iter().map(|m| m.name.to_string()).collect();
+
+    for required in ["itemEdited", "itemViewed"] {
+        assert!(
+            event_names.iter().any(|n| n == required),
+            "the branch-merge surface MUST merge BOTH branches of the \
+             undecided NAMED conditional emit alias `ConditionalEmits` (Mode \
+             extends 'editor' ? EditorEmits : ViewerEmits). Event `{required}` is \
+             missing — the merge must follow the DeclRef carrier to the \
+             Conditional root. Got events: {event_names:?}"
+        );
+    }
+}
+
+// Carrier walk terminates by visited-node IDENTITY, not by a depth cap:
+// a legitimate alias chain LONGER than the retired depth-8 bound must
+// still reach its terminal Conditional emit so the branch-merge fires.
+//
+// `defineEmits<EmitChain0>()` where `EmitChain0 -> EmitChain1 -> ... ->
+// EmitChain11 -> (Mode extends 'editor' ? EditorEmits : ViewerEmits)` is
+// a 12-hop alias chain to the Conditional root. Under the retired
+// `depth > 8` cap the carrier walk returned `None` at hop 9 — BEFORE
+// reaching the Conditional — so the inherited emit set collapsed and the
+// branch-merge silently lost both events. Identity-bounded termination
+// follows every distinct hop (no node repeats), reaches the Conditional,
+// and enumerates BOTH branches' events.
+//
+// Driven directly through `resolve_payload_surface_with_scope` (the
+// EmitClassMacroObject branch-merge entry) with the Navigate-lowered
+// carrier for the chain head — the same shape the macro projector hands
+// the branch-merge. This is discriminating: it FAILS against the
+// depth-8-capped tree (events missing) and PASSES against the
+// identity-bounded tree.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+fn dispatch_long_alias_chain_to_conditional_emits_branch_merge() {
+    use crate::meta_resolve::projectors::{
+        resolve_payload_surface_with_scope, PayloadSurfaceScope,
+    };
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeData};
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts" generic="Mode extends 'editor' | 'viewer'">
+type EditorEmits = { itemEdited: [id: number] }
+type ViewerEmits = { itemViewed: [id: number] }
+type EmitChain11 = Mode extends 'editor' ? EditorEmits : ViewerEmits
+type EmitChain10 = EmitChain11
+type EmitChain9 = EmitChain10
+type EmitChain8 = EmitChain9
+type EmitChain7 = EmitChain8
+type EmitChain6 = EmitChain7
+type EmitChain5 = EmitChain6
+type EmitChain4 = EmitChain5
+type EmitChain3 = EmitChain4
+type EmitChain2 = EmitChain3
+type EmitChain1 = EmitChain2
+type EmitChain0 = EmitChain1
+defineEmits<EmitChain0>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let _ = session.evaluate_types("/src/App.vue").unwrap();
+    let host = project.host();
+
+    let scope = "/src/App.vue";
+    let dispatch = ProjectSemanticDispatch::new(host);
+
+    // The macro projector resolves `defineEmits<EmitChain0>()`'s type
+    // argument in Navigate mode → a terminal `DeclRef` carrier for the
+    // NAMED alias chain head (NOT the `Conditional`). Lower the chain head
+    // the same way to obtain that carrier payload node.
+    let chain_head_ref = TypeExpr::Ref {
+        name: std::sync::Arc::from("EmitChain0"),
+        type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
+    };
+    let payload_node = dispatch
+        .lower_type_expr_in_scope_with_mode(scope, &chain_head_ref, ProjectionMode::Navigate)
+        .expect("EmitChain0 must lower to a Navigate carrier node");
+
+    // Precondition: the chain head is a carrier (NOT a bare Conditional),
+    // and the chain is longer than the retired depth-8 bound (12 hops to
+    // the Conditional root).
+    assert!(
+        !matches!(
+            crate::project_semantic_dispatch::node_data_for(host, payload_node).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "fixture precondition: the Navigate-lowered chain head must be a \
+         CARRIER (DeclRef/DeclPlaceholder), not a bare Conditional"
+    );
+
+    let mut diag_sink = Vec::new();
+    let surface = resolve_payload_surface_with_scope(
+        &dispatch,
+        payload_node,
+        0,
+        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineEmits,
+        PayloadSurfaceScope::EmitClassMacroObject,
+        &mut diag_sink,
+    );
+    let surface = surface.expect(
+        "long-chain branch-merge must follow the >8-hop DeclRef carrier chain \
+         to the Conditional root — identity-bounded termination reaches it; the \
+         retired depth-8 cap returned None before hop 12 and lost the merge",
+    );
+    let members = crate::meta_resolve::projectors::read_surface_members(host, surface);
+    let event_names: Vec<String> = members.iter().map(|m| m.name.to_string()).collect();
+
+    for required in ["itemEdited", "itemViewed"] {
+        assert!(
+            event_names.iter().any(|n| n == required),
+            "long-chain branch-merge MUST merge BOTH branches of the undecided \
+             NAMED conditional emit at the END of a 12-hop alias chain. Event \
+             `{required}` is missing — a depth-8 cap truncates the walk before \
+             the Conditional. Got events: {event_names:?}"
+        );
+    }
+}
+
+// Carrier walk terminates a 2-node alias CYCLE by visited-node identity,
+// on the FIRST re-entry — NOT by exhausting the pathological fuse.
+//
+// `type CycA = CycB; type CycB = CycA` used as the emit payload has no
+// Conditional root, so the carrier walk must return `None`. The retired
+// `depth > 8` cap only terminated this cycle by bouncing CycA<->CycB nine
+// times until the bound tripped; the `*resolved != node` filter caught
+// only 1-cycles, never this 2-cycle. Visited-node identity catches the
+// cycle the instant CycA is re-entered (the third call), independent of
+// the fuse.
+//
+// Discriminating proof of identity (not depth): the walk re-enters CycA
+// after visiting exactly {CycA, CycB}, so `visited.len() == 2` and
+// termination occurs at re-entry depth 2 — three orders of magnitude
+// below `EMIT_CARRIER_WALK_FUSE` (1024). If termination depended on the
+// fuse the cycle would bounce up to 1024 hops before returning; instead
+// it returns immediately with a 2-element visited set.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+fn dispatch_mutual_alias_cycle_emits_terminates_by_identity() {
+    use crate::meta_resolve::projectors::{
+        resolve_emit_payload_to_conditional_root, EMIT_CARRIER_WALK_FUSE,
+    };
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeData, SemanticNodeId};
+
+    // Seed the cyclic aliases through the SHALLOW indexing path
+    // (`ensure_indexed_ready`) rather than full SFC evaluation. The
+    // carrier walk only needs the prepared type-decl bodies for CycA/CycB
+    // to exist; full `defineEmits<CycA>()` evaluation of a mutual alias
+    // cycle is a SEPARATE upstream concern and is out of scope here — this
+    // test isolates the carrier walk's own cycle termination.
+    let ws = verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default());
+    ws.inject_file(
+        "/src/cyclic.ts".to_string(),
+        std::sync::Arc::from("export type CycA = CycB\nexport type CycB = CycA\n"),
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        std::sync::Arc::new(ws),
+    );
+    let _seeded = host
+        .ensure_indexed_ready("/src/cyclic.ts")
+        .expect("cyclic alias module must shallow-index");
+
+    let scope = "/src/cyclic.ts";
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // Navigate-lower the cyclic alias head to its DeclRef carrier — the
+    // shape the macro projector hands the carrier walk. Navigate produces
+    // a TERMINAL carrier without recursing into the cyclic body, so this
+    // lowering does not itself diverge.
+    let cyc_ref = TypeExpr::Ref {
+        name: std::sync::Arc::from("CycA"),
+        type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
+    };
+    let payload_node = dispatch
+        .lower_type_expr_in_scope_with_mode(scope, &cyc_ref, ProjectionMode::Navigate)
+        .expect("CycA must lower to a Navigate carrier node");
+
+    // Precondition: the cyclic head is a carrier, not a Conditional.
+    assert!(
+        !matches!(
+            crate::project_semantic_dispatch::node_data_for(&host, payload_node).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "fixture precondition: CycA must Navigate-lower to a CARRIER, not a \
+         bare Conditional"
+    );
+
+    // Drive the carrier walk DIRECTLY so the termination mechanism is
+    // observable. A mutual alias cycle has no Conditional root → `None`.
+    let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+    let result = resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut visited);
+
+    assert!(
+        result.is_none(),
+        "a mutual 2-node alias cycle (type CycA = CycB; type CycB = CycA) used \
+         as an emit payload has no Conditional root — the carrier walk MUST \
+         return None, got {result:?}"
+    );
+
+    // IDENTITY, not the fuse: the walk re-entered CycA after visiting
+    // exactly {CycA, CycB}. Termination happened at re-entry depth 2, far
+    // below the pathological fuse — proof the cycle is caught by node
+    // identity on the first repeat, not by exhausting the depth bound.
+    assert_eq!(
+        visited.len(),
+        2,
+        "the carrier walk must visit exactly the two cycle nodes (CycA, CycB) \
+         then terminate on the FIRST re-entry of CycA — visited set: \
+         {visited:?}"
+    );
+    assert!(
+        visited.len() < EMIT_CARRIER_WALK_FUSE,
+        "cycle termination must occur far below the pathological fuse \
+         ({EMIT_CARRIER_WALK_FUSE}); identity termination visited only \
+         {} node(s)",
+        visited.len()
     );
 }
 

@@ -498,6 +498,23 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         self.context.provenance
     }
 
+    /// Effective surface provenance for a carrier-unwrap dispatch in the
+    /// shallow-surface worklist (transparent-carrier provenance downgrade).
+    ///
+    /// When a `Frame::Visit` carries a `provenance_override` (set when the
+    /// walker crossed a TRANSPARENT carrier — an identity-utility `Alias`
+    /// such as `NoInfer<T>`, or any alias-target indirection — whose own
+    /// body has no declared members), that override wins so members reached
+    /// THROUGH the carrier are NOT stamped `MacroTypeArgOwnBody`. Otherwise
+    /// the walker's constructing context provenance applies.
+    #[inline]
+    fn effective_provenance(
+        &self,
+        provenance_override: Option<crate::semantic_query::SurfaceProvenanceContext>,
+    ) -> crate::semantic_query::SurfaceProvenanceContext {
+        provenance_override.unwrap_or_else(|| self.provenance())
+    }
+
     fn graph(&self) -> &Arc<SemanticGraphStore> {
         self.dispatch.graph()
     }
@@ -1994,6 +2011,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             target: BufferTarget::Root,
             member_role_override: None,
             heritage_overlay_body: false,
+            // Root seed: no transparent-carrier downgrade yet. The walk's
+            // constructing context provenance (`self.provenance()`) applies
+            // until a transparent carrier is crossed.
+            provenance_override: None,
         });
 
         while let Some(frame) = work.pop() {
@@ -2020,6 +2041,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     target,
                     member_role_override,
                     heritage_overlay_body,
+                    provenance_override,
                 } => {
                     tracing::trace!(
                         target: "verter::dispatch::walk",
@@ -2048,6 +2070,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         target,
                         member_role_override,
                         heritage_overlay_body,
+                        provenance_override,
                         &mut work,
                         &mut intersection_buffers,
                         &mut union_buffers,
@@ -2062,6 +2085,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     kind,
                     member_role_override,
                     heritage_overlay,
+                    provenance_override,
                 } => {
                     if arm_index >= arms.len() {
                         // No more arms — the queued FlushIntersection /
@@ -2092,6 +2116,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             kind,
                             member_role_override,
                             heritage_overlay,
+                            provenance_override,
                         });
                     }
                     // Per-arm role override (codex BINDING design): a
@@ -2113,6 +2138,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         target,
                         member_role_override: arm_role_override,
                         heritage_overlay_body: false,
+                        // Arm descent inherits the parent's transparent-carrier
+                        // downgrade: a union/intersection nested under a
+                        // crossed transparent carrier keeps the structural
+                        // provenance for its members.
+                        provenance_override,
                     });
                 }
                 Frame::FlushIntersection {
@@ -2148,7 +2178,18 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 });
                         }
                     }
-                    let merged = merge_union_surfaces(self.graph(), &arm_surfaces);
+                    // Vue macro object-surface publication enumerates
+                    // the UNION of arm members; ordinary `ProjectPath` /
+                    // `keyof` uses the TS common-member intersection. The
+                    // demand axis on the walker's context selects the rule;
+                    // both are cache-keyed in distinct slots
+                    // (`MacroSurfaceShallow` vs the `Shallow` publication
+                    // slot) so they never collide.
+                    let merged = if self.context.is_macro_object_surface() {
+                        merge_union_surfaces_for_macro(self.graph(), &arm_surfaces)
+                    } else {
+                        merge_union_surfaces(self.graph(), &arm_surfaces)
+                    };
                     self.contribute_surface(
                         parent_target,
                         &mut root_contribution,
@@ -2184,6 +2225,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         target: BufferTarget,
         member_role_override: Option<crate::semantic_query::MemberMergeRole>,
         heritage_overlay_body: bool,
+        provenance_override: Option<crate::semantic_query::SurfaceProvenanceContext>,
         work: &mut Vec<Frame>,
         intersection_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
         union_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
@@ -2251,6 +2293,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         // descent stamp reference arms `Heritage`.
                         member_role_override,
                         heritage_overlay: heritage_overlay_body,
+                        provenance_override,
                     });
                 }
             }
@@ -2273,6 +2316,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         kind: ArmKind::Union,
                         member_role_override,
                         heritage_overlay: false,
+                        provenance_override,
                     });
                 }
             }
@@ -2299,7 +2343,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     context: crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     )
-                    .with_provenance(self.provenance()),
+                    .with_provenance(self.effective_provenance(provenance_override)),
                 }) {
                     QueryResult::Value(body) => {
                         // Continue the walk into the materialised body. If the
@@ -2320,6 +2364,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             target,
                             member_role_override,
                             heritage_overlay_body,
+                            provenance_override,
                         });
                     }
                     QueryResult::Recursive(_) => {
@@ -2372,13 +2417,21 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // = true`. A bare `structural_transit_with_mode(Navigate)`
                 // here drops the provenance and the macro-T-root own-body
                 // members all report `false`.
+                //
+                // Transparent-carrier provenance downgrade: when this
+                // DeclPlaceholder was reached THROUGH a transparent carrier
+                // (an identity-utility `Alias` such as `NoInfer<Base>`),
+                // `provenance_override` is
+                // `Some(Structural)` and `effective_provenance` downgrades the
+                // unwrap so `Base`'s own-body members are NOT mis-stamped as
+                // the macro type argument's own body.
                 match self.dispatch.execute(SemanticQueryKey::Instantiate {
                     base: identity.to_decl_key(),
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     context: crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     )
-                    .with_provenance(self.provenance()),
+                    .with_provenance(self.effective_provenance(provenance_override)),
                 }) {
                     QueryResult::Value(body) => {
                         // Interface/class declaration body → heritage overlay
@@ -2396,6 +2449,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             target,
                             member_role_override,
                             heritage_overlay_body,
+                            provenance_override,
                         });
                     }
                     QueryResult::Recursive(_) => {
@@ -2489,6 +2543,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         kind: ArmKind::Union,
                         member_role_override,
                         heritage_overlay: false,
+                        provenance_override,
                     });
                 }
             }
@@ -2522,11 +2577,30 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // Follow the alias, preserving the role override + heritage
                 // flag so an identity-alias wrapper of a heritage carrier /
                 // interface body keeps its role classification.
+                //
+                // TRANSPARENT-carrier provenance downgrade.
+                // An `Alias` node is a transparent carrier: it is produced by an
+                // identity utility (`NoInfer<T>` interns `Alias(T)`) or by an
+                // alias-target indirection. Its own body has NO declared
+                // members — the members live on the alias TARGET. A member
+                // reached only THROUGH this carrier is therefore NOT the macro
+                // type argument's own-body member, so the macro-T own-body
+                // provenance must NOT propagate past the alias. Downgrade to
+                // `Structural` for the target walk (and keep any already-active
+                // downgrade). A DIRECT object-alias macro argument
+                // (`type P = { x }`) does NOT reach here as the own-body
+                // source: its members are stamped at the
+                // `DeclPlaceholder → Instantiate → Object` overlay
+                // (`overlay_macro_type_arg_own_body`) before any `Alias` node,
+                // so this downgrade does not regress it.
                 work.push(Frame::Visit {
                     node: target_id,
                     target,
                     member_role_override,
                     heritage_overlay_body,
+                    provenance_override: Some(
+                        crate::semantic_query::SurfaceProvenanceContext::Structural,
+                    ),
                 });
             }
             SemanticNodeData::DeclRef { identity } => {
@@ -2557,11 +2631,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             // `Heritage` override flowing into the resolved
                             // declaration's body (cross-file / same-file
                             // heritage members surface as `Heritage`).
+                            // Thread any active transparent-carrier
+                            // downgrade so a `DeclRef` reached through a
+                            // transparent alias keeps the structural provenance.
                             work.push(Frame::Visit {
                                 node: resolved,
                                 target,
                                 member_role_override,
                                 heritage_overlay_body,
+                                provenance_override,
                             });
                         }
                     }
@@ -2974,6 +3052,21 @@ enum Frame {
         /// `Object` arm keeps its lowered `OwnBody` role. Only meaningful for
         /// the immediate decl-body Intersection; sub-visits default to false.
         heritage_overlay_body: bool,
+        /// Surface-provenance override (transparent-carrier downgrade): when
+        /// `Some`, the
+        /// carrier-unwrap dispatches (Alias-target Instantiate via
+        /// DeclPlaceholder / InstantiationRef) below this node use this
+        /// provenance INSTEAD of the walker's `self.provenance()`. Set to
+        /// `Some(Structural)` when the walker crosses a TRANSPARENT carrier
+        /// (an `Alias` produced by an identity utility such as `NoInfer<T>`,
+        /// or any alias-target indirection) whose own body has no declared
+        /// members: a member reached only THROUGH such a carrier is NOT the
+        /// macro type argument's own-body member, so it must not inherit
+        /// `MacroTypeArgOwnBody`. Propagates verbatim through subsequent
+        /// carrier hops so the downgrade sticks all the way to the Object.
+        /// `None` ⇒ use `self.provenance()` (the macro-root / structural
+        /// context the walk was constructed under).
+        provenance_override: Option<crate::semantic_query::SurfaceProvenanceContext>,
     },
     /// Iterator frame for an Intersection / Union arm list. Pops at
     /// each step, pushes a `Visit` for the current arm and a fresh
@@ -2992,6 +3085,11 @@ enum Frame {
         /// body: REFERENCE-carrier arms get `Some(Heritage)`, own `Object`
         /// arms keep their lowered role.
         heritage_overlay: bool,
+        /// Surface-provenance override (transparent-carrier downgrade)
+        /// propagated to each
+        /// arm's `Visit`. `None` for ordinary intersections / unions; carries
+        /// the transparent-carrier downgrade through arm descents.
+        provenance_override: Option<crate::semantic_query::SurfaceProvenanceContext>,
     },
     FlushIntersection {
         buffer_id: usize,
@@ -3391,6 +3489,109 @@ fn merge_union_surfaces(
             // Union common-member: the name appears in every arm, so there is
             // no single source declaration site — genuinely synthetic. No spans
             // and no single declaration file (a multi-origin fact).
+            spans: verter_type_expr::MemberSpans::default(),
+            declaration_origin: None,
+        });
+    }
+    Some(ShallowSurface {
+        members,
+        call_signatures: Vec::new(),
+        construct_signatures: Vec::new(),
+        index_signatures: Vec::new(),
+        keyspace: None,
+    })
+}
+
+/// Merge per-arm union surfaces under the **Vue macro object-surface**
+/// rule — the UNION of arm members, NOT the TS
+/// property-access common-member intersection.
+///
+/// A prop / slot present in ANY union arm is part of the component macro
+/// surface (`defineProps<FixedProps | BubbleProps>()` declares every
+/// arm's props). Per the codex BINDING ruling:
+///
+/// - A member survives iff it is present (by name) in AT LEAST ONE arm.
+/// - Its value is the UNION of the per-arm member values for the arms
+///   that declare it (a single declaring arm stays as-is).
+/// - `optional` iff optional in ANY arm OR ABSENT from any arm (a member
+///   not declared by every arm is optional on the merged surface).
+/// - `readonly` iff readonly in ALL arms that declare it.
+/// - `is_method` / `declared_in_macro_type_arg` are `false`; merge role is
+///   [`MemberMergeRole::Authored`] — a member reached THROUGH the union is
+///   neither macro-T own-body nor heritage.
+/// - A union has no single call/construct/index surface, so the merged
+///   surface carries none.
+///
+/// Returns `Some(empty)` when no arm declares any Object member. Returns
+/// `None` only when the arm vector is empty (defensive). Unlike the
+/// common-member rule, a non-Object (`None`) arm does NOT collapse the
+/// whole surface — the Object arms still contribute their members (a
+/// `{ a } | string` macro surface publishes `a`, optional).
+fn merge_union_surfaces_for_macro(
+    graph: &SemanticGraphStore,
+    arm_surfaces: &[Option<ShallowSurface>],
+) -> Option<ShallowSurface> {
+    use crate::semantic_query::MemberMergeRole;
+
+    if arm_surfaces.is_empty() {
+        return None;
+    }
+    let arm_count = arm_surfaces.len();
+    let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
+    if live.is_empty() {
+        return Some(ShallowSurface::empty());
+    }
+    // A non-Object arm (`None`) means that arm declares NO members, so
+    // every member is effectively absent from it → optional on the union.
+    let has_non_object_arm = arm_surfaces.iter().any(|s| s.is_none());
+
+    // Enumerate member names in first-seen order across all arms.
+    let mut ordered_names: Vec<Arc<str>> = Vec::new();
+    let mut seen: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
+    for arm in &live {
+        for member in &arm.members {
+            if seen.insert(Arc::clone(&member.name)) {
+                ordered_names.push(Arc::clone(&member.name));
+            }
+        }
+    }
+
+    let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(ordered_names.len());
+    for name in &ordered_names {
+        let mut per_arm_values: Vec<SemanticNodeId> = Vec::with_capacity(live.len());
+        let mut optional_in_any = false;
+        let mut readonly_in_all = true;
+        let mut declaring_arms = 0usize;
+        for arm in &live {
+            if let Some(arm_member) = arm.members.iter().find(|m| &m.name == name) {
+                declaring_arms += 1;
+                per_arm_values.push(arm_member.value);
+                optional_in_any |= arm_member.optional;
+                readonly_in_all &= arm_member.readonly;
+            }
+        }
+        // Absent from at least one arm (a live arm without it, or a
+        // non-Object arm) ⇒ optional on the merged surface.
+        if declaring_arms < arm_count || has_non_object_arm {
+            optional_in_any = true;
+        }
+        let value = if per_arm_values.len() == 1 {
+            per_arm_values[0]
+        } else {
+            graph.intern_node(SemanticNodeData::Union(Arc::from(
+                per_arm_values.into_boxed_slice(),
+            )))
+        };
+        members.push(ShallowSurfaceMember {
+            name: Arc::clone(name),
+            value,
+            optional: optional_in_any,
+            readonly: readonly_in_all,
+            is_method: false,
+            declared_in_macro_type_arg: false,
+            merge_role: MemberMergeRole::Authored,
+            // Union arm-member: reached THROUGH the union, no single source
+            // declaration site — genuinely synthetic (multi-origin).
             spans: verter_type_expr::MemberSpans::default(),
             declaration_origin: None,
         });
