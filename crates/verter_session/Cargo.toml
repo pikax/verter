@@ -119,6 +119,15 @@ uuid = { version = "1.23", features = ["rng-getrandom"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 toml = "1.1"
 verter_parser = { path = "../verter_parser" }
+# Activates the `test-support` feature on `verter_scheduler` for
+# `cargo test --package verter_session` (and example/bench) builds only.
+# The regular dependency above does NOT enable the feature, so
+# `cargo build --release --package verter_session` still compiles
+# verter_scheduler without `host_cpu_pool_token`, `HostCpuPool::pool_id`,
+# `HostCpuPool::build_count`, or the per-pool identity TLS. Cargo
+# unifies feature requirements per-target — for tests/examples/benches
+# the union includes `test-support`; for production it does not.
+verter_scheduler = { path = "../verter_scheduler", features = ["test-support"] }
 verter_type_expr = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }

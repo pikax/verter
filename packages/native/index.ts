@@ -133,8 +133,6 @@ export interface CompileBatchInput {
 }
 
 export interface CompileBatchOptions {
-  /** Number of host orchestration threads. 0 or undefined = all logical CPUs. */
-  threads?: number;
   /**
    * Scheduler priority for batch upserts. Default: "background" (yields to
    * concurrent interactive work). Use "interactive" when there is no

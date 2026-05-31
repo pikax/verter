@@ -54,6 +54,18 @@ export interface HostConfig {
    * tests.
    */
   typeinfoScratchCacheCapacity?: number;
+  /**
+   * Worker count for the host-owned CPU pool used by `compileMany`'s
+   * outer coordinator. `undefined` (default) resolves to the platform's
+   * available parallelism at host-construction time; `0` is treated as
+   * `undefined` (the default), so a misconfigured caller passing `0`
+   * still gets a working host pool; other positive values cap the
+   * pool's worker count.
+   *
+   * The host pool is built once at host construction and reused across
+   * `compileMany` calls. To change the pool size, construct a new host.
+   */
+  hostCpuThreads?: number;
 }
 
 export interface HostCompileProfile {

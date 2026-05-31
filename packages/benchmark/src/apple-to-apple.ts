@@ -211,20 +211,19 @@ for (const f of allFiles) {
 const vueSTMs = performance.now() - vueSTStart;
 console.log(` done — ${formatDuration(vueSTMs)}`);
 
-// 2b. Verter MT via host.compileMany (Phase 9b host-backed path:
-//     scheduler + dispatch + compile_cache + Rayon worker pool with
-//     8 MiB worker stacks). The benchmark passes priority="interactive"
-//     because there is no concurrent interactive work — measures the
-//     production path's full throughput.
+// 2b. Verter MT via host.compileMany (host-backed path: scheduler +
+//     dispatch + compile_cache + the host-owned CPU pool sized at host
+//     construction via HostConfig.hostCpuThreads). The benchmark passes
+//     priority="interactive" because there is no concurrent interactive
+//     work — measures the production path's full throughput.
 process.stdout.write(`  Running Verter MT (${CPU_COUNT} Rayon threads, Interactive priority)...`);
-const verterHostForBatch = createVerterHost("none");
+const verterHostForBatch = createVerterHost("none", CPU_COUNT);
 const inputs: CompileBatchInput[] = allFiles.map((f) => ({
   canonicalId: f.filename,
   source: f.source,
 }));
 const verterMTStart = performance.now();
 const verterBatch: CompileBatchEntry[] = verterHostForBatch.compileMany(inputs, {
-  threads: CPU_COUNT,
   priority: "interactive",
   // Explicit default cache mode — the fact-validated session cache (the
   // host default). Reported alongside the throughput numbers below so a

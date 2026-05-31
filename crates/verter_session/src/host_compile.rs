@@ -1,9 +1,9 @@
 //! Host-backed parallel SFC compilation.
 //!
 //! Bundler/runtime output only. Returns the assembled Main virtual
-//! file (script + template render fn). For IDE TSX or TSC type-extract
-//! batch surfaces, see future `ide_many` / `public_api_many` (sub-plan
-//! §8.3 — out of scope, not deferred).
+//! file (script + template render fn). IDE TSX and TSC type-extract
+//! batch surfaces are out of scope here; they would land as separate
+//! `ide_many` / `public_api_many` entry points.
 //!
 //! ## Four-stage batch
 //!
@@ -29,12 +29,21 @@
 //!    the result for that canonical and clone its `Arc<str>` payloads
 //!    (refcount-only, no string copy).
 //!
-//! All Rayon work uses ONE locally-built thread pool with an 8 MiB
-//! worker stack. The local pool is always built (never falls through
-//! to Rayon's global pool) to ensure the stack guard applies to the
-//! default path, not just explicit `threads: Some(N)` callers.
-//! `pool.install` is synchronous: Stage B fully completes before
-//! Stage C begins.
+//! All Rayon work runs on the host-owned
+//! [`verter_scheduler::HostCpuPool`] reached via
+//! [`VerterHost::host_cpu_pool`]. The pool is built once at host
+//! construction with an 8 MiB worker stack, so the stack guard
+//! applies to every code path (no fall-through to Rayon's global
+//! pool with its 1 MiB Windows default). `pool.install` is
+//! synchronous: Stage B fully completes before Stage C begins.
+//!
+//! Workers register as
+//! [`verter_scheduler::caller_kind::CallerKind::External`], so when
+//! the compile coordinator blocks on a scheduler completion handle
+//! the host worker parks on the condvar rather than inline-executing
+//! scheduler CPU tasks. The dual-pool isolation eliminates the
+//! deadlock class where a saturated scheduler CPU pool could starve
+//! `compile_many`'s outer collect/order/finalise phase.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -97,14 +106,14 @@ pub struct CompileBatchEntry {
 
 /// Caller-configurable batch options.
 ///
-/// `threads = None` / `Some(0)` resolves to
-/// [`std::thread::available_parallelism`]. `priority = None` defaults
-/// to [`Priority::Background`] (yields to concurrent interactive
-/// work). Callers with no concurrent interactive work (benchmarks,
-/// CI cold-start measurement) should pass `Priority::Interactive`.
+/// `priority = None` defaults to [`Priority::Background`] (yields to
+/// concurrent interactive work). Callers with no concurrent interactive
+/// work (benchmarks, CI cold-start measurement) should pass
+/// [`Priority::Interactive`]. Worker count is fixed at host
+/// construction time via [`crate::HostConfig::host_cpu_threads`] —
+/// the host-owned CPU pool is not resized per call.
 #[derive(Default, Clone, Debug)]
 pub struct CompileBatchOptions {
-    pub threads: Option<usize>,
     pub priority: Option<Priority>,
     /// Default compile cache mode applied to inputs whose
     /// [`CompileBatchInput::requested_mode`] is `None`. `None` resolves
@@ -152,22 +161,17 @@ impl VerterHost {
         // it. `None` on both resolves to the host default `Session`.
         let default_mode = options.default_mode.unwrap_or(CompileCacheMode::Session);
 
-        // Build a local Rayon pool with an 8 MiB worker stack. The
-        // local pool is ALWAYS built — None / Some(0) resolves to
-        // available_parallelism; Rayon's global pool (with the default
-        // 1 MiB Windows stack) is never reached, so the stack guard
-        // applies to every code path (tested by
-        // `compile_many_default_pool_has_8mib_stack`).
-        let thread_count = options.threads.filter(|&n| n > 0).unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-        });
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(thread_count)
-            .stack_size(8 * 1024 * 1024)
-            .build()
-            .expect("build rayon thread pool");
+        // Run on the host-owned CPU pool reached via
+        // `host_cpu_pool()`. Built once at host construction with an
+        // 8 MiB worker stack (so the stack guard applies to every
+        // code path, including the default worker-count path tested by
+        // `compile_many_default_pool_has_8mib_stack`); the workers
+        // register as `CallerKind::External`, so the coordinator
+        // never inline-executes scheduler CPU tasks while blocked on
+        // a completion handle. Worker count is fixed at construction
+        // time (`HostConfig::host_cpu_threads`) and is not resized
+        // per call.
+        let pool = self.host_cpu_pool();
 
         // ── group + selective upsert ──
         // HashMap iteration is non-deterministic, but we only iterate
@@ -358,6 +362,40 @@ impl VerterHost {
         #[cfg(test)]
         self.compile_one_call_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Test-only: record the caller-kind tag of the worker
+        // running this `compile_one_in_batch`. Workers running on
+        // `HostCpuPool` MUST report `External` (the dual-pool
+        // isolation invariant); a regression that ran `compile_many`
+        // on the scheduler's CPU pool would record `CpuWorker`
+        // instead. Read by
+        // `compile_many_workers_carry_host_cpu_pool_id` (secondary
+        // caller-kind canary alongside the primary pool-id token
+        // assertion).
+        #[cfg(test)]
+        {
+            let tag: u8 = match verter_scheduler::caller_kind::CallerKind::current() {
+                verter_scheduler::caller_kind::CallerKind::External => 1,
+                verter_scheduler::caller_kind::CallerKind::Driver => 2,
+                verter_scheduler::caller_kind::CallerKind::CpuWorker => 3,
+                verter_scheduler::caller_kind::CallerKind::IoWorker => 4,
+                verter_scheduler::caller_kind::CallerKind::Inline => 5,
+            };
+            self.compile_one_caller_kind_tag
+                .store(tag, std::sync::atomic::Ordering::Relaxed);
+            // Record the host-CPU-pool identity token of this worker.
+            // The discriminator: a worker running on *this host's*
+            // host pool reports `Some(host.host_cpu_pool().pool_id())`;
+            // a regression that re-routes `compile_many` onto a
+            // per-call Rayon pool or any other `External`-defaulting
+            // thread reports `None` (no `start_handler` installed the
+            // token). Stored as `usize` with `usize::MAX` reserved as
+            // the "unobserved / None" sentinel so the field stays
+            // lock-free.
+            let token_repr = verter_scheduler::host_cpu_pool_token().unwrap_or(usize::MAX);
+            self.compile_one_host_cpu_pool_token
+                .store(token_repr, std::sync::atomic::Ordering::Relaxed);
+        }
 
         let start = Instant::now();
 

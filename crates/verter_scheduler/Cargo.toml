@@ -11,6 +11,13 @@ publish = false
 
 [features]
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
+# Exposes test-only HostCpuPool internals (per-pool identity token TLS,
+# `HostCpuPool::pool_id`, `HostCpuPool::build_count`, the
+# `host_cpu_pool_token` re-export) to cross-crate test code. Production
+# binaries MUST NOT enable this feature; downstream crates that need it
+# for their own tests should add `features = ["test-support"]` only in
+# `[dev-dependencies]`.
+test-support = []
 
 [dependencies]
 arc-swap = "1.9"

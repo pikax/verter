@@ -141,6 +141,36 @@ impl VerterHost {
             ..verter_audit::AuditConfig::default()
         };
         let scratch_cache_capacity = config.typeinfo_scratch_cache_capacity;
+        // Resolve the host CPU pool worker count BEFORE moving
+        // `config` into the struct. The mapping (matching the
+        // documented `HostConfig::host_cpu_threads` contract):
+        //
+        // - `None`                 -> `available_parallelism()` (default)
+        // - `Some(0)`              -> `available_parallelism()` (same as
+        //                             None; treated as default so a
+        //                             misconfigured FFI / NAPI / TS
+        //                             caller passing `0` still gets a
+        //                             working pool rather than a panic)
+        // - `Some(n)` where n > 0  -> `n` workers
+        //
+        // The `.filter(|&n| n > 0).unwrap_or_else(...)` pattern below
+        // implements exactly this mapping in one pass.
+        //
+        // `available_parallelism()` may itself fail (return `Err`) on
+        // some platforms; we final-fallback to `1` worker so
+        // `HostCpuPool::new`'s positive-thread assertion never fires
+        // from any host-construction path.
+        #[cfg(not(target_arch = "wasm32"))]
+        let host_cpu_threads = config
+            .host_cpu_threads
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1)
+            });
+        #[cfg(not(target_arch = "wasm32"))]
+        let host_cpu_pool = verter_scheduler::HostCpuPool::new(host_cpu_threads);
         Self {
             instance_id: next_host_instance_id(),
             config,
@@ -168,12 +198,21 @@ impl VerterHost {
             last_upsert_priority: parking_lot::Mutex::new(None),
             #[cfg(test)]
             compile_one_call_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            compile_one_caller_kind_tag: std::sync::atomic::AtomicU8::new(0),
+            // `usize::MAX` is the "unobserved" sentinel. A real worker
+            // overwrites this with either its host-pool id or `usize::MAX`
+            // again if no token is installed (the regression case).
+            #[cfg(test)]
+            compile_one_host_cpu_pool_token: std::sync::atomic::AtomicUsize::new(usize::MAX),
             typeinfo_scratch_cache: parking_lot::Mutex::new(match scratch_cache_capacity {
                 Some(cap) => crate::typeinfo::scratch_cache::ScratchCache::with_capacity(cap),
                 None => crate::typeinfo::scratch_cache::ScratchCache::with_default_capacity(),
             }),
             vue_shallow_metadata_store:
                 crate::typeinfo::adapters::vue::store::VueShallowMetadataStore::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            host_cpu_pool,
         }
     }
 
@@ -324,6 +363,38 @@ impl VerterHost {
     /// taking the host lock.
     pub fn project_type_store(&self) -> &Arc<crate::project_type_store::ProjectTypeStore> {
         &self.project_type_store
+    }
+
+    /// Reference to the host-owned CPU pool used by `compile_many`'s
+    /// outer coordinator.
+    ///
+    /// The pool is built once at host construction (worker count from
+    /// [`crate::types::HostConfig::host_cpu_threads`], defaulting to
+    /// `std::thread::available_parallelism`) and reused across every
+    /// `compile_many` call. Distinct from the scheduler's own CPU
+    /// pool — see [`verter_scheduler::HostCpuPool`] for the dual-pool
+    /// isolation invariant.
+    ///
+    /// Not present on `wasm32` — `compile_many` is gated behind
+    /// `#[cfg(not(target_arch = "wasm32"))]` and the host-pool field
+    /// is gated alongside it.
+    ///
+    /// Crate-internal: the host pool is `compile_many`'s
+    /// implementation detail. Downstream crates that need to size the
+    /// pool should pass `HostConfig::host_cpu_threads` at host
+    /// construction (exposed end-to-end through
+    /// `FfiHostConfig::host_cpu_threads` and
+    /// `NapiHostConfig::hostCpuThreads`); they should not reach into
+    /// the pool itself. Narrowing this visibility prevents
+    /// dual-pool-isolation regressions where a downstream consumer
+    /// could route its own CPU work onto `compile_many`'s coordinator
+    /// pool (which would defeat the isolation invariant). Test code
+    /// in this crate reads the pool through `host.host_cpu_pool()`
+    /// for the `pool_id` token assertion.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub(crate) fn host_cpu_pool(&self) -> &Arc<verter_scheduler::HostCpuPool> {
+        &self.host_cpu_pool
     }
 
     /// Env-hash bundle (R21) attached to a [`HostStoreView`] at

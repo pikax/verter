@@ -234,8 +234,17 @@ coordinator's wait.
 
 ## Per-call concurrency semaphore
 
-`CompileBatchOptions.threads: Option<usize>` is enforced as a
-per-call concurrency limit on `SchedulerCpuPool` admissions.
+`compile_many` has no per-call `threads` option — the `HostCpuPool`
+worker count is sized once at host construction from
+`HostConfig::host_cpu_threads`, and the pool is reused across every
+`compile_many` call. Per-call concurrency capping on
+`SchedulerCpuPool` admissions (the `CpuConcurrencySemaphore` handle
+propagated through `CacheNodeDagNode`) is deferred to §6d; until §6d
+lands, scheduler-side admission runs at the pool's default
+concurrency.
+
+When §6d lands, callers attach the handle to every
+`CacheNodeDagNode.cpu_concurrency_semaphore` in the batch DAG:
 
 ```rust
 impl Scheduler {

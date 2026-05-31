@@ -613,6 +613,35 @@ pub struct VerterHost {
     /// **Compiled out in production builds.**
     #[cfg(test)]
     pub(crate) compile_one_call_count: std::sync::atomic::AtomicUsize,
+    /// Test-only observable: records the `CallerKind` reported by
+    /// `CallerKind::current()` on each `compile_one_in_batch` worker.
+    /// Stored as a `u8` tag so the field is lock-free and the discrete
+    /// caller-kind discriminator is exposed without a `CallerKind`
+    /// import in non-test code. Encoding: `0 = unobserved`, `1 = External`,
+    /// `2 = Driver`, `3 = CpuWorker`, `4 = IoWorker`, `5 = Inline`.
+    /// Read by `compile_many_workers_carry_host_cpu_pool_id`
+    /// (secondary caller-kind canary, alongside the primary
+    /// pool-id-token assertion read from
+    /// `compile_one_host_cpu_pool_token`) to confirm the dual-pool
+    /// isolation invariant: workers running `compile_one_in_batch`
+    /// MUST report `External` (host pool) rather than `CpuWorker`
+    /// (scheduler pool). **Compiled out in production builds.**
+    #[cfg(test)]
+    pub(crate) compile_one_caller_kind_tag: std::sync::atomic::AtomicU8,
+    /// Test-only observable: records the host-CPU-pool identity token
+    /// observed on the worker that ran `compile_one_in_batch`. Encoding:
+    /// `usize::MAX` is the "unobserved / not on a host pool" sentinel
+    /// (so the field stays lock-free and avoids `AtomicOption`);
+    /// any other value is the worker's
+    /// `verter_scheduler::host_cpu_pool_token()` reading, expected to
+    /// equal `self.host_cpu_pool().pool_id()` on a properly host-owned
+    /// `compile_many`. A regressed per-call Rayon pool (no
+    /// `start_handler` installs the token) would report the sentinel
+    /// even though `CallerKind::current() == External`. Read by
+    /// `compile_many_workers_carry_host_cpu_pool_id`. **Compiled out
+    /// in production builds.**
+    #[cfg(test)]
+    pub(crate) compile_one_host_cpu_pool_token: std::sync::atomic::AtomicUsize,
     /// Host-owned LRU cache for the typeinfo `evaluate_type_expression`
     /// scratch URIs. See `typeinfo::scratch_cache` for the LRU policy
     /// and §5.3 of the typeinfo plan for the deterministic-URI
@@ -627,6 +656,20 @@ pub struct VerterHost {
     /// `typeinfo::adapters::vue::store::VueShallowMetadataStore`.
     pub(crate) vue_shallow_metadata_store:
         crate::typeinfo::adapters::vue::store::VueShallowMetadataStore,
+    /// Host-owned CPU pool for `compile_many`'s outer coordinator.
+    /// Distinct from the scheduler's own CPU pool — workers register
+    /// as [`verter_scheduler::caller_kind::CallerKind::External`] so
+    /// `wait_or_drive` parks instead of inline-executing scheduler
+    /// CPU tasks. Built once at host construction and reused across
+    /// every `compile_many` call (a regressed per-call rebuild would
+    /// bump
+    /// [`verter_scheduler::HostCpuPool::build_count`] on every batch).
+    ///
+    /// Not present on `wasm32` — `compile_many` is gated behind
+    /// `#[cfg(not(target_arch = "wasm32"))]` and the host-pool field
+    /// is gated alongside it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) host_cpu_pool: Arc<verter_scheduler::HostCpuPool>,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.

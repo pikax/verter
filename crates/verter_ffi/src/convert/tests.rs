@@ -117,6 +117,53 @@ fn config_defaults_are_valid() {
     assert!(result.dev_mode);
 }
 
+/// `FfiHostConfig::host_cpu_threads` forwards through
+/// `ffi_config_to_host` into the host config's `host_cpu_threads`
+/// slot. Discriminator: a regression that dropped or shadowed the
+/// new field would leave the resulting `HostConfig.host_cpu_threads`
+/// at `None`.
+#[test]
+fn host_cpu_threads_forwards_to_host_config() {
+    // Explicit `Some(n)` round-trips.
+    let config = FfiHostConfig {
+        host_cpu_threads: Some(4),
+        ..Default::default()
+    };
+    let result = ffi_config_to_host(config).unwrap();
+    assert_eq!(
+        result.host_cpu_threads,
+        Some(4),
+        "FfiHostConfig::host_cpu_threads must forward to \
+         HostConfig::host_cpu_threads"
+    );
+
+    // `None` (the default) maps to `None` on the host config —
+    // pool construction will then resolve to
+    // `std::thread::available_parallelism`.
+    let config_default = FfiHostConfig::default();
+    let result_default = ffi_config_to_host(config_default).unwrap();
+    assert_eq!(
+        result_default.host_cpu_threads, None,
+        "FfiHostConfig::host_cpu_threads default of `None` must \
+         forward as `None` on the host config"
+    );
+
+    // `Some(0)` is forwarded as-is — host construction handles the
+    // "treat 0 as default" semantics (so the value remains visible
+    // on the host config in case a future caller introspects it).
+    let config_zero = FfiHostConfig {
+        host_cpu_threads: Some(0),
+        ..Default::default()
+    };
+    let result_zero = ffi_config_to_host(config_zero).unwrap();
+    assert_eq!(
+        result_zero.host_cpu_threads,
+        Some(0),
+        "FfiHostConfig::host_cpu_threads = Some(0) must forward \
+         as Some(0); the host constructor floors it to the default"
+    );
+}
+
 #[test]
 fn profile_none_returns_default() {
     let result = ffi_profile_to_host(None).unwrap();
@@ -495,6 +542,7 @@ fn config_all_fields() {
         audit_enabled: None,
         footprint_capture: None,
         typeinfo_scratch_cache_capacity: None,
+        host_cpu_threads: None,
     };
     let result = ffi_config_to_host(config).unwrap();
     assert!(!result.dev_mode);

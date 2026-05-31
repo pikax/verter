@@ -247,10 +247,15 @@ at `crates/verter_scheduler/src/{cpu_concurrency,node}.rs`) and
 records both edges (B6 → B7, B6 → B12-types) so the implementer
 lands B7's scheduler-side types and B12's `MAX_TEST_TIMEOUT`
 constant BEFORE B6's `compile_many_no_pool_deadlock` /
-`threads_option_honored` tests compile. The `MAX_TEST_TIMEOUT`
-landing is a one-line constant + module declaration, intentionally
-small so the B12-types edge into B6 is cheap; the full B12
-benchmark surface still depends on the rest of B6.
+`cpu_concurrency_semaphore_caps_concurrent_cpu_tasks` tests compile
+(the latter was originally drafted as `threads_option_honored` when
+`compile_many` carried a per-call `threads` option; the option has
+since been removed and the semaphore capacity is sourced from the
+scheduler config rather than the batch options). The
+`MAX_TEST_TIMEOUT` landing is a one-line constant + module
+declaration, intentionally small so the B12-types edge into B6 is
+cheap; the full B12 benchmark surface still depends on the rest of
+B6.
 
 Prose explanation (verbatim — no cycles):
 
@@ -1727,12 +1732,21 @@ impl HostCpuPool {
 }
 ```
 
-`VerterHost` constructs `Arc::new(HostCpuPool::new(num_threads))`,
-stores its own `Arc<HostCpuPool>` clone, and hands a second clone to
-`Scheduler::new(... Arc<HostCpuPool>, ...)`. `compile_many` exclusively
-uses `host.host_cpu_pool.install(...)` for its outer coordinator
-phase; the scheduler's CPU stage executor exclusively uses
-`SchedulerCpuPool`. The two pools never share workers.
+`VerterHost` owns `Arc<HostCpuPool>` and exposes it via
+`host_cpu_pool()`. The scheduler does NOT know about the host pool —
+the host pool is the coordinator-only side of the dual-pool design,
+constructed and stored entirely on the host. `compile_many`
+exclusively uses `host.host_cpu_pool().install(...)` for its outer
+coordinator phase; the scheduler's CPU stage executor exclusively
+uses `SchedulerCpuPool`. The two pools never share workers, and the
+scheduler has no reference to `HostCpuPool` at all.
+
+Workers register as `CallerKind::External` in TLS via the host pool's
+`start_handler`, so when the coordinator blocks on a scheduler
+completion handle (via `wait_or_drive`) the host worker parks on the
+condvar rather than inline-executing scheduler CPU tasks. The dual-
+pool isolation eliminates the deadlock class where a saturated
+scheduler CPU pool could starve `compile_many`'s outer coordinator.
 
 Replace `compile_many` with a transaction:
 
@@ -1776,7 +1790,6 @@ pub struct CompileBatchOptions {
     pub cache_mode: CompileCacheMode,
     pub source_map_policy: SourceMapPolicy,
     pub priority: Option<Priority>,    // `verter_scheduler::Priority`
-    pub threads: Option<usize>,
 }
 ```
 
@@ -1789,7 +1802,7 @@ The transaction:
 - performs one publish phase for cache-visible source changes;
 - batches VFS edge recording and overlay notifications;
 - runs its OUTER coordinator on `HostCpuPool` via
-  `host.host_cpu_pool.install(...)`. Scheduler-side dispatch of every
+  `host.host_cpu_pool().install(...)`. Scheduler-side dispatch of every
   `TaskKind::Parse` and `TaskKind::CacheNode` runs on
   `SchedulerCpuPool`. The two pools are independent
   `rayon::ThreadPool` instances; worker sets do not intersect;
@@ -1801,17 +1814,18 @@ conversions. Callers that do not set `cache_mode` get
 `CompileCacheMode::Session`; callers that do not set
 `source_map_policy` get the workspace default.
 
-**`threads` option semantics.** `threads: Option<usize>` is enforced
-by a per-call `CpuConcurrencySemaphore` (Block 7) whose capacity
-equals `threads.unwrap_or(scheduler_cpu_threads)`. The coordinator
-calls `scheduler.cpu_concurrency_semaphore(threads.unwrap_or(scheduler_cpu_threads))`
-which returns an `Arc<CpuConcurrencySemaphore>` HANDLE (NOT a
-pre-acquired permit), then clones the handle onto every
-`CacheNodeDagNode.cpu_concurrency_semaphore` in the submitted DAG.
-The worker dispatch site acquires a FRESH permit from the handle
-immediately before running each CPU task and drops the permit on
-task completion (RAII). Passing `None` admits at the pool's default
-concurrency (`cpu_concurrency_semaphore` field is `None`).
+**Worker-count semantics.** `compile_many` has no per-call thread
+option. The `HostCpuPool` worker count is sized once at host
+construction from `HostConfig::host_cpu_threads`
+(`Option<usize>`; `None` resolves to
+`std::thread::available_parallelism()`, `Some(0)` is normalised to
+the same default, `Some(n)` for `n >= 1` caps at `n`). The pool is
+reused across every `compile_many` call on the same host, so per-call
+sizing is no longer reachable from the public API. Per-call
+concurrency capping on `SchedulerCpuPool` admissions (the
+`CpuConcurrencySemaphore` propagation through `CacheNodeDagNode`) is
+deferred to §6d; until §6d lands, scheduler-side admission runs at the
+pool's default concurrency.
 
 #### Legacy Deletions
 
@@ -1891,7 +1905,7 @@ pnpm install --frozen-lockfile
 
 - Rust crate: `compile_many(inputs, options: CompileBatchOptions)` —
   `cache_mode` already exposed via Block 5.
-- NAPI: `compileMany(inputs, { cacheMode?, priority?, threads? })`.
+- NAPI: `compileMany(inputs, { cacheMode?, priority? })`.
 - WASM: same shape.
 - Protocol DTOs: `CompileBatchRequestDto.cache_mode` already mirrored
   in Block 5.
@@ -3992,10 +4006,16 @@ pnpm install --frozen-lockfile
 - `crates/verter_scheduler/tests/scheduler_cpu_pool_has_8mib_stack.rs::scheduler_cpu_pool_has_8mib_stack`
   — runs a 200-level recursive parse fixture through
   `SchedulerCpuPool::submit`. Completes without stack overflow.
-- `crates/verter_scheduler/tests/threads_option_honored.rs::compile_many_with_threads_4_does_not_exceed_4_concurrent_cpu_tasks`
+- `crates/verter_scheduler/tests/cpu_concurrency_semaphore_caps_concurrent_cpu_tasks.rs::semaphore_capacity_4_caps_concurrent_cpu_tasks_at_4`
   — acquires `let semaphore: Arc<CpuConcurrencySemaphore> = scheduler.cpu_concurrency_semaphore(4)`;
   submits 16 cache-node tasks each carrying
   `Arc::clone(&semaphore)`; observed max concurrent CPU tasks ≤ 4.
+  (Originally named `threads_option_honored.rs` when `compile_many`
+  exposed a per-call `threads` option; the option has since been
+  removed and `HostCpuPool` worker count is sized at host
+  construction via `HostConfig::host_cpu_threads`. The semaphore
+  capacity is now sourced from the scheduler config rather than a
+  per-call option.)
 - `crates/verter_scheduler/tests/cpu_concurrency_permit_acquired_per_task_at_dispatch.rs::cpu_concurrency_permit_acquired_per_task_at_dispatch`
   — capacity-4 semaphore, 8 long-running cache-node tasks each
   carrying `Arc::clone(&semaphore)`. Executor records

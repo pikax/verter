@@ -619,6 +619,24 @@ pub struct HostConfig {
     /// the chosen size — used by the `@verter/typeinfo` LRU
     /// eviction tests.
     pub typeinfo_scratch_cache_capacity: Option<usize>,
+    /// Worker count for the host-owned CPU pool used by
+    /// `compile_many`'s outer coordinator
+    /// ([`verter_scheduler::HostCpuPool`]).
+    ///
+    /// `None` (the default) resolves to
+    /// [`std::thread::available_parallelism`] at host-construction
+    /// time, mirroring the previous per-call default. `Some(0)` is
+    /// treated as `None` (i.e. also resolves to
+    /// `available_parallelism`) rather than rejected — a
+    /// misconfigured caller passing `0` through the FFI / NAPI / TS
+    /// surfaces still gets a working host pool. Other positive
+    /// values cap the pool's worker count.
+    ///
+    /// The host pool is built once at host construction and reused
+    /// across `compile_many` calls. The pool is distinct from the
+    /// scheduler's own CPU pool — see the module documentation on
+    /// [`verter_scheduler`] for the dual-pool isolation invariant.
+    pub host_cpu_threads: Option<usize>,
 }
 
 /// Test / advanced-tuning hooks for resolver budgets. Each field is
@@ -880,6 +898,7 @@ impl Default for HostConfig {
             lsp_method_timeouts: LspMethodTimeoutsConfig::default(),
             recursion_budget_overrides: RecursionBudgetOverrides::default(),
             typeinfo_scratch_cache_capacity: None,
+            host_cpu_threads: None,
         }
     }
 }

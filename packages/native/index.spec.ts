@@ -704,7 +704,7 @@ describe("VerterHost.compileMany", () => {
     const host = new VerterHost();
     const r = host.compileMany(
       [{ canonicalId: "/A.vue", source: "<template><div>x</div></template>" }],
-      { threads: 1 },
+      {},
     );
     expect(r).toHaveLength(1);
     expect(r[0].errors).toEqual([]);
@@ -721,7 +721,7 @@ describe("VerterHost.compileMany", () => {
         { canonicalId: "/B.vue", source: "<template><div>{{ unclosed </template>" },
         { canonicalId: "/C.vue", source: "<template><div>also good</div></template>" },
       ],
-      { threads: 2 },
+      {},
     );
     expect(r).toHaveLength(3);
     expect(r[0].errors).toEqual([]);
@@ -807,5 +807,69 @@ describe("VerterHost.compileMany", () => {
         { priority: "urgent" },
       ),
     ).toThrow(/invalid priority/);
+  });
+
+  // hostCpuThreads is a real, typed (`u32`) field on the NAPI host
+  // config: `FfiHostConfig → HostConfig` forwarding and the
+  // `Option<usize>::filter(|&n| n > 0).unwrap_or(available_parallelism)`
+  // pool-sizing resolution are characterised Rust-side by
+  // `verter_ffi::convert::tests::host_cpu_threads_forwards_to_host_config`
+  // and `verter_session::host_compile_tests::host_cpu_threads_some_{zero,explicit}_*`
+  // (which read the resolved worker count via `pool_thread_count()`).
+  // The JS surface exposes no pool introspection, so this spec's only
+  // honest job is to pin the *wire/type surface*: that `hostCpuThreads`
+  // is a real NAPI-decoded `u32` field, not an ignored extra key.
+  //
+  // DISCRIMINATION (the reason each test below pairs a valid value with a
+  // bad-typed one): napi-derive emits `let hostCpuThreads: Option<u32> =
+  // obj.get("hostCpuThreads")?` during constructor-argument binding. An
+  // absent or `undefined` key yields `None`; a present value is decoded
+  // through `u32::from_napi_value` → `napi_get_value_uint32`, which
+  // returns `napi_number_expected` (and throws) for any non-number JS type.
+  // If `hostCpuThreads` were dropped
+  // from `NapiHostConfig`, no `obj.get("hostCpuThreads")` would be
+  // generated, the bad value would be an ignored extra key, the
+  // constructor would NOT throw, and the `toThrow()` arm would FAIL —
+  // which is exactly the wire regression these tests exist to catch.
+  // (Removing the field from the `HostConfig` TS type independently
+  // breaks the valid-construction lines under any spec typecheck.)
+  it("accepts hostCpuThreads = 2 (valid u32) and rejects a non-numeric value", () => {
+    const host = new VerterHost({ hostCpuThreads: 2 });
+    const r = host.compileMany(
+      [{ canonicalId: "/host-cpu-threads-2.vue", source: "<template><div>x</div></template>" }],
+      {},
+    );
+    expect(r).toHaveLength(1);
+    expect(r[0].errors).toEqual([]);
+    expect(r[0].code.length).toBeGreaterThan(0);
+
+    expect(
+      // @ts-expect-error — exercising NAPI runtime rejection of a non-numeric hostCpuThreads
+      () => new VerterHost({ hostCpuThreads: "nope" }),
+    ).toThrow();
+  });
+
+  it("accepts hostCpuThreads = 0 (documented Some(0)→None normalisation) and rejects a non-numeric value", () => {
+    // Documented contract: Some(0) is normalised to None so a
+    // misconfigured caller still gets a working host pool. 0 is a valid
+    // u32, so the wire accepts it and compileMany completes.
+    const host = new VerterHost({ hostCpuThreads: 0 });
+    const r = host.compileMany(
+      [{ canonicalId: "/host-cpu-threads-0.vue", source: "<template><div>x</div></template>" }],
+      {},
+    );
+    expect(r).toHaveLength(1);
+    expect(r[0].errors).toEqual([]);
+    expect(r[0].code.length).toBeGreaterThan(0);
+
+    // Same wire discriminator as above: a non-numeric value makes
+    // `napi_get_value_uint32` return `NumberExpected`. (A negative JS
+    // *number* would NOT discriminate — `napi_get_value_uint32` coerces
+    // it via ToUint32 rather than throwing — so we use a non-number type.)
+    // Dropping the field makes this an ignored key → no throw → FAILS.
+    expect(
+      // @ts-expect-error — exercising NAPI runtime rejection of a non-numeric hostCpuThreads
+      () => new VerterHost({ hostCpuThreads: {} }),
+    ).toThrow();
   });
 });

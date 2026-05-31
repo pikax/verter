@@ -13,6 +13,28 @@
 //! - [`OverlayMap`](overlay::OverlayMap) — concurrent editor buffer storage
 //! - [`SourceLoader`](source_loader::SourceLoader) — file loading trait (memory/disk)
 //!
+//! # Worker pools
+//!
+//! Two CPU pools coexist in the host process:
+//!
+//! - The scheduler-owned CPU pool (`Scheduler::cpu_pool`) executes
+//!   `TaskKind::{Parse, Analysis, Artifact}` stage work. Its workers
+//!   register as [`CallerKind::CpuWorker`](caller_kind::CallerKind) so
+//!   the cooperative pump may inline-execute ready dependencies on the
+//!   same thread.
+//! - [`HostCpuPool`](host_cpu_pool::HostCpuPool) — owned by `VerterHost`,
+//!   used exclusively by `compile_many`'s outer coordinator. Workers
+//!   register as [`CallerKind::External`](caller_kind::CallerKind) so
+//!   `wait_or_drive` parks on the completion handle (the scheduler
+//!   driver and its own CPU pool make progress). Host workers never
+//!   inline-execute scheduler CPU work — `dispatch_ready_job` excludes
+//!   `External` from its inline-eligible branch.
+//!
+//! The two pools never share workers; the isolation eliminates the
+//! deadlock class where a saturated scheduler CPU pool could starve
+//! `compile_many`'s outer coordinator that itself blocks on scheduler-
+//! queued parse work.
+//!
 //! # Pump architecture
 //!
 //! The driver thread is the normal pump caller, but it is NOT the
@@ -62,6 +84,8 @@ pub mod dag;
 pub mod driver;
 pub mod edges;
 pub mod executor;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod host_cpu_pool;
 pub mod invalidation;
 pub mod job;
 pub mod node;
@@ -72,3 +96,14 @@ pub mod request_context;
 pub mod scheduler;
 pub mod source_loader;
 pub mod stage;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use host_cpu_pool::HostCpuPool;
+
+/// Re-export of the test-only `host_cpu_pool_token` reader. Gated behind
+/// the `test-support` feature so production binaries cannot reach the
+/// TLS reader; cross-crate tests (e.g. `verter_session`) opt in via
+/// `verter_scheduler = { features = ["test-support"] }` in
+/// `[dev-dependencies]`.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+pub use host_cpu_pool::host_cpu_pool_token;
