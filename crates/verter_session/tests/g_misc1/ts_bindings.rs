@@ -148,7 +148,8 @@ fn atomic_write(target: &std::path::Path, bytes: &[u8]) {
         .unwrap_or_else(|e| panic!("create temp file in `{dir:?}`: {e}"));
     tmp.write_all(bytes)
         .unwrap_or_else(|e| panic!("write temp bindings file: {e}"));
-    tmp.flush().unwrap_or_else(|e| panic!("flush temp bindings file: {e}"));
+    tmp.flush()
+        .unwrap_or_else(|e| panic!("flush temp bindings file: {e}"));
     tmp.persist(target)
         .unwrap_or_else(|e| panic!("atomic-rename temp bindings into `{target:?}`: {e}"));
 }
@@ -909,8 +910,8 @@ fn audit_types_have_no_ts_export_auto_export() {
         let mut files = Vec::new();
         collect_rs_files(&abs, &mut files);
         for file in files {
-            let contents = fs::read_to_string(&file)
-                .unwrap_or_else(|e| panic!("read `{file:?}`: {e}"));
+            let contents =
+                fs::read_to_string(&file).unwrap_or_else(|e| panic!("read `{file:?}`: {e}"));
             for (i, line) in contents.lines().enumerate() {
                 if line_has_bare_ts_export_flag(line) {
                     let rel = file.strip_prefix(&root).unwrap_or(&file);
@@ -944,8 +945,8 @@ fn cargo_config_does_not_set_ts_rs_export_dir() {
     // and this test FAILS.
     let root = workspace_root();
     let config_path = root.join(".cargo/config.toml");
-    let contents = fs::read_to_string(&config_path)
-        .unwrap_or_else(|e| panic!("read `{config_path:?}`: {e}"));
+    let contents =
+        fs::read_to_string(&config_path).unwrap_or_else(|e| panic!("read `{config_path:?}`: {e}"));
     let active: Vec<(usize, &str)> = contents
         .lines()
         .enumerate()
