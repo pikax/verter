@@ -44,13 +44,13 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use verter_span::Span;
 use verter_type_expr::{
     FunctionExpr, FunctionParam, FunctionSpans, IndexSignature, IndexSignatureSpans, LiteralValue,
     MappedModifier, MemberSpans, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty,
     PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame, SyntheticCarrierKey,
     SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeParam, ValueRef,
 };
-use verter_span::Span;
 
 // ---------------------------------------------------------------------------
 // Recording hasher — captures the exact ordered Hasher call stream
@@ -404,16 +404,34 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
     }
 
     // Literals incl. float edge cases (NaN / -0.0 / inf).
-    v.push(("lit-str", TypeExpr::Literal(LiteralValue::String("hi".into()))));
+    v.push((
+        "lit-str",
+        TypeExpr::Literal(LiteralValue::String("hi".into())),
+    ));
     v.push(("lit-num", TypeExpr::Literal(LiteralValue::Number(42.0))));
-    v.push(("lit-num-neg0", TypeExpr::Literal(LiteralValue::Number(-0.0))));
-    v.push(("lit-num-nan", TypeExpr::Literal(LiteralValue::Number(f64::NAN))));
-    v.push(("lit-num-inf", TypeExpr::Literal(LiteralValue::Number(f64::INFINITY))));
+    v.push((
+        "lit-num-neg0",
+        TypeExpr::Literal(LiteralValue::Number(-0.0)),
+    ));
+    v.push((
+        "lit-num-nan",
+        TypeExpr::Literal(LiteralValue::Number(f64::NAN)),
+    ));
+    v.push((
+        "lit-num-inf",
+        TypeExpr::Literal(LiteralValue::Number(f64::INFINITY)),
+    ));
     v.push(("lit-bool", TypeExpr::Literal(LiteralValue::Boolean(true))));
-    v.push(("lit-bigint", TypeExpr::Literal(LiteralValue::BigInt("123".into()))));
+    v.push((
+        "lit-bigint",
+        TypeExpr::Literal(LiteralValue::BigInt("123".into())),
+    ));
 
     // Union / Intersection — empty and multi-element (ordering).
-    v.push(("union-empty", TypeExpr::Union(Arc::from([] as [TypeExpr; 0]))));
+    v.push((
+        "union-empty",
+        TypeExpr::Union(Arc::from([] as [TypeExpr; 0])),
+    ));
     v.push((
         "union-multi",
         TypeExpr::Union(Arc::from(vec![
@@ -424,10 +442,7 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
     ));
     v.push((
         "intersection-multi",
-        TypeExpr::Intersection(Arc::from(vec![
-            TypeExpr::named("A"),
-            TypeExpr::named("B"),
-        ])),
+        TypeExpr::Intersection(Arc::from(vec![TypeExpr::named("A"), TypeExpr::named("B")])),
     ));
 
     // Array (readonly true/false) — trailing-bool-after-child.
@@ -530,7 +545,10 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
     ));
 
     // Function variant directly (params + type-params + return + spans).
-    v.push(("function", TypeExpr::Function(Arc::new(sample_function(true)))));
+    v.push((
+        "function",
+        TypeExpr::Function(Arc::new(sample_function(true))),
+    ));
     v.push((
         "function-no-return",
         TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
@@ -729,7 +747,12 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
     ));
 
     // Unknown.
-    v.push(("unknown", TypeExpr::Unknown { raw: "weird<>".into() }));
+    v.push((
+        "unknown",
+        TypeExpr::Unknown {
+            raw: "weird<>".into(),
+        },
+    ));
 
     // Deep-ish nesting to exercise multi-level child ordering.
     let mut nested = TypeExpr::named("Leaf");

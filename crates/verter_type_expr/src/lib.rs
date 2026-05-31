@@ -343,7 +343,9 @@ fn drain_children(node: &mut TypeExpr, worklist: &mut Vec<TypeExpr>) {
         TypeExpr::Object(obj) => {
             if let Some(obj) = Arc::into_inner(std::mem::replace(
                 obj,
-                Arc::new(ObjectExpr { properties: Vec::new() }),
+                Arc::new(ObjectExpr {
+                    properties: Vec::new(),
+                }),
             )) {
                 for member in obj.properties {
                     drain_object_member(member, worklist);
