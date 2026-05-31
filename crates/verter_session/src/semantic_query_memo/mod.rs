@@ -57,10 +57,12 @@ mod test_gates;
 // Test-only observability surface for `SemanticGraphStore` (in-flight
 // abort driver, joiner-admission strong-count + condvar-pairing probes,
 // per-store cold-abort trigger). Extracted to a sibling so the hot-path
-// memo logic here stays under the Tier-2 module-size budget. The free
-// functions are reached unconditionally through the `for_tests` shim, so
-// the module is not `cfg`-gated.
+// memo logic here stays under the Tier-2 module-size budget. Gated out of
+// release: its only consumers are tests and the `for_tests` shims, both of
+// which build with `debug_assertions` (test profile) or `cfg(test)`.
+#[cfg(any(test, debug_assertions))]
 mod test_support;
+#[cfg(any(test, debug_assertions))]
 #[doc(hidden)]
 pub use test_support::{
     empty_signature_for_tests, test_trigger_inflight_abort, TestForceColdAbortGuard,
