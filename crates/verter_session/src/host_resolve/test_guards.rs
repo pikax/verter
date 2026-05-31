@@ -1,7 +1,7 @@
-//! Test-only thread-local guards that forbid the legacy route-frontier and
-//! import-route shadow paths from running on a thread. Used by the
-//! `host_resolve_tests` and `host_manage_tests` to assert the production
-//! pipeline does not regress through the legacy code paths.
+//! Test-only thread-local guards that forbid the legacy route-frontier path
+//! from running on a thread. Used by the `host_resolve_tests` and
+//! `host_manage_tests` to assert the production pipeline does not regress
+//! through the legacy code path.
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -9,27 +9,15 @@ use std::cell::Cell;
 #[cfg(test)]
 thread_local! {
     static FORBID_ROUTE_FRONTIER_FOR_TESTS: Cell<usize> = const { Cell::new(0) };
-    static FORBID_IMPORT_ROUTE_SHADOW_FOR_TESTS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
 pub(crate) struct RouteFrontierGuard;
-#[cfg(test)]
-pub(crate) struct ImportRouteShadowGuard;
 
 #[cfg(test)]
 impl Drop for RouteFrontierGuard {
     fn drop(&mut self) {
         FORBID_ROUTE_FRONTIER_FOR_TESTS.with(|depth| {
-            depth.set(depth.get().saturating_sub(1));
-        });
-    }
-}
-
-#[cfg(test)]
-impl Drop for ImportRouteShadowGuard {
-    fn drop(&mut self) {
-        FORBID_IMPORT_ROUTE_SHADOW_FOR_TESTS.with(|depth| {
             depth.set(depth.get().saturating_sub(1));
         });
     }
@@ -44,14 +32,6 @@ pub(crate) fn forbid_route_frontier_for_tests() -> RouteFrontierGuard {
 }
 
 #[cfg(test)]
-pub(crate) fn forbid_import_route_shadow_for_tests() -> ImportRouteShadowGuard {
-    FORBID_IMPORT_ROUTE_SHADOW_FOR_TESTS.with(|depth| {
-        depth.set(depth.get().saturating_add(1));
-    });
-    ImportRouteShadowGuard
-}
-
-#[cfg(test)]
 pub(super) fn assert_route_frontier_allowed() {
     assert!(
         !route_frontier_forbidden_for_current_thread(),
@@ -60,27 +40,9 @@ pub(super) fn assert_route_frontier_allowed() {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn assert_import_route_shadow_allowed() {
-    assert!(
-        !import_route_shadow_forbidden_for_current_thread(),
-        "route/root/component-meta production path should not read legacy import-route shadow maps",
-    );
-}
-
-#[cfg(test)]
 pub(crate) fn route_frontier_forbidden_for_current_thread() -> bool {
     FORBID_ROUTE_FRONTIER_FOR_TESTS.with(|depth| depth.get() > 0)
 }
 
-#[cfg(test)]
-pub(crate) fn import_route_shadow_forbidden_for_current_thread() -> bool {
-    FORBID_IMPORT_ROUTE_SHADOW_FOR_TESTS.with(|depth| depth.get() > 0)
-}
-
 #[cfg(not(test))]
 pub(super) fn assert_route_frontier_allowed() {}
-
-#[cfg(not(test))]
-#[allow(dead_code)]
-pub(crate) fn assert_import_route_shadow_allowed() {}

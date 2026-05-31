@@ -47,29 +47,19 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, source: &str) {
 }
 
 #[test]
-fn frontier_and_shadow_forbid_guards_are_thread_local() {
+fn frontier_forbid_guard_is_thread_local() {
     let _frontier_guard = crate::host_resolve::forbid_route_frontier_for_tests();
-    let _shadow_guard = crate::host_resolve::forbid_import_route_shadow_for_tests();
 
     assert!(crate::host_resolve::route_frontier_forbidden_for_current_thread());
-    assert!(crate::host_resolve::import_route_shadow_forbidden_for_current_thread());
 
-    let (frontier_forbidden, shadow_forbidden) = std::thread::spawn(|| {
-        (
-            crate::host_resolve::route_frontier_forbidden_for_current_thread(),
-            crate::host_resolve::import_route_shadow_forbidden_for_current_thread(),
-        )
-    })
-    .join()
-    .expect("thread-local guard probe should join cleanly");
+    let frontier_forbidden =
+        std::thread::spawn(crate::host_resolve::route_frontier_forbidden_for_current_thread)
+            .join()
+            .expect("thread-local guard probe should join cleanly");
 
     assert!(
         !frontier_forbidden,
         "route-frontier forbid guard should not leak across test threads",
-    );
-    assert!(
-        !shadow_forbidden,
-        "import-route-shadow forbid guard should not leak across test threads",
     );
 }
 

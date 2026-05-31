@@ -1084,7 +1084,7 @@ fn resolve_imported_type_root_caches_stable_miss_in_imported_root_db() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn prepared_type_decl_does_not_require_import_route_shadow_materialization() {
+fn prepared_type_decl_canonicalizes_imported_extends_base() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types.ts",
@@ -1100,10 +1100,9 @@ fn prepared_type_decl_does_not_require_import_route_shadow_materialization() {
         ws,
     );
 
-    let _route_shadow_guard = crate::host_resolve::forbid_import_route_shadow_for_tests();
     let prepared = host
         .prepared_type_decl("/src/types.ts", "Props")
-        .expect("prepared decl should materialize without the legacy import-route shadow path");
+        .expect("prepared decl should materialize the imported extends base");
 
     let base = prepared
         .name_resolution
@@ -5852,7 +5851,6 @@ fn route_and_root_resolution_do_not_fall_back_through_frontier() {
         ws,
     );
 
-    let _route_shadow_guard = crate::host_resolve::forbid_import_route_shadow_for_tests();
     let _guard = crate::host_resolve::forbid_route_frontier_for_tests();
     let route = host.resolve_named_type_export_target("/src/index.ts", "Props");
     assert_eq!(
