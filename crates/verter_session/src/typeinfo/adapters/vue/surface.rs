@@ -757,7 +757,7 @@ pub(crate) fn props_from_typeinfo_surface(
     // analyzer's `extract_define_model_type`) — the model prop is genuinely
     // analyzer-derived, not a macro-T object surface member.
     if macro_surface.macro_kind == AnalyzedMacroKind::DefineModel {
-        return model_prop_fields(host, macro_surface);
+        return model_prop_fields(ctx, macro_surface);
     }
 
     macro_surface
@@ -837,8 +837,16 @@ fn prop_index_signatures_from_surface(
 /// (default `modelValue`) typed `T`; the analyzer already captured this as the
 /// macro's single `prop_fields` entry. Re-scope the typed form to the SFC owner
 /// so nested `Ref`s resolve in the SFC.
-fn model_prop_fields(host: &VerterHost, macro_surface: &VueMacroSurface) -> Vec<AnalyzedPropField> {
-    let Some(indexed) = host.ensure_indexed_ready(macro_surface.owner_canonical.as_ref()) else {
+///
+/// The owner SFC's `IndexedReady` is fetched through the ACTIVE `ctx`
+/// (`ctx.ensure_indexed_ready`), NOT the base `VerterHost`, so an overlay
+/// session reads the OVERLAY `defineModel` macro facts — a `defineModel<number>`
+/// edit no longer rereads the base host's `defineModel<string>` snapshot.
+fn model_prop_fields(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    macro_surface: &VueMacroSurface,
+) -> Vec<AnalyzedPropField> {
+    let Some(indexed) = ctx.ensure_indexed_ready(macro_surface.owner_canonical.as_ref()) else {
         return Vec::new();
     };
     let Some(mac) = indexed.snapshot.macros.get(macro_surface.macro_index) else {
