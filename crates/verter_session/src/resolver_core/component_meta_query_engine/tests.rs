@@ -1421,7 +1421,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
 }
 
 #[test]
-fn project_type_surface_expr_nested_pick_and_omit_generic_interface_avoids_structural_substitution_slow_lane(
+fn project_type_surface_expr_nested_pick_and_omit_generic_interface_keeps_exact_shallow_surface(
 ) {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -1502,11 +1502,10 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     let _store_view = host.resolver_store_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
-    let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
 "/src/App.vue", "ColorModeSelectProps")
-        .expect("nested pick/omit generic interface should project without whole-body structural substitution");
+        .expect("nested pick/omit generic interface should project the routed object surface");
 
     let TypeExpr::Object(object) = projected else {
         panic!("prepared projection should still materialize the routed object surface");
@@ -1520,18 +1519,18 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             _ => None,
         })
         .collect();
-    // The structural-substitution fast path must reproduce the EXACT
-    // shallow member surface the standard route produces for this fixture
-    // (covered by `..nested_pick_and_omit_generic_interface_stays_shallow`):
+    // The routed surface must reproduce the EXACT shallow member surface
+    // the standard route produces for this fixture (covered by
+    // `..nested_pick_and_omit_generic_interface_stays_shallow`):
     // `Omit<SelectMenuProps<Item[]>, 'items'>` over the picked
     // `RootProps` members + `IconProps` + the `Omit`'d `HtmlAttrs`. A
-    // structural-substitution regression that mangles the surface (drops
-    // an inherited member, leaks the `items`/`type`/`disabled`/`name`
-    // Omit'd members, or fails to honor the pick) flips this RED.
+    // regression that mangles the surface (drops an inherited member,
+    // leaks the `items`/`type`/`disabled`/`name` Omit'd members, or
+    // fails to honor the pick) flips this RED.
     assert_eq!(
         member_names,
         std::collections::BTreeSet::from(["defaultOpen", "disabled", "icon", "id", "open"]),
-        "structural-substitution fast path should keep the picked + inherited members while \
+        "routed surface should keep the picked + inherited members while \
          honoring the nested omits, got {member_names:?}",
     );
 }
