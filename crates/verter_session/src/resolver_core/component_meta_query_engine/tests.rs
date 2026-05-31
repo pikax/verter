@@ -1726,6 +1726,29 @@ type Wrapper<T> = { value: T; label: string }
         shape.properties.iter().all(|property| property.optional),
         "Partial<...> must mark every member optional",
     );
+    // Substitution coverage: the cutover's core guarantee is that dispatch
+    // SUBSTITUTES the generic arg (it is the replacement for the deleted
+    // `substitute_type_expr`). Assert the concrete member TYPES, not just
+    // names: a regression returning `{ value: T; label: string }` (no
+    // substitution) would pass the name/optional checks above but flip these.
+    let value_ty = shape
+        .properties
+        .iter()
+        .find(|property| property.name.as_str() == "value")
+        .map(|property| &property.ty);
+    assert!(
+        matches!(value_ty, Some(TypeExpr::Primitive(PrimitiveName::Number))),
+        "dispatch must substitute Wrapper's `T` -> number in `value`, got {value_ty:?}",
+    );
+    let label_ty = shape
+        .properties
+        .iter()
+        .find(|property| property.name.as_str() == "label")
+        .map(|property| &property.ty);
+    assert!(
+        matches!(label_ty, Some(TypeExpr::Primitive(PrimitiveName::String))),
+        "`label` must stay `string`, got {label_ty:?}",
+    );
 }
 
 /// PHASE-1A — function generic shadowing through the dispatch
@@ -1934,6 +1957,28 @@ type Cond<T> = T extends number ? { value: T; label: string } : never
     assert!(
         shape.properties.iter().all(|property| property.optional),
         "Partial<...> must mark every member of the conditional-resolved surface optional",
+    );
+    // Substitution coverage: assert dispatch evaluated the conditional's true
+    // branch AND substituted `T` -> number — not merely that a `{ value; label }`
+    // surface exists. A regression yielding `{ value: T; label: string }` would
+    // pass the name/optional checks above but flip these.
+    let value_ty = shape
+        .properties
+        .iter()
+        .find(|property| property.name.as_str() == "value")
+        .map(|property| &property.ty);
+    assert!(
+        matches!(value_ty, Some(TypeExpr::Primitive(PrimitiveName::Number))),
+        "dispatch must resolve Cond<number>'s true branch with `T` -> number in `value`, got {value_ty:?}",
+    );
+    let label_ty = shape
+        .properties
+        .iter()
+        .find(|property| property.name.as_str() == "label")
+        .map(|property| &property.ty);
+    assert!(
+        matches!(label_ty, Some(TypeExpr::Primitive(PrimitiveName::String))),
+        "`label` must stay `string`, got {label_ty:?}",
     );
 }
 
