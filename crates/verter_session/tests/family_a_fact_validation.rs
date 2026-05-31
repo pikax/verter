@@ -116,47 +116,6 @@ fn family_a_producers_call_new_fact_helpers() {
          resolvability_db, owner_collection_db) — these track top-level type identity."
     );
 
-    let prepared_surface =
-        read_session_source("resolver_core/component_meta_query_engine/prepared_surface.rs");
-    assert!(
-        !prepared_surface.contains("engine_dep_signature_for_canonical("),
-        "prepared_surface.rs must NOT call engine_dep_signature_for_canonical after the R28 \
-         migration — use the engine_fact_signature_* helpers instead."
-    );
-    // PreparedSurface observes top-level identity directly;
-    // PreparedTarget observes top-level identity for both keyed
-    // canonicals via the engine_fact_signature_for_prepared_target
-    // helper; PreparedMember observes per-member facts.
-    assert!(
-        prepared_surface.contains("engine_fact_signature_for_exported_type("),
-        "prepared_surface.rs must call engine_fact_signature_for_exported_type for the \
-         prepared_surface_db cache producer (top-level identity)."
-    );
-    assert!(
-        prepared_surface.contains("engine_fact_signature_for_prepared_target("),
-        "prepared_surface.rs must call engine_fact_signature_for_prepared_target for the \
-         prepared_target_db cache producer — it roots BOTH the active scope and the \
-         declaring canonical as self-roots."
-    );
-    assert!(
-        prepared_surface.contains("engine_fact_signature_for_canonical_member("),
-        "prepared_surface.rs must call engine_fact_signature_for_canonical_member for the \
-         prepared_member_db cache producer (path-precise member observation per R28)."
-    );
-
-    let routed_expr =
-        read_session_source("resolver_core/component_meta_query_engine/routed_expr.rs");
-    assert!(
-        !routed_expr.contains("engine_dep_signature_for_canonical("),
-        "routed_expr.rs must NOT call engine_dep_signature_for_canonical after the R28 \
-         migration — use engine_fact_signature_for_exported_type instead."
-    );
-    assert!(
-        routed_expr.contains("engine_fact_signature_for_exported_type("),
-        "routed_expr.rs must call engine_fact_signature_for_exported_type for the \
-         routed_expr_surface_db cache producer (top-level identity)."
-    );
-
     let materialize = read_session_source("meta_resolve/materialize/field_types.rs");
     assert!(
         !materialize.contains("engine_dep_signature_for_canonical("),

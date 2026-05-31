@@ -134,36 +134,6 @@ pub(crate) const SEMANTIC_MISS: &str = "semanticMiss";
 pub(crate) const SEMANTIC_OBJECT_SURFACE: &str = "semanticObjectSurface";
 pub(crate) const SEMANTIC_SURFACE_MEMBER: &str = "semanticSurfaceMember";
 
-/// Build an R28 path-precise `Arc<[FactVersionRef]>` for a cache
-/// whose validity depends on a single MEMBER of an exporter type.
-/// Observes `MemberPresence(exporter, member)` and `Member(exporter,
-/// member)` facts in the `Type` symbol space so the consumer
-/// invalidates ONLY when the named member's header or body changes;
-/// sibling-member edits in the same file keep the consumer warm.
-///
-/// The builder is **provenance-pure**: `observed_hash` is the keyed
-/// canonical's content version the producer's value was computed
-/// against, captured once at the value source. The self-root
-/// `FileWholeHash` and both parse facts are pinned to that observed
-/// version — the helper never re-reads current content. Returns
-/// `None` (refuse shared-cache admission) when the observed version's
-/// parse-fact registry cannot be recovered.
-pub(crate) fn engine_fact_signature_for_canonical_member(
-    ctx: &dyn ResolverContext,
-    canonical_id: &str,
-    exporter: &str,
-    member: &str,
-    observed_hash: crate::resolver_core::ResolverHash16,
-) -> Option<std::sync::Arc<[crate::resolver_core::FactVersionRef]>> {
-    crate::fact_signature_helpers::fact_signature_for_canonical_member(
-        ctx,
-        canonical_id,
-        exporter,
-        member,
-        verter_semantic::facts::registry::SymbolSpace::Type,
-        observed_hash,
-    )
-}
 
 /// Build an R28 signature for a cache whose validity depends on the
 /// IDENTITY of a top-level type at `(canonical, type_name)`. Observes
@@ -194,87 +164,6 @@ pub(crate) fn engine_fact_signature_for_exported_type(
     )
 }
 
-/// Build the fact signature for a `PreparedTargetDb` entry.
-///
-/// A `PreparedTargetDb` entry maps `(active_scope, target_name)` to a
-/// resolved `(canonical, symbol)` pair. The entry has up to THREE
-/// self-roots: the active scope, the original declaring canonical, AND
-/// — when the requested name re-exports through an intermediate module
-/// to a third file — the FINAL routed declaring canonical. The
-/// resolved target depends on the top-level identity of `target_name`
-/// in `active_scope`, on the original declaring `(decl_canonical,
-/// decl_symbol)`, and on the routed `(routed_canonical, routed_symbol)`.
-/// A content edit to ANY of the three files shifts its self-root
-/// `FileWholeHash` and rejects the entry.
-///
-/// The builder is **provenance-pure**: `observed_active_scope_hash`,
-/// `observed_decl_hash`, and (when present) the routed canonical's
-/// observed hash are the keyed/declaring canonicals' content versions
-/// the producer's value was resolved against, each captured once at
-/// the value source — the routed canonical's hash comes from the
-/// prepared-decl bundle actually used for the value
-/// ([`crate::resolver_core::prepared_decl::PreparedDeclBundle::owner_whole_hash`]),
-/// NOT a current-content re-read. Each
-/// `engine_fact_signature_for_exported_type` sub-signature is pinned
-/// to its own observed hash. Returns `None` (refuse shared-cache
-/// admission) when any observed version's parse-fact registry cannot
-/// be recovered.
-///
-/// `routed_decl` is `Some((routed_canonical, routed_symbol,
-/// observed_routed_hash))` when the resolved declaring canonical
-/// differs from the original declaring canonical (a re-export hop);
-/// `None` when no re-route occurred (or the routed canonical equals
-/// the active scope / original declaring canonical, already rooted).
-pub(crate) fn engine_fact_signature_for_prepared_target(
-    ctx: &dyn ResolverContext,
-    active_scope: &str,
-    target_name: &str,
-    observed_active_scope_hash: crate::resolver_core::ResolverHash16,
-    decl_canonical: &str,
-    decl_symbol: &str,
-    observed_decl_hash: crate::resolver_core::ResolverHash16,
-    routed_decl: Option<(&str, &str, crate::resolver_core::ResolverHash16)>,
-) -> Option<std::sync::Arc<[crate::resolver_core::FactVersionRef]>> {
-    let mut entries: Vec<crate::resolver_core::FactVersionRef> =
-        engine_fact_signature_for_exported_type(
-            ctx,
-            active_scope,
-            target_name,
-            observed_active_scope_hash,
-        )?
-        .to_vec();
-    if decl_canonical != active_scope || decl_symbol != target_name {
-        entries.extend(
-            engine_fact_signature_for_exported_type(
-                ctx,
-                decl_canonical,
-                decl_symbol,
-                observed_decl_hash,
-            )?
-            .iter()
-            .cloned(),
-        );
-    }
-    // The FINAL routed declaring canonical — the third self-root the
-    // cache key never encodes. Root it only when it is a genuinely
-    // distinct file: a routed canonical equal to the active scope or
-    // the original declaring canonical is already rooted above.
-    if let Some((routed_canonical, routed_symbol, observed_routed_hash)) = routed_decl {
-        if routed_canonical != active_scope && routed_canonical != decl_canonical {
-            entries.extend(
-                engine_fact_signature_for_exported_type(
-                    ctx,
-                    routed_canonical,
-                    routed_symbol,
-                    observed_routed_hash,
-                )?
-                .iter()
-                .cloned(),
-            );
-        }
-    }
-    Some(std::sync::Arc::from(entries))
-}
 
 /// A prepared type declaration bundled with the keyed canonical's
 /// observed content version.
@@ -739,23 +628,6 @@ fn assert_direct_pick_routed_expr_slow_lane_allowed() {
 #[allow(dead_code)]
 fn assert_direct_pick_routed_expr_slow_lane_allowed() {}
 
-#[cfg(test)]
-fn assert_prepared_structural_substitution_slow_lane_allowed(expr: &TypeExpr) {
-    let is_structural = matches!(
-        expr,
-        TypeExpr::Object(_)
-            | TypeExpr::Intersection(_)
-            | TypeExpr::Union(_)
-            | TypeExpr::Function(_)
-            | TypeExpr::Parenthesized(_),
-    );
-    if is_structural {
-        assert!(
-            !prepared_structural_substitution_slow_lane_forbidden_for_current_thread(),
-            "prepared generic projection should not whole-substitute structural bodies when shallow member-local substitution can satisfy the route",
-        );
-    }
-}
 
 #[cfg(test)]
 pub(crate) fn structural_slow_lane_forbidden_for_current_thread() -> bool {

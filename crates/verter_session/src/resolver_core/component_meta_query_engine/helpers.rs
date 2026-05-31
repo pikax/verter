@@ -297,16 +297,3 @@ pub(super) fn projected_surface_member_names(expr: &TypeExpr) -> Option<Vec<Stri
     }
 }
 
-pub(super) fn string_literal_keys_type_expr(mut keys: Vec<String>) -> Option<TypeExpr> {
-    keys.sort();
-    keys.dedup();
-    match keys.len() {
-        0 => None,
-        1 => Some(TypeExpr::string_literal(keys.pop().unwrap())),
-        _ => Some(TypeExpr::Union(std::sync::Arc::from(
-            keys.into_iter()
-                .map(TypeExpr::string_literal)
-                .collect::<Vec<_>>(),
-        ))),
-    }
-}
