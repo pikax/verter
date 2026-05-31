@@ -114,6 +114,36 @@ fn resolved_route() -> RouteResult {
     }
 }
 
+/// Join `handle` and return its value, panicking if it does not complete
+/// within ~10s.
+///
+/// The leader/follower joins are reached only after the leader has been
+/// released and the follower woken by the leader's publish, so on the
+/// happy path they complete promptly. They would block forever only on a
+/// genuine RouteDb singleflight deadlock — exactly the hang class this
+/// suite must surface loudly rather than hanging. The join runs on a
+/// helper thread that reports its outcome (the joined value) through a
+/// rendezvous channel; the caller blocks on `recv_timeout` and PANICs on
+/// the deadline.
+fn join_within<T: Send + 'static>(handle: thread::JoinHandle<T>, label: &str) -> T {
+    let (tx, rx) = mpsc::sync_channel::<thread::Result<T>>(1);
+    thread::spawn(move || {
+        // `send` fails only if the receiver was dropped (caller already
+        // panicked on timeout); ignore the benign disconnect.
+        let _ = tx.send(handle.join());
+    });
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(value)) => value,
+        Ok(Err(_)) => panic!("{label} panicked"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{label} deadlocked (join did not complete within 10s)")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("{label} watchdog channel disconnected before reporting")
+        }
+    }
+}
+
 #[test]
 fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
     let db = Arc::new(RouteDb::new());
@@ -194,8 +224,8 @@ fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
     // tracer, and bumps the coalesced counter.
     tx_release_leader.send(()).expect("release leader");
 
-    let leader_result = leader.join().expect("leader joined");
-    let (follower_result, follower_finalise) = follower.join().expect("follower joined");
+    let leader_result = join_within(leader, "leader");
+    let (follower_result, follower_finalise) = join_within(follower, "follower");
 
     assert!(leader_result.is_some(), "leader must return Some");
     assert!(follower_result.is_some(), "follower must return Some");
