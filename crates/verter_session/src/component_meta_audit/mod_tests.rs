@@ -242,9 +242,11 @@ fn component_meta_payload_accessor_returns_none_for_other_kinds() {
 ///     hit"). The diamond makes the intern-hit a property of the import
 ///     graph itself, independent of any single cache's self-rooting.
 ///   - which together force the substrate to: intern semantic
-///     nodes (NodeArena push_impl shard locks), walk origins
-///     under the completion fence (dep_signature merges), and
-///     re-merge an already-observed origin (intern hits).
+///     nodes (NodeArena push_impl shard locks), fold memoised
+///     dispatch reads' dep-signatures through the shared fan-in
+///     (`accumulate_dispatch_dep_signature` — dep_signature merges),
+///     and re-observe an already-accumulated fact via the second
+///     diamond route (intern hits).
 fn run_probe_request() -> RequestAuditRecord {
     let host = crate::VerterHost::new_standalone(crate::types::HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
@@ -365,19 +367,21 @@ fn audit_counter_smallest_reproducer() {
     assert!(
         cm.dep_signature_merges > 0,
         "smallest reproducer: dep_signature merges must increment when \
-         the cold resolver folds a cached read's dep-signature into the \
-         materialiser's per-frame local fence. Production \
-         `merge_dep_signature_into_local_fence` bumps the counter at \
+         the cold resolver folds a memoised dispatch read's dep-signature \
+         into the per-request accumulator. Production \
+         `accumulate_dispatch_dep_signature` (the sole drain of the shared \
+         `emit_dispatch_dep_signature_facts` fan-in) bumps the counter at \
          every such fold — observing 0 means the audit hook is no longer \
-         wired into the production merge site. Counter: {}",
+         wired into the shared dispatch fan-in. Counter: {}",
         cm.dep_signature_merges,
     );
     assert!(
         cm.dep_signature_intern_hits > 0,
         "smallest reproducer: dep_signature intern-hits must increment \
-         when `merge_signature` observes a `(canonical, kind)` pair \
-         already present at the same version (redundant merge avoided). \
-         Counter: {}",
+         when the shared dispatch fan-in (`accumulate_dispatch_dep_signature`) \
+         observes a fact already present in the per-request accumulator at the \
+         same version (the diamond's shared base reached through a second import \
+         route — redundant merge avoided). Counter: {}",
         cm.dep_signature_intern_hits,
     );
 }
