@@ -219,6 +219,22 @@ impl JobIndex {
                 if entry.enqueue_time < existing.enqueue_time {
                     existing.enqueue_time = entry.enqueue_time;
                 }
+                // Request context is request-scoped and must NOT be
+                // dropped on merge. A dependency can be enqueued
+                // context-less first (background pre-warm) and then
+                // re-ingested with a parent's context — adopting the
+                // incoming context lets the dispatching worker install
+                // the parent's TLS so VFS-sink events carry the
+                // parent's `request_id`. We adopt the incoming context
+                // ONLY when the existing entry has none; an already
+                // present context is the authoritative attribution and
+                // is never overwritten (a later context-less re-insert
+                // must not clear it).
+                if existing.request_context.is_none() {
+                    if let Some(ctx) = entry.request_context {
+                        existing.request_context = Some(ctx);
+                    }
+                }
                 return false;
             }
         }
@@ -880,5 +896,115 @@ mod tests {
         }
         // 5 old (not cancelled) + 15 new = 20
         assert_eq!(count, 20);
+    }
+
+    // ── Dedup merge: request_context must never be dropped ──
+
+    use std::sync::Arc;
+
+    use crate::request_context::{
+        CacheEventKind, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike, TlsUninstall,
+    };
+
+    /// Minimal `RequestContextLike` fake carrying only a request id —
+    /// enough to assert which context survives a queue merge.
+    struct FakeCtx(u64);
+    impl RequestContextLike for FakeCtx {
+        fn request_id(&self) -> u64 {
+            self.0
+        }
+        fn capture_enabled(&self) -> bool {
+            false
+        }
+        fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {}
+        fn record_cache_event(&self, _event: CacheEventKind) {}
+        fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
+            let guard =
+                OpaqueContextGuard::install(OpaqueRequestContext(self as Arc<dyn RequestContextLike>));
+            Box::new(FakeGuard(guard))
+        }
+    }
+    struct FakeGuard(#[allow(dead_code)] OpaqueContextGuard);
+    impl TlsUninstall for FakeGuard {
+        fn uninstall(self: Box<Self>) {}
+    }
+
+    fn opaque_ctx(id: u64) -> OpaqueRequestContext {
+        OpaqueRequestContext(Arc::new(FakeCtx(id)) as Arc<dyn RequestContextLike>)
+    }
+
+    #[test]
+    fn merge_adopts_incoming_context_when_existing_is_none() {
+        // (a) Insert key K context-LESS first, then re-insert K WITH a
+        // parent context. The merged entry must ADOPT the parent
+        // context. Pre-fix the merge ignored `entry.request_context`,
+        // so the dequeued entry's context stayed `None` and this
+        // `request_id() == 7` assertion failed (it would panic on the
+        // `.expect` of a `None`).
+        let mut idx = JobIndex::new(AgingConfig::default());
+
+        let added = idx.insert(make_entry(
+            "dep.ts",
+            1,
+            TaskKind::Source,
+            Priority::Background,
+        ));
+        assert!(added, "first context-less insert must add a new entry");
+
+        let with_ctx = make_entry("dep.ts", 1, TaskKind::Source, Priority::Background)
+            .with_request_context(Some(opaque_ctx(7)));
+        let added = idx.insert(with_ctx);
+        assert!(!added, "same-key re-insert must merge, not add");
+        assert_eq!(idx.len(), 1, "merge must keep a single entry");
+
+        let entry = idx.dequeue().expect("one merged entry must be present");
+        let ctx = entry
+            .request_context
+            .as_ref()
+            .expect("merge must adopt the incoming parent context, not drop it");
+        assert_eq!(
+            ctx.0.request_id(),
+            7,
+            "merged entry must carry the parent request id from the second insert",
+        );
+    }
+
+    #[test]
+    fn merge_keeps_existing_context_when_incoming_is_none() {
+        // (b) Insert key K WITH a context first, then re-insert K
+        // context-LESS. The merged entry must KEEP the original
+        // context — a later context-less re-insert must never clear an
+        // already-present attribution. Pre-fix the merge ignored
+        // request_context entirely; because the EXISTING entry already
+        // held the context this branch happened to pass on the buggy
+        // tree, so this test alone is not discriminating — its purpose
+        // is to lock the "never overwrite a present Some" half of the
+        // contract that the fix must not regress. The discriminating
+        // half is `merge_adopts_incoming_context_when_existing_is_none`.
+        let mut idx = JobIndex::new(AgingConfig::default());
+
+        let with_ctx = make_entry("dep.ts", 1, TaskKind::Source, Priority::Background)
+            .with_request_context(Some(opaque_ctx(42)));
+        let added = idx.insert(with_ctx);
+        assert!(added, "first insert with context must add a new entry");
+
+        let added = idx.insert(make_entry(
+            "dep.ts",
+            1,
+            TaskKind::Source,
+            Priority::Background,
+        ));
+        assert!(!added, "context-less re-insert must merge, not add");
+
+        let entry = idx.dequeue().expect("one merged entry must be present");
+        let ctx = entry
+            .request_context
+            .as_ref()
+            .expect("merge must keep the original context");
+        assert_eq!(
+            ctx.0.request_id(),
+            42,
+            "a later context-less insert must not clear the original parent context",
+        );
     }
 }
