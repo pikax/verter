@@ -1116,7 +1116,30 @@ fn root_surface_bridges_carry_no_prepared_decl_fallback() {
 #[test]
 fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback() {
     use syn::visit::Visit;
-    use syn::{ImplItemFn, Item, ItemFn, ItemImpl};
+    use syn::{ImplItemFn, Item, ItemFn, ItemImpl, UseTree};
+
+    /// Macros that may legitimately appear inside the guarded function bodies.
+    /// ANY other macro invocation is rejected: a `macro_rules!` wrapper whose
+    /// expansion contains the forbidden symbol would be invisible to the path /
+    /// method-call scanners (its body is an unparsed token stream), so an
+    /// unknown macro in the body is a potential re-introduction vector. Adding a
+    /// new macro to a guarded body requires consciously extending this list
+    /// (after confirming the macro cannot expand to the forbidden symbol).
+    const APPROVED_MACROS: &[&str] = &[
+        "component_meta_trace_custom",
+        "format",
+        "matches",
+        "vec",
+        "assert",
+        "assert_eq",
+        "debug_assert",
+        "debug_assert_eq",
+        "write",
+        "writeln",
+        "panic",
+        "todo",
+        "unreachable",
+    ];
 
     /// Walks one function body counting references to a forbidden symbol via
     /// ANY path segment (direct call, qualified path, or a segment produced by
@@ -1124,31 +1147,101 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
     /// (`receiver.forbidden(...)`). Method calls are `ExprMethodCall`, NOT path
     /// segments, so both visitors are required — a `.or_else(|| engine.
     /// project_prepared_requested_member_from_symbol(...))` rescue is a method
-    /// call and would be invisible to a path-only scan.
+    /// call and would be invisible to a path-only scan. Macro INVOCATIONS in the
+    /// body are collected by name so the caller can reject any non-approved
+    /// macro (a `macro_rules!` wrapper that expands to the forbidden symbol).
     struct ForbiddenSymbolCounter<'a> {
-        forbidden: &'a str,
+        /// The forbidden symbols (the canonical name plus any `use`-alias of it).
+        forbidden: &'a [String],
         hits: usize,
+        /// Macro invocation names (last path segment) seen in the body.
+        macros_used: Vec<String>,
     }
     impl<'ast, 'a> Visit<'ast> for ForbiddenSymbolCounter<'a> {
         fn visit_path_segment(&mut self, seg: &'ast syn::PathSegment) {
-            if seg.ident == self.forbidden {
+            if self.forbidden.iter().any(|f| seg.ident == f.as_str()) {
                 self.hits += 1;
             }
             syn::visit::visit_path_segment(self, seg);
         }
         fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
-            if mc.method == self.forbidden {
+            if self.forbidden.iter().any(|f| mc.method == f.as_str()) {
                 self.hits += 1;
             }
             syn::visit::visit_expr_method_call(self, mc);
         }
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            if let Some(seg) = mac.path.segments.last() {
+                self.macros_used.push(seg.ident.to_string());
+            }
+            // Do NOT recurse into the macro token stream — it is unparsed
+            // tokens, not a path/expr tree. The allow-list check on the macro
+            // NAME is the guard; an approved macro cannot expand to the
+            // forbidden symbol, an unapproved macro is rejected outright.
+        }
+    }
+
+    /// Collect every `use`-alias (`... as Alias`) whose ORIGINAL last segment is
+    /// `forbidden` from the file's `use` items. An `use crate::…::forbidden as
+    /// reroute;` import lets `reroute(...)` call the retired symbol without the
+    /// body scan ever seeing `forbidden` — so the aliases are added to the
+    /// forbidden set AND their mere existence is itself reported.
+    fn use_aliases_of(file: &syn::File, forbidden: &str) -> Vec<String> {
+        fn walk(tree: &UseTree, forbidden: &str, out: &mut Vec<String>) {
+            match tree {
+                UseTree::Path(p) => walk(&p.tree, forbidden, out),
+                UseTree::Group(g) => {
+                    for t in &g.items {
+                        walk(t, forbidden, out);
+                    }
+                }
+                UseTree::Rename(r) => {
+                    if r.ident == forbidden {
+                        out.push(r.rename.to_string());
+                    }
+                }
+                UseTree::Name(_) | UseTree::Glob(_) => {}
+            }
+        }
+        let mut out = Vec::new();
+        for item in &file.items {
+            if let Item::Use(u) = item {
+                walk(&u.tree, forbidden, &mut out);
+            }
+        }
+        out
     }
 
     /// Find a free fn OR an impl method named `fn_name` in `file` and count
-    /// `forbidden`-symbol references in its body. Panics if the function is not
-    /// found (the guard's anchor moved).
-    fn forbidden_hits_in_fn(file: &syn::File, fn_name: &str, forbidden: &str) -> usize {
-        let mut counter = ForbiddenSymbolCounter { forbidden, hits: 0 };
+    /// `forbidden`-symbol references (canonical name + `use`-aliases) in its
+    /// body. Also asserts every macro invocation in the body is on
+    /// `APPROVED_MACROS`. Panics if the function is not found (the guard's
+    /// anchor moved).
+    fn assert_fn_free_of_symbol(
+        file: &syn::File,
+        fn_name: &str,
+        canonical_forbidden: &str,
+        message: &str,
+    ) {
+        // An aliased import of the forbidden symbol is itself the evasion —
+        // report it before the body scan even runs.
+        let aliases = use_aliases_of(file, canonical_forbidden);
+        assert!(
+            aliases.is_empty(),
+            "Stage 4a guard: the file declaring `{fn_name}` imports the retired \
+             symbol `{canonical_forbidden}` under alias(es) {aliases:?} \
+             (`use … as …`). An aliased import is an import-alias evasion of the \
+             materializer/fallback retirement. Remove the alias import. {message}"
+        );
+
+        let forbidden: Vec<String> = std::iter::once(canonical_forbidden.to_string())
+            .chain(aliases)
+            .collect();
+        let mut counter = ForbiddenSymbolCounter {
+            forbidden: &forbidden,
+            hits: 0,
+            macros_used: Vec::new(),
+        };
         let mut found = false;
         for item in &file.items {
             match item {
@@ -1174,42 +1267,87 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
             "guard anchor moved: fn `{fn_name}` not found — re-point the guard at \
              the renamed component-meta resolution entry point"
         );
-        counter.hits
+        assert_eq!(counter.hits, 0, "{message}");
+        // Reject any macro invocation in the body that is not on the approved
+        // list — an unapproved `macro_rules!` wrapper could expand to the
+        // forbidden symbol (its expansion is invisible to the symbol scan).
+        let unapproved: Vec<&String> = counter
+            .macros_used
+            .iter()
+            .filter(|m| !APPROVED_MACROS.contains(&m.as_str()))
+            .collect();
+        assert!(
+            unapproved.is_empty(),
+            "Stage 4a guard: `{fn_name}` invokes non-approved macro(s) \
+             {unapproved:?}. A `macro_rules!` wrapper can expand to the retired \
+             materializer/fallback symbol, evading the path/method-call scan. \
+             Either remove the macro or, if it provably cannot expand to the \
+             forbidden symbol, add its name to APPROVED_MACROS. {message}"
+        );
     }
 
     let methods_src =
         read_workspace_file("crates/verter_session/src/host_manage/component_meta_methods.rs");
     let methods_file = syn::parse_file(&methods_src).expect("parse component_meta_methods.rs");
-    let materializer_hits = forbidden_hits_in_fn(
+    assert_fn_free_of_symbol(
         &methods_file,
         "compute_component_meta_state_inner",
         "produce_macro_object_shapes_for_purpose",
-    );
-    assert_eq!(
-        materializer_hits, 0,
         "Stage 4a: `compute_component_meta_state_inner` references \
          `produce_macro_object_shapes_for_purpose` — the eager macro-object \
          materialiser was retired from the production resolution path. Macro \
          shapes are owned by `projectors::define_shapes::project_define_macro_shapes`; \
-         do NOT re-introduce the materialiser (directly OR through a macro)."
+         do NOT re-introduce the materialiser (directly, via a `use`-alias, OR \
+         through a macro).",
     );
 
     let engine_src = read_workspace_file(
         "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
     );
     let engine_file = syn::parse_file(&engine_src).expect("parse component_meta_query_engine/mod.rs");
-    let fallback_hits = forbidden_hits_in_fn(
+    assert_fn_free_of_symbol(
         &engine_file,
         "dispatch_member_for_root_symbol",
         "project_prepared_requested_member_from_symbol",
-    );
-    assert_eq!(
-        fallback_hits, 0,
         "Stage 4a: `dispatch_member_for_root_symbol` references \
          `project_prepared_requested_member_from_symbol` — the prepared-decl \
          member rescue was removed; a dispatch miss is an authoritative miss. Do \
-         NOT re-add the `.or_else(...)` fallback (directly OR through a macro)."
+         NOT re-add the `.or_else(...)` fallback (directly, via a `use`-alias, OR \
+         through a macro).",
     );
+
+    // Owner-local AUTHORITY gate retarget guard: `owner_local_macro_root_has_surface`
+    // (jsdoc_resolve.rs) was retargeted from the prepared-decl walker
+    // (`cached_prepared_root_surface` via `project_prepared_type_surface_*`) to
+    // the shared dispatch surface projector
+    // (`project_expr_surface_shape_via_host_threaded`). It must STAY on dispatch
+    // — re-introducing the prepared-decl walker here is a second-resolver
+    // (Typed-IR-Only) violation. (The projectable-roots PRE-FILTER
+    // `projectable_owner_local_macro_roots` is a separate, coarser pass and is
+    // out of scope for this gate.)
+    let jsdoc_src =
+        read_workspace_file("crates/verter_session/src/host_manage/jsdoc_resolve.rs");
+    let jsdoc_file = syn::parse_file(&jsdoc_src).expect("parse jsdoc_resolve.rs");
+    for prepared_walker_symbol in [
+        "cached_prepared_root_surface",
+        "project_prepared_type_surface_shape_via_host_threaded",
+        "project_prepared_type_surface_expr_via_host_threaded",
+        "project_prepared_requested_member_from_symbol",
+    ] {
+        assert_fn_free_of_symbol(
+            &jsdoc_file,
+            "owner_local_macro_root_has_surface",
+            prepared_walker_symbol,
+            &format!(
+                "Stage 4a: the owner-local AUTHORITY gate \
+                 `owner_local_macro_root_has_surface` references the prepared-decl \
+                 walker `{prepared_walker_symbol}` — it was retargeted to the shared \
+                 dispatch surface projector `project_expr_surface_shape_via_host_threaded` \
+                 and must stay there (one resolver). Do NOT route the authority \
+                 gate back through the prepared-surface walker."
+            ),
+        );
+    }
 }
 
 // ===========================================================================
