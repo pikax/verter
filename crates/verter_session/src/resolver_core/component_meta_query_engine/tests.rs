@@ -1863,6 +1863,284 @@ type F<T> = <T>(x: T) => T
     );
 }
 
+/// PHASE-1B (route site route_keys.rs:599 — `project_direct_utility_surface_shape`
+/// → `projected_target_shape` last-resort `instantiate_local_generic_ref_via_engine`).
+/// NON-structural generic alias body: a `Conditional`.
+///
+/// The structural-body coverage at this site is
+/// `project_direct_utility_partial_generic_stays_off_substitution_slow_lane`
+/// (`Partial<Wrapper<number>>`, Object body). The trip-wire in
+/// `apply_type_param_substitutions` only fires for STRUCTURAL bodies
+/// (`Object`/`Intersection`/`Union`/`Function`/`Parenthesized`), so a
+/// non-structural body needs an explicit lock that dispatch's
+/// `build_instantiate` `_ => shallow_lower_type_expr_with_context`
+/// catch-all (build.rs) resolves the body correctly.
+///
+/// Fixture: `type Cond<T> = T extends number ? { value: T; label: string } : never`
+/// projected as `Partial<Cond<number>>`. `Cond`'s body is a `Conditional`
+/// (non-structural). Dispatch must evaluate the conditional to the
+/// `{ value; label }` object so `Partial` can mark both members optional.
+///
+/// Discriminator: if dispatch's instantiation catch-all regressed for
+/// conditionals the dispatch arms would miss and the route would fall to
+/// the `:599` engine fallback (proven by the revert-and-observe in the
+/// impl feedback). The guard is armed; the positive `{ value; label }` +
+/// all-optional assertions flip RED on a mangled surface.
+#[test]
+fn project_direct_utility_conditional_body_generic_stays_off_substitution_slow_lane() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+type Cond<T> = T extends number ? { value: T; label: string } : never
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    // `Partial<Cond<number>>` — utility wrapper over an instantiated
+    // generic alias whose body is a NON-structural `Conditional`.
+    let expr = TypeExpr::named_with_args(
+        "Partial",
+        vec![TypeExpr::named_with_args(
+            "Cond",
+            vec![TypeExpr::Primitive(PrimitiveName::Number)],
+        )],
+    );
+
+    let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
+    let shape = crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
+        &mut query_engine,
+        "/src/App.vue",
+        &expr,
+    )
+    .expect(
+        "Partial<Cond<number>> should project its conditional-resolved target shape via the \
+         dispatch fast lane without the structural-substitution slow lane",
+    );
+    let member_names: std::collections::BTreeSet<&str> = shape
+        .properties
+        .iter()
+        .map(|property| property.name.as_str())
+        .collect();
+    assert_eq!(
+        member_names,
+        std::collections::BTreeSet::from(["label", "value"]),
+        "Partial<Cond<number>> should resolve the conditional's number branch to both members, \
+         got {member_names:?}",
+    );
+    assert!(
+        shape.properties.iter().all(|property| property.optional),
+        "Partial<...> must mark every member of the conditional-resolved surface optional",
+    );
+}
+
+/// PHASE-1B (route site route_keys.rs:465 — `enumerate_member_surface_keys_via_route`
+/// `IndexedAccess { object: Ref<Args>, .. }` arm `instantiate_local_generic_ref_via_engine`).
+/// NON-structural generic alias body: a `Conditional`.
+///
+/// The structural-body coverage at this site is
+/// `enumerate_route_literal_keys_generic_ref_indexed_access_stays_off_substitution_slow_lane`
+/// (`ComponentConfig<T>` with a structural Object body). This locks the
+/// non-structural case: a generic alias whose WHOLE body is a
+/// `Conditional` resolving to the nested indexed object.
+///
+/// Fixture: `type Cfg<T> = T extends true ? { variants: { color: { primary: 1; secondary: 2 } } } : never`
+/// with key source `keyof Cfg<true>['variants']['color']`. The body is a
+/// `Conditional` (non-structural); dispatch must resolve
+/// `Cfg<true>['variants']['color']` to the concrete `{ primary; secondary }`
+/// object so the literal keys enumerate via the dispatch fast lane.
+///
+/// Discriminator: the guard is armed; a dispatch regression on the
+/// conditional-bodied indexed-access route would fall to the `:465`
+/// engine fallback (and trip on the structural sub-object). The
+/// positive `{ primary, secondary }` key assertion flips RED on a wrong
+/// surface.
+#[test]
+fn enumerate_route_literal_keys_conditional_body_indexed_access_stays_off_substitution_slow_lane() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/cfg.ts".to_string(),
+        Arc::from(
+            r#"
+export type Cfg<T> = T extends true
+  ? { variants: { color: { primary: 1; secondary: 2 } } }
+  : never
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { Cfg } from './cfg'
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./cfg".to_string(),
+            resolved_canonical_id: Some("/src/cfg.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    // `keyof Cfg<true>['variants']['color']`
+    let key_source = TypeExpr::KeyOf(Arc::new(TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named_with_args(
+                "Cfg",
+                vec![TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(
+                    true,
+                ))],
+            )),
+            index: Arc::new(TypeExpr::string_literal("variants")),
+        }),
+        index: Arc::new(TypeExpr::string_literal("color")),
+    }));
+
+    let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
+    let keys = query_engine
+        .enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &key_source)
+        .expect(
+            "keyof Cfg<true>['variants']['color'] over a conditional-bodied generic alias should \
+             enumerate its literal keys via the dispatch fast lane without the \
+             structural-substitution slow lane",
+        );
+    let key_set: std::collections::BTreeSet<&str> = keys.iter().map(String::as_str).collect();
+    assert_eq!(
+        key_set,
+        std::collections::BTreeSet::from(["primary", "secondary"]),
+        "conditional-bodied generic indexed-access key source should yield exactly the concrete \
+         color keys, got {key_set:?}",
+    );
+}
+
+/// PHASE-1B (route site route_keys.rs:215 — `enumerate_member_surface_keys_via_route`
+/// top `Unknown`-fallback arm `instantiate_local_generic_ref_via_engine`).
+/// NON-structural generic alias body: a `Ref` to another generic alias.
+///
+/// The `:215` arm fires when the dispatch leaf stabiliser returns
+/// `Unknown` for the member route's `object`, after which the engine
+/// fallback instantiated the generic alias and retried. This locks the
+/// non-structural case where the alias body is itself a generic `Ref`
+/// (alias-to-alias) rather than an inline structural shape.
+///
+/// Fixture: `type Inner<T> = { variants: { color: { primary: T; secondary: T } } }`
+/// and `type Outer<T> = Inner<T>` (Outer's body is a NON-structural
+/// `Ref`). Key source `keyof Outer<number>['variants']['color']`.
+/// Dispatch must chase the alias-to-alias indirection and resolve the
+/// nested indexed object so the keys enumerate via the dispatch fast
+/// lane.
+///
+/// Discriminator: the guard is armed; the positive `{ primary, secondary }`
+/// key assertion flips RED on a wrong surface, and a dispatch regression
+/// that left the route `object` as `Unknown` would fall to the `:215`
+/// engine fallback.
+#[test]
+fn enumerate_route_literal_keys_alias_to_alias_body_stays_off_substitution_slow_lane() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/cfg.ts".to_string(),
+        Arc::from(
+            r#"
+export type Inner<T> = { variants: { color: { primary: T; secondary: T } } }
+export type Outer<T> = Inner<T>
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { Outer } from './cfg'
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./cfg".to_string(),
+            resolved_canonical_id: Some("/src/cfg.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    // `keyof Outer<number>['variants']['color']`
+    let key_source = TypeExpr::KeyOf(Arc::new(TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named_with_args(
+                "Outer",
+                vec![TypeExpr::Primitive(PrimitiveName::Number)],
+            )),
+            index: Arc::new(TypeExpr::string_literal("variants")),
+        }),
+        index: Arc::new(TypeExpr::string_literal("color")),
+    }));
+
+    let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
+    let keys = query_engine
+        .enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &key_source)
+        .expect(
+            "keyof Outer<number>['variants']['color'] over an alias-to-alias generic body should \
+             enumerate its literal keys via the dispatch fast lane without the \
+             structural-substitution slow lane",
+        );
+    let key_set: std::collections::BTreeSet<&str> = keys.iter().map(String::as_str).collect();
+    assert_eq!(
+        key_set,
+        std::collections::BTreeSet::from(["primary", "secondary"]),
+        "alias-to-alias generic indexed-access key source should yield exactly the concrete \
+         color keys, got {key_set:?}",
+    );
+}
+
 #[test]
 fn type_expr_references_type_params_detects_nested_member_routes() {
     let expr = TypeExpr::IndexedAccess {
