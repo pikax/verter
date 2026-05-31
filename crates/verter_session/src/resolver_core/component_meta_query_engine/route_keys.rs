@@ -707,7 +707,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
     // ---- moved from routed_expr.rs: solve_or_project_prepared_member_leaf_expr ----
-    #[allow(dead_code)]
     pub(super) fn solve_or_project_prepared_member_leaf_expr(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -752,7 +751,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ///   per-sub-expression scope splitting because their sub-
     ///   expressions are already `TypeExpr` leaves that round-trip
     ///   through this function.
-    #[allow(dead_code)]
     fn solve_or_project_leaf_expr_with_context(
         &mut self,
         context: &PreparedProjectionContext,
@@ -918,7 +916,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     // ---- moved from routed_expr.rs: solve_or_project_leaf_expr_until_stable ----
-    #[allow(dead_code)]
     fn solve_or_project_leaf_expr_until_stable(
         &mut self,
         scope_canonical_id: &str,
@@ -973,7 +970,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     // ---- moved from routed_expr.rs: expr_references_prepared_scope_symbol ----
-    #[allow(dead_code)]
     fn expr_references_prepared_scope_symbol(
         &mut self,
         scope_canonical_id: &str,
