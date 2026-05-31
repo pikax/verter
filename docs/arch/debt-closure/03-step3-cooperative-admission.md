@@ -192,6 +192,16 @@ primitive landed in commit `95039972`:
 | `prepared_member_cache` | `PreparedMemberDb` | `PreparedMemberCacheKey` | `Option<Arc<ProjectedMember>>` |
 | `routed_expr_surface_cache` | `RoutedExprSurfaceDb` | `RoutedExprSurfaceCacheKey` | `Arc<TypeExpr>` |
 
+> Retired-history note: the table above records the cooperative-admission
+> consumers as of commit `95039972`. The prepared/routed walker cluster
+> (`PreparedTargetDb`, `PreparedSurfaceDb`, `PreparedMemberDb`,
+> `RoutedExprSurfaceDb`) and the per-member `MaterializedMemberSurfaceDb`
+> have since been deleted with the materializer/walker subgraph, and
+> `MaterializeMemoDb` was unified into `ShapeCacheDb`. The live
+> cooperative-admission consumers are `ImportedRegistryDb`,
+> `DeclarationLookupDb`, `ResolvabilityDb`, `OwnerCollectionDb`, and
+> `ShapeCacheDb`.
+
 **Sub-task 3.2.2 — relocated key types** in
 `crates/verter_session/src/resolver_core/cache_keys.rs`:
 - `MaterializedMemberSurfaceKey` / `MaterializedMemberSurfaceTarget`
