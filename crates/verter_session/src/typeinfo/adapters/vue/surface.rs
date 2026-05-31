@@ -1076,6 +1076,15 @@ enum ArmCombine {
 /// function types. Every arm MUST be a `Function` (a non-function arm makes the
 /// member not slot-like → `None`). The first params are intersected; the
 /// returns are combined per `combine`.
+///
+/// SOUNDNESS — a slot binding is guaranteed only if EVERY arm supplies a first
+/// parameter. A template destructuring `<template #default="{ x }">` runs for
+/// WHICHEVER arm the slot actually is, so a binding the template can rely on must
+/// be present across all arms. If ANY arm is a no-param callable (`() => any`),
+/// the multi-arm callable can be invoked with no slot props in that branch, so
+/// there are NO guaranteed bindings — the first param is dropped to `None`
+/// (otherwise a union like `(() => any) | ((props: { a }) => any)` would
+/// wrongly publish `a`). The return type still combines across arms.
 fn slot_callable_param_and_return_from_arms(
     arms: &[TypeExpr],
     combine: ArmCombine,
@@ -1086,6 +1095,10 @@ fn slot_callable_param_and_return_from_arms(
 )> {
     let mut first_params: Vec<TypeExpr> = Vec::new();
     let mut returns: Vec<TypeExpr> = Vec::new();
+    // A binding is guaranteed only when EVERY arm contributes a first param.
+    // A single no-param arm makes the slot callable with no props in that
+    // branch, so no binding is sound.
+    let mut all_arms_have_first_param = true;
     for arm in arms.iter() {
         let TypeExpr::Function(func) = arm else {
             // A non-function arm means the member is not purely slot-callable;
@@ -1094,6 +1107,8 @@ fn slot_callable_param_and_return_from_arms(
         };
         if let Some(p) = func.parameters.first() {
             first_params.push(p.ty.clone());
+        } else {
+            all_arms_have_first_param = false;
         }
         if let Some(rt) = func.return_type.as_ref() {
             returns.push((**rt).clone());
@@ -1102,14 +1117,20 @@ fn slot_callable_param_and_return_from_arms(
     if first_params.is_empty() && returns.is_empty() {
         return None;
     }
-    // First params: always the INTERSECTION (the slot prop object a template
-    // can destructure must be guaranteed across every arm).
-    let first_param = match first_params.len() {
-        0 => None,
-        1 => Some(first_params.into_iter().next().unwrap()),
-        _ => Some(TypeExpr::Intersection(std::sync::Arc::from(
-            first_params.into_boxed_slice(),
-        ))),
+    // First params: the INTERSECTION (the slot prop object a template can
+    // destructure must be guaranteed across every arm) — but ONLY when every
+    // arm actually supplied a first param. A no-param arm guarantees nothing, so
+    // the bindings are dropped entirely (the return type is still combined).
+    let first_param = if all_arms_have_first_param {
+        match first_params.len() {
+            0 => None,
+            1 => Some(first_params.into_iter().next().unwrap()),
+            _ => Some(TypeExpr::Intersection(std::sync::Arc::from(
+                first_params.into_boxed_slice(),
+            ))),
+        }
+    } else {
+        None
     };
     // Returns: combine per the arm kind (intersection of returns for an
     // intersection of functions; union of returns for a union of functions).
