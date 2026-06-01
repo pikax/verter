@@ -267,6 +267,48 @@ impl RequestGroup {
     }
 }
 
+/// A deferred dedup-join observation produced by
+/// [`SchedulerDag::register_request`] when a request joins an existing
+/// waiter group.
+///
+/// The session-side `on_dedup_joiner` callback may re-enter the
+/// scheduler (it records a share-reuse fact and can touch host-owned
+/// state), so it must NOT run while admission holds `dag.lock()`.
+/// `register_request` returns this event instead of firing the
+/// callback; the admission path collects every event and calls
+/// [`Self::fire`] AFTER the DAG lock is released. This keeps the
+/// callback-under-lock hazard out of both the single-request and the
+/// atomic-batch admission paths through one shared mechanism.
+pub struct DedupJoinerEvent {
+    canonical: Arc<str>,
+    joiner_context: crate::request_context::OpaqueRequestContext,
+    winner_request_id: u64,
+    winner_audited: bool,
+}
+
+impl DedupJoinerEvent {
+    /// Invoke the joiner's `on_dedup_joiner` callback. MUST be called
+    /// after the DAG lock has been released — the callback may re-enter
+    /// the scheduler.
+    pub fn fire(self) {
+        self.joiner_context.0.on_dedup_joiner(
+            self.canonical,
+            self.winner_request_id,
+            self.winner_audited,
+        );
+    }
+}
+
+impl std::fmt::Debug for DedupJoinerEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DedupJoinerEvent")
+            .field("canonical", &self.canonical)
+            .field("winner_request_id", &self.winner_request_id)
+            .field("winner_audited", &self.winner_audited)
+            .finish()
+    }
+}
+
 /// Per-node bookkeeping inside the DAG. `pub(in crate::dag)` so the
 /// `terminal_failures` child module can mutate
 /// `failed_blocker_deps` and `deps_remaining` directly when fanning
@@ -1457,15 +1499,25 @@ impl SchedulerDag {
     /// waiter group. If a matching group exists the sender joins;
     /// otherwise a new group is created.
     ///
-    /// On dedup, the joiner's `request_context` is called back with the
-    /// winner's `(request_id, capture_enabled)` via
-    /// `on_dedup_joiner` — the joiner's session-side code records a
-    /// share-reuse fact keyed by `(canonical, winner_id, winner_audited)`.
+    /// On dedup, the joiner observes the winner via a
+    /// [`DedupJoinerEvent`] that the caller fires AFTER releasing the
+    /// DAG lock (see [`DedupJoinerEvent::fire`]). The session-side
+    /// `on_dedup_joiner` impl records a share-reuse fact keyed by
+    /// `(canonical, winner_id, winner_audited)`; running that callback
+    /// under the DAG lock would let session-side code re-enter the
+    /// scheduler while admission still holds the mutex. This method
+    /// therefore RETURNS the event instead of invoking it — admission
+    /// (single or batch) collects the events and fires them once the
+    /// lock has dropped.
     ///
-    /// Returns `()` because there is no group-level priority upgrade
-    /// semantics any more: priority service lives on the DAG node and
-    /// callers propagate urgency via [`Self::upgrade_priority`] on the
-    /// matching identity directly.
+    /// Returns `Some(event)` exactly when this registration was a
+    /// dedup join AND the joiner carried a `request_context`;
+    /// otherwise `None`.
+    ///
+    /// There is no group-level priority upgrade semantics: priority
+    /// service lives on the DAG node and callers propagate urgency via
+    /// [`Self::upgrade_priority`] on the matching identity directly.
+    #[must_use = "the returned DedupJoinerEvent must be fired after the DAG lock is released"]
     pub fn register_request(
         &mut self,
         canonical: &Arc<str>,
@@ -1473,7 +1525,7 @@ impl SchedulerDag {
         target: TargetStage,
         sender: CompletionSender<RequestResult>,
         request_context: Option<crate::request_context::OpaqueRequestContext>,
-    ) {
+    ) -> Option<DedupJoinerEvent> {
         let key = FileGenKey {
             canonical: Arc::clone(canonical),
             generation,
@@ -1481,19 +1533,24 @@ impl SchedulerDag {
         let state = self.file_waiters.entry(key).or_default();
         for group in state.groups.iter_mut() {
             if group.target == target {
-                // Dedup: joiner observes winner via on_dedup_joiner.
-                if let Some(joiner_ctx) = request_context.as_ref() {
+                // Dedup: capture the winner details so the caller can
+                // observe them via `on_dedup_joiner` AFTER unlock. The
+                // callback is NOT fired here.
+                let event = request_context.as_ref().map(|joiner_ctx| {
                     let (winner_id, winner_audited) = group
                         .winner_context
                         .as_ref()
                         .map(|w| (w.0.request_id(), w.0.capture_enabled()))
                         .unwrap_or((0, false));
-                    joiner_ctx
-                        .0
-                        .on_dedup_joiner(Arc::clone(canonical), winner_id, winner_audited);
-                }
+                    DedupJoinerEvent {
+                        canonical: Arc::clone(canonical),
+                        joiner_context: joiner_ctx.clone(),
+                        winner_request_id: winner_id,
+                        winner_audited,
+                    }
+                });
                 group.senders.push(sender);
-                return;
+                return event;
             }
         }
         state.groups.push(RequestGroup {
@@ -1501,6 +1558,7 @@ impl SchedulerDag {
             senders: vec![sender],
             winner_context: request_context,
         });
+        None
     }
 
     /// Signal all waiter groups at `(canonical, generation)` matching

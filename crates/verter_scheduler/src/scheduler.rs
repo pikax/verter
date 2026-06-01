@@ -15,10 +15,10 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 
 use crate::dag::{
-    profile_hash_from_bytes, profile_hash_to_bytes, DagAgingConfig, DagCapacityBudget, DepKey,
-    FileStageKey, ReadyJob, SchedulerDag, WorkKind, WorkNodeIdentity,
+    profile_hash_from_bytes, profile_hash_to_bytes, DagAgingConfig, DagCapacityBudget,
+    DedupJoinerEvent, DepKey, FileStageKey, ReadyJob, SchedulerDag, WorkKind, WorkNodeIdentity,
 };
-use crate::driver::{Submission, SubmissionInbox};
+use crate::driver::{QueuedRequest, Submission, SubmissionInbox};
 use crate::edges::EdgeManager;
 use crate::executor::{DefaultExecutor, StageExecutor};
 use crate::job::{
@@ -286,7 +286,8 @@ pub struct Request {
 
 /// Batch submission handle.
 ///
-/// Produced by [`Scheduler::submit_batch`]; drained via
+/// Produced by [`Scheduler::submit_batch`] and
+/// [`Scheduler::submit_batch_atomic`]; drained via
 /// [`Scheduler::wait_batch`]. Callers submit N independent requests
 /// before any waits; the scheduler runs each request's stage work on
 /// its own stage `cpu_pool` as the driver dispatches it (the scheduler
@@ -296,6 +297,72 @@ pub struct Request {
 /// results in the same order.
 pub struct BatchHandle {
     pub(crate) handles: Vec<CompletionHandle<RequestResult>>,
+}
+
+impl BatchHandle {
+    /// Number of requests in the batch (one completion handle each).
+    pub fn len(&self) -> usize {
+        self.handles.len()
+    }
+
+    /// `true` when the batch carries no requests.
+    pub fn is_empty(&self) -> bool {
+        self.handles.is_empty()
+    }
+
+    /// The per-request completion handles in submission (input) order.
+    pub fn handles(&self) -> &[CompletionHandle<RequestResult>] {
+        &self.handles
+    }
+
+    /// Consume the handle, yielding the owned completion handles in
+    /// submission (input) order.
+    pub fn into_handles(self) -> Vec<CompletionHandle<RequestResult>> {
+        self.handles
+    }
+}
+
+/// A request after pre-lock preparation (tombstone gate + node ensure),
+/// carrying everything the shared admission core needs to admit it
+/// under the DAG lock. The `node` `Arc` was cloned out of the `nodes`
+/// DashMap so no shard `Ref` is held across `dag.lock()`.
+struct PreparedRequest {
+    file_id: String,
+    canonical: Arc<str>,
+    node: Arc<FileNode>,
+    target: TargetStage,
+    priority: Priority,
+    source: Option<Arc<str>>,
+    sender: CompletionSender<RequestResult>,
+    request_context: Option<crate::request_context::OpaqueRequestContext>,
+}
+
+/// Work accumulated by the shared admission core that MUST run AFTER
+/// the DAG lock releases: deferred dedup callbacks (which may re-enter
+/// the scheduler) and auto-ingest-tracking clears (which touch a
+/// DashMap that would deadlock against a held DAG lock).
+#[derive(Default)]
+struct AdmissionPostWork {
+    /// Deferred dedup-join callbacks collected from
+    /// [`SchedulerDag::register_request`].
+    dedup_events: Vec<DedupJoinerEvent>,
+    /// `(canonical, generation)` pairs whose auto-ingest tracking entry
+    /// should be cleared once a Source identity has been admitted.
+    auto_ingest_clears: Vec<(Arc<str>, u64)>,
+}
+
+impl AdmissionPostWork {
+    /// Fire every deferred dedup callback and clear every recorded
+    /// auto-ingest entry. MUST be invoked only after the DAG lock has
+    /// been released.
+    fn run(self, scheduler: &Scheduler) {
+        for event in self.dedup_events {
+            event.fire();
+        }
+        for (canonical, generation) in self.auto_ingest_clears {
+            scheduler.clear_auto_ingest_tracking(&canonical, generation);
+        }
+    }
 }
 
 /// Reason a pump iteration ran. Carried by audit/diagnostic prose;
@@ -710,6 +777,13 @@ impl Scheduler {
     /// fan-out (that wait belongs to the host/runtime coordinator pool).
     /// Returns a [`BatchHandle`] that carries one completion handle per
     /// request in submission order.
+    ///
+    /// This sends N separate `NewRequest` items into the inbox — the
+    /// driver may interleave other submissions between them, and the
+    /// pump can observe the batch partially admitted. When admission
+    /// must be all-or-nothing (no half-admitted state visible to the
+    /// pump, one wake, one supersede sweep across all files), use
+    /// [`Self::submit_batch_atomic`] instead.
     pub fn submit_batch(&self, requests: Vec<Request>) -> BatchHandle {
         let mut handles = Vec::with_capacity(requests.len());
         for request in requests {
@@ -718,17 +792,106 @@ impl Scheduler {
         BatchHandle { handles }
     }
 
+    /// Atomically submit a batch of requests as ONE inbox item.
+    ///
+    /// Unlike [`Self::submit_batch`] (N separate `NewRequest` items),
+    /// this lands a single [`Submission::NewRequestBatch`] that the
+    /// driver drains as a unit and admits under ONE `dag.lock()`
+    /// acquisition (generation bumps + supersede sweeps + waiter
+    /// registration for every request). Consequences:
+    ///
+    /// - The pump can never observe the batch half-admitted — either
+    ///   none or all N nodes are in the DAG after the single item is
+    ///   processed.
+    /// - One batch is ONE wake and ONE `submit_count` increment, not N.
+    /// - A source-updating batch supersedes the old generations of
+    ///   every file in the batch in the same critical section.
+    ///
+    /// The pump discipline is preserved: dispatch / wait / parse /
+    /// compile / dedup-callbacks all run OUTSIDE the DAG lock (dedup
+    /// callbacks are collected during registration and fired after the
+    /// lock releases). Capacity is still reserved at dequeue time, not
+    /// at admission.
+    ///
+    /// Returns a [`BatchHandle`] whose completion handles are in input
+    /// order; drain it via [`Self::wait_batch`].
+    pub fn submit_batch_atomic(&self, requests: Vec<Request>) -> BatchHandle {
+        let mut handles = Vec::with_capacity(requests.len());
+        let mut queued = Vec::with_capacity(requests.len());
+        let submitted_epoch = self.removal_epoch.load(Ordering::Acquire);
+        for request in requests {
+            let (handle, sender) = completion_pair();
+            // Mirror `submit_request`'s request-level target stamp so a
+            // cooperative waiter on a batch handle gets the same
+            // same-path fallback before admission overwrites it with the
+            // concrete `Work` identity.
+            sender.set_target(crate::job::CompletionTarget::Request {
+                canonical: Arc::from(request.file_id.as_str()),
+                target: request.target.clone(),
+            });
+            queued.push(QueuedRequest {
+                file_id: request.file_id,
+                target: request.target,
+                priority: request.priority,
+                source: request.source,
+                file_kind: request.file_kind,
+                sender,
+                submitted_epoch,
+                request_context: request.request_context,
+            });
+            handles.push(handle);
+        }
+
+        if queued.is_empty() {
+            // Nothing to submit — no wake, no accounting (mirrors the
+            // empty-batch contract of `account_batch_submission`).
+            return BatchHandle { handles };
+        }
+
+        match self
+            .inbox
+            .sender
+            .send(Submission::NewRequestBatch { requests: queued })
+        {
+            Ok(()) => {
+                // ONE batch == ONE submission for contention accounting,
+                // regardless of how many items it carries.
+                self.counters.submit_count.fetch_add(1, Ordering::Relaxed);
+                let depth = self.inbox.sender.len() as u64;
+                let prev_max = self.counters.inbox_depth_max.load(Ordering::Relaxed);
+                if depth > prev_max {
+                    let _ = self
+                        .counters
+                        .inbox_depth_max
+                        .fetch_max(depth, Ordering::Relaxed);
+                }
+            }
+            Err(crossbeam_channel::SendError(submission)) => {
+                // Inbox closed (scheduler shutting down): signal every
+                // handle so callers don't hang.
+                Self::shutdown_drained_submission(submission);
+            }
+        }
+        BatchHandle { handles }
+    }
+
     /// Wait for a submitted batch to complete. Drains each
-    /// [`CompletionHandle`] in submission order. The caller receives
-    /// per-request results as they arrive; each request's stage work
-    /// runs on the scheduler's own stage `cpu_pool` (the scheduler owns
-    /// no outer batch fan-out).
+    /// [`CompletionHandle`] in submission (INPUT) order and returns the
+    /// per-request results in that same order, so `result[i]`
+    /// corresponds to the i-th submitted request regardless of the
+    /// order the underlying stage work actually completed. The waiter
+    /// never observes a partial set — every handle is resolved before
+    /// the result vec is returned. Each request's stage work runs on
+    /// the scheduler's own stage `cpu_pool` (the scheduler owns no outer
+    /// batch fan-out).
     ///
     /// Uses `wait_or_drive` so both native (driver thread) and
     /// single-threaded callers share the same completion semantics.
+    /// Borrows the batch so the caller may inspect the handles
+    /// afterward (e.g. for per-request audit attribution).
     pub fn wait_batch(
         self: &Arc<Self>,
-        batch: BatchHandle,
+        batch: &BatchHandle,
     ) -> Vec<crate::job::CompletionState<RequestResult>> {
         batch
             .handles
@@ -820,9 +983,7 @@ impl Scheduler {
 
         // 2. Drain inbox — driver is stopped, so this is exclusive.
         while let Ok(submission) = self.inbox.receiver.try_recv() {
-            if let Submission::NewRequest { sender, .. } = submission {
-                sender.send(CompletionState::Shutdown);
-            }
+            Self::shutdown_drained_submission(submission);
         }
 
         // 3. Remove all nodes, recording generation floors so re-added
@@ -867,9 +1028,7 @@ impl Scheduler {
         //    step 3, so handle_stage_complete will no-op), but draining
         //    keeps the channel clean.
         while let Ok(submission) = self.inbox.receiver.try_recv() {
-            if let Submission::NewRequest { sender, .. } = submission {
-                sender.send(CompletionState::Shutdown);
-            }
+            Self::shutdown_drained_submission(submission);
         }
 
         // 6. Unset shutdown so the next driver can run.
@@ -898,9 +1057,25 @@ impl Scheduler {
         while let Ok(submission) = self.inbox.receiver.try_recv() {
             // Signal shutdown to any senders in discarded submissions
             // so their CompletionHandles don't hang.
-            if let Submission::NewRequest { sender, .. } = submission {
+            Self::shutdown_drained_submission(submission);
+        }
+    }
+
+    /// Signal `Shutdown` to every completion sender carried by a
+    /// drained-but-unprocessed submission so the corresponding handles
+    /// resolve instead of hanging. `Wake` / `StageComplete` carry no
+    /// waiter sender and are dropped silently.
+    fn shutdown_drained_submission(submission: Submission) {
+        match submission {
+            Submission::NewRequest { sender, .. } => {
                 sender.send(CompletionState::Shutdown);
             }
+            Submission::NewRequestBatch { requests } => {
+                for req in requests {
+                    req.sender.send(CompletionState::Shutdown);
+                }
+            }
+            Submission::Wake | Submission::StageComplete { .. } => {}
         }
     }
 
@@ -1738,6 +1913,9 @@ impl Scheduler {
                     request_context,
                 );
             }
+            Submission::NewRequestBatch { requests } => {
+                self.handle_new_request_batch(requests);
+            }
             Submission::StageComplete {
                 file_id,
                 generation,
@@ -1748,7 +1926,14 @@ impl Scheduler {
         }
     }
 
-    /// Handle a new request submission.
+    /// Handle a single new request submission.
+    ///
+    /// Thin wrapper over the shared admission core: prepare the request
+    /// (tombstone gate + node ensure) outside the DAG lock, then admit
+    /// it under ONE `dag.lock()` acquisition, then fire any deferred
+    /// dedup callback + clear auto-ingest tracking after the lock
+    /// releases. The single-request and the atomic-batch paths share
+    /// the SAME core so their admission semantics cannot drift.
     #[allow(clippy::too_many_arguments)]
     fn handle_new_request(
         &self,
@@ -1761,10 +1946,105 @@ impl Scheduler {
         submitted_epoch: u64,
         request_context: Option<crate::request_context::OpaqueRequestContext>,
     ) {
-        // Check tombstone. A submission is stale if it was submitted before
-        // the removal (submitted_epoch < tombstone_epoch). Only genuinely
-        // post-remove submissions (submitted_epoch >= tombstone_epoch AND
-        // carrying source) can clear the tombstone.
+        let request = QueuedRequest {
+            file_id,
+            target,
+            priority,
+            source,
+            file_kind,
+            sender,
+            submitted_epoch,
+            request_context,
+        };
+        // Prepare outside the lock (tombstone gate, node ensure — the
+        // node `Arc` is cloned out of the `nodes` DashMap and the shard
+        // `Ref` dropped BEFORE the lock per the AB-BA rule).
+        let Some(prepared) = self.prepare_request(request) else {
+            return; // tombstone-rejected; sender already signalled.
+        };
+
+        // Admit under ONE DAG lock; collect the deferred dedup event +
+        // auto-ingest-clear obligation. Callbacks are NOT fired here.
+        let mut post = AdmissionPostWork::default();
+        {
+            let mut dag = self.dag.lock();
+            self.admit_prepared_under_lock(&mut dag, prepared, &mut post);
+        }
+        post.run(self);
+    }
+
+    /// Handle an atomic batch of new request submissions drained as ONE
+    /// inbox item.
+    ///
+    /// All N requests are prepared outside the DAG lock (so no `nodes`
+    /// DashMap `Ref` is ever held while the DAG mutex is taken — the
+    /// AB-BA-safe ordering), then admitted under a SINGLE `dag.lock()`
+    /// acquisition: generation bumps, supersede sweeps, waiter
+    /// registration, and work admission for EVERY request happen inside
+    /// that one critical section. The pump therefore can never observe
+    /// the batch half-admitted. Deferred dedup callbacks and
+    /// auto-ingest-tracking cleanup run AFTER the lock releases, keeping
+    /// the callback-under-lock hazard out of the batch path exactly as
+    /// it is kept out of the single-request path.
+    fn handle_new_request_batch(&self, requests: Vec<QueuedRequest>) {
+        if requests.is_empty() {
+            return;
+        }
+        // Prepare every request OUTSIDE the lock. Tombstone-rejected
+        // requests signal their sender here and are dropped from the
+        // admission set. Node `Arc`s are cloned out of the `nodes`
+        // DashMap so no shard `Ref` is held when the lock is taken.
+        let prepared: Vec<PreparedRequest> = requests
+            .into_iter()
+            .filter_map(|req| self.prepare_request(req))
+            .collect();
+        if prepared.is_empty() {
+            return;
+        }
+        // Admit ALL prepared requests under ONE DAG lock.
+        let mut post = AdmissionPostWork::default();
+        {
+            let mut dag = self.dag.lock();
+            for p in prepared {
+                self.admit_prepared_under_lock(&mut dag, p, &mut post);
+            }
+        }
+        // After the lock has dropped: fire deferred dedup callbacks +
+        // clear auto-ingest tracking.
+        post.run(self);
+    }
+
+    /// Pre-lock preparation shared by the single-request and atomic-
+    /// batch admission paths.
+    ///
+    /// Performs the two steps that must NOT run under `dag.lock()`:
+    ///
+    /// 1. **Tombstone gate.** A submission predating a removal (or a
+    ///    `source: None` reload of a since-deleted file) is rejected
+    ///    here; the sender receives `Failed(FileNotFound)` and `None`
+    ///    is returned. A genuine post-removal re-add clears the
+    ///    tombstone.
+    /// 2. **Node ensure.** The `FileNode` is created if absent and its
+    ///    `Arc` is cloned out of the `nodes` DashMap so the shard `Ref`
+    ///    drops before any caller takes the DAG mutex (the canonical
+    ///    DAG-first lock ordering — holding a `nodes` `Ref` across
+    ///    `dag.lock()` is the AB-BA hazard).
+    ///
+    /// Returns the [`PreparedRequest`] for an admissible request, or
+    /// `None` when the request was tombstone-rejected.
+    fn prepare_request(&self, request: QueuedRequest) -> Option<PreparedRequest> {
+        let QueuedRequest {
+            file_id,
+            target,
+            priority,
+            source,
+            file_kind,
+            sender,
+            submitted_epoch,
+            request_context,
+        } = request;
+
+        // Tombstone gate.
         if let Some(tombstone_ref) = self.tombstones.get(&file_id) {
             let tombstone_epoch = *tombstone_ref;
             drop(tombstone_ref);
@@ -1775,7 +2055,7 @@ impl Scheduler {
                         file_id: file_id.clone(),
                     },
                 ));
-                return;
+                return None;
             }
             // Submitted at or after the removal epoch.
             if source.is_some() {
@@ -1789,54 +2069,98 @@ impl Scheduler {
                         file_id: file_id.clone(),
                     },
                 ));
-                return;
+                return None;
             }
         }
 
-        // Ensure node exists
+        // Ensure node exists. Clone the `Arc<FileNode>` out and drop the
+        // `nodes` shard `Ref` BEFORE returning so no caller holds it
+        // across `dag.lock()`.
         let node = self
             .nodes
             .entry(file_id.clone())
             .or_insert_with(|| self.create_node(&file_id, file_kind))
             .clone();
+        let canonical: Arc<str> = Arc::from(file_id.as_str());
 
+        Some(PreparedRequest {
+            file_id,
+            canonical,
+            node,
+            target,
+            priority,
+            source,
+            sender,
+            request_context,
+        })
+    }
+
+    /// Shared admission core. Runs entirely under the caller-held
+    /// `dag.lock()` — the SOLE place where a request's generation is
+    /// bumped, the supersede sweep runs, the waiter is registered, and
+    /// the work node is admitted. Both [`Self::handle_new_request`] and
+    /// [`Self::handle_new_request_batch`] funnel through here so single
+    /// and batch admission share identical semantics.
+    ///
+    /// Side effects that are independent of the DAG mutex (the
+    /// `overlay`/`pending_source` writes, the completion-sender signals,
+    /// the `set_target` stamp) run inline; they take their own
+    /// independent locks (the overlay DashMap shard, the handle's inner
+    /// mutex) and never the `nodes` shard, so they are safe under the
+    /// DAG lock.
+    ///
+    /// Deferred work that MUST happen after the lock releases (firing
+    /// dedup callbacks, clearing auto-ingest tracking on a DashMap) is
+    /// pushed onto `post` rather than executed here.
+    fn admit_prepared_under_lock(
+        &self,
+        dag: &mut SchedulerDag,
+        prepared: PreparedRequest,
+        post: &mut AdmissionPostWork,
+    ) {
+        let PreparedRequest {
+            file_id,
+            canonical,
+            node,
+            target,
+            priority,
+            source,
+            sender,
+            request_context,
+        } = prepared;
+
+        // Generation: bump under the lock so the bump and the supersede
+        // sweep form one critical section. A bare-atomic bump separated
+        // from the lock would let a dispatcher observe the bumped
+        // generation BEFORE the supersede sweep cancelled the stale
+        // identity — the dispatch-time defensive `debug_assert!` would
+        // then trip on a not-yet-terminalized stale identity.
         let generation = if source.is_some() {
-            // Source provided: bump generation under the DAG lock so
-            // the bump and the supersede sweep run as one critical
-            // section. A bare-atomic bump separated from the lock
-            // acquisition would let a dispatcher observe the bumped
-            // generation BEFORE the supersede sweep cancelled the
-            // stale identity — the dispatch-time defensive
-            // `debug_assert!` would then trip on the stale identity
-            // that had not yet been terminalized.
-            let canonical: Arc<str> = Arc::from(file_id.as_str());
-            let mut dag = self.dag.lock();
             let gen = node.bump_generation();
-            // Store source in overlay for SourceLoader access
+            // Store source in the overlay for SourceLoader access.
             if let Some(ref src) = source {
                 self.overlay.set(file_id.clone(), Arc::clone(src));
             }
-            // Store in pending_source for the Source job
+            // Store in pending_source for the Source job.
             node.pending_source
                 .store(Arc::new(source.map(|s| (gen, s))));
             dag.supersede_old_file_generations(&canonical, gen);
-            // Drop the DAG lock before the rest of the function
-            // re-acquires it for `register_request` + `admit_work`.
-            drop(dag);
             gen
         } else {
             let gen = node.generation();
             if gen == 0 {
                 // Node was just created, needs a Source job. No
-                // supersede sweep is needed here — at generation 0
-                // there is no prior dispatched identity.
+                // supersede sweep is needed at generation 0 — there is
+                // no prior dispatched identity.
                 node.bump_generation()
             } else {
                 gen
             }
         };
 
-        // Check if target is already satisfied
+        // Already-satisfied short-circuit. Note: `current_*` is
+        // generation-coherent, so after a source-update bump these
+        // return `None` and the request always admits a fresh Source.
         let already_satisfied = match &target {
             TargetStage::Source => node.current_source().is_some(),
             TargetStage::Analysis => node.current_analysis().is_some(),
@@ -1844,9 +2168,7 @@ impl Scheduler {
                 node.current_artifact(*profile_hash).is_some()
             }
         };
-
         if already_satisfied {
-            // Signal immediately
             let result = match &target {
                 TargetStage::Source => RequestResult::Source(node.current_source().unwrap()),
                 TargetStage::Analysis => RequestResult::Analysis(node.current_analysis().unwrap()),
@@ -1858,37 +2180,13 @@ impl Scheduler {
             return;
         }
 
-        // Register the waiter group on the DAG and admit a work node.
-        let canonical_id: Arc<str> = Arc::from(file_id.as_str());
-
-        // Determine the first-missing work stage BEFORE we register
-        // the sender. The concrete `Work` identity for that stage
-        // is stamped on the sender's target so the cooperative
-        // pump's same-path self-await detection matches by the
-        // exact `WorkNodeIdentity` once admission has run.
-        //
-        // The Request-shape fallback (used during the brief race
-        // window between `submit_request` stamping
-        // `CompletionTarget::Request` and `handle_new_request`
-        // overwriting with the concrete `Work` identity) covers
-        // every self-await class via `active_path_contains_request`:
-        //   - Source request matches an active Source frame on
-        //     the same canonical.
-        //   - Analysis request matches an active Source OR Analysis
-        //     frame on the same canonical.
-        //   - Artifact request matches an active Source OR Analysis
-        //     frame on the same canonical, OR an active Artifact
-        //     frame on the same canonical AND the same
-        //     `profile_hash` (two Artifact frames for the same
-        //     canonical with different profiles are independent
-        //     work units and must NOT collapse into a same-path
-        //     match).
-        //
-        // The Work stamp narrows the match to exact
-        // `WorkNodeIdentity` (canonical + generation + stage; for
-        // Artifact also `profile_hash`) post-admission, which is
-        // the precise relation other paths reference once the
-        // work node is in the DAG.
+        // Determine the first-missing work stage BEFORE registering the
+        // sender, then stamp its concrete `Work` identity on the
+        // sender's target so the cooperative pump's same-path
+        // self-await detection matches by the exact `WorkNodeIdentity`
+        // once admission has run. (See `CompletionTarget` docs for the
+        // Request-shape fallback that covers the race window before
+        // this stamp lands.)
         let first_missing = if node.current_source().is_none() {
             TaskKind::Source
         } else if node.current_analysis().is_none() {
@@ -1898,72 +2196,60 @@ impl Scheduler {
         };
         let first_missing_identity: WorkNodeIdentity = match first_missing {
             TaskKind::Source => WorkNodeIdentity::FileStage {
-                canonical: Arc::clone(&canonical_id),
+                canonical: Arc::clone(&canonical),
                 generation,
                 stage: FileStageKey::Source,
             },
             TaskKind::Analysis => WorkNodeIdentity::FileStage {
-                canonical: Arc::clone(&canonical_id),
+                canonical: Arc::clone(&canonical),
                 generation,
                 stage: FileStageKey::Analysis,
             },
             TaskKind::Artifact { profile_hash } => WorkNodeIdentity::Artifact {
-                canonical: Arc::clone(&canonical_id),
+                canonical: Arc::clone(&canonical),
                 generation,
                 profile_hash: profile_hash_to_bytes(profile_hash),
                 content_hash: [0u8; 16],
             },
         };
-        // Overwrite the request-level `CompletionTarget::Request`
-        // stamped at `submit_request` with the concrete `Work`
-        // identity. Last-writer-wins on the `CompletionSender`'s
-        // target slot (see `CompletionSender::set_target`).
         sender.set_target(crate::job::CompletionTarget::Work(
             first_missing_identity.clone(),
         ));
 
-        let mut dag = self.dag.lock();
-        dag.register_request(
-            &canonical_id,
-            generation,
-            target.clone(),
-            sender,
-            request_context,
-        );
+        // Register the waiter group. The dedup callback (if any) is
+        // returned as a deferred event and fired after the lock drops.
+        let dedup_event =
+            dag.register_request(&canonical, generation, target.clone(), sender, request_context);
+        if let Some(event) = dedup_event {
+            post.dedup_events.push(event);
+        }
 
         let effective_priority = priority;
 
-        // If the next missing stage is an Artifact and there is a
-        // file-level gate engaged at this generation (a dependency-
-        // gating Analysis node still pending in the DAG), do NOT admit
-        // the Artifact node yet — the DAG's dep edge will drive
-        // re-dispatch when the gate clears.
+        // If the next missing stage is an Artifact gated behind a
+        // still-pending Analysis node at this generation, do NOT admit
+        // the Artifact yet — the DAG's dep edge drives re-dispatch when
+        // the gate clears. Propagate the new request's priority onto the
+        // gate instead.
         let analysis_gate = WorkNodeIdentity::FileStage {
-            canonical: Arc::clone(&canonical_id),
+            canonical: Arc::clone(&canonical),
             generation,
             stage: FileStageKey::Analysis,
         };
-        if matches!(first_missing, TaskKind::Artifact { .. })
-            && dag.has_pending_deps(&analysis_gate)
+        if matches!(first_missing, TaskKind::Artifact { .. }) && dag.has_pending_deps(&analysis_gate)
         {
-            // Propagate the new request's priority onto the gate.
             dag.upgrade_priority(&analysis_gate, effective_priority);
             return;
         }
 
-        // Artifact admissions must inherit any blockers persisted
-        // by `register_resolved_deps` to the per-canonical Artifact
-        // blocker registry at this `(file_id, generation)`. Owner
-        // Analysis is admitted ungated for macro_type_deps; the
-        // helper below drains the registry, re-classifies persisted
-        // deps against the live DAG state, and attaches the
-        // resulting gating deps + failure records to the
-        // just-submitted Artifact so codegen waits on (or short-
-        // circuits over) the blocker's Analysis.
+        // Artifact admissions inherit any blockers persisted to the
+        // per-canonical Artifact blocker registry at this
+        // `(file_id, generation)` (owner Analysis is admitted ungated
+        // for macro_type_deps).
         if let TaskKind::Artifact { profile_hash } = first_missing {
             self.admit_artifact_with_blockers(
-                &mut dag,
-                &canonical_id,
+                dag,
+                &canonical,
                 generation,
                 profile_hash,
                 effective_priority,
@@ -1973,25 +2259,22 @@ impl Scheduler {
         }
 
         admit_work(
-            &mut dag,
-            &canonical_id,
+            dag,
+            &canonical,
             generation,
             first_missing,
             effective_priority,
             None,
         );
-        // Drop the DAG guard before touching the tracking set —
-        // `auto_ingested_recent` is a DashMap and would deadlock
-        // anyone holding the DAG lock waiting for a shard write.
-        drop(dag);
-        // If this admit transitioned the dep from "queued in inbox"
-        // to "Source DAG identity admitted", clear any tracking
-        // entry so the matrix stops treating the dep as a pending
-        // auto-ingest. Only the matching-generation entry is
-        // removed; a stale entry from a previous incarnation stays
-        // until the freshness check trims it.
+        // A Source admission transitions the dep from "queued in inbox"
+        // to "Source DAG identity admitted"; the matrix must stop
+        // treating it as a pending auto-ingest. The clear touches a
+        // DashMap, so it is deferred until the DAG lock releases (it
+        // would otherwise deadlock against anyone holding the DAG lock
+        // and waiting on that shard).
         if matches!(first_missing, TaskKind::Source) {
-            self.clear_auto_ingest_tracking(&canonical_id, generation);
+            post.auto_ingest_clears
+                .push((Arc::clone(&canonical), generation));
         }
     }
 
@@ -7487,7 +7770,8 @@ mod tests {
         let joiner_ctx = TestContext::new(200, true);
 
         let canonical: Arc<str> = Arc::from("/x.vue");
-        dag.register_request(
+        // First registration creates the group — no dedup event.
+        let winner_event = dag.register_request(
             &canonical,
             1,
             TargetStage::Analysis,
@@ -7496,7 +7780,14 @@ mod tests {
                 Arc::clone(&winner_ctx) as Arc<dyn RequestContextLike>
             )),
         );
-        dag.register_request(
+        assert!(
+            winner_event.is_none(),
+            "the group-creating registration is not a dedup join",
+        );
+        // Second registration joins — returns a deferred event that is
+        // NOT fired under the lock. The joiner callback only runs when
+        // the caller fires the returned event.
+        let joiner_event = dag.register_request(
             &canonical,
             1,
             TargetStage::Analysis,
@@ -7505,6 +7796,13 @@ mod tests {
                 Arc::clone(&joiner_ctx) as Arc<dyn RequestContextLike>
             )),
         );
+        assert!(
+            joiner_ctx.joiner_calls().is_empty(),
+            "register_request must NOT fire the dedup callback itself — it returns an event",
+        );
+        joiner_event
+            .expect("a dedup join must return a DedupJoinerEvent")
+            .fire();
 
         let calls = joiner_ctx.joiner_calls();
         assert_eq!(calls.len(), 1);
@@ -7527,7 +7825,7 @@ mod tests {
         let joiner_ctx = TestContext::new(201, true);
 
         let canonical: Arc<str> = Arc::from("/y.vue");
-        dag.register_request(
+        let winner_event = dag.register_request(
             &canonical,
             2,
             TargetStage::Analysis,
@@ -7536,7 +7834,8 @@ mod tests {
                 Arc::clone(&winner_ctx) as Arc<dyn RequestContextLike>
             )),
         );
-        dag.register_request(
+        assert!(winner_event.is_none());
+        let joiner_event = dag.register_request(
             &canonical,
             2,
             TargetStage::Analysis,
@@ -7545,6 +7844,9 @@ mod tests {
                 Arc::clone(&joiner_ctx) as Arc<dyn RequestContextLike>
             )),
         );
+        joiner_event
+            .expect("a dedup join must return a DedupJoinerEvent")
+            .fire();
 
         let calls = joiner_ctx.joiner_calls();
         assert_eq!(calls.len(), 1);
@@ -14261,5 +14563,480 @@ mod tests {
                 panic!("expected Failed(StageFailed) after late Work-stamp re-check, got {other:?}",)
             }
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // §6b — atomic batch admission (`submit_batch_atomic` / `wait_batch`)
+    //
+    // Each test below is DISCRIMINATING: it fails against a naive
+    // sequential implementation (N separate `NewRequest` inbox items,
+    // dedup callbacks fired under the DAG lock, per-item `submit_count`
+    // bumps) and passes only against the atomic implementation (one
+    // `NewRequestBatch` inbox item drained as a unit, all N admitted
+    // under ONE DAG lock, dedup callbacks fired AFTER the lock releases,
+    // one `submit_count` bump per batch).
+    // ──────────────────────────────────────────────────────────────────
+
+    /// A test source loader that resolves any path to a fixed body so a
+    /// batch of N distinct canonicals can all admit a Source stage.
+    fn batch_loader(paths: &[&str]) -> Arc<MemorySourceLoader> {
+        let loader = Arc::new(MemorySourceLoader::new());
+        for p in paths {
+            loader.insert((*p).to_string(), Arc::from("<template>x</template>"));
+        }
+        loader
+    }
+
+    /// Build N distinct Source requests over `/n0.vue`.. with no source
+    /// bytes (cold load through the loader).
+    fn n_source_requests(n: usize) -> (Vec<String>, Vec<Request>) {
+        let ids: Vec<String> = (0..n).map(|i| format!("/n{i}.vue")).collect();
+        let reqs = ids
+            .iter()
+            .map(|id| Request {
+                file_id: id.clone(),
+                target: TargetStage::Source,
+                priority: Priority::Interactive,
+                source: None,
+                file_kind: None,
+                request_context: None,
+            })
+            .collect();
+        (ids, reqs)
+    }
+
+    /// (1) The pump must NOT be able to observe a batch half-admitted.
+    ///
+    /// Submit N distinct requests as ONE atomic batch, then drain
+    /// EXACTLY ONE inbox item. The atomic path lands all N DAG nodes
+    /// from that single item, so `pending_len() == N` and the inbox is
+    /// empty afterward.
+    ///
+    /// Discrimination: a sequential `submit_batch` pushes N separate
+    /// `NewRequest` items; draining exactly one would admit ONE node
+    /// (`pending_len() == 1`) and leave N-1 items in the inbox. The
+    /// `== N` + empty-inbox assertion fails on the sequential impl.
+    #[test]
+    fn atomic_batch_admission_not_partially_observable_by_pump() {
+        const N: usize = 5;
+        let (ids, reqs) = n_source_requests(N);
+        let loader = batch_loader(&ids.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let sched = test_scheduler_with_loader(loader);
+
+        let _batch = sched.submit_batch_atomic(reqs);
+
+        // Drain exactly ONE inbox item — the whole batch is one item.
+        let one = sched
+            .inbox
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the atomic batch must arrive as a single inbox item");
+        sched.process_submission(one);
+
+        // All N nodes admitted from that single item.
+        let pending = sched.dag.lock().pending_len();
+        assert_eq!(
+            pending, N,
+            "one atomic batch item must admit all {N} nodes; got pending_len={pending} \
+             (a sequential N-item batch would admit only 1 from one drained item)",
+        );
+        // Inbox empty: the batch was a single item, fully consumed.
+        assert!(
+            sched.inbox.receiver.is_empty(),
+            "after draining the single batch item the inbox must be empty; a sequential \
+             N-item batch would still hold N-1 items",
+        );
+    }
+
+    /// (2) One batch == one wake == one `submit_count` increment.
+    ///
+    /// After `submit_batch_atomic(N)`, a single `pump_ready` reports
+    /// `drained == 1` (one inbox item) and `submit_count` advanced by
+    /// exactly 1.
+    ///
+    /// Discrimination: a sequential `submit_batch` increments
+    /// `submit_count` N times (once per `submit_request`) and pushes N
+    /// inbox items, so `drained == N`. Both `== 1` assertions fail on
+    /// the sequential impl.
+    #[test]
+    fn exactly_one_wake_per_batch() {
+        use crate::caller_kind::CallerKind;
+        const N: usize = 4;
+        let (ids, reqs) = n_source_requests(N);
+        let loader = batch_loader(&ids.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let sched = test_scheduler_with_loader(loader);
+
+        let before = sched
+            .counters
+            .submit_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        let _batch = sched.submit_batch_atomic(reqs);
+
+        let after = sched
+            .counters
+            .submit_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            after - before,
+            1,
+            "one atomic batch must bump submit_count by exactly 1; got +{} \
+             (a sequential N-item batch bumps it N times)",
+            after - before,
+        );
+
+        let stats = sched.pump_ready(PumpReason::DriverWake, CallerKind::Driver);
+        assert_eq!(
+            stats.drained, 1,
+            "the atomic batch is ONE inbox item, so the pump drains exactly 1; got {} \
+             (a sequential N-item batch drains N)",
+            stats.drained,
+        );
+    }
+
+    /// (3) Dedup callbacks must run AFTER the DAG lock is released.
+    ///
+    /// A batch carrying two requests for the SAME canonical (a dedup
+    /// join) with test contexts. The joiner's `on_dedup_joiner`
+    /// callback asserts `dag.try_lock()` SUCCEEDS — proving the
+    /// callback is not fired while admission still holds the lock.
+    ///
+    /// Discrimination: today `register_request` fires `on_dedup_joiner`
+    /// INSIDE the `dag.lock()` critical section. If the atomic batch
+    /// fired callbacks the same way, `try_lock()` inside the callback
+    /// would FAIL (the admitting thread already holds it). The atomic
+    /// path collects dedup events and fires them after `drop(dag)`, so
+    /// `try_lock()` succeeds.
+    #[test]
+    fn dedup_callbacks_run_after_dag_unlock() {
+        let canonical = "/dup.vue";
+        let loader = batch_loader(&[canonical]);
+        let sched = test_scheduler_with_loader(loader);
+
+        // A context whose `on_dedup_joiner` probes the DAG lock and
+        // records the outcome via the shared Arc.
+        struct LockProbeCtx {
+            id: u64,
+            dag: Arc<Mutex<SchedulerDag>>,
+            try_lock_succeeded: Arc<std::sync::atomic::AtomicBool>,
+            fired: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl crate::request_context::RequestContextLike for LockProbeCtx {
+            fn request_id(&self) -> u64 {
+                self.id
+            }
+            fn capture_enabled(&self) -> bool {
+                false
+            }
+            fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {
+                self.fired
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                // The whole point: the admitting thread must NOT be
+                // holding the DAG lock when this callback runs.
+                let got = self.dag.try_lock();
+                self.try_lock_succeeded
+                    .store(got.is_some(), std::sync::atomic::Ordering::SeqCst);
+            }
+            fn record_cache_event(&self, _event: crate::request_context::CacheEventKind) {}
+            fn install_tls(
+                self: Arc<Self>,
+            ) -> Box<dyn crate::request_context::TlsUninstall + Send> {
+                struct NoopUninstall;
+                impl crate::request_context::TlsUninstall for NoopUninstall {
+                    fn uninstall(self: Box<Self>) {}
+                }
+                Box::new(NoopUninstall)
+            }
+        }
+
+        let try_lock_succeeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Winner has a plain context; joiner probes the lock.
+        let winner_ctx = OpaqueRequestContext(Arc::new(LockProbeCtx {
+            id: 1,
+            dag: Arc::clone(&sched.dag),
+            try_lock_succeeded: Arc::clone(&try_lock_succeeded),
+            fired: Arc::clone(&fired),
+        }) as Arc<dyn crate::request_context::RequestContextLike>);
+        let joiner_ctx = OpaqueRequestContext(Arc::new(LockProbeCtx {
+            id: 2,
+            dag: Arc::clone(&sched.dag),
+            try_lock_succeeded: Arc::clone(&try_lock_succeeded),
+            fired: Arc::clone(&fired),
+        }) as Arc<dyn crate::request_context::RequestContextLike>);
+
+        let reqs = vec![
+            Request {
+                file_id: canonical.to_string(),
+                target: TargetStage::Analysis,
+                priority: Priority::Interactive,
+                source: None,
+                file_kind: None,
+                request_context: Some(winner_ctx),
+            },
+            Request {
+                file_id: canonical.to_string(),
+                target: TargetStage::Analysis,
+                priority: Priority::Interactive,
+                source: None,
+                file_kind: None,
+                request_context: Some(joiner_ctx),
+            },
+        ];
+
+        let _batch = sched.submit_batch_atomic(reqs);
+        // Drain + process the single batch item (admission runs here).
+        let item = sched
+            .inbox
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("batch item");
+        sched.process_submission(item);
+
+        assert!(
+            fired.load(std::sync::atomic::Ordering::SeqCst),
+            "the second same-canonical request must trigger on_dedup_joiner",
+        );
+        assert!(
+            try_lock_succeeded.load(std::sync::atomic::Ordering::SeqCst),
+            "on_dedup_joiner must run AFTER the DAG lock is released — \
+             dag.try_lock() must succeed inside the callback (a callback fired \
+             under the admission lock would see try_lock() fail)",
+        );
+    }
+
+    /// (4) Capacity contract is unchanged for the batch path: capacity
+    /// is reserved at DEQUEUE time, not at admission time.
+    ///
+    /// With an `io` budget of 1, admit a batch of 2 Source requests.
+    /// Before any dequeue, zero permits are held (admission reserves
+    /// nothing). The first `next_ready_for_pump` reserves one I/O
+    /// permit; the second is budget-blocked (returns `None`).
+    ///
+    /// Discrimination: an impl that reserved capacity at admission
+    /// would either show non-zero permits post-admission OR fail to
+    /// admit the second node. The at-dequeue reservation invariant —
+    /// permits == 0 after admission, exactly one reserved on first
+    /// dequeue, second blocked — is what this asserts.
+    #[test]
+    fn capacity_contract_unchanged_for_batch() {
+        use crate::caller_kind::CallerKind;
+        let ids = ["/cap0.vue", "/cap1.vue"];
+        let loader = batch_loader(&ids);
+        // io budget = 1 so the second Source dequeue is budget-blocked.
+        let sched = Scheduler::new_sync(
+            SchedulerConfig {
+                cpu_threads: 1,
+                io_threads: 1,
+                ..SchedulerConfig::default()
+            },
+            loader,
+        );
+
+        let reqs: Vec<Request> = ids
+            .iter()
+            .map(|id| Request {
+                file_id: (*id).to_string(),
+                target: TargetStage::Source,
+                priority: Priority::Interactive,
+                source: None,
+                file_kind: None,
+                request_context: None,
+            })
+            .collect();
+
+        let _batch = sched.submit_batch_atomic(reqs);
+        let item = sched
+            .inbox
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("batch item");
+        sched.process_submission(item);
+
+        // After admission, before dequeue: no permits held.
+        {
+            let dag = sched.dag.lock();
+            assert_eq!(
+                dag.pending_len(),
+                2,
+                "both Source nodes admitted by the atomic batch",
+            );
+            assert_eq!(
+                dag.in_flight_io_permits(),
+                0,
+                "admission must NOT reserve capacity — permits are taken at dequeue time",
+            );
+        }
+
+        // First dequeue reserves exactly one I/O permit.
+        let first = {
+            let mut dag = sched.dag.lock();
+            dag.next_ready_for_pump(CallerKind::Driver, &[])
+        };
+        assert!(first.is_some(), "first Source dequeue must succeed");
+        assert_eq!(
+            sched.dag.lock().in_flight_io_permits(),
+            1,
+            "first dequeue reserves exactly one I/O permit",
+        );
+
+        // Second dequeue is budget-blocked (io budget == 1).
+        let second = {
+            let mut dag = sched.dag.lock();
+            dag.next_ready_for_pump(CallerKind::Driver, &[])
+        };
+        assert!(
+            second.is_none(),
+            "second Source dequeue must be budget-blocked under io budget == 1",
+        );
+    }
+
+    /// (5) A source-updating batch supersedes ALL old-generation
+    /// waiters atomically — after ONE batch message every stale handle
+    /// is `Superseded`.
+    ///
+    /// Set up two files each with an old-generation Analysis waiter
+    /// (generation 1) registered on the DAG. Then submit a batch that
+    /// source-updates BOTH files (which bumps each to generation 2 and
+    /// runs the supersede sweep). After processing the single batch
+    /// item, both old-gen handles resolve to `Superseded`.
+    ///
+    /// Discrimination: a sequential batch would process the two source
+    /// updates as two separate inbox items; draining the single batch
+    /// item would supersede only the FIRST file's waiter, leaving the
+    /// second still pending. The "both superseded after ONE message"
+    /// assertion fails on the sequential impl.
+    #[test]
+    fn batch_supersede_sweep_is_atomic() {
+        let ids = ["/sup0.vue", "/sup1.vue"];
+        let loader = batch_loader(&ids);
+        let sched = test_scheduler_with_loader(loader);
+
+        // Create gen-1 nodes + register an old-gen Analysis waiter on
+        // each, directly on the DAG (mirrors an in-flight request from
+        // a prior generation).
+        let mut old_handles = Vec::new();
+        for id in ids {
+            let canonical: Arc<str> = Arc::from(id);
+            // Ensure the FileNode exists and is at generation 1.
+            let node = sched
+                .nodes
+                .entry(id.to_string())
+                .or_insert_with(|| sched.create_node(id, None))
+                .clone();
+            let gen = node.bump_generation();
+            assert_eq!(gen, 1, "fixture expects first bump to land generation 1");
+            let (handle, sender) = completion_pair::<RequestResult>();
+            // No context → no dedup event; discard the (None) return.
+            let _ = sched.dag.lock().register_request(
+                &canonical,
+                1,
+                TargetStage::Analysis,
+                sender,
+                None,
+            );
+            old_handles.push(handle);
+        }
+
+        // Sanity: both old-gen handles are still pending.
+        for h in &old_handles {
+            assert!(
+                h.try_get().is_none(),
+                "old-gen waiter must be pending before the supersede batch",
+            );
+        }
+
+        // A batch that source-updates BOTH files (each carries source,
+        // so each bumps to gen 2 and supersedes gen 1).
+        let reqs: Vec<Request> = ids
+            .iter()
+            .map(|id| Request {
+                file_id: (*id).to_string(),
+                target: TargetStage::Source,
+                priority: Priority::Interactive,
+                source: Some(Arc::from("<template>updated</template>")),
+                file_kind: None,
+                request_context: None,
+            })
+            .collect();
+
+        let _batch = sched.submit_batch_atomic(reqs);
+        let item = sched
+            .inbox
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("batch item");
+        sched.process_submission(item);
+
+        // After ONE batch message every old-gen waiter is Superseded.
+        for (i, h) in old_handles.iter().enumerate() {
+            match h.try_get() {
+                Some(CompletionState::Superseded) => {}
+                other => panic!(
+                    "old-gen waiter #{i} must be Superseded after ONE atomic batch message; \
+                     got {other:?} (a sequential batch would supersede only the first file)",
+                ),
+            }
+        }
+    }
+
+    /// (6) `wait_batch` returns results in INPUT order even when the
+    /// underlying handles complete out of dispatch order.
+    ///
+    /// Construct a `BatchHandle` by hand with three handles, complete
+    /// them in the order [2, 0, 1] (out of input order), then assert
+    /// `wait_batch` yields a result vec whose i-th entry is the
+    /// completion sent to the i-th handle.
+    ///
+    /// Discrimination: an impl that returned results in completion
+    /// order (e.g. a `select`/`FuturesUnordered`-style drain) would
+    /// surface [r2, r0, r1]. The input-order contract — result[i]
+    /// corresponds to input[i] — fails on a completion-order impl.
+    #[test]
+    fn wait_batch_returns_input_order() {
+        let loader = Arc::new(MemorySourceLoader::new());
+        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+
+        // Build three handles directly so the test fully controls the
+        // completion order. Each is tagged with a distinct generation
+        // so the recovered result is identifiable per input position.
+        let mut handles = Vec::new();
+        let mut senders = Vec::new();
+        for _ in 0..3 {
+            let (h, s) = completion_pair::<RequestResult>();
+            handles.push(h);
+            senders.push(s);
+        }
+        let batch = BatchHandle { handles };
+
+        let mk = |gen: u64| {
+            RequestResult::Source(Arc::new(crate::node::SourceSnapshot::new_empty(
+                Arc::from("x"),
+                gen,
+            )))
+        };
+
+        // Complete OUT of input order: index 2 first, then 0, then 1.
+        senders[2].send(CompletionState::Ready(mk(22)));
+        senders[0].send(CompletionState::Ready(mk(0)));
+        senders[1].send(CompletionState::Ready(mk(11)));
+
+        let results = sched.wait_batch(&batch);
+        assert_eq!(results.len(), 3, "one result per input handle");
+
+        let gen_of = |state: &CompletionState<RequestResult>| -> u64 {
+            match state {
+                CompletionState::Ready(RequestResult::Source(snap)) => snap.generation,
+                other => panic!("expected Ready(Source), got {other:?}"),
+            }
+        };
+        assert_eq!(
+            gen_of(&results[0]),
+            0,
+            "result[0] must correspond to INPUT handle 0, not the first-completed handle",
+        );
+        assert_eq!(gen_of(&results[1]), 11, "result[1] must correspond to input handle 1");
+        assert_eq!(gen_of(&results[2]), 22, "result[2] must correspond to input handle 2");
     }
 }
