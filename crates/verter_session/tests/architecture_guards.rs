@@ -11063,59 +11063,22 @@ mod typed_ir_resolver_guards {
     }
 
     // -----------------------------------------------------------------------
-    // Guard 6: `parse_checker_text_to_type_expr` — TS checker display
-    // text adapter. The helper does NOT exist pre-W5.3; the allowlist
-    // is empty today and the guard matches nothing. Once W5.3 lands
-    // the helper at `crates/verter_session/src/resolver_core/checker_text_adapter.rs`,
-    // the guard fires anywhere else the symbol is referenced (scope:
-    // every production `.rs` file outside the adapter module itself).
+    // (Former Guard 6 — `no_checker_display_text_parsing_outside_adapter`)
     //
-    // The "checker_text_adapter.rs" exception is the file basename so
-    // any future relocation that keeps the name still passes; the
-    // bridge consumer in `type_expansion_verter.rs` will be added to
-    // the allowlist by W5.3 when it lands.
+    // The TS-checker-display-text adapter (`parse_checker_text_to_type_expr`
+    // in `resolver_core::checker_text_adapter`) was a dead bridge with no
+    // production caller and has been DELETED. The "ban this symbol everywhere
+    // except the one sanctioned adapter module" framing this guard encoded is
+    // therefore obsolete — there is no longer any sanctioned site for it.
     //
-    // This guard is deliberately distinct from
-    // `no_parse_type_annotation_outside_jsdoc` — JSDoc and
-    // checker-display-text are two different input boundaries.
+    // Re-introduction is now forbidden OUTRIGHT (no allowlisted exception):
+    // both `parse_checker_text_to_type_expr` and the `checker_text_adapter`
+    // module name are entries in the `RETIRED_SYMBOLS` ledger in
+    // `crates/verter_session/tests/g_misc0/no_legacy_walker.rs`, whose
+    // `retired_symbols_absent_from_production_source` guard scans every
+    // `crates/*/src/**` production file (comments and `#[cfg(test)]` bodies
+    // stripped) and FAILS if either identifier reappears in production source.
     // -----------------------------------------------------------------------
-    const CHECKER_TEXT_ADAPTER_ALLOWLIST: &[(&str, u32, &str)] = &[];
-
-    fn scan_checker_text_adapter() -> Vec<(String, u32, String)> {
-        let files = collect_production_rs_files();
-        let mut out: Vec<(String, u32, String)> = Vec::new();
-        for (path, rel) in &files {
-            let basename = rel.rsplit('/').next().unwrap_or("");
-            if basename == "checker_text_adapter.rs" {
-                continue;
-            }
-            let src = match fs::read_to_string(path) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let stripped = preprocess(&src);
-            for (idx, line) in stripped.split('\n').enumerate() {
-                if line.contains("parse_checker_text_to_type_expr") {
-                    out.push((
-                        rel.clone(),
-                        (idx + 1) as u32,
-                        "parse_checker_text_to_type_expr".to_string(),
-                    ));
-                }
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn no_checker_display_text_parsing_outside_adapter() {
-        let actual = scan_checker_text_adapter();
-        assert_exact_allowlist_match(
-            "no_checker_display_text_parsing_outside_adapter",
-            &actual,
-            CHECKER_TEXT_ADAPTER_ALLOWLIST,
-        );
-    }
 }
 
 /// Architecture guard — direct content-agnostic `FileArtifactStore`

@@ -256,20 +256,27 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // dedicated `no_old_parse_type_annotation_name_in_production`
     // architecture guard.
     "parse_type_annotation",
-    // The retired `resolver_core::type_text_parser` module. The
-    // checker-text adapter (`parse_checker_text_to_type_expr`) now
-    // wraps OXC directly; the hand-written recursive-descent parser
-    // it replaced is DELETED. The scanner's identifier-boundary
-    // match treats the module name identically to a function name,
-    // so re-introduction at any site is forbidden here too.
+    // The retired `resolver_core::type_text_parser` module — a
+    // hand-written recursive-descent parser for TS type text. It is
+    // DELETED. The scanner's identifier-boundary match treats the
+    // module name identically to a function name, so re-introduction
+    // at any site is forbidden here too.
     "type_text_parser",
     // The retired `type_text_parser::parse_type_text` entry function.
     // Companion to `type_text_parser` (the module name) — covers the
     // case where someone re-introduces just the public entry as a
-    // free function in a different module. The checker-text adapter
-    // (`parse_checker_text_to_type_expr`) is the only sanctioned
-    // checker-display-text parser.
+    // free function in a different module.
     "parse_type_text",
+    // The retired TS-checker-display-text adapter. It wrapped checker
+    // display text in `type __T = ...;` and re-parsed it via OXC to
+    // produce a `TypeExpr`. It had NO production caller (only
+    // self-tests + a perf bench) and is DELETED under the
+    // no-dormant-legacy rule. Both the function name and the module
+    // name are forbidden: re-introducing either at any production site
+    // would revive the dead checker-display-text re-parse bridge. The
+    // scanner treats the module name identically to a function name.
+    "parse_checker_text_to_type_expr",
+    "checker_text_adapter",
     // F1 cutover (eradicate-string-resolver follow-up F1) — the
     // component-meta policy's nominal `name.ends_with("Props")`
     // classifier is DELETED. The structural §3.4 macro-participation
