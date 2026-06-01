@@ -347,7 +347,12 @@ fn upsert_batch_result_indices_map_to_prepared_canonicals() {
     // cold parse; enough of them that completion order is not the
     // submission order.
     let reqs: Vec<UpsertRequest> = (0..8)
-        .map(|i| upsert_req(&format!("/idx{i}.vue"), &good_template(&format!("body-{i}"))))
+        .map(|i| {
+            upsert_req(
+                &format!("/idx{i}.vue"),
+                &good_template(&format!("body-{i}")),
+            )
+        })
         .collect();
     let expected_ids: Vec<String> = reqs
         .iter()
@@ -440,9 +445,8 @@ fn compile_many_no_deadlock_under_full_host_and_scheduler_pools() {
         }
     });
 
-    assert_eq!(
-        host.compile_one_call_count.load(Ordering::Relaxed) as usize >= N,
-        true,
+    assert!(
+        host.compile_one_call_count.load(Ordering::Relaxed) >= N,
         "every unique canonical must have been compiled at least once"
     );
 }

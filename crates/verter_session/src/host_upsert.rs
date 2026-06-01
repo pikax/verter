@@ -225,7 +225,11 @@ impl VerterHost {
     /// thread's request context once, run each request's producer
     /// contract + priority observable + pre-submit snapshot, assert
     /// canonical uniqueness, and issue the SINGLE `submit_batch_atomic`.
-    fn submit_upsert_batch(&self, requests: Vec<UpsertRequest>, priority: Priority) -> UpsertBatchTxn {
+    fn submit_upsert_batch(
+        &self,
+        requests: Vec<UpsertRequest>,
+        priority: Priority,
+    ) -> UpsertBatchTxn {
         // Capture the CALLING thread's request context ONCE, before any
         // submission, and clone it into every batch Request. The
         // scheduler installs it into the source / analysis worker TLS, so
@@ -300,7 +304,9 @@ impl VerterHost {
         debug_assert!(
             {
                 let mut seen = std::collections::HashSet::with_capacity(prepared.len());
-                prepared.iter().all(|p| seen.insert(p.canonical_id.as_str()))
+                prepared
+                    .iter()
+                    .all(|p| seen.insert(p.canonical_id.as_str()))
             },
             "upsert_many_with_priority received duplicate canonical_ids — a \
              source-updating batch with a repeated file_id would bump the \

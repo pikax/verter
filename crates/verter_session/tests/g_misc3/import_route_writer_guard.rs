@@ -88,16 +88,14 @@ const ROUTE_MAP_ADMIT_ALLOWED_FNS: &[&str] = &[
 ];
 
 /// Whitelisted reset methods for the positive route map.
-const ROUTE_MAP_CLEAR_ALLOWED_FNS: &[&str] =
-    &["configure_projects", "finish_upsert_post_commit"];
+const ROUTE_MAP_CLEAR_ALLOWED_FNS: &[&str] = &["configure_projects", "finish_upsert_post_commit"];
 
 /// The only writer allowed to admit known-miss sidecar entries
 /// (snapshot assignment).
 const SIDECAR_ASSIGN_ALLOWED_FNS: &[&str] = &["set_import_dependencies"];
 
 /// Whitelisted reset methods for the known-miss sidecar.
-const SIDECAR_CLEAR_ALLOWED_FNS: &[&str] =
-    &["configure_projects", "finish_upsert_post_commit"];
+const SIDECAR_CLEAR_ALLOWED_FNS: &[&str] = &["configure_projects", "finish_upsert_post_commit"];
 
 /// Visitor that tracks the current enclosing `fn` name and the local
 /// variables in scope that are bound from

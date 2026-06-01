@@ -77,9 +77,7 @@ fn collect_production_rs(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.expect("dir entry").path();
         if path.is_dir() {
             collect_production_rs(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs")
-            && !is_test_file(&path)
-        {
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") && !is_test_file(&path) {
             out.push(path);
         }
     }
@@ -122,7 +120,7 @@ fn preprocess(src: &str) -> String {
             let mut opened = false;
             // The attribute line itself may also carry the `mod {`.
             let mut pending = vec![line.to_string()];
-            while let Some(next) = lines.next() {
+            for next in lines.by_ref() {
                 let has_brace = next.contains('{');
                 pending.push(next.to_string());
                 if has_brace {
