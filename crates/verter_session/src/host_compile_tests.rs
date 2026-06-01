@@ -9,7 +9,7 @@
 //! | `compile_many_warm_cache_reuses_compile_results` | r1 cold, r2 warm, identical code. |
 //! | `compile_many_isolates_per_file_errors` | Bad input only fails its own slot. |
 //! | `compile_many_records_all_errors_not_just_first` | errors[0].len() >= 2 on multi-error inputs. |
-//! | `compile_many_isolates_panics` | Production catch_unwind boundary catches panics. |
+//! | `compile_many_isolates_panics` | Coordinator's per-item catch boundary isolates panics. |
 //! | `compile_many_dedup_conflicting_source_rejects_entire_group` | Both conflict entries fail; sibling /B.vue compiles. |
 //! | `compile_many_with_zero_inputs` | Empty input — no panic, no pool. |
 //! | `compile_many_compiles_each_canonical_once` | Read-once invariant via compile_one_call_count. |
@@ -185,7 +185,7 @@ fn compile_many_records_all_errors_not_just_first() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Per-input panic isolation (production catch_unwind boundary)
+// 5. Per-input panic isolation (host batch coordinator's catch boundary)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -193,9 +193,11 @@ fn compile_many_isolates_panics() {
     let host = new_host();
     let inputs = vec![
         ok_input("/before.vue", &good_template("before")),
-        // Panic-inject sentinel — handled by the `#[cfg(test)]` branch
-        // INSIDE `compile_one_in_batch`'s `catch_unwind` closure
-        // (same code path as a real codegen panic).
+        // Panic-inject sentinel — the `#[cfg(test)]` branch in
+        // `compile_one_in_batch`'s worker body panics, so the panic
+        // unwinds through the host batch coordinator's generic catch
+        // boundary (the same code path as a real codegen panic) and is
+        // rendered into an error entry by `compile_panic_entry`.
         ok_input(PANIC_INJECT_SENTINEL, &good_template("ignored")),
         ok_input("/after.vue", &good_template("after")),
     ];

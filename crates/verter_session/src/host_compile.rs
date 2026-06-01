@@ -19,8 +19,11 @@
 //!    existing public `upsert` does) at the caller-configured priority
 //!    and wait for all to commit.
 //! 3. **Stage C — compile each unique canonical group exactly once.**
-//!    Call [`VerterHost::get_virtual_file`] for `Main` inside
-//!    `std::panic::catch_unwind`. The cache-hit determination and mode
+//!    Call [`VerterHost::get_virtual_file`] for `Main`. Per-input panic
+//!    isolation is owned by the host batch coordinator's generic catch
+//!    boundary (a codegen panic in one input becomes an error
+//!    `CompileBatchEntry` for that slot via `compile_panic_entry`,
+//!    leaving siblings intact). The cache-hit determination and mode
 //!    metadata come back on the response, decided at the single
 //!    classification site. Read/process-once invariant: same
 //!    canonical+profile is never compiled twice within one batch even
@@ -52,7 +55,6 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::collections::{HashMap, HashSet};
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -66,12 +68,14 @@ use crate::types::{
 use crate::VerterHost;
 
 /// Test-only sentinel: any input with this canonical id panics inside
-/// the production `catch_unwind` boundary inside
-/// [`VerterHost::compile_one_in_batch`]. Used by the
+/// [`VerterHost::compile_one_in_batch`]'s worker body, so the panic
+/// unwinds through the host batch coordinator's generic catch boundary
+/// exactly like a real codegen panic. Used by the
 /// `compile_many_isolates_panics` test to verify the production catch
-/// boundary, not just the test scaffolding.
+/// path (the coordinator boundary + `compile_panic_entry` conversion),
+/// not just the test scaffolding.
 #[cfg(test)]
-pub(crate) const PANIC_INJECT_SENTINEL: &str = "/__phase09b_panic_inject__.vue";
+pub(crate) const PANIC_INJECT_SENTINEL: &str = "/__compile_panic_inject__.vue";
 
 /// One file in a batch compile call.
 #[derive(Debug, Clone)]
@@ -233,15 +237,39 @@ impl VerterHost {
             }
         }
 
-        let upsert_results = coordinator.run_batch(&canonical_to_upsert, |input| {
-            let res = self.upsert_with_priority_for_batch(input, priority);
+        // The host batch coordinator owns the shared coordination
+        // concerns (host-coordinator-pool fan-out, deterministic
+        // ordering, the non-reentrant guard, and the generic per-item
+        // panic boundary). `compile_many` performs NO per-batch scheduler
+        // submission accounting, so its policy carries `scheduler: None`;
+        // it supplies only the item work and the domain conversion of a
+        // caught panic into an error result for that slot.
+        let upsert_policy = crate::host_batch_coordinator::BatchPolicy {
+            scheduler: None,
+            label: "compile_many_upsert",
+            on_item_panic: &|panic: crate::host_batch_coordinator::BatchItemPanic<
+                '_,
+                &CompileBatchInput,
+            >| {
+                (
+                    panic.item.canonical_id.clone(),
+                    Err(format!("upsert panicked: {}", panic.message())),
+                )
+            },
+        };
+        let upsert_results = coordinator.run_batch(&canonical_to_upsert, &upsert_policy, |input| {
+            // Render the upsert error to a string inside the worker so a
+            // caught panic (converted by `on_item_panic`) can produce the
+            // same `Result<(), String>` slot shape — the consumer below
+            // only needs the message.
+            let res = self
+                .upsert_with_priority_for_batch(input, priority)
+                .map_err(|e| format!("upsert failed: {e}"));
             (input.canonical_id.clone(), res)
         });
         for (id, res) in upsert_results {
-            if let Err(e) = res {
-                group_errors
-                    .entry(id)
-                    .or_insert_with(|| format!("upsert failed: {e}"));
+            if let Err(message) = res {
+                group_errors.entry(id).or_insert(message);
             }
         }
 
@@ -251,8 +279,29 @@ impl VerterHost {
         // `compile_one_call_count` test-only counter on `VerterHost` is
         // incremented at the top of `compile_one_in_batch` to make the
         // read-once invariant directly observable.
+        //
+        // Per-input panic isolation is owned by the coordinator's generic
+        // catch boundary: a codegen panic in one input is caught there
+        // and handed to this policy's `on_item_panic`, which renders it
+        // into an error `CompileBatchEntry` for that slot (the domain
+        // conversion). Sibling inputs are unaffected and `compile_many`
+        // still returns one entry per input. `compile_many` performs no
+        // scheduler submission accounting (`scheduler: None`).
+        let compile_policy = crate::host_batch_coordinator::BatchPolicy {
+            scheduler: None,
+            label: "compile_many",
+            on_item_panic: &|panic: crate::host_batch_coordinator::BatchItemPanic<
+                '_,
+                &CompileBatchInput,
+            >| {
+                let input = panic.item;
+                let effective_mode = input.requested_mode.unwrap_or(default_mode);
+                let entry = compile_panic_entry(input, effective_mode, &panic.message());
+                ((input.canonical_id.clone(), effective_mode), entry)
+            },
+        };
         let compiled: HashMap<(String, CompileCacheMode), CompileBatchEntry> = coordinator
-            .run_batch(&canonical_to_compile, |input| {
+            .run_batch(&canonical_to_compile, &compile_policy, |input| {
                 let pre_err = group_errors.get(&input.canonical_id).cloned();
                 let entry = self.compile_one_in_batch(input, &profile, default_mode, pre_err);
                 let effective_mode = input.requested_mode.unwrap_or(default_mode);
@@ -417,28 +466,33 @@ impl VerterHost {
             };
         }
 
-        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            // Test-only panic injection inside the production
-            // `catch_unwind` boundary — same code path as a real
-            // codegen panic. Production builds compile this branch
-            // out completely.
-            #[cfg(test)]
-            if input.canonical_id == PANIC_INJECT_SENTINEL {
-                panic!("synthetic panic for compile_many_isolates_panics test");
-            }
-            self.get_virtual_file(VirtualQuery {
-                raw_id: None,
-                canonical_id: Some(input.canonical_id.clone()),
-                node_kind: Some(VirtualNodeKind::Main),
-                compile_profile: per_input_profile.clone(),
-            })
-        }));
+        // Per-input panic isolation is owned by the host batch
+        // coordinator's generic catch boundary (see `compile_many`'s
+        // `compile_policy.on_item_panic`). This worker does NOT wrap its
+        // own `catch_unwind`: a codegen panic propagates to the
+        // coordinator, which catches it and renders the error
+        // `CompileBatchEntry` via `compile_panic_entry`. Centralizing the
+        // catch keeps one coordination rule for every batch client.
+        //
+        // Test-only panic injection — fired in the worker so it unwinds
+        // through the coordinator's catch exactly like a real codegen
+        // panic. Production builds compile this branch out completely.
+        #[cfg(test)]
+        if input.canonical_id == PANIC_INJECT_SENTINEL {
+            panic!("synthetic panic for compile_many_isolates_panics test");
+        }
+        let result = self.get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(input.canonical_id.clone()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: per_input_profile.clone(),
+        });
 
         let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
         let id_prefix = format!("[{}] ", input.canonical_id);
 
         match result {
-            Ok(Ok(response)) => {
+            Ok(response) => {
                 let errors: Vec<String> = response
                     .diagnostics
                     .diagnostics
@@ -475,7 +529,7 @@ impl VerterHost {
             // must report the mode it actually ran under, not the requested
             // mode — so the error entry mirrors the success entry's mode
             // surface instead of resetting to the request.
-            Ok(Err(HostError::CompileError(failure))) => {
+            Err(HostError::CompileError(failure)) => {
                 let mut errors: Vec<String> = failure
                     .diagnostics
                     .diagnostics
@@ -498,7 +552,7 @@ impl VerterHost {
                     downgrade_reason: failure.downgrade_reason,
                 }
             }
-            Ok(Err(host_err)) => CompileBatchEntry {
+            Err(host_err) => CompileBatchEntry {
                 canonical_id: input.canonical_id.clone(),
                 code: Arc::from(""),
                 source_map: None,
@@ -509,30 +563,31 @@ impl VerterHost {
                 actual_mode: requested_mode,
                 downgrade_reason: None,
             },
-            Err(panic_payload) => CompileBatchEntry {
-                canonical_id: input.canonical_id.clone(),
-                code: Arc::from(""),
-                source_map: None,
-                errors: vec![format!(
-                    "{id_prefix}compiler panic: {}",
-                    panic_message(&panic_payload)
-                )],
-                duration_ms,
-                cache_hit: false,
-                requested_mode,
-                actual_mode: requested_mode,
-                downgrade_reason: None,
-            },
         }
     }
 }
 
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic payload".to_string()
+/// Render a caught per-input compile panic into the error
+/// `CompileBatchEntry` for that slot. The host batch coordinator owns
+/// the generic `catch_unwind`; this is the domain conversion
+/// `compile_many` supplies through its `BatchPolicy::on_item_panic`, so
+/// a panicking input produces a one-error entry (prefixed with the
+/// canonical id and `"compiler panic:"`) without aborting the batch or
+/// poisoning sibling inputs.
+fn compile_panic_entry(
+    input: &CompileBatchInput,
+    effective_mode: CompileCacheMode,
+    message: &str,
+) -> CompileBatchEntry {
+    CompileBatchEntry {
+        canonical_id: input.canonical_id.clone(),
+        code: Arc::from(""),
+        source_map: None,
+        errors: vec![format!("[{}] compiler panic: {}", input.canonical_id, message)],
+        duration_ms: 0.0,
+        cache_hit: false,
+        requested_mode: effective_mode,
+        actual_mode: effective_mode,
+        downgrade_reason: None,
     }
 }

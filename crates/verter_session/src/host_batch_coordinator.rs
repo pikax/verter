@@ -3,7 +3,11 @@
 //! Every host/runtime API that fans a batch of independent items out
 //! across the host-owned coordinator pool routes through
 //! [`HostBatchCoordinator::run_batch`]. It is the single owner of the
-//! outer-coordinator fan-out policy:
+//! shared outer-coordinator concerns; call sites supply only the
+//! per-item work and (for clients that can panic) the domain-specific
+//! panic→result conversion.
+//!
+//! What the coordinator owns (one coordination rule for every client):
 //!
 //! - **Pool ownership.** The parallel `install` runs on the host's
 //!   dedicated coordinator pool ([`verter_scheduler::HostCpuPool`]),
@@ -13,6 +17,21 @@
 //!   worker that the scheduler's driver needs to dispatch that very
 //!   work. Routing the outer wait onto the stage pool is exactly the
 //!   starvation-deadlock class this primitive exists to prevent.
+//! - **Submission accounting.** When a client's [`BatchPolicy`] carries
+//!   a scheduler handle, the coordinator performs the per-batch
+//!   `Scheduler::account_batch_submission` bump exactly once per
+//!   non-empty batch (the N items share one submission context). The
+//!   accounting is pool-free; it lives here so neither client hand-rolls
+//!   it at the call site.
+//! - **Per-item panic isolation.** Each item closure runs inside a
+//!   generic `catch_unwind` boundary. A panic in ONE item is caught and
+//!   handed to the client's [`BatchPolicy::on_item_panic`] converter,
+//!   which maps it to that client's domain result — so one panicking
+//!   item never aborts the whole batch or poisons sibling results. The
+//!   generic catch/isolation is centralized here; only the domain
+//!   payload→result conversion stays at the call site (it is genuinely
+//!   client-specific: a compile maps it to an error `CompileBatchEntry`,
+//!   a meta query maps it to a missing slot).
 //! - **Empty / single-item fast path.** Zero items allocate and run
 //!   nothing; a single item runs on the coordinator pool but skips the
 //!   parallel fan-out machinery (no `par_iter`, no index/sort). The
@@ -20,6 +39,10 @@
 //!   semantics are uniform across batch sizes.
 //! - **Deterministic ordering.** Exactly one result per input, in
 //!   input order, regardless of completion order.
+//! - **Tracing.** Each batch opens one `debug_span!` carrying the
+//!   client's [`BatchPolicy::label`] and the item count, so a batch's
+//!   fan-out is attributable in a trace without each client wiring its
+//!   own span at the boundary.
 //! - **Non-reentrant host-batch policy.** A `run_batch` invoked while
 //!   the calling thread is ALREADY inside a host-batch fan-out runs the
 //!   nested batch INLINE / sequentially on the current worker rather
@@ -31,7 +54,15 @@
 //!   itself.
 //! - **wasm / sync fallback.** With no coordinator pool (wasm32) the
 //!   batch runs inline / sequentially with identical observable
-//!   ordering.
+//!   ordering, the same accounting, and the same per-item panic
+//!   isolation.
+//!
+//! What the coordinator deliberately does NOT own: there is no
+//! cancellation or shutdown facility for these batches in the current
+//! runtime (the scheduler exposes no batch-cancellation token), so the
+//! coordinator does not pretend to provide one. A batch runs to
+//! completion. The shared concerns above are exactly the ones that
+//! genuinely exist and were previously duplicated at the call sites.
 //!
 //! New invariant (host batch coordination): outer API fan-out may block
 //! only on scheduler-owned work; scheduler-owned work must never
@@ -43,16 +74,17 @@ use std::cell::Cell;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
+use verter_scheduler::scheduler::Scheduler;
 #[cfg(not(target_arch = "wasm32"))]
 use verter_scheduler::HostCpuPool;
 
 thread_local! {
     /// Set while the calling thread is executing a host-batch item
     /// closure. `run_batch` installs this marker per item, around each
-    /// `f(item)` call on whichever pool worker runs that item, so a
-    /// nested `run_batch` reached from inside `f` observes the flag and
-    /// collapses to the inline / sequential path instead of issuing a
-    /// fresh coordinator-pool `install`.
+    /// item closure on whichever pool worker runs that item, so a
+    /// nested `run_batch` reached from inside the closure observes the
+    /// flag and collapses to the inline / sequential path instead of
+    /// issuing a fresh coordinator-pool `install`.
     ///
     /// Per-item (not per-install) scoping is required because
     /// `par_iter` distributes items across the pool's workers via
@@ -88,6 +120,65 @@ impl Drop for InHostBatchGuard {
     fn drop(&mut self) {
         IN_HOST_BATCH.with(|c| c.set(self.previous));
     }
+}
+
+/// The opaque payload of a caught item panic, handed to
+/// [`BatchPolicy::on_item_panic`] so the client can render it into its
+/// domain result. Carries the unwind payload (for message extraction)
+/// and a reference to the item whose closure panicked (so the converter
+/// can attribute the failure — e.g. include the canonical id — without
+/// re-deriving it).
+pub(crate) struct BatchItemPanic<'a, T> {
+    /// The panic payload captured by `catch_unwind`. Use
+    /// [`BatchItemPanic::message`] to extract a human-readable string.
+    pub payload: Box<dyn std::any::Any + Send>,
+    /// The item that panicked, so the converter can attribute the
+    /// failure (e.g. include the canonical id) without re-deriving it.
+    pub item: &'a T,
+}
+
+impl<T> BatchItemPanic<'_, T> {
+    /// Best-effort human-readable message from the unwind payload
+    /// (`&str` / `String` panics; otherwise a generic marker).
+    pub fn message(&self) -> String {
+        if let Some(s) = self.payload.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = self.payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "panic payload was not a string".to_string()
+        }
+    }
+}
+
+/// Per-client batch coordination policy.
+///
+/// Captures the genuinely client-specific coordination differences so
+/// the [`HostBatchCoordinator`] can own the shared rule while each
+/// client supplies only what truly differs:
+///
+/// - whether the batch performs scheduler submission accounting (the
+///   component-meta batch shares one scheduler submission context per
+///   batch; the SFC compile batch does not account at all);
+/// - the tracing label for the batch span;
+/// - how a caught item panic converts into the client's domain result.
+///
+/// The closure `on_item_panic` is the ONLY place domain-specific panic
+/// handling lives: the coordinator catches the panic generically, the
+/// client decides what `R` a panicked item produces.
+pub(crate) struct BatchPolicy<'p, T, R> {
+    /// When `Some`, the coordinator calls
+    /// [`Scheduler::account_batch_submission`] exactly once for a
+    /// non-empty batch. `None` for clients (e.g. compile) that perform
+    /// no per-batch scheduler accounting. The accounting is pool-free,
+    /// so it is performed identically on the native and wasm/sync paths.
+    pub scheduler: Option<&'p Scheduler>,
+    /// Static label naming this batch in the per-batch tracing span.
+    pub label: &'static str,
+    /// Converts a caught per-item panic into the client's domain result
+    /// for that slot, keeping the batch's input→output alignment intact
+    /// while isolating the panic from sibling items.
+    pub on_item_panic: &'p (dyn Fn(BatchItemPanic<'_, T>) -> R + Sync + Send),
 }
 
 /// Coordinator for host/runtime batch fan-out over the host-owned CPU
@@ -148,16 +239,40 @@ impl<'a> HostBatchCoordinator<'a> {
         }
     }
 
-    /// Fan `items` out across the host coordinator pool, applying `f` to
-    /// each item, and return one result per item in input order.
+    /// Run one item closure inside the generic per-item panic boundary,
+    /// converting a caught panic into the client's domain result via
+    /// `policy.on_item_panic`. The in-batch marker is set for the
+    /// duration of the closure so a nested `run_batch` reached from
+    /// inside it collapses inline.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_item<T, R, F>(policy: &BatchPolicy<'_, T, R>, item: &T, f: &F) -> R
+    where
+        F: Fn(&T) -> R + Sync + Send,
+    {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = InHostBatchGuard::enter();
+            f(item)
+        }));
+        match outcome {
+            Ok(r) => r,
+            Err(payload) => (policy.on_item_panic)(BatchItemPanic { payload, item }),
+        }
+    }
+
+    /// Fan `items` out across the host coordinator pool under `policy`,
+    /// applying `f` to each item, and return one result per item in
+    /// input order.
     ///
     /// Routing rules (single source of truth for host batch fan-out):
     ///
-    /// - `items.is_empty()` → no pool work, empty `Vec`.
+    /// - `items.is_empty()` → no pool work, no accounting, empty `Vec`.
+    /// - otherwise the per-batch scheduler submission accounting (if
+    ///   `policy.scheduler` is `Some`) runs exactly once.
     /// - already inside a host-batch fan-out on this thread → run
     ///   inline / sequentially on the current coordinator worker
     ///   (non-reentrant guard; never a nested coordinator-pool
-    ///   `install`).
+    ///   `install`). Per-item panic isolation still applies.
     /// - exactly one item (cold) → `install` on the coordinator pool
     ///   and run the single item there, skipping the parallel fan-out
     ///   machinery. The work still runs on a coordinator-pool worker so
@@ -165,21 +280,48 @@ impl<'a> HostBatchCoordinator<'a> {
     /// - otherwise → `install` on the coordinator pool and fan out with
     ///   rayon, preserving input order via an indexed parallel map.
     ///
+    /// Each item closure runs inside a generic `catch_unwind` boundary;
+    /// a panic in one item is converted to a domain result through
+    /// `policy.on_item_panic` and does not abort the batch.
+    ///
     /// `f` must be `Sync + Send` (it runs on multiple pool workers) and
     /// each result `R` must be `Send`. The closure may freely call
     /// scalar host/scheduler operations and may even call back into
     /// `run_batch` (the nested call collapses inline), but it must not
     /// rely on a nested call running in parallel.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn run_batch<T, R, F>(&self, items: &[T], f: F) -> Vec<R>
+    pub(crate) fn run_batch<T, R, F>(
+        &self,
+        items: &[T],
+        policy: &BatchPolicy<'_, T, R>,
+        f: F,
+    ) -> Vec<R>
     where
         T: Sync,
         R: Send,
         F: Fn(&T) -> R + Sync + Send,
     {
-        // Empty: nothing to fan out.
+        // Empty: nothing to fan out, and no accounting (submit_count
+        // stays O(1) per *non-empty* batch).
         if items.is_empty() {
             return Vec::new();
+        }
+
+        // One per-batch tracing span carrying the client's label + the
+        // fan-out width, so the batch is attributable without each call
+        // site wiring its own span.
+        let _span = tracing::debug_span!("host_batch", label = policy.label, items = items.len())
+            .entered();
+
+        // Per-batch scheduler submission accounting: the N items share
+        // one submission context, so the counter bumps exactly once per
+        // non-empty batch. Pool-free; it never installs an outer wait.
+        // Skipped on the nested path below — a nested batch is part of
+        // the same outer submission and must not double-count.
+        if !IN_HOST_BATCH.with(Cell::get) {
+            if let Some(scheduler) = policy.scheduler {
+                scheduler.account_batch_submission();
+            }
         }
 
         // Nested host-batch fan-out (any size): the non-reentrant guard.
@@ -188,9 +330,13 @@ impl<'a> HostBatchCoordinator<'a> {
         // same finite coordinator pool, reintroducing the starvation
         // class one level up. The thread is already in-batch (we only
         // reach a nested call from inside an outer item closure), so the
-        // marker is already set.
+        // marker is already set; `run_item` re-asserts it per item and
+        // still applies the per-item panic boundary.
         if IN_HOST_BATCH.with(Cell::get) {
-            return items.iter().map(&f).collect();
+            return items
+                .iter()
+                .map(|item| Self::run_item(policy, item, &f))
+                .collect();
         }
 
         // Single item (cold, not nested): run it ON the coordinator pool
@@ -199,28 +345,27 @@ impl<'a> HostBatchCoordinator<'a> {
         // inline-execute scheduler CPU work) own the outer wait
         // uniformly, regardless of batch size. The fast path skips only
         // the parallel fan-out machinery (no `par_iter`, no index/sort),
-        // not the pool. The in-batch marker is set so a nested
-        // `run_batch` reached from inside `f` collapses inline.
+        // not the pool. The per-item boundary in `run_item` sets the
+        // in-batch marker and isolates a panic.
         if items.len() == 1 {
             #[cfg(test)]
             self.install_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return self.pool.install(|| {
-                let _guard = InHostBatchGuard::enter();
-                vec![f(&items[0])]
-            });
+            return self
+                .pool
+                .install(|| vec![Self::run_item(policy, &items[0], &f)]);
         }
 
         // Cold outer fan-out: run the parallel map on the coordinator
-        // pool. The in-batch marker is set PER ITEM, inside the map
-        // closure, NOT once around the whole install: `par_iter`
-        // distributes items across every worker in the pool via
-        // work-stealing, so a single marker on the install-entry thread
-        // would leave stolen items running un-marked — and a nested
-        // `run_batch` reached from one of those would wrongly re-install.
-        // Scoping the marker to each item's `f` call guarantees every
-        // worker running an item is marked for the duration of that
-        // item's closure, regardless of which worker stole it.
+        // pool. The in-batch marker is set PER ITEM (inside `run_item`),
+        // NOT once around the whole install: `par_iter` distributes
+        // items across every worker in the pool via work-stealing, so a
+        // single marker on the install-entry thread would leave stolen
+        // items running un-marked — and a nested `run_batch` reached
+        // from one of those would wrongly re-install. Scoping the marker
+        // to each item's closure guarantees every worker running an item
+        // is marked for the duration of that item, regardless of which
+        // worker stole it.
         #[cfg(test)]
         self.install_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -231,10 +376,7 @@ impl<'a> HostBatchCoordinator<'a> {
             let mut indexed: Vec<(usize, R)> = items
                 .par_iter()
                 .enumerate()
-                .map(|(idx, item)| {
-                    let _guard = InHostBatchGuard::enter();
-                    (idx, f(item))
-                })
+                .map(|(idx, item)| (idx, Self::run_item(policy, item, &f)))
                 .collect();
             indexed.sort_by_key(|(idx, _)| *idx);
             indexed.into_iter().map(|(_, r)| r).collect()
@@ -242,13 +384,46 @@ impl<'a> HostBatchCoordinator<'a> {
     }
 
     /// wasm32 / sync fallback: run the batch inline, sequentially, with
-    /// identical observable ordering (one result per input, in order).
+    /// identical observable semantics — the same per-batch accounting
+    /// (there is no scheduler pool, but the accounting is pool-free and
+    /// still bumps once per non-empty batch), the same per-item panic
+    /// isolation, and one result per input in order.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn run_batch<T, R, F>(&self, items: &[T], f: F) -> Vec<R>
+    pub(crate) fn run_batch<T, R, F>(
+        &self,
+        items: &[T],
+        policy: &BatchPolicy<'_, T, R>,
+        f: F,
+    ) -> Vec<R>
     where
         F: Fn(&T) -> R,
     {
-        items.iter().map(&f).collect()
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        if items.is_empty() {
+            return Vec::new();
+        }
+        // Same per-batch tracing span as the native path.
+        let _span = tracing::debug_span!("host_batch", label = policy.label, items = items.len())
+            .entered();
+        // Same once-per-non-empty-batch accounting as the native path
+        // (pool-free; the nested guard prevents double-counting).
+        if !IN_HOST_BATCH.with(Cell::get) {
+            if let Some(scheduler) = policy.scheduler {
+                scheduler.account_batch_submission();
+            }
+        }
+        items
+            .iter()
+            .map(|item| {
+                match catch_unwind(AssertUnwindSafe(|| {
+                    let _guard = InHostBatchGuard::enter();
+                    f(item)
+                })) {
+                    Ok(r) => r,
+                    Err(payload) => (policy.on_item_panic)(BatchItemPanic { payload, item }),
+                }
+            })
+            .collect()
     }
 }
 
@@ -262,13 +437,29 @@ mod tests {
         HostCpuPool::new(4)
     }
 
+    /// A panic-free policy whose `on_item_panic` resurfaces the panic as
+    /// a hard test failure — used by the order/empty/single tests that
+    /// never panic an item, so an accidental panic does not silently
+    /// pass through a converter.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn never_panic_policy<T, R>() -> BatchPolicy<'static, T, R> {
+        BatchPolicy {
+            scheduler: None,
+            label: "test",
+            on_item_panic: &|p: BatchItemPanic<'_, T>| -> R {
+                panic!("unexpected item panic: {}", p.message())
+            },
+        }
+    }
+
     /// Empty input fans out nothing and returns an empty vector.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn run_batch_empty_returns_empty() {
         let pool = pool();
         let coord = HostBatchCoordinator::new(&pool);
-        let out = coord.run_batch::<u32, u32, _>(&[], |x| *x);
+        let policy = never_panic_policy::<u32, u32>();
+        let out = coord.run_batch::<u32, u32, _>(&[], &policy, |x| *x);
         assert!(out.is_empty(), "empty input must produce empty output");
     }
 
@@ -280,10 +471,11 @@ mod tests {
     fn run_batch_preserves_input_order() {
         let pool = pool();
         let coord = HostBatchCoordinator::new(&pool);
+        let policy = never_panic_policy::<usize, usize>();
         let items: Vec<usize> = (0..64).collect();
         // Reverse the per-item work so earlier items finish LAST under a
         // naive scheduler — order preservation must still hold.
-        let out = coord.run_batch(&items, |i| {
+        let out = coord.run_batch(&items, &policy, |i| {
             // Larger sleep for smaller indices so completion order is
             // (roughly) reversed relative to input order.
             std::thread::sleep(std::time::Duration::from_micros(((64 - *i) * 50) as u64));
@@ -310,6 +502,7 @@ mod tests {
         // other coordinator the suite runs concurrently.
         let installs = Arc::new(AtomicUsize::new(0));
         let coord = HostBatchCoordinator::new_with_install_counter(&pool, Arc::clone(&installs));
+        let policy = never_panic_policy::<u32, u32>();
 
         // The calling thread must not be marked in-batch before/after.
         assert!(
@@ -318,7 +511,7 @@ mod tests {
         );
 
         let observed_in_batch = std::sync::atomic::AtomicBool::new(false);
-        let out = coord.run_batch(std::slice::from_ref(&7u32), |x| {
+        let out = coord.run_batch(std::slice::from_ref(&7u32), &policy, |x| {
             observed_in_batch.store(in_host_batch(), Ordering::Relaxed);
             *x + 1
         });
@@ -341,7 +534,7 @@ mod tests {
         );
     }
 
-    /// **D3 — non-reentrant host-batch guard (discriminating).**
+    /// Non-reentrant host-batch guard (discriminating).
     ///
     /// An outer `run_batch` whose every item closure ITSELF calls
     /// `run_batch` (a nested multi-item fan-out) must:
@@ -362,7 +555,7 @@ mod tests {
     /// fails without the guard, and passes with it.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
-    fn run_batch_nested_collapses_inline_and_does_not_reinstall() {
+    fn nested_run_batch_collapses_inline_without_reinstall() {
         // Coordinator pool narrower than the outer batch width so that a
         // guard-less nested `install` would have to contend for workers
         // the outer fan-out already holds.
@@ -373,6 +566,7 @@ mod tests {
         // would race with compile / meta-batch tests).
         let installs = Arc::new(AtomicUsize::new(0));
         let coord = HostBatchCoordinator::new_with_install_counter(&pool, Arc::clone(&installs));
+        let policy = never_panic_policy::<usize, usize>();
 
         let outer: Vec<usize> = (0..8).collect();
 
@@ -382,10 +576,10 @@ mod tests {
         // false observation is permanent.
         let all_nested_saw_in_batch = std::sync::atomic::AtomicBool::new(true);
 
-        let outer_out = coord.run_batch(&outer, |o| {
+        let outer_out = coord.run_batch(&outer, &policy, |o| {
             // Each outer item fans out a nested batch of 4 sub-items.
             let nested_items: Vec<usize> = (0..4).collect();
-            let nested_out = coord.run_batch(&nested_items, |n| {
+            let nested_out = coord.run_batch(&nested_items, &policy, |n| {
                 if !in_host_batch() {
                     all_nested_saw_in_batch.store(false, Ordering::Relaxed);
                 }
@@ -431,6 +625,136 @@ mod tests {
             all_nested_saw_in_batch.load(Ordering::Relaxed),
             "every nested closure must run with the in-batch marker set (inline under the \
              outer fan-out)",
+        );
+    }
+
+    /// The coordinator performs the per-batch scheduler submission
+    /// accounting exactly ONCE for a non-empty batch and NOT AT ALL for
+    /// an empty batch — the centralized accounting that used to live at
+    /// the meta-batch call sites. Discriminating: a coordinator that
+    /// forgot the accounting (or ran it per item) would record `0` /
+    /// `items.len()` instead of `1`; a coordinator that accounted on the
+    /// empty path would record `1` instead of `0`.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_batch_accounts_submission_once_per_nonempty_batch() {
+        use verter_scheduler::scheduler::{Scheduler, SchedulerConfig};
+        use verter_scheduler::source_loader::MemorySourceLoader;
+
+        let pool = pool();
+        let coord = HostBatchCoordinator::new(&pool);
+        let scheduler = Scheduler::new(
+            SchedulerConfig::default(),
+            Arc::new(MemorySourceLoader::new()),
+        );
+
+        // Shared panic converter for every accounting-test policy (no
+        // item panics here, so a panic is a hard test failure).
+        let on_item_panic = |p: BatchItemPanic<'_, usize>| -> usize {
+            panic!("unexpected item panic: {}", p.message())
+        };
+        let make_policy = || BatchPolicy::<usize, usize> {
+            scheduler: Some(scheduler.as_ref()),
+            label: "test-accounting",
+            on_item_panic: &on_item_panic,
+        };
+
+        let before = scheduler.counters().submit_count.load(Ordering::Relaxed);
+
+        // Empty batch: NO accounting bump.
+        let empty_policy = make_policy();
+        let _ = coord.run_batch::<usize, usize, _>(&[], &empty_policy, |x| *x);
+        let after_empty = scheduler.counters().submit_count.load(Ordering::Relaxed);
+        assert_eq!(
+            after_empty, before,
+            "an empty batch must NOT account a scheduler submission",
+        );
+
+        // Non-empty multi-item batch: exactly ONE bump for the whole
+        // batch, regardless of item count.
+        let multi: Vec<usize> = (0..16).collect();
+        let multi_policy = make_policy();
+        let _ = coord.run_batch(&multi, &multi_policy, |x| *x * 2);
+        let after_multi = scheduler.counters().submit_count.load(Ordering::Relaxed);
+        assert_eq!(
+            after_multi,
+            before + 1,
+            "a non-empty batch must account EXACTLY ONE scheduler submission for the whole \
+             batch (got {} bumps for 16 items)",
+            after_multi - before,
+        );
+
+        // Single-item batch: also exactly one bump (the single-item fast
+        // path must not skip accounting).
+        let single_policy = make_policy();
+        let _ = coord.run_batch(std::slice::from_ref(&99usize), &single_policy, |x| *x);
+        let after_single = scheduler.counters().submit_count.load(Ordering::Relaxed);
+        assert_eq!(
+            after_single,
+            before + 2,
+            "a single-item batch must also account exactly one scheduler submission",
+        );
+    }
+
+    /// A panic in ONE item is isolated by the coordinator's generic
+    /// per-item boundary: the panicking slot is converted to a domain
+    /// result through `policy.on_item_panic`, sibling items still run
+    /// and return their real values, and input→output ordering is
+    /// preserved. Discriminating: without the catch boundary the panic
+    /// would unwind out of the rayon fan-out and poison the whole batch
+    /// (the assertion on the sibling results would never run); a
+    /// boundary that dropped order would misattribute the panic slot.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_batch_isolates_single_item_panic() {
+        let pool = pool();
+        let coord = HostBatchCoordinator::new(&pool);
+
+        // Convert a panicked item into a sentinel that encodes the
+        // failing item value, so we can assert the panic landed in the
+        // RIGHT slot (ordering preserved) and carried the right message.
+        let policy = BatchPolicy::<usize, String> {
+            scheduler: None,
+            label: "test-panic-isolation",
+            on_item_panic: &|p: BatchItemPanic<'_, usize>| -> String {
+                format!("PANIC[item={}]: {}", p.item, p.message())
+            },
+        };
+
+        let items: Vec<usize> = (0..6).collect();
+        let out = coord.run_batch(&items, &policy, |i| {
+            if *i == 3 {
+                panic!("synthetic panic in item 3");
+            }
+            format!("ok({i})")
+        });
+
+        assert_eq!(out.len(), 6, "every input slot must produce a result");
+        // Sibling items ran and returned their real values.
+        for (i, slot) in out.iter().enumerate() {
+            if i == 3 {
+                assert!(
+                    slot.starts_with("PANIC[item=3]: "),
+                    "the panic must land in slot 3 (ordering preserved): {slot}",
+                );
+                assert!(
+                    slot.contains("synthetic panic in item 3"),
+                    "the converter must receive the original panic message: {slot}",
+                );
+            } else {
+                assert_eq!(
+                    slot,
+                    &format!("ok({i})"),
+                    "sibling item {i} must be unaffected by the panic in item 3",
+                );
+            }
+        }
+
+        // The calling thread must not be left marked in-batch after a
+        // batch that contained a panic (RAII restore on unwind).
+        assert!(
+            !in_host_batch(),
+            "a panicking item must not leak the in-batch marker",
         );
     }
 }

@@ -676,15 +676,34 @@ impl MetaSession {
         // the closure; the coordinator runs the N jobs synchronously
         // (blocking install) before the closure returns, so the snapshot
         // stays alive across the whole batch.
-        // One scheduler submission per non-empty batch (the N jobs
-        // share the submission context); the outer fan-out itself runs
-        // on the host coordinator pool via the batch coordinator, NOT on
-        // the scheduler's stage pool.
-        if !jobs.is_empty() {
-            scheduler.account_batch_submission();
-        }
+        //
+        // The batch coordinator owns the shared coordination concerns:
+        // it runs the outer fan-out on the host coordinator pool (NOT the
+        // scheduler's stage pool), performs the per-batch scheduler
+        // submission accounting exactly once (the policy carries the
+        // scheduler handle; the N jobs share one submission context), and
+        // isolates a per-job panic via `on_item_panic`. This call site
+        // supplies only the per-job resolution and the domain panic
+        // conversion below.
+        let on_item_panic = |panic: crate::host_batch_coordinator::BatchItemPanic<
+            '_,
+            verter_scheduler::stage::SchedulerJobKind,
+        >| {
+            let verter_scheduler::stage::SchedulerJobKind::ComponentMeta { canonical_id } =
+                panic.item;
+            Err(MetaError::Host(format!(
+                "component-meta batch job for `{}` panicked: {}",
+                canonical_id,
+                panic.message()
+            )))
+        };
+        let policy = crate::host_batch_coordinator::BatchPolicy {
+            scheduler: Some(scheduler.as_ref()),
+            label: "component_meta_batch",
+            on_item_panic: &on_item_panic,
+        };
         let results = self.with_overlay_view(|view| {
-            host.batch_coordinator().run_batch(&jobs, |job| {
+            host.batch_coordinator().run_batch(&jobs, &policy, |job| {
                 let verter_scheduler::stage::SchedulerJobKind::ComponentMeta { canonical_id } = job;
                 Ok(host.get_component_meta_via_view(canonical_id.as_ref(), view))
             })
@@ -737,13 +756,24 @@ impl MetaSession {
         // The closure mirrors `get_component_meta_payload`'s body —
         // payload-cache fast path → cold resolve → encode → publish.
         let encode_fn_ref = &encode_fn;
-        // One scheduler submission per non-empty batch; the fan-out runs
-        // on the host coordinator pool via the batch coordinator.
-        if !jobs.is_empty() {
-            scheduler.account_batch_submission();
-        }
+        // The batch coordinator owns the shared coordination concerns:
+        // host-coordinator-pool fan-out, the once-per-non-empty-batch
+        // scheduler submission accounting (the policy carries the
+        // scheduler handle), and per-job panic isolation. A panicked
+        // per-id payload job converts to a missing (`None`) slot — the
+        // domain-specific conversion for this surface — without poisoning
+        // the rest of the batch.
+        let on_item_panic = |_panic: crate::host_batch_coordinator::BatchItemPanic<
+            '_,
+            verter_scheduler::stage::SchedulerJobKind,
+        >| { None::<Vec<u8>> };
+        let policy = crate::host_batch_coordinator::BatchPolicy {
+            scheduler: Some(scheduler.as_ref()),
+            label: "component_meta_batch_payloads",
+            on_item_panic: &on_item_panic,
+        };
         let results = self.with_overlay_view(|_view| {
-            host.batch_coordinator().run_batch(&jobs, move |job| {
+            host.batch_coordinator().run_batch(&jobs, &policy, move |job| {
                 let verter_scheduler::stage::SchedulerJobKind::ComponentMeta { canonical_id } = job;
                 let canonical_or_alias = canonical_id.as_ref();
                 let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
