@@ -82,6 +82,15 @@ pub(crate) use vue_script_extract::{extract_vue_script_content, template_convert
 #[doc(hidden)]
 pub use virtual_file_pipeline::CompileForceOverflowGuard;
 
+// Test-only introspection for the Session-only compile-tier prefetch
+// gate. Same cfg gate as above (a `pub use` of a cfg-stripped item is an
+// unresolved-import error in release builds).
+#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
+pub use virtual_file_pipeline::{
+    compile_tier_prefetch_invocations, reset_compile_tier_prefetch_invocations,
+};
+
 // Test-only re-exports: `host_resolve_tests.rs` and the inline frontier
 // tests reference internal helpers via `super::*`. After the split,
 // `super` from those tests resolves to this `mod.rs`, so we re-expose

@@ -147,6 +147,25 @@ pub fn compile_force_overflow_observations_for_tests(n: usize) -> CompileForceOv
 #[doc(hidden)]
 pub use crate::host_resolve::CompileForceOverflowGuard;
 
+/// Reset the compile-tier prefetch invocation counter to zero. Call
+/// immediately before a cold compute so the post-compute read counts
+/// only that compute. The cold-compute path installs the prefetch ONLY
+/// for `Session` cache mode (it pre-populates the compile-tier fact
+/// tracer, which is itself `Session`-only), so a routing test arms this,
+/// runs one cold compute per requested mode, and asserts the counter
+/// stays `0` for `Content` / `Stateless` and increments for `Session`.
+pub fn reset_compile_tier_prefetch_invocations_for_tests() {
+    crate::host_resolve::reset_compile_tier_prefetch_invocations();
+}
+
+/// Read the compile-tier prefetch invocation counter. Pair with
+/// [`reset_compile_tier_prefetch_invocations_for_tests`] around a single
+/// cold compute for a deterministic observation of the Session-only
+/// prefetch gate.
+pub fn compile_tier_prefetch_invocations_for_tests() -> usize {
+    crate::host_resolve::compile_tier_prefetch_invocations()
+}
+
 /// Read the materialiser's `materialize_structure_overflow_refusals`
 /// counter for the given host. Test surface; production callers reach
 /// this through the `host_audit_runtime().snapshot()` provenance

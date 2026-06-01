@@ -70,6 +70,42 @@ impl Drop for CompileForceOverflowGuard {
     }
 }
 
+/// Test/debug-only invocation counter for
+/// [`VerterHost::prefetch_compile_tier_observation_targets`]. Incremented
+/// once per actual call to the prefetch. The cold-compute path installs
+/// the prefetch ONLY for the `Session` cache mode (it pre-populates the
+/// compile-tier fact tracer, which is itself installed only for
+/// `Session`); `Content` / `Stateless` compile with no fact rail and
+/// therefore never invoke it. This counter lets a routing test assert
+/// exactly that gate — it stays `0` across a `Content` / `Stateless`
+/// cold compute and increments on a `Session` cold compute.
+///
+/// Gated to `cfg(any(test, debug_assertions))` so release builds carry
+/// neither the atomic nor the increment.
+#[doc(hidden)]
+#[cfg(any(test, debug_assertions))]
+pub(crate) static COMPILE_TIER_PREFETCH_INVOCATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Reset [`COMPILE_TIER_PREFETCH_INVOCATIONS`] to zero. Test setup calls
+/// this immediately before a cold compute so the post-compute read
+/// reflects only that compute's prefetch invocations, independent of any
+/// earlier compile in the same process.
+#[doc(hidden)]
+#[cfg(any(test, debug_assertions))]
+pub fn reset_compile_tier_prefetch_invocations() {
+    COMPILE_TIER_PREFETCH_INVOCATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Current value of [`COMPILE_TIER_PREFETCH_INVOCATIONS`]. Reads the
+/// relaxed atomic; pair with [`reset_compile_tier_prefetch_invocations`]
+/// around a single cold compute for a deterministic observation.
+#[doc(hidden)]
+#[cfg(any(test, debug_assertions))]
+pub fn compile_tier_prefetch_invocations() -> usize {
+    COMPILE_TIER_PREFETCH_INVOCATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Compile-mode discriminator for the content-addressed cache key:
 /// the `Content` cache-mode stable hash folded with the full profile
 /// identity. The profile (`DefaultHasher`-based; in-memory only, never
@@ -276,6 +312,12 @@ impl VerterHost {
         macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
         external_requests: &[ExternalSourceRequest],
     ) {
+        // Test/debug-only invocation count. The cold-compute path gates
+        // this prefetch to `Session`; the counter lets a routing test
+        // observe that gate without a fact-rail side channel.
+        #[cfg(any(test, debug_assertions))]
+        COMPILE_TIER_PREFETCH_INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         // Owner's indexed-ready must be present so the tracer can
         // resolve owner-relative import surfaces; the owner's own
         // FileArtifactStore entry is also a producer-side dependency
@@ -1005,17 +1047,27 @@ impl VerterHost {
         }
 
         // Cold-compute prefetch: resolve + index the cross-file
-        // dependency surface before compiling so the compile pass sees
-        // resolved deps. Performed outside any fact-tracer scope so that
-        // load / index mutations are not folded into a consumer's
-        // observed read set. Runs for every mode (it governs compile
-        // correctness, not just fact observation).
-        self.prefetch_compile_tier_observation_targets(
-            &canonical_id,
-            &compile_input.script_imports,
-            &compile_input.macro_type_deps,
-            &compile_input.external_requests,
-        );
+        // dependency surface so the compile-tier fact tracer can observe
+        // populated import-route + `IndexedReady` state. Performed
+        // outside any fact-tracer scope so that load / index mutations
+        // are not folded into a consumer's observed read set.
+        //
+        // Session-only: the tracer is installed exclusively in the
+        // `Session` branch below, and a no-tracer fact call is a no-op
+        // (`observe_compile_tier_dependencies` caller contract). The
+        // prefetch is pure fact-observation pre-population — `Content` /
+        // `Stateless` compile correctness (external `src=` resolution,
+        // macro-type collection, dep sync) is produced independently by
+        // `compile_entry`, so running the prefetch for those modes would
+        // be load + index work nobody records.
+        if actual_mode == CompileCacheMode::Session {
+            self.prefetch_compile_tier_observation_targets(
+                &canonical_id,
+                &compile_input.script_imports,
+                &compile_input.macro_type_deps,
+                &compile_input.external_requests,
+            );
+        }
 
         // Compile, routed by the actual cache mode.
         //
