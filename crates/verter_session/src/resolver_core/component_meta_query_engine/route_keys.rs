@@ -887,12 +887,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 // breaks fixpoint convergence for imported alias
                 // helpers like `Button['ui']` where the Navigate
                 // carrier would freeze a generic InstantiationRef at
-                // the empty-path terminal (see AX-WIP comment on
-                // `lower_and_project_to_expanded_via_host_threaded`
-                // for the documented constraint). Per the consult's
-                // "Keep Expanded" hint, this callsite preserves the
-                // legacy behaviour while the helper signature itself
-                // becomes mode-explicit.
+                // the empty-path terminal (see the documented
+                // constraint on
+                // `lower_and_project_to_expanded_via_host_threaded`).
+                // Per the consult's "Keep Expanded" hint, this
+                // callsite preserves the legacy behaviour while the
+                // helper signature itself becomes mode-explicit.
                 crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
                     self,
                     scope_canonical_id,
