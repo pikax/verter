@@ -459,6 +459,7 @@ fn rewrite_ref(
     ctx.active_refs.insert(guard_key.clone());
     if (ctx.active_refs.len() as u64) > ctx.active_refs_max_depth {
         ctx.active_refs_max_depth = ctx.active_refs.len() as u64;
+        #[cfg(any(test, debug_assertions))]
         crate::capture_token::with_active_capture(|t| {
             t.record_counter("policy_active_refs_max_depth", 1)
         });

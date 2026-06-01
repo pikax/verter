@@ -160,7 +160,10 @@ pub(crate) fn dep_signature_to_fact_signature(sig: &DepSignature) -> Vec<FactVer
 /// Exposed for integration tests that verify overflow telemetry —
 /// reached through the `for_tests::read_signature_overflow_at_install`
 /// re-export in `lib.rs` (see
-/// `tests/fact_read_set_finalise_overflow.rs`).
+/// `tests/fact_read_set_finalise_overflow.rs`). The `for_tests` shim is
+/// gated `cfg(any(test, debug_assertions))`; this accessor matches so it
+/// is not a dead symbol in release.
+#[cfg(any(test, debug_assertions))]
 #[inline]
 pub(crate) fn read_signature_overflow_at_install() -> u64 {
     SIGNATURE_OVERFLOW_AT_INSTALL.load(std::sync::atomic::Ordering::Relaxed)
@@ -174,6 +177,13 @@ pub(crate) fn read_signature_overflow_at_install() -> u64 {
 /// have no R3 oracle to consult — typical for cache entries produced
 /// outside an installed tracer scope; the cache stays correct under
 /// the legacy whole-hash regime).
+///
+/// This is the lazy (non-strict) validator. Production warm reads use
+/// [`validate_fact_signature_with_self_roots`]; the only consumer of
+/// the lazy form is the `cfg(any(test, debug_assertions))`-gated
+/// `AppConfigNoOverrideProofDb::peek` plus the substrate test suite, so
+/// it is gated to match (no dead surface in release).
+#[cfg(any(test, debug_assertions))]
 #[inline]
 #[track_caller]
 pub(crate) fn validate_fact_signature(

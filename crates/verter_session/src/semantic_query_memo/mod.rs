@@ -546,12 +546,19 @@ impl SemanticGraphStore {
     fn entries_lock_diagnosed<'a>(
         &'a self,
     ) -> EntriesLockGuard<'a, FxHashMap<FamilyKey, FamilySlots>> {
+        // Wait-time measurement feeds the capture-token entries-mutex
+        // hook only; gated to match the instrumentation module (absent
+        // in release).
+        #[cfg(any(test, debug_assertions))]
         let wait_start = Instant::now();
         let guard = self.entries.lock();
+        #[cfg(any(test, debug_assertions))]
         let wait_ns = wait_start.elapsed().as_nanos();
         EntriesLockGuard {
             guard: Some(guard),
+            #[cfg(any(test, debug_assertions))]
             hold_start: Instant::now(),
+            #[cfg(any(test, debug_assertions))]
             wait_ns,
         }
     }
@@ -1662,12 +1669,12 @@ impl SemanticGraphStore {
         // so it does not perturb the production hot path beyond the
         // `with_active_capture` thread-local lookup that is already
         // present below. The deltas are only consumed when a token is
-        // bound; the producer always pays the two timestamp reads, but
-        // they are constant-time and on the critical path of every
-        // origin-edge emission anyway (`stats.origin_edges_emitted` is
-        // already atomically bumped). The diagnosis benchmark is the
-        // only consumer; production-path behaviour is unchanged when no
-        // token is bound.
+        // bound (test/debug instrumentation only); the diagnosis
+        // benchmark is the only consumer; production-path behaviour is
+        // unchanged when no token is bound. The timestamp read and the
+        // recording site below both gate on the instrumentation module so
+        // release does not pay for them.
+        #[cfg(any(test, debug_assertions))]
         let start = Instant::now();
         // Build the edge under the derivation lock, then release the
         // lock before pushing into the accumulator — the accumulator
@@ -1740,7 +1747,9 @@ impl SemanticGraphStore {
         // `origin_edge_count` bump on the dedup path. The ledger / count
         // mirror the production-side ledger writes so test snapshots
         // observe the same dedup property.
+        #[cfg(any(test, debug_assertions))]
         let elapsed_ns = start.elapsed().as_nanos();
+        #[cfg(any(test, debug_assertions))]
         crate::capture_token::with_active_capture(|t| {
             if !already_recorded {
                 let dep_signature_hash =
@@ -2316,8 +2325,10 @@ impl SemanticGraphStore {
         #[cfg(test)]
         crate::project_semantic_dispatch::raise::record_dispatch_warm(key);
 
-        // Production capture-token dispatch recording (warm). Same as
-        // the slow path's pre-loop observation.
+        // Capture-token dispatch recording (warm). Same as the slow
+        // path's pre-loop observation. Gated to match the instrumentation
+        // module (absent in release).
+        #[cfg(any(test, debug_assertions))]
         crate::capture_token::with_active_capture(|t| t.record_dispatch(key, /* hit */ true));
 
         tracing::debug!(
@@ -2371,7 +2382,9 @@ impl SemanticGraphStore {
         #[cfg(test)]
         crate::project_semantic_dispatch::raise::record_dispatch_cold(&key);
 
-        // Production capture-token dispatch recording (cold).
+        // Capture-token dispatch recording (cold). Gated to match the
+        // instrumentation module (absent in release).
+        #[cfg(any(test, debug_assertions))]
         crate::capture_token::with_active_capture(|t| {
             t.record_dispatch(&key, /* hit */ false)
         });
@@ -3631,6 +3644,13 @@ impl SemanticGraphStore {
 /// (D103). Mirrors the proto `BatchExpandError` enum so the BFS bridge can
 /// project per-key failures into a typed `BridgeError::StaleAtFrontier`
 /// envelope without losing the reason.
+///
+/// `execute_cooperative_batch` (the constructing consumer) is a
+/// `#[cfg(test)]` non-admission probe, but the enum is also re-exported
+/// through the `for_tests` shim (gated `cfg(any(test, debug_assertions))`)
+/// so the integration suite can probe its existence; gate to match the
+/// shim so it is not a dead symbol in release.
+#[cfg(any(test, debug_assertions))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BatchExpandError {
     /// Canonical's content hash changed between the surface envelope's

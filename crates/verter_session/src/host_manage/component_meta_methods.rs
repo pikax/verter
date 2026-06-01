@@ -1970,6 +1970,7 @@ impl VerterHost {
                             .as_ref()
                             .is_some_and(type_expr_contains_callable_surface)
                         {
+                            #[cfg(any(test, debug_assertions))]
                             crate::capture_token::with_active_capture(|t| {
                                 t.record_counter(
                                     crate::meta_resolve::PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER,
@@ -2399,6 +2400,7 @@ impl VerterHost {
                     continue;
                 }
                 if slot_binding_targets_define_props_root(field, &define_props_roots) {
+                    #[cfg(any(test, debug_assertions))]
                     crate::capture_token::with_active_capture(|t| {
                         t.record_counter(
                             crate::meta_resolve::SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER,

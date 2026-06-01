@@ -78,7 +78,12 @@ use crate::instant::Instant;
 use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
 use crate::resolver_core::{FactVersionRef, ResolvedTypeDeclaration, ResolverContext};
-use crate::semantic_query::{DepSignature, ProjectionMode};
+use crate::semantic_query::DepSignature;
+// `ProjectionMode` is referenced only by the mode-only key constructors and
+// the schema-probe helpers, all gated `cfg(any(test, debug_assertions))`;
+// gate the import to match so release does not see it unused.
+#[cfg(any(test, debug_assertions))]
+use crate::semantic_query::ProjectionMode;
 
 // ===========================================================================
 // 1. ImportedRegistryDb — `(canonical, name) → Option<ResolvedImportedRegistrySymbol>`
@@ -1131,6 +1136,13 @@ impl ShapeCacheKey {
     /// for callers that have not adopted path-precise demand). The
     /// terminal context is implicitly `Published(mode)` for backwards-
     /// compatible whole-subject lookups.
+    ///
+    /// Mode-only convenience: production callers route through
+    /// [`Self::type_expr_whole_with_context`]; only tests and the
+    /// `cfg(any(test, debug_assertions))` schema-probe helpers reach the
+    /// mode-only form, so it is gated to match (no dead surface in
+    /// release).
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn type_expr_whole(
         scope: Arc<str>,
         expr: Arc<TypeExpr>,
@@ -1163,6 +1175,13 @@ impl ShapeCacheKey {
     /// Construct a key for the legacy `MemberShapeCacheDb` shape
     /// (SemanticNode-subject, whole-subject demand). Terminal
     /// context is implicitly `Published(mode)`.
+    ///
+    /// Mode-only convenience: production callers route through
+    /// [`Self::semantic_node_whole_with_context`]; only tests and the
+    /// `cfg(any(test, debug_assertions))` schema-probe helpers reach the
+    /// mode-only form, so it is gated to match (no dead surface in
+    /// release).
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn semantic_node_whole(
         scope: Arc<str>,
         node: crate::semantic_query::SemanticNodeId,
@@ -3559,6 +3578,11 @@ fn ref_cycle_read_set(
 /// The ComponentConfig theme-variant fast-path resolver (a future
 /// re-introduction of the retired rescue cascade) and the
 /// Block-1.H Track-2.5 deferred test both reach this producer.
+///
+/// Reached today only through tests and the `for_tests` wrapper (both
+/// gated `cfg(any(test, debug_assertions))`); gated to match so the
+/// producer is not a dead symbol in release.
+#[cfg(any(test, debug_assertions))]
 pub(crate) fn app_config_no_override_proof_get_or_compute(
     ctx: &dyn crate::resolver_core::ResolverContext,
     key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,

@@ -15,6 +15,9 @@ use rustc_hash::FxHashMap;
 
 use super::derivation::sorted_percentile;
 use super::SemanticGraphStore;
+// Only the (gated) `EntriesLockGuard::hold_start` timing field uses
+// `Instant`; gate the import to match so release does not see it unused.
+#[cfg(any(test, debug_assertions))]
 use crate::instant::Instant;
 use crate::semantic_query::{SemanticGraphStats, SemanticNodeId};
 
@@ -238,7 +241,11 @@ impl Drop for InFlightStatsGuard<'_> {
 /// `with_active_capture` hook when no token is bound.
 pub(super) struct EntriesLockGuard<'a, T> {
     pub(super) guard: Option<parking_lot::MutexGuard<'a, T>>,
+    // Timing fields feed the capture-token entries-mutex hook only;
+    // gated to match the instrumentation module (absent in release).
+    #[cfg(any(test, debug_assertions))]
     pub(super) hold_start: Instant,
+    #[cfg(any(test, debug_assertions))]
     pub(super) wait_ns: u128,
 }
 
@@ -273,8 +280,14 @@ impl<'a, T> Drop for EntriesLockGuard<'a, T> {
         if let Some(guard) = self.guard.take() {
             std::mem::drop(guard);
         }
+        // Entries-mutex timing recording — test/debug instrumentation
+        // only; gated to match the capture-token module (absent in
+        // release).
+        #[cfg(any(test, debug_assertions))]
         let hold_ns = self.hold_start.elapsed().as_nanos();
+        #[cfg(any(test, debug_assertions))]
         let wait_ns = self.wait_ns;
+        #[cfg(any(test, debug_assertions))]
         crate::capture_token::with_active_capture(|t| {
             t.record_entries_mutex_timing(wait_ns, hold_ns);
         });

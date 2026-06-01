@@ -136,11 +136,15 @@ impl AppConfigNoOverrideProofDb {
     /// On a successful warm hit, the path-precise observation set
     /// bubbles into any active outer fact tracer.
     ///
-    /// Called from the production producer
+    /// Called from the producer
     /// (`component_meta_caches::app_config_no_override_proof_get_or_compute`)
     /// on the cold path; the warm-hit fast path inside the
     /// component-meta ComponentConfig resolver consumes the proof
-    /// via the same `peek` surface.
+    /// via the same `peek` surface. That producer is reached today only
+    /// through tests / the `for_tests` wrapper, so this read gate is
+    /// `cfg(any(test, debug_assertions))` to match (no dead surface in
+    /// release).
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn peek(
         &self,
         key: &AppConfigNoOverrideProofKey,

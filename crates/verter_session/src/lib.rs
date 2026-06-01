@@ -332,12 +332,17 @@ mod upsert;
 
 // Test harness module — defines the per-request `CaptureToken` API
 // consumed by counter assertions across the verter_session test suite.
-// The module is NOT `cfg(test)`-gated because integration tests in
+// Capture-token test/diagnosis instrumentation. Gated `cfg(any(test,
+// debug_assertions))` — the same gate as `mod tests` / `mod for_tests`
+// below — so it is wholly absent from `cargo build --release`
+// (`debug_assertions` is OFF there). Integration tests in
 // `crates/verter_session/tests/*.rs` build the lib WITHOUT `cfg(test)`
-// set; the production-cost discipline is enforced via `pub(crate)` on
-// the module itself plus the empty-thread-local fast path inside
-// `with_active_capture` (no token bound → immediate return, no lock
-// acquisition, no allocation).
+// but WITH `debug_assertions`, so the `debug_assertions` arm keeps the
+// instrumentation reachable for them. Production hooks
+// (`with_active_capture(..)`) at the recording sites carry the matching
+// `#[cfg(any(test, debug_assertions))]` so release pays zero cost (the
+// hook is not even compiled in) instead of the prior one-TLS-lookup.
+#[cfg(any(test, debug_assertions))]
 pub(crate) mod capture_token;
 
 // Test-support submodules accessible to integration tests under

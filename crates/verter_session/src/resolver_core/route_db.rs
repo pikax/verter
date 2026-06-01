@@ -27,9 +27,14 @@ use crate::file_artifact_store::{
     FileArtifactStore, ProjectIdentity,
 };
 use crate::resolver_core::{
-    FactVersionRef, PermissiveStoreView, RouteSurfaceFactRef, SingleflightGroup, SingleflightRole,
+    FactVersionRef, PermissiveStoreView, RouteSurfaceFactRef, SingleflightGroup,
     SingleflightRunResult, StoreView, ValidatedFactCache,
 };
+// `SingleflightRole` is read only by the leader/follower telemetry split,
+// which is itself `cfg(any(test, debug_assertions))`; gate the import to
+// match so release (no debug_assertions) does not see an unused import.
+#[cfg(any(test, debug_assertions))]
+use crate::resolver_core::SingleflightRole;
 use crate::types::Hash16;
 
 /// Result of resolving a named export route.

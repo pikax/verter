@@ -117,6 +117,11 @@ pub(crate) use crate::host_manage::jsdoc_resolve::{
 };
 pub(crate) use macro_member_walk::{
     collect_define_props_root_names, slot_binding_targets_define_props_root,
+};
+// Capture-token counter names — test/debug instrumentation only; gated to
+// match their definitions (absent in release).
+#[cfg(any(test, debug_assertions))]
+pub(crate) use macro_member_walk::{
     PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER, SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER,
 };
 pub(crate) use materialize::{
