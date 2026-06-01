@@ -268,6 +268,64 @@ impl DispatchPauseHook {
     }
 }
 
+/// Test-only rendezvous fired by [`Scheduler::handle_new_request_batch`]
+/// AFTER the FIRST request in a batch has been admitted but BEFORE the
+/// remaining requests are admitted — strictly WHILE the single
+/// `dag.lock()` is still held.
+///
+/// This is the deterministic seam that proves the batch's atomic
+/// admission really holds ONE continuously-held `dag.lock()` across all
+/// N admits (the §6b LOCK-CONTINUITY invariant), not a per-item
+/// lock/unlock that merely leaves the right end-state. A test installs a
+/// hook that hands off to a watcher thread; the watcher does a
+/// NON-BLOCKING `dag.try_lock()` at the seam and asserts it is HELD
+/// (`None`) — i.e. no other thread can acquire the DAG lock mid-batch.
+///
+/// Mirrors the resolver-core P1b discriminator
+/// (`non_retained_publish_and_remove_share_one_held_flights_lock`): the
+/// only deterministic, both-directions discriminator for "one held
+/// lock" is a held-lock probe at an in-window seam. A regression to
+/// per-item lock/unlock makes the watcher observe a FREE lock at the
+/// seam and the assertion FAILS; the continuous lock makes it PASS.
+///
+/// Carries zero footprint in release builds — the field, the firing
+/// site, and the installer are all `cfg`-gated to `test` /
+/// `debug_assertions`, so production batch admission is unchanged.
+#[cfg(any(test, debug_assertions))]
+#[derive(Default)]
+pub(crate) struct BatchAdmitSeamHook {
+    /// Installed by a test; fired once per batch, on the admitting
+    /// thread, between the first and second admit while the DAG lock is
+    /// held. `Box<dyn Fn>` is not `Debug`, hence the manual `Debug`.
+    hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+#[cfg(any(test, debug_assertions))]
+impl std::fmt::Debug for BatchAdmitSeamHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchAdmitSeamHook")
+            .field("installed", &self.hook.lock().is_some())
+            .finish()
+    }
+}
+
+#[cfg(any(test, debug_assertions))]
+impl BatchAdmitSeamHook {
+    /// Install the seam hook. Fired once per subsequent batch, after the
+    /// first admit and before the rest, while `dag.lock()` is held.
+    fn install(&self, hook: Box<dyn Fn() + Send + Sync>) {
+        *self.hook.lock() = Some(hook);
+    }
+
+    /// Fire the installed hook (no-op when none is installed). Called by
+    /// [`Scheduler::handle_new_request_batch`] at the mid-batch seam.
+    fn fire(&self) {
+        if let Some(hook) = self.hook.lock().as_ref() {
+            hook();
+        }
+    }
+}
+
 /// A request to the scheduler.
 pub struct Request {
     pub file_id: String,
@@ -506,6 +564,14 @@ pub struct Scheduler {
     /// absent from release builds.
     #[cfg(any(test, debug_assertions))]
     pub(crate) dispatch_pause: DispatchPauseHook,
+    /// Test-only mid-batch admission seam. Fired once per atomic batch,
+    /// after the first admit and before the rest, WHILE the single
+    /// `dag.lock()` is held — the rendezvous a LOCK-CONTINUITY test uses
+    /// to prove the batch holds one continuously-held DAG lock across
+    /// all N admits. `cfg`-gated to `test` / `debug_assertions`; absent
+    /// from release builds.
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) batch_admit_seam: BatchAdmitSeamHook,
 }
 
 /// Classification of a recorded `FileStage::Analysis` blocker dep
@@ -647,6 +713,8 @@ impl Scheduler {
             counters: SchedulerCounters::default(),
             #[cfg(any(test, debug_assertions))]
             dispatch_pause: DispatchPauseHook::default(),
+            #[cfg(any(test, debug_assertions))]
+            batch_admit_seam: BatchAdmitSeamHook::default(),
         });
 
         // Driver holds Weak so it doesn't prevent Drop.
@@ -719,6 +787,8 @@ impl Scheduler {
             counters: SchedulerCounters::default(),
             #[cfg(any(test, debug_assertions))]
             dispatch_pause: DispatchPauseHook::default(),
+            #[cfg(any(test, debug_assertions))]
+            batch_admit_seam: BatchAdmitSeamHook::default(),
         })
     }
 
@@ -2021,8 +2091,23 @@ impl Scheduler {
         let mut post = AdmissionPostWork::default();
         {
             let mut dag = self.dag.lock();
-            for p in prepared {
+            for (admit_index, p) in prepared.into_iter().enumerate() {
                 self.admit_prepared_under_lock(&mut dag, p, &mut post);
+                // Test-only LOCK-CONTINUITY seam: after the FIRST admit
+                // and BEFORE the rest, fire the rendezvous WHILE `dag` is
+                // still held. A watcher's non-blocking `dag.try_lock()`
+                // at this seam proves the batch holds ONE continuously-
+                // held DAG lock across all N admits (it must see HELD).
+                // The lock guard `dag` is NOT released here — the loop
+                // continues admitting the remaining requests under the
+                // same critical section. Zero footprint outside
+                // `cfg(test, debug_assertions)`.
+                #[cfg(any(test, debug_assertions))]
+                if admit_index == 0 {
+                    self.batch_admit_seam.fire();
+                }
+                #[cfg(not(any(test, debug_assertions)))]
+                let _ = admit_index;
             }
         }
         // After the lock has dropped: fire deferred dedup callbacks +
@@ -3532,6 +3617,18 @@ impl Scheduler {
         let mut state = self.dispatch_pause.state.lock();
         state.released = true;
         self.dispatch_pause.cv.notify_all();
+    }
+
+    /// Test-only: install the mid-batch admission seam hook. Fired once
+    /// per subsequent atomic batch, after the first admit and before the
+    /// rest, WHILE the single `dag.lock()` is held. Used by the
+    /// LOCK-CONTINUITY discriminator to prove the batch holds one
+    /// continuously-held DAG lock across all N admits. See
+    /// [`BatchAdmitSeamHook`].
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn test_install_batch_admit_seam(&self, hook: Box<dyn Fn() + Send + Sync>) {
+        self.batch_admit_seam.install(hook);
     }
 
     /// Dispatch work inline (used by `drive_one`/`drive_all` in sync mode and WASM).
@@ -14643,6 +14740,125 @@ mod tests {
         (ids, reqs)
     }
 
+    /// LOCK-CONTINUITY discriminator (§6b P1b): process the already-drained
+    /// atomic batch `item` and PROVE that the batch holds ONE continuously-
+    /// held `dag.lock()` across all N admits — i.e. no other thread can
+    /// acquire the DAG lock mid-batch.
+    ///
+    /// Mechanism (mirrors the resolver-core P1b discriminator
+    /// `non_retained_publish_and_remove_share_one_held_flights_lock`):
+    ///
+    /// 1. A `#[cfg(test)]` seam hook fires on the admitting (caller) thread
+    ///    AFTER the first request is admitted and BEFORE the rest, WHILE
+    ///    `dag.lock()` is held (wired into `handle_new_request_batch`).
+    /// 2. The hook hands off to a watcher thread that probes the DAG mutex
+    ///    with a NON-BLOCKING `try_lock` (so it can never deadlock against
+    ///    the admitting thread) and records whether the lock was FREE.
+    /// 3. `process_submission` admits the batch; the seam blocks the
+    ///    admitting thread until the watcher has probed, so the remaining
+    ///    N-1 admits happen strictly AFTER the probe — still under the same
+    ///    held lock.
+    ///
+    /// Discrimination (fail-pre / pass-post):
+    ///   * one continuously-held lock → `try_lock` returns `None` at the
+    ///     seam → `lock_was_free == false` (asserted PASS);
+    ///   * a per-item lock/unlock admission would release the DAG lock
+    ///     between admits, so the seam sits in a lock GAP → `try_lock`
+    ///     returns `Some` → `lock_was_free == true` → assertion FAILS.
+    ///
+    /// A watchdog bounds the watcher so a regression that prevents the seam
+    /// from firing fails loudly instead of hanging the suite.
+    ///
+    /// Requires a batch of at least 2 prepared requests so there IS a
+    /// post-first-admit gap to probe.
+    fn assert_batch_admit_holds_one_dag_lock(sched: &Arc<Scheduler>, item: Submission) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::sync::Barrier;
+        use std::time::Duration;
+
+        // Rendezvous: the seam hook signals `at_seam`, then blocks on
+        // `probe_done` until the watcher finishes its NON-BLOCKING probe.
+        let at_seam = Arc::new(Barrier::new(2));
+        let probe_done = Arc::new(Barrier::new(2));
+        // `true` iff the watcher could acquire `dag` AT THE SEAM (the
+        // pre-fix per-item-lock bug). Post-fix this stays `false`.
+        let lock_was_free_at_seam = Arc::new(AtomicBool::new(false));
+        // Set once the watcher has actually run its probe, so the watchdog
+        // distinguishes "seam never fired" from "fired, lock was held".
+        let watcher_ran = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+
+        // Watcher: wait for the admitting thread to reach the mid-batch
+        // seam, probe the DAG mutex without blocking, record, release.
+        let watcher = {
+            let dag = Arc::clone(&sched.dag);
+            let at_seam = Arc::clone(&at_seam);
+            let probe_done = Arc::clone(&probe_done);
+            let lock_was_free_at_seam = Arc::clone(&lock_was_free_at_seam);
+            let watcher_ran = Arc::clone(&watcher_ran);
+            std::thread::spawn(move || {
+                at_seam.wait();
+                // NON-BLOCKING probe: `None` (held) post-fix, `Some` (free)
+                // in a pre-fix per-item-unlock gap. `try_lock` never parks,
+                // so it cannot deadlock against the held DAG lock.
+                let probe = dag.try_lock();
+                lock_was_free_at_seam.store(probe.is_some(), Ordering::SeqCst);
+                drop(probe);
+                watcher_ran.store(true, Ordering::SeqCst);
+                let _ = done_tx.send(());
+                // Release the admitting thread to finish the remaining
+                // admits under the same held lock and drop it.
+                probe_done.wait();
+            })
+        };
+
+        // Install the seam for exactly this batch. It runs ON the admitting
+        // thread WHILE the DAG lock is held, between the first and the rest.
+        {
+            let at_seam = Arc::clone(&at_seam);
+            let probe_done = Arc::clone(&probe_done);
+            sched.test_install_batch_admit_seam(Box::new(move || {
+                at_seam.wait();
+                probe_done.wait();
+            }));
+        }
+
+        // Admit the batch on THIS thread; the seam fires mid-loop.
+        sched.process_submission(item);
+
+        // WATCHDOG: the watcher must report within the timeout. A
+        // regression that never reaches the seam fails here, not hangs.
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "batch-admit seam watchdog: the mid-batch seam never fired — the atomic \
+                     batch did not reach the post-first-admit window under a held DAG lock \
+                     (P1b LOCK-CONTINUITY regression)",
+                )
+            });
+
+        watcher.join().expect("watcher thread must not panic");
+
+        assert!(
+            watcher_ran.load(Ordering::SeqCst),
+            "the batch-admit seam watcher must have run its lock probe",
+        );
+
+        // DECISIVE: at the mid-batch seam the DAG lock was HELD, so the
+        // batch admits all N under ONE continuously-held lock. A per-item
+        // lock/unlock admission frees the lock between admits → `true` here
+        // → this assertion FAILS (the fail-pre / pass-post discriminator).
+        assert!(
+            !lock_was_free_at_seam.load(Ordering::SeqCst),
+            "the atomic batch must hold ONE `dag.lock()` continuously across ALL admits — a \
+             FREE lock at the mid-batch seam means admission released the DAG lock between \
+             items, so the pump could observe the batch half-admitted (P1b LOCK-CONTINUITY \
+             regression: per-item lock/unlock instead of one held lock)",
+        );
+    }
+
     /// (1) The pump must NOT be able to observe a batch half-admitted.
     ///
     /// Submit N distinct requests as ONE atomic batch, then drain
@@ -14650,10 +14866,21 @@ mod tests {
     /// from that single item, so `pending_len() == N` and the inbox is
     /// empty afterward.
     ///
-    /// Discrimination: a sequential `submit_batch` pushes N separate
-    /// `NewRequest` items; draining exactly one would admit ONE node
-    /// (`pending_len() == 1`) and leave N-1 items in the inbox. The
-    /// `== N` + empty-inbox assertion fails on the sequential impl.
+    /// Discrimination has TWO independent rails:
+    ///
+    /// 1. END-STATE: a sequential `submit_batch` pushes N separate
+    ///    `NewRequest` items; draining exactly one would admit ONE node
+    ///    (`pending_len() == 1`) and leave N-1 items in the inbox. The
+    ///    `== N` + empty-inbox assertion fails on the sequential impl.
+    /// 2. LOCK-CONTINUITY (P1b): the end-state alone does NOT prove the
+    ///    admit ran under ONE held `dag.lock()` — a per-item lock/unlock
+    ///    that admitted all N from the one item would leave the same
+    ///    `pending_len == N` + empty inbox while letting a concurrent
+    ///    pump observe partial DAG state mid-batch. The
+    ///    `assert_batch_admit_holds_one_dag_lock` helper fires a seam
+    ///    after the first admit and has a watcher probe the DAG mutex
+    ///    with a non-blocking `try_lock`: it MUST be HELD. A per-item
+    ///    lock/unlock frees it at the seam → the helper FAILS.
     #[test]
     fn atomic_batch_admission_not_partially_observable_by_pump() {
         const N: usize = 5;
@@ -14669,9 +14896,12 @@ mod tests {
             .receiver
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the atomic batch must arrive as a single inbox item");
-        sched.process_submission(one);
 
-        // All N nodes admitted from that single item.
+        // Admit the batch AND prove it holds ONE dag.lock() continuously
+        // across all N admits (the LOCK-CONTINUITY rail).
+        assert_batch_admit_holds_one_dag_lock(&sched, one);
+
+        // END-STATE rail: all N nodes admitted from that single item.
         let pending = sched.dag.lock().pending_len();
         assert_eq!(
             pending, N,
@@ -14953,11 +15183,22 @@ mod tests {
     /// runs the supersede sweep). After processing the single batch
     /// item, both old-gen handles resolve to `Superseded`.
     ///
-    /// Discrimination: a sequential batch would process the two source
-    /// updates as two separate inbox items; draining the single batch
-    /// item would supersede only the FIRST file's waiter, leaving the
-    /// second still pending. The "both superseded after ONE message"
-    /// assertion fails on the sequential impl.
+    /// Discrimination has TWO independent rails:
+    ///
+    /// 1. END-STATE: a sequential batch would process the two source
+    ///    updates as two separate inbox items; draining the single batch
+    ///    item would supersede only the FIRST file's waiter, leaving the
+    ///    second still pending. The "both superseded after ONE message"
+    ///    assertion fails on the sequential impl.
+    /// 2. LOCK-CONTINUITY (P1b): the both-superseded end-state does NOT
+    ///    by itself prove the two supersede sweeps ran under ONE held
+    ///    `dag.lock()` — a per-item lock/unlock that swept both from the
+    ///    one item would leave the same end-state while exposing a
+    ///    mid-batch window where file 0 is superseded but file 1 is not.
+    ///    The `assert_batch_admit_holds_one_dag_lock` helper fires a seam
+    ///    after the first file's admit+sweep and has a watcher probe the
+    ///    DAG mutex with a non-blocking `try_lock`: it MUST be HELD. A
+    ///    per-item lock/unlock frees it at the seam → the helper FAILS.
     #[test]
     fn batch_supersede_sweep_is_atomic() {
         let ids = ["/sup0.vue", "/sup1.vue"];
@@ -15018,9 +15259,13 @@ mod tests {
             .receiver
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("batch item");
-        sched.process_submission(item);
 
-        // After ONE batch message every old-gen waiter is Superseded.
+        // Admit the batch AND prove both supersede sweeps run under ONE
+        // dag.lock() held continuously across both admits (LOCK-CONTINUITY).
+        assert_batch_admit_holds_one_dag_lock(&sched, item);
+
+        // END-STATE rail: after ONE batch message every old-gen waiter is
+        // Superseded.
         for (i, h) in old_handles.iter().enumerate() {
             match h.try_get() {
                 Some(CompletionState::Superseded) => {}
