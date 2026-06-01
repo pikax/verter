@@ -148,8 +148,9 @@ fn whole_hash_read_site_3_routed_expr_retired() {
 
     // (2) The surviving dispatch routed-expr method exists and does NOT
     // read whole_hash for routing.
-    let path = workspace_root()
-        .join("crates/verter_session/src/resolver_core/component_meta_query_engine/registry_decl.rs");
+    let path = workspace_root().join(
+        "crates/verter_session/src/resolver_core/component_meta_query_engine/registry_decl.rs",
+    );
     let source = read_source_file(&path);
     let body = extract_fn_body(&source, "pub(crate) fn dispatch_routed_expr_surface_expr(");
     for forbidden in ["whole_hash", "get_whole_hash", "content_hash_for"] {

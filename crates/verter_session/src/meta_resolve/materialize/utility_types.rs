@@ -171,4 +171,3 @@ fn peel_paren(expr: &TypeExpr) -> &TypeExpr {
         _ => expr,
     }
 }
-

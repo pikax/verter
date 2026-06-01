@@ -1021,11 +1021,17 @@ mod tests {
 
         let first = make_entry("dep.ts", 1, TaskKind::Source, Priority::Background)
             .with_request_context(Some(opaque_ctx(42)));
-        assert!(idx.insert(first), "first contextful insert must add a new entry");
+        assert!(
+            idx.insert(first),
+            "first contextful insert must add a new entry"
+        );
 
         let second = make_entry("dep.ts", 1, TaskKind::Source, Priority::Background)
             .with_request_context(Some(opaque_ctx(7)));
-        assert!(!idx.insert(second), "same-key re-insert must merge, not add");
+        assert!(
+            !idx.insert(second),
+            "same-key re-insert must merge, not add"
+        );
         assert_eq!(idx.len(), 1, "merge must keep a single entry");
 
         let entry = idx.dequeue().expect("one merged entry must be present");

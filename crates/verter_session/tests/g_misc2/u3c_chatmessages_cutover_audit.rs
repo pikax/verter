@@ -45,7 +45,9 @@
 
 use std::time::Instant;
 
-use crate::harness::{build_hermetic_host, build_preupserted_host, footprint_of, resolve_under_audit};
+use crate::harness::{
+    build_hermetic_host, build_preupserted_host, footprint_of, resolve_under_audit,
+};
 
 const CHAT_MESSAGES_VUE: &str =
     include_str!("../component_meta_audit_corpus/fixtures/ChatMessages.vue");

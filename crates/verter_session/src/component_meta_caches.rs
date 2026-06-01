@@ -965,7 +965,6 @@ impl Default for OwnerCollectionDb {
     }
 }
 
-
 // ===========================================================================
 // 6. ShapeCacheDb — `ShapeCacheKey → MaterializedTypeExpr`
 //
@@ -1569,7 +1568,6 @@ impl crate::cache_schema::CacheSchemaVersioned for ShapeCacheDb {
         count
     }
 }
-
 
 // ===========================================================================
 //

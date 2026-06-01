@@ -217,7 +217,10 @@ fn extract_db_impl_window<'a>(src: &'a str, anchor: &str) -> &'a str {
 /// Byte index (within `haystack`) of the start of the `n`-th (1-based)
 /// occurrence of `needle`, or `None` if there are fewer than `n`.
 fn nth_occurrence(haystack: &str, needle: &str, n: usize) -> Option<usize> {
-    haystack.match_indices(needle).nth(n - 1).map(|(idx, _)| idx)
+    haystack
+        .match_indices(needle)
+        .nth(n - 1)
+        .map(|(idx, _)| idx)
 }
 
 /// Assert that `region` (a named code site) carries EXACTLY one strict

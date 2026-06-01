@@ -7,8 +7,8 @@
 //! engine-impl methods as `pub(super)` from sibling modules so the
 //! tests resolve symmetrically regardless of which sibling
 //! `impl<'a> ComponentMetaQueryEngine<'a>` block defined the method.
-use super::ComponentMetaQueryEngine;
 use super::type_expr_references_type_params;
+use super::ComponentMetaQueryEngine;
 use crate::types::{AnalysisLevel, HostConfig};
 use crate::VerterHost;
 use std::sync::Arc;
@@ -680,8 +680,11 @@ export interface LinkProps extends NuxtLinkProps {
 
     let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
         &mut query_engine,
-"/src/Link.vue", "LinkProps", &route)
-        .expect("member-viable inherited pick route should project to the requested members only");
+        "/src/Link.vue",
+        "LinkProps",
+        &route,
+    )
+    .expect("member-viable inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -1116,8 +1119,11 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
 
     let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
         &mut query_engine,
-"/src/Link.vue", "LinkProps", &route)
-        .expect("module-routed inherited pick route should project to the requested members only");
+        "/src/Link.vue",
+        "LinkProps",
+        &route,
+    )
+    .expect("module-routed inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -1417,8 +1423,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
 }
 
 #[test]
-fn project_type_surface_expr_nested_pick_and_omit_generic_interface_keeps_exact_shallow_surface(
-) {
+fn project_type_surface_expr_nested_pick_and_omit_generic_interface_keeps_exact_shallow_surface() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -1500,8 +1505,10 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
 
     let projected = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
         &mut query_engine,
-"/src/App.vue", "ColorModeSelectProps")
-        .expect("nested pick/omit generic interface should project the routed object surface");
+        "/src/App.vue",
+        "ColorModeSelectProps",
+    )
+    .expect("nested pick/omit generic interface should project the routed object surface");
 
     let TypeExpr::Object(object) = &projected else {
         panic!("prepared projection should still materialize the routed object surface");
@@ -1802,10 +1809,7 @@ type F<T> = <T>(x: T) => T
 
     // `F<string>` — instantiate the generic function-typed alias with the
     // outer `T` bound to `string`.
-    let expr = TypeExpr::named_with_args(
-        "F",
-        vec![TypeExpr::Primitive(PrimitiveName::String)],
-    );
+    let expr = TypeExpr::named_with_args("F", vec![TypeExpr::Primitive(PrimitiveName::String)]);
 
     let instantiated = crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
         query_engine.ctx,

@@ -328,7 +328,6 @@ pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
     }
 }
 
-
 pub(super) fn projected_surface_is_empty(surface: &ProjectedSurface) -> bool {
     surface.members.is_empty()
         && surface.call_signatures.is_empty()

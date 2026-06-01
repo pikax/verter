@@ -4,8 +4,6 @@
 //! The shared `component_meta_audit` harness is declared ONCE at the binary
 //! root so leaf modules import it via `use crate::harness` instead of each
 //! `#[path]`-loading the same file (which trips `clippy::duplicate_mod`).
-#[path = "component_meta_audit/harness.rs"]
-mod harness;
 #[path = "g_misc3/correctness.rs"]
 mod correctness;
 #[path = "g_misc3/cutover_state_arch_guard.rs"]
@@ -20,6 +18,8 @@ mod derived_raw_state_cached_meta_payload_matrix_route_surface;
 mod derived_raw_state_cached_resolved_meta_matrix_member_presence;
 #[path = "g_misc3/external_corpus_drift.rs"]
 mod external_corpus_drift;
+#[path = "component_meta_audit/harness.rs"]
+mod harness;
 #[path = "g_misc3/import_route_writer_guard.rs"]
 mod import_route_writer_guard;
 #[path = "g_misc3/legacy_accumulate_dispatch_dep_signature_gone.rs"]

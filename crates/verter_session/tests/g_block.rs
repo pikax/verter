@@ -5,10 +5,6 @@
 //! modules import them via `use crate::harness` / `use crate::canary_harness`
 //! instead of each `#[path]`-loading the same file (which trips
 //! `clippy::duplicate_mod`).
-#[path = "component_meta_audit/harness.rs"]
-mod harness;
-#[path = "block_2_canary/harness.rs"]
-mod canary_harness;
 #[path = "g_block/block_1_f_p2_isolation_and_staleness.rs"]
 mod block_1_f_p2_isolation_and_staleness;
 #[path = "g_block/block_1_i_discriminators.rs"]
@@ -71,3 +67,7 @@ mod block_6i_runtime_arch_guards;
 mod block_6i_slot_callable_realization;
 #[path = "g_block/block_6i_static_guards.rs"]
 mod block_6i_static_guards;
+#[path = "block_2_canary/harness.rs"]
+mod canary_harness;
+#[path = "component_meta_audit/harness.rs"]
+mod harness;
