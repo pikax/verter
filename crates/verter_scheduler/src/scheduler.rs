@@ -1983,16 +1983,25 @@ impl Scheduler {
     /// Handle an atomic batch of new request submissions drained as ONE
     /// inbox item.
     ///
-    /// All N requests are prepared outside the DAG lock (so no `nodes`
-    /// DashMap `Ref` is ever held while the DAG mutex is taken — the
-    /// AB-BA-safe ordering), then admitted under a SINGLE `dag.lock()`
-    /// acquisition: generation bumps, supersede sweeps, waiter
-    /// registration, and work admission for EVERY request happen inside
-    /// that one critical section. The pump therefore can never observe
-    /// the batch half-admitted. Deferred dedup callbacks and
-    /// auto-ingest-tracking cleanup run AFTER the lock releases, keeping
-    /// the callback-under-lock hazard out of the batch path exactly as
-    /// it is kept out of the single-request path.
+    /// All N requests are prepared outside the DAG lock: the node-ensure
+    /// step clones each `FileNode` `Arc` out of the `nodes` DashMap and
+    /// drops the shard `Ref` BEFORE the lock is taken, so no prepared
+    /// request carries a `nodes` `Ref` INTO the critical section. They
+    /// are then admitted under a SINGLE `dag.lock()` acquisition:
+    /// generation bumps, supersede sweeps, waiter registration, and work
+    /// admission for EVERY request happen inside that one critical
+    /// section. The pump therefore can never observe the batch
+    /// half-admitted.
+    ///
+    /// The admission core itself may still read the `nodes` shard under
+    /// the held DAG lock (the Artifact-gating path in
+    /// [`Self::file_stage_analysis_blocker_status`]); that access obeys
+    /// the canonical DAG-first order (lock held first, transient read
+    /// `Ref` dropped before return, never a `Ref` held across a
+    /// `dag.lock()`) — see [`Self::admit_prepared_under_lock`]. Deferred
+    /// dedup callbacks and auto-ingest-tracking cleanup run AFTER the
+    /// lock releases, keeping the callback-under-lock hazard out of the
+    /// batch path exactly as it is kept out of the single-request path.
     fn handle_new_request_batch(&self, requests: Vec<QueuedRequest>) {
         if requests.is_empty() {
             return;
@@ -2113,8 +2122,24 @@ impl Scheduler {
     /// `overlay`/`pending_source` writes, the completion-sender signals,
     /// the `set_target` stamp) run inline; they take their own
     /// independent locks (the overlay DashMap shard, the handle's inner
-    /// mutex) and never the `nodes` shard, so they are safe under the
-    /// DAG lock.
+    /// mutex), so they are safe under the DAG lock.
+    ///
+    /// `nodes`-shard lock ordering under the DAG lock. The admission
+    /// core DOES read the `nodes` shard while the caller holds
+    /// `dag.lock()` — the Artifact-gating path reaches
+    /// [`Self::file_stage_analysis_blocker_status`] (via
+    /// [`Self::admit_artifact_with_blockers`] →
+    /// [`Self::classify_recorded_dep`]), which calls `self.nodes.get(..)`
+    /// to read the producer FileNode's generation/commit state. That is
+    /// safe NOT because admission avoids the `nodes` shard, but because
+    /// the access obeys the crate's canonical **DAG-first** lock order:
+    /// the `dag.lock()` is acquired FIRST (by the caller), then a
+    /// TRANSIENT read `Ref` is taken on the `nodes` shard and dropped at
+    /// every return arm. No path here takes a `nodes`/shard `Ref` and
+    /// THEN acquires `dag.lock()` — that inversion (`nodes` then `dag`)
+    /// is the AB-BA hazard, and it is structurally absent because the
+    /// caller already holds the DAG lock. The shard `Ref` is never held
+    /// across a `dag.lock()` acquisition.
     ///
     /// Deferred work that MUST happen after the lock releases (firing
     /// dedup callbacks, clearing auto-ingest tracking on a DashMap) is
