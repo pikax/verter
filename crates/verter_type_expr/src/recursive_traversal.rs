@@ -88,6 +88,29 @@ fn drop_leaf_arc() -> Arc<TypeExpr> {
     Arc::clone(&LEAF)
 }
 
+/// Shared cheap empty-`Object` placeholder, allocated once. Swapped into
+/// the `Object` field during drain so the stolen real `ObjectExpr` can be
+/// flattened; the empty clone left behind drops in O(1) (no members → no
+/// recursive children).
+fn drop_leaf_object() -> Arc<ObjectExpr> {
+    static LEAF: LazyLock<Arc<ObjectExpr>> = LazyLock::new(|| {
+        Arc::new(ObjectExpr {
+            properties: Vec::new(),
+        })
+    });
+    Arc::clone(&LEAF)
+}
+
+/// Shared cheap empty-`Function` placeholder, allocated once. Swapped into
+/// the `Function` field during drain so the stolen real `FunctionExpr`
+/// can be flattened; the empty clone left behind drops in O(1) (no
+/// parameters / return / type parameters → no recursive children).
+fn drop_leaf_function() -> Arc<FunctionExpr> {
+    static LEAF: LazyLock<Arc<FunctionExpr>> =
+        LazyLock::new(|| Arc::new(FunctionExpr::synthetic(Vec::new(), None, Vec::new())));
+    Arc::clone(&LEAF)
+}
+
 impl Drop for TypeExpr {
     fn drop(&mut self) {
         // Worklist of stolen children to flatten. `self`'s own (now
@@ -128,12 +151,7 @@ fn drain_children(node: &mut TypeExpr, worklist: &mut Vec<TypeExpr>) {
         }
 
         TypeExpr::Object(obj) => {
-            if let Some(obj) = Arc::into_inner(std::mem::replace(
-                obj,
-                Arc::new(ObjectExpr {
-                    properties: Vec::new(),
-                }),
-            )) {
+            if let Some(obj) = Arc::into_inner(std::mem::replace(obj, drop_leaf_object())) {
                 for member in obj.properties {
                     drain_object_member(member, worklist);
                 }
@@ -141,10 +159,7 @@ fn drain_children(node: &mut TypeExpr, worklist: &mut Vec<TypeExpr>) {
         }
 
         TypeExpr::Function(func) => {
-            if let Some(func) = Arc::into_inner(std::mem::replace(
-                func,
-                Arc::new(FunctionExpr::synthetic(Vec::new(), None, Vec::new())),
-            )) {
+            if let Some(func) = Arc::into_inner(std::mem::replace(func, drop_leaf_function())) {
                 drain_function_expr(func, worklist);
             }
         }
