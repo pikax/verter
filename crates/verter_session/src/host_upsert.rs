@@ -130,7 +130,7 @@ impl UpsertBatchTxn {
     /// `Superseded`/`Shutdown` arms through the production mapping logic
     /// without standing up a scheduler that produces those terminal
     /// states on demand — the mapping itself is not duplicated in the
-    /// test. `prepared` and `states` MUST be the same length (the §6c
+    /// test. `prepared` and `states` MUST be the same length (the
     /// index-alignment invariant); a length mismatch silently truncates
     /// via `zip`, so the seam asserts equality up front.
     #[cfg(test)]
@@ -388,7 +388,7 @@ impl VerterHost {
     /// batch. Callers MUST dedup by canonical before reaching the engine.
     ///
     /// Lifted out of `submit_upsert_batch` so it is a single named
-    /// invariant the §6c regression test can drive directly and so the
+    /// invariant a regression test can drive directly and so the
     /// check is unambiguously computed before any per-request side effect.
     fn assert_canonicals_unique(canonicals: &[String]) {
         let mut seen = std::collections::HashSet::with_capacity(canonicals.len());

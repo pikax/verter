@@ -56,12 +56,6 @@
 //!   safety-precondition failure floors to `Stateless`.
 //! * [`CompileCacheMode::Stateless`] never changes — it is the floor
 //!   and ignores every reason (stateless already bypasses host caches).
-//!
-//! `#![allow(dead_code)]` at module scope: the helpers and classifier
-//! land ahead of the compile-entry-path wiring that consumes them.
-//! The inline `tests` module exercises every public surface
-//! independently of the routing.
-#![allow(dead_code)]
 
 use smallvec::SmallVec;
 use verter_workspace::WorkspaceAlias;
