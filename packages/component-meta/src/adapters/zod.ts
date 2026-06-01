@@ -9,8 +9,55 @@ import { createRequire } from "node:module";
  *   (requires `zod` as a peer dependency)
  */
 
-import type { TypeDescriptor } from "@verter/type-ir";
+import type { ObjectIndexSignature, TypeDescriptor } from "@verter/type-ir";
 import type { ComponentMeta } from "../types.js";
+
+// ── Index-signature helpers ──────────────────────────────────────
+
+/**
+ * Select the index signature to project as a `z.record(...)` key/value pair.
+ *
+ * Only `string` and `number` primitive key types map onto `z.record`; other
+ * key types (e.g. `symbol`, template-literal unions) have no faithful zod
+ * record representation, so they are skipped (the surrounding object falls back
+ * to `z.object({})` / a property-only schema).
+ */
+function findRecordIndexSignature(
+  indexSignatures: ObjectIndexSignature[] | undefined,
+): ObjectIndexSignature | undefined {
+  return indexSignatures?.find(
+    (signature) =>
+      signature.keyType.kind === "primitive" &&
+      (signature.keyType.name === "string" || signature.keyType.name === "number"),
+  );
+}
+
+/**
+ * Derive the `z.record(...)` key schema string from the index-signature key type.
+ *
+ * A `number` index signature lowers to `z.number()` (zod v4 records keyed by
+ * `z.number()` accept numeric-looking keys and reject non-numeric ones); every
+ * other key type — only `string` reaches here after `findRecordIndexSignature`,
+ * but the default is kept explicit for safety — lowers to `z.string()`.
+ */
+function recordKeySchemaString(keyType: TypeDescriptor): string {
+  if (keyType.kind === "primitive" && keyType.name === "number") {
+    return "z.number()";
+  }
+  return "z.string()";
+}
+
+/**
+ * Runtime counterpart of {@link recordKeySchemaString}: builds the actual zod
+ * key schema instance (`z.number()` for a `number` index signature, otherwise
+ * `z.string()`).
+ */
+function recordKeySchema(z: typeof import("zod"), keyType: TypeDescriptor): unknown {
+  if (keyType.kind === "primitive" && keyType.name === "number") {
+    return z.number();
+  }
+  return z.string();
+}
 
 // ── Codegen mode ─────────────────────────────────────────────────
 
@@ -81,14 +128,11 @@ export function typeToZodString(type: TypeDescriptor): string {
     }
 
     case "object": {
-      const stringIndexSignature = type.indexSignatures?.find(
-        (signature) =>
-          signature.keyType.kind === "primitive" &&
-          (signature.keyType.name === "string" || signature.keyType.name === "number"),
-      );
+      const indexSignature = findRecordIndexSignature(type.indexSignatures);
       if (type.properties.length === 0) {
-        if (stringIndexSignature) {
-          return `z.record(z.string(), ${typeToZodString(stringIndexSignature.valueType)})`;
+        if (indexSignature) {
+          const keySchema = recordKeySchemaString(indexSignature.keyType);
+          return `z.record(${keySchema}, ${typeToZodString(indexSignature.valueType)})`;
         }
         return "z.object({})";
       }
@@ -98,8 +142,8 @@ export function typeToZodString(type: TypeDescriptor): string {
         return `  ${JSON.stringify(p.name)}: ${schema}${optSuffix}`;
       });
       const base = `z.object({\n${props.join(",\n")}\n})`;
-      if (stringIndexSignature) {
-        return `${base}.catchall(${typeToZodString(stringIndexSignature.valueType)})`;
+      if (indexSignature) {
+        return `${base}.catchall(${typeToZodString(indexSignature.valueType)})`;
       }
       return base;
     }
@@ -255,14 +299,11 @@ function buildZodSchema(z: typeof import("zod"), type: TypeDescriptor): unknown 
     }
 
     case "object": {
-      const stringIndexSignature = type.indexSignatures?.find(
-        (signature) =>
-          signature.keyType.kind === "primitive" &&
-          (signature.keyType.name === "string" || signature.keyType.name === "number"),
-      );
+      const indexSignature = findRecordIndexSignature(type.indexSignatures);
       if (type.properties.length === 0) {
-        if (stringIndexSignature) {
-          return z.record(z.string(), buildZodSchema(z, stringIndexSignature.valueType) as any);
+        if (indexSignature) {
+          const keySchema = recordKeySchema(z, indexSignature.keyType) as any;
+          return z.record(keySchema, buildZodSchema(z, indexSignature.valueType) as any);
         }
         return z.object({});
       }
@@ -275,8 +316,8 @@ function buildZodSchema(z: typeof import("zod"), type: TypeDescriptor): unknown 
         shape[prop.name] = schema;
       }
       const base = z.object(shape);
-      if (stringIndexSignature) {
-        return base.catchall(buildZodSchema(z, stringIndexSignature.valueType) as any);
+      if (indexSignature) {
+        return base.catchall(buildZodSchema(z, indexSignature.valueType) as any);
       }
       return base;
     }

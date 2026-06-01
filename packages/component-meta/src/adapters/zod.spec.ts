@@ -90,6 +90,24 @@ describe("typeToZodString (codegen)", () => {
     expect(result).not.toContain("z.object({})");
   });
 
+  it("derives a z.number() key for number index signatures", () => {
+    const result = typeToZodString({
+      kind: "object",
+      properties: [],
+      indexSignatures: [
+        {
+          keyName: "key",
+          keyType: { kind: "primitive", name: "number" },
+          valueType: { kind: "primitive", name: "string" },
+        },
+      ],
+    });
+    expect(result).toBe("z.record(z.number(), z.string())");
+    // The number key must NOT be widened to a string key.
+    expect(result).not.toContain("z.string(), z.string()");
+    expect(result).not.toContain("z.object({})");
+  });
+
   it("converts function", () => {
     expect(
       typeToZodString({
@@ -222,6 +240,26 @@ describe("typeToZodSchema (runtime)", () => {
     }) as z.ZodRecord<any, any>;
     expect(schema.parse({ a: 1, b: 2 })).toEqual({ a: 1, b: 2 });
     expect(() => schema.parse({ a: "nope" })).toThrow();
+  });
+
+  it("creates a number-keyed record for number index signatures", () => {
+    const schema = typeToZodSchema({
+      kind: "object",
+      properties: [],
+      indexSignatures: [
+        {
+          keyName: "key",
+          keyType: { kind: "primitive", name: "number" },
+          valueType: { kind: "primitive", name: "string" },
+        },
+      ],
+    }) as z.ZodRecord<any, any>;
+    // zod v4: a z.number() record key accepts numeric-looking keys ...
+    expect(schema.parse({ 1: "a", 2: "b" })).toEqual({ 1: "a", 2: "b" });
+    // ... and rejects non-numeric keys (this is what z.string() would have allowed).
+    expect(() => schema.parse({ foo: "a" })).toThrow();
+    // The value schema still applies.
+    expect(() => schema.parse({ 1: 99 })).toThrow();
   });
 });
 
