@@ -397,6 +397,35 @@ impl VerterHost {
         &self.host_cpu_pool
     }
 
+    /// The host's batch-coordinator primitive, bound to the host-owned
+    /// coordinator pool.
+    ///
+    /// Every host/runtime batch fan-out (component-meta batch, batch
+    /// SFC compile) routes its outer wait through the returned
+    /// [`crate::host_batch_coordinator::HostBatchCoordinator`] so the
+    /// coordinator wait runs on the dedicated coordinator pool, never on
+    /// the scheduler's stage-execution pool. This is the single
+    /// host-side coordination rule; call sites must not re-implement an
+    /// ad-hoc `host_cpu_pool().install(...)` fan-out.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub(crate) fn batch_coordinator(
+        &self,
+    ) -> crate::host_batch_coordinator::HostBatchCoordinator<'_> {
+        crate::host_batch_coordinator::HostBatchCoordinator::new(&self.host_cpu_pool)
+    }
+
+    /// wasm32 batch coordinator: there is no coordinator pool, so the
+    /// returned primitive runs every batch inline / sequentially with
+    /// identical observable ordering.
+    #[cfg(target_arch = "wasm32")]
+    #[must_use]
+    pub(crate) fn batch_coordinator(
+        &self,
+    ) -> crate::host_batch_coordinator::HostBatchCoordinator<'_> {
+        crate::host_batch_coordinator::HostBatchCoordinator::new()
+    }
+
     /// Env-hash bundle (R21) attached to a [`HostStoreView`] at
     /// view-build time. Returns the workspace-default env-hash bundle
     /// composed from the workspace's parser fingerprint + resolve

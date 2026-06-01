@@ -178,6 +178,7 @@ pub mod component_meta_payload;
 pub mod host_analyze_audit;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod host_audit_bridge;
+pub(crate) mod host_batch_coordinator;
 mod host_cache_runtime;
 pub mod host_compile;
 pub mod host_compile_audit;
