@@ -249,3 +249,39 @@ fn h23_dag_capacity_reservation_release_consumes_by_value() {
         "H23: DagCapacityReservation::release must not take `&mut self` — double-release would be possible",
     );
 }
+
+/// §6c — `submit_batch_atomic` is the SOLE batch submission API.
+///
+/// The non-atomic `Scheduler::submit_batch` (which fanned N separate
+/// `NewRequest` items, each its own wake + `submit_count` bump) was
+/// deleted by the §6c cutover. Every batch submission now lands ONE
+/// `Submission::NewRequestBatch` admitted under a single `dag.lock()`
+/// via `submit_batch_atomic`. This guard pins both halves: the
+/// non-atomic signature is gone, and the atomic signature remains.
+///
+/// Discriminator: the needle `pub fn submit_batch(` (open paren
+/// immediately after the name) matches ONLY the deleted non-atomic
+/// method — `pub fn submit_batch_atomic(` does not match because the
+/// byte after `submit_batch` is `_`, not `(`. Backtick doc mentions
+/// (`` `submit_batch` ``) likewise do not match the `pub fn ...(`
+/// shape. If a future change re-introduces the non-atomic fan-out, the
+/// first assertion fires; if it deletes the atomic API, the second
+/// fires.
+#[test]
+fn scheduler_has_only_atomic_batch_api() {
+    let src = read_scheduler_source();
+    assert!(
+        !src.contains("pub fn submit_batch("),
+        "§6c: the non-atomic `Scheduler::submit_batch(...)` must stay deleted — \
+         `submit_batch_atomic` is the sole batch submission API. Re-introducing \
+         the N-separate-`NewRequest` fan-out resurrects the deleted dual path \
+         (N wakes + N `submit_count` bumps instead of one atomic batch).",
+    );
+    assert!(
+        src.contains("pub fn submit_batch_atomic("),
+        "§6c: `Scheduler::submit_batch_atomic(...)` is the sole batch submission \
+         API and must exist. If it was renamed or removed, every host batch \
+         caller (compile_many Stage B, the single-file `upsert`) lost its \
+         atomic-admission primitive.",
+    );
+}

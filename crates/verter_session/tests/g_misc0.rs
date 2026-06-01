@@ -84,6 +84,8 @@ mod mcp_audit_tls_propagation;
 mod no_accumulate_dispatch_dep_signature_outside_helpers;
 #[path = "g_misc0/no_default_env_hashes_in_production.rs"]
 mod no_default_env_hashes_in_production;
+#[path = "g_misc0/no_legacy_compile_many_upsert_fanout.rs"]
+mod no_legacy_compile_many_upsert_fanout;
 #[path = "g_misc0/no_legacy_walker.rs"]
 mod no_legacy_walker;
 #[path = "g_misc0/origin_graph_consumer_contract.rs"]
