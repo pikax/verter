@@ -22,18 +22,19 @@
 //!   register as [`CallerKind::CpuWorker`](caller_kind::CallerKind) so
 //!   the cooperative pump may inline-execute ready dependencies on the
 //!   same thread.
-//! - [`HostCpuPool`](host_cpu_pool::HostCpuPool) — owned by `VerterHost`,
-//!   used exclusively by `compile_many`'s outer coordinator. Workers
-//!   register as [`CallerKind::External`](caller_kind::CallerKind) so
-//!   `wait_or_drive` parks on the completion handle (the scheduler
-//!   driver and its own CPU pool make progress). Host workers never
-//!   inline-execute scheduler CPU work — `dispatch_ready_job` excludes
-//!   `External` from its inline-eligible branch.
+//! - [`HostCpuPool`](host_cpu_pool::HostCpuPool) — owned by the external
+//!   host/runtime layer and shared by every host batch API's outer
+//!   coordinator (batch component-meta, batch SFC compile, and any
+//!   future host batch fan-out). Workers register as
+//!   [`CallerKind::External`](caller_kind::CallerKind) so `wait_or_drive`
+//!   parks on the completion handle (the scheduler driver and its own
+//!   CPU pool make progress). Coordinator workers never inline-execute
+//!   scheduler CPU work — `dispatch_ready_job` excludes `External` from
+//!   its inline-eligible branch.
 //!
 //! The two pools never share workers; the isolation eliminates the
-//! deadlock class where a saturated scheduler CPU pool could starve
-//! `compile_many`'s outer coordinator that itself blocks on scheduler-
-//! queued parse work.
+//! deadlock class where a saturated scheduler CPU pool could starve a
+//! batch coordinator that itself blocks on scheduler-queued parse work.
 //!
 //! # Pump architecture
 //!

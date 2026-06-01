@@ -50,15 +50,16 @@ pub struct FfiHostConfig {
     /// other values cap the LRU at the chosen size — used by the
     /// `@verter/typeinfo` LRU eviction tests.
     pub typeinfo_scratch_cache_capacity: Option<u32>,
-    /// Worker count for the host-owned CPU pool used by
-    /// `compile_many`'s outer coordinator
+    /// Worker count for the host-owned CPU pool used by every host
+    /// batch API's outer coordinator — `compile_many` and the
+    /// component-meta batch
     /// (`verter_scheduler::HostCpuPool`). `None` (the default)
     /// resolves to `std::thread::available_parallelism` at
     /// host-construction time; `Some(0)` is treated as `None`
     /// (rather than rejected, so a misconfigured caller passing `0`
     /// gets the default instead of a panic); other positive values
     /// cap the pool's worker count. The host pool is built once at
-    /// host construction and reused across `compile_many` calls — to
+    /// host construction and reused across every batch call — to
     /// change the pool size, construct a new host.
     pub host_cpu_threads: Option<u32>,
 }

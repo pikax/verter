@@ -429,10 +429,12 @@ pub struct MetaSession {
     id: u64,
     project: Arc<MetaProject>,
     closed: AtomicBool,
-    /// Per-session execution mode. Scheduler dispatch branches on
-    /// this to choose between interactive and batch surfaces; the
-    /// component-meta job dispatcher reads this flag to route batch
-    /// callers through the scheduler's batched submission surface.
+    /// Per-session execution mode. Batch sessions fan their N
+    /// component-meta jobs out through the host batch coordinator on
+    /// the host-owned coordinator pool; the scheduler is not the
+    /// fan-out owner — it only accounts the batch submission once via
+    /// `account_batch_submission`. Interactive sessions resolve one
+    /// request at a time without a batch coordinator.
     #[allow(dead_code)]
     execution_mode: ExecutionMode,
     /// Session-owned runtime for overlay-sensitive request execution.
@@ -620,7 +622,7 @@ impl MetaSession {
     }
 
     /// Batch surface for [`Self::get_component_meta`]: compute metadata
-    /// for `canonical_or_aliases` in a single scheduler dispatch under
+    /// for `canonical_or_aliases` as one host-coordinated batch under
     /// **one shared overlay view**.
     ///
     /// Construction contract:
@@ -628,8 +630,9 @@ impl MetaSession {
     /// - the session's overlay map is snapshotted **once** into a
     ///   borrow-based [`crate::session_view::OverlaidViewRef`] that
     ///   lives for the duration of the batch (no per-id view rebuild);
-    /// - the scheduler dispatches the N jobs in a single batched
-    ///   submission, so `scheduler.counters().submit_count` increases
+    /// - the host batch coordinator fans the N jobs out on the
+    ///   host-owned coordinator pool and accounts the batch submission
+    ///   exactly once, so `scheduler.counters().submit_count` increases
     ///   by exactly one (independent of N);
     /// - all N jobs route through
     ///   [`VerterHost::get_component_meta_via_view`] against the same
@@ -646,8 +649,8 @@ impl MetaSession {
     ///
     /// Interactive callers (LSP, single-request SFC fetches) should
     /// continue using [`Self::get_component_meta`] — for one query, the
-    /// single-request synchronous path avoids the Rayon dispatch cost
-    /// Batch mode pays.
+    /// single-request synchronous path avoids the coordinator-pool
+    /// fan-out cost Batch mode pays.
     pub fn get_component_meta_batch(
         &self,
         canonical_or_aliases: &[String],
@@ -756,9 +759,10 @@ impl MetaSession {
             )
             .collect();
         // Wire the per-id payload path through one shared
-        // `SessionView` (R17, R18) and one scheduler dispatch (R7 / R8).
-        // The closure mirrors `get_component_meta_payload`'s body —
-        // payload-cache fast path → cold resolve → encode → publish.
+        // `SessionView` (R17, R18) and one accounted host-coordinator
+        // batch (R7 / R8). The closure mirrors
+        // `get_component_meta_payload`'s body — payload-cache fast path
+        // → cold resolve → encode → publish.
         let encode_fn_ref = &encode_fn;
         // The batch coordinator owns the shared coordination concerns:
         // host-coordinator-pool fan-out, the once-per-non-empty-batch

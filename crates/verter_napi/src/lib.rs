@@ -205,12 +205,13 @@ pub struct NapiHostConfig {
     /// 64 entries; `Some(0)` disables the cache; other values cap
     /// the LRU at the chosen size.
     pub typeinfoScratchCacheCapacity: Option<u32>,
-    /// Worker count for the host-owned CPU pool used by `compile_many`'s
-    /// outer coordinator. `None` (default) resolves to
+    /// Worker count for the host-owned CPU pool used by every host batch
+    /// API's outer coordinator — `compile_many` and the component-meta
+    /// batch. `None` (default) resolves to
     /// `std::thread::available_parallelism` at host-construction time;
     /// `Some(0)` is treated as `None`; other positive values cap the
     /// pool's worker count. The host pool is built once at host
-    /// construction and reused across `compile_many` calls — to
+    /// construction and reused across every batch call — to
     /// change the pool size, construct a new host.
     pub hostCpuThreads: Option<u32>,
 }

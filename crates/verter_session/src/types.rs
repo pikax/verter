@@ -619,8 +619,9 @@ pub struct HostConfig {
     /// the chosen size — used by the `@verter/typeinfo` LRU
     /// eviction tests.
     pub typeinfo_scratch_cache_capacity: Option<usize>,
-    /// Worker count for the host-owned CPU pool used by
-    /// `compile_many`'s outer coordinator
+    /// Worker count for the host-owned CPU pool used by every host
+    /// batch API's outer coordinator — `compile_many` and the
+    /// component-meta batch
     /// ([`verter_scheduler::HostCpuPool`]).
     ///
     /// `None` (the default) resolves to
@@ -633,7 +634,7 @@ pub struct HostConfig {
     /// values cap the pool's worker count.
     ///
     /// The host pool is built once at host construction and reused
-    /// across `compile_many` calls. The pool is distinct from the
+    /// across every host batch call. The pool is distinct from the
     /// scheduler's own CPU pool — see the module documentation on
     /// [`verter_scheduler`] for the dual-pool isolation invariant.
     pub host_cpu_threads: Option<usize>,

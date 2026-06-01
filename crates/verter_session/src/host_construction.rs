@@ -365,21 +365,22 @@ impl VerterHost {
         &self.project_type_store
     }
 
-    /// Reference to the host-owned CPU pool used by `compile_many`'s
-    /// outer coordinator.
+    /// Reference to the host-owned CPU pool used by every host batch
+    /// API's outer coordinator (`compile_many` and the component-meta
+    /// batch both fan out on it through the host batch coordinator).
     ///
     /// The pool is built once at host construction (worker count from
     /// [`crate::types::HostConfig::host_cpu_threads`], defaulting to
     /// `std::thread::available_parallelism`) and reused across every
-    /// `compile_many` call. Distinct from the scheduler's own CPU
-    /// pool — see [`verter_scheduler::HostCpuPool`] for the dual-pool
-    /// isolation invariant.
+    /// batch call. Distinct from the scheduler's own CPU pool — see
+    /// [`verter_scheduler::HostCpuPool`] for the dual-pool isolation
+    /// invariant.
     ///
     /// Not present on `wasm32` — `compile_many` is gated behind
     /// `#[cfg(not(target_arch = "wasm32"))]` and the host-pool field
     /// is gated alongside it.
     ///
-    /// Crate-internal: the host pool is `compile_many`'s
+    /// Crate-internal: the host pool is a batch-coordination
     /// implementation detail. Downstream crates that need to size the
     /// pool should pass `HostConfig::host_cpu_threads` at host
     /// construction (exposed end-to-end through
@@ -387,8 +388,8 @@ impl VerterHost {
     /// `NapiHostConfig::hostCpuThreads`); they should not reach into
     /// the pool itself. Narrowing this visibility prevents
     /// dual-pool-isolation regressions where a downstream consumer
-    /// could route its own CPU work onto `compile_many`'s coordinator
-    /// pool (which would defeat the isolation invariant). Test code
+    /// could route its own CPU work onto the batch-coordinator pool
+    /// (which would defeat the isolation invariant). Test code
     /// in this crate reads the pool through `host.host_cpu_pool()`
     /// for the `pool_id` token assertion.
     #[cfg(not(target_arch = "wasm32"))]

@@ -38,8 +38,13 @@ use verter_session::meta::MetaProject;
 use verter_session::{HostConfig, VerterHost};
 
 /// Build a hermetic project with the supplied files pre-loaded via
-/// `upsert_base`. Pre-loading is required so the batch dispatch does
-/// not recursively re-enter the scheduler under `cpu_pool.install`.
+/// `upsert_base`. Pre-loading keeps each batch on the warm
+/// shared-admission + single-submission-accounting path: the host batch
+/// coordinator fans the jobs out on the host coordinator pool and bumps
+/// `account_batch_submission` once, while the scheduler's stage pool
+/// stays free for any residual cross-file `Load`/`Parse`. The cold
+/// cross-file starvation path is exercised separately by
+/// `batch_meta_cold_deps_no_pool_starvation`.
 fn build_hermetic_project_with_files(files: &[(&str, &str)]) -> Arc<MetaProject> {
     let scheduler_config = verter_scheduler::scheduler::SchedulerConfig {
         cpu_threads: 1,

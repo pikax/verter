@@ -37,6 +37,14 @@ fails the build.
 
 ## Generic dedupe-hook surface
 
+> **Not yet implemented — cache-runtime DAG design (Block 7).** The
+> `DedupeHook` trait, the `DedupKey` / `DedupeJoiner` types, and the
+> `submit_dag` dedupe argument described in this section are the Block 7
+> design target from `docs/arch/cache-runtime-overhaul-plan.md`; they are
+> NOT on the current tree (there is no `dedupe_hook.rs`, and
+> `submit_request` / `submit_batch` take no `DedupeHook` arg today). The
+> surface below describes the intended Block 7 hook.
+
 The scheduler exposes a generic dedupe-hook trait that the calling
 crate implements over its own in-flight table. The scheduler itself
 owns NO in-flight cache table — the calling crate deduplicates
@@ -68,6 +76,18 @@ callers), the scheduler proceeds directly. The scheduler never
 imports any concrete in-flight-table type from a higher-level crate.
 
 ## KeyedJob, DedupKey, and `CacheNodeDagNode` lifecycle
+
+> **Not yet implemented — cache-runtime DAG design (Block 7).** The
+> `KeyedJob` / `DedupKey` / `CacheNodeDagNode` / `CacheNodeDag` /
+> `submit_dag` types and the whole lifecycle in this section are the
+> Block 7 design target from
+> `docs/arch/cache-runtime-overhaul-plan.md`; none of them are on the
+> current tree. The live submission surface is `Scheduler::submit_request`
+> / `submit_batch` (returning a `BatchHandle`) over the live `TaskKind`
+> set `Source` / `Analysis` / `Artifact`, dispatched onto the
+> scheduler-owned `cpu_pool` via `cpu_pool.spawn(...)` (see *Dual pool
+> ownership*). The types and steps below describe the intended Block 7
+> shape.
 
 `KeyedJob` is the submission identity. `CacheNodeDagNode` is the
 ready-queue envelope that the driver dispatches. The inbox-level
@@ -409,9 +429,20 @@ adapters before writing it on `node.completion`.
 
 ## DAG submission semantics
 
-The DAG API is one method, one type, one signature, carrying every
-field the driver requires to dispatch each node as an executable
-unit of work:
+> **Not yet implemented — cache-runtime DAG design (Block 7).** The
+> `submit_dag` / `CacheNodeDag` / `submit_batch`-as-DAG-shim surface
+> described in this whole section is the Block 7 design target from
+> `docs/arch/cache-runtime-overhaul-plan.md`; it is NOT on the current
+> tree. On the current tree the scheduler exposes `submit_request` (no
+> `submit_dag` and no `CacheNodeDag` envelope), and the live `TaskKind`
+> set is `Source` / `Analysis` / `Artifact` dispatched onto the
+> scheduler-owned `cpu_pool` via `cpu_pool.spawn(...)` (see *Dual pool
+> ownership* for the authoritative live pool model). The DAG submission
+> contract below describes the intended flow once Block 7 lands.
+
+The DAG API (Block 7 design target) is one method, one type, one
+signature, carrying every field the driver requires to dispatch each
+node as an executable unit of work:
 
 ```rust
 pub struct CacheNodeDag {
@@ -493,8 +524,10 @@ DAG contract:
   `pending_requests`. Cross-DAG dedupe uses the consumer-side
   in-flight table via `DedupeHook::probe` BEFORE submission.
 
-`submit_batch(reqs: Vec<Request>)` is a thin shim that constructs a
-no-edge `CacheNodeDag` and calls `submit_dag`.
+Under Block 7, `submit_batch(reqs: Vec<Request>)` becomes a thin shim
+that constructs a no-edge `CacheNodeDag` and calls `submit_dag`. On the
+current tree it loops over `submit_request` (see the surface table
+below).
 
 ## Scheduler surface (current → Block 7 planned)
 
@@ -514,21 +547,29 @@ tree. The left column is the live surface.
 
 ## Pool routing rules
 
-- **`io_pool`** owns `TaskKind::Load { canonical }` and any other
-  pure-I/O work. A parse closure on the I/O pool is a bug
+The live `TaskKind` set is `Source` / `Analysis` / `Artifact`. (The
+expanded `Load` / `Parse` / `CacheNode` shape and the
+`SchedulerCpuPool::submit` dispatch form are the demarcated Block 7
+design target — see *TaskKind routing* and *Scheduler surface*; they are
+NOT current routing rules.)
+
+- **`io_pool`** owns the pure-I/O step of `TaskKind::Source` (reading
+  bytes off disk) and any other pure-I/O work. A parse closure on the
+  I/O pool is a bug
   (`pool_isolation::source_parse_runs_on_cpu_pool_not_io_pool`).
-- **Scheduler stage pool (`cpu_pool`)** owns `TaskKind::Parse`,
-  `TaskKind::CacheNode`, and CPU-bound `TaskKind::Analysis` /
-  `TaskKind::Artifact`. The scheduler builds and owns it internally
-  from `SchedulerConfig::cpu_threads`; it is NOT passed into the
-  constructor. This is the only pool the driver dispatches stage work
-  onto.
+- **Scheduler stage pool (`cpu_pool`)** owns the CPU stage work —
+  the parse step folded into `TaskKind::Source`, plus `TaskKind::Analysis`
+  and `TaskKind::Artifact` — dispatched via `cpu_pool.spawn(...)`. The
+  scheduler builds and owns it internally from
+  `SchedulerConfig::cpu_threads`; it is NOT passed into the constructor.
+  This is the only pool the driver dispatches stage work onto.
 - **Coordinator pool (`HostCpuPool`)** owns the outer batch
-  coordinator's wait points. The external host/runtime layer
-  constructs it once at startup and OWNS it (a sibling of the
-  `Scheduler`, never handed into the constructor). The scheduler does
-  NOT reference it and NEVER dispatches tasks onto it; equally, no
-  scheduler API installs an outer wait on the stage pool. The
+  coordinator's wait points for EVERY host batch API (batch
+  component-meta, batch SFC compile, and any future host batch fan-out).
+  The external host/runtime layer constructs it once at startup and OWNS
+  it (a sibling of the `Scheduler`, never handed into the constructor).
+  The scheduler does NOT reference it and NEVER dispatches tasks onto it;
+  equally, no scheduler API installs an outer wait on the stage pool. The
   coordinator pool is reused across batch calls (sized once from the
   external layer's config). Guard (external layer):
   `two_back_to_back_compile_many_share_pool`.

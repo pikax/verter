@@ -1,13 +1,16 @@
-//! Host-owned CPU pool for `compile_many`'s outer coordinator.
+//! Host/runtime batch-coordinator CPU pool.
 //!
 //! Distinct from the scheduler's own CPU pool (`Scheduler::cpu_pool`).
-//! Coordinator-only: dispatches outer `compile_many` collect/order/
-//! finalise work. Parse and cache-node work goes through the scheduler
-//! and lands on its own pool.
+//! Coordinator-only: the external host/runtime layer owns it and runs
+//! the outer collect/order/finalise wait of EVERY host batch API on it —
+//! both the component-meta batch and the SFC compile batch (and any
+//! future host batch fan-out) share this one pool. Parse and cache-node
+//! work never lands here; it goes through the scheduler and runs on the
+//! scheduler's own stage pool.
 //!
 //! Dual-pool isolation eliminates the deadlock class where a saturated
-//! `SchedulerCpuPool` could starve `compile_many`'s coordinator while
-//! parse tasks await CPU availability.
+//! scheduler stage pool could starve a batch coordinator while parse
+//! tasks await CPU availability.
 //!
 //! Workers register as [`CallerKind::External`] in TLS — `wait_or_drive`
 //! parks rather than executes inline when the caller is `External` with
@@ -98,9 +101,11 @@ pub fn host_cpu_pool_token() -> Option<usize> {
     HOST_CPU_POOL_TOKEN.with(|c| c.get())
 }
 
-/// Host-owned CPU pool used exclusively by `compile_many`'s outer
-/// coordinator. See module documentation for the dual-pool isolation
-/// invariant.
+/// Host/runtime batch-coordinator CPU pool, owned by the external
+/// host/runtime layer and shared by every host batch API's outer
+/// coordinator (component-meta batch, SFC compile batch, and any future
+/// host batch fan-out). See module documentation for the dual-pool
+/// isolation invariant.
 pub struct HostCpuPool {
     pool: rayon::ThreadPool,
     /// Process-unique id for this pool. Workers stash this into

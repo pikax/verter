@@ -288,10 +288,12 @@ pub struct Request {
 ///
 /// Produced by [`Scheduler::submit_batch`]; drained via
 /// [`Scheduler::wait_batch`]. Callers submit N independent requests
-/// before any waits; the scheduler fans them out onto its Rayon pool.
-/// The handle carries one [`CompletionHandle`] per submitted request
-/// in submission order so `wait_batch` can surface results in the
-/// same order.
+/// before any waits; the scheduler runs each request's stage work on
+/// its own stage `cpu_pool` as the driver dispatches it (the scheduler
+/// owns no OUTER batch fan-out — that wait lives on the host/runtime
+/// coordinator pool). The handle carries one [`CompletionHandle`] per
+/// submitted request in submission order so `wait_batch` can surface
+/// results in the same order.
 pub struct BatchHandle {
     pub(crate) handles: Vec<CompletionHandle<RequestResult>>,
 }
@@ -701,10 +703,13 @@ impl Scheduler {
         }
     }
 
-    /// Batch submit. Submits N requests without individual waits so
-    /// the scheduler can coalesce drain and fan-out onto its Rayon
-    /// pool. Returns a [`BatchHandle`] that carries one completion
-    /// handle per request in submission order.
+    /// Batch submit. Lands N requests on the inbox without individual
+    /// waits so the driver can coalesce their drain; each request's
+    /// stage work then runs on the scheduler's own stage `cpu_pool` as
+    /// the driver dispatches it. The scheduler performs NO outer batch
+    /// fan-out (that wait belongs to the host/runtime coordinator pool).
+    /// Returns a [`BatchHandle`] that carries one completion handle per
+    /// request in submission order.
     pub fn submit_batch(&self, requests: Vec<Request>) -> BatchHandle {
         let mut handles = Vec::with_capacity(requests.len());
         for request in requests {
@@ -715,8 +720,9 @@ impl Scheduler {
 
     /// Wait for a submitted batch to complete. Drains each
     /// [`CompletionHandle`] in submission order. The caller receives
-    /// per-request results as they arrive; the scheduler fans out the
-    /// work across its configured CPU pool.
+    /// per-request results as they arrive; each request's stage work
+    /// runs on the scheduler's own stage `cpu_pool` (the scheduler owns
+    /// no outer batch fan-out).
     ///
     /// Uses `wait_or_drive` so both native (driver thread) and
     /// single-threaded callers share the same completion semantics.

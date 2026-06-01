@@ -662,13 +662,14 @@ pub struct VerterHost {
     /// `typeinfo::adapters::vue::store::VueShallowMetadataStore`.
     pub(crate) vue_shallow_metadata_store:
         crate::typeinfo::adapters::vue::store::VueShallowMetadataStore,
-    /// Host-owned CPU pool for `compile_many`'s outer coordinator.
-    /// Distinct from the scheduler's own CPU pool — workers register
-    /// as [`verter_scheduler::caller_kind::CallerKind::External`] so
-    /// `wait_or_drive` parks instead of inline-executing scheduler
-    /// CPU tasks. Built once at host construction and reused across
-    /// every `compile_many` call (a regressed per-call rebuild would
-    /// bump
+    /// Host-owned CPU pool for every host batch API's outer coordinator
+    /// — both `compile_many` and the component-meta batch fan their
+    /// outer wait out on it through the host batch coordinator. Distinct
+    /// from the scheduler's own CPU pool — workers register as
+    /// [`verter_scheduler::caller_kind::CallerKind::External`] so
+    /// `wait_or_drive` parks instead of inline-executing scheduler CPU
+    /// tasks. Built once at host construction and reused across every
+    /// batch call (a regressed per-call rebuild would bump
     /// [`verter_scheduler::HostCpuPool::build_count`] on every batch).
     ///
     /// Not present on `wasm32` — `compile_many` is gated behind
