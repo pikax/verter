@@ -1385,6 +1385,16 @@ enum FlightInner<V, E> {
         owner: std::thread::ThreadId,
     },
     Done(Result<Arc<V>, E>),
+    /// The leader's `compute`/`retain` PANICKED before it could publish a
+    /// terminal. Set by the leader's panic-abort guard (`LeaderAbortGuard`)
+    /// while it unwinds, so waiters parked on `ready` do not block forever
+    /// behind a thread that will never publish. A waiter that wakes to
+    /// `Aborted` releases its pin and RE-ELECTS against a fresh lane (the
+    /// aborted lane is removed under the `flights` lock as part of the
+    /// abort, so the re-election creates a new flight). A flight never
+    /// LEAVES `Aborted` — the variant exists only to wake and redirect
+    /// waiters; the lane carrying it is already detached from the map.
+    Aborted,
 }
 
 /// RAII pin that keeps a flight lane alive for the duration of a
@@ -1409,6 +1419,69 @@ where
 {
     fn drop(&mut self) {
         self.group.unpin(&self.lane_key, &self.state);
+    }
+}
+
+/// Panic-safety guard around the leader's `compute` + `retain` window in
+/// [`SingleflightGroup::run_retaining`]. While `armed`, an unwind through
+/// this guard's `Drop` (a panic from `compute` or from the `retain`
+/// predicate) ABORTS the leader's lane so no waiter is left blocked behind a
+/// thread that will never publish a terminal:
+///
+/// 1. transition the lane's `inner` to [`FlightInner::Aborted`] and
+///    `notify_all`, so every parked waiter wakes and RE-ELECTS;
+/// 2. release the leader's self-pin (`fetch_sub` under the `flights` lock,
+///    preserving the `FlightState::pins` "mutated ONLY under the `flights`
+///    map lock" invariant);
+/// 3. remove the lane from the map (`ptr_eq`-guarded so a fresh leader's
+///    re-inserted slot for the same key is not evicted).
+///
+/// All three run in ONE critical section holding the `flights` lock across
+/// them (lock order `flights` → `inner`), exactly as the non-retained
+/// terminal does — so the aborted lane is never observable to a NEW
+/// claimant. The panic then continues to unwind past `Drop`.
+///
+/// On the SUCCESS path the leader sets `armed = false` the instant
+/// `compute` + `retain` have returned (BEFORE publishing the real terminal),
+/// so the guard's `Drop` is a no-op and the normal terminal logic owns the
+/// lane transition. The guard never publishes a result — it only redirects
+/// waiters and tears the lane down on panic.
+struct LeaderAbortGuard<'a, K, V, E>
+where
+    K: Eq + Hash + Clone,
+{
+    group: &'a SingleflightGroup<K, V, E>,
+    lane_key: &'a (K, StoreViewCompatToken),
+    state: &'a Arc<FlightState<V, E>>,
+    armed: bool,
+}
+
+impl<'a, K, V, E> Drop for LeaderAbortGuard<'a, K, V, E>
+where
+    K: Eq + Hash + Clone,
+{
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // UNWINDING: the leader's `compute`/`retain` panicked before it
+        // published a terminal. Abort the lane atomically under the
+        // `flights` lock so waiters re-elect instead of blocking forever.
+        let mut flights = self.group.flights.lock();
+        {
+            let mut inner = self.state.inner.lock();
+            *inner = FlightInner::Aborted;
+            self.state.ready.notify_all();
+        }
+        self.state
+            .pins
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        if flights
+            .get(self.lane_key)
+            .is_some_and(|existing| Arc::ptr_eq(existing, self.state))
+        {
+            flights.remove(self.lane_key);
+        }
     }
 }
 
@@ -1539,160 +1612,210 @@ where
         let lane_key = (key.clone(), token);
         let current_thread = std::thread::current().id();
 
-        // Take a self-pin and either claim leadership or take a reference
-        // to an existing flight, ALL under the map lock. `pins` is
-        // incremented here for the self-pin; `participate` pins are added
-        // and released under the same lock, so every increment is
-        // serialized against the decrement-and-reap (`unpin`). The lane
-        // is never reaped while any pin is held — so a caller arriving in
-        // the leader's post-compute gap (but pinned via `participate`)
-        // observes the retained `Done` slot rather than a vacant lane.
-        //
-        // `leader` is `true` when this caller is responsible for running
-        // `compute`: either it created the slot, or it found a
-        // `Pending` slot a participation pin had created and claimed
-        // leadership of it.
-        let (state, leader, forked_lane) = {
-            let mut flights = self.flights.lock();
-            let forked_lane = flights.iter().any(|((existing_key, existing_token), s)| {
-                existing_key == &key
-                    && *existing_token != token
-                    && !matches!(&*s.inner.lock(), FlightInner::Done(_))
-            });
-            if let Some(existing) = flights.get(&lane_key).cloned() {
-                existing
-                    .pins
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // Claim a Pending lane (created by a participation pin)
-                // by transitioning it to Running under this thread.
-                let mut leader = false;
-                {
-                    let mut inner = existing.inner.lock();
-                    if matches!(&*inner, FlightInner::Pending) {
-                        *inner = FlightInner::Running {
+        // `compute` / `retain` are `FnOnce`; a re-electing waiter (one woken
+        // to a leader's `Aborted` lane) may itself become the fresh leader
+        // and run them. They are consumed AT MOST once across re-election
+        // iterations (every path that consumes them then returns), so the
+        // `Option::take` is the single-shot carrier the borrow checker
+        // needs across the loop.
+        let mut compute = Some(compute);
+        let mut retain = Some(retain);
+
+        'reelect: loop {
+            // Take a self-pin and either claim leadership or take a
+            // reference to an existing flight, ALL under the map lock.
+            // `pins` is incremented here for the self-pin; `participate`
+            // pins are added and released under the same lock, so every
+            // increment is serialized against the decrement-and-reap
+            // (`unpin`). The lane is never reaped while any pin is held — so
+            // a caller arriving in the leader's post-compute gap (but pinned
+            // via `participate`) observes the retained `Done` slot rather
+            // than a vacant lane.
+            //
+            // `leader` is `true` when this caller is responsible for running
+            // `compute`: either it created the slot, or it found a `Pending`
+            // slot a participation pin had created and claimed leadership of
+            // it.
+            let (state, leader, forked_lane) = {
+                let mut flights = self.flights.lock();
+                let forked_lane = flights.iter().any(|((existing_key, existing_token), s)| {
+                    existing_key == &key
+                        && *existing_token != token
+                        && !matches!(&*s.inner.lock(), FlightInner::Done(_))
+                });
+                if let Some(existing) = flights.get(&lane_key).cloned() {
+                    existing
+                        .pins
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Claim a Pending lane (created by a participation pin)
+                    // by transitioning it to Running under this thread.
+                    let mut leader = false;
+                    {
+                        let mut inner = existing.inner.lock();
+                        if matches!(&*inner, FlightInner::Pending) {
+                            *inner = FlightInner::Running {
+                                owner: current_thread,
+                            };
+                            leader = true;
+                        }
+                    }
+                    (existing, leader, forked_lane)
+                } else {
+                    let state = Arc::new(FlightState {
+                        inner: Mutex::new(FlightInner::Running {
                             owner: current_thread,
-                        };
-                        leader = true;
+                        }),
+                        ready: Condvar::new(),
+                        pins: std::sync::atomic::AtomicUsize::new(1),
+                    });
+                    flights.insert(lane_key.clone(), state.clone());
+                    (state, true, forked_lane)
+                }
+            };
+
+            if leader {
+                // Run `compute` + `retain` under a panic-abort guard. If
+                // either panics, the guard's `Drop` aborts the lane (sets
+                // `Aborted`, notifies waiters, releases this self-pin,
+                // removes the lane) so no waiter blocks forever behind a
+                // leader that never publishes — then the panic resumes. On
+                // the success path the guard is disarmed BEFORE the real
+                // terminal is published, so it is a no-op and the normal
+                // logic below owns the lane transition.
+                let mut abort_guard = LeaderAbortGuard {
+                    group: self,
+                    lane_key: &lane_key,
+                    state: &state,
+                    armed: true,
+                };
+                let result =
+                    (compute.take().expect("compute consumed at most once"))().map(Arc::new);
+                // Decide retention from the freshly-computed value. A
+                // retained (stable) result stays in the map as a joinable
+                // rendezvous; a non-retained result (an error, or a value
+                // the caller declines to retain such as an unstable one)
+                // must NOT be joinable by a NEW claimant — only by waiters
+                // already committed to THIS flight, who treat it exactly as
+                // a fresh leader would (an unstable result drives them to
+                // recompute; an error propagates).
+                let keep = matches!(&result, Ok(value)
+                    if (retain.take().expect("retain consumed at most once"))(value));
+                // Past the last point that can panic — disarm so the guard
+                // does not also tear down the lane we are about to publish
+                // into.
+                abort_guard.armed = false;
+                drop(abort_guard);
+
+                if keep {
+                    // Publish the stable result, then release this self-pin
+                    // via `unpin`. The result stays in the map as a joinable
+                    // rendezvous; the slot is reclaimed once the last pin is
+                    // released, so a burst member still mid-claim joins it
+                    // instead of finding a vacant lane. New claimants joining
+                    // a STABLE `Done` is correct and is the whole point.
+                    {
+                        let mut inner = state.inner.lock();
+                        *inner = FlightInner::Done(result.clone());
+                        state.ready.notify_all();
+                    }
+                    self.unpin(&lane_key, &state);
+                } else {
+                    // Non-retained terminal: publish the `Done` to existing
+                    // waiters AND remove the lane in ONE critical section
+                    // that holds the `flights` lock across both, so a NEW
+                    // claimant (which must take this same `flights` lock
+                    // before it can observe the lane's state) can NEVER see
+                    // the non-retained `Done` — it finds the lane already
+                    // gone and re-elects a fresh leader. Without removing
+                    // under the `flights` lock, a claimant could enter
+                    // between publish and removal, read `Done(unstable_or_err)`,
+                    // and return it as a Follower — joining a result that
+                    // must never be retained (an error would wrongly
+                    // propagate; an unstable result would be observed before
+                    // the recompute). Waiters ALREADY parked on `state.ready`
+                    // hold their own `Arc` and are woken by `notify_all`;
+                    // they re-check under `inner` after this critical section
+                    // and act on the `Done` exactly as a fresh leader's
+                    // outcome dictates.
+                    //
+                    // Lock order is preserved (`flights` then `inner`). The
+                    // self-pin `fetch_sub` runs under the `flights` lock too,
+                    // so the `FlightState::pins` "mutated ONLY under the
+                    // `flights` map lock" invariant holds literally. The
+                    // removal is `ptr_eq`-guarded so a fresh leader that
+                    // already re-inserted a new slot for the same `lane_key`
+                    // is not evicted; any still-outstanding participation pin
+                    // on this (now-orphaned) `state` becomes a no-op on its
+                    // own `unpin` via the same guard.
+                    let mut flights = self.flights.lock();
+                    {
+                        let mut inner = state.inner.lock();
+                        *inner = FlightInner::Done(result.clone());
+                        state.ready.notify_all();
+                    }
+                    state
+                        .pins
+                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    if flights
+                        .get(&lane_key)
+                        .is_some_and(|existing| Arc::ptr_eq(existing, &state))
+                    {
+                        flights.remove(&lane_key);
                     }
                 }
-                (existing, leader, forked_lane)
-            } else {
-                let state = Arc::new(FlightState {
-                    inner: Mutex::new(FlightInner::Running {
-                        owner: current_thread,
-                    }),
-                    ready: Condvar::new(),
-                    pins: std::sync::atomic::AtomicUsize::new(1),
+                return result.map(|value| SingleflightRunResult {
+                    value,
+                    role: SingleflightRole::Leader,
+                    forked_lane,
                 });
-                flights.insert(lane_key.clone(), state.clone());
-                (state, true, forked_lane)
             }
-        };
 
-        if leader {
-            let result = compute().map(Arc::new);
-            // Decide retention from the freshly-computed value. A retained
-            // (stable) result stays in the map as a joinable rendezvous; a
-            // non-retained result (an error, or a value the caller declines
-            // to retain such as an unstable one) must NOT be joinable by a
-            // NEW claimant — only by waiters already committed to THIS
-            // flight, who treat it exactly as a fresh leader would (an
-            // unstable result drives them to recompute; an error
-            // propagates).
-            let keep = matches!(&result, Ok(value) if retain(value));
-            if keep {
-                // Publish the stable result, then release this self-pin via
-                // `unpin`. The result stays in the map as a joinable
-                // rendezvous; the slot is reclaimed once the last pin is
-                // released, so a burst member still mid-claim joins it
-                // instead of finding a vacant lane. New claimants joining a
-                // STABLE `Done` is correct and is the whole point.
-                {
-                    let mut inner = state.inner.lock();
-                    *inner = FlightInner::Done(result.clone());
-                    state.ready.notify_all();
-                }
-                self.unpin(&lane_key, &state);
-            } else {
-                // Non-retained terminal: publish the `Done` to existing
-                // waiters AND remove the lane in ONE critical section that
-                // holds the `flights` lock across both, so a NEW claimant
-                // (which must take this same `flights` lock before it can
-                // observe the lane's state) can NEVER see the non-retained
-                // `Done` — it finds the lane already gone and re-elects a
-                // fresh leader. Without removing under the `flights` lock,
-                // a claimant could enter between publish and removal, read
-                // `Done(unstable_or_err)`, and return it as a Follower —
-                // joining a result that must never be retained (an error
-                // would wrongly propagate; an unstable result would be
-                // observed before the recompute). Waiters ALREADY parked on
-                // `state.ready` hold their own `Arc` and are woken by
-                // `notify_all`; they re-check under `inner` after this
-                // critical section and act on the `Done` exactly as a fresh
-                // leader's outcome dictates.
-                //
-                // Lock order is preserved (`flights` then `inner`). The
-                // self-pin `fetch_sub` runs under the `flights` lock too,
-                // so the `FlightState::pins` "mutated ONLY under the
-                // `flights` map lock" invariant holds literally. The
-                // removal is `ptr_eq`-guarded so a fresh leader that
-                // already re-inserted a new slot for the same `lane_key` is
-                // not evicted; any still-outstanding participation pin on
-                // this (now-orphaned) `state` becomes a no-op on its own
-                // `unpin` via the same guard.
-                let mut flights = self.flights.lock();
-                {
-                    let mut inner = state.inner.lock();
-                    *inner = FlightInner::Done(result.clone());
-                    state.ready.notify_all();
-                }
-                state
-                    .pins
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                if flights
-                    .get(&lane_key)
-                    .is_some_and(|existing| Arc::ptr_eq(existing, &state))
-                {
-                    flights.remove(&lane_key);
-                }
-            }
-            return result.map(|value| SingleflightRunResult {
-                value,
-                role: SingleflightRole::Leader,
-                forked_lane,
-            });
-        }
-
-        let mut inner = state.inner.lock();
-        loop {
-            match &*inner {
-                FlightInner::Running { owner } if *owner == current_thread => {
-                    // Same-thread re-entry on a flight this thread itself
-                    // leads (recursion sentinel): compute inline as a
-                    // nested leader. Release the self-pin taken above.
-                    drop(inner);
-                    self.unpin(&lane_key, &state);
-                    return compute().map(|value| SingleflightRunResult {
-                        value: Arc::new(value),
-                        role: SingleflightRole::Leader,
-                        forked_lane,
-                    });
-                }
-                // A `Pending` lane is claimed by the first `run` caller in
-                // the block above; any thread that reaches the loop in
-                // `Pending` state is racing a sibling that is about to
-                // claim leadership — wait for the transition.
-                FlightInner::Pending => state.ready.wait(&mut inner),
-                FlightInner::Running { .. } => state.ready.wait(&mut inner),
-                FlightInner::Done(result) => {
-                    let result = result.clone();
-                    drop(inner);
-                    self.unpin(&lane_key, &state);
-                    return result.map(|value| SingleflightRunResult {
-                        value,
-                        role: SingleflightRole::Follower,
-                        forked_lane,
-                    });
+            let mut inner = state.inner.lock();
+            loop {
+                match &*inner {
+                    FlightInner::Running { owner } if *owner == current_thread => {
+                        // Same-thread re-entry on a flight this thread itself
+                        // leads (recursion sentinel): compute inline as a
+                        // nested leader. Release the self-pin taken above.
+                        drop(inner);
+                        self.unpin(&lane_key, &state);
+                        return (compute.take().expect("compute consumed at most once"))().map(
+                            |value| SingleflightRunResult {
+                                value: Arc::new(value),
+                                role: SingleflightRole::Leader,
+                                forked_lane,
+                            },
+                        );
+                    }
+                    // A `Pending` lane is claimed by the first `run` caller
+                    // in the block above; any thread that reaches the loop in
+                    // `Pending` state is racing a sibling that is about to
+                    // claim leadership — wait for the transition.
+                    FlightInner::Pending => state.ready.wait(&mut inner),
+                    FlightInner::Running { .. } => state.ready.wait(&mut inner),
+                    FlightInner::Done(result) => {
+                        let result = result.clone();
+                        drop(inner);
+                        self.unpin(&lane_key, &state);
+                        return result.map(|value| SingleflightRunResult {
+                            value,
+                            role: SingleflightRole::Follower,
+                            forked_lane,
+                        });
+                    }
+                    FlightInner::Aborted => {
+                        // The leader this waiter joined PANICKED and aborted
+                        // the lane. Release this waiter's self-pin and
+                        // re-elect against a fresh lane: the aborted lane was
+                        // removed from the map as part of the abort, so the
+                        // next claim creates a new flight (one re-electing
+                        // waiter becomes the fresh leader and runs its own
+                        // `compute`; the rest join it). This is what keeps a
+                        // leader-panic from wedging every waiter forever.
+                        drop(inner);
+                        self.unpin(&lane_key, &state);
+                        continue 'reelect;
+                    }
                 }
             }
         }
@@ -2865,6 +2988,276 @@ mod tests {
             0,
             "after the orphaned sibling pin drops and the late leader's own pin released, \
              the lane is fully reaped",
+        );
+    }
+
+    /// A leader whose `compute` PANICS must not wedge its waiters forever:
+    /// they re-elect a fresh leader and COMPLETE (P1c — panic-safety /
+    /// deadlock-on-panic).
+    ///
+    /// Several follower threads commit onto a leader's in-flight lane, then
+    /// the leader's `compute` panics. The panic-abort guard transitions the
+    /// lane to `Aborted`, notifies the waiters, releases the leader's
+    /// self-pin, and removes the lane — all under the `flights` lock — then
+    /// resumes the panic (so the leader thread itself `join()`s to an
+    /// `Err`). Every waiter wakes to `Aborted`, releases its pin, and
+    /// re-elects: exactly one becomes the fresh leader and runs ITS own
+    /// `compute` (which succeeds), and the rest join that result. The whole
+    /// flight therefore completes with the success value.
+    ///
+    /// WATCHDOG: the followers' results are collected through a channel with
+    /// a bounded `recv_timeout`. If a regression leaves a waiter blocked on
+    /// the condvar (the pre-fix behaviour: a panicking leader never
+    /// transitions `Running` → terminal, never notifies, never releases its
+    /// pin, never removes the entry, so waiters wait FOREVER and future
+    /// callers find a permanently `Running` lane), the `recv_timeout` fires
+    /// and the test FAILS loudly instead of hanging the suite.
+    ///
+    /// DISCRIMINATES P1c: against the pre-fix code this test HANGS — the
+    /// follower threads never return — and the watchdog converts that hang
+    /// into a hard failure. Post-fix every follower returns the re-elected
+    /// success value well within the timeout.
+    #[test]
+    fn leader_compute_panic_lets_waiters_reelect_and_complete() {
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        const N_FOLLOWERS: usize = 4;
+        const SUCCESS_VALUE: usize = 77;
+        // Total strong refs on the lane once all followers are parked as
+        // waiters while the leader is mid-compute:
+        //   1 leader's `state` binding + 1 map entry
+        // + N_FOLLOWERS run-claim clones (each parked follower holds one).
+        const FOLLOWERS_COMMITTED_COUNT: usize = 2 + N_FOLLOWERS;
+
+        let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
+        let token = StoreViewCompatToken {
+            epoch: 8,
+            session: None,
+        };
+        let leader_in_compute = Arc::new((Mutex::new(false), Condvar::new()));
+        let recompute_count = Arc::new(AtomicUsize::new(0));
+
+        // Leader: enters `compute`, waits until every follower has committed
+        // as a waiter on its lane, then PANICS.
+        let leader = {
+            let group = Arc::clone(&group);
+            let leader_in_compute = Arc::clone(&leader_in_compute);
+            std::thread::spawn(move || {
+                let _ = group.run_retaining(
+                    "node".to_string(),
+                    token,
+                    || -> Result<usize, &'static str> {
+                        // Announce that the leader is mid-flight (lane is
+                        // `Running`), so followers may commit.
+                        {
+                            let (lock, cv) = &*leader_in_compute;
+                            *lock.lock() = true;
+                            cv.notify_all();
+                        }
+                        // Wait until all followers are parked as waiters on
+                        // this lane, so the abort genuinely has to WAKE
+                        // committed waiters (the exact deadlock surface).
+                        let mut spins = 0;
+                        while group.test_flight_strong_count(&"node".to_string(), token)
+                            < FOLLOWERS_COMMITTED_COUNT
+                        {
+                            spins += 1;
+                            assert!(
+                                spins < 10_000_000,
+                                "followers never committed onto the leader's lane",
+                            );
+                            std::thread::yield_now();
+                        }
+                        panic!("leader compute boom");
+                    },
+                    |_| true,
+                );
+            })
+        };
+
+        // Wait until the leader is provably inside `compute`.
+        {
+            let (lock, cv) = &*leader_in_compute;
+            let mut in_compute = lock.lock();
+            while !*in_compute {
+                cv.wait(&mut in_compute);
+            }
+        }
+
+        // Followers: commit onto the leader's in-flight lane, then (post
+        // panic) re-elect and complete. Each reports its outcome through the
+        // watchdog channel.
+        let (tx, rx) = mpsc::channel::<Result<usize, &'static str>>();
+        let mut follower_handles = Vec::new();
+        for _ in 0..N_FOLLOWERS {
+            let group = Arc::clone(&group);
+            let recompute_count = Arc::clone(&recompute_count);
+            let tx = tx.clone();
+            follower_handles.push(std::thread::spawn(move || {
+                let outcome = group
+                    .run_retaining(
+                        "node".to_string(),
+                        token,
+                        || {
+                            // Only a re-elected fresh leader runs this; count
+                            // the genuine recomputes.
+                            recompute_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(SUCCESS_VALUE)
+                        },
+                        |_| true,
+                    )
+                    .map(|run| *run.value);
+                // Best-effort send; the receiver may already have all it
+                // needs.
+                let _ = tx.send(outcome);
+            }));
+        }
+        drop(tx);
+
+        // WATCHDOG: every follower must report within the timeout. A hang
+        // (pre-fix deadlock) trips the timeout and fails the test.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut collected = Vec::new();
+        while collected.len() < N_FOLLOWERS {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "panic-safety watchdog: only {}/{} followers completed within the timeout — a \
+                 waiter is blocked behind the panicked leader (P1c deadlock-on-panic regression)",
+                collected.len(),
+                N_FOLLOWERS,
+            );
+            match rx.recv_timeout(remaining) {
+                Ok(outcome) => collected.push(outcome),
+                Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                    "panic-safety watchdog: only {}/{} followers completed within the timeout — a \
+                     waiter is blocked behind the panicked leader (P1c deadlock-on-panic regression)",
+                    collected.len(),
+                    N_FOLLOWERS,
+                ),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        for handle in follower_handles {
+            handle.join().expect("follower thread must not panic");
+        }
+        // The leader thread itself unwound (its `compute` panicked); joining
+        // it yields the panic. Assert it DID panic (the abort path ran).
+        assert!(
+            leader.join().is_err(),
+            "the leader thread's `compute` panic must propagate after the abort guard runs",
+        );
+
+        // Every follower completed with the re-elected success value.
+        assert_eq!(collected.len(), N_FOLLOWERS);
+        for outcome in &collected {
+            assert_eq!(
+                *outcome,
+                Ok(SUCCESS_VALUE),
+                "every waiter must re-elect and complete with the fresh leader's success value",
+            );
+        }
+        // After the abort, the re-electing waiters cold-recompute through a
+        // fresh leader. At least one genuine recompute must occur (the
+        // panicked leader produced no value), and never more than one per
+        // re-electing thread. The exact count is best-effort dedup: a fresh
+        // leader that finishes before the other re-electors commit onto its
+        // new lane leaves them to spawn their own fresh leader — that is
+        // correct re-election, not a defect. The decisive panic-safety
+        // property is the watchdog above (no waiter hangs) plus every
+        // waiter completing with the success value.
+        let recomputes = recompute_count.load(Ordering::SeqCst);
+        assert!(
+            (1..=N_FOLLOWERS).contains(&recomputes),
+            "after the leader panic, the re-electing waiters must cold-recompute through a fresh \
+             leader (expected 1..={N_FOLLOWERS} recomputes, got {recomputes})",
+        );
+
+        // The lane is fully reaped once the burst drains.
+        assert_eq!(
+            group.test_flight_strong_count(&"node".to_string(), token),
+            0,
+            "the lane must be fully reaped after the panic-and-re-election burst drains",
+        );
+    }
+
+    /// A panic in the `retain` PREDICATE (not just `compute`) also aborts
+    /// the lane, so a later claimant is not wedged behind a permanently
+    /// `Running` lane (P1c — the abort guard spans `compute` AND `retain`).
+    ///
+    /// The guard is disarmed only AFTER `retain` returns, so a `retain`
+    /// panic — which happens after `compute` succeeded but before the
+    /// terminal is published — still unwinds through the guard and aborts
+    /// the lane. This test runs the panicking leader on its own thread
+    /// (joining it surfaces the panic), then asserts the lane is gone and a
+    /// fresh claim on the same key/token re-elects and completes.
+    ///
+    /// DISCRIMINATES P1c (retain arm): pre-fix, a `retain` panic left the
+    /// lane `Running` forever; the post-panic claim below would block on the
+    /// condvar and the test would hang. Post-fix the lane is aborted and the
+    /// fresh claim cold-computes.
+    #[test]
+    fn leader_retain_panic_aborts_lane_so_later_claim_reelects() {
+        use std::time::Instant;
+
+        let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
+        let token = StoreViewCompatToken {
+            epoch: 12,
+            session: None,
+        };
+
+        // Leader: `compute` succeeds, then the `retain` predicate panics.
+        let leader = {
+            let group = Arc::clone(&group);
+            std::thread::spawn(move || {
+                let _ = group.run_retaining(
+                    "node".to_string(),
+                    token,
+                    || -> Result<usize, &'static str> { Ok(1) },
+                    |_| panic!("retain predicate boom"),
+                );
+            })
+        };
+        assert!(
+            leader.join().is_err(),
+            "the leader thread's `retain` panic must propagate after the abort guard runs",
+        );
+
+        // The aborted lane must be gone (no permanently `Running` slot).
+        assert_eq!(
+            group.test_flight_strong_count(&"node".to_string(), token),
+            0,
+            "a `retain` panic must abort + remove the lane, leaving no `Running` slot behind",
+        );
+
+        // A fresh claim re-elects and completes — guarded by a watchdog so a
+        // regression (permanently `Running` lane) fails rather than hangs.
+        let (tx, rx) = std::sync::mpsc::channel::<usize>();
+        std::thread::spawn(move || {
+            let run = group
+                .run_retaining(
+                    "node".to_string(),
+                    token,
+                    || -> Result<usize, &'static str> { Ok(55) },
+                    |_| true,
+                )
+                .unwrap();
+            let _ = tx.send(*run.value);
+        });
+        let value = rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| {
+                let _ = Instant::now();
+                panic!(
+                    "post-`retain`-panic watchdog: a fresh claim blocked behind a permanently \
+                     `Running` lane (P1c retain-arm deadlock regression)",
+                )
+            });
+        assert_eq!(
+            value, 55,
+            "after a `retain` panic aborts the lane, a fresh claim must cold-compute to completion",
         );
     }
 
