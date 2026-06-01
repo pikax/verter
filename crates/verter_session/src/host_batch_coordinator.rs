@@ -757,4 +757,141 @@ mod tests {
             "a panicking item must not leak the in-batch marker",
         );
     }
+
+    /// DETERMINISTIC unwind-restore discrimination.
+    ///
+    /// The multi-item `run_batch_isolates_single_item_panic` above
+    /// asserts the no-leak invariant on the CALLING thread — but the
+    /// per-item [`InHostBatchGuard`] is set on whichever POOL WORKER runs
+    /// the item, and the calling thread is never marked at the top level.
+    /// So that assertion catches a leaked-`IN_HOST_BATCH`-on-unwind
+    /// regression only probabilistically (when the calling thread happens
+    /// to be the worker that ran the panicking item). This test removes
+    /// the probability:
+    ///
+    /// - it runs a SINGLE-item batch whose one item panics, so the
+    ///   panicking item runs deterministically on a coordinator-pool
+    ///   worker (the `items.len() == 1` path installs the item ON the
+    ///   pool — the calling test thread is not a member of the pool, so
+    ///   `install` blocks it and runs the item on a worker);
+    /// - it probes the worker's `IN_HOST_BATCH` flag INSIDE
+    ///   `on_item_panic`, which the coordinator invokes ON THAT SAME
+    ///   WORKER *after* `catch_unwind` has already unwound past the
+    ///   guard's drop. With the guard's `Drop` restore intact the worker
+    ///   observes `false` (the value restored on unwind); a guard whose
+    ///   unwind-restore were removed would leave the worker marked `true`.
+    ///
+    /// Discrimination (stated for the gate): deleting the `impl Drop for
+    /// InHostBatchGuard` restore — or constructing the guard OUTSIDE the
+    /// `catch_unwind` closure so the restore happens after the catch
+    /// rather than during the unwind — makes
+    /// `worker_in_batch_after_unwind` observe `true`, and the
+    /// `assert!(!worker_in_batch_after_unwind...)` below FAILS. With the
+    /// restore in place it observes `false` and the test passes. The
+    /// probe runs on the worker (asserted distinct from the calling
+    /// thread), so the outcome does not depend on which thread `install`
+    /// happens to schedule onto.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn single_item_panic_restores_in_batch_marker_on_worker() {
+        use std::sync::atomic::AtomicBool;
+        use std::thread::ThreadId;
+
+        let pool = pool();
+        let coord = HostBatchCoordinator::new(&pool);
+
+        let calling_thread = std::thread::current().id();
+
+        // Worker observations captured during the panicking item's run
+        // and its unwind. `Mutex<Option<ThreadId>>` so we can prove the
+        // probe ran on a pool worker (not the caller) and that the
+        // item-body and the panic-converter ran on the SAME worker.
+        let worker_in_batch_during_item = AtomicBool::new(false);
+        let worker_in_batch_after_unwind = AtomicBool::new(false);
+        let item_body_thread: std::sync::Mutex<Option<ThreadId>> = std::sync::Mutex::new(None);
+        let converter_thread: std::sync::Mutex<Option<ThreadId>> = std::sync::Mutex::new(None);
+
+        // The panic converter runs on the worker thread AFTER the unwind
+        // has dropped the per-item guard, so probing `in_host_batch()`
+        // here observes the RESTORED value. It also records its thread id
+        // and resurfaces the failing item value so we keep the existing
+        // attribution guarantee.
+        let on_item_panic = |p: BatchItemPanic<'_, u32>| -> String {
+            *converter_thread.lock().unwrap() = Some(std::thread::current().id());
+            worker_in_batch_after_unwind.store(in_host_batch(), Ordering::SeqCst);
+            format!("PANIC[item={}]: {}", p.item, p.message())
+        };
+        let policy = BatchPolicy::<u32, String> {
+            scheduler: None,
+            label: "test-single-panic-restore",
+            on_item_panic: &on_item_panic,
+        };
+
+        assert!(
+            !in_host_batch(),
+            "calling thread must not be in-batch before run_batch",
+        );
+
+        let out = coord.run_batch(std::slice::from_ref(&3u32), &policy, |_i| -> String {
+            // Inside the item body the worker IS marked in-batch (the
+            // guard is live here). Record it + the worker thread id, then
+            // panic so the unwind exercises the guard's drop-restore. The
+            // diverging `panic!` (`!`) satisfies the `String` return.
+            *item_body_thread.lock().unwrap() = Some(std::thread::current().id());
+            worker_in_batch_during_item.store(in_host_batch(), Ordering::SeqCst);
+            panic!("synthetic single-item panic for unwind-restore test")
+        });
+
+        // The slot converted to the panic sentinel (attribution intact).
+        assert_eq!(out.len(), 1, "single-item batch must produce one slot");
+        assert!(
+            out[0].starts_with("PANIC[item=3]: ")
+                && out[0].contains("synthetic single-item panic for unwind-restore test"),
+            "the single panicking item must convert via on_item_panic with the right message: {}",
+            out[0],
+        );
+
+        let body_thread = item_body_thread.lock().unwrap().expect("item body ran");
+        let conv_thread = converter_thread.lock().unwrap().expect("converter ran");
+
+        // Determinism evidence: the panicking item ran on a coordinator
+        // POOL WORKER (not the calling thread), and the panic converter
+        // ran on that SAME worker — so the post-unwind probe below is a
+        // worker-thread observation, not a calling-thread one.
+        assert_ne!(
+            body_thread, calling_thread,
+            "the single item must run on a coordinator-pool worker, not the calling thread \
+             (otherwise the probe is not deterministic)",
+        );
+        assert_eq!(
+            body_thread, conv_thread,
+            "the panic converter must run on the SAME worker that ran the panicking item, so the \
+             post-unwind marker probe observes that worker's restored state",
+        );
+
+        // Sanity: the worker WAS marked in-batch while the item body ran
+        // (the guard was live). If this were false the next assertion
+        // would be vacuous.
+        assert!(
+            worker_in_batch_during_item.load(Ordering::SeqCst),
+            "the item body must run with the in-batch marker set on its worker",
+        );
+
+        // THE DISCRIMINATING ASSERTION: after the unwind, the worker's
+        // in-batch marker is restored to its prior (false) value. With
+        // the guard's drop-on-unwind restore removed, the worker would
+        // still read `true` here and this fails.
+        assert!(
+            !worker_in_batch_after_unwind.load(Ordering::SeqCst),
+            "the per-item guard must RESTORE the worker's in-batch marker on panic unwind \
+             (observed on the worker thread, after the catch): a leaked `true` here means the \
+             InHostBatchGuard drop-restore regressed",
+        );
+
+        // And the calling thread is, as ever, never left marked.
+        assert!(
+            !in_host_batch(),
+            "the calling thread must not be left marked in-batch after a panicking batch",
+        );
+    }
 }
