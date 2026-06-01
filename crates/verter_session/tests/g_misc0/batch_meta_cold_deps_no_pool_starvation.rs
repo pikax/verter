@@ -96,7 +96,7 @@ export interface Props{i} extends {next_name} {{
 }}
 "#
         );
-        workspace.inject_file(format!("/workspace/types-{i}.ts").into(), Arc::from(src));
+        workspace.inject_file(format!("/workspace/types-{i}.ts"), Arc::from(src));
     }
 
     // The `.vue` owners. Each imports its own `Props{i}` link and
@@ -111,7 +111,7 @@ defineProps<Props{i}>();
 <template><div /></template>
 "#
         );
-        workspace.inject_file(format!("/workspace/Owner{i}.vue").into(), Arc::from(src));
+        workspace.inject_file(format!("/workspace/Owner{i}.vue"), Arc::from(src));
     }
 
     let ws_access: Arc<dyn WorkspaceAccess> = workspace;

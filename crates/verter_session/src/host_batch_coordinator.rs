@@ -251,9 +251,7 @@ mod tests {
         let out = coord.run_batch(&items, |i| {
             // Larger sleep for smaller indices so completion order is
             // (roughly) reversed relative to input order.
-            std::thread::sleep(std::time::Duration::from_micros(
-                ((64 - *i) * 50) as u64,
-            ));
+            std::thread::sleep(std::time::Duration::from_micros(((64 - *i) * 50) as u64));
             *i * 10
         });
         let expected: Vec<usize> = (0..64).map(|i| i * 10).collect();
@@ -332,8 +330,7 @@ mod tests {
             let nested_items: Vec<usize> = (0..4).collect();
             let nested_out = coord.run_batch(&nested_items, |n| {
                 if !in_host_batch() {
-                    all_nested_saw_in_batch
-                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    all_nested_saw_in_batch.store(false, std::sync::atomic::Ordering::Relaxed);
                 }
                 // Nested result is a deterministic function of (outer,
                 // nested) index so we can verify ordering precisely.
