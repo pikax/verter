@@ -4044,7 +4044,16 @@ impl Scheduler {
         handle: &crate::job::CompletionHandle<T>,
         caller_kind: crate::caller_kind::CallerKind,
     ) -> crate::job::CompletionState<T> {
+        // `caller_kind` discriminates driver/worker/external waiters and is
+        // read only on native (the driver-aware park/cooperative paths
+        // below). wasm is single-threaded with no driver, so it takes the
+        // inline path and the discriminant is intentionally unused there —
+        // the parameter stays in the cross-target signature so callers pass
+        // it identically regardless of target.
+        #[cfg(not(target_arch = "wasm32"))]
         use crate::caller_kind::CallerKind;
+        #[cfg(target_arch = "wasm32")]
+        let _ = caller_kind;
 
         // Lock-discipline guard: the driver thread MUST NOT enter
         // wait_or_drive — its loop is the sole pump and would
@@ -4053,7 +4062,11 @@ impl Scheduler {
         // external waiters. A debug_assert catches programming
         // errors during development; release builds rely on the
         // structural separation enforced by the driver loop never
-        // calling this method.
+        // calling this method. Native-only: wasm has no driver thread
+        // (`driver_loop_native` and `driver_handle` are both
+        // `cfg(not(target_arch = "wasm32"))`), so a `Driver` caller
+        // cannot occur there and the invariant is vacuous.
+        #[cfg(not(target_arch = "wasm32"))]
         debug_assert!(
             !matches!(caller_kind, CallerKind::Driver) || self.driver_handle.lock().is_none(),
             "Driver thread must not enter wait_or_drive (would deadlock: \
