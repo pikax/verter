@@ -145,6 +145,22 @@ jobs:
           path: packages/native/dist/*.node
           if-no-files-found: error
 
+      # The NAPI-generated JS loader (`dist/index.js`) is what the
+      # committed root `index.js` wrapper requires at runtime; it owns
+      # platform detection + the optional-dependency fallback. It is
+      # identical across every target (same exported idents + package
+      # name), so upload it from ONE canonical native build. The
+      # publish-npm job drops it into the main package's `dist/` before
+      # packing — without any `.node`, which ships only in the
+      # per-platform optional-dependency packages.
+      - name: Upload generated napi loader
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@v6
+        with:
+          name: native-loader
+          path: packages/native/dist/index.js
+          if-no-files-found: error
+
   # ---------------------------------------------------------------------------
   # Build verter-tsc binary (matrix — for npm platform packages)
   # ---------------------------------------------------------------------------
@@ -507,6 +523,31 @@ jobs:
       # Build TS packages
       - name: Build TS packages
         run: pnpm run build:ts
+
+      # Prepare the @verter/native MAIN package for publishing.
+      #
+      # The root `index.js` is a thin wrapper that `require('./dist/index.js')`
+      # — the NAPI-generated loader. That loader (built once on the canonical
+      # native runner) owns platform detection + the optional-dependency
+      # fallback, so the main package must ship `dist/index.js` (the loader)
+      # and `dist/*.d.ts` (the types) but NO `.node`. The real binaries went
+      # to `packages/native/npm/<triple>/` in the "Move native artifacts"
+      # step above; the main package's `dist/` deliberately stays binary-free.
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-loader
+          path: packages/native/dist
+      - name: Generate @verter/native dist types
+        run: pnpm --filter @verter/native run build:types
+      # Gate publish on the packaging guards ONLY (hermetic — they build
+      # their own fake install layouts / use `npm pack --dry-run`, so they
+      # do NOT require a built `.node` in the main package's binary-free
+      # `dist/`). The Rust-backed suite is covered by CI, not the publish
+      # gate.
+      - name: Guard @verter/native pack shape + loader fallback
+        run: >-
+          pnpm --filter @verter/native exec vitest run
+          loader-fallback.spec.ts pack-shape.spec.ts clean-dist.spec.ts
 
       # Publish all packages that need publishing
       - name: Publish packages

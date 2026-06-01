@@ -20,7 +20,10 @@
     "index.js",
     "host-types.ts",
     "audit.ts",
-    "dist"
+    "dist/index.js",
+    "dist/index.d.ts",
+    "dist/host-types.d.ts",
+    "dist/audit.d.ts"
   ],
   "main": "index.js",
   "types": "dist/index.d.ts",
@@ -41,6 +44,8 @@
     "build:debug": "pnpm run clean:dist && napi build -o dist --platform --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact",
     "prepublishOnly": "pnpm run build && napi prepublish -t npm",
     "artifacts": "napi artifacts",
+    "ensure-native-loader": "node ./scripts/ensure-native-loader.mjs",
+    "pretest": "pnpm run ensure-native-loader",
     "test": "vitest run"
   },
   "devDependencies": {

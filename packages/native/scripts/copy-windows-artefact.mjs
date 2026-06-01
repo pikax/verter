@@ -7,8 +7,9 @@
 // directly, but a direct `cargo build --release --package
 // verter_napi` (e.g. from a developer doing a quick rebuild) lands
 // the DLL in `target/release/verter_napi.dll` without renaming. This
-// hook closes that gap so `packages/native/index.js`'s tryLoad can
-// find the binary.
+// hook closes that gap so the generated `dist/index.js` loader's
+// co-located lookup (`require('./verter-native.win32-x64-msvc.node')`)
+// finds the binary.
 //
 // On non-Windows platforms this script is a no-op.
 //

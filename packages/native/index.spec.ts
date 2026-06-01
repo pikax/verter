@@ -653,12 +653,19 @@ describe("VerterHost type declarations in sync with native binary", () => {
 
   it("prefers the canonical verter-native binary when loading from dist", () => {
     const indexPath = require.resolve("./index.js");
+    // The root wrapper delegates to the NAPI-generated loader at
+    // `./dist/index.js`, which is what actually `require`s the `.node`.
+    // Evict BOTH the wrapper and the loader from the module cache so the
+    // re-require below re-runs the loader's binary resolution (otherwise
+    // the cached loader short-circuits and no `.node` is re-loaded).
+    const loaderPath = require.resolve("./dist/index.js");
     const nativeNodeModules = Object.keys(require.cache).filter(
       (entry) =>
         entry.includes(`${sep}packages${sep}native${sep}dist${sep}`) && entry.endsWith(".node"),
     );
 
     delete require.cache[indexPath];
+    delete require.cache[loaderPath];
     for (const entry of nativeNodeModules) {
       delete require.cache[entry];
     }
