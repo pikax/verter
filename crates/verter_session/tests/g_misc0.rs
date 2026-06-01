@@ -128,6 +128,8 @@ mod tls_harness_cross_crate;
 mod tls_harness_in_crate;
 #[path = "g_misc0/tracer_stack_reentrant_observe_safe.rs"]
 mod tracer_stack_reentrant_observe_safe;
+#[path = "g_misc0/uniqueness_check_release_active.rs"]
+mod uniqueness_check_release_active;
 #[path = "g_misc0/walker_parity_baselines_have_full_coverage.rs"]
 mod walker_parity_baselines_have_full_coverage;
 #[path = "g_misc0/workspace_audit_production_callsite.rs"]

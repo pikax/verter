@@ -584,29 +584,42 @@ fn compile_many_no_deadlock_under_full_host_and_scheduler_pools() {
 // 7. Duplicate canonicals NEVER reach submit_batch_atomic (P0-1)
 // ---------------------------------------------------------------------------
 
-/// The engine's canonical-uniqueness check must be ACTIVE IN RELEASE and
-/// computed BEFORE the atomic submission (and before every per-request
-/// side effect). A source-updating batch carrying two requests for the
-/// SAME canonical would bump that node's generation twice under the
-/// single `dag.lock()` acquisition inside `submit_batch_atomic`,
-/// self-superseding the earlier admit and corrupting the batch —
-/// `submit_batch_atomic` does not dedup.
+/// The engine's canonical-uniqueness check must EXIST, must be computed
+/// BEFORE the atomic submission, and must run BEFORE every per-request side
+/// effect. A source-updating batch carrying two requests for the SAME
+/// canonical would bump that node's generation twice under the single
+/// `dag.lock()` acquisition inside `submit_batch_atomic`, self-superseding
+/// the earlier admit and corrupting the batch — `submit_batch_atomic` does
+/// not dedup.
+///
+/// SCOPE. This is a DEBUG-profile test: it drives the scheduler's per-admit
+/// epoch trace (`test_install_batch_admit_epoch_trace` /
+/// `test_take_batch_admit_epochs`), whose hooks are gated `#[cfg(any(test,
+/// debug_assertions))]` in the scheduler crate, so a `--release` test run
+/// does NOT compile this test. It therefore proves the EXISTENCE and
+/// ORDERING of the check in the debug profile; it does NOT, and cannot,
+/// prove the check is RELEASE-ACTIVE. Release-activeness (the check must be
+/// a real `assert!`/`panic!`, never a `debug_assert!` that a release build
+/// compiles out) is enforced statically by
+/// `tests/g_misc0/uniqueness_check_release_active.rs`, which extracts the
+/// `assert_canonicals_unique` fn body and fails on a `debug_assert*!`
+/// downgrade.
 ///
 /// Discriminating properties (this test FAILS against the pre-fix tree,
 /// where the check was a `debug_assert!` that ran AFTER the per-request
-/// side-effect loop AND after building the scheduler request list):
+/// side-effect loop AND after building the scheduler request list — in the
+/// DEBUG profile the old `debug_assert!` still fired, but it fired in the
+/// WRONG ORDER, which properties 2 and 4 below detect):
 ///
 ///  1. **The call panics.** Driving `upsert_many_with_priority` with a
-///     duplicated canonical unwinds (caught here). A pre-fix release
-///     build compiled the `debug_assert!` out entirely, so the duplicate
-///     would silently reach `submit_batch_atomic`; pinning the panic
-///     pins the release-active form.
+///     duplicated canonical unwinds (caught here), proving the check
+///     EXISTS and fires in this debug build. (This says nothing about
+///     release — see SCOPE above; the static guard pins the release form.)
 ///  2. **No batch was admitted.** The per-admit epoch trace — populated
 ///     EXCLUSIVELY by `handle_new_request_batch` (the body of
 ///     `submit_batch_atomic`) — is EMPTY after the panic, proving the
 ///     check fired BEFORE submission. A regression that moved the check
-///     back after `submit_batch_atomic` (or relied on the no-op release
-///     `debug_assert!`) would record ≥1 epoch here.
+///     back after `submit_batch_atomic` would record ≥1 epoch here.
 ///  3. **No source was committed.** The scheduler holds NO source
 ///     snapshot for the duplicated canonical afterwards, corroborating
 ///     that the atomic submission never ran for this batch.
@@ -616,9 +629,8 @@ fn compile_many_no_deadlock_under_full_host_and_scheduler_pools() {
 ///     still be `None` — proving the uniqueness check fired before ANY
 ///     per-request side effect. The pre-fix `debug_assert!` ran AFTER
 ///     the loop, so the first duplicate had already written
-///     `Some(priority)` here; this assertion fails against that ordering
-///     in BOTH debug and release test builds (independent of whether
-///     `debug_assertions` compiles the old assert out).
+///     `Some(priority)` here; this assertion fails against that pre-fix
+///     ordering in the debug test build.
 #[test]
 fn upsert_duplicate_canonical_panics_before_submit_batch_atomic() {
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -650,10 +662,13 @@ fn upsert_duplicate_canonical_panics_before_submit_batch_atomic() {
 
     assert!(
         result.is_err(),
-        "a duplicate-canonical batch must PANIC through the release-active \
-         uniqueness assertion before reaching `submit_batch_atomic`; the \
-         pre-fix `debug_assert!` would be compiled out in a release-shaped \
-         build and the duplicate would silently corrupt the batch"
+        "a duplicate-canonical batch must PANIC through the uniqueness \
+         assertion before reaching `submit_batch_atomic` (proven here in the \
+         debug profile). The production check MUST be release-active so the \
+         duplicate also cannot silently corrupt the batch in a release build \
+         where a `debug_assert!` would be compiled out — that release form is \
+         pinned statically by `uniqueness_check_release_active.rs`, since this \
+         test does not compile under `--release`"
     );
 
     let epochs = host.scheduler.test_take_batch_admit_epochs();
