@@ -17,10 +17,13 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum SchedulerJobKind {
-    /// Resolve component-meta for a given canonical id. The session
-    /// layer (`MetaSession::get_component_meta` in Batch mode) submits
-    /// this variant so N independent requests run concurrently on the
-    /// scheduler's CPU pool.
+    /// Resolve component-meta for a given canonical id. The external
+    /// host/runtime layer maps a batch of these job items and fans them
+    /// out through its own batch-coordination primitive (running the
+    /// outer wait on its coordinator pool, NOT the scheduler stage
+    /// pool); the scheduler only accounts for the batch submission. The
+    /// per-item closures resolve concurrently while the scheduler's
+    /// stage pool stays free to dispatch their cross-file `Load`/`Parse`.
     ComponentMeta { canonical_id: Arc<str> },
 }
 

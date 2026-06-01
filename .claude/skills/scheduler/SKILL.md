@@ -139,98 +139,110 @@ Lifecycle (steady state):
 
 ## Dual pool ownership
 
-Two distinct `rayon::ThreadPool`s live in the scheduler crate so the
-batch-orchestration outer wait and the scheduler's CPU stage
-executor cannot deadlock on the same workers.
+Two distinct `rayon::ThreadPool`s cooperate so the batch-orchestration
+outer wait and the scheduler's CPU stage executor cannot deadlock on
+the same workers. They are owned by DIFFERENT layers — the split is
+the deadlock-isolation invariant.
 
-- **`HostCpuPool`** —
-  `crates/verter_scheduler/src/host_cpu_pool.rs`. Constructed once
-  at host startup by the calling crate via
-  `verter_scheduler::HostCpuPool::new(num_threads)`. Reserved for
-  the outer batch coordinator's synchronous wait points. Workers do
-  **NOT** execute `TaskKind::Parse` or `TaskKind::CacheNode`.
-- **`SchedulerCpuPool`** —
-  `crates/verter_scheduler/src/pool.rs`. Caller-constructed and
-  passed as `Arc<SchedulerCpuPool>` at `Scheduler::new` /
-  `with_executor`. The scheduler holds the Arc internally for
-  driver `TaskKind::Parse` / `TaskKind::CacheNode` dispatch.
+- **Scheduler stage pool (`cpu_pool`)** — owned BY the scheduler,
+  built internally in `Scheduler::with_executor` /
+  `new_sync_with_executor` from `SchedulerConfig::cpu_threads`. It is
+  the ONLY pool for parse/analysis/artifact/cache-node stage
+  execution: the driver dispatches `TaskKind::Parse` /
+  `TaskKind::CacheNode` / CPU `Analysis` / CPU `Artifact` onto it via
+  `cpu_pool.spawn(...)`. Workers register `CallerKind::CpuWorker` so
+  `wait_or_drive` routes them to the cooperative-pump branch. The
+  scheduler also owns the bounded `io_pool`
+  (`SchedulerConfig::io_threads`) for `TaskKind::Load`.
+- **Coordinator pool (`HostCpuPool`)** —
+  `crates/verter_scheduler/src/host_cpu_pool.rs`. Constructed once at
+  startup by the external host/runtime layer via
+  `verter_scheduler::HostCpuPool::new(num_threads)` and owned THERE,
+  as a sibling of the `Scheduler` — NOT passed into the scheduler and
+  NOT a field on it. Reserved for the outer batch coordinator's
+  synchronous wait points. Its workers register `CallerKind::External`
+  (8 MiB stacks), so they PARK in `wait_or_drive` rather than
+  inline-executing scheduler CPU tasks, and the driver's inline-execute
+  branch excludes `External` — coordinator-pool workers therefore NEVER
+  run `TaskKind::Parse` / `TaskKind::CacheNode`.
 
-Both pools build their `rayon::ThreadPool` with
-`.stack_size(8 * 1024 * 1024)` so deeply-nested template
-compilation cannot stack-overflow under Windows defaults.
+The scheduler constructor takes only `(config, source_loader[,
+executor])` — there is NO pool parameter. The scheduler builds and owns
+its `cpu_pool` + `io_pool`; the coordinator pool lives entirely in the
+external layer:
 
 ```rust
 impl Scheduler {
     pub fn new(
         config: SchedulerConfig,
         source_loader: Arc<dyn SourceLoader>,
-        host_cpu_pool: Arc<HostCpuPool>,
-        scheduler_cpu_pool: Arc<SchedulerCpuPool>,
-        io_pool: Arc<IoPool>,
     ) -> Arc<Self> {
-        Self::with_executor(
-            config,
-            source_loader,
-            Arc::new(DefaultExecutor),
-            host_cpu_pool,
-            scheduler_cpu_pool,
-            io_pool,
-        )
+        Self::with_executor(config, source_loader, Arc::new(DefaultExecutor))
     }
 
     pub fn with_executor(
         config: SchedulerConfig,
         source_loader: Arc<dyn SourceLoader>,
         executor: Arc<dyn StageExecutor>,
-        host_cpu_pool: Arc<HostCpuPool>,
-        scheduler_cpu_pool: Arc<SchedulerCpuPool>,
-        io_pool: Arc<IoPool>,
     ) -> Arc<Self> {
-        // Construct + spawn driver thread holding `Weak<Scheduler>`.
+        // Build `cpu_pool` (config.cpu_threads, CpuWorker-tagged) and
+        // `io_pool` (config.io_threads); spawn the driver thread
+        // holding `Weak<Scheduler>`. No coordinator pool here.
     }
 }
 
 pub struct Scheduler {
-    pub(crate) host_cpu_pool: Arc<HostCpuPool>,
-    pub(crate) scheduler_cpu_pool: Arc<SchedulerCpuPool>,
-    pub(crate) io_pool: Arc<IoPool>,
-    pub(crate) ready_queue: Arc<crossbeam_queue::ArrayQueue<Arc<CacheNodeDagNode>>>,
-    pub(crate) pending_requests: Arc<DashMap<DedupKey, Vec<CompletionSender<RequestResult>>>>,
-    // ... other existing state (inbox, edges, job_index, overlay, source_loader,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) cpu_pool: rayon::ThreadPool, // stage execution ONLY
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) io_pool: crate::pool::IoPool,
+    // ... other existing state (inbox, edges, dag, overlay, source_loader,
     //     executor, tombstones, generation_floors, deferred_blocker_ids,
-    //     removal_epoch, shutdown, driver_handle, counters, config, dags) ...
+    //     removal_epoch, shutdown, driver_handle, counters, config) ...
 }
 ```
 
-The pool handles are `Arc`-stored so no lifetime parametrisation is
-needed on `Scheduler`. The constructor takes `Arc<HostCpuPool>` (not
-a borrow) because `HostCpuPool { pool: rayon::ThreadPool }` is not
-`Clone`. The return type is `Arc<Self>` so the existing
-`Weak<Scheduler>` driver thread lifecycle is preserved. The caller
-constructs:
+**Single batch-coordination primitive (lives in the external host/
+runtime layer, not in this crate).** Every host/runtime batch API
+(batch component-meta, batch SFC compile, and any future batch
+fan-out) routes its outer wait through ONE coordinator primitive owned
+by the external layer. That primitive — not the scheduler — owns:
+coordinator-pool `install`; the empty / single-item fast path;
+deterministic per-input ordering; panic / cancellation / shutdown
+propagation; and the non-reentrant policy below. The scheduler crate
+exposes NO outer-fan-out API and performs NO `par_iter().install(...)`
+outer wait on its `cpu_pool`; a batch's per-batch submission accounting
+is a pool-free counter bump (`Scheduler::account_batch_submission`).
 
-```rust
-let host_cpu_pool = Arc::new(HostCpuPool::new(num_threads_outer));
-let scheduler_cpu_pool = Arc::new(SchedulerCpuPool::new(num_threads_scheduler));
-let io_pool = Arc::new(IoPool::new(io_threads));
-let scheduler: Arc<Scheduler> = Scheduler::new(
-    config,
-    source_loader,
-    Arc::clone(&host_cpu_pool), // shared with the host
-    scheduler_cpu_pool,
-    io_pool,
-);
-// `host_cpu_pool` is retained by the calling crate for outer
-// batch installs; the scheduler holds the matching Arc clone.
-```
+**Non-reentrant host-batch contract.** A batch item closure may call
+scalar scheduler operations, but a nested batch fan-out reached from
+inside an item closure must NOT issue a fresh coordinator-pool install.
+The external primitive detects re-entrancy (a per-thread marker scoped
+around each item's execution) and runs the nested fan-out INLINE /
+sequentially on the current coordinator worker. Stacking a second outer
+wait on the same finite coordinator pool would reintroduce the
+starvation class one level up.
 
-**Deadlock-free property.** The two pools are distinct: **no worker
-waits for a job in its OWN pool.** A `HostCpuPool` worker CAN block
-on `SchedulerCpuPool` work without deadlock because the
-`SchedulerCpuPool` has its own worker set that proceeds
-independently. A `SchedulerCpuPool` worker running `TaskKind::Parse`
-is not a worker on `HostCpuPool` and does not gate the outer
-coordinator's wait.
+**Deadlock-free property + new invariant.** The two pools are distinct
+and owned by different layers: **no worker waits for a job in its OWN
+pool.** A coordinator-pool worker may block on scheduler stage work
+without deadlock because the scheduler's `cpu_pool` has its own worker
+set that proceeds independently; a `cpu_pool` worker running
+`TaskKind::Parse` is not a coordinator worker and does not gate the
+outer coordinator's wait. The invariant in full:
+
+> Outer API fan-out may block only on scheduler-owned work;
+> scheduler-owned work must never require coordinator-pool workers;
+> nested host-batch fan-out is rejected or collapsed inline by the
+> external batch coordinator. External host/runtime layers own the
+> coordinator pool(s) and the batch-coordination primitive; they must
+> not run outer waits on the scheduler stage pool.
+
+Guards live in the external host/runtime layer (not in this crate, to
+preserve the one-way dependency): a watchdog-bounded regression
+characterizes the starvation deadlock (cold cross-file deps + a stage
+pool sized to the batch width), and the coordinator primitive's own
+reentrancy test pins the inline collapse of a nested batch.
 
 ## Per-call concurrency semaphore
 
@@ -282,14 +294,21 @@ and let N>capacity tasks run concurrently.
 
 ## TaskKind routing
 
+> Pool naming: the stage-execution CPU pool is the scheduler-owned
+> `cpu_pool` (`rayon::ThreadPool`, dispatched via `cpu_pool.spawn`); see
+> *Dual pool ownership* for the authoritative pool model. The
+> `SchedulerCpuPool::submit` form below is the cache-runtime
+> DAG-submission design target; on the current tree the same stage work
+> dispatches onto `cpu_pool`.
+
 The scheduler routes:
 
-- `TaskKind::Load { canonical }` → `IoPool::submit` (pure I/O —
-  reads bytes off disk; no executor dispatch, the source loader
-  drives the I/O directly).
-- `TaskKind::Parse { canonical, source, file_kind }` →
-  `SchedulerCpuPool::submit` (pure CPU; payload carries `file_kind`
-  so `execute_source` classifies without re-deriving from path).
+- `TaskKind::Load { canonical }` → I/O pool (pure I/O — reads bytes
+  off disk; no executor dispatch, the source loader drives the I/O
+  directly).
+- `TaskKind::Parse { canonical, source, file_kind }` → stage CPU pool
+  (pure CPU; payload carries `file_kind` so `execute_source`
+  classifies without re-deriving from path).
 - `TaskKind::Analysis { canonical, source_snapshot }` →
   `SchedulerCpuPool::submit`. Dispatch destructures `canonical` off
   the payload and passes the snapshot reference to
@@ -317,9 +336,13 @@ The legacy `TaskKind::Source` (which combined load + parse on I/O)
 is RETIRED. The source loader synthesises a `Load → Parse` DAG
 edge. `SchedulerJobKind` (the existing non-staged component-meta
 batch enum at `stage.rs:19`) is **retained** unchanged — it
-discriminates `ComponentMeta { canonical_id }` and is dispatched by
-`Scheduler::dispatch_meta_jobs`. The new `TaskKind::CacheNode`
-variant lives alongside it on the new ready-queue envelope.
+discriminates `ComponentMeta { canonical_id }`. The scheduler does
+NOT own the batch fan-out for it: the external host/runtime layer maps
+these job items and fans them out through its own batch-coordination
+primitive (see *Dual pool ownership*), calling
+`Scheduler::account_batch_submission` once per non-empty batch for the
+O(1) submission accounting. The new `TaskKind::CacheNode` variant
+lives alongside it on the new ready-queue envelope.
 
 ### StageExecutor dispatch surface
 
@@ -455,20 +478,24 @@ no-edge `CacheNodeDag` and calls `submit_dag`.
 
 ## Pool routing rules
 
-- **`IoPool`** owns `TaskKind::Load { canonical }` and any other
-  pure-I/O work. A parse closure on `IoPool` is a bug
+- **`io_pool`** owns `TaskKind::Load { canonical }` and any other
+  pure-I/O work. A parse closure on the I/O pool is a bug
   (`pool_isolation::source_parse_runs_on_cpu_pool_not_io_pool`).
-- **`SchedulerCpuPool`** owns `TaskKind::Parse`,
+- **Scheduler stage pool (`cpu_pool`)** owns `TaskKind::Parse`,
   `TaskKind::CacheNode`, and CPU-bound `TaskKind::Analysis` /
-  `TaskKind::Artifact`. The calling crate constructs
-  `Arc<SchedulerCpuPool>` at host startup and hands the Arc clone
-  into `Scheduler::new`.
-- **`HostCpuPool`** owns the outer batch coordinator's wait points.
-  The calling crate constructs `Arc<HostCpuPool>` at host startup,
-  retains its own Arc clone for outer-batch installs, and hands a
-  second Arc clone into `Scheduler::new`. The scheduler does NOT
-  dispatch tasks onto `HostCpuPool`. Guard:
-  `compile_many_one_pool_per_host::two_back_to_back_compile_many_share_pool`.
+  `TaskKind::Artifact`. The scheduler builds and owns it internally
+  from `SchedulerConfig::cpu_threads`; it is NOT passed into the
+  constructor. This is the only pool the driver dispatches stage work
+  onto.
+- **Coordinator pool (`HostCpuPool`)** owns the outer batch
+  coordinator's wait points. The external host/runtime layer
+  constructs it once at startup and OWNS it (a sibling of the
+  `Scheduler`, never handed into the constructor). The scheduler does
+  NOT reference it and NEVER dispatches tasks onto it; equally, no
+  scheduler API installs an outer wait on the stage pool. The
+  coordinator pool is reused across batch calls (sized once from the
+  external layer's config). Guard (external layer):
+  `two_back_to_back_compile_many_share_pool`.
 
 ## Test-support helpers (`feature = "test-support"`)
 
