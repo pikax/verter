@@ -15054,3 +15054,110 @@ fn typeinfo_surface_carries_spans_not_rendered_strings() {
         violations.join("\n"),
     );
 }
+
+// ── Guard — compile_batch_options_has_no_thread_field ──
+//
+// Worker count for `compile_many` is fixed at host construction time
+// (`HostConfig::host_cpu_threads`); the host-owned CPU pool is never
+// resized per call. `CompileBatchOptions` must therefore carry NO
+// per-call thread / concurrency knob. A per-call `threads` field
+// (`CompileBatchOptions.threads`) was removed; re-adding any of
+// `threads` / `thread_count` / `num_threads` would reintroduce a
+// per-call concurrency surface and is a B7-scoped concept that does not
+// belong on this options struct. (`CpuConcurrencySemaphore` and a
+// per-call concurrency cap are the not-yet-built B7 design target.)
+//
+// Predicate: parse `crates/verter_session/src/host_compile.rs` via syn,
+// find `pub struct CompileBatchOptions`, and assert none of its named
+// fields is one of the banned thread-knob names.
+
+const BANNED_THREAD_FIELD_NAMES: &[&str] = &["threads", "thread_count", "num_threads"];
+
+/// Pure core of the guard. Given parsed source and the target struct
+/// name, returns `(found_struct, banned_fields_present)`. No I/O, so the
+/// discriminator self-test can drive it against a synthetic struct.
+fn compile_batch_options_banned_thread_fields(
+    parsed: &syn::File,
+    target_struct: &str,
+) -> (bool, Vec<String>) {
+    use syn::{Fields, Item};
+    let mut found_struct = false;
+    let mut banned_present = Vec::<String>::new();
+    for item in &parsed.items {
+        let Item::Struct(s) = item else { continue };
+        if s.ident != target_struct {
+            continue;
+        }
+        found_struct = true;
+        let Fields::Named(named) = &s.fields else {
+            panic!(
+                "{target_struct} is expected to have named fields; found {:?}",
+                s.fields
+            );
+        };
+        for field in &named.named {
+            let field_name = field
+                .ident
+                .as_ref()
+                .map(|id| id.to_string())
+                .unwrap_or_default();
+            if BANNED_THREAD_FIELD_NAMES.contains(&field_name.as_str()) {
+                banned_present.push(field_name);
+            }
+        }
+        break;
+    }
+    (found_struct, banned_present)
+}
+
+#[test]
+fn compile_batch_options_has_no_thread_field() {
+    use syn::parse_file;
+
+    let src = read_workspace_file("crates/verter_session/src/host_compile.rs");
+    let parsed = parse_file(&src).expect("parse host_compile.rs via syn");
+
+    let (found_struct, banned_present) =
+        compile_batch_options_banned_thread_fields(&parsed, "CompileBatchOptions");
+
+    // Positive precondition: the guard actually SAW the struct (a rename
+    // or move would silently pass otherwise).
+    assert!(
+        found_struct,
+        "compile_batch_options_has_no_thread_field: `pub struct CompileBatchOptions` not found in \
+         host_compile.rs — did it move or get renamed? The guard must scan the real surface type."
+    );
+
+    assert!(
+        banned_present.is_empty(),
+        "CompileBatchOptions must carry NO per-call thread/concurrency knob, but found field(s): \
+         {banned_present:?}. Worker count is fixed at host construction via \
+         HostConfig::host_cpu_threads; a per-call thread cap is a B7-scoped concept \
+         (CpuConcurrencySemaphore), not an option on this struct."
+    );
+}
+
+/// Discriminator self-test: the predicate MUST flag a `threads` field if
+/// one is re-added. Drives the pure core against a synthetic struct
+/// source carrying the banned field, proving the guard above is not
+/// vacuous.
+#[test]
+fn compile_batch_options_guard_catches_readded_thread_field() {
+    use syn::parse_file;
+
+    let synthetic = "pub struct CompileBatchOptions { \
+                     pub priority: Option<Priority>, \
+                     pub default_mode: Option<CompileCacheMode>, \
+                     pub threads: Option<usize>, \
+                     }";
+    let parsed = parse_file(synthetic).expect("parse synthetic struct");
+    let (found_struct, banned_present) =
+        compile_batch_options_banned_thread_fields(&parsed, "CompileBatchOptions");
+    assert!(found_struct, "self-test must find the synthetic struct");
+    assert_eq!(
+        banned_present,
+        vec!["threads".to_string()],
+        "the guard predicate must flag a re-added `threads` field — otherwise the \
+         real guard is vacuous"
+    );
+}
