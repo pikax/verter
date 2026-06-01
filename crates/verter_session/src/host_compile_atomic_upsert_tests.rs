@@ -250,78 +250,125 @@ fn compile_many_upsert_batch_captures_calling_thread_request_context() {
 
 /// The Stage-B error string is `format!("upsert failed: {e}")` where
 /// `e` is the `HostError` produced by the completion-state mapper inside
-/// `upsert_many_with_priority`:
+/// the upsert engine:
 ///   - `Ready(_)`     → `finish_upsert_post_commit(...)`
 ///   - `Failed(e)`    → `HostError::Scheduler(e)`
 ///   - `Superseded`   → `HostError::Superseded`
 ///   - `Shutdown`     → `HostError::Shutdown`
 ///
-/// This test pins BOTH halves so it discriminates:
+/// This test drives a REAL batch through the ACTUAL mapper
+/// (`UpsertBatchTxn::map_states`, the SAME code `finish` runs after
+/// `wait_batch`) with a MIXED state vector covering all four arms, then
+/// pins each per-index outcome:
 ///
-///  1. **Real atomic path (Ready arm).** A valid cold batch driven
-///     through `upsert_many_with_priority` must map every request to
-///     `Ok(HostUpdateResult)`. This exercises the production
-///     `submit_batch_atomic` + `wait_batch` + per-index
-///     `finish_upsert_post_commit` mapping. (`upsert_many_with_priority`
-///     and `UpsertBatchOutcome` do not exist pre-change, so the test
-///     cannot compile against the old tree — the mapper it pins is new.)
+///  - It builds the genuine transaction via `test_submit_upsert_batch_parts`
+///    (real `submit_batch_atomic`, real committed source snapshots),
+///    takes the genuine `Ready` states via `wait_batch`, then SPLICES in
+///    synthetic `Failed` / `Superseded` / `Shutdown` states at chosen
+///    indices and feeds the whole vector to `finish_from_states`.
+///  - The Ready index therefore routes through the real
+///    `finish_upsert_post_commit` against a really-committed source; the
+///    three failure indices route through the real error arms. No mapping
+///    logic is reconstructed in the test — only the *source* of the
+///    non-Ready states is synthetic.
 ///
-///  2. **Exhaustive terminal-state strings.** Every non-Ready terminal
-///     state's `upsert failed: …` rendering is pinned through the SAME
-///     `HostError::Display` Stage B uses, so a regression that changed
-///     the completion-state→`HostError` mapping or the error string
-///     fails here.
+/// Discriminating properties (would FAIL on a regressed mapper that the
+/// hand-built-`HostError` predecessor could not catch):
+///  1. **No early-return.** All four indices are present in the output.
+///  2. **Ready → Ok with its canonical.** A mapper that swapped the
+///     Ready arm to an error, or attached the wrong canonical, fails.
+///  3. **Each failure arm → EXACT `upsert failed: {e}` string.** A
+///     transposed arm (e.g. `Superseded`↦`Shutdown`) changes the per-
+///     index string and fails. The strings render through the SAME
+///     `HostError::Display` Stage B uses
+///     (`format!("upsert failed: {e}")`).
 #[test]
 fn upsert_batch_completion_mapping_preserves_error_strings() {
-    // ── Part 1: real atomic path, Ready arm maps to Ok ──
+    use verter_scheduler::job::{CompletionState, RequestResult, SchedulerError};
+
     let host = new_host();
-    let outcomes = host.upsert_many_with_priority(
-        vec![
-            upsert_req("/ok0.vue", &good_template("o0")),
-            upsert_req("/ok1.vue", &good_template("o1")),
-        ],
-        Priority::Background,
+
+    // Index → canonical. Index 0 is the only Ready arm; 1..=3 are the
+    // three non-Ready terminal arms.
+    let reqs = vec![
+        upsert_req("/map-ready.vue", &good_template("ready")),
+        upsert_req("/map-failed.vue", &good_template("failed")),
+        upsert_req("/map-superseded.vue", &good_template("superseded")),
+        upsert_req("/map-shutdown.vue", &good_template("shutdown")),
+    ];
+    let ids: Vec<String> = reqs.iter().map(|r| r.canonical_id.clone().unwrap()).collect();
+
+    // Build the REAL transaction (real submit + committed sources) and
+    // take the genuine states via the production `wait_batch`.
+    let (prepared, batch) =
+        host.test_submit_upsert_batch_parts(reqs, Priority::Background);
+    let mut states: Vec<CompletionState<RequestResult>> = host.scheduler.wait_batch(&batch);
+    assert_eq!(states.len(), 4, "one completion state per submitted request");
+    assert!(
+        matches!(states[0], CompletionState::Ready(_)),
+        "index 0 must have genuinely committed to Ready so the Ready arm \
+         exercises the real finish_upsert_post_commit against a committed \
+         source; got {:?}",
+        states[0]
     );
-    assert_eq!(outcomes.len(), 2, "every request maps to one outcome");
-    for outcome in &outcomes {
-        match &outcome.result {
-            Ok(update) => assert_eq!(
-                update.canonical_id, outcome.canonical_id,
-                "Ready arm must route through finish_upsert_post_commit and \
-                 carry the request's canonical"
-            ),
-            Err(e) => panic!(
-                "valid cold upsert of `{}` must succeed through the atomic \
-                 path, got: {e}",
-                outcome.canonical_id
-            ),
-        }
+
+    // Splice synthetic non-Ready terminal states at 1..=3. The Ready
+    // state at index 0 is left untouched (a real committed snapshot).
+    states[1] = CompletionState::Failed(SchedulerError::FileNotFound {
+        file_id: "/x.vue".to_string(),
+    });
+    states[2] = CompletionState::Superseded;
+    states[3] = CompletionState::Shutdown;
+
+    // Drive the REAL mapper. `finish_from_states` calls the same
+    // `map_states` the production `finish` calls — only the state source
+    // is controlled.
+    let outcomes = crate::host_upsert::UpsertBatchTxn::finish_from_states(&host, prepared, states);
+
+    // (1) No early-return: every index present, in input order.
+    assert_eq!(
+        outcomes.len(),
+        4,
+        "the mapper must map EVERY index — a partial failure must not \
+         early-return"
+    );
+    for (i, outcome) in outcomes.iter().enumerate() {
+        assert_eq!(
+            outcome.canonical_id, ids[i],
+            "outcome[{i}] must carry its prepared canonical"
+        );
     }
 
-    // ── Part 2: exhaustive HostError → Stage-B string shapes ──
-    // Pin the EXACT `upsert failed: …` rendering for every terminal
-    // state the mapper produces, through the same `HostError::Display`
-    // Stage B uses (`group_errors.entry(id).or_insert_with(|| format!(
-    // "upsert failed: {e}"))`).
-    let superseded = format!("upsert failed: {}", HostError::Superseded);
+    // (2) Ready arm → Ok carrying its canonical.
+    match &outcomes[0].result {
+        Ok(update) => assert_eq!(
+            update.canonical_id, ids[0],
+            "Ready arm must route through finish_upsert_post_commit and \
+             carry the request's canonical"
+        ),
+        Err(e) => panic!("Ready arm must map to Ok, got error: {e}"),
+    }
+
+    // (3) Each failure arm → its EXACT `upsert failed: {e}` string,
+    //     rendered through the same `HostError::Display` Stage B uses.
+    let render = |r: &Result<crate::types::HostUpdateResult, HostError>| match r {
+        Ok(_) => panic!("expected an Err arm"),
+        Err(e) => format!("upsert failed: {e}"),
+    };
     assert_eq!(
-        superseded, "upsert failed: request superseded by newer generation",
-        "Superseded → exact string"
-    );
-    let shutdown = format!("upsert failed: {}", HostError::Shutdown);
-    assert_eq!(
-        shutdown, "upsert failed: scheduler shut down",
-        "Shutdown → exact string"
-    );
-    let failed = format!(
-        "upsert failed: {}",
-        HostError::Scheduler(verter_scheduler::job::SchedulerError::FileNotFound {
-            file_id: "/x.vue".to_string(),
-        })
+        render(&outcomes[1].result),
+        "upsert failed: scheduler error: file not found: /x.vue",
+        "Failed(SchedulerError) → HostError::Scheduler exact string"
     );
     assert_eq!(
-        failed, "upsert failed: scheduler error: file not found: /x.vue",
-        "Failed(SchedulerError) → exact string"
+        render(&outcomes[2].result),
+        "upsert failed: request superseded by newer generation",
+        "Superseded → HostError::Superseded exact string"
+    );
+    assert_eq!(
+        render(&outcomes[3].result),
+        "upsert failed: scheduler shut down",
+        "Shutdown → HostError::Shutdown exact string"
     );
 }
 
@@ -329,65 +376,139 @@ fn upsert_batch_completion_mapping_preserves_error_strings() {
 // 5. Completion indices map to prepared canonicals regardless of order (P0)
 // ---------------------------------------------------------------------------
 
-/// `wait_batch` returns completion states in INPUT order, and
-/// `upsert_many_with_priority` zips `state[i]` with `prepared[i]`. Even
-/// though the N requests complete on the scheduler's pool in a
-/// nondeterministic order, `outcomes[i].canonical_id` must equal the
-/// i-th submitted request's canonical, and a successful
-/// `HostUpdateResult.canonical_id` must equal that SAME canonical
-/// (proving `finish_upsert_post_commit` received the matching
-/// `prepared[i]`, not a transposed one).
+/// The mapper zips `state[i]` with `prepared[i]`, and that pairing must
+/// be the IDENTITY zip — `state[i] ↔ prepared[i]` for every i. The
+/// predecessor of this test used N all-`Ready` requests where
+/// `finish_upsert_post_commit` reads back by the prepared canonical, so a
+/// reversed `state[i]` list still produced the right per-index canonical
+/// and the test could NOT detect a transposition.
 ///
-/// Pre-change `upsert_many_with_priority` does not exist, so this test
-/// pins the new transaction's index-preserving contract.
+/// This version makes a transposition OBSERVABLE by giving each index a
+/// DISTINCT terminal state through the real mapper
+/// (`UpsertBatchTxn::finish_from_states` → `map_states`): one `Ready`
+/// arm and three distinct error arms (`Failed`/`Superseded`/`Shutdown`),
+/// each error carrying a per-index-unique payload. Because every index's
+/// expected outcome is unique, swapping ANY two completion states changes
+/// at least one per-index outcome and trips an assertion. The test
+/// proves this directly: it asserts the in-order mapping, then re-runs
+/// the mapper with two states swapped and asserts the swapped outcome no
+/// longer matches the in-order expectation.
 #[test]
 fn upsert_batch_result_indices_map_to_prepared_canonicals() {
-    let host = new_host();
-    // Distinct canonicals with distinct sources so each is a genuine
-    // cold parse; enough of them that completion order is not the
-    // submission order.
-    let reqs: Vec<UpsertRequest> = (0..8)
-        .map(|i| {
-            upsert_req(
-                &format!("/idx{i}.vue"),
-                &good_template(&format!("body-{i}")),
-            )
-        })
-        .collect();
-    let expected_ids: Vec<String> = reqs
-        .iter()
-        .map(|r| r.canonical_id.clone().unwrap())
-        .collect();
+    use verter_scheduler::job::{CompletionState, RequestResult, SchedulerError};
 
-    let outcomes = host.upsert_many_with_priority(reqs, Priority::Interactive);
-    assert_eq!(
-        outcomes.len(),
-        expected_ids.len(),
-        "one outcome per submitted request"
+    let host = new_host();
+    let reqs = vec![
+        upsert_req("/zip-ready.vue", &good_template("zr")),
+        upsert_req("/zip-failed.vue", &good_template("zf")),
+        upsert_req("/zip-superseded.vue", &good_template("zs")),
+        upsert_req("/zip-shutdown.vue", &good_template("zd")),
+    ];
+    let ids: Vec<String> = reqs.iter().map(|r| r.canonical_id.clone().unwrap()).collect();
+
+    // Per-index DISTINCT terminal states. Index 0 stays the genuine
+    // `Ready` (committed source); 1..=3 are distinct error arms.
+    let build_states =
+        |ready: CompletionState<RequestResult>| -> Vec<CompletionState<RequestResult>> {
+            vec![
+                ready,
+                CompletionState::Failed(SchedulerError::FileNotFound {
+                    file_id: "/zip-failed-payload.vue".to_string(),
+                }),
+                CompletionState::Superseded,
+                CompletionState::Shutdown,
+            ]
+        };
+
+    // The per-index expected error string (None ⇒ the Ready/Ok index).
+    let expected_err: [Option<&str>; 4] = [
+        None,
+        Some("upsert failed: scheduler error: file not found: /zip-failed-payload.vue"),
+        Some("upsert failed: request superseded by newer generation"),
+        Some("upsert failed: scheduler shut down"),
+    ];
+
+    // ── In-order run: each state at its own index ──
+    let (prepared, batch) =
+        host.test_submit_upsert_batch_parts(reqs, Priority::Interactive);
+    let mut states = host.scheduler.wait_batch(&batch);
+    assert!(
+        matches!(states[0], CompletionState::Ready(_)),
+        "index 0 must commit to Ready"
     );
+    let ready0 = std::mem::replace(&mut states[0], CompletionState::Superseded);
+    let in_order = build_states(ready0);
+
+    let outcomes =
+        crate::host_upsert::UpsertBatchTxn::finish_from_states(&host, prepared, in_order);
+    assert_eq!(outcomes.len(), 4, "one outcome per index");
 
     for (i, outcome) in outcomes.iter().enumerate() {
         assert_eq!(
-            outcome.canonical_id, expected_ids[i],
-            "outcome[{i}].canonical_id must equal the i-th submitted \
-             request's canonical (input-order zip): expected `{}`, got `{}`",
-            expected_ids[i], outcome.canonical_id
+            outcome.canonical_id, ids[i],
+            "outcome[{i}].canonical_id must equal the i-th prepared canonical"
         );
-        match &outcome.result {
-            Ok(update) => assert_eq!(
-                update.canonical_id, expected_ids[i],
-                "the Ready post-commit result for position {i} must carry \
-                 the SAME canonical — a transposed zip would attach \
-                 `finish_upsert_post_commit`'s result to the wrong prepared \
-                 entry. Expected `{}`, got `{}`",
-                expected_ids[i], update.canonical_id
+        match (&outcome.result, expected_err[i]) {
+            (Ok(update), None) => assert_eq!(
+                update.canonical_id, ids[i],
+                "the Ready post-commit result for index {i} must carry the \
+                 SAME canonical — a transposed zip would attach the result \
+                 to the wrong prepared entry"
             ),
-            Err(e) => panic!(
-                "cold upsert of `{}` must succeed, got error: {e}",
-                expected_ids[i]
+            (Err(e), Some(want)) => assert_eq!(
+                format!("upsert failed: {e}"),
+                want,
+                "index {i} must map to its OWN terminal state's error string"
+            ),
+            (got, want) => panic!(
+                "index {i}: outcome/expectation mismatch — got {got:?}, \
+                 expected error {want:?}"
             ),
         }
     }
+
+    // ── Transposition is observable: swap states[1]↔states[2] and prove
+    //    the per-index outcome changes (the identity zip is load-bearing).
+    //    A mapper that ignored index alignment would yield the SAME
+    //    per-index outcomes as the in-order run; here index 1 must flip
+    //    from the `Failed` string to the `Superseded` string and index 2
+    //    vice-versa.
+    let (prepared2, batch2) = host.test_submit_upsert_batch_parts(
+        vec![
+            upsert_req("/zip-ready.vue", &good_template("zr")),
+            upsert_req("/zip-failed.vue", &good_template("zf")),
+            upsert_req("/zip-superseded.vue", &good_template("zs")),
+            upsert_req("/zip-shutdown.vue", &good_template("zd")),
+        ],
+        Priority::Interactive,
+    );
+    let mut states2 = host.scheduler.wait_batch(&batch2);
+    let ready0b = std::mem::replace(&mut states2[0], CompletionState::Superseded);
+    let mut swapped = build_states(ready0b);
+    swapped.swap(1, 2);
+
+    let swapped_outcomes =
+        crate::host_upsert::UpsertBatchTxn::finish_from_states(&host, prepared2, swapped);
+    // Index 1 now holds the `Superseded` state; index 2 the `Failed` one.
+    assert_eq!(
+        match &swapped_outcomes[1].result {
+            Err(e) => format!("upsert failed: {e}"),
+            Ok(_) => panic!("index 1 must be an error after the swap"),
+        },
+        "upsert failed: request superseded by newer generation",
+        "after swapping states[1]↔states[2], index 1 MUST reflect the \
+         state now at position 1 (Superseded) — proving the mapper pairs \
+         state[i] with prepared[i] positionally, not by content"
+    );
+    assert_eq!(
+        match &swapped_outcomes[2].result {
+            Err(e) => format!("upsert failed: {e}"),
+            Ok(_) => panic!("index 2 must be an error after the swap"),
+        },
+        "upsert failed: scheduler error: file not found: /zip-failed-payload.vue",
+        "after the swap, index 2 MUST reflect the Failed state now at \
+         position 2"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -448,5 +569,113 @@ fn compile_many_no_deadlock_under_full_host_and_scheduler_pools() {
     assert!(
         host.compile_one_call_count.load(Ordering::Relaxed) >= N,
         "every unique canonical must have been compiled at least once"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 7. Duplicate canonicals NEVER reach submit_batch_atomic (P0-1)
+// ---------------------------------------------------------------------------
+
+/// The engine's canonical-uniqueness check must be ACTIVE IN RELEASE and
+/// computed BEFORE the atomic submission (and before every per-request
+/// side effect). A source-updating batch carrying two requests for the
+/// SAME canonical would bump that node's generation twice under the
+/// single `dag.lock()` acquisition inside `submit_batch_atomic`,
+/// self-superseding the earlier admit and corrupting the batch —
+/// `submit_batch_atomic` does not dedup.
+///
+/// Discriminating properties (this test FAILS against the pre-fix tree,
+/// where the check was a `debug_assert!` that ran AFTER the per-request
+/// side-effect loop AND after building the scheduler request list):
+///
+///  1. **The call panics.** Driving `upsert_many_with_priority` with a
+///     duplicated canonical unwinds (caught here). A pre-fix release
+///     build compiled the `debug_assert!` out entirely, so the duplicate
+///     would silently reach `submit_batch_atomic`; pinning the panic
+///     pins the release-active form.
+///  2. **No batch was admitted.** The per-admit epoch trace — populated
+///     EXCLUSIVELY by `handle_new_request_batch` (the body of
+///     `submit_batch_atomic`) — is EMPTY after the panic, proving the
+///     check fired BEFORE submission. A regression that moved the check
+///     back after `submit_batch_atomic` (or relied on the no-op release
+///     `debug_assert!`) would record ≥1 epoch here.
+///  3. **No source was committed.** The scheduler holds NO source
+///     snapshot for the duplicated canonical afterwards, corroborating
+///     that the atomic submission never ran for this batch.
+///  4. **The check runs BEFORE the per-request side-effect loop.** The
+///     `#[cfg(test)]` `last_upsert_priority` observable is written
+///     INSIDE that loop (once per request). After the panic it must
+///     still be `None` — proving the uniqueness check fired before ANY
+///     per-request side effect. The pre-fix `debug_assert!` ran AFTER
+///     the loop, so the first duplicate had already written
+///     `Some(priority)` here; this assertion fails against that ordering
+///     in BOTH debug and release test builds (independent of whether
+///     `debug_assertions` compiles the old assert out).
+#[test]
+fn upsert_duplicate_canonical_panics_before_submit_batch_atomic() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let host = new_host();
+    let dup = "/dup-engine.vue";
+
+    // The side-effect-ordering observable starts unset on a fresh host.
+    assert!(
+        host.last_upsert_priority.lock().is_none(),
+        "precondition: fresh host has no recorded upsert priority"
+    );
+
+    // Arm the per-admit epoch recorder BEFORE the (expected-to-panic)
+    // call. It is populated only from inside `submit_batch_atomic`'s
+    // `handle_new_request_batch`, so an empty trace afterward proves the
+    // uniqueness check fired before any admission.
+    host.scheduler.test_install_batch_admit_epoch_trace();
+
+    // Two source-updating requests for ONE canonical in a single batch.
+    let reqs = vec![
+        upsert_req(dup, &good_template("first")),
+        upsert_req(dup, &good_template("second")),
+    ];
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        host.upsert_many_with_priority(reqs, Priority::Interactive)
+    }));
+
+    assert!(
+        result.is_err(),
+        "a duplicate-canonical batch must PANIC through the release-active \
+         uniqueness assertion before reaching `submit_batch_atomic`; the \
+         pre-fix `debug_assert!` would be compiled out in a release-shaped \
+         build and the duplicate would silently corrupt the batch"
+    );
+
+    let epochs = host.scheduler.test_take_batch_admit_epochs();
+    assert!(
+        epochs.is_empty(),
+        "the uniqueness check must fire BEFORE `submit_batch_atomic` — the \
+         per-admit epoch trace (populated only inside \
+         `handle_new_request_batch`) must be EMPTY, proving NO batch was \
+         admitted. Got {} admit epoch(s): {epochs:?}. A non-empty trace \
+         means the duplicate reached the atomic admission path.",
+        epochs.len()
+    );
+
+    assert!(
+        host.scheduler.try_get_source(dup).is_none(),
+        "no source snapshot must have been committed for the duplicated \
+         canonical `{dup}` — the panic must precede the atomic submission \
+         that would commit it"
+    );
+
+    // Ordering: the uniqueness check fired BEFORE the per-request
+    // side-effect loop, so the in-loop `last_upsert_priority` observable
+    // was never written. The pre-fix post-loop `debug_assert!` would have
+    // left this `Some(Priority::Interactive)` (the first duplicate ran
+    // the loop body before the panic).
+    assert!(
+        host.last_upsert_priority.lock().is_none(),
+        "the uniqueness check must run BEFORE any per-request side effect — \
+         `last_upsert_priority` (written inside the per-request loop) must \
+         still be None after the panic. A recorded priority means the \
+         check ran AFTER the side-effect loop (the pre-fix ordering)."
     );
 }

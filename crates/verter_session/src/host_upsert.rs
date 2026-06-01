@@ -41,7 +41,7 @@ pub(crate) struct UpsertBatchOutcome {
 /// `old_source_snap` is a cloned `Arc<SourceSnapshot>` (or `None` for a
 /// cold file) read from the scheduler before submission — never a live
 /// DashMap shard `Ref`, so no guard crosses `submit_batch_atomic`.
-struct PreparedUpsertCommit {
+pub(crate) struct PreparedUpsertCommit {
     canonical_id: String,
     req: UpsertRequest,
     old_source_snap: Option<Arc<verter_scheduler::node::SourceSnapshot>>,
@@ -52,12 +52,12 @@ struct PreparedUpsertCommit {
 ///
 /// The transaction is the unit that owns the index alignment invariant:
 /// `prepared[i]` is the request whose completion is `batch.handles()[i]`.
-/// `submit` builds it (capture context once, prepare each request,
-/// assert canonical uniqueness, ONE `submit_batch_atomic`); `finish`
-/// consumes it (ONE `wait_batch`, then zip `state[i]` ↔ `prepared[i]`
-/// and run each post-commit). There is no path that produces a
-/// `prepared`/`batch` pair out of alignment.
-struct UpsertBatchTxn {
+/// `submit` builds it (resolve + assert canonical uniqueness FIRST,
+/// capture context once, prepare each request, ONE `submit_batch_atomic`);
+/// `finish` consumes it (ONE `wait_batch`, then zip `state[i]` ↔
+/// `prepared[i]` and run each post-commit). There is no path that
+/// produces a `prepared`/`batch` pair out of alignment.
+pub(crate) struct UpsertBatchTxn {
     prepared: Vec<PreparedUpsertCommit>,
     batch: verter_scheduler::scheduler::BatchHandle,
 }
@@ -69,8 +69,6 @@ impl UpsertBatchTxn {
     /// failure never early-returns, so the result `Vec` always has one
     /// outcome per submitted request, in input order.
     fn finish(self, host: &VerterHost) -> Vec<UpsertBatchOutcome> {
-        use verter_scheduler::job::CompletionState;
-
         let UpsertBatchTxn { prepared, batch } = self;
         // ONE input-order wait. `wait_batch` returns `state[i]` for the
         // i-th submitted request regardless of completion order.
@@ -80,6 +78,29 @@ impl UpsertBatchTxn {
             prepared.len(),
             "wait_batch must return one completion state per submitted request"
         );
+        Self::map_states(host, prepared, states)
+    }
+
+    /// The completion-state → [`UpsertBatchOutcome`] mapper: zip each
+    /// `state[i]` with its `prepared[i]` and route by completion arm.
+    /// This is the SOLE partial-failure mapping logic — `finish` calls it
+    /// after the production `wait_batch`, and the test-only
+    /// `finish_from_states` seam calls it with controlled states so the
+    /// mapping under test is the production one (never duplicated).
+    ///
+    /// Every index is mapped (no early-return on a non-Ready arm), in
+    /// input order:
+    ///   - `Ready(_)`     → `finish_upsert_post_commit` (carries the
+    ///                       request's canonical on success)
+    ///   - `Failed(e)`    → `HostError::Scheduler(e)`
+    ///   - `Superseded`   → `HostError::Superseded`
+    ///   - `Shutdown`     → `HostError::Shutdown`
+    fn map_states(
+        host: &VerterHost,
+        prepared: Vec<PreparedUpsertCommit>,
+        states: Vec<verter_scheduler::job::CompletionState<verter_scheduler::job::RequestResult>>,
+    ) -> Vec<UpsertBatchOutcome> {
+        use verter_scheduler::job::CompletionState;
 
         prepared
             .into_iter()
@@ -100,6 +121,30 @@ impl UpsertBatchTxn {
                 }
             })
             .collect()
+    }
+
+    /// Test-only seam: run the REAL completion-state mapper
+    /// ([`Self::map_states`]) against a caller-supplied
+    /// `(prepared, states)` pair, bypassing only the `wait_batch` source
+    /// of the states. Lets a test drive MIXED `Ready`/`Failed`/
+    /// `Superseded`/`Shutdown` arms through the production mapping logic
+    /// without standing up a scheduler that produces those terminal
+    /// states on demand — the mapping itself is not duplicated in the
+    /// test. `prepared` and `states` MUST be the same length (the §6c
+    /// index-alignment invariant); a length mismatch silently truncates
+    /// via `zip`, so the seam asserts equality up front.
+    #[cfg(test)]
+    pub(crate) fn finish_from_states(
+        host: &VerterHost,
+        prepared: Vec<PreparedUpsertCommit>,
+        states: Vec<verter_scheduler::job::CompletionState<verter_scheduler::job::RequestResult>>,
+    ) -> Vec<UpsertBatchOutcome> {
+        assert_eq!(
+            prepared.len(),
+            states.len(),
+            "finish_from_states requires one completion state per prepared entry"
+        );
+        Self::map_states(host, prepared, states)
     }
 }
 
@@ -139,8 +184,8 @@ impl VerterHost {
     /// there is no second single-file submit path. The semantic-db
     /// pre-invalidation (the parse-domain producer contract) and the
     /// test-only priority observable live in `upsert_many_with_priority`,
-    /// applied per request, so a 1-element call observes them exactly as
-    /// the former dedicated single-file path did.
+    /// applied per request, so a 1-element call observes them exactly as a
+    /// multi-request batch does.
     pub(crate) fn upsert_with_priority(
         &self,
         req: UpsertRequest,
@@ -177,25 +222,26 @@ impl VerterHost {
     ///
     /// Flow:
     /// 1. Empty input short-circuits to an empty `Vec`.
-    /// 2. The calling thread's `OpaqueRequestContext` is captured ONCE
+    /// 2. Every request's canonical is resolved up front and checked for
+    ///    uniqueness FIRST, before any per-request side effect or the
+    ///    atomic submission. A release-active assertion
+    ///    (`assert_canonicals_unique`) rejects a duplicated canonical: two
+    ///    source-updating requests for one file would each bump the node
+    ///    generation and supersede the prior in the same critical section,
+    ///    a correctness bug `submit_batch_atomic` does not guard against
+    ///    (it does not dedup). This is a caller-contract invariant —
+    ///    every caller dedups by canonical before reaching the engine.
+    /// 3. The calling thread's `OpaqueRequestContext` is captured ONCE
     ///    here (before any submission) and cloned into every batch
     ///    `Request`. This is the correct audit owner: the scheduler
     ///    installs the context into the source / analysis worker TLS, so
     ///    fan-out events stay attributable to the outer audited request.
-    ///    (The former per-file `current_context()` ran inside a host-pool
-    ///    worker, which carries no caller TLS — an implementation
-    ///    artifact, not the intended owner.)
-    /// 3. Per request: the parse-domain producer contract
+    /// 4. Per request: the parse-domain producer contract
     ///    (`register_facts_for_new_content`) fires, the test-only
     ///    priority observable is recorded, the pre-submit source snapshot
     ///    is captured (a cloned `Arc`, never a live shard `Ref` — no
     ///    DashMap guard crosses `submit_batch_atomic`), and one
     ///    `Request { target: Analysis, .. }` is built.
-    /// 4. A hard uniqueness assertion rejects duplicate canonicals BEFORE
-    ///    admission — two source-updating requests for one file would each
-    ///    bump the node generation and supersede the prior in the same
-    ///    critical section, a correctness bug `submit_batch_atomic` does
-    ///    not guard against (it does not dedup).
     /// 5. Exactly ONE `submit_batch_atomic` + exactly ONE `wait_batch`.
     /// 6. `wait_batch` returns completion states in INPUT order; `state[i]`
     ///    is zipped with `prepared[i]` and mapped to one outcome each. A
@@ -215,21 +261,54 @@ impl VerterHost {
         if requests.is_empty() {
             return Vec::new();
         }
-        // 2–5: build the transaction (capture context once, prepare each
-        //      request, assert uniqueness, ONE `submit_batch_atomic`).
+        // 2–5: build the transaction (resolve + uniqueness-check canonicals
+        //      first, capture context once, prepare each request, ONE
+        //      `submit_batch_atomic`).
         // 6:   drive it (ONE `wait_batch`, then per-index post-commit).
         self.submit_upsert_batch(requests, priority).finish(self)
     }
 
-    /// Build the in-flight upsert transaction: capture the calling
-    /// thread's request context once, run each request's producer
-    /// contract + priority observable + pre-submit snapshot, assert
-    /// canonical uniqueness, and issue the SINGLE `submit_batch_atomic`.
+    /// Build the in-flight upsert transaction: resolve and uniqueness-
+    /// check every canonical FIRST, capture the calling thread's request
+    /// context once, run each request's producer contract + priority
+    /// observable + pre-submit snapshot, and issue the SINGLE
+    /// `submit_batch_atomic`.
     fn submit_upsert_batch(
         &self,
         requests: Vec<UpsertRequest>,
         priority: Priority,
     ) -> UpsertBatchTxn {
+        // ── Canonical uniqueness: resolved + enforced FIRST ──
+        //
+        // Resolve every request's canonical id up front, then reject a
+        // duplicated canonical BEFORE any per-request side effect runs
+        // (`register_facts_for_new_content`, the pre-submit snapshot
+        // read) and BEFORE the atomic submission. A duplicated canonical
+        // in one source-updating batch would bump that node's generation
+        // twice under the single `dag.lock()` acquisition, self-superseding
+        // the earlier admit and corrupting the batch — `submit_batch_atomic`
+        // does NOT dedup. Resolving first also means the side-effect loop
+        // below reuses these canonicals instead of re-deriving them.
+        //
+        // This is a `pub(crate)` caller-contract invariant, not a runtime
+        // input class: every caller already guarantees uniqueness
+        // (`compile_many`'s Stage B keys `canonical_to_upsert` by canonical
+        // so it carries one entry per file; the single-file
+        // `upsert_with_priority` submits a 1-element batch that is trivially
+        // unique). A breach is a programming bug in the caller, so it is a
+        // `assert!` (active in release, unlike the inputs it guards) that
+        // fails loudly before admission rather than a recoverable error
+        // arm. `assert_canonicals_unique` panics on a duplicate.
+        let canonicals: Vec<String> = requests
+            .iter()
+            .map(|req| {
+                req.canonical_id
+                    .clone()
+                    .unwrap_or_else(|| canonicalize_id(&req.input_id).into_owned())
+            })
+            .collect();
+        Self::assert_canonicals_unique(&canonicals);
+
         // Capture the CALLING thread's request context ONCE, before any
         // submission, and clone it into every batch Request. The
         // scheduler installs it into the source / analysis worker TLS, so
@@ -244,21 +323,15 @@ impl VerterHost {
         let mut prepared: Vec<PreparedUpsertCommit> = Vec::with_capacity(requests.len());
         let mut scheduler_requests: Vec<verter_scheduler::scheduler::Request> =
             Vec::with_capacity(requests.len());
-        for req in requests {
-            let canonical_id = req
-                .canonical_id
-                .clone()
-                .unwrap_or_else(|| canonicalize_id(&req.input_id).into_owned());
-
+        for (req, canonical_id) in requests.into_iter().zip(canonicals) {
             // R4 producer: drop the prior parse-domain `FileSemantic` for
             // this canonical so the next resolver pass rebuilds the fact
             // registry from the new content. This is the producer
             // contract — NOT downstream cache invalidation. Downstream
             // caches revalidate lazily through their own
             // `fact_dep_signature` checks (R3); the upsert itself does not
-            // eagerly drain them. (The former single-file path ran this in
-            // `upsert_with_priority` before delegating; the engine now owns
-            // it per request so both entry points behave identically.)
+            // eagerly drain them. The engine owns this per request so the
+            // single-file and batch entry points behave identically.
             if let Some(ref id) = req.canonical_id {
                 self.register_facts_for_new_content(id);
             }
@@ -295,25 +368,6 @@ impl VerterHost {
             });
         }
 
-        // Hard uniqueness assertion: duplicate source-updating requests
-        // for one canonical must fail before scheduler admission, not
-        // silently bump the node generation twice in one critical section.
-        // `compile_many`'s Stage B dedups upstream (`canonical_to_upsert`
-        // carries one entry per canonical), and a 1-element single-file
-        // call is trivially unique.
-        debug_assert!(
-            {
-                let mut seen = std::collections::HashSet::with_capacity(prepared.len());
-                prepared
-                    .iter()
-                    .all(|p| seen.insert(p.canonical_id.as_str()))
-            },
-            "upsert_many_with_priority received duplicate canonical_ids — a \
-             source-updating batch with a repeated file_id would bump the \
-             node generation twice under one DAG-lock and supersede the prior \
-             admit, corrupting the batch. Dedup before calling the engine."
-        );
-
         // Exactly ONE atomic submission. `submit_batch_atomic` lands a
         // single `NewRequestBatch` admitted under one `dag.lock()` and
         // accounts once itself — do NOT call `account_batch_submission` on
@@ -321,6 +375,55 @@ impl VerterHost {
         // order, index-aligned with `prepared`.
         let batch = self.scheduler.submit_batch_atomic(scheduler_requests);
         UpsertBatchTxn { prepared, batch }
+    }
+
+    /// Enforce the engine's canonical-uniqueness caller contract.
+    ///
+    /// Panics (active in release) if `canonicals` contains a duplicated
+    /// entry. A source-updating atomic batch with a repeated canonical
+    /// would bump that node's generation twice under the single
+    /// `dag.lock()` acquisition, self-superseding the earlier admit and
+    /// corrupting the batch; `submit_batch_atomic` does not dedup, so the
+    /// guard is the only thing standing between a buggy caller and a torn
+    /// batch. Callers MUST dedup by canonical before reaching the engine.
+    ///
+    /// Lifted out of `submit_upsert_batch` so it is a single named
+    /// invariant the §6c regression test can drive directly and so the
+    /// check is unambiguously computed before any per-request side effect.
+    fn assert_canonicals_unique(canonicals: &[String]) {
+        let mut seen = std::collections::HashSet::with_capacity(canonicals.len());
+        for canonical in canonicals {
+            assert!(
+                seen.insert(canonical.as_str()),
+                "upsert_many_with_priority received duplicate canonical_id \
+                 `{canonical}` — a source-updating batch with a repeated \
+                 file_id would bump the node generation twice under one \
+                 DAG-lock and supersede the prior admit, corrupting the \
+                 batch. Dedup by canonical before calling the engine."
+            );
+        }
+    }
+
+    /// Test-only seam: run the REAL `submit_upsert_batch` and hand back
+    /// its `(prepared, batch)` parts (index-aligned) so a test can call
+    /// `wait_batch` for the genuine `Ready` states, then splice in
+    /// synthetic non-Ready terminal states at chosen indices and drive
+    /// the whole vector through the production mapper
+    /// ([`UpsertBatchTxn::finish_from_states`]). The Ready arm therefore
+    /// exercises the real `finish_upsert_post_commit` against genuinely
+    /// committed source snapshots, while the failure arms exercise the
+    /// real error mapping — no mapping logic is reconstructed in the test.
+    #[cfg(test)]
+    pub(crate) fn test_submit_upsert_batch_parts(
+        &self,
+        requests: Vec<UpsertRequest>,
+        priority: Priority,
+    ) -> (
+        Vec<PreparedUpsertCommit>,
+        verter_scheduler::scheduler::BatchHandle,
+    ) {
+        let UpsertBatchTxn { prepared, batch } = self.submit_upsert_batch(requests, priority);
+        (prepared, batch)
     }
 
     /// Per-canonical post-commit: read back the committed parse, compute
