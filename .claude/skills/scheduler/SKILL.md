@@ -1,6 +1,6 @@
 ---
 name: scheduler
-description: Verter scheduler — Scheduler, submit_request/submit_batch, live TaskKind (Source/Analysis/Artifact), CPU vs I/O pool routing, scheduler-owned cpu_pool + host-owned HostCpuPool coordinator (shared by every host batch API), account_batch_submission; plus the Block-7 design target (KeyedJob/CacheNodeDagNode/SchedulerCpuPool/submit_dag/DAG submission/dedupe-hook) demarcated as not-yet-implemented
+description: Verter scheduler — Scheduler, submit_request/submit_batch/submit_batch_atomic (atomic DAG admission via driver-drained NewRequestBatch + shared admission core + deferred DedupJoinerEvent), wait_batch (input-order), live TaskKind (Source/Analysis/Artifact), CPU vs I/O pool routing, scheduler-owned cpu_pool + host-owned HostCpuPool coordinator (shared by every host batch API), account_batch_submission; plus the Block-7 design target (KeyedJob/CacheNodeDagNode/SchedulerCpuPool/submit_dag/DAG submission/dedupe-hook) demarcated as not-yet-implemented
 ---
 
 # Scheduler
@@ -8,12 +8,41 @@ description: Verter scheduler — Scheduler, submit_request/submit_batch, live T
 This skill is the concise reference for the `verter_scheduler` crate.
 
 The **live** surface (current tree) is: the `submit_request` /
-`submit_batch` submission API, the live `TaskKind` variant set
-(`Source` / `Analysis` / `Artifact`), CPU vs I/O pool routing, and the
-dual pool ownership — the scheduler-owned stage `cpu_pool` (+ `io_pool`)
-plus the host-owned `HostCpuPool` coordinator shared by every host batch
-API, with per-batch `account_batch_submission` accounting. The *Dual
-pool ownership* section is the authority for the live pool model.
+`submit_batch` / `submit_batch_atomic` submission API, the live
+`TaskKind` variant set (`Source` / `Analysis` / `Artifact`), CPU vs I/O
+pool routing, and the dual pool ownership — the scheduler-owned stage
+`cpu_pool` (+ `io_pool`) plus the host-owned `HostCpuPool` coordinator
+shared by every host batch API, with per-batch
+`account_batch_submission` accounting. The *Dual pool ownership* section
+is the authority for the live pool model.
+
+`submit_batch` is non-atomic (N separate `Submission::NewRequest` items;
+the pump may observe the batch half-admitted, and `submit_count` is
+bumped per item). `submit_batch_atomic` lands ONE
+`Submission::NewRequestBatch { requests: Vec<QueuedRequest> }` that the
+driver drains as a unit and admits under a SINGLE `dag.lock()`
+acquisition via `handle_new_request_batch` (generation bumps + supersede
+sweeps + waiter registration for every request inside one critical
+section): the pump can never observe a half-admitted batch, one batch is
+ONE wake + ONE `submit_count` bump, and a source-updating batch
+supersedes every file's old generation atomically. Both paths share one
+admission core — `prepare_request` (pre-lock: tombstone gate + node
+ensure, cloning the `FileNode` `Arc` out of the `nodes` DashMap BEFORE
+locking, the AB-BA-safe DAG-first ordering), `admit_prepared_under_lock`
+(the sole place a request bumps generation, runs the supersede sweep,
+registers the waiter, and admits work), and an `AdmissionPostWork`
+accumulator that fires deferred dedup callbacks + clears auto-ingest
+tracking AFTER the lock releases. `SchedulerDag::register_request`
+returns `Option<DedupJoinerEvent>` (fired post-unlock via
+`DedupJoinerEvent::fire`) instead of invoking `on_dedup_joiner` under the
+DAG lock — the callback may re-enter the scheduler, so it must not run
+while admission holds the mutex. `BatchHandle` carries one
+`CompletionHandle` per input in submission order; `wait_batch(&self,
+&BatchHandle)` returns results in INPUT order and never surfaces a
+partial set. The pump discipline is preserved throughout: dispatch /
+wait / parse / compile / callbacks all run outside the DAG lock, and
+capacity stays reserved at dequeue time. `compile_many` is NOT yet wired
+onto `submit_batch_atomic` (it still upserts per-file).
 
 The **Block 7 design target** (NOT yet on the tree) adds the
 `submit_dag` / `CacheNodeDag` DAG surface, the `KeyedJob` /
