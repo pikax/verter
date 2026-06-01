@@ -13,7 +13,8 @@ use std::sync::Arc;
 /// coordinator pool (never the scheduler stage pool), accounting the
 /// batch submission through the scheduler's pool-free
 /// `account_batch_submission`. The scheduler's stage pool stays free to
-/// dispatch each item's cross-file `Load`/`Parse`.
+/// dispatch each item's cross-file `Source` stage work (the load+parse
+/// step folded into `TaskKind::Source`).
 ///
 /// Currently the only non-staged job kind is `ComponentMeta`; the enum
 /// is kept open for future extensions (resolve-named-type adapters,
@@ -27,7 +28,8 @@ pub enum SchedulerJobKind {
     /// outer wait on its coordinator pool, NOT the scheduler stage
     /// pool); the scheduler only accounts for the batch submission. The
     /// per-item closures resolve concurrently while the scheduler's
-    /// stage pool stays free to dispatch their cross-file `Load`/`Parse`.
+    /// stage pool stays free to dispatch their cross-file `Source` stage
+    /// work (the load+parse step folded into `TaskKind::Source`).
     ComponentMeta { canonical_id: Arc<str> },
 }
 

@@ -18,7 +18,7 @@
 //! Two CPU pools coexist in the host process:
 //!
 //! - The scheduler-owned CPU pool (`Scheduler::cpu_pool`) executes
-//!   `TaskKind::{Parse, Analysis, Artifact}` stage work. Its workers
+//!   `TaskKind::{Source, Analysis, Artifact}` stage work. Its workers
 //!   register as [`CallerKind::CpuWorker`](caller_kind::CallerKind) so
 //!   the cooperative pump may inline-execute ready dependencies on the
 //!   same thread.

@@ -1694,10 +1694,15 @@ would allow a saturated scheduler CPU pool to starve `compile_many`'s
 outer collect/order phase that itself blocks on scheduler-queued
 parse work.
 
-- **`HostCpuPool`** — owned by `VerterHost`, used **only** by
-  `compile_many`'s outer batch coordinator (the synchronous
-  collect/order/finalise phase). Workers do NOT execute
-  `TaskKind::Parse` or `TaskKind::CacheNode`. Located at
+- **`HostCpuPool`** — owned by `VerterHost`. As introduced in this
+  block it backed `compile_many`'s outer batch coordinator (the
+  synchronous collect/order/finalise phase). A later change (the
+  batch-pool deadlock fix) routes the component-meta batch coordinator
+  through this **same** host pool, so in the current tree `HostCpuPool`
+  is the shared coordinator pool for **every** host batch API — see
+  the `HostBatchCoordinator` primitive in
+  `crates/verter_session/src/host_batch_coordinator.rs`. Its workers do
+  NOT execute scheduler stage work. Located at
   `crates/verter_scheduler/src/host_cpu_pool.rs` so both the
   host-side `verter_session::host_compile` and the scheduler can
   reference the type (H20 — `verter_scheduler → verter_session` is
@@ -1735,11 +1740,15 @@ impl HostCpuPool {
 `VerterHost` owns `Arc<HostCpuPool>` and exposes it via
 `host_cpu_pool()`. The scheduler does NOT know about the host pool —
 the host pool is the coordinator-only side of the dual-pool design,
-constructed and stored entirely on the host. `compile_many`
-exclusively uses `host.host_cpu_pool().install(...)` for its outer
-coordinator phase; the scheduler's CPU stage executor exclusively
-uses `SchedulerCpuPool`. The two pools never share workers, and the
-scheduler has no reference to `HostCpuPool` at all.
+constructed and stored entirely on the host. As introduced here
+`compile_many` was the lone consumer of
+`host.host_cpu_pool().install(...)` for its outer coordinator phase;
+in the current tree the same host pool serves the outer coordinator of
+**every** host batch API (component-meta batch included) via the shared
+`HostBatchCoordinator`, so it is no longer `compile_many`-exclusive.
+The scheduler's own CPU stage executor never touches the host pool. The
+two pools never share workers, and the scheduler has no reference to
+`HostCpuPool` at all.
 
 Workers register as `CallerKind::External` in TLS via the host pool's
 `start_handler`, so when the coordinator blocks on a scheduler

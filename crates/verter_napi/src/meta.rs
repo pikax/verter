@@ -293,9 +293,11 @@ impl NapiMetaSession {
     }
 
     /// Batch surface for `getComponentMeta`: compute metadata for
-    /// `canonicalsOrAliases` under one shared overlay view and a single
-    /// scheduler dispatch. Returns one slot per input in input order;
-    /// a missing slot is encoded as a sentinel zero-length `Buffer`
+    /// `canonicalsOrAliases` under one shared overlay view. The host batch
+    /// coordinator fans the N queries out on the host-owned coordinator
+    /// pool and accounts the batch submission exactly once. Returns one
+    /// slot per input in input order; a missing slot is encoded as a
+    /// sentinel zero-length `Buffer`
     /// (a real payload always contains the FFI envelope, so JS readers
     /// can use `buf.length === 0` as the canonical "no result"
     /// sentinel). Per-id failures (budget overruns, alias errors)

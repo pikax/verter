@@ -1,17 +1,28 @@
 ---
 name: scheduler
-description: Verter scheduler — Scheduler, KeyedJob, CacheNodeDagNode, TaskKind (Load/Parse/Analysis/Artifact/CacheNode), pool routing (CPU vs I/O), HostCpuPool + SchedulerCpuPool ownership, DAG submission, dedupe-hook integration
+description: Verter scheduler — Scheduler, submit_request/submit_batch, live TaskKind (Source/Analysis/Artifact), CPU vs I/O pool routing, scheduler-owned cpu_pool + host-owned HostCpuPool coordinator (shared by every host batch API), account_batch_submission; plus the Block-7 design target (KeyedJob/CacheNodeDagNode/SchedulerCpuPool/submit_dag/DAG submission/dedupe-hook) demarcated as not-yet-implemented
 ---
 
 # Scheduler
 
 This skill is the concise reference for the `verter_scheduler` crate.
-It covers the public submission surface (`submit_request` /
-`submit_dag`), the `KeyedJob` / `CacheNodeDagNode` types, the
-`TaskKind` variant set, CPU vs I/O pool routing, the dual
-host-CPU / scheduler-CPU pool ownership, DAG semantics (dependency
+
+The **live** surface (current tree) is: the `submit_request` /
+`submit_batch` submission API, the live `TaskKind` variant set
+(`Source` / `Analysis` / `Artifact`), CPU vs I/O pool routing, and the
+dual pool ownership — the scheduler-owned stage `cpu_pool` (+ `io_pool`)
+plus the host-owned `HostCpuPool` coordinator shared by every host batch
+API, with per-batch `account_batch_submission` accounting. The *Dual
+pool ownership* section is the authority for the live pool model.
+
+The **Block 7 design target** (NOT yet on the tree) adds the
+`submit_dag` / `CacheNodeDag` DAG surface, the `KeyedJob` /
+`CacheNodeDagNode` types, the expanded `Load` / `Parse` / `CacheNode`
+`TaskKind` variants on `SchedulerCpuPool`, DAG semantics (dependency
 gating, priority inheritance, cancellation propagation, bounded
-admission / backpressure), and the generic dedupe-hook surface.
+admission / backpressure), and the generic dedupe-hook surface. Every
+section describing those surfaces carries an explicit
+"Not yet implemented — Block 7" banner.
 
 The binding implementation spec lives in
 `docs/arch/cache-runtime-overhaul-plan.md` (Blocks 6 and 7). When in
@@ -178,24 +189,27 @@ the deadlock-isolation invariant.
 - **Scheduler stage pool (`cpu_pool`)** — owned BY the scheduler,
   built internally in `Scheduler::with_executor` /
   `new_sync_with_executor` from `SchedulerConfig::cpu_threads`. It is
-  the ONLY pool for parse/analysis/artifact/cache-node stage
-  execution: the driver dispatches `TaskKind::Parse` /
-  `TaskKind::CacheNode` / CPU `Analysis` / CPU `Artifact` onto it via
+  the ONLY pool for CPU stage execution: the driver dispatches the live
+  `TaskKind::Source` CPU step (the parse folded into `Source`) plus
+  `TaskKind::Analysis` and `TaskKind::Artifact` onto it via
   `cpu_pool.spawn(...)`. Workers register `CallerKind::CpuWorker` so
   `wait_or_drive` routes them to the cooperative-pump branch. The
   scheduler also owns the bounded `io_pool`
-  (`SchedulerConfig::io_threads`) for `TaskKind::Load`.
+  (`SchedulerConfig::io_threads`) for the pure-I/O step of
+  `TaskKind::Source` (reading bytes off disk).
 - **Coordinator pool (`HostCpuPool`)** —
   `crates/verter_scheduler/src/host_cpu_pool.rs`. Constructed once at
   startup by the external host/runtime layer via
   `verter_scheduler::HostCpuPool::new(num_threads)` and owned THERE,
   as a sibling of the `Scheduler` — NOT passed into the scheduler and
-  NOT a field on it. Reserved for the outer batch coordinator's
-  synchronous wait points. Its workers register `CallerKind::External`
-  (8 MiB stacks), so they PARK in `wait_or_drive` rather than
-  inline-executing scheduler CPU tasks, and the driver's inline-execute
-  branch excludes `External` — coordinator-pool workers therefore NEVER
-  run `TaskKind::Parse` / `TaskKind::CacheNode`.
+  NOT a field on it. Shared by the outer batch coordinator of EVERY
+  host batch API (batch component-meta, batch SFC compile, and any
+  future host batch fan-out) for its synchronous wait points. Its
+  workers register `CallerKind::External` (8 MiB stacks), so they PARK
+  in `wait_or_drive` rather than inline-executing scheduler CPU tasks,
+  and the driver's inline-execute branch excludes `External` —
+  coordinator-pool workers therefore NEVER run scheduler CPU stage work
+  (`TaskKind::Source` / `Analysis` / `Artifact`).
 
 The scheduler constructor takes only `(config, source_loader[,
 executor])` — there is NO pool parameter. The scheduler builds and owns
@@ -268,8 +282,8 @@ and owned by different layers: **no worker waits for a job in its OWN
 pool.** A coordinator-pool worker may block on scheduler stage work
 without deadlock because the scheduler's `cpu_pool` has its own worker
 set that proceeds independently; a `cpu_pool` worker running
-`TaskKind::Parse` is not a coordinator worker and does not gate the
-outer coordinator's wait. The invariant in full:
+`TaskKind::Source` stage work is not a coordinator worker and does not
+gate the outer coordinator's wait. The invariant in full:
 
 > Outer API fan-out may block only on scheduler-owned work;
 > scheduler-owned work must never require coordinator-pool workers;
@@ -384,19 +398,32 @@ becomes an `Arc` clone. The discriminating test
 `task_kind_clone_is_cheap_arc_clone` pins the clone cost at < 100ns
 p99.
 
-The legacy `TaskKind::Source` (which combined load + parse on I/O)
-is RETIRED. The source loader synthesises a `Load → Parse` DAG
-edge. `SchedulerJobKind` (the existing non-staged component-meta
+Under the Block 7 design target, `TaskKind::Source` (which on the
+current tree combines load + parse, with the I/O step on `io_pool` and
+the parse step folded onto `cpu_pool`) is split: the source loader
+synthesises a `Load → Parse` DAG edge. **On the current tree
+`TaskKind::Source` is the live first stage and is NOT split or
+retired** — `Load` / `Parse` are not separate variants yet.
+`SchedulerJobKind` (the existing non-staged component-meta
 batch enum at `stage.rs:19`) is **retained** unchanged — it
 discriminates `ComponentMeta { canonical_id }`. The scheduler does
 NOT own the batch fan-out for it: the external host/runtime layer maps
 these job items and fans them out through its own batch-coordination
 primitive (see *Dual pool ownership*), calling
 `Scheduler::account_batch_submission` once per non-empty batch for the
-O(1) submission accounting. The new `TaskKind::CacheNode` variant
+O(1) submission accounting. The Block 7 `TaskKind::CacheNode` variant
 lives alongside it on the new ready-queue envelope.
 
 ### StageExecutor dispatch surface
+
+> **Not yet implemented — cache-runtime DAG design (Block 7).** The
+> five-method dispatch surface, the `CacheNodeDispatchCtx` /
+> `execute_cache_node` machinery, and the `Parse` / `CacheNode` / `Load`
+> rows below are the Block 7 design target from
+> `docs/arch/cache-runtime-overhaul-plan.md`; they are NOT on the current
+> tree. On the current tree the `StageExecutor` dispatches the live
+> `TaskKind::Source` / `Analysis` / `Artifact` stages. The surface below
+> describes the intended Block 7 dispatch.
 
 The `StageExecutor` trait exposes five dispatch methods, one per
 `TaskKind` variant. Workers route through `TaskKind` at dispatch
@@ -575,6 +602,16 @@ NOT current routing rules.)
   `two_back_to_back_compile_many_share_pool`.
 
 ## Test-support helpers (`feature = "test-support"`)
+
+> **Not yet implemented — cache-runtime DAG design (Block 7).** The
+> `feature = "test-support"` gate itself is live, but on the current
+> tree it exposes only `host_cpu_pool_token` (see *Dual pool
+> ownership*). The fixture catalogue below — `Scheduler::new_for_test`,
+> `enqueue_analysis`, `last_dispatched_task`, `LastDispatchedTaskRecorder`,
+> the `KeyedJob` / `CacheNodeDagNode` / `DedupKey` / `SchedulerCacheId`
+> stubs, etc. — is the Block 7 design target from
+> `docs/arch/cache-runtime-overhaul-plan.md` and is NOT on the current
+> tree. The helpers below describe the intended Block 7 test surface.
 
 The crate gates a small set of fixture helpers behind
 `feature = "test-support"` so the production build never compiles

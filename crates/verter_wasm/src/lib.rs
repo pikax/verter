@@ -1511,9 +1511,11 @@ impl WasmMetaSession {
     }
 
     /// Batch surface for `getComponentMeta`: compute metadata for
-    /// `canonicalsOrAliases` under one shared overlay view and a
-    /// single scheduler dispatch. Returns one slot per input in input
-    /// order as a JS array; each slot is the FFI projection of the
+    /// `canonicalsOrAliases` under one shared overlay view. The host batch
+    /// coordinator fans the N queries out on the host-owned coordinator
+    /// pool and accounts the batch submission exactly once. Returns one
+    /// slot per input in input order as a JS array; each slot is the FFI
+    /// projection of the
     /// analysis, or `null` for a missing canonical / per-id failure.
     ///
     /// Throws only on project-level shutdown.

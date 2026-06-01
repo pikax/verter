@@ -333,8 +333,9 @@ impl ComponentMetaSession {
     }
 
     /// Batch surface for [`Self::get_component_meta`]: compute metadata
-    /// for `canonical_or_aliases` under one shared overlay view and a
-    /// single scheduler dispatch.
+    /// for `canonical_or_aliases` under one shared overlay view. The host
+    /// batch coordinator fans the N queries out on the host-owned
+    /// coordinator pool and accounts the batch submission exactly once.
     ///
     /// Delegates to [`crate::meta::MetaSession::get_component_meta_batch`]
     /// so all N queries share the host-owned admission caches
@@ -449,8 +450,10 @@ impl ComponentMetaSession {
 
     /// Batch surface for [`Self::get_component_meta_payload`]: compute
     /// encoded payloads for `canonicals_or_aliases` under one shared
-    /// overlay view and a single scheduler dispatch. Per-id misses /
-    /// failures surface as `None` in their slot.
+    /// overlay view. The host batch coordinator fans the N queries out on
+    /// the host-owned coordinator pool and accounts the batch submission
+    /// exactly once. Per-id misses / failures surface as `None` in their
+    /// slot.
     pub fn get_component_meta_batch_payloads<F>(
         &self,
         canonical_or_aliases: &[String],

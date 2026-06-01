@@ -751,7 +751,8 @@ impl Scheduler {
     /// dedicated coordinator pool, never on the scheduler's
     /// stage-execution `cpu_pool`. Installing an outer wait on the stage
     /// pool would let parked coordinator jobs starve the very
-    /// `Load`/`Parse` work the driver dispatches onto that pool — the
+    /// `Source` stage work (the load+parse step folded into
+    /// `TaskKind::Source`) the driver dispatches onto that pool — the
     /// pool-starvation deadlock class. This method therefore performs
     /// accounting ONLY; it never touches a pool.
     pub fn account_batch_submission(&self) {
