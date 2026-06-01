@@ -1805,6 +1805,124 @@ mod tests {
         );
     }
 
+    /// A caller that arrives AFTER the leader has fully completed —
+    /// strictly outside the leader's compute window — must still join
+    /// the leader's published result as a `Follower`, NOT spawn a fresh
+    /// cold `Leader`.
+    ///
+    /// This is the deterministic, load-independent characterization of
+    /// the cold-concurrent singleflight race that
+    /// `cache_layer_cold_concurrent_attribution::sixteen_cold_concurrent_…`
+    /// hits non-deterministically under CPU contention. The earlier
+    /// `singleflight_coalesces_same_key_and_token` test only proves
+    /// coalescing for callers that OVERLAP the leader's compute (the
+    /// leader sleeps 50ms and both threads are barrier-released into
+    /// that window). It does NOT exercise the post-compute gap: a
+    /// caller whose claim lands after the leader returned.
+    ///
+    /// DISCRIMINATES: pre-fix, the leader removed its flight slot the
+    /// instant `compute()` returned, so the second caller found an
+    /// empty lane and became a second `Leader` (`computes == 2`).
+    /// Post-fix, the leader retains its `Done` result as a joinable
+    /// rendezvous, so the second caller joins as `Follower`
+    /// (`computes == 1`).
+    #[test]
+    fn singleflight_late_caller_joins_completed_leader_as_follower() {
+        let group = SingleflightGroup::<String, usize, &'static str>::default();
+        let token = StoreViewCompatToken {
+            epoch: 9,
+            session: None,
+        };
+        let computes = AtomicUsize::new(0);
+
+        // Leader runs to completion synchronously on this thread and
+        // returns BEFORE the second call is even issued — the second
+        // call therefore lands strictly in the post-compute gap.
+        let leader = group
+            .run("node".to_string(), token, || {
+                computes.fetch_add(1, Ordering::SeqCst);
+                Ok(7)
+            })
+            .unwrap();
+        assert_eq!(leader.role, SingleflightRole::Leader);
+        assert_eq!(computes.load(Ordering::SeqCst), 1);
+
+        // Second caller, same key + token, issued only now. It must
+        // observe the leader's retained `Done` result and join as a
+        // Follower WITHOUT recomputing.
+        let late = group
+            .run("node".to_string(), token, || {
+                computes.fetch_add(1, Ordering::SeqCst);
+                Ok(999)
+            })
+            .unwrap();
+
+        assert_eq!(
+            computes.load(Ordering::SeqCst),
+            1,
+            "late caller must NOT recompute — it joins the completed leader's published result",
+        );
+        assert_eq!(
+            late.role,
+            SingleflightRole::Follower,
+            "a caller arriving after the leader finished must be a Follower, not a second cold Leader",
+        );
+        assert_eq!(*late.value, 7, "late caller receives the leader's value");
+    }
+
+    /// The retained `Done` rendezvous must not leak: once every
+    /// participant of a completed flight has returned, the slot is
+    /// reaped so a SUBSEQUENT independent request (e.g. after the value
+    /// was evicted from the durable cache) cold-computes as a fresh
+    /// Leader instead of forever returning the stale retained result.
+    ///
+    /// DISCRIMINATES a naive "never remove Done" fix: that fix would
+    /// keep returning the original value (`computes` would stay at 1 on
+    /// the third call and the role would be `Follower`). The correct
+    /// reap drops the slot after the last waiter leaves, so the third
+    /// call is a fresh Leader (`computes == 2`).
+    #[test]
+    fn singleflight_done_rendezvous_is_reaped_after_last_participant() {
+        let group = SingleflightGroup::<String, usize, &'static str>::default();
+        let token = StoreViewCompatToken {
+            epoch: 3,
+            session: None,
+        };
+        let computes = AtomicUsize::new(0);
+
+        // Leader completes and a single late follower joins; after both
+        // have returned the slot must be empty.
+        let _leader = group
+            .run("node".to_string(), token, || {
+                computes.fetch_add(1, Ordering::SeqCst);
+                Ok(1)
+            })
+            .unwrap();
+        let _follower = group
+            .run("node".to_string(), token, || {
+                computes.fetch_add(1, Ordering::SeqCst);
+                Ok(2)
+            })
+            .unwrap();
+        assert_eq!(computes.load(Ordering::SeqCst), 1, "follower joined leader");
+
+        // The Done slot was reaped once the last participant left, so a
+        // fresh request re-enters the cold path as a Leader.
+        let fresh = group
+            .run("node".to_string(), token, || {
+                computes.fetch_add(1, Ordering::SeqCst);
+                Ok(3)
+            })
+            .unwrap();
+        assert_eq!(
+            computes.load(Ordering::SeqCst),
+            2,
+            "after the rendezvous is reaped, a new request must cold-compute again",
+        );
+        assert_eq!(fresh.role, SingleflightRole::Leader);
+        assert_eq!(*fresh.value, 3);
+    }
+
     #[test]
     fn singleflight_forks_incompatible_tokens() {
         let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
