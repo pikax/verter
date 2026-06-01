@@ -4387,6 +4387,11 @@ mod foundations_guards {
         // `MaterializeMemoDb` producer pins its observed-version parse
         // fact through.
         "pub(crate) mod fact_signature_helpers",
+        // host batch-coordinator primitive — the single owner of
+        // outer-coordinator batch fan-out (component-meta batch + batch
+        // compile route through it). Crate-internal: callers reach it
+        // via `VerterHost::batch_coordinator()`.
+        "pub(crate) mod host_batch_coordinator",
         "pub(crate) mod host_executor",
         "pub(crate) mod host_test_audit",
         "pub(crate) mod instant",
