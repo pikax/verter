@@ -34,25 +34,34 @@
 //!    the result for that canonical and clone its `Arc<str>` payloads
 //!    (refcount-only, no string copy).
 //!
-//! Both parallel stages fan out through the host batch coordinator
-//! ([`VerterHost::batch_coordinator`] →
+//! Stage B is a single atomic submission on the calling thread: it does
+//! NOT fan out through the host batch coordinator. The deduped
+//! per-canonical source updates go to the scheduler as ONE
+//! `Scheduler::submit_batch_atomic`, followed by ONE `wait_batch`, with
+//! the per-canonical post-commit running on the calling thread. The
+//! scheduler's own CPU/IO pools execute the parse/analysis work; the
+//! caller thread only submits, waits, and commits.
+//!
+//! Stage C is the parallel stage, and it alone fans out through the host
+//! batch coordinator ([`VerterHost::batch_coordinator`] →
 //! [`crate::host_batch_coordinator::HostBatchCoordinator::run_batch`]),
-//! the single host-side coordination rule shared with the
-//! component-meta batch path. The coordinator installs on the
-//! host-owned [`verter_scheduler::HostCpuPool`], built once at host
-//! construction with an 8 MiB worker stack so the stack guard applies
-//! to every code path (no fall-through to Rayon's global pool with its
-//! 1 MiB Windows default). `run_batch` is synchronous: Stage B fully
-//! completes before Stage C begins.
+//! the single host-side coordination rule shared with the component-meta
+//! batch path. The coordinator installs on the host-owned
+//! [`verter_scheduler::HostCpuPool`], built once at host construction
+//! with an 8 MiB worker stack so the stack guard applies to every code
+//! path (no fall-through to Rayon's global pool with its 1 MiB Windows
+//! default). `run_batch` is synchronous and the stages are sequential:
+//! Stage B fully completes before the Stage-C coordinator is even
+//! acquired.
 //!
 //! The coordinator pool's workers register as
-//! [`verter_scheduler::caller_kind::CallerKind::External`], so when the
-//! compile coordinator blocks on a scheduler completion handle the host
-//! worker parks on the condvar rather than inline-executing scheduler
-//! CPU tasks. Running the outer wait on the coordinator pool (never the
-//! scheduler's stage pool) eliminates the deadlock class where a
-//! saturated scheduler CPU pool could starve `compile_many`'s outer
-//! collect/order/finalise phase.
+//! [`verter_scheduler::caller_kind::CallerKind::External`], so when a
+//! Stage-C compile worker blocks on a scheduler completion handle the
+//! host worker parks on the condvar rather than inline-executing
+//! scheduler CPU tasks. Running Stage C's waits on the coordinator pool
+//! (never the scheduler's stage pool) eliminates the deadlock class
+//! where a saturated scheduler CPU pool could starve `compile_many`'s
+//! compile/collect/order/finalise phase.
 
 #![cfg(not(target_arch = "wasm32"))]
 
