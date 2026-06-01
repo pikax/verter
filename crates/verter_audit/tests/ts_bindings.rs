@@ -117,7 +117,7 @@ fn ts_bindings_record_the_typeinfo_graph_payload_fields() {
         "operation",
         "snapshot_node_count",
         "snapshot_edge_count",
-        "exactness_exact_resolved",
+        "exactness_counts",
         "publication_retries",
         "degradation_reasons",
     ];

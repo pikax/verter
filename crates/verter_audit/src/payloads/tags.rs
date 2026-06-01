@@ -220,7 +220,7 @@ pub enum FactKeyKindTag {
 /// audit consumers may aggregate downgrade counts per (requested,
 /// actual) pair.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum CompileCacheModeTag {
     /// Bypass host caches entirely. The compile runs fresh and no
     /// entry is published.
@@ -241,7 +241,7 @@ pub enum CompileCacheModeTag {
 /// `Copy + Hash + Eq` because audit consumers may aggregate downgrade
 /// counts per reason.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum DowngradeReasonTag {
     /// Default — placeholder default; consumers compare on the
     /// actual triggering reason rather than relying on this.

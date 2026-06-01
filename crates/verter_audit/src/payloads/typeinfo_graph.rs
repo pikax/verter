@@ -12,6 +12,8 @@
 //! depend on `verter_protocol`, `verter_session`, or any consumer
 //! crate.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::payloads::tags::ProjectionModeTag;
@@ -23,7 +25,7 @@ use crate::payloads::tags::ProjectionModeTag;
 /// producers map the wire operation enum to this tag at the audit
 /// emission boundary.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum GraphOperationTag {
     /// `resolve_symbol_graph_with_audit`.
     #[default]
@@ -47,7 +49,7 @@ pub enum GraphOperationTag {
 /// Closed mirror of the reduction-demand axis on
 /// `GraphProjectionReductionContext`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum ReductionDemandTag {
     /// Caller asked for the published surface (the default macro /
     /// consumer-facing shape).
@@ -63,7 +65,7 @@ pub enum ReductionDemandTag {
 /// surface keeps only the discriminator because consumers aggregate
 /// by policy class rather than budget value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum GraphClosurePolicyTag {
     /// Root + its symbol only.
     #[default]
@@ -82,8 +84,21 @@ pub enum GraphClosurePolicyTag {
 /// the payload below carries the cumulative counts per status, so
 /// the audit observer can attribute degraded results without
 /// re-reading the snapshot.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    ts_rs::TS,
+)]
+#[ts(export_to = "audit.generated.ts")]
 pub enum ExactnessTag {
     /// Fully resolved to a concrete node.
     #[default]
@@ -113,7 +128,7 @@ pub enum ExactnessTag {
 /// `StructuredAuditEvent::TypeInfoGraphDegraded`. Captures WHY a
 /// publication was admitted as degraded.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum TypeInfoDegradationReasonTag {
     /// Walker exhausted the node budget.
     #[default]
@@ -143,7 +158,7 @@ pub enum TypeInfoDegradationReasonTag {
 /// carries only the aggregated counters / discriminators the audit
 /// runtime needs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct TypeInfoGraphPayload {
     /// Which graph operation produced the response.
     pub operation: GraphOperationTag,
@@ -165,25 +180,14 @@ pub struct TypeInfoGraphPayload {
     pub snapshot_edge_count: u32,
     /// Total symbol nodes in the response snapshot.
     pub snapshot_symbol_count: u32,
-    /// Per-status node counts. Sum equals
-    /// [`Self::snapshot_node_count`].
-    pub exactness_exact_resolved: u32,
-    /// See [`Self::exactness_exact_resolved`].
-    pub exactness_exact_symbolic: u32,
-    /// See [`Self::exactness_exact_resolved`].
-    pub exactness_unresolved_generic: u32,
-    /// See [`Self::exactness_exact_resolved`].
-    pub exactness_partial: u32,
-    /// See [`Self::exactness_exact_resolved`].
-    pub exactness_miss: u32,
-    /// See [`Self::exactness_exact_resolved`].
-    pub exactness_unsupported: u32,
-    /// See [`Self::exactness_exact_resolved`].
-    pub exactness_budget_exceeded: u32,
-    /// See [`Self::exactness_exact_resolved`].
-    pub exactness_unstable: u32,
-    /// See [`Self::exactness_exact_resolved`].
-    pub exactness_cycle: u32,
+    /// Per-status node counts keyed by the [`ExactnessTag`] lattice.
+    /// Absent statuses count as zero; the populated sum equals
+    /// [`Self::snapshot_node_count`]. Keying on the enum keeps the
+    /// audit surface DRY (one entry per status, no hand-spelled
+    /// per-status field) and makes [`ExactnessTag`] a genuine wire
+    /// dependency of this payload.
+    #[serde(default)]
+    pub exactness_counts: BTreeMap<ExactnessTag, u32>,
     /// `true` when this record came from the warm cache.
     pub cache_hit: bool,
     /// Number of publication-fence retries (≤
@@ -252,15 +256,10 @@ impl TypeInfoGraphPayload {
     /// [`Self::snapshot_node_count`].
     #[must_use]
     pub fn total_exactness_counted(&self) -> u32 {
-        self.exactness_exact_resolved
-            .saturating_add(self.exactness_exact_symbolic)
-            .saturating_add(self.exactness_unresolved_generic)
-            .saturating_add(self.exactness_partial)
-            .saturating_add(self.exactness_miss)
-            .saturating_add(self.exactness_unsupported)
-            .saturating_add(self.exactness_budget_exceeded)
-            .saturating_add(self.exactness_unstable)
-            .saturating_add(self.exactness_cycle)
+        self.exactness_counts
+            .values()
+            .copied()
+            .fold(0, u32::saturating_add)
     }
 }
 
@@ -282,13 +281,17 @@ mod tests {
     #[test]
     fn total_exactness_counted_is_saturating_sum() {
         let mut payload = TypeInfoGraphPayload {
-            exactness_exact_resolved: 3,
-            exactness_partial: 2,
-            exactness_miss: 1,
+            exactness_counts: BTreeMap::from([
+                (ExactnessTag::ExactResolved, 3),
+                (ExactnessTag::Partial, 2),
+                (ExactnessTag::Miss, 1),
+            ]),
             ..TypeInfoGraphPayload::default()
         };
         assert_eq!(payload.total_exactness_counted(), 6);
-        payload.exactness_cycle = u32::MAX;
+        payload
+            .exactness_counts
+            .insert(ExactnessTag::Cycle, u32::MAX);
         assert_eq!(payload.total_exactness_counted(), u32::MAX);
     }
 
@@ -304,8 +307,10 @@ mod tests {
             snapshot_node_count: 5,
             snapshot_edge_count: 6,
             snapshot_symbol_count: 2,
-            exactness_exact_resolved: 4,
-            exactness_partial: 1,
+            exactness_counts: BTreeMap::from([
+                (ExactnessTag::ExactResolved, 4),
+                (ExactnessTag::Partial, 1),
+            ]),
             cache_hit: true,
             publication_retries: 0,
             ..TypeInfoGraphPayload::default()
@@ -316,5 +321,11 @@ mod tests {
         assert_eq!(back.mode, ProjectionModeTag::Expanded);
         assert_eq!(back.snapshot_node_count, 5);
         assert!(back.cache_hit);
+        assert_eq!(
+            back.exactness_counts.get(&ExactnessTag::ExactResolved),
+            Some(&4)
+        );
+        assert_eq!(back.exactness_counts.get(&ExactnessTag::Partial), Some(&1));
+        assert_eq!(back.total_exactness_counted(), 5);
     }
 }
