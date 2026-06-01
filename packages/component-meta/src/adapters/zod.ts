@@ -88,7 +88,7 @@ export function typeToZodString(type: TypeDescriptor): string {
       );
       if (type.properties.length === 0) {
         if (stringIndexSignature) {
-          return `z.record(${typeToZodString(stringIndexSignature.valueType)})`;
+          return `z.record(z.string(), ${typeToZodString(stringIndexSignature.valueType)})`;
         }
         return "z.object({})";
       }
@@ -262,7 +262,7 @@ function buildZodSchema(z: typeof import("zod"), type: TypeDescriptor): unknown 
       );
       if (type.properties.length === 0) {
         if (stringIndexSignature) {
-          return z.record(buildZodSchema(z, stringIndexSignature.valueType) as any);
+          return z.record(z.string(), buildZodSchema(z, stringIndexSignature.valueType) as any);
         }
         return z.object({});
       }

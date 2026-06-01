@@ -86,7 +86,7 @@ describe("typeToZodString (codegen)", () => {
         },
       ],
     });
-    expect(result).toBe("z.record(z.number())");
+    expect(result).toBe("z.record(z.string(), z.number())");
     expect(result).not.toContain("z.object({})");
   });
 
