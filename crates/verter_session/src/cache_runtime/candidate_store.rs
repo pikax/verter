@@ -58,6 +58,9 @@ use super::admission::{
 };
 use super::node::QUERY_SLOT_CANDIDATE_CAP;
 use crate::bounded_query_retention::GlobalRetentionBudget;
+// Used only by the test/debug-gated `insert_for_test` surface below; gated
+// to match so release builds do not flag it as unused.
+#[cfg(any(test, debug_assertions))]
 use crate::fact_signature_helpers::ReadSetSignature;
 
 /// A candidate stored in the multi-candidate store. The carried
@@ -553,8 +556,12 @@ where
         };
         // Capture-token hook: surface the per-canonical visit count so the
         // invalidation-perf regression test can assert visited == K (NOT
-        // N). No-op on the production hot path (no token bound).
+        // N). Test/debug instrumentation only — gated to match the
+        // capture-token module (absent in release), so the production hot
+        // path pays zero cost.
+        #[cfg(any(test, debug_assertions))]
         let visited = drained.len() as u64;
+        #[cfg(any(test, debug_assertions))]
         crate::capture_token::with_active_capture(|t| {
             t.record_counter("invalidate_canonical_entries_visited", visited);
         });
