@@ -6,6 +6,8 @@ mod admission_guard;
 mod audited_request_e2e;
 #[path = "g_misc0/batch_api_shared_admissions.rs"]
 mod batch_api_shared_admissions;
+#[path = "g_misc0/batch_meta_cold_deps_no_pool_starvation.rs"]
+mod batch_meta_cold_deps_no_pool_starvation;
 #[path = "g_misc0/bounded_query_identity_retention.rs"]
 mod bounded_query_identity_retention;
 #[path = "g_misc0/bubble_fact_signature_fans_out.rs"]
