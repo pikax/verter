@@ -1591,33 +1591,64 @@ where
 
         if leader {
             let result = compute().map(Arc::new);
-            // Decide retention from the freshly-computed value. An error,
-            // or a value the caller declines to retain (e.g. an unstable
-            // result), is published to current waiters but the lane is
-            // then dropped immediately so subsequent claims — including
-            // this request's own retry — recompute instead of joining a
-            // non-reusable result.
+            // Decide retention from the freshly-computed value. A retained
+            // (stable) result stays in the map as a joinable rendezvous; a
+            // non-retained result (an error, or a value the caller declines
+            // to retain such as an unstable one) must NOT be joinable by a
+            // NEW claimant — only by waiters already committed to THIS
+            // flight, who treat it exactly as a fresh leader would (an
+            // unstable result drives them to recompute; an error
+            // propagates).
             let keep = matches!(&result, Ok(value) if retain(value));
-            {
-                let mut inner = state.inner.lock();
-                *inner = FlightInner::Done(result.clone());
-                state.ready.notify_all();
-            }
             if keep {
-                // Retain the published result as a joinable rendezvous;
-                // the slot is reclaimed by `unpin` once the last pin is
+                // Publish the stable result, then release this self-pin via
+                // `unpin`. The result stays in the map as a joinable
+                // rendezvous; the slot is reclaimed once the last pin is
                 // released, so a burst member still mid-claim joins it
-                // instead of finding a vacant lane.
+                // instead of finding a vacant lane. New claimants joining a
+                // STABLE `Done` is correct and is the whole point.
+                {
+                    let mut inner = state.inner.lock();
+                    *inner = FlightInner::Done(result.clone());
+                    state.ready.notify_all();
+                }
                 self.unpin(&lane_key, &state);
             } else {
-                // Drop the lane now (releasing this self-pin first so the
-                // count stays balanced) so it is not joined again. A
-                // concurrent participation pin still outstanding becomes a
-                // no-op on `unpin` via its `ptr_eq` guard.
+                // Non-retained terminal: publish the `Done` to existing
+                // waiters AND remove the lane in ONE critical section that
+                // holds the `flights` lock across both, so a NEW claimant
+                // (which must take this same `flights` lock before it can
+                // observe the lane's state) can NEVER see the non-retained
+                // `Done` — it finds the lane already gone and re-elects a
+                // fresh leader. Without removing under the `flights` lock,
+                // a claimant could enter between publish and removal, read
+                // `Done(unstable_or_err)`, and return it as a Follower —
+                // joining a result that must never be retained (an error
+                // would wrongly propagate; an unstable result would be
+                // observed before the recompute). Waiters ALREADY parked on
+                // `state.ready` hold their own `Arc` and are woken by
+                // `notify_all`; they re-check under `inner` after this
+                // critical section and act on the `Done` exactly as a fresh
+                // leader's outcome dictates.
+                //
+                // Lock order is preserved (`flights` then `inner`). The
+                // self-pin `fetch_sub` runs under the `flights` lock too,
+                // so the `FlightState::pins` "mutated ONLY under the
+                // `flights` map lock" invariant holds literally. The
+                // removal is `ptr_eq`-guarded so a fresh leader that
+                // already re-inserted a new slot for the same `lane_key` is
+                // not evicted; any still-outstanding participation pin on
+                // this (now-orphaned) `state` becomes a no-op on its own
+                // `unpin` via the same guard.
+                let mut flights = self.flights.lock();
+                {
+                    let mut inner = state.inner.lock();
+                    *inner = FlightInner::Done(result.clone());
+                    state.ready.notify_all();
+                }
                 state
                     .pins
                     .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                let mut flights = self.flights.lock();
                 if flights
                     .get(&lane_key)
                     .is_some_and(|existing| Arc::ptr_eq(existing, &state))
@@ -2427,12 +2458,27 @@ mod tests {
             })
         };
 
-        // Give the straggler time to commit onto the singleflight (admit
-        // its participation pin + reach the condvar wait inside
-        // `run_retaining`). Poll the run-lane strong count deterministically
-        // rather than sleeping a fixed wall-clock duration: while the
-        // leader holds the lane, the straggler raising the count proves it
-        // joined the SAME `session: Some(id)` lane.
+        // Wait until the straggler has provably committed INTO
+        // `run_retaining` on the leader's lane — past its pre-flight
+        // `try_get_cached` peek — so it joins the in-flight leader as a
+        // Follower rather than reading a warm cache hit the leader is about
+        // to publish. Poll the run-lane strong count deterministically
+        // instead of sleeping a fixed wall-clock duration.
+        //
+        // Strong-count bookkeeping on the `session: Some(id)` lane while the
+        // leader is parked mid-flight:
+        //   1 leader's local `state` binding
+        // + 1 the `flights` map entry
+        // + 1 the straggler's `participate` guard clone (taken BEFORE its
+        //     `try_get_cached` peek)
+        // + 1 the straggler's `run_retaining` clone (taken AFTER the peek,
+        //     as it joins the Running lane and parks on the condvar)
+        // = 4. Requiring >= 4 therefore guarantees the straggler is past its
+        // cache peek and committed as a Follower-in-waiting; releasing the
+        // gate only then means the leader's `store_stable` cannot turn the
+        // straggler into a pre-flight `Cache` hit. (A count that never
+        // reaches 4 would mean the straggler pinned/joined a DIFFERENT lane
+        // than the leader's run lane — the P1a drift.)
         let run_lane = StoreViewCompatToken {
             epoch: 1,
             session: Some(SESSION_ID),
@@ -2440,18 +2486,15 @@ mod tests {
         let mut spins = 0;
         loop {
             let count = singleflight.test_flight_strong_count(&"node".to_string(), run_lane);
-            // Leader's `state` binding + map entry + straggler's clone +
-            // straggler's participation `state` = the straggler has fully
-            // committed onto the lane.
-            if count >= 3 {
+            if count >= 4 {
                 break;
             }
             spins += 1;
             assert!(
-                spins < 100_000,
-                "straggler never committed onto the `session: Some(id)` run lane (count stuck). \
-                 This means the straggler pinned/joined a DIFFERENT lane than the leader's run \
-                 lane (P1a: pin lane drifted off the run lane).",
+                spins < 10_000_000,
+                "straggler never committed onto the `session: Some(id)` run lane (count stuck \
+                 below 4). This means the straggler pinned/joined a DIFFERENT lane than the \
+                 leader's run lane (P1a: pin lane drifted off the run lane).",
             );
             std::thread::yield_now();
         }
@@ -2667,6 +2710,162 @@ mod tests {
         assert_eq!(second.role, SingleflightRole::Leader);
         assert!(first.forked_lane || second.forked_lane);
         assert!(!Arc::ptr_eq(&first.value, &second.value));
+    }
+
+    /// A NON-RETAINED leader result (`retain` returns false) must not leave
+    /// a joinable lane behind: once `run_retaining` returns, the lane is
+    /// fully reaped and a subsequent claim cold-recomputes as a fresh
+    /// Leader (P1b contract, post-return form).
+    ///
+    /// This pins the non-cache half of the contract deterministically: a
+    /// non-retained `Done` is never a persistent rendezvous, and the
+    /// self-pin `fetch_sub` (now under the `flights` lock) leaves the pin
+    /// count consistent so the reap fires.
+    #[test]
+    fn singleflight_non_retained_result_leaves_no_joinable_lane() {
+        let group = SingleflightGroup::<String, usize, &'static str>::default();
+        let token = StoreViewCompatToken {
+            epoch: 2,
+            session: None,
+        };
+        let computes = AtomicUsize::new(0);
+
+        // Leader produces a value the caller declines to retain.
+        let leader = group
+            .run_retaining(
+                "node".to_string(),
+                token,
+                || {
+                    computes.fetch_add(1, Ordering::SeqCst);
+                    Ok(1)
+                },
+                |_| false,
+            )
+            .unwrap();
+        assert_eq!(leader.role, SingleflightRole::Leader);
+        assert_eq!(computes.load(Ordering::SeqCst), 1);
+
+        // The non-retained lane must be gone — no lingering `Done`.
+        assert_eq!(
+            group.test_flight_strong_count(&"node".to_string(), token),
+            0,
+            "a non-retained result must not leave a joinable lane behind",
+        );
+
+        // A subsequent claim re-enters the cold path as a fresh Leader.
+        let next = group
+            .run_retaining(
+                "node".to_string(),
+                token,
+                || {
+                    computes.fetch_add(1, Ordering::SeqCst);
+                    Ok(2)
+                },
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(
+            computes.load(Ordering::SeqCst),
+            2,
+            "after a non-retained result, the next claim must cold-recompute",
+        );
+        assert_eq!(next.role, SingleflightRole::Leader);
+        assert_eq!(*next.value, 2);
+    }
+
+    /// A new claimant must NEVER FIRST-OBSERVE a NON-RETAINED `Done`; it
+    /// must re-elect a fresh leader against a clean lane (P1b — the
+    /// torn/non-retained contract, deterministic form via a sibling pin).
+    ///
+    /// Reproduces the post-terminal window deterministically — the
+    /// keep==false analogue of
+    /// [`singleflight_late_caller_joins_pinned_completed_leader_as_follower`].
+    /// A sibling holds a `participate` pin on the lane (modelling a
+    /// concurrent burst member), so the leader's `FlightState` `Arc` is
+    /// kept alive even after the leader's terminal. A leader then runs
+    /// `run_retaining(retain = false)` to completion and returns; a LATE
+    /// claimant issues its `run_retaining` only afterwards — strictly in
+    /// the post-terminal window.
+    ///
+    /// The decisive property: the late claimant must re-elect (it is a
+    /// fresh `Leader` that RECOMPUTES), NEVER a `Follower` joining the
+    /// non-retained `Done`. Because the non-retained terminal removes the
+    /// lane under the `flights` lock atomically with the publish, the late
+    /// claimant finds NO lane (despite the sibling pin keeping the orphaned
+    /// `state` alive) and starts a fresh flight. This pins:
+    ///   * the non-retained result is not joinable by a new claimant;
+    ///   * the immediate removal happens even while another pin is held
+    ///     (non-retained results are dropped now, not at last-pin);
+    ///   * the self-pin `fetch_sub` (moved under the `flights` lock) keeps
+    ///     the count consistent, so the surviving sibling pin's later
+    ///     `unpin` neither underflows nor evicts the fresh lane.
+    #[test]
+    fn non_retained_result_forces_late_claimant_to_reelect_not_join() {
+        let group = SingleflightGroup::<String, usize, &'static str>::default();
+        let token = StoreViewCompatToken {
+            epoch: 6,
+            session: None,
+        };
+        let computes = AtomicUsize::new(0);
+
+        // Sibling participation pin (as a concurrent burst member holds),
+        // kept alive across the whole window so the leader's `state` is not
+        // dropped merely because its own self-pin went away.
+        let sibling_pin = group.participate("node".to_string(), token);
+
+        // Leader produces a NON-RETAINED result and returns.
+        let leader = group
+            .run_retaining(
+                "node".to_string(),
+                token,
+                || {
+                    computes.fetch_add(1, Ordering::SeqCst);
+                    Ok(1)
+                },
+                |_| false,
+            )
+            .unwrap();
+        assert_eq!(leader.role, SingleflightRole::Leader);
+        assert_eq!(computes.load(Ordering::SeqCst), 1);
+
+        // Even though the sibling pin is still held, the non-retained lane
+        // was removed immediately under the `flights` lock — it must NOT be
+        // joinable.
+        let late = group
+            .run_retaining(
+                "node".to_string(),
+                token,
+                || {
+                    computes.fetch_add(1, Ordering::SeqCst);
+                    Ok(2)
+                },
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(
+            late.role,
+            SingleflightRole::Leader,
+            "a late claimant must re-elect a fresh leader, never join a non-retained `Done`",
+        );
+        assert_eq!(
+            computes.load(Ordering::SeqCst),
+            2,
+            "the late claimant must cold-recompute (the non-retained result is not joinable)",
+        );
+        assert_eq!(*late.value, 2);
+
+        // Dropping the orphaned sibling pin must be a clean no-op (its
+        // `unpin` `fetch_sub` does not underflow, and its `ptr_eq` guard
+        // does not evict the fresh `Leader` lane the late claimant retained).
+        drop(sibling_pin);
+        // The fresh stable lane retained by the late `Leader` survives the
+        // orphaned sibling-pin drop and is reaped only by its own pins.
+        assert_eq!(
+            group.test_flight_strong_count(&"node".to_string(), token),
+            0,
+            "after the orphaned sibling pin drops and the late leader's own pin released, \
+             the lane is fully reaped",
+        );
     }
 
     // -----------------------------------------------------------------------
