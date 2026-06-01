@@ -14707,12 +14707,16 @@ mod tests {
         );
     }
 
-    /// (3) Dedup callbacks must run AFTER the DAG lock is released.
+    /// (3) Dedup callbacks must run AFTER the DAG lock is released, and
+    /// fire EXACTLY ONCE.
     ///
     /// A batch carrying two requests for the SAME canonical (a dedup
     /// join) with test contexts. The joiner's `on_dedup_joiner`
-    /// callback asserts `dag.try_lock()` SUCCEEDS — proving the
-    /// callback is not fired while admission still holds the lock.
+    /// callback (a) asserts `dag.try_lock()` SUCCEEDS — proving the
+    /// callback is not fired while admission still holds the lock — and
+    /// (b) bumps an `AtomicU64` so the assertion can pin the firing
+    /// count to exactly 1. A boolean flag would mask a double-fire (two
+    /// callbacks both store `true`); the counter catches it.
     ///
     /// Discrimination: today `register_request` fires `on_dedup_joiner`
     /// INSIDE the `dag.lock()` critical section. If the atomic batch
@@ -14732,7 +14736,7 @@ mod tests {
             id: u64,
             dag: Arc<Mutex<SchedulerDag>>,
             try_lock_succeeded: Arc<std::sync::atomic::AtomicBool>,
-            fired: Arc<std::sync::atomic::AtomicBool>,
+            fire_count: Arc<std::sync::atomic::AtomicU64>,
         }
         impl crate::request_context::RequestContextLike for LockProbeCtx {
             fn request_id(&self) -> u64 {
@@ -14742,7 +14746,11 @@ mod tests {
                 false
             }
             fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {
-                self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
+                // Count every firing so a DOUBLE-fire is caught: a
+                // boolean flag would silently collapse two callbacks into
+                // one observed `true`. The contract is exactly-once.
+                self.fire_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 // The whole point: the admitting thread must NOT be
                 // holding the DAG lock when this callback runs.
                 let got = self.dag.try_lock();
@@ -14762,21 +14770,21 @@ mod tests {
         }
 
         let try_lock_succeeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fire_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         // Winner has a plain context; joiner probes the lock.
         let winner_ctx = OpaqueRequestContext(Arc::new(LockProbeCtx {
             id: 1,
             dag: Arc::clone(&sched.dag),
             try_lock_succeeded: Arc::clone(&try_lock_succeeded),
-            fired: Arc::clone(&fired),
+            fire_count: Arc::clone(&fire_count),
         })
             as Arc<dyn crate::request_context::RequestContextLike>);
         let joiner_ctx = OpaqueRequestContext(Arc::new(LockProbeCtx {
             id: 2,
             dag: Arc::clone(&sched.dag),
             try_lock_succeeded: Arc::clone(&try_lock_succeeded),
-            fired: Arc::clone(&fired),
+            fire_count: Arc::clone(&fire_count),
         })
             as Arc<dyn crate::request_context::RequestContextLike>);
 
@@ -14808,9 +14816,13 @@ mod tests {
             .expect("batch item");
         sched.process_submission(item);
 
-        assert!(
-            fired.load(std::sync::atomic::Ordering::SeqCst),
-            "the second same-canonical request must trigger on_dedup_joiner",
+        assert_eq!(
+            fire_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "on_dedup_joiner must fire EXACTLY ONCE for the single same-canonical \
+             join — not zero (the joiner was never detected) and not twice (a \
+             double-fire). A boolean flag would mask a double-fire as a single \
+             observed `true`; the counter catches it.",
         );
         assert!(
             try_lock_succeeded.load(std::sync::atomic::Ordering::SeqCst),
