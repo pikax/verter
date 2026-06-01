@@ -290,10 +290,11 @@ impl MetaProject {
 
     /// Open a new session in batch execution mode.
     ///
-    /// Batch mode opts into the scheduler's batched submission surface
-    /// where callers submit N independent requests before any waits.
-    /// The scheduler fans them out onto its Rayon pool. Test harness
-    /// and MCP server callers use this path.
+    /// Batch mode is for callers that issue N independent component-meta
+    /// requests together. The batch fans out on the host coordinator
+    /// pool via the host batch coordinator (NOT the scheduler's stage
+    /// pool); the scheduler only accounts the batch submission. Test
+    /// harness and MCP server callers use this path.
     #[allow(dead_code)]
     pub fn open_session_batch(self: &Arc<Self>) -> Result<MetaSession, MetaError> {
         self.open_session_with_mode(ExecutionMode::Batch)
@@ -403,9 +404,11 @@ impl MetaProject {
 ///
 /// Separates interactive-latency callers (LSP) from batch-throughput
 /// callers (test harness, MCP server). Interactive mode follows the
-/// single-request-then-wait path; Batch mode opts into the
-/// scheduler's `submit_batch` / `wait_batch` surface so N independent
-/// requests fan out onto the Rayon pool.
+/// single-request-then-wait path; Batch mode issues N independent
+/// component-meta requests that fan out on the host coordinator pool
+/// via the host batch coordinator (the scheduler only accounts the
+/// batch submission; its stage pool stays free for the items' cross-file
+/// `Load`/`Parse`).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExecutionMode {
@@ -715,11 +718,12 @@ impl MetaSession {
     /// NAPI / WASM consumers that need the wire-format buffer rather
     /// than the in-process `ComponentMetaAnalysis` struct.
     ///
-    /// Shares the same single-scheduler-dispatch contract as
+    /// Shares the same single-submission contract as
     /// [`Self::get_component_meta_batch`]: one overlay view, one
-    /// scheduler context, shared host-owned admission caches. The
-    /// supplied `encode_fn` is invoked once per non-cached id on the
-    /// scheduler's CPU pool.
+    /// scheduler submission accounting, shared host-owned admission
+    /// caches. The fan-out runs on the host coordinator pool via the
+    /// host batch coordinator; the supplied `encode_fn` is invoked once
+    /// per non-cached id on a coordinator-pool worker.
     ///
     /// Returns one slot per input in input order: `Some(bytes)` for a
     /// successful payload, `None` for a missing canonical or per-id

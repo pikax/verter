@@ -6,10 +6,14 @@
 use std::fmt;
 use std::sync::Arc;
 
-/// Scheduler job kind for non-file-staged work. Lets the session layer
-/// route component-meta requests through the scheduler as independent
-/// jobs so N component-meta queries in Batch mode fan out onto the
-/// Rayon pool instead of executing synchronously in caller order.
+/// Scheduler job kind for non-file-staged work. Identifies the
+/// independent items an external host/runtime batch carries. The
+/// scheduler does NOT fan these out: the host/runtime layer maps a
+/// batch of these items and runs the outer fan-out on its own
+/// coordinator pool (never the scheduler stage pool), accounting the
+/// batch submission through the scheduler's pool-free
+/// `account_batch_submission`. The scheduler's stage pool stays free to
+/// dispatch each item's cross-file `Load`/`Parse`.
 ///
 /// Currently the only non-staged job kind is `ComponentMeta`; the enum
 /// is kept open for future extensions (resolve-named-type adapters,

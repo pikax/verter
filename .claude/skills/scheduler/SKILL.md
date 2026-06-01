@@ -98,7 +98,18 @@ pub struct KeyedJob {
 discriminator lives on `CacheNodeDagNode.task_kind` only — there is
 one source of truth.
 
-Lifecycle (steady state):
+> **Not yet implemented — cache-runtime DAG design (Block 7).** The
+> `submit_dag` / `CacheNodeDag` / `SchedulerCpuPool` / per-task
+> `cpu_concurrency_semaphore` lifecycle below is the Block 7 design
+> target from `docs/arch/cache-runtime-overhaul-plan.md`; it is NOT on
+> the current tree. On the current tree the scheduler exposes
+> `submit_request` (no `submit_dag`), the live `TaskKind` set is
+> `Source` / `Analysis` / `Artifact`, and CPU stage work dispatches via
+> the scheduler-owned `cpu_pool.spawn(...)` (see *Dual pool ownership*
+> for the authoritative live pool model). The steps below describe the
+> intended DAG flow once Block 7 lands.
+
+Lifecycle (Block 7 design target):
 
 1. **Caller-side dedupe.** Cache-runtime callers consult their
    in-flight table FIRST. A matching flight short-circuits — no
@@ -206,13 +217,22 @@ pub struct Scheduler {
 runtime layer, not in this crate).** Every host/runtime batch API
 (batch component-meta, batch SFC compile, and any future batch
 fan-out) routes its outer wait through ONE coordinator primitive owned
-by the external layer. That primitive — not the scheduler — owns:
+by the external layer, parameterised by a small per-client batch
+policy/context. That primitive — not the scheduler — owns:
 coordinator-pool `install`; the empty / single-item fast path;
-deterministic per-input ordering; panic / cancellation / shutdown
-propagation; and the non-reentrant policy below. The scheduler crate
-exposes NO outer-fan-out API and performs NO `par_iter().install(...)`
-outer wait on its `cpu_pool`; a batch's per-batch submission accounting
-is a pool-free counter bump (`Scheduler::account_batch_submission`).
+deterministic per-input ordering; a generic per-item panic boundary
+(it catches a panicking item and hands it to the client's policy for
+domain conversion, so one item never aborts the batch); the per-batch
+submission accounting (when the policy carries a scheduler handle); a
+per-batch tracing span; and the non-reentrant policy below. Each client
+supplies only its item work and its domain panic→result conversion. The
+primitive does NOT own cancellation/shutdown — the scheduler exposes no
+batch-cancellation facility today, so a batch runs to completion. The
+scheduler crate exposes NO outer-fan-out API and performs NO
+`par_iter().install(...)` outer wait on its `cpu_pool`; a batch's
+per-batch submission accounting is a pool-free counter bump
+(`Scheduler::account_batch_submission`), which the coordinator invokes
+once per non-empty batch.
 
 **Non-reentrant host-batch contract.** A batch item closure may call
 scalar scheduler operations, but a nested batch fan-out reached from
@@ -246,17 +266,19 @@ reentrancy test pins the inline collapse of a nested batch.
 
 ## Per-call concurrency semaphore
 
-`compile_many` has no per-call `threads` option — the `HostCpuPool`
-worker count is sized once at host construction from
-`HostConfig::host_cpu_threads`, and the pool is reused across every
-`compile_many` call. Per-call concurrency capping on
-`SchedulerCpuPool` admissions (the `CpuConcurrencySemaphore` handle
-propagated through `CacheNodeDagNode`) is deferred to §6d; until §6d
-lands, scheduler-side admission runs at the pool's default
-concurrency.
+Current state: batch fan-out has no per-call `threads` option — the
+host coordinator pool's worker count is sized once at host construction
+(from the host's CPU-thread config) and reused across every batch call,
+and the scheduler's stage `cpu_pool` runs at its configured concurrency.
 
-When §6d lands, callers attach the handle to every
-`CacheNodeDagNode.cpu_concurrency_semaphore` in the batch DAG:
+> **Not yet implemented — cache-runtime DAG design (Block 7).** Per-call
+> concurrency capping on `SchedulerCpuPool` admissions (the
+> `CpuConcurrencySemaphore` handle propagated through `CacheNodeDagNode`)
+> is part of the Block 7 design target in
+> `docs/arch/cache-runtime-overhaul-plan.md` and is NOT on the current
+> tree. The rest of this section describes that intended design. Once it
+> lands, callers attach the handle to every
+> `CacheNodeDagNode.cpu_concurrency_semaphore` in the batch DAG:
 
 ```rust
 impl Scheduler {
@@ -294,14 +316,24 @@ and let N>capacity tasks run concurrently.
 
 ## TaskKind routing
 
-> Pool naming: the stage-execution CPU pool is the scheduler-owned
-> `cpu_pool` (`rayon::ThreadPool`, dispatched via `cpu_pool.spawn`); see
-> *Dual pool ownership* for the authoritative pool model. The
-> `SchedulerCpuPool::submit` form below is the cache-runtime
-> DAG-submission design target; on the current tree the same stage work
-> dispatches onto `cpu_pool`.
+> **Current state.** The live `TaskKind` set is `Source` / `Analysis` /
+> `Artifact`. CPU stage work (`Analysis` / `Artifact`, and the parse
+> step folded into `Source`) dispatches onto the scheduler-owned
+> `cpu_pool` via `cpu_pool.spawn(...)`; `Load`-style I/O runs on the
+> `io_pool`. See *Dual pool ownership* for the authoritative live pool
+> model.
+>
+> **Not yet implemented — cache-runtime DAG design (Block 7).** The
+> expanded `TaskKind` shape below (`Load` / `Parse` / `CacheNode`
+> variants) and the `SchedulerCpuPool::submit` dispatch form are the
+> Block 7 design target from
+> `docs/arch/cache-runtime-overhaul-plan.md`; they are NOT on the
+> current tree. Wherever a routing bullet below says
+> `SchedulerCpuPool::submit`, the current tree dispatches the equivalent
+> stage work onto `cpu_pool` via `cpu_pool.spawn(...)`. The bullets
+> describe the intended Block 7 routing.
 
-The scheduler routes:
+The scheduler routes (Block 7 design target):
 
 - `TaskKind::Load { canonical }` → I/O pool (pure I/O — reads bytes
   off disk; no executor dispatch, the source loader drives the I/O
@@ -464,9 +496,13 @@ DAG contract:
 `submit_batch(reqs: Vec<Request>)` is a thin shim that constructs a
 no-edge `CacheNodeDag` and calls `submit_dag`.
 
-## Scheduler surface diff (today → post-cutover)
+## Scheduler surface (current → Block 7 planned)
 
-| Method | Today | Post-cutover |
+The right column is the Block 7 cache-runtime design target from
+`docs/arch/cache-runtime-overhaul-plan.md`; it is NOT on the current
+tree. The left column is the live surface.
+
+| Method | Current | Block 7 (planned) |
 |---|---|---|
 | `submit_request(req)` | inbox + per-request `CompletionHandle` | unchanged signature; gains optional `&dyn DedupeHook` arg |
 | `submit_batch(reqs)` | loop over `submit_request` | thin shim over `submit_dag` (no-edge DAG) |
