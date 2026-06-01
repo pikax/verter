@@ -229,7 +229,14 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "no_format_then_reparse",
             "no_pick_or_omit_string_prefix_check",
             "no_role_inference_from_name_suffix",
-            "no_checker_display_text_parsing_outside_adapter",
+            // The checker-display-text re-parse bridge
+            // (`parse_checker_text_to_type_expr` /
+            // `checker_text_adapter`) is a dead path: both identifiers
+            // are entries in the `RETIRED_SYMBOLS` ledger, and this
+            // guard FAILS if either reappears in production source —
+            // pinning the "no synthesise-then-reparse via checker text"
+            // facet of this rule.
+            "retired_symbols_absent_from_production_source",
         ],
     ),
     (
@@ -308,13 +315,17 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // mechanically forbids the forbidden patterns the rule
             // text names (string parsing, format!-then-reparse, Pick/
             // Omit shape sniffing, role-name suffix heuristics,
-            // checker display-text adapter abuse).
+            // checker display-text re-parse bridge).
             "no_macro_string_heuristics_in_resolver_core",
             "no_text_based_macro_surface_projection_helpers",
             "no_format_then_reparse",
             "no_pick_or_omit_string_prefix_check",
             "no_role_inference_from_name_suffix",
-            "no_checker_display_text_parsing_outside_adapter",
+            // The retired checker-display-text re-parse bridge
+            // (`parse_checker_text_to_type_expr` / `checker_text_adapter`)
+            // is pinned by the `RETIRED_SYMBOLS` ledger: this guard
+            // FAILS if either identifier reappears in production source.
+            "retired_symbols_absent_from_production_source",
         ],
     ),
     (

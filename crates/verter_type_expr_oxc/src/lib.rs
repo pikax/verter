@@ -7,9 +7,9 @@
 //!
 //! The data tier (`verter_type_expr`) intentionally has no OXC
 //! dependency so NAPI / WASM / JSON-only consumers can pull only that
-//! crate. Producer-side callers (the analyzer, the parser's
-//! cross-file external resolution path, the checker-text adapter)
-//! depend on this crate to perform the lowering at OXC visit points.
+//! crate. Producer-side callers (the analyzer and the parser's
+//! cross-file external resolution path) depend on this crate to
+//! perform the lowering at OXC visit points.
 //!
 //! # Contract
 //!

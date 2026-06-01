@@ -10696,7 +10696,7 @@ mod typed_ir_resolver_guards {
             // The three reparse needles we treat as a synthesise-then-reparse:
             //   * `parse_jsdoc_tag_type_payload(&` — post-W5.2 JSDoc helper.
             //   * `parse_type_annotation(&` — pre-W5.2 helper (belt-and-braces).
-            //   * `parse_type_text(&` — checker-text adapter.
+            //   * `parse_type_text(&` — retired `type_text_parser` entry function.
             let needle_jsdoc = b"parse_jsdoc_tag_type_payload(&";
             let needle_a = b"parse_type_annotation(&";
             let needle_t = b"parse_type_text(&";
@@ -11061,24 +11061,6 @@ mod typed_ir_resolver_guards {
             "name-like check must fire for chain-peeled `name`",
         );
     }
-
-    // -----------------------------------------------------------------------
-    // (Former Guard 6 — `no_checker_display_text_parsing_outside_adapter`)
-    //
-    // The TS-checker-display-text adapter (`parse_checker_text_to_type_expr`
-    // in `resolver_core::checker_text_adapter`) was a dead bridge with no
-    // production caller and has been DELETED. The "ban this symbol everywhere
-    // except the one sanctioned adapter module" framing this guard encoded is
-    // therefore obsolete — there is no longer any sanctioned site for it.
-    //
-    // Re-introduction is now forbidden OUTRIGHT (no allowlisted exception):
-    // both `parse_checker_text_to_type_expr` and the `checker_text_adapter`
-    // module name are entries in the `RETIRED_SYMBOLS` ledger in
-    // `crates/verter_session/tests/g_misc0/no_legacy_walker.rs`, whose
-    // `retired_symbols_absent_from_production_source` guard scans every
-    // `crates/*/src/**` production file (comments and `#[cfg(test)]` bodies
-    // stripped) and FAILS if either identifier reappears in production source.
-    // -----------------------------------------------------------------------
 }
 
 /// Architecture guard — direct content-agnostic `FileArtifactStore`
