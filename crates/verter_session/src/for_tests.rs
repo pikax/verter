@@ -176,6 +176,25 @@ pub fn read_materialize_structure_overflow_refusals(host: &crate::VerterHost) ->
         .load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Read the workspace `semantic_transitive` dependency set for
+/// `canonical_id` (the cross-file macro/type dependency axis maintained
+/// by `sync_transitive_macro_type_dependencies` →
+/// `WorkspaceAccess::replace_semantic_transitive`). Returns an empty set
+/// when the file has no snapshot. Integration tests use this to assert
+/// the semantic axis is CLEARED when a compute carries no
+/// `macro_type_deps` — the clearing is unconditional and must survive
+/// the empty-deps collector-setup skip. `WorkspaceAccess` is reachable
+/// only through `ws()` (`pub(crate)`), so this thin read is routed here.
+pub fn workspace_semantic_transitive_deps_for_tests(
+    host: &crate::VerterHost,
+    canonical_id: &str,
+) -> std::collections::BTreeSet<String> {
+    host.ws()
+        .dependency_snapshot(canonical_id)
+        .map(|snap| snap.semantic_transitive)
+        .unwrap_or_default()
+}
+
 /// Arm the dispatch's test-only Parse-fact injection slot. The
 /// next cold build through `ProjectSemanticDispatch::execute()`
 /// observes the supplied `Parse(...)` fact onto every active

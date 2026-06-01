@@ -1444,18 +1444,31 @@ impl VerterHost {
             .unwrap_or(&canonical)
             .trim_end_matches(".vue")
             .to_string();
-        let store_view = self.resolver_store_view();
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-        let (external_types, _, transitive_macro_type_deps) = self
-            .collect_external_types_from_loaded_files(
+        // External-macro-type collection. The collector iterates only
+        // `macro_type_deps`; with none, it returns `(None, vec![],
+        // empty_set)`, so skip building the resolver context + collector
+        // entirely and substitute the empty result. The transitive set
+        // is then EMPTY, which the sync below clears unconditionally.
+        let (external_types, transitive_macro_type_deps) = if macro_type_deps.is_empty() {
+            (None, std::collections::BTreeSet::<String>::new())
+        } else {
+            let store_view = self.resolver_store_view();
+            let overlay =
+                std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let host_ctx =
+                crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+            let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+            let (external_types, _, transitive) = self.collect_external_types_from_loaded_files(
                 ctx,
                 &canonical,
                 &macro_type_deps,
                 &script_imports,
                 profile_hash,
             );
+            (external_types, transitive)
+        };
+        // Unconditional: `replace_semantic_transitive(canonical, {})`
+        // CLEARS the semantic axis when the set is empty (closes F15).
         self.sync_transitive_macro_type_dependencies(&canonical, &transitive_macro_type_deps);
         let tsc_mode = match mode {
             PublicApiMode::Public => verter_compiler::tsc::TscMode::Public,
@@ -1621,18 +1634,35 @@ impl VerterHost {
         let mut unresolved_macro_type_diags = Vec::new();
         let profile_hash = compile_profile_hash(profile);
 
-        let store_view = self.resolver_store_view();
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-        let (external_types, missing_macro_type_diags, transitive_macro_type_deps) = self
-            .collect_external_types_from_loaded_files(
-                ctx,
-                &snapshot.canonical_id,
-                &snapshot.macro_type_deps,
-                &snapshot.script_imports,
-                Some(profile_hash),
-            );
+        // External-macro-type collection. The collector iterates only
+        // `macro_type_deps`; with none, it returns `(None, vec![],
+        // empty_set)`, so skip building the resolver context + collector
+        // entirely and substitute the empty result. The transitive set
+        // is then EMPTY, which the sync below clears unconditionally.
+        let (external_types, missing_macro_type_diags, transitive_macro_type_deps) =
+            if snapshot.macro_type_deps.is_empty() {
+                (
+                    None,
+                    Vec::new(),
+                    std::collections::BTreeSet::<String>::new(),
+                )
+            } else {
+                let store_view = self.resolver_store_view();
+                let overlay =
+                    std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+                let host_ctx =
+                    crate::resolver_core::HostResolverContext::new(self, &store_view, overlay);
+                let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+                self.collect_external_types_from_loaded_files(
+                    ctx,
+                    &snapshot.canonical_id,
+                    &snapshot.macro_type_deps,
+                    &snapshot.script_imports,
+                    Some(profile_hash),
+                )
+            };
+        // Unconditional: `replace_semantic_transitive(canonical, {})`
+        // CLEARS the semantic axis when the set is empty (closes F15).
         self.sync_transitive_macro_type_dependencies(
             &snapshot.canonical_id,
             &transitive_macro_type_deps,
