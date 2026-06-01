@@ -18,10 +18,7 @@
 
 #![allow(clippy::too_many_lines, dead_code, unused_imports)]
 
-#[path = "../component_meta_audit/harness.rs"]
-mod harness;
-
-use harness::{build_hermetic_host, footprint_of, resolve_under_audit};
+use crate::harness::{build_hermetic_host, footprint_of, resolve_under_audit};
 
 /// The owner SFC's props type lives in `/related.ts`. `/unrelated.ts` is
 /// imported into the SFC scope but is NEVER referenced by any macro — it is

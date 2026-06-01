@@ -1,5 +1,14 @@
 //! Consolidated integration-test group `block`: each module below was
 //! a separate top-level tests/*.rs binary, merged to cut test-link count.
+//!
+//! Shared test harnesses are declared ONCE at the binary root so the leaf
+//! modules import them via `use crate::harness` / `use crate::canary_harness`
+//! instead of each `#[path]`-loading the same file (which trips
+//! `clippy::duplicate_mod`).
+#[path = "component_meta_audit/harness.rs"]
+mod harness;
+#[path = "block_2_canary/harness.rs"]
+mod canary_harness;
 #[path = "g_block/block_1_f_p2_isolation_and_staleness.rs"]
 mod block_1_f_p2_isolation_and_staleness;
 #[path = "g_block/block_1_i_discriminators.rs"]

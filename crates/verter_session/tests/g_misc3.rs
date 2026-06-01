@@ -1,5 +1,11 @@
 //! Consolidated integration-test group `misc3`: each module below was
 //! a separate top-level tests/*.rs binary, merged to cut test-link count.
+//!
+//! The shared `component_meta_audit` harness is declared ONCE at the binary
+//! root so leaf modules import it via `use crate::harness` instead of each
+//! `#[path]`-loading the same file (which trips `clippy::duplicate_mod`).
+#[path = "component_meta_audit/harness.rs"]
+mod harness;
 #[path = "g_misc3/correctness.rs"]
 mod correctness;
 #[path = "g_misc3/cutover_state_arch_guard.rs"]

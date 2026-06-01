@@ -43,12 +43,9 @@
 // `block_6i_leak_chatmessages_audit.rs` harness-include.
 #![allow(clippy::too_many_lines, dead_code, unused_imports)]
 
-#[path = "../component_meta_audit/harness.rs"]
-mod harness;
-
 use std::time::Instant;
 
-use harness::{build_hermetic_host, build_preupserted_host, footprint_of, resolve_under_audit};
+use crate::harness::{build_hermetic_host, build_preupserted_host, footprint_of, resolve_under_audit};
 
 const CHAT_MESSAGES_VUE: &str =
     include_str!("../component_meta_audit_corpus/fixtures/ChatMessages.vue");

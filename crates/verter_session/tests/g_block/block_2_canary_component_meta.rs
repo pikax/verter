@@ -33,10 +33,7 @@
 
 use verter_session::FileKind;
 
-#[path = "../block_2_canary/harness.rs"]
-mod harness;
-
-use harness::{meta_hits, meta_misses, upsert, workspace_host};
+use crate::canary_harness::{meta_hits, meta_misses, upsert, workspace_host};
 
 /// Sorted slot-binding names for the named slot of a
 /// `get_component_meta` result.

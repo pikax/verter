@@ -73,9 +73,8 @@ use std::sync::Arc;
 // other test files in this dir consume. This test only needs
 // `build_hermetic_host`; suppress dead-code warnings for the rest
 // of the shared surface to keep the file's signal clean.
-#[allow(dead_code, unused_imports)]
-#[path = "../component_meta_audit/harness.rs"]
-mod harness;
+#[allow(unused_imports)]
+use crate::harness;
 
 use verter_session::audited_request::AuditedRequest;
 use verter_session::test_only::mapper_fingerprint::MapperFingerprintProbe;
