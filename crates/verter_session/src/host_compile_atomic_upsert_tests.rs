@@ -296,14 +296,20 @@ fn upsert_batch_completion_mapping_preserves_error_strings() {
         upsert_req("/map-superseded.vue", &good_template("superseded")),
         upsert_req("/map-shutdown.vue", &good_template("shutdown")),
     ];
-    let ids: Vec<String> = reqs.iter().map(|r| r.canonical_id.clone().unwrap()).collect();
+    let ids: Vec<String> = reqs
+        .iter()
+        .map(|r| r.canonical_id.clone().unwrap())
+        .collect();
 
     // Build the REAL transaction (real submit + committed sources) and
     // take the genuine states via the production `wait_batch`.
-    let (prepared, batch) =
-        host.test_submit_upsert_batch_parts(reqs, Priority::Background);
+    let (prepared, batch) = host.test_submit_upsert_batch_parts(reqs, Priority::Background);
     let mut states: Vec<CompletionState<RequestResult>> = host.scheduler.wait_batch(&batch);
-    assert_eq!(states.len(), 4, "one completion state per submitted request");
+    assert_eq!(
+        states.len(),
+        4,
+        "one completion state per submitted request"
+    );
     assert!(
         matches!(states[0], CompletionState::Ready(_)),
         "index 0 must have genuinely committed to Ready so the Ready arm \
@@ -404,7 +410,10 @@ fn upsert_batch_result_indices_map_to_prepared_canonicals() {
         upsert_req("/zip-superseded.vue", &good_template("zs")),
         upsert_req("/zip-shutdown.vue", &good_template("zd")),
     ];
-    let ids: Vec<String> = reqs.iter().map(|r| r.canonical_id.clone().unwrap()).collect();
+    let ids: Vec<String> = reqs
+        .iter()
+        .map(|r| r.canonical_id.clone().unwrap())
+        .collect();
 
     // Per-index DISTINCT terminal states. Index 0 stays the genuine
     // `Ready` (committed source); 1..=3 are distinct error arms.
@@ -429,8 +438,7 @@ fn upsert_batch_result_indices_map_to_prepared_canonicals() {
     ];
 
     // ── In-order run: each state at its own index ──
-    let (prepared, batch) =
-        host.test_submit_upsert_batch_parts(reqs, Priority::Interactive);
+    let (prepared, batch) = host.test_submit_upsert_batch_parts(reqs, Priority::Interactive);
     let mut states = host.scheduler.wait_batch(&batch);
     assert!(
         matches!(states[0], CompletionState::Ready(_)),

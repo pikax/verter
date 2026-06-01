@@ -90,11 +90,11 @@ impl UpsertBatchTxn {
     ///
     /// Every index is mapped (no early-return on a non-Ready arm), in
     /// input order:
-    ///   - `Ready(_)`     → `finish_upsert_post_commit` (carries the
-    ///                       request's canonical on success)
-    ///   - `Failed(e)`    → `HostError::Scheduler(e)`
-    ///   - `Superseded`   → `HostError::Superseded`
-    ///   - `Shutdown`     → `HostError::Shutdown`
+    /// - `Ready(_)` → `finish_upsert_post_commit` (carries the request's
+    ///   canonical on success)
+    /// - `Failed(e)` → `HostError::Scheduler(e)`
+    /// - `Superseded` → `HostError::Superseded`
+    /// - `Shutdown` → `HostError::Shutdown`
     fn map_states(
         host: &VerterHost,
         prepared: Vec<PreparedUpsertCommit>,
