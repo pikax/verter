@@ -382,8 +382,8 @@ impl VerterHost {
         // because the reader's `import_route_is_known_miss` predicate
         // would still consult a generation tag from the previous
         // project graph. Symmetric with
-        // [`Self::upsert_via_scheduler_with_priority`], which clears
-        // both fields when owner source content advances.
+        // [`Self::finish_upsert_post_commit`], which clears both fields
+        // when owner source content advances.
         for mut entry in self.derived_raw_cache().iter_mut() {
             entry.import_routes.clear();
             entry

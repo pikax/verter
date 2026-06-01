@@ -19,7 +19,7 @@
 //! - `self.<cache_field>.clear()` calls in production source whose
 //!   enclosing function is NOT in the allow-list of dedicated
 //!   reset/clear methods (`clear_*`, `reset_*`, `drop_*`, `purge_*`,
-//!   `wipe_*`, `configure_projects`, `upsert_via_scheduler_with_priority`).
+//!   `wipe_*`, `configure_projects`, `finish_upsert_post_commit`).
 //! - `self.<cache_field>.iter_mut().for_each(...)` calls in production
 //!   source — bulk mutation across all cache entries is a strict
 //!   superset of bulk clear and equally bypasses revalidation.
@@ -34,10 +34,11 @@
 //! - `configure_projects` — lifecycle reconfiguration of the project
 //!   resolver; clears caches whose validity depends on the project
 //!   graph identity.
-//! - `upsert_via_scheduler_with_priority` — owner source update path;
-//!   drains the upserted canonical's own caches (the own-canonical
-//!   drain). The reverse-dependent cascade was removed; this entry
-//!   covers only the upserted file's own-cache drain.
+//! - `finish_upsert_post_commit` — the per-canonical post-commit step
+//!   of the shared upsert engine (`upsert_many_with_priority`); drains
+//!   the upserted canonical's own caches (the own-canonical drain). The
+//!   reverse-dependent cascade was removed; this entry covers only the
+//!   upserted file's own-cache drain.
 //!
 //! Reference pattern: Block 1.E's `import_route_writer_guard.rs` and
 //! Block 1.G's `no_accumulate_dispatch_dep_signature_outside_helpers.rs`.
@@ -72,10 +73,11 @@ const RESET_NAME_PREFIXES: &[&str] = &[
 const RESET_WHOLE_NAMES: &[&str] = &[
     // Project-graph lifecycle reset entry points.
     "configure_projects",
-    // Owner source update path — drains the upserted canonical's own
-    // caches (`resolved_type_cache().clear()`). This is the
-    // own-canonical drain; there is no reverse-dependent cascade.
-    "upsert_via_scheduler_with_priority",
+    // Per-canonical post-commit of the shared upsert engine
+    // (`upsert_many_with_priority`) — drains the upserted canonical's own
+    // caches. This is the own-canonical drain; there is no
+    // reverse-dependent cascade.
+    "finish_upsert_post_commit",
     // File close / eviction lifecycle.
     "close",
     "evict",

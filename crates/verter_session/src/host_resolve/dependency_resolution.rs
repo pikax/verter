@@ -330,7 +330,7 @@ impl VerterHost {
     ///   supplied route-snapshot writer is
     ///   [`Self::set_import_dependencies`]; lifecycle reset goes
     ///   through [`Self::configure_projects`] and
-    ///   [`Self::upsert_via_scheduler_with_priority`]. A new positive
+    ///   [`Self::finish_upsert_post_commit`]. A new positive
     ///   route admission must route through this helper rather than
     ///   inlining a direct
     ///   `derived_raw_cache().entry(...).import_routes.insert(...)`.
@@ -346,7 +346,7 @@ impl VerterHost {
     ///   Positive resolutions do not need a generation tag: they stay
     ///   valid until the owner's own source content changes (which
     ///   evicts the `DerivedRawState` entry in
-    ///   `upsert_via_scheduler_with_priority`).
+    ///   `finish_upsert_post_commit`).
     ///
     /// * Reader correctness:
     ///   [`Self::import_route_is_known_miss`] requires resolved

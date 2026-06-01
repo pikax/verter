@@ -22,6 +22,87 @@ use crate::upsert::{build_upsert_result, UpsertResultData};
 use crate::VerterHost;
 use verter_scheduler::stage::Priority;
 
+/// One per-request outcome from the shared upsert engine
+/// [`VerterHost::upsert_many_with_priority`]. `result` is the same
+/// `Result<HostUpdateResult, HostError>` the single-file
+/// [`VerterHost::upsert`] returns; `canonical_id` is the request's
+/// resolved canonical, carried so callers (`compile_many`'s Stage B)
+/// can fold a failure into a per-canonical error map without re-deriving
+/// it.
+pub(crate) struct UpsertBatchOutcome {
+    pub canonical_id: String,
+    pub result: Result<HostUpdateResult, HostError>,
+}
+
+/// The per-canonical state captured BEFORE the atomic batch is
+/// submitted, paired with its request, so the post-commit step can run
+/// against the correct prior snapshot after the single `wait_batch`.
+///
+/// `old_source_snap` is a cloned `Arc<SourceSnapshot>` (or `None` for a
+/// cold file) read from the scheduler before submission — never a live
+/// DashMap shard `Ref`, so no guard crosses `submit_batch_atomic`.
+struct PreparedUpsertCommit {
+    canonical_id: String,
+    req: UpsertRequest,
+    old_source_snap: Option<Arc<verter_scheduler::node::SourceSnapshot>>,
+}
+
+/// An in-flight upsert batch transaction: the prepared per-canonical
+/// state index-aligned with the submitted [`BatchHandle`].
+///
+/// The transaction is the unit that owns the index alignment invariant:
+/// `prepared[i]` is the request whose completion is `batch.handles()[i]`.
+/// `submit` builds it (capture context once, prepare each request,
+/// assert canonical uniqueness, ONE `submit_batch_atomic`); `finish`
+/// consumes it (ONE `wait_batch`, then zip `state[i]` ↔ `prepared[i]`
+/// and run each post-commit). There is no path that produces a
+/// `prepared`/`batch` pair out of alignment.
+struct UpsertBatchTxn {
+    prepared: Vec<PreparedUpsertCommit>,
+    batch: verter_scheduler::scheduler::BatchHandle,
+}
+
+impl UpsertBatchTxn {
+    /// Drain the batch with EXACTLY ONE input-order `wait_batch`, then
+    /// zip each completion `state[i]` with its `prepared[i]` and map to
+    /// one [`UpsertBatchOutcome`]. Every index is mapped — a partial
+    /// failure never early-returns, so the result `Vec` always has one
+    /// outcome per submitted request, in input order.
+    fn finish(self, host: &VerterHost) -> Vec<UpsertBatchOutcome> {
+        use verter_scheduler::job::CompletionState;
+
+        let UpsertBatchTxn { prepared, batch } = self;
+        // ONE input-order wait. `wait_batch` returns `state[i]` for the
+        // i-th submitted request regardless of completion order.
+        let states = host.scheduler.wait_batch(&batch);
+        debug_assert_eq!(
+            states.len(),
+            prepared.len(),
+            "wait_batch must return one completion state per submitted request"
+        );
+
+        prepared
+            .into_iter()
+            .zip(states)
+            .map(|(prepared, state)| {
+                let canonical_id = prepared.canonical_id.clone();
+                let result = match state {
+                    CompletionState::Ready(ready) => {
+                        host.finish_upsert_post_commit(prepared, ready)
+                    }
+                    CompletionState::Failed(e) => Err(HostError::Scheduler(e)),
+                    CompletionState::Superseded => Err(HostError::Superseded),
+                    CompletionState::Shutdown => Err(HostError::Shutdown),
+                };
+                UpsertBatchOutcome {
+                    canonical_id,
+                    result,
+                }
+            })
+            .collect()
+    }
+}
+
 impl VerterHost {
     /// Insert or update a file in the host.
     ///
@@ -53,90 +134,146 @@ impl VerterHost {
 
     /// Insert or update a file with caller-configured scheduler priority.
     ///
-    /// Performs the semantic-cache pre-invalidation that `upsert` always
-    /// performs (delete the canonical's semantic-db entries before
-    /// re-parsing), records the priority into the test-only
-    /// `last_upsert_priority` observable, then delegates to
-    /// `upsert_via_scheduler_with_priority`.
-    ///
-    /// Batch callers (`VerterHost::compile_many`) reach this method via
-    /// `host_compile::upsert_with_priority_for_batch`.
+    /// Collapses onto the single shared upsert engine
+    /// [`Self::upsert_many_with_priority`] as a 1-element atomic batch —
+    /// there is no second single-file submit path. The semantic-db
+    /// pre-invalidation (the parse-domain producer contract) and the
+    /// test-only priority observable live in `upsert_many_with_priority`,
+    /// applied per request, so a 1-element call observes them exactly as
+    /// the former dedicated single-file path did.
     pub(crate) fn upsert_with_priority(
         &self,
         req: UpsertRequest,
         priority: Priority,
     ) -> Result<HostUpdateResult, HostError> {
-        // R4 producer: drop the prior parse-domain `FileSemantic`
-        // for this canonical so the next resolver pass rebuilds the
-        // fact registry from the new content. This is the producer
-        // contract — NOT downstream cache invalidation. Downstream
-        // caches revalidate lazily through their own
-        // `fact_dep_signature` checks (R3); the upsert itself does
-        // not eagerly drain them.
-        if let Some(ref id) = req.canonical_id {
-            self.register_facts_for_new_content(id);
-        }
-
-        // Test-only observable: lets `compile_many_propagates_*_priority`
-        // tests confirm the priority that flowed to the scheduler.
-        // Production builds compile this branch out completely.
-        #[cfg(test)]
-        {
-            *self.last_upsert_priority.lock() = Some(priority);
-        }
-
-        self.upsert_via_scheduler_with_priority(req, priority)
-    }
-
-    /// Priority-parameterized inner helper for the scheduler-backed
-    /// upsert path. Carries the scheduler-submit, wait-for-commit, and
-    /// post-process flow. Callers MUST go through `upsert_with_priority`
-    /// (which performs the semantic-db pre-invalidation invariant) —
-    /// direct callers of this inner helper bypass that invariant.
-    ///
-    /// Invalidation is lazy on both axes. Same-canonical: a warm
-    /// query-identity entry for the upserted canonical is rejected by
-    /// its current-content self-version root on the cold-recompute read
-    /// path — the upsert performs no eager own-canonical cache drain.
-    /// Cross-file: a downstream consumer's warm cache entry is
-    /// revalidated on read through its own `fact_dep_signature` check,
-    /// not by an eager cascade fired here. The only cache work this
-    /// helper performs is the parse-domain producer contract — see
-    /// `register_facts_for_new_content` below.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(crate) fn upsert_via_scheduler_with_priority(
-        &self,
-        req: UpsertRequest,
-        priority: Priority,
-    ) -> Result<HostUpdateResult, HostError> {
-        use crate::host_executor::HostSourceData;
-        use verter_scheduler::job::CompletionState;
-
-        #[cfg(feature = "session_metrics")]
-        self.metrics
-            .upserts
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
         let canonical_id = req
             .canonical_id
             .clone()
             .unwrap_or_else(|| canonicalize_id(&req.input_id).into_owned());
+        // Drain the single outcome of the 1-element batch back into the
+        // single-file return shape. `upsert_many_with_priority` always
+        // returns exactly one outcome per input request.
+        self.upsert_many_with_priority(vec![req], priority)
+            .into_iter()
+            .next()
+            .map(|outcome| outcome.result)
+            .unwrap_or_else(|| {
+                // Unreachable: a non-empty input yields one outcome. Keep
+                // a typed error rather than panicking on an impossible
+                // empty drain.
+                Err(HostError::MissingSource { canonical_id })
+            })
+    }
 
-        // ── Pre-submit: read old state from scheduler ──
-        let old_source_snap = self.scheduler.try_get_source(&canonical_id);
-        let old_host_data = old_source_snap
-            .as_ref()
-            .and_then(|s| s.downcast_data::<HostSourceData>());
+    /// The single shared upsert engine: submit every request as ONE
+    /// atomic batch, wait once, and run per-canonical post-commit in
+    /// input order.
+    ///
+    /// This is the SOLE scheduler-backed upsert path. The public
+    /// single-file [`Self::upsert_with_priority`] collapses onto it as a
+    /// 1-element batch, and `compile_many`'s Stage B drives it directly
+    /// with the deduped per-canonical request list. There is no
+    /// hand-rolled per-file submit/wait anywhere else.
+    ///
+    /// Flow:
+    /// 1. Empty input short-circuits to an empty `Vec`.
+    /// 2. The calling thread's `OpaqueRequestContext` is captured ONCE
+    ///    here (before any submission) and cloned into every batch
+    ///    `Request`. This is the correct audit owner: the scheduler
+    ///    installs the context into the source / analysis worker TLS, so
+    ///    fan-out events stay attributable to the outer audited request.
+    ///    (The former per-file `current_context()` ran inside a host-pool
+    ///    worker, which carries no caller TLS — an implementation
+    ///    artifact, not the intended owner.)
+    /// 3. Per request: the parse-domain producer contract
+    ///    (`register_facts_for_new_content`) fires, the test-only
+    ///    priority observable is recorded, the pre-submit source snapshot
+    ///    is captured (a cloned `Arc`, never a live shard `Ref` — no
+    ///    DashMap guard crosses `submit_batch_atomic`), and one
+    ///    `Request { target: Analysis, .. }` is built.
+    /// 4. A hard uniqueness assertion rejects duplicate canonicals BEFORE
+    ///    admission — two source-updating requests for one file would each
+    ///    bump the node generation and supersede the prior in the same
+    ///    critical section, a correctness bug `submit_batch_atomic` does
+    ///    not guard against (it does not dedup).
+    /// 5. Exactly ONE `submit_batch_atomic` + exactly ONE `wait_batch`.
+    /// 6. `wait_batch` returns completion states in INPUT order; `state[i]`
+    ///    is zipped with `prepared[i]` and mapped to one outcome each. A
+    ///    partial failure does NOT early-return — every index is mapped.
+    ///
+    /// Invalidation is lazy on both axes (R1/R3): the upsert performs no
+    /// eager own-canonical query-identity drain and fires no
+    /// reverse-dependent cascade. The only cache work is the parse-domain
+    /// producer contract; see `finish_upsert_post_commit`.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub(crate) fn upsert_many_with_priority(
+        &self,
+        requests: Vec<UpsertRequest>,
+        priority: Priority,
+    ) -> Vec<UpsertBatchOutcome> {
+        // 1. Empty input: no submission, no wake, no accounting.
+        if requests.is_empty() {
+            return Vec::new();
+        }
+        // 2–5: build the transaction (capture context once, prepare each
+        //      request, assert uniqueness, ONE `submit_batch_atomic`).
+        // 6:   drive it (ONE `wait_batch`, then per-index post-commit).
+        self.submit_upsert_batch(requests, priority).finish(self)
+    }
 
-        // ── Submit to scheduler (sole parse authority) ──
-        //
-        // Thread the current thread's `OpaqueRequestContext` (if any)
-        // so worker threads install it before running stages — keeps
-        // fan-out events from the scheduler's SourceStage attributable
-        // to an outer audited request.
-        let handle = self
-            .scheduler
-            .submit_request(verter_scheduler::scheduler::Request {
+    /// Build the in-flight upsert transaction: capture the calling
+    /// thread's request context once, run each request's producer
+    /// contract + priority observable + pre-submit snapshot, assert
+    /// canonical uniqueness, and issue the SINGLE `submit_batch_atomic`.
+    fn submit_upsert_batch(&self, requests: Vec<UpsertRequest>, priority: Priority) -> UpsertBatchTxn {
+        // Capture the CALLING thread's request context ONCE, before any
+        // submission, and clone it into every batch Request. The
+        // scheduler installs it into the source / analysis worker TLS, so
+        // fan-out events stay attributable to the outer audited request.
+        let request_context = verter_scheduler::request_context::current_context();
+
+        #[cfg(feature = "session_metrics")]
+        self.metrics
+            .upserts
+            .fetch_add(requests.len() as u64, std::sync::atomic::Ordering::Relaxed);
+
+        let mut prepared: Vec<PreparedUpsertCommit> = Vec::with_capacity(requests.len());
+        let mut scheduler_requests: Vec<verter_scheduler::scheduler::Request> =
+            Vec::with_capacity(requests.len());
+        for req in requests {
+            let canonical_id = req
+                .canonical_id
+                .clone()
+                .unwrap_or_else(|| canonicalize_id(&req.input_id).into_owned());
+
+            // R4 producer: drop the prior parse-domain `FileSemantic` for
+            // this canonical so the next resolver pass rebuilds the fact
+            // registry from the new content. This is the producer
+            // contract — NOT downstream cache invalidation. Downstream
+            // caches revalidate lazily through their own
+            // `fact_dep_signature` checks (R3); the upsert itself does not
+            // eagerly drain them. (The former single-file path ran this in
+            // `upsert_with_priority` before delegating; the engine now owns
+            // it per request so both entry points behave identically.)
+            if let Some(ref id) = req.canonical_id {
+                self.register_facts_for_new_content(id);
+            }
+
+            // Test-only observable: lets `compile_many_propagates_*_priority`
+            // tests confirm the priority that flowed to the scheduler.
+            // Production builds compile this branch out completely.
+            #[cfg(test)]
+            {
+                *self.last_upsert_priority.lock() = Some(priority);
+            }
+
+            // Pre-submit: read old state from the scheduler. `try_get_source`
+            // returns a cloned `Arc<SourceSnapshot>`; the shard `Ref` is
+            // dropped before this returns, so NO DashMap guard crosses
+            // `submit_batch_atomic` (AB-BA: holding an `Arc` is not a lock).
+            let old_source_snap = self.scheduler.try_get_source(&canonical_id);
+
+            scheduler_requests.push(verter_scheduler::scheduler::Request {
                 file_id: canonical_id.clone(),
                 target: verter_scheduler::stage::TargetStage::Analysis,
                 priority,
@@ -145,25 +282,87 @@ impl VerterHost {
                     FileKind::VueSfc => verter_scheduler::source_loader::FileKind::VueSfc,
                     FileKind::NonSfc => verter_scheduler::source_loader::FileKind::NonSfc,
                 }),
-                request_context: verter_scheduler::request_context::current_context(),
+                request_context: request_context.clone(),
             });
-
-        // Wait for scheduler to commit Source + Analysis snapshots.
-        // `wait_or_drive` blocks on the native driver's condvar when a driver
-        // thread is installed; on WASM (single-threaded sync mode) it drives
-        // stages inline until the handle resolves.
-        match self.scheduler.wait_or_drive(&handle) {
-            CompletionState::Ready(_) => {}
-            CompletionState::Failed(e) => {
-                return Err(HostError::Scheduler(e));
-            }
-            CompletionState::Superseded => {
-                return Err(HostError::Superseded);
-            }
-            CompletionState::Shutdown => {
-                return Err(HostError::Shutdown);
-            }
+            prepared.push(PreparedUpsertCommit {
+                canonical_id,
+                req,
+                old_source_snap,
+            });
         }
+
+        // Hard uniqueness assertion: duplicate source-updating requests
+        // for one canonical must fail before scheduler admission, not
+        // silently bump the node generation twice in one critical section.
+        // `compile_many`'s Stage B dedups upstream (`canonical_to_upsert`
+        // carries one entry per canonical), and a 1-element single-file
+        // call is trivially unique.
+        debug_assert!(
+            {
+                let mut seen = std::collections::HashSet::with_capacity(prepared.len());
+                prepared.iter().all(|p| seen.insert(p.canonical_id.as_str()))
+            },
+            "upsert_many_with_priority received duplicate canonical_ids — a \
+             source-updating batch with a repeated file_id would bump the \
+             node generation twice under one DAG-lock and supersede the prior \
+             admit, corrupting the batch. Dedup before calling the engine."
+        );
+
+        // Exactly ONE atomic submission. `submit_batch_atomic` lands a
+        // single `NewRequestBatch` admitted under one `dag.lock()` and
+        // accounts once itself — do NOT call `account_batch_submission` on
+        // top of it. The returned `BatchHandle`'s handles are in input
+        // order, index-aligned with `prepared`.
+        let batch = self.scheduler.submit_batch_atomic(scheduler_requests);
+        UpsertBatchTxn { prepared, batch }
+    }
+
+    /// Per-canonical post-commit: read back the committed parse, compute
+    /// granular changes, run the per-domain own-canonical cache drain, and
+    /// build the [`HostUpdateResult`].
+    ///
+    /// Runs once per canonical on the CALLING thread after the single
+    /// `wait_batch` returns. Drives a generation commit-fence: the
+    /// `RequestResult::Analysis` snapshot's `generation` is the fence; the
+    /// source snapshot read back here must carry the SAME generation. A
+    /// mismatch means a newer source landed mid-flight and this result is
+    /// stale → `HostError::Superseded` (never warm a torn provisional
+    /// result into a shared cache).
+    ///
+    /// Invalidation is lazy on both axes. Same-canonical: a warm
+    /// query-identity entry for the upserted canonical is rejected by its
+    /// current-content self-version root on the cold-recompute read path.
+    /// Cross-file: a downstream consumer's warm entry is revalidated on
+    /// read through its own `fact_dep_signature` check (R3), not by an
+    /// eager cascade fired here. The only cache work here is the
+    /// parse-domain producer contract (`register_facts_for_new_content`)
+    /// plus the upserted file's own-cache drain.
+    fn finish_upsert_post_commit(
+        &self,
+        prepared: PreparedUpsertCommit,
+        ready: verter_scheduler::job::RequestResult,
+    ) -> Result<HostUpdateResult, HostError> {
+        use crate::host_executor::HostSourceData;
+        use verter_scheduler::job::RequestResult;
+
+        let PreparedUpsertCommit {
+            canonical_id,
+            req,
+            old_source_snap,
+        } = prepared;
+
+        // The batch target was `Analysis`, so the Ready payload is the
+        // Analysis snapshot. Its generation is the commit fence.
+        let RequestResult::Analysis(analysis_snap) = ready else {
+            return Err(HostError::MissingSource {
+                canonical_id: canonical_id.clone(),
+            });
+        };
+        let committed_generation = analysis_snap.generation;
+
+        let old_host_data = old_source_snap
+            .as_ref()
+            .and_then(|s| s.downcast_data::<HostSourceData>());
 
         // ── Post-commit: read new state from scheduler ──
         let new_source_snap = self
@@ -172,6 +371,16 @@ impl VerterHost {
             .ok_or_else(|| HostError::MissingSource {
                 canonical_id: canonical_id.clone(),
             })?;
+
+        // Commit fence: the source snapshot must match the generation the
+        // Analysis stage committed against. A higher source generation
+        // means a newer upsert raced in after our batch admitted; the
+        // read-back parse would be torn relative to the analysis we waited
+        // on — reject as superseded rather than publishing a stale result.
+        if new_source_snap.generation != committed_generation {
+            return Err(HostError::Superseded);
+        }
+
         let new_host_data = new_source_snap
             .downcast_data::<HostSourceData>()
             .ok_or_else(|| HostError::MissingSource {

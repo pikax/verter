@@ -354,8 +354,7 @@ pub struct Request {
 
 /// Batch submission handle.
 ///
-/// Produced by [`Scheduler::submit_batch`] and
-/// [`Scheduler::submit_batch_atomic`]; drained via
+/// Produced by [`Scheduler::submit_batch_atomic`]; drained via
 /// [`Scheduler::wait_batch`]. Callers submit N independent requests
 /// before any waits; the scheduler runs each request's stage work on
 /// its own stage `cpu_pool` as the driver dispatches it (the scheduler
@@ -877,32 +876,9 @@ impl Scheduler {
         }
     }
 
-    /// Batch submit. Lands N requests on the inbox without individual
-    /// waits so the driver can coalesce their drain; each request's
-    /// stage work then runs on the scheduler's own stage `cpu_pool` as
-    /// the driver dispatches it. The scheduler performs NO outer batch
-    /// fan-out (that wait belongs to the host/runtime coordinator pool).
-    /// Returns a [`BatchHandle`] that carries one completion handle per
-    /// request in submission order.
-    ///
-    /// This sends N separate `NewRequest` items into the inbox — the
-    /// driver may interleave other submissions between them, and the
-    /// pump can observe the batch partially admitted. When admission
-    /// must be all-or-nothing (no half-admitted state visible to the
-    /// pump, one wake, one supersede sweep across all files), use
-    /// [`Self::submit_batch_atomic`] instead.
-    pub fn submit_batch(&self, requests: Vec<Request>) -> BatchHandle {
-        let mut handles = Vec::with_capacity(requests.len());
-        for request in requests {
-            handles.push(self.submit_request(request));
-        }
-        BatchHandle { handles }
-    }
-
     /// Atomically submit a batch of requests as ONE inbox item.
     ///
-    /// Unlike [`Self::submit_batch`] (N separate `NewRequest` items),
-    /// this lands a single [`Submission::NewRequestBatch`] that the
+    /// This lands a single [`Submission::NewRequestBatch`] that the
     /// driver drains as a unit and admits under ONE `dag.lock()`
     /// acquisition (generation bumps + supersede sweeps + waiter
     /// registration for every request). Consequences:
@@ -15038,10 +15014,11 @@ mod tests {
     ///
     /// Discrimination has TWO independent rails:
     ///
-    /// 1. END-STATE: a sequential `submit_batch` pushes N separate
-    ///    `NewRequest` items; draining exactly one would admit ONE node
-    ///    (`pending_len() == 1`) and leave N-1 items in the inbox. The
-    ///    `== N` + empty-inbox assertion fails on the sequential impl.
+    /// 1. END-STATE: a sequential per-request submission (N separate
+    ///    `submit_request` calls) pushes N separate `NewRequest` items;
+    ///    draining exactly one would admit ONE node (`pending_len() == 1`)
+    ///    and leave N-1 items in the inbox. The `== N` + empty-inbox
+    ///    assertion fails on the sequential impl.
     /// 2. LOCK-CONTINUITY (P1b): the end-state alone does NOT prove the
     ///    admit ran under ONE held `dag.lock()` — a per-item lock/unlock
     ///    that admitted all N from the one item would leave the same
@@ -15095,7 +15072,7 @@ mod tests {
     /// `drained == 1` (one inbox item) and `submit_count` advanced by
     /// exactly 1.
     ///
-    /// Discrimination: a sequential `submit_batch` increments
+    /// Discrimination: a sequential per-request submission increments
     /// `submit_count` N times (once per `submit_request`) and pushes N
     /// inbox items, so `drained == N`. Both `== 1` assertions fail on
     /// the sequential impl.

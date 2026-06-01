@@ -14,10 +14,12 @@
 //!    receives a duplicate-conflict error). For non-conflicting unique
 //!    groups, skip the upsert when the scheduler already holds
 //!    byte-identical source (preserves warm `compile_slot` cache).
-//!    Submit upserts via [`VerterHost::upsert_with_priority`] (which
-//!    performs the same `semantic_db` pre-invalidation that the
-//!    existing public `upsert` does) at the caller-configured priority
-//!    and wait for all to commit.
+//!    Submit the deduped per-canonical source updates as ONE atomic
+//!    batch through the shared upsert engine
+//!    [`VerterHost::upsert_many_with_priority`] (one
+//!    `Scheduler::submit_batch_atomic` + one `wait_batch`, with
+//!    per-canonical post-commit on the calling thread) at the
+//!    caller-configured priority.
 //! 3. **Stage C — compile each unique canonical group exactly once.**
 //!    Call [`VerterHost::get_virtual_file`] for `Main`. Per-input panic
 //!    isolation is owned by the host batch coordinator's generic catch
@@ -168,18 +170,6 @@ impl VerterHost {
         // it. `None` on both resolves to the host default `Session`.
         let default_mode = options.default_mode.unwrap_or(CompileCacheMode::Session);
 
-        // Fan the batch out through the host batch coordinator — the
-        // single host-side coordination rule. The coordinator installs
-        // on the host-owned coordinator pool (built once at host
-        // construction with an 8 MiB worker stack; workers register as
-        // `CallerKind::External`, so the coordinator never inline-
-        // executes scheduler CPU tasks while blocked on a completion
-        // handle). The outer wait therefore runs on the coordinator
-        // pool, never on the scheduler's stage pool. Worker count is
-        // fixed at construction time (`HostConfig::host_cpu_threads`)
-        // and is not resized per call.
-        let coordinator = self.batch_coordinator();
-
         // ── group + selective upsert ──
         // HashMap iteration is non-deterministic, but we only iterate
         // it for parallel-independent upserts and probe-keys — never
@@ -237,49 +227,55 @@ impl VerterHost {
             }
         }
 
-        // The host batch coordinator owns the shared coordination
-        // concerns (host-coordinator-pool fan-out, deterministic
-        // ordering, the non-reentrant guard, and the generic per-item
-        // panic boundary). `compile_many` performs NO per-batch scheduler
-        // submission accounting, so its policy carries `scheduler: None`;
-        // it supplies only the item work and the domain conversion of a
-        // caught panic into an error result for that slot.
-        let upsert_policy = crate::host_batch_coordinator::BatchPolicy {
-            scheduler: None,
-            label: "compile_many_upsert",
-            on_item_panic: &|panic: crate::host_batch_coordinator::BatchItemPanic<
-                '_,
-                &CompileBatchInput,
-            >| {
-                (
-                    panic.item.canonical_id.clone(),
-                    Err(format!("upsert panicked: {}", panic.message())),
-                )
-            },
-        };
-        let upsert_results = coordinator.run_batch(&canonical_to_upsert, &upsert_policy, |input| {
-            // Render the upsert error to a string inside the worker so a
-            // caught panic (converted by `on_item_panic`) can produce the
-            // same `Result<(), String>` slot shape — the consumer below
-            // only needs the message.
-            let res = self
-                .upsert_with_priority_for_batch(input, priority)
-                .map_err(|e| format!("upsert failed: {e}"));
-            (input.canonical_id.clone(), res)
-        });
-        for (id, res) in upsert_results {
-            if let Err(message) = res {
-                group_errors.entry(id).or_insert(message);
+        // ── Stage-B upsert: ONE atomic batch ──
+        // Every per-canonical source update is admitted as a SINGLE
+        // `Scheduler::submit_batch_atomic` + one `wait_batch` driven by the
+        // shared upsert engine. `canonical_to_upsert` is already deduped to
+        // one entry per canonical (conflicting-source duplicates were
+        // diverted to `group_errors` above), so it is the exact index space
+        // for the engine — which captures the calling thread's request
+        // context once, asserts canonical uniqueness, submits the whole
+        // batch under one DAG-lock acquisition, then runs each canonical's
+        // post-commit on this thread after the single wait. Upsert errors
+        // fold into `group_errors`, surfaced to every original input
+        // position for that canonical in Stage D.
+        let upsert_requests: Vec<UpsertRequest> = canonical_to_upsert
+            .iter()
+            .map(|input| UpsertRequest {
+                canonical_id: Some(input.canonical_id.clone()),
+                input_id: input.canonical_id.clone(),
+                source: Arc::clone(&input.source),
+                file_kind: FileKind::VueSfc,
+                aliases: Vec::new(),
+            })
+            .collect();
+        for outcome in self.upsert_many_with_priority(upsert_requests, priority) {
+            if let Err(e) = outcome.result {
+                group_errors
+                    .entry(outcome.canonical_id)
+                    .or_insert_with(|| format!("upsert failed: {e}"));
             }
         }
 
         // ── compile each UNIQUE canonical group exactly once ──
-        // `run_batch` is synchronous: this block doesn't begin until
-        // Stage B's `run_batch` above has returned. The
+        // Stage C fans the parallel `get_virtual_file` calls out through
+        // the host batch coordinator — the single host-side coordination
+        // rule. The coordinator installs on the host-owned coordinator pool
+        // (built once at host construction with an 8 MiB worker stack;
+        // workers register as `CallerKind::External`, so the coordinator
+        // never inline-executes scheduler CPU tasks while blocked on a
+        // completion handle). The outer wait therefore runs on the
+        // coordinator pool, never on the scheduler's stage pool. The
+        // coordinator is acquired HERE (not before Stage B) because Stage B
+        // no longer fans out: it issues one atomic submit + one wait.
+        //
+        // `run_batch` is synchronous: this block doesn't begin until the
+        // Stage-B `wait_batch` above has returned. The
         // `compile_one_call_count` test-only counter on `VerterHost` is
         // incremented at the top of `compile_one_in_batch` to make the
         // read-once invariant directly observable.
         //
+        let coordinator = self.batch_coordinator();
         // Per-input panic isolation is owned by the coordinator's generic
         // catch boundary: a codegen panic in one input is caught there
         // and handed to this policy's `on_item_panic`, which renders it
@@ -362,29 +358,6 @@ impl VerterHost {
             None => return true,
         };
         hash_16(source.as_bytes()) != hd.parse.whole_hash
-    }
-
-    /// Batch-side upsert wrapper. Goes through `upsert_with_priority`
-    /// (NOT `upsert_via_scheduler_with_priority` directly) to preserve
-    /// the `semantic_db.invalidate(id)` pre-invalidation that the
-    /// existing public `upsert` performs. See
-    /// `host_upsert.rs::VerterHost::upsert_with_priority`.
-    fn upsert_with_priority_for_batch(
-        &self,
-        input: &CompileBatchInput,
-        priority: Priority,
-    ) -> Result<(), HostError> {
-        self.upsert_with_priority(
-            UpsertRequest {
-                canonical_id: Some(input.canonical_id.clone()),
-                input_id: input.canonical_id.clone(),
-                source: Arc::clone(&input.source),
-                file_kind: FileKind::VueSfc,
-                aliases: Vec::new(),
-            },
-            priority,
-        )
-        .map(|_| ())
     }
 
     /// Per-input compile worker. The `precomputed_error` slot is
