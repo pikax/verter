@@ -2218,8 +2218,13 @@ impl Scheduler {
 
         // Register the waiter group. The dedup callback (if any) is
         // returned as a deferred event and fired after the lock drops.
-        let dedup_event =
-            dag.register_request(&canonical, generation, target.clone(), sender, request_context);
+        let dedup_event = dag.register_request(
+            &canonical,
+            generation,
+            target.clone(),
+            sender,
+            request_context,
+        );
         if let Some(event) = dedup_event {
             post.dedup_events.push(event);
         }
@@ -2236,7 +2241,8 @@ impl Scheduler {
             generation,
             stage: FileStageKey::Analysis,
         };
-        if matches!(first_missing, TaskKind::Artifact { .. }) && dag.has_pending_deps(&analysis_gate)
+        if matches!(first_missing, TaskKind::Artifact { .. })
+            && dag.has_pending_deps(&analysis_gate)
         {
             dag.upgrade_priority(&analysis_gate, effective_priority);
             return;
@@ -14729,8 +14735,7 @@ mod tests {
                 false
             }
             fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {
-                self.fired
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
                 // The whole point: the admitting thread must NOT be
                 // holding the DAG lock when this callback runs.
                 let got = self.dag.try_lock();
@@ -14758,13 +14763,15 @@ mod tests {
             dag: Arc::clone(&sched.dag),
             try_lock_succeeded: Arc::clone(&try_lock_succeeded),
             fired: Arc::clone(&fired),
-        }) as Arc<dyn crate::request_context::RequestContextLike>);
+        })
+            as Arc<dyn crate::request_context::RequestContextLike>);
         let joiner_ctx = OpaqueRequestContext(Arc::new(LockProbeCtx {
             id: 2,
             dag: Arc::clone(&sched.dag),
             try_lock_succeeded: Arc::clone(&try_lock_succeeded),
             fired: Arc::clone(&fired),
-        }) as Arc<dyn crate::request_context::RequestContextLike>);
+        })
+            as Arc<dyn crate::request_context::RequestContextLike>);
 
         let reqs = vec![
             Request {
@@ -15036,7 +15043,15 @@ mod tests {
             0,
             "result[0] must correspond to INPUT handle 0, not the first-completed handle",
         );
-        assert_eq!(gen_of(&results[1]), 11, "result[1] must correspond to input handle 1");
-        assert_eq!(gen_of(&results[2]), 22, "result[2] must correspond to input handle 2");
+        assert_eq!(
+            gen_of(&results[1]),
+            11,
+            "result[1] must correspond to input handle 1"
+        );
+        assert_eq!(
+            gen_of(&results[2]),
+            22,
+            "result[2] must correspond to input handle 2"
+        );
     }
 }
