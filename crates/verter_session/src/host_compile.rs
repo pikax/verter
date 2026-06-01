@@ -29,21 +29,25 @@
 //!    the result for that canonical and clone its `Arc<str>` payloads
 //!    (refcount-only, no string copy).
 //!
-//! All Rayon work runs on the host-owned
-//! [`verter_scheduler::HostCpuPool`] reached via
-//! [`VerterHost::host_cpu_pool`]. The pool is built once at host
-//! construction with an 8 MiB worker stack, so the stack guard
-//! applies to every code path (no fall-through to Rayon's global
-//! pool with its 1 MiB Windows default). `pool.install` is
-//! synchronous: Stage B fully completes before Stage C begins.
+//! Both parallel stages fan out through the host batch coordinator
+//! ([`VerterHost::batch_coordinator`] →
+//! [`crate::host_batch_coordinator::HostBatchCoordinator::run_batch`]),
+//! the single host-side coordination rule shared with the
+//! component-meta batch path. The coordinator installs on the
+//! host-owned [`verter_scheduler::HostCpuPool`], built once at host
+//! construction with an 8 MiB worker stack so the stack guard applies
+//! to every code path (no fall-through to Rayon's global pool with its
+//! 1 MiB Windows default). `run_batch` is synchronous: Stage B fully
+//! completes before Stage C begins.
 //!
-//! Workers register as
-//! [`verter_scheduler::caller_kind::CallerKind::External`], so when
-//! the compile coordinator blocks on a scheduler completion handle
-//! the host worker parks on the condvar rather than inline-executing
-//! scheduler CPU tasks. The dual-pool isolation eliminates the
-//! deadlock class where a saturated scheduler CPU pool could starve
-//! `compile_many`'s outer collect/order/finalise phase.
+//! The coordinator pool's workers register as
+//! [`verter_scheduler::caller_kind::CallerKind::External`], so when the
+//! compile coordinator blocks on a scheduler completion handle the host
+//! worker parks on the condvar rather than inline-executing scheduler
+//! CPU tasks. Running the outer wait on the coordinator pool (never the
+//! scheduler's stage pool) eliminates the deadlock class where a
+//! saturated scheduler CPU pool could starve `compile_many`'s outer
+//! collect/order/finalise phase.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -52,7 +56,6 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rayon::prelude::*;
 use verter_scheduler::stage::Priority;
 
 use crate::hash::hash_16;
@@ -161,17 +164,17 @@ impl VerterHost {
         // it. `None` on both resolves to the host default `Session`.
         let default_mode = options.default_mode.unwrap_or(CompileCacheMode::Session);
 
-        // Run on the host-owned CPU pool reached via
-        // `host_cpu_pool()`. Built once at host construction with an
-        // 8 MiB worker stack (so the stack guard applies to every
-        // code path, including the default worker-count path tested by
-        // `compile_many_default_pool_has_8mib_stack`); the workers
-        // register as `CallerKind::External`, so the coordinator
-        // never inline-executes scheduler CPU tasks while blocked on
-        // a completion handle. Worker count is fixed at construction
-        // time (`HostConfig::host_cpu_threads`) and is not resized
-        // per call.
-        let pool = self.host_cpu_pool();
+        // Fan the batch out through the host batch coordinator — the
+        // single host-side coordination rule. The coordinator installs
+        // on the host-owned coordinator pool (built once at host
+        // construction with an 8 MiB worker stack; workers register as
+        // `CallerKind::External`, so the coordinator never inline-
+        // executes scheduler CPU tasks while blocked on a completion
+        // handle). The outer wait therefore runs on the coordinator
+        // pool, never on the scheduler's stage pool. Worker count is
+        // fixed at construction time (`HostConfig::host_cpu_threads`)
+        // and is not resized per call.
+        let coordinator = self.batch_coordinator();
 
         // ── group + selective upsert ──
         // HashMap iteration is non-deterministic, but we only iterate
@@ -230,14 +233,9 @@ impl VerterHost {
             }
         }
 
-        let upsert_results = pool.install(|| {
-            canonical_to_upsert
-                .par_iter()
-                .map(|input| {
-                    let res = self.upsert_with_priority_for_batch(input, priority);
-                    (input.canonical_id.clone(), res)
-                })
-                .collect::<Vec<_>>()
+        let upsert_results = coordinator.run_batch(&canonical_to_upsert, |input| {
+            let res = self.upsert_with_priority_for_batch(input, priority);
+            (input.canonical_id.clone(), res)
         });
         for (id, res) in upsert_results {
             if let Err(e) = res {
@@ -248,22 +246,20 @@ impl VerterHost {
         }
 
         // ── compile each UNIQUE canonical group exactly once ──
-        // pool.install is synchronous: this block doesn't begin until
-        // Stage B's pool.install above has returned. The
+        // `run_batch` is synchronous: this block doesn't begin until
+        // Stage B's `run_batch` above has returned. The
         // `compile_one_call_count` test-only counter on `VerterHost` is
         // incremented at the top of `compile_one_in_batch` to make the
         // read-once invariant directly observable.
-        let compiled: HashMap<(String, CompileCacheMode), CompileBatchEntry> = pool.install(|| {
-            canonical_to_compile
-                .par_iter()
-                .map(|input| {
-                    let pre_err = group_errors.get(&input.canonical_id).cloned();
-                    let entry = self.compile_one_in_batch(input, &profile, default_mode, pre_err);
-                    let effective_mode = input.requested_mode.unwrap_or(default_mode);
-                    ((input.canonical_id.clone(), effective_mode), entry)
-                })
-                .collect()
-        });
+        let compiled: HashMap<(String, CompileCacheMode), CompileBatchEntry> = coordinator
+            .run_batch(&canonical_to_compile, |input| {
+                let pre_err = group_errors.get(&input.canonical_id).cloned();
+                let entry = self.compile_one_in_batch(input, &profile, default_mode, pre_err);
+                let effective_mode = input.requested_mode.unwrap_or(default_mode);
+                ((input.canonical_id.clone(), effective_mode), entry)
+            })
+            .into_iter()
+            .collect();
 
         // ── fan out to original input order ──
         // For canonicals that errored in Stage B (duplicate-source

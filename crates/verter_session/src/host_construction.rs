@@ -412,7 +412,7 @@ impl VerterHost {
     pub(crate) fn batch_coordinator(
         &self,
     ) -> crate::host_batch_coordinator::HostBatchCoordinator<'_> {
-        crate::host_batch_coordinator::HostBatchCoordinator::new(&self.host_cpu_pool)
+        crate::host_batch_coordinator::HostBatchCoordinator::new(self.host_cpu_pool())
     }
 
     /// wasm32 batch coordinator: there is no coordinator pool, so the

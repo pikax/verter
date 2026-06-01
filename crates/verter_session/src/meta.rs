@@ -673,11 +673,18 @@ impl MetaSession {
         // every dispatched job sees identical view semantics (R17 — base
         // host is never mutated; R18 — the view is passed explicitly).
         // `with_overlay_view` borrows the snapshot for the duration of
-        // the closure; the scheduler runs the N jobs synchronously
-        // before the closure returns, so the snapshot stays alive
-        // across the whole batch.
+        // the closure; the coordinator runs the N jobs synchronously
+        // (blocking install) before the closure returns, so the snapshot
+        // stays alive across the whole batch.
+        // One scheduler submission per non-empty batch (the N jobs
+        // share the submission context); the outer fan-out itself runs
+        // on the host coordinator pool via the batch coordinator, NOT on
+        // the scheduler's stage pool.
+        if !jobs.is_empty() {
+            scheduler.account_batch_submission();
+        }
         let results = self.with_overlay_view(|view| {
-            scheduler.dispatch_meta_jobs(jobs, |job| {
+            host.batch_coordinator().run_batch(&jobs, |job| {
                 let verter_scheduler::stage::SchedulerJobKind::ComponentMeta { canonical_id } = job;
                 Ok(host.get_component_meta_via_view(canonical_id.as_ref(), view))
             })
@@ -730,8 +737,13 @@ impl MetaSession {
         // The closure mirrors `get_component_meta_payload`'s body —
         // payload-cache fast path → cold resolve → encode → publish.
         let encode_fn_ref = &encode_fn;
+        // One scheduler submission per non-empty batch; the fan-out runs
+        // on the host coordinator pool via the batch coordinator.
+        if !jobs.is_empty() {
+            scheduler.account_batch_submission();
+        }
         let results = self.with_overlay_view(|_view| {
-            scheduler.dispatch_meta_jobs(jobs, move |job| {
+            host.batch_coordinator().run_batch(&jobs, move |job| {
                 let verter_scheduler::stage::SchedulerJobKind::ComponentMeta { canonical_id } = job;
                 let canonical_or_alias = canonical_id.as_ref();
                 let canonical = host.resolve_alias_or_canonical(canonical_or_alias);

@@ -731,56 +731,27 @@ impl Scheduler {
             .collect()
     }
 
-    /// Dispatch a batch of non-staged scheduler jobs (per-job-kind
-    /// work that does not flow through the
-    /// Source → Analysis → Artifact lifecycle). Each job runs as a
-    /// closure on the scheduler's CPU pool and the function returns
-    /// per-job results in submission order.
+    /// Account for one batch submission against the scheduler's
+    /// contention counters.
     ///
-    /// Used by `MetaSession::get_component_meta_batch` to fan out N
-    /// independent component-meta queries onto the Rayon pool when
-    /// the session is in [`crate::scheduler::SchedulerConfig`]'s
-    /// Batch execution mode. Interactive callers continue to use the
-    /// single-request synchronous path through
-    /// `MetaSession::get_component_meta`.
+    /// A batch fan-out is ONE scheduler submission regardless of how
+    /// many items it carries: the N items share the submission's
+    /// context. Callers invoke this exactly once per batch (and not at
+    /// all for an empty batch) so `counters.submit_count` stays O(1) per
+    /// batch.
     ///
-    /// Counter side effect: increments `counters.submit_count` by
-    /// **exactly one per batch dispatch**, regardless of `jobs.len()`.
-    /// One batch dispatch is one scheduler submission; the N individual
-    /// jobs share that submission's context. Callers can rely on
-    /// `submit_count` being O(1) per `dispatch_meta_jobs` call (zero
-    /// when `jobs` is empty).
-    ///
-    /// On WASM (single-threaded), runs sequentially on the calling
-    /// thread — same observable behaviour, no Rayon fan-out.
-    pub fn dispatch_meta_jobs<F, R>(
-        self: &Arc<Self>,
-        jobs: Vec<crate::stage::SchedulerJobKind>,
-        executor: F,
-    ) -> Vec<R>
-    where
-        F: Fn(&crate::stage::SchedulerJobKind) -> R + Sync + Send,
-        R: Send,
-    {
-        if jobs.is_empty() {
-            return Vec::new();
-        }
-        // One scheduler submission per batch dispatch, independent of
-        // `jobs.len()` — see the batch-API verify-bullet:
-        // `submit_count` increases by exactly 1 per batch.
+    /// The scheduler deliberately owns NO outer fan-out: the parallel
+    /// wait that drives a batch's items runs on the host/runtime layer's
+    /// dedicated coordinator pool, never on the scheduler's
+    /// stage-execution `cpu_pool`. Installing an outer wait on the stage
+    /// pool would let parked coordinator jobs starve the very
+    /// `Load`/`Parse` work the driver dispatches onto that pool — the
+    /// pool-starvation deadlock class. This method therefore performs
+    /// accounting ONLY; it never touches a pool.
+    pub fn account_batch_submission(&self) {
         self.counters
             .submit_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            use rayon::prelude::*;
-            self.cpu_pool
-                .install(|| jobs.par_iter().map(&executor).collect())
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            jobs.iter().map(&executor).collect()
-        }
     }
 
     /// Access the scheduler's contention instrumentation counters.

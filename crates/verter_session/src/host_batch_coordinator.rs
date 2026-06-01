@@ -59,11 +59,11 @@ thread_local! {
 }
 
 /// True iff the calling thread is currently executing inside a
-/// host-batch fan-out. Exposed for discriminating tests that assert the
-/// non-reentrant guard collapsed a nested batch inline rather than
-/// re-installing on the coordinator pool.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn in_host_batch() -> bool {
+/// host-batch fan-out. Used by the discriminating reentrancy tests to
+/// assert the non-reentrant guard collapsed a nested batch inline
+/// rather than re-installing on the coordinator pool.
+#[cfg(test)]
+fn in_host_batch() -> bool {
     IN_HOST_BATCH.with(Cell::get)
 }
 
