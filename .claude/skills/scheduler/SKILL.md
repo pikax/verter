@@ -41,8 +41,14 @@ while admission holds the mutex. `BatchHandle` carries one
 &BatchHandle)` returns results in INPUT order and never surfaces a
 partial set. The pump discipline is preserved throughout: dispatch /
 wait / parse / compile / callbacks all run outside the DAG lock, and
-capacity stays reserved at dequeue time. `compile_many` is NOT yet wired
-onto `submit_batch_atomic` (it still upserts per-file).
+capacity stays reserved at dequeue time. `compile_many` IS wired onto
+atomic batch admission: its source-upsert stage routes every input
+through `VerterHost::upsert_many_with_priority` (the upsert engine),
+which lands ONE `submit_batch_atomic` + ONE `wait_batch` for the whole
+batch rather than one upsert per file. Per-call worker count is NOT a
+parameter of `compile_many` — concurrency is the construction-time
+host-owned `HostCpuPool` (`HostConfig::host_cpu_threads`); see the *Dual
+pool ownership* section.
 
 The **Block 7 design target** (NOT yet on the tree) adds the
 `submit_dag` / `CacheNodeDag` DAG surface, the `KeyedJob` /

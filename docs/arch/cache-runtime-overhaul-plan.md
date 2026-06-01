@@ -1685,6 +1685,21 @@ regressions to avoid:
 Block 6 turns `compile_many` into a transaction over the cache
 runtime + host CPU pool.
 
+> **Status (current tree).** §6a–§6c are LANDED: the dual host-owned
+> CPU pools (`HostCpuPool` / `SchedulerCpuPool`), the construction-time
+> `HostConfig::host_cpu_threads` worker sizing, the removal of the
+> per-call `CompileBatchOptions.threads` option, the per-input
+> `requested_mode` + classifier-owned `actual_mode`, and the atomic
+> batch admission (`compile_many` → `upsert_many_with_priority` → one
+> `submit_batch_atomic` + one `wait_batch`) are all on the tree. The
+> §6d∪§6e finalization (this block, also LANDED) gates the compile-tier
+> prefetch to `Session` and skips the empty-`macro_type_deps` collector
+> setup (the *Legacy Deletions* below describe both). The per-call
+> CPU-concurrency cap — `CpuConcurrencySemaphore` propagation through
+> `CacheNodeDagNode` — is NOT part of Block 6; it is a **Block-7**
+> design concept and is not on the tree. Until B7 lands, scheduler-side
+> admission runs at the pool's default concurrency.
+
 #### Changes
 
 **Dual-pool design.** Block 6 introduces TWO distinct host-owned CPU
@@ -1830,11 +1845,15 @@ construction from `HostConfig::host_cpu_threads`
 `std::thread::available_parallelism()`, `Some(0)` is normalised to
 the same default, `Some(n)` for `n >= 1` caps at `n`). The pool is
 reused across every `compile_many` call on the same host, so per-call
-sizing is no longer reachable from the public API. Per-call
+sizing is no longer reachable from the public API. `CompileBatchOptions`
+carries only `priority` + `default_mode` — no `threads` / `thread_count`
+/ `num_threads` field (locked by the
+`compile_batch_options_has_no_thread_field` static guard in
+`crates/verter_session/tests/architecture_guards.rs`). Per-call
 concurrency capping on `SchedulerCpuPool` admissions (the
-`CpuConcurrencySemaphore` propagation through `CacheNodeDagNode`) is
-deferred to §6d; until §6d lands, scheduler-side admission runs at the
-pool's default concurrency.
+`CpuConcurrencySemaphore` propagation through `CacheNodeDagNode`) is a
+**Block-7** design concept that is NOT on the tree; until B7 lands,
+scheduler-side admission runs at the pool's default concurrency.
 
 #### Legacy Deletions
 
@@ -1845,11 +1864,20 @@ pool's default concurrency.
   compilation.
 - DELETE per-canonical interleaved publish/admission paths inside
   `compile_many`.
-- DELETE the unconditional compile-tier owner `ensure_indexed_ready`
-  prefetch for dependency-free compile output (handled by Content
-  mode via `CompileOutputNode_PureContent`).
-- DELETE the unconditional external type collection setup when
-  `macro_type_deps` is empty (Stateless/Content skip this).
+- GATE the compile-tier `prefetch_compile_tier_observation_targets`
+  (cross-file import-route cache + dependency `ensure_indexed_ready`
+  pre-population) to `actual_mode == Session`. The prefetch only feeds
+  the compile-tier fact tracer, which is installed for `Session` alone;
+  `Content` / `Stateless` compile with no fact rail and produce their
+  cross-file correctness independently via `compile_entry`, so running
+  the prefetch for those modes was load + index work nobody records.
+- SKIP the external-macro-type collector SETUP (resolver context +
+  `collect_external_types_from_loaded_files`) when `macro_type_deps` is
+  empty — the collector iterates only `macro_type_deps`, so it returns
+  an empty result anyway. `sync_transitive_macro_type_dependencies`
+  stays UNCONDITIONAL: its `replace_semantic_transitive(canonical, {})`
+  clears the semantic dependency axis when the set is empty (closes
+  F15).
 
 #### Verification
 
