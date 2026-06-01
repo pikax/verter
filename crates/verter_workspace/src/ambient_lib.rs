@@ -139,6 +139,7 @@ pub fn compute_ambient_hash16(bytes: &[u8]) -> Hash16 {
 /// Lock-free CAS retry — if a concurrent writer races us, we re-read and
 /// retry. Worst case the registry grows monotonically; at steady state the
 /// number of retries equals the number of contending writers.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn cas_register(
     storage: &arc_swap::ArcSwap<AmbientLibsByProject>,
     stable_key: ProjectStableKey,
@@ -219,6 +220,7 @@ pub(crate) fn cas_register(
 }
 
 /// CAS-loop unregistration. Returns `true` if an entry was removed.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn cas_unregister(
     storage: &arc_swap::ArcSwap<AmbientLibsByProject>,
     stable_key: ProjectStableKey,

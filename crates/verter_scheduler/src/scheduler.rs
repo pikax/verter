@@ -1609,6 +1609,7 @@ impl Scheduler {
     /// crashed stage. The panic has been swallowed by the worker's
     /// `catch_unwind` — this helper completes the signalling that the
     /// executor's normal error path would have done.
+    #[cfg(not(target_arch = "wasm32"))]
     fn surface_stage_panic_as_failed(
         node: &FileNode,
         generation: u64,

@@ -1,6 +1,11 @@
 use crate::path_matches_prefix;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
+// `FxHashSet` only backs the native-only `DirListing::basenames` field; the
+// WASM build excludes that field, so the import would otherwise be unused.
+#[cfg(not(target_arch = "wasm32"))]
+use rustc_hash::FxHashSet;
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirIndexLookup {
     Hit(bool),
@@ -15,6 +20,7 @@ pub struct DirIndex {
 
 #[derive(Debug, Default)]
 struct DirListing {
+    #[cfg(not(target_arch = "wasm32"))]
     basenames: FxHashSet<String>,
     dirty: bool,
 }
@@ -24,6 +30,7 @@ impl DirIndex {
         Self::default()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn file_exists(&self, canonical_id: &str) -> Option<bool> {
         match self.lookup(canonical_id) {
             DirIndexLookup::Hit(exists) => Some(exists),
@@ -31,6 +38,7 @@ impl DirIndex {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn lookup(&self, canonical_id: &str) -> DirIndexLookup {
         let Some((dir, basename)) = split_parent_basename(canonical_id) else {
             return DirIndexLookup::Unindexed;
@@ -44,6 +52,7 @@ impl DirIndex {
         DirIndexLookup::Hit(listing.basenames.contains(basename))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn refresh(&mut self, dir: &str, basenames: Vec<String>) {
         self.entries.insert(
             dir.to_string(),
@@ -69,6 +78,7 @@ impl DirIndex {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn split_parent_basename(canonical_id: &str) -> Option<(&str, &str)> {
     let (parent, basename) = canonical_id.rsplit_once('/')?;
     if parent.is_empty() || basename.is_empty() {
@@ -78,5 +88,6 @@ fn split_parent_basename(canonical_id: &str) -> Option<(&str, &str)> {
 }
 
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 #[path = "dir_index_tests.rs"]
 mod tests;

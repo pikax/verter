@@ -23,7 +23,12 @@
 //! — `process_rss_peak_bytes` stays at `0` there regardless of
 //! flag state.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+// `AtomicU64` backs the peak-RSS sampler thread-count statics, which only
+// exist on native targets; the WASM build excludes those statics, so the
+// import would otherwise be unused there.
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Weak};
 
 use parking_lot::RwLock;
@@ -262,6 +267,7 @@ impl HostAuditRuntime {
     /// re-enter the registry. The sampler intentionally only does
     /// `fetch_max` on a per-context atomic — that operation is
     /// lock-free and can never deadlock.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn for_each_active_request<F>(&self, mut f: F)
     where
         F: FnMut(&Arc<RequestContext>),
