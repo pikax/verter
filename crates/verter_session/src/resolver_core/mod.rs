@@ -1334,6 +1334,23 @@ pub struct SingleflightRunResult<V> {
     pub forked_lane: bool,
 }
 
+/// **Test-only.** `Debug`-able wrapper around an optional non-retained seam
+/// hook (a `Box<dyn Fn>` is not `Debug`, so it cannot live directly in a
+/// `#[derive(Debug)]` struct). Exists only under `cfg(test)`.
+#[cfg(test)]
+#[derive(Default)]
+struct SeamHookSlot(Mutex<Option<Box<dyn Fn() + Send + Sync>>>);
+
+#[cfg(test)]
+impl std::fmt::Debug for SeamHookSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let installed = self.0.lock().is_some();
+        f.debug_struct("SeamHookSlot")
+            .field("installed", &installed)
+            .finish()
+    }
+}
+
 #[derive(Debug)]
 pub struct SingleflightGroup<K, V, E>
 where
@@ -1341,6 +1358,14 @@ where
 {
     #[allow(clippy::type_complexity)]
     flights: Mutex<FxHashMap<(K, StoreViewCompatToken), Arc<FlightState<V, E>>>>,
+    /// **Test-only.** A rendezvous hook fired on the LEADER thread inside the
+    /// NON-RETAINED (`keep == false`) terminal, strictly between the `Done`
+    /// publish and the lane removal, WHILE the `flights` lock is held. Tests
+    /// install it to prove the publish+remove window is one continuously-held
+    /// critical section (P1b). It carries zero footprint in production
+    /// builds (the field exists only under `cfg(test)`).
+    #[cfg(test)]
+    non_retained_seam_hook: SeamHookSlot,
 }
 
 #[derive(Debug)]
@@ -1492,6 +1517,8 @@ where
     fn default() -> Self {
         Self {
             flights: Mutex::new(FxHashMap::default()),
+            #[cfg(test)]
+            non_retained_seam_hook: SeamHookSlot::default(),
         }
     }
 }
@@ -1756,6 +1783,15 @@ where
                     state
                         .pins
                         .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    // Test-only rendezvous: fire the seam hook AFTER the
+                    // publish and BEFORE the removal, while `flights` is still
+                    // held — the window a test probes to prove publish+remove
+                    // is one atomic critical section (the `flights` lock is
+                    // observably held here). Zero footprint outside `cfg(test)`.
+                    #[cfg(test)]
+                    if let Some(hook) = self.non_retained_seam_hook.0.lock().as_ref() {
+                        hook();
+                    }
                     if flights
                         .get(&lane_key)
                         .is_some_and(|existing| Arc::ptr_eq(existing, &state))
@@ -1848,6 +1884,17 @@ where
             .get(&lane_key)
             .map(Arc::strong_count)
             .unwrap_or(0)
+    }
+
+    /// **Test-only.** Install the non-retained seam hook (see
+    /// [`SingleflightGroup::non_retained_seam_hook`]). The hook fires on the
+    /// leader thread inside the `keep == false` terminal, strictly between
+    /// the `Done` publish and the lane removal, while the `flights` lock is
+    /// held — the deterministic rendezvous a test uses to prove the
+    /// publish+remove window is one continuously-held critical section.
+    #[cfg(test)]
+    pub fn set_non_retained_seam_hook(&self, hook: Box<dyn Fn() + Send + Sync>) {
+        *self.non_retained_seam_hook.0.lock() = Some(hook);
     }
 }
 
@@ -2988,6 +3035,172 @@ mod tests {
             0,
             "after the orphaned sibling pin drops and the late leader's own pin released, \
              the lane is fully reaped",
+        );
+    }
+
+    /// The non-retained terminal publishes the `Done` AND removes the lane
+    /// inside ONE continuously-held `flights` critical section (P1b — the
+    /// atomic publish+remove window). This is the discriminating proof that
+    /// no concurrent claimant can EVER first-observe a non-retained `Done`,
+    /// because every claimant's only lane observation is gated behind that
+    /// same `flights` lock (the claim block in `run_retaining` and
+    /// `participate` both take `self.flights.lock()` before reading any lane
+    /// state — there is NO lock-free observation path).
+    ///
+    /// Why this characterises the fix by construction rather than chasing a
+    /// torn join: a NEW claimant cannot witness the intermediate `Done`
+    /// without acquiring `flights`. Post-fix the leader holds `flights` from
+    /// before the publish through past the removal, so the entire window is
+    /// invisible by mutual exclusion. A test that instead tried to drive a
+    /// real claimant into the window would have to hold the leader at the
+    /// seam until the claimant observed — but the claimant's observation
+    /// needs the very lock the leader holds, so it would DEADLOCK post-fix
+    /// (and a non-blocking signal-and-proceed variant would make the pre-fix
+    /// split a lock-race, i.e. flaky, not reliably-failing). The lock-held
+    /// invariant is therefore the only deterministic, both-directions
+    /// discriminator.
+    ///
+    /// Mechanism: a `#[cfg(test)]` seam hook fires on the LEADER thread at
+    /// the exact point between the non-retained publish and the lane
+    /// removal. The hook hands off to a watcher thread that probes the map
+    /// lock with a NON-BLOCKING `try_lock` (so it can never deadlock against
+    /// the leader) and records whether the lock was free:
+    ///   * post-fix the lock is HELD at the seam → `try_lock` returns `None`
+    ///     → `lock_was_free == false` (asserted);
+    ///   * pre-fix (publish, drop lock, then remove) the seam sits in the
+    ///     lock GAP → `try_lock` returns `Some` → `lock_was_free == true`,
+    ///     and the assertion FAILS.
+    ///
+    /// The hook is reached exactly once (a single non-retained terminal), so
+    /// the handshake barriers below are a deterministic rendezvous, not a
+    /// timing race. A watchdog bounds the watcher so any regression that
+    /// prevented the hook from firing fails loudly instead of hanging.
+    ///
+    /// FAIL-PRE / PASS-POST was proven by temporarily splitting the critical
+    /// section (publish under the lock, drop it, then re-acquire to remove):
+    /// the watcher observed a free lock at the seam and this test FAILED;
+    /// restoring the single held lock made it PASS.
+    #[test]
+    fn non_retained_publish_and_remove_share_one_held_flights_lock() {
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
+        let token = StoreViewCompatToken {
+            epoch: 14,
+            session: None,
+        };
+
+        // Rendezvous: the leader's seam hook signals `at_seam`, then blocks on
+        // `probe_done` until the watcher has finished its NON-BLOCKING lock
+        // probe. Because the probe is `try_lock` (never blocks on the lock the
+        // leader holds), the leader's wait on `probe_done` always completes —
+        // no deadlock in either arrangement.
+        let at_seam = Arc::new(Barrier::new(2));
+        let probe_done = Arc::new(Barrier::new(2));
+        // `true` iff the watcher could acquire `flights` AT THE SEAM (i.e. the
+        // publish and the removal were NOT in one held lock — the pre-fix
+        // bug). Post-fix this stays `false`.
+        let lock_was_free_at_seam = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Set by the watcher once it has actually run, so the watchdog can
+        // tell "hook never fired" from "hook fired, lock was held".
+        let watcher_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+
+        // Watcher: waits for the leader to reach the seam, probes the map lock
+        // without blocking, records the result, then releases the leader.
+        let watcher = {
+            let group = Arc::clone(&group);
+            let at_seam = Arc::clone(&at_seam);
+            let probe_done = Arc::clone(&probe_done);
+            let lock_was_free_at_seam = Arc::clone(&lock_was_free_at_seam);
+            let watcher_ran = Arc::clone(&watcher_ran);
+            std::thread::spawn(move || {
+                // Block until the leader is at the publish/remove seam.
+                at_seam.wait();
+                // NON-BLOCKING probe: held (None) post-fix, free (Some) in the
+                // pre-fix lock gap. `try_lock` never parks, so this cannot
+                // deadlock against the leader holding `flights`.
+                let probe = group.flights.try_lock();
+                lock_was_free_at_seam.store(probe.is_some(), Ordering::SeqCst);
+                drop(probe);
+                watcher_ran.store(true, Ordering::SeqCst);
+                let _ = done_tx.send(());
+                // Release the leader to finish its critical section (remove the
+                // lane, drop the lock) and return.
+                probe_done.wait();
+            })
+        };
+
+        // Install the seam hook for exactly the one non-retained terminal this
+        // leader produces. It runs ON the leader thread WHILE (post-fix) the
+        // `flights` lock is held, strictly between the publish and the removal.
+        {
+            let at_seam = Arc::clone(&at_seam);
+            let probe_done = Arc::clone(&probe_done);
+            group.set_non_retained_seam_hook(Box::new(move || {
+                at_seam.wait();
+                probe_done.wait();
+            }));
+        }
+
+        // Leader produces a NON-RETAINED result (`retain = false`), driving the
+        // exact `keep == false` critical section the seam hook is wired into.
+        let leader_group = Arc::clone(&group);
+        let leader = std::thread::spawn(move || {
+            leader_group
+                .run_retaining(
+                    "node".to_string(),
+                    token,
+                    || -> Result<usize, &'static str> { Ok(1) },
+                    |_| false,
+                )
+                .unwrap()
+        });
+
+        // WATCHDOG: the watcher must report (hook fired) within the timeout. A
+        // regression that never reaches the seam fails here instead of hanging
+        // the suite.
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| {
+                let _ = Instant::now();
+                panic!(
+                "seam watchdog: the non-retained seam hook never fired — the leader did not reach \
+                 the publish/remove window (P1b regression)",
+            )
+            });
+
+        let leader_result = leader.join().expect("leader thread must not panic");
+        watcher.join().expect("watcher thread must not panic");
+
+        // The leader genuinely ran the non-retained terminal as a fresh Leader.
+        assert_eq!(leader_result.role, SingleflightRole::Leader);
+        assert_eq!(*leader_result.value, 1);
+
+        // The watcher actually executed its probe (guards against a trivially
+        // passing test where the hook was skipped).
+        assert!(
+            watcher_ran.load(Ordering::SeqCst),
+            "the seam watcher must have run its lock probe",
+        );
+
+        // DECISIVE: at the publish/remove seam the `flights` lock was HELD, so
+        // the publish and the removal are one atomic critical section. Pre-fix
+        // (publish, drop lock, remove) this is `true` and the test FAILS.
+        assert!(
+            !lock_was_free_at_seam.load(Ordering::SeqCst),
+            "the `flights` lock must be HELD continuously across publish AND removal of a \
+             non-retained lane — a free lock at the seam means a claimant could first-observe \
+             the non-retained `Done` (P1b atomic-window regression)",
+        );
+
+        // After the leader returns, the non-retained lane is fully gone (the
+        // removal inside the held critical section took effect).
+        assert_eq!(
+            group.test_flight_strong_count(&"node".to_string(), token),
+            0,
+            "the non-retained lane must be removed once the leader returns",
         );
     }
 
