@@ -14,8 +14,10 @@
 //!   work. Routing the outer wait onto the stage pool is exactly the
 //!   starvation-deadlock class this primitive exists to prevent.
 //! - **Empty / single-item fast path.** Zero items allocate and run
-//!   nothing; a single item runs inline on the calling thread (no pool
-//!   round-trip for the common interactive-sized batch).
+//!   nothing; a single item runs on the coordinator pool but skips the
+//!   parallel fan-out machinery (no `par_iter`, no index/sort). The
+//!   work stays on a coordinator-pool worker so the outer-wait
+//!   semantics are uniform across batch sizes.
 //! - **Deterministic ordering.** Exactly one result per input, in
 //!   input order, regardless of completion order.
 //! - **Non-reentrant host-batch policy.** A `run_batch` invoked while
@@ -138,11 +140,14 @@ impl<'a> HostBatchCoordinator<'a> {
     /// Routing rules (single source of truth for host batch fan-out):
     ///
     /// - `items.is_empty()` → no pool work, empty `Vec`.
-    /// - exactly one item → run inline on the caller (no pool
-    ///   round-trip).
     /// - already inside a host-batch fan-out on this thread → run
-    ///   inline / sequentially (non-reentrant guard; never a nested
-    ///   coordinator-pool `install`).
+    ///   inline / sequentially on the current coordinator worker
+    ///   (non-reentrant guard; never a nested coordinator-pool
+    ///   `install`).
+    /// - exactly one item (cold) → `install` on the coordinator pool
+    ///   and run the single item there, skipping the parallel fan-out
+    ///   machinery. The work still runs on a coordinator-pool worker so
+    ///   the `External` wait semantics are uniform across batch sizes.
     /// - otherwise → `install` on the coordinator pool and fan out with
     ///   rayon, preserving input order via an indexed parallel map.
     ///
@@ -162,12 +167,33 @@ impl<'a> HostBatchCoordinator<'a> {
         if items.is_empty() {
             return Vec::new();
         }
-        // Single item, or a nested host-batch fan-out: run inline /
-        // sequentially on the current thread. The nested case is the
-        // non-reentrant guard — a fresh `install` here would stack a
-        // second outer wait on the same coordinator pool.
-        if items.len() == 1 || IN_HOST_BATCH.with(Cell::get) {
+
+        // Nested host-batch fan-out (any size): the non-reentrant guard.
+        // Run inline / sequentially on the CURRENT coordinator worker —
+        // a fresh `install` here would stack a second outer wait on the
+        // same finite coordinator pool, reintroducing the starvation
+        // class one level up. The thread is already in-batch (we only
+        // reach a nested call from inside an outer item closure), so the
+        // marker is already set.
+        if IN_HOST_BATCH.with(Cell::get) {
             return items.iter().map(&f).collect();
+        }
+
+        // Single item (cold, not nested): run it ON the coordinator pool
+        // — every host/runtime batch executes on the coordinator pool so
+        // its `External`-tagged workers (which park rather than
+        // inline-execute scheduler CPU work) own the outer wait
+        // uniformly, regardless of batch size. The fast path skips only
+        // the parallel fan-out machinery (no `par_iter`, no index/sort),
+        // not the pool. The in-batch marker is set so a nested
+        // `run_batch` reached from inside `f` collapses inline.
+        if items.len() == 1 {
+            #[cfg(test)]
+            COORDINATOR_INSTALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return self.pool.install(|| {
+                let _guard = InHostBatchGuard::enter();
+                vec![f(&items[0])]
+            });
         }
 
         // Cold outer fan-out: run the parallel map on the coordinator
@@ -261,27 +287,46 @@ mod tests {
         );
     }
 
-    /// A single item takes the inline fast path (no coordinator-pool
-    /// install) and still returns the mapped result.
+    /// A single cold item runs ON the coordinator pool (skipping the
+    /// parallel fan-out machinery) — it performs exactly one install and
+    /// runs with the in-batch marker set, so the `External` worker owns
+    /// the wait uniformly with multi-item batches. The result is still
+    /// the mapped value. The calling thread is left un-marked after
+    /// return.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
-    fn run_batch_single_item_runs_inline() {
+    fn run_batch_single_item_runs_on_pool_with_marker() {
+        let _serial = INSTALL_COUNT_LOCK.lock();
         let pool = pool();
         let coord = HostBatchCoordinator::new(&pool);
-        // The calling thread is NOT a host-pool worker, so if the single
-        // item ran on the pool the in-batch flag would have been set on
-        // a worker, not here. Observe the flag from inside the closure:
-        // the inline fast path runs the closure on THIS thread without
-        // marking it in-batch.
-        let observed_in_batch = std::sync::atomic::AtomicBool::new(true);
+
+        // The calling thread must not be marked in-batch before/after.
+        assert!(
+            !in_host_batch(),
+            "calling thread must not be in-batch before run_batch",
+        );
+
+        let observed_in_batch = std::sync::atomic::AtomicBool::new(false);
+        let base = coordinator_install_count();
         let out = coord.run_batch(std::slice::from_ref(&7u32), |x| {
             observed_in_batch.store(in_host_batch(), std::sync::atomic::Ordering::Relaxed);
             *x + 1
         });
-        assert_eq!(out, vec![8]);
+        let installs = coordinator_install_count() - base;
+
+        assert_eq!(out, vec![8], "single item must return its mapped value");
+        assert_eq!(
+            installs, 1,
+            "a single cold item must run on the coordinator pool (exactly one install), \
+             not on the calling thread; got {installs} installs",
+        );
         assert!(
-            !observed_in_batch.load(std::sync::atomic::Ordering::Relaxed),
-            "single-item fast path runs inline and does NOT set the in-batch marker",
+            observed_in_batch.load(std::sync::atomic::Ordering::Relaxed),
+            "the single item runs on a coordinator worker with the in-batch marker set",
+        );
+        assert!(
+            !in_host_batch(),
+            "calling thread must not remain in-batch after run_batch returns",
         );
     }
 
