@@ -70,21 +70,6 @@ fn in_host_batch() -> bool {
     IN_HOST_BATCH.with(Cell::get)
 }
 
-/// Process-wide count of actual coordinator-pool `install` calls.
-/// Bumped immediately before each `self.pool.install(...)` so the
-/// reentrancy test can assert the non-reentrant guard collapsed nested
-/// batches INLINE (zero extra installs) rather than stacking fresh
-/// coordinator-pool installs. Test-only.
-#[cfg(test)]
-static COORDINATOR_INSTALL_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-/// Read the cumulative coordinator-pool install count. Test-only.
-#[cfg(test)]
-fn coordinator_install_count() -> usize {
-    COORDINATOR_INSTALL_COUNT.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// RAII guard that marks the current thread in-batch for the duration
 /// of a coordinator-pool fan-out and restores the prior value on drop
 /// (normal return AND panic unwind).
@@ -114,6 +99,16 @@ impl Drop for InHostBatchGuard {
 pub(crate) struct HostBatchCoordinator<'a> {
     #[cfg(not(target_arch = "wasm32"))]
     pool: &'a Arc<HostCpuPool>,
+    /// Per-instance count of actual coordinator-pool `install` calls
+    /// made through THIS coordinator. Bumped immediately before each
+    /// `self.pool.install(...)`. Per-instance (not a process-global
+    /// static) so a test's install-count assertion is isolated from
+    /// every other coordinator the suite builds concurrently — the
+    /// production `new` hands in a throwaway counter; only a test that
+    /// needs the observation constructs the coordinator with its own.
+    /// Test-only.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    install_count: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(target_arch = "wasm32")]
     _marker: std::marker::PhantomData<&'a ()>,
 }
@@ -122,7 +117,26 @@ impl<'a> HostBatchCoordinator<'a> {
     /// Construct a coordinator bound to the host's coordinator pool.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn new(pool: &'a Arc<HostCpuPool>) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            #[cfg(test)]
+            install_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// Construct a coordinator that reports its coordinator-pool install
+    /// count through `install_count`, so a test can assert the
+    /// non-reentrant guard collapsed nested batches inline (no extra
+    /// installs) in isolation from the rest of the suite. Test-only.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn new_with_install_counter(
+        pool: &'a Arc<HostCpuPool>,
+        install_count: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        Self {
+            pool,
+            install_count,
+        }
     }
 
     /// Construct a coordinator on wasm32 (no coordinator pool; all
@@ -189,7 +203,8 @@ impl<'a> HostBatchCoordinator<'a> {
         // `run_batch` reached from inside `f` collapses inline.
         if items.len() == 1 {
             #[cfg(test)]
-            COORDINATOR_INSTALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.install_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return self.pool.install(|| {
                 let _guard = InHostBatchGuard::enter();
                 vec![f(&items[0])]
@@ -207,7 +222,8 @@ impl<'a> HostBatchCoordinator<'a> {
         // worker running an item is marked for the duration of that
         // item's closure, regardless of which worker stole it.
         #[cfg(test)]
-        COORDINATOR_INSTALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.install_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.pool.install(|| {
             use rayon::prelude::*;
             // Index-paired parallel map keeps results in input order
@@ -239,13 +255,7 @@ impl<'a> HostBatchCoordinator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Serialises the install-count-sensitive tests against each other
-    /// so the process-global `COORDINATOR_INSTALL_COUNT` delta each one
-    /// observes is attributable solely to its own `run_batch` calls.
-    /// Only the tests that assert on the install count take this lock.
-    #[cfg(not(target_arch = "wasm32"))]
-    static INSTALL_COUNT_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[cfg(not(target_arch = "wasm32"))]
     fn pool() -> Arc<HostCpuPool> {
@@ -268,7 +278,6 @@ mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn run_batch_preserves_input_order() {
-        let _serial = INSTALL_COUNT_LOCK.lock();
         let pool = pool();
         let coord = HostBatchCoordinator::new(&pool);
         let items: Vec<usize> = (0..64).collect();
@@ -296,9 +305,11 @@ mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn run_batch_single_item_runs_on_pool_with_marker() {
-        let _serial = INSTALL_COUNT_LOCK.lock();
         let pool = pool();
-        let coord = HostBatchCoordinator::new(&pool);
+        // Per-instance install counter isolates this assertion from any
+        // other coordinator the suite runs concurrently.
+        let installs = Arc::new(AtomicUsize::new(0));
+        let coord = HostBatchCoordinator::new_with_install_counter(&pool, Arc::clone(&installs));
 
         // The calling thread must not be marked in-batch before/after.
         assert!(
@@ -307,21 +318,21 @@ mod tests {
         );
 
         let observed_in_batch = std::sync::atomic::AtomicBool::new(false);
-        let base = coordinator_install_count();
         let out = coord.run_batch(std::slice::from_ref(&7u32), |x| {
-            observed_in_batch.store(in_host_batch(), std::sync::atomic::Ordering::Relaxed);
+            observed_in_batch.store(in_host_batch(), Ordering::Relaxed);
             *x + 1
         });
-        let installs = coordinator_install_count() - base;
 
         assert_eq!(out, vec![8], "single item must return its mapped value");
         assert_eq!(
-            installs, 1,
+            installs.load(Ordering::Relaxed),
+            1,
             "a single cold item must run on the coordinator pool (exactly one install), \
-             not on the calling thread; got {installs} installs",
+             not on the calling thread; got {} installs",
+            installs.load(Ordering::Relaxed),
         );
         assert!(
-            observed_in_batch.load(std::sync::atomic::Ordering::Relaxed),
+            observed_in_batch.load(Ordering::Relaxed),
             "the single item runs on a coordinator worker with the in-batch marker set",
         );
         assert!(
@@ -352,13 +363,16 @@ mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn run_batch_nested_collapses_inline_and_does_not_reinstall() {
-        let _serial = INSTALL_COUNT_LOCK.lock();
-
         // Coordinator pool narrower than the outer batch width so that a
         // guard-less nested `install` would have to contend for workers
         // the outer fan-out already holds.
         let pool = HostCpuPool::new(2);
-        let coord = HostBatchCoordinator::new(&pool);
+        // Per-instance install counter: isolates this assertion from any
+        // other coordinator the suite runs concurrently (the coordinator
+        // is shared batch infrastructure, so a process-global counter
+        // would race with compile / meta-batch tests).
+        let installs = Arc::new(AtomicUsize::new(0));
+        let coord = HostBatchCoordinator::new_with_install_counter(&pool, Arc::clone(&installs));
 
         let outer: Vec<usize> = (0..8).collect();
 
@@ -368,14 +382,12 @@ mod tests {
         // false observation is permanent.
         let all_nested_saw_in_batch = std::sync::atomic::AtomicBool::new(true);
 
-        let base = coordinator_install_count();
-
         let outer_out = coord.run_batch(&outer, |o| {
             // Each outer item fans out a nested batch of 4 sub-items.
             let nested_items: Vec<usize> = (0..4).collect();
             let nested_out = coord.run_batch(&nested_items, |n| {
                 if !in_host_batch() {
-                    all_nested_saw_in_batch.store(false, std::sync::atomic::Ordering::Relaxed);
+                    all_nested_saw_in_batch.store(false, Ordering::Relaxed);
                 }
                 // Nested result is a deterministic function of (outer,
                 // nested) index so we can verify ordering precisely.
@@ -392,14 +404,14 @@ mod tests {
             nested_out.into_iter().sum::<usize>()
         });
 
-        let installs = coordinator_install_count() - base;
+        let observed_installs = installs.load(Ordering::Relaxed);
 
         // (3) Exactly ONE install for the whole nested tree — the guard
         // collapsed all 8 nested fan-outs inline.
         assert_eq!(
-            installs, 1,
+            observed_installs, 1,
             "non-reentrant guard must collapse nested run_batch inline: expected exactly 1 \
-             coordinator-pool install (the outer fan-out), got {installs}. A guard-less \
+             coordinator-pool install (the outer fan-out), got {observed_installs}. A guard-less \
              implementation re-installs once per nested call.",
         );
 
@@ -416,7 +428,7 @@ mod tests {
         // Every nested closure observed the in-batch marker (it ran
         // underneath the outer fan-out, inline).
         assert!(
-            all_nested_saw_in_batch.load(std::sync::atomic::Ordering::Relaxed),
+            all_nested_saw_in_batch.load(Ordering::Relaxed),
             "every nested closure must run with the in-batch marker set (inline under the \
              outer fan-out)",
         );
