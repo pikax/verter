@@ -885,7 +885,7 @@ fn bare_ts_export_offenders(content: &str) -> Vec<usize> {
             // A standalone `export`: the next byte is absent or a non-identifier
             // char. This EXCLUDES `export_to` (next byte `_`).
             let after = pos + "export".len();
-            let after_ok = bb.get(after).map_or(true, |&c| !is_ident_byte(c));
+            let after_ok = bb.get(after).is_none_or(|&c| !is_ident_byte(c));
             if before_ok && after_ok {
                 let abs = open + pos;
                 let line = content[..abs].bytes().filter(|&b| b == b'\n').count() + 1;
