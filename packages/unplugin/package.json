@@ -90,8 +90,8 @@
     }
   },
   "scripts": {
-    "build": "tsdown src/index.ts src/vite.ts src/rollup.ts src/webpack.ts src/esbuild.ts src/rspack.ts src/rolldown.ts src/farm.ts --format cjs,esm --dts --unbundle",
-    "dev": "tsdown src/index.ts src/vite.ts src/rollup.ts src/webpack.ts src/esbuild.ts src/rspack.ts src/rolldown.ts src/farm.ts --format cjs,esm --dts --unbundle --watch",
+    "build": "tsdown",
+    "dev": "tsdown --watch",
     "test": "vitest run && node e2e/scripts/exit-regression.mjs",
     "test:exit-regression": "node e2e/scripts/exit-regression.mjs",
     "e2e": "tsx e2e/scripts/run.ts",

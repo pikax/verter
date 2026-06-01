@@ -3523,6 +3523,7 @@ impl Scheduler {
     /// already drained by `supersede_old_file_generations` is a
     /// no-op. The generation guard only skips the inbox notify path
     /// (already a no-op here).
+    #[cfg(not(target_arch = "wasm32"))]
     fn surface_stage_panic_as_failed(
         node: &FileNode,
         generation: u64,

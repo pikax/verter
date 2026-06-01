@@ -757,12 +757,14 @@ fn split_parent_basename(canonical_id: &str) -> Option<(&str, &str)> {
     Some((parent, basename))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn mark_parent_dir_dirty(engine: &crate::engine::Engine, canonical_id: &str) {
     if let Some((parent, _)) = split_parent_basename(canonical_id) {
         engine.dir_index.write().mark_dirty(parent);
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn basename_from_path(path: &str) -> Option<String> {
     path.rsplit('/')
         .next()
