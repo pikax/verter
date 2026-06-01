@@ -33,8 +33,6 @@ pub mod type_expansion_host;
 pub mod type_expansion_verter;
 pub mod vue_default_synth;
 
-pub mod checker_text_adapter;
-
 pub mod fact_read_set;
 pub mod fuses;
 pub(crate) mod host_resolver_context;
