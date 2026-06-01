@@ -40,7 +40,7 @@ pub const WALKER_DEPTH_CAP: u16 = 256;
 /// from a depth-capped, cycle-terminated, or shared-load-redirected
 /// one.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct ProvenanceChain {
     /// In-audit `NodeId` the walk started from. `None` when the walker
     /// could not locate any matching root in the audit record.
@@ -60,7 +60,7 @@ pub struct ProvenanceChain {
 
 /// One step on a [`ProvenanceChain`].
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct ProvenanceStep {
     /// EdgeId of the derivation edge visited at this step.
     pub edge_id: EdgeId,
@@ -76,7 +76,7 @@ pub struct ProvenanceStep {
 
 /// Why the walker stopped.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum ChainTermination {
     /// All reachable edges were visited without hitting any
     /// structural cap.

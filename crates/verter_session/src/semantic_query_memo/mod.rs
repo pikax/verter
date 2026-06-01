@@ -55,6 +55,19 @@ mod reverse_index;
 mod stats;
 #[cfg(any(test, debug_assertions))]
 mod test_gates;
+// Test-only observability surface for `SemanticGraphStore` (in-flight
+// abort driver, joiner-admission strong-count + condvar-pairing probes,
+// per-store cold-abort trigger). Extracted to a sibling so the hot-path
+// memo logic here stays under the Tier-2 module-size budget. Gated out of
+// release: its only consumers are tests and the `for_tests` shims, both of
+// which build with `debug_assertions` (test profile) or `cfg(test)`.
+#[cfg(any(test, debug_assertions))]
+mod test_support;
+#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
+pub use test_support::{
+    empty_signature_for_tests, test_trigger_inflight_abort, TestForceColdAbortGuard,
+};
 
 #[allow(unused_imports)]
 pub use interner::DepSignatureInterner;
@@ -344,6 +357,23 @@ pub struct SemanticGraphStore {
     /// `debug_assertions`.
     #[cfg(any(test, debug_assertions))]
     invalidate_canonical_inflight_abort_gate: parking_lot::Mutex<Option<Arc<std::sync::Barrier>>>,
+    /// Per-store test-only counter: incremented by one IMMEDIATELY before
+    /// a cooperative joiner blocks on the per-entry `ready` condvar via
+    /// `wait_while` in [`Self::execute_cooperative`]. Unlike the in-flight
+    /// `Arc` strong count (which rises when a joiner merely *clones* the
+    /// entry, one step BEFORE it reaches the condvar), this counter proves
+    /// the joiner is genuinely SUSPENDED on the condvar — the precise
+    /// invariant a condvar-pairing test asserts. Read via
+    /// [`Self::test_joiner_on_condvar_count`].
+    ///
+    /// **Per-store scope (test hermeticity).** Like every other gate on
+    /// this store, the counter is per-store, never a process-global, so a
+    /// condvar-pairing test on one store cannot observe an unrelated
+    /// concurrent test's joiners. `cfg`-gated to `test` / `debug_assertions`;
+    /// the increment and the field are both absent from release builds, so
+    /// the production cooperative-wait path is unchanged.
+    #[cfg(any(test, debug_assertions))]
+    joiner_on_condvar_count: std::sync::atomic::AtomicUsize,
     /// Γ.B reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
     /// dep_signature references it, paired with the dep_signature
@@ -533,12 +563,19 @@ impl SemanticGraphStore {
     fn entries_lock_diagnosed<'a>(
         &'a self,
     ) -> EntriesLockGuard<'a, FxHashMap<FamilyKey, FamilySlots>> {
+        // Wait-time measurement feeds the capture-token entries-mutex
+        // hook only; gated to match the instrumentation module (absent
+        // in release).
+        #[cfg(any(test, debug_assertions))]
         let wait_start = Instant::now();
         let guard = self.entries.lock();
+        #[cfg(any(test, debug_assertions))]
         let wait_ns = wait_start.elapsed().as_nanos();
         EntriesLockGuard {
             guard: Some(guard),
+            #[cfg(any(test, debug_assertions))]
             hold_start: Instant::now(),
+            #[cfg(any(test, debug_assertions))]
             wait_ns,
         }
     }
@@ -1657,12 +1694,12 @@ impl SemanticGraphStore {
         // so it does not perturb the production hot path beyond the
         // `with_active_capture` thread-local lookup that is already
         // present below. The deltas are only consumed when a token is
-        // bound; the producer always pays the two timestamp reads, but
-        // they are constant-time and on the critical path of every
-        // origin-edge emission anyway (`stats.origin_edges_emitted` is
-        // already atomically bumped). The diagnosis benchmark is the
-        // only consumer; production-path behaviour is unchanged when no
-        // token is bound.
+        // bound (test/debug instrumentation only); the diagnosis
+        // benchmark is the only consumer; production-path behaviour is
+        // unchanged when no token is bound. The timestamp read and the
+        // recording site below both gate on the instrumentation module so
+        // release does not pay for them.
+        #[cfg(any(test, debug_assertions))]
         let start = Instant::now();
         // Build the edge under the derivation lock, then release the
         // lock before pushing into the accumulator — the accumulator
@@ -1735,7 +1772,9 @@ impl SemanticGraphStore {
         // `origin_edge_count` bump on the dedup path. The ledger / count
         // mirror the production-side ledger writes so test snapshots
         // observe the same dedup property.
+        #[cfg(any(test, debug_assertions))]
         let elapsed_ns = start.elapsed().as_nanos();
+        #[cfg(any(test, debug_assertions))]
         crate::capture_token::with_active_capture(|t| {
             if !already_recorded {
                 let dep_signature_hash =
@@ -2313,8 +2352,10 @@ impl SemanticGraphStore {
         #[cfg(test)]
         crate::project_semantic_dispatch::raise::record_dispatch_warm(key);
 
-        // Production capture-token dispatch recording (warm). Same as
-        // the slow path's pre-loop observation.
+        // Capture-token dispatch recording (warm). Same as the slow
+        // path's pre-loop observation. Gated to match the instrumentation
+        // module (absent in release).
+        #[cfg(any(test, debug_assertions))]
         crate::capture_token::with_active_capture(|t| t.record_dispatch(key, /* hit */ true));
 
         tracing::debug!(
@@ -2368,7 +2409,9 @@ impl SemanticGraphStore {
         #[cfg(test)]
         crate::project_semantic_dispatch::raise::record_dispatch_cold(&key);
 
-        // Production capture-token dispatch recording (cold).
+        // Capture-token dispatch recording (cold). Gated to match the
+        // instrumentation module (absent in release).
+        #[cfg(any(test, debug_assertions))]
         crate::capture_token::with_active_capture(|t| {
             t.record_dispatch(&key, /* hit */ false)
         });
@@ -2446,6 +2489,16 @@ impl SemanticGraphStore {
                 // Account wait time on the stats surface so the F3 corpus
                 // benchmark surfaces non-zero `waits_ms`.
                 let wait_start = Instant::now();
+                // Test-only: record that this joiner is about to SUSPEND on
+                // the condvar (it already holds `state` and is one statement
+                // from `wait_while`, which atomically releases `state` and
+                // parks). A condvar-pairing test polls this count to observe
+                // the joiner genuinely on the condvar — a stronger signal
+                // than the in-flight strong count, which rises one step
+                // earlier when the joiner merely clones the entry. No
+                // production behaviour change (gated out of release builds).
+                #[cfg(any(test, debug_assertions))]
+                self.joiner_on_condvar_count.fetch_add(1, Ordering::SeqCst);
                 inflight
                     .ready
                     .wait_while(&mut state, |s| s.completed.is_none() && !s.aborted);
@@ -3537,6 +3590,13 @@ impl SemanticGraphStore {
 /// (D103). Mirrors the proto `BatchExpandError` enum so the BFS bridge can
 /// project per-key failures into a typed `BridgeError::StaleAtFrontier`
 /// envelope without losing the reason.
+///
+/// `execute_cooperative_batch` (the constructing consumer) is a
+/// `#[cfg(test)]` non-admission probe, but the enum is also re-exported
+/// through the `for_tests` shim (gated `cfg(any(test, debug_assertions))`)
+/// so the integration suite can probe its existence; gate to match the
+/// shim so it is not a dead symbol in release.
+#[cfg(any(test, debug_assertions))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BatchExpandError {
     /// Canonical's content hash changed between the surface envelope's
@@ -3674,102 +3734,6 @@ pub(crate) fn semantic_graph_read_set_signature(
     ))
 }
 
-impl SemanticGraphStore {
-    /// Test-only driver: set `aborted = true` on the in-flight entry
-    /// for `key`, plant an `Error(Other)` sentinel on `completed` if
-    /// absent, notify waiters, and remove the entry from the table.
-    /// Mirrors `invalidate_canonical` exactly but bypasses the step 1
-    /// warm-slot gate so joiner-retry tests don't have to race a real
-    /// invalidation window between publish and inflight retirement.
-    ///
-    /// Returns `true` when an entry for `key` was aborted, `false` when
-    /// the in-flight table did not contain the key.
-    ///
-    /// `#[doc(hidden)]` and reached only through the `for_tests`
-    /// re-export shim (`crate::for_tests::test_trigger_inflight_abort`)
-    /// so the integration-test surface in
-    /// `crates/verter_session/tests/` can drive joiner retry without
-    /// loosening the public API of `SemanticGraphStore`. In-crate
-    /// tests reach the same body via the same shim function.
-    #[doc(hidden)]
-    pub fn test_trigger_inflight_abort_impl(&self, key: &SemanticQueryKey) -> bool {
-        let mut table = self.inflight.lock();
-        let Some(inflight) = table.remove(key) else {
-            return false;
-        };
-        drop(table);
-        {
-            let mut state = inflight.state.lock();
-            state.aborted = true;
-            if state.completed.is_none() {
-                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                    "aborted by test_trigger_inflight_abort",
-                ))));
-                state.dep_signature = Some(empty_signature());
-            }
-        }
-        inflight.ready.notify_all();
-        true
-    }
-
-    /// Test-only observability accessor: non-destructively read the
-    /// `Arc::strong_count` of the in-flight entry for `key`, or `0` if
-    /// the table has no entry.
-    ///
-    /// Joiner-retry tests use this to deterministically synchronise:
-    /// each caller of `execute_cooperative` clones the entry's `Arc`
-    /// (step 3: `table.entry(key).or_insert_with(...).clone()`). While
-    /// only the cold winner is mid-build, three references are live —
-    /// the table entry, the winner's `inflight` local, and the
-    /// `InflightPanicGuard`'s clone — so the count is `3`; an admitted
-    /// joiner raises it to `4`. Polling this to `> 3` replaces a
-    /// wall-clock `sleep` that races the joiner under parallel test
-    /// load (test hermeticity) — it never touches the entry's state,
-    /// so it cannot perturb the build it observes.
-    ///
-    /// `#[doc(hidden)]` and reached only through the `for_tests`
-    /// re-export shim, mirroring `test_trigger_inflight_abort`.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn test_inflight_strong_count(&self, key: &SemanticQueryKey) -> usize {
-        let table = self.inflight.lock();
-        table.get(key).map_or(0, Arc::strong_count)
-    }
-
-    /// Test-only probe: `true` when the `inflight` table `Mutex` can be
-    /// `try_lock`-acquired right now (no thread is holding it). The
-    /// abort-loop lock-order test uses it to assert [`Self::invalidate_all`]
-    /// does not hold the table lock while locking each collected entry's
-    /// `state` (the collect-then-release order).
-    #[cfg(test)]
-    #[doc(hidden)]
-    #[must_use]
-    pub(crate) fn test_inflight_table_is_unlocked(&self) -> bool {
-        self.inflight.try_lock().is_some()
-    }
-
-    /// Public test driver: set this store's per-store cold-abort
-    /// trigger for the duration of the returned guard so the next
-    /// `execute_cooperative` cold-build on **this store**
-    /// deterministically hits the TOCTOU abort path. Used by
-    /// integration tests in `crates/verter_session/tests/` that drive
-    /// the counter-helper plumbing.
-    ///
-    /// The trigger is scoped to the store the guard borrows — a test
-    /// forcing an abort affects only its own store, never a
-    /// concurrently-running unrelated test's store. The guard restores
-    /// the flag to `false` on drop. Tests must hold the guard for the
-    /// duration of the `execute_cooperative` call.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn test_force_cold_abort_sweep(&self) -> TestForceColdAbortGuard<'_> {
-        self.force_cold_abort_sweep.store(true, Ordering::SeqCst);
-        TestForceColdAbortGuard {
-            flag: &self.force_cold_abort_sweep,
-        }
-    }
-}
-
 impl SemanticGraphRead for SemanticGraphStore {
     fn node_data(&self, node: SemanticNodeId) -> Arc<SemanticNodeData> {
         SemanticGraphStore::node_data(self, node).unwrap_or_else(|| {
@@ -3814,41 +3778,6 @@ impl crate::invalidation_domain::InvalidationByCanonical for SemanticGraphStore 
 
 fn empty_signature() -> DepSignature {
     Arc::from(Vec::new().into_boxed_slice())
-}
-
-/// Public test driver: build an empty `DepSignature` for tests in the
-/// integration-test crate that drive `execute_cooperative` directly.
-/// The integration-test surface is not part of the production resolver
-/// stack — its only job is to discriminate per-request counter
-/// attribution, so an empty signature is sufficient.
-#[doc(hidden)]
-#[allow(dead_code)]
-#[must_use]
-pub fn empty_signature_for_tests() -> DepSignature {
-    empty_signature()
-}
-
-/// Public test driver: trigger an in-flight abort for `key` on `store`.
-/// Forwards to [`SemanticGraphStore::test_trigger_inflight_abort_impl`]
-/// so integration tests in `crates/verter_session/tests/` and in-crate
-/// `tests.rs` drive the same joiner-retry body through one call site.
-#[doc(hidden)]
-#[allow(dead_code)]
-pub fn test_trigger_inflight_abort(store: &SemanticGraphStore, key: &SemanticQueryKey) -> bool {
-    store.test_trigger_inflight_abort_impl(key)
-}
-
-/// Public test driver: read the in-flight entry's `Arc` strong count
-/// for `key` on `store`. Forwards to
-/// [`SemanticGraphStore::test_inflight_strong_count`] so joiner-retry
-/// tests deterministically poll for joiner admission instead of
-/// sleeping. See that method's docs for the strong-count contract
-/// (`3` while only the winner is mid-build, `4` once a joiner joins).
-#[doc(hidden)]
-#[allow(dead_code)]
-#[must_use]
-pub fn test_inflight_strong_count(store: &SemanticGraphStore, key: &SemanticQueryKey) -> usize {
-    store.test_inflight_strong_count(key)
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -3912,25 +3841,6 @@ fn record_cold_abort_swept(stats: &AtomicSemanticGraphStats) {
     stats.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
     if let Some(ctx) = crate::request_context::current_request_context() {
         ctx.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-/// RAII guard returned by
-/// [`SemanticGraphStore::test_force_cold_abort_sweep`]. Borrows the
-/// driving store's per-store
-/// [`force_cold_abort_sweep`](SemanticGraphStore::force_cold_abort_sweep)
-/// flag and restores it to `false` on drop, so a panicking test does
-/// not leak the trigger onto a later `execute_cooperative` on the same
-/// store. The trigger never reaches another store, so sibling tests
-/// running in parallel are unaffected regardless.
-#[doc(hidden)]
-pub struct TestForceColdAbortGuard<'a> {
-    flag: &'a std::sync::atomic::AtomicBool,
-}
-
-impl Drop for TestForceColdAbortGuard<'_> {
-    fn drop(&mut self) {
-        self.flag.store(false, Ordering::SeqCst);
     }
 }
 

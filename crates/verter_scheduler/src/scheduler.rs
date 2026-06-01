@@ -167,6 +167,107 @@ fn should_join_driver_thread(
     handle_thread_id != current_thread_id
 }
 
+/// Test-only dispatch instrumentation that lets a test deterministically
+/// observe SCHEDULER-PRIORITY-QUEUE dwell.
+///
+/// The dispatch loop ([`Scheduler::dispatch_ready_work`]) drains the
+/// scheduler DAG's ready nodes and hands each entry to a bounded pool, so
+/// by the time a stage executor runs, the entry has already left the
+/// queue — a stage-side gate therefore cannot prove that surplus work
+/// accrued `queue_dwell_ms` *in the scheduler queue* (it may have been
+/// sitting in a pool channel instead). This hook moves the rendezvous to
+/// the dispatch site itself:
+///
+/// 1. The test arms the hook with a `pause_after` dispatch count.
+/// 2. After the driver has dispatched exactly `pause_after` jobs and
+///    BEFORE the next dequeue, it parks here. While parked it keeps
+///    re-draining the inbox (via the supplied closure) so every
+///    still-in-flight submission lands in the scheduler DAG regardless of
+///    submission timing — the surplus then provably SITS in the queue.
+/// 3. The test waits until the driver reports `paused`, observes that
+///    the DAG actually contains the surplus (via
+///    [`Scheduler::test_job_queue_depth`]), and only then releases.
+///
+/// Every wait is bounded and panics on a real stall so a logic error
+/// fails loudly instead of hanging the suite. The hook is
+/// `cfg`-gated to `test` / `debug_assertions`; it and its single call
+/// site are absent from release builds, so production dispatch is
+/// unchanged.
+#[cfg(any(test, debug_assertions))]
+#[derive(Default)]
+pub(crate) struct DispatchPauseHook {
+    state: Mutex<DispatchPauseState>,
+    cv: parking_lot::Condvar,
+}
+
+#[cfg(any(test, debug_assertions))]
+#[derive(Default)]
+struct DispatchPauseState {
+    /// `true` once a test has armed the hook.
+    armed: bool,
+    /// Number of dispatches after which the driver parks (cumulative
+    /// across `dispatch_ready_work` invocations).
+    pause_after: usize,
+    /// Cumulative count of jobs dispatched since the hook was armed.
+    dispatched: usize,
+    /// `true` once the driver has reached the pause point and is parked.
+    paused: bool,
+    /// `true` once the pause has fired; prevents re-pausing on later
+    /// dispatch-loop iterations.
+    consumed: bool,
+    /// `true` once the test has released the parked driver.
+    released: bool,
+}
+
+#[cfg(any(test, debug_assertions))]
+impl DispatchPauseHook {
+    /// Driver side: record one dispatch and, if the cumulative count has
+    /// reached the armed `pause_after`, park before the next dequeue.
+    ///
+    /// While parked, `redrain` is invoked repeatedly so every
+    /// still-in-flight submission is pulled into the scheduler DAG; the
+    /// test observes the resulting queue depth before releasing. Bounded
+    /// at ~10 s — a release that never arrives PANICS rather than hanging
+    /// the driver forever.
+    fn on_dispatch_and_maybe_pause(&self, redrain: &dyn Fn()) {
+        use std::time::{Duration, Instant};
+        let mut state = self.state.lock();
+        if !state.armed || state.consumed {
+            return;
+        }
+        state.dispatched += 1;
+        if state.dispatched < state.pause_after {
+            return;
+        }
+        // Reached the pause threshold. Park here (before the next
+        // dequeue) until the test releases, re-draining the inbox so the
+        // surplus provably accrues scheduler-queue dwell.
+        state.consumed = true;
+        state.paused = true;
+        self.cv.notify_all();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !state.released {
+            // Drop the lock around the re-drain so the test can observe
+            // `paused`/`released` and so `redrain` (which locks the
+            // scheduler DAG, not this state) cannot deadlock against it.
+            drop(state);
+            redrain();
+            state = self.state.lock();
+            if state.released {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "dispatch pause was never released within 10s — the test \
+                 driver did not call test_release_dispatch_pause (deadlock)"
+            );
+            // Park briefly on the condvar; a release wakes us promptly,
+            // otherwise we loop to re-drain and re-check the deadline.
+            let _ = self.cv.wait_for(&mut state, Duration::from_millis(2));
+        }
+    }
+}
+
 /// A request to the scheduler.
 pub struct Request {
     pub file_id: String,
@@ -330,6 +431,12 @@ pub struct Scheduler {
     /// Contention instrumentation counters surfaced through
     /// [`Self::counters`].
     pub(crate) counters: SchedulerCounters,
+    /// Test-only dispatch pause instrumentation. Lets a dwell test park
+    /// the driver after N dispatches and observe scheduler-queue depth
+    /// before releasing. `cfg`-gated to `test` / `debug_assertions`;
+    /// absent from release builds.
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) dispatch_pause: DispatchPauseHook,
 }
 
 /// Classification of a recorded `FileStage::Analysis` blocker dep
@@ -469,6 +576,8 @@ impl Scheduler {
             shutdown: AtomicBool::new(false),
             driver_handle: Mutex::new(None),
             counters: SchedulerCounters::default(),
+            #[cfg(any(test, debug_assertions))]
+            dispatch_pause: DispatchPauseHook::default(),
         });
 
         // Driver holds Weak so it doesn't prevent Drop.
@@ -539,6 +648,8 @@ impl Scheduler {
             #[cfg(not(target_arch = "wasm32"))]
             driver_handle: Mutex::new(None),
             counters: SchedulerCounters::default(),
+            #[cfg(any(test, debug_assertions))]
+            dispatch_pause: DispatchPauseHook::default(),
         })
     }
 
@@ -2729,6 +2840,15 @@ impl Scheduler {
                 DispatchOutcome::ExecutedInline => stats.executed_inline += 1,
                 DispatchOutcome::Skipped => {}
             }
+
+            // Test-only: after each dispatch, record it and — once the
+            // armed `pause_after` count is reached — park here (before the
+            // next dequeue) until the test releases, re-draining the inbox
+            // so the surplus provably accrues scheduler-queue dwell. No-op
+            // unless a test has armed the hook; absent from release builds.
+            #[cfg(any(test, debug_assertions))]
+            self.dispatch_pause
+                .on_dispatch_and_maybe_pause(&|| self.drain_inbox());
         }
         stats
     }
@@ -3051,6 +3171,68 @@ impl Scheduler {
             };
             observer.record_scheduler_dispatch(audit);
         }
+    }
+
+    /// Test-only: arm the dispatch pause so the driver parks after
+    /// dispatching `pause_after` jobs and BEFORE the next dequeue. Must
+    /// be called before submitting the requests whose scheduler-queue
+    /// dwell the test inspects. See [`DispatchPauseHook`].
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn test_arm_dispatch_pause(&self, pause_after: usize) {
+        let mut state = self.dispatch_pause.state.lock();
+        state.armed = true;
+        state.pause_after = pause_after;
+        state.dispatched = 0;
+        state.paused = false;
+        state.consumed = false;
+        state.released = false;
+    }
+
+    /// Test-only: block (bounded ~10 s, panic on stall) until the driver
+    /// has reached the armed dispatch pause point and is parked.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn test_wait_until_dispatch_paused(&self) {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut state = self.dispatch_pause.state.lock();
+        while !state.paused {
+            if self
+                .dispatch_pause
+                .cv
+                .wait_for(&mut state, Duration::from_millis(5))
+                .timed_out()
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "driver never reached the dispatch pause point within 10s \
+                     (dispatched {} of pause_after {})",
+                    state.dispatched,
+                    state.pause_after,
+                );
+            }
+        }
+    }
+
+    /// Test-only: current number of pending (non-cancelled,
+    /// non-dispatched) nodes in the scheduler DAG. Lets a dwell test
+    /// confirm the surplus provably SITS in the scheduler queue before
+    /// releasing the pause.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_job_queue_depth(&self) -> usize {
+        self.dag.lock().pending_len()
+    }
+
+    /// Test-only: release the parked driver from the dispatch pause.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn test_release_dispatch_pause(&self) {
+        let mut state = self.dispatch_pause.state.lock();
+        state.released = true;
+        self.dispatch_pause.cv.notify_all();
     }
 
     /// Dispatch work inline (used by `drive_one`/`drive_all` in sync mode and WASM).
@@ -7393,6 +7575,23 @@ mod tests {
     /// observed `current_request_id()` separately via a
     /// canonical-dispatched probe. Both must equal the parent request's
     /// id.
+    ///
+    /// Determinism barrier: the request targets `Artifact`, NOT
+    /// `Analysis`. The blocker the scheduler registers for the
+    /// auto-ingested dep gates the PARENT's **Artifact** stage on the
+    /// dep reaching **Analysis** (see `blockers_gate_artifact_until_dep_analyzed`
+    /// and the `has_pending_blockers` gate in `submit_request`). The
+    /// dep cannot reach Analysis without its Source job running first,
+    /// so by the time `handle.wait()` returns `Ready(Artifact)` the
+    /// dep-source job has provably already executed (and stored its
+    /// observed TLS request_id). Had we targeted `Analysis`, the
+    /// PARENT analysis is NOT gated by the dep blocker (the blocker
+    /// only gates artifacts), so `wait()` could return before the
+    /// auto-ingested dep-source worker ran — the inherited-context
+    /// observation would race. Targeting Artifact turns the
+    /// completion fence into a structural happens-before: dep-source
+    /// observed ⇒ dep analyzed ⇒ blocker cleared ⇒ parent artifact ⇒
+    /// wait() returns. No timing/sleep is involved.
     #[test]
     fn auto_ingested_dep_source_job_inherits_parent_request_context_as_tls() {
         use crate::executor::ExtractedDeps;
@@ -7460,9 +7659,13 @@ mod tests {
         let ctx = TestContext::new(PARENT_REQ_ID, true);
         let opaque = OpaqueRequestContext(Arc::clone(&ctx) as Arc<dyn RequestContextLike>);
 
+        // Target Artifact (not Analysis): the dep blocker gates the
+        // parent's Artifact stage, so completion structurally forces
+        // the dep-source job to have run first (see the doc-comment's
+        // determinism barrier rationale).
         let handle = sched.submit_request(Request {
             file_id: PARENT.to_string(),
-            target: TargetStage::Analysis,
+            target: TargetStage::Artifact { profile_hash: 0 },
             priority: Priority::Interactive,
             source: None,
             file_kind: None,

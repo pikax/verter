@@ -17,7 +17,7 @@ use crate::record::{u64_as_decimal_string, RequestKind};
 /// `slowest_5` lists the longest-running records descending by
 /// `RequestTimingAudit::total_ms`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct BundlerBatchPayload {
     /// Bundler kind (vite, webpack, …) the aggregator was tagged
     /// with. Records originate from any audited request flowing
@@ -78,7 +78,7 @@ pub struct BundlerBatchPayload {
 /// summary is self-contained and safe to serialise once the source
 /// store is mutated.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct SlowRecordSummary {
     /// Monotonic request id from the original record. Decimal-string
     /// transport — non-zero and unique per audited request.

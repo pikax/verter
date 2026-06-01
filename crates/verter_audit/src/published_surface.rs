@@ -42,7 +42,7 @@ use ts_rs::TS;
 /// consumed by `@verter/component-meta/compat` and the benchmark
 /// refiner respectively.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum PublishedSurfacePolicy {
     /// Native producer truth: every name the macro projector
     /// admitted onto the user-visible surface, with no filtering.
@@ -68,7 +68,7 @@ pub enum PublishedSurfacePolicy {
 /// published macro surface. Consumed by [`names_for_policy`] to
 /// produce structural projections (no name-string heuristics).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct AnalyzedSurfaceItem {
     /// Member name as published by the producer.
     pub name: String,
@@ -99,7 +99,7 @@ pub struct AnalyzedSurfaceItem {
 /// projection — callers wanting deterministic ordering should sort
 /// upstream.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct AnalyzedSurface {
     /// Props published by `defineProps` (+ `withDefaults` /
     /// `defineModel` contributions).
@@ -116,7 +116,7 @@ pub struct AnalyzedSurface {
 /// Result of applying a [`PublishedSurfacePolicy`] to an
 /// [`AnalyzedSurface`]. One name list per surface.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct PolicyNamesResult {
     /// Prop names retained by the policy.
     pub props: Vec<String>,

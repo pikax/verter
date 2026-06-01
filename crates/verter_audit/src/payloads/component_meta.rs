@@ -17,7 +17,7 @@ use crate::record::u64_as_decimal_string;
 /// can render structured diagnostics without depending on
 /// `verter_semantic`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum AuditDiagnosticKind {
     /// Cyclic alias / heritage chain detected during the synthesis walk.
     CyclicReference,
@@ -44,7 +44,7 @@ pub enum AuditDiagnosticKind {
 /// scoped to the macro-expansion pass — projected at the session
 /// boundary by `verter_session::host_audit_bridge`.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct AuditDiagnosticEntry {
     /// Discriminator naming the diagnostic class.
     pub kind: AuditDiagnosticKind,
@@ -66,7 +66,7 @@ pub struct AuditDiagnosticEntry {
 
 /// Component-meta request payload.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct ComponentMetaPayload {
     /// Total solver resolve-steps issued across all invocations
     /// during this request.

@@ -915,7 +915,10 @@ pub(crate) fn emits_from_typeinfo_surface(
 
     // (1) Call-signature emits.
     for sig in macro_surface.surface.call_signatures.iter() {
-        let Some(TypeExpr::Function(func)) = dispatch.raise_node_to_type_expr(sig.node) else {
+        // `TypeExpr` implements `Drop`, so `func` cannot be moved out of the
+        // raised value; bind it and borrow the function.
+        let raised = dispatch.raise_node_to_type_expr(sig.node);
+        let Some(TypeExpr::Function(func)) = &raised else {
             continue;
         };
         let Some(first) = func.parameters.first() else {

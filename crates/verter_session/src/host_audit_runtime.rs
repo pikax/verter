@@ -199,6 +199,34 @@ impl HostAuditRuntime {
     /// `audit_request_registration_lifecycle` enforces the single
     /// in-tree call site.
     pub(crate) fn register_active_request(&self, request_id: u64, ctx: &Arc<RequestContext>) {
+        // Seed the per-request peak-RSS slot with one immediate sample
+        // at registration. The 50ms-cadence sampler thread (see
+        // `sampler_loop`) only RAISES the slot via `fetch_max`, so a
+        // trivial request that finishes inside a sampler gap would
+        // otherwise report a peak of `0`. Seeding here initializes the
+        // slot to the RSS at the request's start; the sampler later
+        // raises it if memory grows. We reuse the SAME RSS primitive
+        // the sampler uses and the SAME `fetch_max` write, so there is
+        // no double-count and no cross-request misattribution — the
+        // slot is per-request and `fetch_max` is idempotent under
+        // re-sampling.
+        //
+        // The seed is gated on the SAME flag that governs the sampler
+        // (`audit_timing_capture`): the seed and the sampler are one
+        // peak-RSS feature, both off the request's hot path when the
+        // flag is disabled. This preserves the documented contract that
+        // `process_rss_peak_bytes` stays `0` when `audit_timing_capture`
+        // is off (see `RequestContext::process_rss_peak_bytes` doc and
+        // `memory_peak_rss_zero_when_flag_off`), and the zero-cost path
+        // for hosts that don't opt into timing capture. On `wasm32` the
+        // sampler is gated off entirely; `current_process_rss()` also
+        // returns `0` there, so the seed would be a no-op regardless.
+        if self.config.audit_timing_capture {
+            ctx.process_rss_peak_bytes.fetch_max(
+                verter_audit::current_process_rss(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         let mut map = self.active_requests.write();
         map.insert(request_id, Arc::downgrade(ctx));
     }
@@ -507,5 +535,103 @@ impl crate::VerterHost {
     pub fn replace_host_audit_runtime_for_test(&mut self, config: AuditConfig) {
         let store = Arc::clone(self.host_audit_runtime.audit_records_store());
         self.host_audit_runtime = Arc::new(HostAuditRuntime::new(config, store));
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod seed_tests {
+    //! Deterministic coverage for the registration-time peak-RSS seed
+    //! (`register_active_request`). These tests drive the production
+    //! seed primitive DIRECTLY — they do NOT go through
+    //! `AuditRequestRegistration::new`, so `ensure_sampler_started` is
+    //! never called and NO sampler thread spawns. The per-request peak
+    //! slot therefore has exactly ONE possible writer (the seed), which
+    //! makes the discrimination race-free: there is no sampler tick to
+    //! win or lose against.
+
+    use super::*;
+
+    fn fresh_ctx(request_id: u64) -> Arc<RequestContext> {
+        RequestContext::new(
+            request_id,
+            std::sync::Arc::<str>::from("/seed_probe.vue"),
+            // No footprint capture / accumulator needed — the seed
+            // touches only `process_rss_peak_bytes`.
+            false,
+            None,
+        )
+    }
+
+    #[test]
+    fn register_active_request_seeds_peak_rss_when_timing_capture_on() {
+        // audit_timing_capture ON → the seed fires synchronously inside
+        // register_active_request. No sampler thread exists (we bypass
+        // ensure_sampler_started), so a non-zero slot can come ONLY from
+        // the seed.
+        //
+        // Discrimination contract:
+        // - Pre-fix tree (register_active_request does not seed): the
+        //   slot stays at exactly 0 → the `> 0` assertion FAILS.
+        // - Post-fix tree: the seed writes the start-of-request RSS →
+        //   `> 0` PASSES.
+        let runtime = HostAuditRuntime::new(
+            AuditConfig {
+                audit_timing_capture: true,
+                ..AuditConfig::default()
+            },
+            Arc::new(AuditRecordsStore::default()),
+        );
+        let ctx = fresh_ctx(1);
+        assert_eq!(
+            ctx.process_rss_peak_bytes.load(Ordering::Relaxed),
+            0,
+            "fresh RequestContext must start with a zero peak slot",
+        );
+
+        runtime.register_active_request(ctx.request_id, &ctx);
+
+        let seeded = ctx.process_rss_peak_bytes.load(Ordering::Relaxed);
+        assert!(
+            seeded > 0,
+            "register_active_request must seed the per-request peak slot with an \
+             immediate RSS sample when audit_timing_capture is on; got {seeded} \
+             (pre-fix this is 0 because nothing writes the slot at registration)",
+        );
+        // The seed reads real process RSS, so it must land in a
+        // realistic range for a debug test process — not a sentinel.
+        const ONE_MB: u64 = 1024 * 1024;
+        const SIXTEEN_GB: u64 = 16u64 * 1024 * 1024 * 1024;
+        assert!(
+            seeded > ONE_MB && seeded < SIXTEEN_GB,
+            "seeded peak {seeded} must fall in the realistic RSS range (1 MB .. 16 GB)",
+        );
+    }
+
+    #[test]
+    fn register_active_request_does_not_seed_when_timing_capture_off() {
+        // audit_timing_capture OFF → the seed is gated off (same flag
+        // that governs the sampler). The slot MUST stay 0, preserving
+        // the documented "peak stays 0 when audit_timing_capture is off"
+        // contract (see `RequestContext::process_rss_peak_bytes` and the
+        // `memory_peak_rss_zero_when_flag_off` integration test). This
+        // pins the gate so a future change that seeds unconditionally
+        // (which would regress that contract) fails here.
+        let runtime = HostAuditRuntime::new(
+            AuditConfig {
+                audit_timing_capture: false,
+                ..AuditConfig::default()
+            },
+            Arc::new(AuditRecordsStore::default()),
+        );
+        let ctx = fresh_ctx(2);
+
+        runtime.register_active_request(ctx.request_id, &ctx);
+
+        assert_eq!(
+            ctx.process_rss_peak_bytes.load(Ordering::Relaxed),
+            0,
+            "with audit_timing_capture off the seed must NOT fire — the peak slot \
+             stays 0 (zero-cost path; matches the sampler's own gate)",
+        );
     }
 }

@@ -1314,14 +1314,21 @@ fn collect_array_element_types_from_type(ty: &TypeExpr) -> Option<Vec<TypeExpr>>
 }
 
 fn append_union_members(into: &mut Vec<TypeExpr>, ty: TypeExpr) {
-    match ty {
-        TypeExpr::Union(members) => into.extend(members.iter().cloned()),
-        other => into.push(other),
+    // `TypeExpr` implements `Drop`; flatten a union by borrowing + cloning
+    // its (refcounted) members, otherwise push the whole value by move.
+    if let TypeExpr::Union(members) = &ty {
+        into.extend(members.iter().cloned());
+    } else {
+        into.push(ty);
     }
 }
 
 fn widen_literal_type(expr: TypeExpr) -> TypeExpr {
-    match expr {
+    // `TypeExpr` implements `Drop`, so the compound arms below cannot bind
+    // their children by-move out of an owned `expr`. Match on a borrow and
+    // clone the (refcounted) children; the catch-all forwards `expr` whole
+    // (a full-value move, which `Drop` permits).
+    match &expr {
         TypeExpr::Literal(verter_type_expr::LiteralValue::String(_)) => {
             TypeExpr::Primitive(PrimitiveName::String)
         }
@@ -1350,7 +1357,7 @@ fn widen_literal_type(expr: TypeExpr) -> TypeExpr {
         ),
         TypeExpr::Array { element, readonly } => TypeExpr::Array {
             element: Arc::new(widen_literal_type(element.as_ref().clone())),
-            readonly,
+            readonly: *readonly,
         },
         TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
             elements: Arc::from(
@@ -1363,7 +1370,7 @@ fn widen_literal_type(expr: TypeExpr) -> TypeExpr {
                     })
                     .collect::<Vec<_>>(),
             ),
-            readonly,
+            readonly: *readonly,
         },
         TypeExpr::Object(obj) => TypeExpr::Object(Arc::new(ObjectExpr {
             properties: obj
@@ -1382,7 +1389,7 @@ fn widen_literal_type(expr: TypeExpr) -> TypeExpr {
             function.type_parameters.clone(),
             function.spans,
         ))),
-        other => other,
+        _ => expr,
     }
 }
 

@@ -29,6 +29,55 @@ fn scope(canonical: &str) -> ScopeId {
     }
 }
 
+/// Join `handle` and return its value, panicking if it does not complete
+/// within ~10s.
+///
+/// These cooperative-join tests reach their post-rendezvous joins only
+/// after the winner has been released and the joiner woken by the
+/// winner's publish, so on the happy path they complete promptly. They
+/// would block forever only on a genuine `execute_cooperative`
+/// singleflight deadlock — exactly the hang class this suite must surface
+/// loudly rather than hanging the whole `--lib` run. A bare
+/// `handle.join()` would itself hang on such a deadlock; this helper runs
+/// the join on a watchdog thread that reports the joined value through a
+/// rendezvous channel, and the caller PANICs if `recv_timeout` elapses.
+fn join_within<T: Send + 'static>(handle: std::thread::JoinHandle<T>, label: &str) -> T {
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::sync_channel::<std::thread::Result<T>>(1);
+    std::thread::spawn(move || {
+        // `send` fails only if the receiver was dropped (caller already
+        // panicked on timeout); ignore the benign disconnect.
+        let _ = tx.send(handle.join());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(Ok(value)) => value,
+        Ok(Err(_)) => panic!("{label} panicked"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{label} deadlocked (join did not complete within 10s)")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("{label} watchdog channel disconnected before reporting")
+        }
+    }
+}
+
+/// Receive one signal from `rx`, panicking if it does not arrive within
+/// ~10s. Replaces a bare `recv()` in the cooperative-join rendezvous
+/// channels so a producer that stalls/deadlocks before signalling fails
+/// loudly within the deadline instead of hanging the suite forever.
+fn recv_signal_within(rx: &std::sync::mpsc::Receiver<()>, label: &str) {
+    use std::sync::mpsc::RecvTimeoutError;
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(()) => {}
+        Err(RecvTimeoutError::Timeout) => {
+            panic!("{label}: timed out waiting for signal (10s)")
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            panic!("{label}: signal channel disconnected before the producer signalled")
+        }
+    }
+}
+
 #[test]
 fn interning_returns_unique_stable_ids() {
     let store = SemanticGraphStore::new();
@@ -2880,7 +2929,6 @@ fn recursive_sentinel_does_not_promote_to_warm_memo() {
 #[test]
 fn cross_thread_joiner_waits_on_winner_publish() {
     use std::thread;
-    use std::time::Duration;
 
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -2888,10 +2936,14 @@ fn cross_thread_joiner_waits_on_winner_publish() {
         name: Arc::from("Shared"),
     });
 
-    let start_barrier = Arc::new(std::sync::Barrier::new(2));
+    // Bounded entry rendezvous: the winner sends one signal as the first
+    // act of its build closure, and the driver receives it with a 10s
+    // deadline. A 2-party `Barrier` here would hang the driver forever if
+    // the winner panicked before reaching the barrier; the channel +
+    // `recv_signal_within` makes that a loud panic instead.
+    let (tx_winner_in_build, rx_winner_in_build) = std::sync::mpsc::channel::<()>();
     let store_owner = Arc::clone(&store);
     let key_owner = key.clone();
-    let barrier_owner = Arc::clone(&start_barrier);
 
     let winner = thread::spawn(move || {
         let host = ctx_host();
@@ -2900,10 +2952,26 @@ fn cross_thread_joiner_waits_on_winner_publish() {
             key_owner,
             || store_owner.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
-                barrier_owner.wait();
-                // Hold the build open briefly so the joiner reaches
-                // the condvar wait.
-                thread::sleep(Duration::from_millis(25));
+                tx_winner_in_build
+                    .send(())
+                    .expect("winner: signal entered build");
+                // Hold the build open until the joiner has PROVABLY
+                // suspended on the per-entry condvar — not merely been
+                // admitted onto the in-flight entry. This test's stated
+                // intent is the condvar PAIRING: the joiner must be parked
+                // on the condvar when the winner publishes, so the
+                // publish's `notify_all` is what wakes it. The in-flight
+                // strong count (used by the 8 same-flight tests) rises one
+                // step EARLIER, when the joiner clones the entry's `Arc`
+                // BEFORE reaching `wait_while`, so it does NOT prove the
+                // joiner is on the condvar. `joiner_on_condvar_count` is
+                // incremented immediately before `wait_while`, so observing
+                // it proves the real invariant. The probe is bounded
+                // (~10 s) and panics on a genuine hang. This is a read-only
+                // counter poll, not a re-entrant `execute_cooperative`
+                // call, so the winner does not self-await its own in-flight
+                // entry.
+                wait_for_joiner_on_condvar(&store_owner);
                 let id =
                     store_owner.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
                 (QueryResult::Value(id), empty_signature())
@@ -2912,8 +2980,8 @@ fn cross_thread_joiner_waits_on_winner_publish() {
     });
 
     // Let the winner claim first, then the joiner waits on the
-    // condvar.
-    start_barrier.wait();
+    // condvar. Bounded: panics if the winner never enters its build.
+    recv_signal_within(&rx_winner_in_build, "winner entered build");
     let joiner = thread::spawn({
         let store = Arc::clone(&store);
         let key = key.clone();
@@ -2930,8 +2998,8 @@ fn cross_thread_joiner_waits_on_winner_publish() {
         }
     });
 
-    let winner_result = winner.join().unwrap();
-    let joiner_result = joiner.join().unwrap();
+    let winner_result = join_within(winner, "winner");
+    let joiner_result = join_within(joiner, "joiner");
 
     // Both must see the winner's node id.
     match (winner_result.value, joiner_result.value) {
@@ -4438,6 +4506,34 @@ fn wait_for_joiner_admitted(store: &SemanticGraphStore, key: &SemanticQueryKey) 
     }
 }
 
+/// Block the calling (test) thread until at least one cooperative
+/// joiner has SUSPENDED on a per-entry `ready` condvar on `store`.
+///
+/// This is strictly stronger than [`wait_for_joiner_admitted`]: that
+/// probe returns once a joiner has cloned the in-flight `Arc` (step 3
+/// of the dispatch loop), which happens one statement BEFORE the
+/// joiner reaches `wait_while`. For a condvar-PAIRING test — one whose
+/// stated intent is that the joiner is genuinely parked on the condvar
+/// when the winner publishes — admitted-count is insufficient. This
+/// probe instead polls the store's `joiner_on_condvar_count`, which is
+/// incremented immediately before `wait_while`, so a return proves the
+/// joiner is committed to the condvar wait.
+///
+/// The poll is bounded: it spins for at most ~10 s, then panics so a
+/// genuine hang fails loudly rather than blocking the suite forever.
+fn wait_for_joiner_on_condvar(store: &SemanticGraphStore) {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while store.test_joiner_on_condvar_count() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for a joiner to suspend on the per-entry \
+             condvar (joiner_on_condvar_count never rose above 0)",
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// Joiner threads cooperatively blocked on an in-flight condvar
 /// increment `SemanticGraphStats::joined_waits` exactly once per
 /// `wait_while` return (not per retry — each fresh wait on a new
@@ -4466,7 +4562,8 @@ fn semantic_graph_stats_joined_waits_increments_on_cooperative_join() {
             || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
                 tx_in_build.send(()).expect("winner signal in_build");
-                rx_finish_build.recv().expect("winner signal finish");
+                // Bounded wait for the driver's release — panics on stall.
+                recv_signal_within(&rx_finish_build, "winner signal finish");
                 let id =
                     winner_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
                 (QueryResult::Value(id), empty_signature())
@@ -4476,8 +4573,8 @@ fn semantic_graph_stats_joined_waits_increments_on_cooperative_join() {
 
     // Wait until the winner is inside the build — this guarantees
     // the in-flight entry is registered + claimed when the joiner
-    // arrives.
-    rx_in_build.recv().expect("winner entered build");
+    // arrives. Bounded: panics if the winner never enters its build.
+    recv_signal_within(&rx_in_build, "winner entered build");
 
     let joiner_store = Arc::clone(&store);
     let joiner_key = key.clone();
@@ -4493,14 +4590,16 @@ fn semantic_graph_stats_joined_waits_increments_on_cooperative_join() {
         )
     });
 
-    // Joiner blocks on the condvar. Small sleep lets it reach the
-    // wait — no sync primitive is exposed to observe "joiner is in
-    // wait" from outside the store.
-    thread::sleep(std::time::Duration::from_millis(50));
+    // Block until the joiner has been admitted onto the in-flight
+    // entry (its `Arc` clone raises the strong count above the
+    // winner-only baseline). This deterministically guarantees the
+    // joiner reached the cooperative wait branch before the winner is
+    // released to publish — no wall-clock race.
+    wait_for_joiner_admitted(&store, &key);
     tx_finish_build.send(()).expect("release winner");
 
-    let _ = winner.join().expect("winner joined");
-    let joiner_result = joiner.join().expect("joiner joined");
+    let _ = join_within(winner, "winner");
+    let joiner_result = join_within(joiner, "joiner");
     assert!(
         matches!(joiner_result.value, QueryResult::Value(_)),
         "joiner must observe the winner's published result"
@@ -4545,7 +4644,7 @@ fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
             || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
                 tx_in_build.send(()).expect("winner signal in_build");
-                rx_finish_build.recv().expect("winner signal finish");
+                recv_signal_within(&rx_finish_build, "winner finish-build signal");
                 let id =
                     winner_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
                 (QueryResult::Value(id), empty_signature())
@@ -4553,7 +4652,7 @@ fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
         )
     });
 
-    rx_in_build.recv().expect("winner entered build");
+    recv_signal_within(&rx_in_build, "winner entered build");
 
     let joiner_store = Arc::clone(&store);
     let joiner_key = key.clone();
@@ -4591,8 +4690,8 @@ fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
     // publish will hit the aborted re-check and be skipped.
     tx_finish_build.send(()).expect("release winner");
 
-    let _ = winner.join().expect("winner joined");
-    let joiner_result = joiner.join().expect("joiner joined");
+    let _ = join_within(winner, "winner");
+    let joiner_result = join_within(joiner, "joiner");
     // Joiner either became the fresh cold winner (Value) or, if the
     // winner's aborted-publish-skip raced with joiner's retry, the
     // joiner ran its own cold build (also Value). Either way the
@@ -5402,7 +5501,6 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
     use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -5489,7 +5587,10 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
         finalise
     });
 
-    thread::sleep(Duration::from_millis(50));
+    // Block until the joiner has joined the winner's in-flight entry
+    // (deterministic admission probe — no wall-clock race) before the
+    // winner is released to publish.
+    wait_for_joiner_admitted(&store, &key);
     tx_release_winner.send(()).expect("release winner");
 
     let _winner_read = winner.join().expect("winner joined");
@@ -5567,7 +5668,6 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
     use crate::{FileKind, UpsertRequest};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     // A real keyed file gives the carrier a tracked self-root the
     // follower's view can strictly validate — the winner therefore
@@ -5684,7 +5784,10 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
         (joiner_suppress, finalise)
     });
 
-    thread::sleep(Duration::from_millis(50));
+    // Block until the joiner has joined the winner's in-flight entry
+    // (deterministic admission probe — no wall-clock race) before the
+    // winner is released to publish.
+    wait_for_joiner_admitted(&store, &key);
     tx_release_winner.send(()).expect("release winner");
 
     let _winner_read = winner.join().expect("winner joined");
@@ -5810,7 +5913,6 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     let keyed_canonical = "/p2_1/keyed.ts";
     let host = ctx_host();
@@ -5945,9 +6047,12 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
         (cache_read.value, recompute_id)
     });
 
-    // Give the follower time to reach the cooperative wait branch
-    // BEFORE the winner publishes — this forces a real coalesce.
-    thread::sleep(Duration::from_millis(80));
+    // Block until the follower has been admitted onto the winner's
+    // in-flight entry — it is now guaranteed to be inside the
+    // cooperative wait branch BEFORE the winner publishes, forcing a
+    // real coalesce. Deterministic alternative to a wall-clock sleep,
+    // which races the follower under parallel test load.
+    wait_for_joiner_admitted(&store, &key);
     tx_release_winner.send(()).expect("release winner");
 
     let winner_read = winner.join().expect("winner joined");
@@ -6020,7 +6125,6 @@ fn same_view_joiner_still_coalesces_onto_winner() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     let keyed_canonical = "/p2_1_same/keyed.ts";
     let host = ctx_host();
@@ -6114,7 +6218,10 @@ fn same_view_joiner_still_coalesces_onto_winner() {
         cache_read.value
     });
 
-    thread::sleep(Duration::from_millis(80));
+    // Block until the follower has joined the winner's in-flight entry
+    // (deterministic admission probe — no wall-clock race) before the
+    // winner is released to publish.
+    wait_for_joiner_admitted(&store, &key);
     tx_release_winner.send(()).expect("release winner");
 
     let _winner_read = winner.join().expect("winner joined");
@@ -6197,7 +6304,6 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     let keyed_canonical = "/p2_8_overflow/keyed.ts";
     let host = ctx_host();
@@ -6322,7 +6428,10 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
         (cache_read.value, recompute_id)
     });
 
-    thread::sleep(Duration::from_millis(80));
+    // Block until the follower has joined the winner's in-flight entry
+    // (deterministic admission probe — no wall-clock race) before the
+    // winner is released to publish.
+    wait_for_joiner_admitted(&store, &key);
     tx_release_winner.send(()).expect("release winner");
 
     let _winner_read = winner.join().expect("winner joined");
@@ -6442,7 +6551,6 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     let keyed_canonical = "/p2_8_unrootable/keyed.ts";
     let host = ctx_host();
@@ -6575,7 +6683,10 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
         (cache_read.value, recompute_id)
     });
 
-    thread::sleep(Duration::from_millis(80));
+    // Block until the follower has joined the winner's in-flight entry
+    // (deterministic admission probe — no wall-clock race) before the
+    // winner is released to publish.
+    wait_for_joiner_admitted(&store, &key);
     tx_release_winner.send(()).expect("release winner");
 
     let _winner_read = winner.join().expect("winner joined");
@@ -6715,7 +6826,6 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     let keyed_canonical = "/p2_9_nonsuppressed_miss/keyed.ts";
     let host = ctx_host();
@@ -6856,7 +6966,10 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
         (cache_read.value, recompute_id)
     });
 
-    thread::sleep(Duration::from_millis(80));
+    // Block until the follower has joined the winner's in-flight entry
+    // (deterministic admission probe — no wall-clock race) before the
+    // winner is released to publish.
+    wait_for_joiner_admitted(&store, &key);
     tx_release_winner.send(()).expect("release winner");
 
     let winner_read = winner.join().expect("winner joined");

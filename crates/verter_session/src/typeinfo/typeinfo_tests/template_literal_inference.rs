@@ -33,7 +33,7 @@ fn template_literal_split_on_dot_produces_segment_tuple() {
         ProjectionMode::Expanded,
     );
 
-    let TypeExpr::Tuple { elements, readonly } = expr else {
+    let TypeExpr::Tuple { elements, readonly } = &expr else {
         panic!("expected tuple, got {expr:?}");
     };
     assert!(!readonly);

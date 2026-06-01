@@ -28,10 +28,9 @@
 use verter_session::{CompileProfile, FileKind};
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
-#[path = "../block_2_canary/harness.rs"]
-mod harness;
-
-use harness::{meta_hits, meta_misses, prime_compile, standalone_host, upsert, workspace_host};
+use crate::canary_harness::{
+    meta_hits, meta_misses, prime_compile, standalone_host, upsert, workspace_host,
+};
 
 /// Resolve the evaluated type of a single prop from an
 /// `ExpandedComponentTypes` snapshot.
@@ -279,7 +278,7 @@ fn unrelated_file_upsert_keeps_compile_slot_warm() {
 
     // The user-visible output is the still-valid warm compilation — a
     // recompile is a no-op and the assembled module is unchanged.
-    let response = harness::compile_main(&host, "/src/Comp.vue")
+    let response = crate::canary_harness::compile_main(&host, "/src/Comp.vue")
         .expect("the warm compilation remains readable after unrelated edits");
     assert!(
         !response.diagnostics.has_errors,

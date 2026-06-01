@@ -37,7 +37,7 @@ use crate::record::u64_as_decimal_string;
 /// the role at the point the file enters the request's bookkeeping;
 /// the role is determined by which path the file came in through.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum FileRole {
     /// The explicit canonical id passed to the public audited entry
     /// point — the request's primary subject.
@@ -88,7 +88,7 @@ pub enum FileRole {
 /// Per-file attribution attached to a
 /// [`crate::record::RequestAuditRecord::files`] entry.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS, PartialEq)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct FileAudit {
     /// Canonical id of the file the entry attributes.
     pub canonical_id: String,

@@ -38,6 +38,7 @@ use verter_type_expr::{ObjectExpr, ObjectMember, TypeExpr};
 /// `&'static str`; this helper interns parametric counter names so
 /// each unique `member_materialize_calls::<DeclName>` reaches the
 /// snapshot via a stable static reference.
+#[cfg(any(test, debug_assertions))]
 const COUNTER_NAME_INTERNER_LIMIT: usize = 64;
 
 /// Intern a counter name as a `&'static str` so the capture-token
@@ -46,6 +47,10 @@ const COUNTER_NAME_INTERNER_LIMIT: usize = 64;
 /// The interner has a bounded limit; once exceeded, returns a stable
 /// fallback name so a malicious or pathological test cannot cause
 /// unbounded leak.
+///
+/// Test/debug instrumentation only — gated to match the capture-token
+/// module (absent in release).
+#[cfg(any(test, debug_assertions))]
 pub(crate) fn leak_counter_name(name: &str) -> &'static str {
     use parking_lot::Mutex;
     use rustc_hash::FxHashMap;
@@ -64,20 +69,15 @@ pub(crate) fn leak_counter_name(name: &str) -> &'static str {
     leaked
 }
 
-/// Return the parametric counter name for `<DeclName>`. Used by the
-/// production hooks and by tests reading the counter from a
-/// `CaptureSnapshot`.
+/// Return the parametric counter name for `<DeclName>`. Test/debug
+/// instrumentation only (the capture-token recording site and the tests
+/// reading the counter from a `CaptureSnapshot`); gated to match the
+/// capture-token module (absent in release).
+#[cfg(any(test, debug_assertions))]
 pub(crate) fn member_materialize_calls_counter(decl_name: &str) -> &'static str {
     let owned = format!("member_materialize_calls::{}", decl_name);
     leak_counter_name(&owned)
 }
-
-/// Trace event name for the "expensive omit member resolution" trace
-/// emitted when a downstream consumer demands a concrete object
-/// surface from a previously-symbolic `Omit<package_backed, K>` and
-/// the resolver is forced to materialise individual members.
-pub(crate) const EXPENSIVE_OMIT_MEMBER_RESOLUTION_TRACE_COUNTER: &str =
-    "expensive_omit_member_resolution";
 
 /// Selective `Pick<T, K>` expansion for a package-backed target.
 ///
@@ -96,9 +96,13 @@ pub(crate) const EXPENSIVE_OMIT_MEMBER_RESOLUTION_TRACE_COUNTER: &str =
 pub(crate) fn selective_pick_expansion_for_package_backed(
     target_body: &TypeExpr,
     key_set: &[String],
-    decl_name: &str,
+    // Used only to key the test/debug instrumentation counter below;
+    // leading underscore keeps it warning-free in release where the
+    // counter is gated out.
+    _decl_name: &str,
 ) -> Option<TypeExpr> {
-    let counter_name = member_materialize_calls_counter(decl_name);
+    #[cfg(any(test, debug_assertions))]
+    let counter_name = member_materialize_calls_counter(_decl_name);
     let body = peel_paren(target_body);
     let TypeExpr::Object(object) = body else {
         return None;
@@ -113,7 +117,9 @@ pub(crate) fn selective_pick_expansion_for_package_backed(
         if key_set.iter().any(|k| k == name) {
             // Record the member-materialize counter once per picked
             // member. Selective expansion is O(|K|), proven by this
-            // counter's value matching the size of `key_set`.
+            // counter's value matching the size of `key_set`. Gated to
+            // match the instrumentation module (absent in release).
+            #[cfg(any(test, debug_assertions))]
             crate::capture_token::with_active_capture(|t| {
                 t.record_counter(counter_name, 1);
             });
@@ -164,16 +170,4 @@ fn peel_paren(expr: &TypeExpr) -> &TypeExpr {
         TypeExpr::Parenthesized(inner) => peel_paren(inner),
         _ => expr,
     }
-}
-
-/// Convenience: drive the symbolic-Omit trace emission for an
-/// `Omit<package_backed, K>` materialisation that a downstream
-/// consumer forces concrete (e.g., by indexing into the result with
-/// a literal that doesn't appear in K). Records once per forced
-/// resolution; informational, not a failure.
-#[allow(dead_code)]
-pub(crate) fn record_expensive_omit_member_resolution() {
-    crate::capture_token::with_active_capture(|t| {
-        t.record_counter(EXPENSIVE_OMIT_MEMBER_RESOLUTION_TRACE_COUNTER, 1);
-    });
 }

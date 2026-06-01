@@ -58,8 +58,7 @@
 
 #![allow(clippy::too_many_lines, dead_code, unused_imports)]
 
-#[path = "../component_meta_audit/harness.rs"]
-mod harness;
+use crate::harness;
 
 use verter_audit::origin_graph::{OriginEdgeKind, OriginEdgeMetaDto};
 use verter_session::audited_request::AuditedRequest;

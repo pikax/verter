@@ -1968,11 +1968,11 @@ mod tests {
             .raise_node_to_type_expr(indexed)
             .expect("indexed-access semantic node should serialize");
 
-        let TypeExpr::IndexedAccess { index, .. } = expr else {
+        let TypeExpr::IndexedAccess { index, .. } = &expr else {
             panic!("expected IndexedAccess expr, got {expr:?}");
         };
         assert_eq!(
-            *index,
+            **index,
             TypeExpr::number_literal(7.0),
             "numeric index keys should serialize as number literals",
         );
@@ -2072,7 +2072,7 @@ mod tests {
         let dispatch = ProjectSemanticDispatch::new(&host);
         let materialized = dispatch.raise_and_reduce(template, ProjectionMode::Expanded);
 
-        match materialized.type_expr {
+        match &materialized.type_expr {
             TypeExpr::Unknown { raw } => {
                 assert!(
                     raw.contains("template literal"),
@@ -2105,7 +2105,7 @@ mod tests {
         let dispatch = ProjectSemanticDispatch::new(&host);
         let materialized = dispatch.raise_and_reduce(decl_ref, ProjectionMode::Navigate);
 
-        match materialized.type_expr {
+        match &materialized.type_expr {
             TypeExpr::Ref {
                 name,
                 type_arguments,
@@ -2152,11 +2152,11 @@ mod tests {
             .raise_node_to_type_expr(indexed)
             .expect("indexed-access semantic node should serialize");
 
-        let TypeExpr::IndexedAccess { index, .. } = expr else {
+        let TypeExpr::IndexedAccess { index, .. } = &expr else {
             panic!("expected IndexedAccess expr, got {expr:?}");
         };
         assert_eq!(
-            *index,
+            **index,
             TypeExpr::string_literal("key"),
             "string index keys should serialize as string literals",
         );

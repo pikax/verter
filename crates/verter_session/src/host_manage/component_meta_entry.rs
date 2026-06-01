@@ -976,20 +976,64 @@ impl VerterHost {
             // per-request accumulator (used below to synthesise the
             // warm-path footprint).
             let mut memory = crate::component_meta_audit::RequestMemoryAudit::default();
-            // Hold a strong handle to the request context so the
-            // warm-path footprint mining below sees the SAME context
-            // the rest of this branch read attribution from — a TLS
-            // re-read would race a `RequestContextGuard::Drop` that
-            // is itself impossible while this scope is alive (the
-            // outer audited entry-point still owns the guard) but
-            // would also undermine the symmetry contract this
-            // branch maintains with the cold-path.
-            let (parent_request_id, scheduler_audit, waits, trace_id, warm_request_ctx) =
+            let (parent_request_id, scheduler_audit, waits, trace_id, footprint, files) =
                 match crate::request_context::current_request_context() {
                     Some(ctx) if ctx.request_id == request_id => {
                         memory.process_rss_peak_bytes = ctx
                             .process_rss_peak_bytes
                             .load(std::sync::atomic::Ordering::Relaxed);
+                        // Finalise the footprint through the SAME path
+                        // the cold resolver uses
+                        // (`compute_and_record_component_meta`): drain
+                        // THIS request's accumulator, build the per-file
+                        // audit vector off the drained state, then feed
+                        // the rest through the deterministic miner. A
+                        // warm hit performs little/no VFS work, so the
+                        // mined footprint is typically empty — but it is
+                        // always `Some(..)`, never `None`, so every
+                        // audited request (warm or cold) carries a
+                        // footprint. The accumulator is per-request and
+                        // the `SessionVfsSink` filters by `request_id`,
+                        // so the drained state attributes ONLY this
+                        // request's reads — the strict per-request
+                        // isolation the cold path relies on is
+                        // preserved. Footprint is `Some` exactly when
+                        // the cold path would produce one (i.e. when
+                        // `footprint_capture` is on and an accumulator is
+                        // attached); when capture is off it stays `None`,
+                        // matching the cold contract.
+                        let (footprint, files) = if ctx.footprint_capture {
+                            if let Some(acc) = ctx.audit_accumulator.as_ref() {
+                                let state = acc.drain();
+                                let direct_imports: rustc_hash::FxHashSet<String> = self
+                                    .shallow_file_state(ctx.canonical_id.as_ref())
+                                    .map(|sfs| {
+                                        sfs.import_targets
+                                            .values()
+                                            .map(|t| t.canonical_id.clone())
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let files = crate::component_meta_audit::build_file_audit_vec(
+                                    &state,
+                                    ctx.canonical_id.as_ref(),
+                                    &direct_imports,
+                                    self.config.audit_timing_capture && self.config.audit_enabled,
+                                );
+                                let footprint = crate::component_meta_audit::mine_footprint(
+                                    self.project_type_store().semantic_graph(),
+                                    state,
+                                    &ctx,
+                                    self.config.max_derivation_edges,
+                                    &self.config.audit_caps,
+                                );
+                                (Some(footprint), files)
+                            } else {
+                                (None, Vec::new())
+                            }
+                        } else {
+                            (None, Vec::new())
+                        };
                         // Surface `WaitAudit` only when the host's
                         // `audit_timing_capture` flag is on (mirrored on
                         // `RequestContext::timing_capture`). The warm
@@ -1020,67 +1064,12 @@ impl VerterHost {
                             scheduler_audit,
                             waits,
                             trace_id,
-                            Some(ctx),
+                            footprint,
+                            files,
                         )
                     }
-                    _ => (None, None, None, String::new(), None),
+                    _ => (None, None, None, String::new(), None, Vec::new()),
                 };
-            // Mine the warm-path footprint and per-file attribution
-            // from the per-request accumulator. The warm-cache
-            // validation (the `ComponentMetaResultDb::get_with_view`
-            // call above and `shallow_file_state` preceding it) emits
-            // VFS reads / cache events through the active observer;
-            // draining the accumulator here surfaces them on the
-            // synthesised record so audit consumers see a uniform
-            // `Some(_)` footprint and a non-empty `files` vec
-            // regardless of cold/warm path. A request running on a
-            // context whose `footprint_capture` flag is off produces
-            // `None` exactly as before — the warm path mirrors the
-            // cold-path policy so the contract is path-symmetric.
-            // The file ledger is read off the accumulator state
-            // BEFORE the miner consumes it, matching the cold path's
-            // `build_file_audit_vec` → `mine_footprint` sequence in
-            // `component_meta_methods.rs`.
-            let (footprint, files) = match warm_request_ctx
-                .as_ref()
-                .filter(|ctx| ctx.footprint_capture)
-                .and_then(|ctx| ctx.audit_accumulator.as_ref().map(|acc| (ctx, acc)))
-            {
-                Some((ctx, acc)) => {
-                    let state = acc.drain();
-                    // Direct imports of the entry: extract from the
-                    // entry's shallow surface so the file-role
-                    // classifier can distinguish first-level imports
-                    // (`DirectImport`) from deeper-closure files
-                    // (`TransitiveImport`). Mirrors the cold-path
-                    // extraction in
-                    // `component_meta_methods::compute_component_meta_state_inner`.
-                    let direct_imports: rustc_hash::FxHashSet<String> = self
-                        .shallow_file_state(canonical)
-                        .map(|sfs| {
-                            sfs.import_targets
-                                .values()
-                                .map(|t| t.canonical_id.clone())
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let files = crate::component_meta_audit::build_file_audit_vec(
-                        &state,
-                        canonical,
-                        &direct_imports,
-                        self.config.audit_timing_capture && self.config.audit_enabled,
-                    );
-                    let footprint = crate::component_meta_audit::mine_footprint(
-                        self.project_type_store().semantic_graph(),
-                        state,
-                        ctx,
-                        self.config.max_derivation_edges,
-                        &self.config.audit_caps,
-                    );
-                    (Some(footprint), files)
-                }
-                None => (None, Vec::new()),
-            };
             let synthesized = crate::component_meta_audit::RequestAuditRecord {
                 request_id,
                 canonical_id: canonical.to_string(),

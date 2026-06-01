@@ -17,13 +17,23 @@ use verter_type_expr::{FunctionExpr, ObjectMember, PrimitiveName, TypeExpr};
 /// emission. Recorded inside [`enqueue_component_meta_registry_ref`]
 /// so every enqueue site reports the route variant it pushed onto
 /// the queue.
+///
+/// Test/debug instrumentation only — gated to match the capture-token
+/// module (absent in release).
+#[cfg(any(test, debug_assertions))]
 pub(crate) const ROUTE_DEMAND_EMITTED_WHOLE_COUNTER: &str = "route_demand_emitted::Whole";
+#[cfg(any(test, debug_assertions))]
 pub(crate) const ROUTE_DEMAND_EMITTED_PICK_COUNTER: &str = "route_demand_emitted::Pick";
+#[cfg(any(test, debug_assertions))]
 pub(crate) const ROUTE_DEMAND_EMITTED_MEMBER_PATH_COUNTER: &str =
     "route_demand_emitted::MemberPath";
+#[cfg(any(test, debug_assertions))]
 pub(crate) const ROUTE_DEMAND_EMITTED_OMIT_COUNTER: &str = "route_demand_emitted::Omit";
 
 /// Map a `RouteDemand` variant to its capture-token counter name.
+/// Test/debug instrumentation only — gated to match the capture-token
+/// module (absent in release).
+#[cfg(any(test, debug_assertions))]
 fn route_demand_counter_name(route: &RouteDemand) -> &'static str {
     match route {
         RouteDemand::Whole => ROUTE_DEMAND_EMITTED_WHOLE_COUNTER,
@@ -303,7 +313,11 @@ pub(crate) fn enqueue_component_meta_registry_ref(
     // `route_demand_emitted::Whole >= 1` and
     // `route_demand_emitted::Pick + ::MemberPath == 0` for owner-local
     // ComponentConfig aliases (and the inverse for external imports).
+    // Route-demand counter recording — test/debug instrumentation only;
+    // gated to match the capture-token module (absent in release).
+    #[cfg(any(test, debug_assertions))]
     let counter_name = route_demand_counter_name(&route);
+    #[cfg(any(test, debug_assertions))]
     crate::capture_token::with_active_capture(|t| t.record_counter(counter_name, 1));
     let source_hint = source_hint
         .filter(|source| !source.is_empty())
@@ -2661,7 +2675,7 @@ mod tests {
 
         let merged = merge_component_meta_registry_candidates(Some(left), Some(right))
             .expect("partial route candidates should merge");
-        let TypeExpr::Object(shape) = merged else {
+        let TypeExpr::Object(shape) = &merged else {
             panic!("merged partial route candidates should stay object-shaped");
         };
 
@@ -3015,7 +3029,7 @@ export interface AvatarProps {
         let projected = component_meta_registry_raw_member_path_surface(&raw, &["ui".to_string()])
             .expect("explicit object surface should project the requested member path");
 
-        let TypeExpr::Object(shape) = projected else {
+        let TypeExpr::Object(shape) = &projected else {
             panic!("member path projection should stay object-shaped, got {projected:?}");
         };
         let member_names: Vec<_> = shape

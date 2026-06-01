@@ -54,13 +54,48 @@
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use verter_session::for_tests::install_fact_tracer_for_tests;
 use verter_session::resolver_core::{
     FactReadSetFinalise, FactVersionRef, PermissiveStoreView, RouteDb, RouteResult,
 };
 use verter_session::VerterHost;
+
+/// Strong-reference count of the route singleflight in-flight entry
+/// while only the leader is parked inside its resolve closure: the
+/// leader's local `state` binding plus the `flights` map entry. A
+/// follower that has joined and is committed to the condvar wait raises
+/// the count by one (to 3).
+const LEADER_ONLY_INFLIGHT_REFS: usize = 2;
+
+/// Block the calling (driver) thread until a follower has been admitted
+/// onto the route singleflight in-flight entry for `(provider, name)`.
+///
+/// This is the RouteDb analogue of the semantic-graph
+/// `wait_for_joiner_admitted` probe: it observes the in-flight
+/// `FlightState` `Arc` strong count rising above the leader-only
+/// baseline ([`LEADER_ONLY_INFLIGHT_REFS`]) — the deterministic signal
+/// that the follower has cloned the flight entry and entered the
+/// singleflight join — rather than racing the follower with a
+/// wall-clock `sleep`. The poll is bounded: it spins for at most ~10 s,
+/// then panics so a genuine hang fails loudly rather than blocking the
+/// suite forever.
+fn wait_for_route_follower_admitted<V>(db: &RouteDb, provider: &str, name: &str, view: &V)
+where
+    V: verter_session::resolver_core::StoreView + ?Sized,
+{
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while db.test_route_inflight_strong_count(provider, name, view) <= LEADER_ONLY_INFLIGHT_REFS {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the follower to be admitted onto the \
+             route singleflight in-flight entry (strong count never \
+             exceeded {LEADER_ONLY_INFLIGHT_REFS})",
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
 
 /// Build the leader's fact: a `FileWholeHash` with a recognisable
 /// 16-byte pattern. The same fact value re-appears in the follower's
@@ -76,6 +111,36 @@ fn resolved_route() -> RouteResult {
     RouteResult::Resolved {
         defining_canonical: "join_dep.ts".to_string(),
         defining_symbol: "JoinExport".to_string(),
+    }
+}
+
+/// Join `handle` and return its value, panicking if it does not complete
+/// within ~10s.
+///
+/// The leader/follower joins are reached only after the leader has been
+/// released and the follower woken by the leader's publish, so on the
+/// happy path they complete promptly. They would block forever only on a
+/// genuine RouteDb singleflight deadlock — exactly the hang class this
+/// suite must surface loudly rather than hanging. The join runs on a
+/// helper thread that reports its outcome (the joined value) through a
+/// rendezvous channel; the caller blocks on `recv_timeout` and PANICs on
+/// the deadline.
+fn join_within<T: Send + 'static>(handle: thread::JoinHandle<T>, label: &str) -> T {
+    let (tx, rx) = mpsc::sync_channel::<thread::Result<T>>(1);
+    thread::spawn(move || {
+        // `send` fails only if the receiver was dropped (caller already
+        // panicked on timeout); ignore the benign disconnect.
+        let _ = tx.send(handle.join());
+    });
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(value)) => value,
+        Ok(Err(_)) => panic!("{label} panicked"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{label} deadlocked (join did not complete within 10s)")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("{label} watchdog channel disconnected before reporting")
+        }
     }
 }
 
@@ -100,19 +165,37 @@ fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
             tx_leader_in_closure
                 .send(())
                 .expect("leader: signal in-closure");
-            rx_release_leader
-                .recv()
-                .expect("leader: released by driver");
+            // Bounded wait for the driver's release. A bare `recv()` would
+            // hang forever if the driver stalled before releasing; the
+            // deadline makes a genuine stall PANIC within ~10s instead.
+            match rx_release_leader.recv_timeout(Duration::from_secs(10)) {
+                Ok(()) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("leader: timed out waiting for driver release (10s)")
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("leader: driver dropped the release channel before releasing")
+                }
+            }
             Some((resolved_route(), vec![leader_fact()]))
         })
     });
 
     // Wait until the leader is inside its resolve closure. This
     // guarantees the follower reaches the singleflight condvar-wait
-    // branch rather than executing its own cold resolve.
-    rx_leader_in_closure
-        .recv()
-        .expect("leader entered resolve closure");
+    // branch rather than executing its own cold resolve. Bounded: a bare
+    // `recv()` would hang forever if the leader deadlocked while claiming
+    // the singleflight slot (before signalling); the deadline makes that
+    // stall PANIC within ~10s instead of blocking the suite.
+    match rx_leader_in_closure.recv_timeout(Duration::from_secs(10)) {
+        Ok(()) => {}
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("timed out waiting for the leader to enter its resolve closure (10s)")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("leader thread dropped the in-closure channel before signalling")
+        }
+    }
 
     // Spawn the follower. It installs its own outer tracer BEFORE
     // entering the observing entry-point so the post-admission
@@ -141,12 +224,16 @@ fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
         (route_result, finalise)
     });
 
-    // Give the follower time to register on the in-flight slot and
-    // block on the singleflight condvar. 50 ms matches the heuristic
-    // in `cross_thread_joiner_bubbles_facts.rs`. If a race ever
-    // surfaces under load, the discriminator below will catch it
-    // (counter stays at zero or follower runs its own resolve).
-    thread::sleep(Duration::from_millis(50));
+    // Block until the follower has registered on the in-flight slot and
+    // is committed to the singleflight condvar wait. Observing the
+    // in-flight `FlightState` strong count rising above the leader-only
+    // baseline is deterministic — unlike a wall-clock sleep it cannot
+    // race the follower's registration under parallel load. The
+    // discriminators below (coalesced counter == 1, follower tracer
+    // contains the leader's fact, follower resolve `unreachable!`) still
+    // prove the join actually happened.
+    let probe_view = PermissiveStoreView;
+    wait_for_route_follower_admitted(&db, "join_provider.ts", "Joined", &probe_view);
 
     // Release the leader. It publishes the result, admits the entry
     // (with the fact signature), notifies the singleflight condvar,
@@ -155,8 +242,8 @@ fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
     // tracer, and bumps the coalesced counter.
     tx_release_leader.send(()).expect("release leader");
 
-    let leader_result = leader.join().expect("leader joined");
-    let (follower_result, follower_finalise) = follower.join().expect("follower joined");
+    let leader_result = join_within(leader, "leader");
+    let (follower_result, follower_finalise) = join_within(follower, "follower");
 
     assert!(leader_result.is_some(), "leader must return Some");
     assert!(follower_result.is_some(), "follower must return Some");

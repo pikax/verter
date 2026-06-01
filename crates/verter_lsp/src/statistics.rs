@@ -179,7 +179,6 @@ impl Drop for Timer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
 
     #[test]
     fn disabled_by_default() {
@@ -235,14 +234,24 @@ mod tests {
 
         {
             let _timer = stats.timer("slow_op", Some("file:///test.vue".to_string()));
-            thread::sleep(Duration::from_millis(5));
+            // Deterministically force a measured interval instead of
+            // sleeping and hoping. The timer's internal `start` was
+            // captured inside `stats.timer(...)` above, strictly before
+            // `spin_start`, so once `spin_start` has advanced past the
+            // threshold the timer's own elapsed is at least as large.
+            // The `>= 4.0` assertion below is therefore satisfied by
+            // construction — not by timing slack — and cannot flake.
+            let spin_start = Instant::now();
+            while spin_start.elapsed() < Duration::from_millis(5) {
+                std::hint::spin_loop();
+            }
         }
 
         let events = stats.events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "slow_op");
         assert_eq!(events[0].uri.as_deref(), Some("file:///test.vue"));
-        assert!(events[0].duration_ms >= 4.0); // Allow some timing slack
+        assert!(events[0].duration_ms >= 4.0);
     }
 
     #[test]

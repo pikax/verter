@@ -301,7 +301,7 @@ fn raise_member_value(
 /// `Span::default()`). Mirrors `slot_callable_param_and_return`, which reads
 /// `func.spans.return_type` off the raised `TypeExpr::Function`.
 fn slot_return_type_span(host: &VerterHost, member: &TypeInfoSurfaceMember) -> verter_span::Span {
-    match raise_member_value(host, member) {
+    match &raise_member_value(host, member) {
         verter_type_expr::TypeExpr::Function(func) => func
             .spans
             .return_type

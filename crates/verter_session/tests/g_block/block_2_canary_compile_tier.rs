@@ -33,10 +33,7 @@
 
 use verter_session::{CompileProfile, FileKind};
 
-#[path = "../block_2_canary/harness.rs"]
-mod harness;
-
-use harness::{compile_main, prime_compile, standalone_host, upsert};
+use crate::canary_harness::{compile_main, prime_compile, standalone_host, upsert};
 
 /// Canary — cross-file macro type member edit.
 ///

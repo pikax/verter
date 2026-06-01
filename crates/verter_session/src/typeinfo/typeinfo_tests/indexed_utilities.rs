@@ -15,7 +15,7 @@ fn direct_parameters_tuple_preserves_function_arguments() {
         ProjectionMode::Expanded,
     );
 
-    let TypeExpr::Tuple { elements, .. } = expr else {
+    let TypeExpr::Tuple { elements, .. } = &expr else {
         panic!("expected Parameters<T> to resolve to tuple, got {expr:?}");
     };
     assert_eq!(elements.len(), 2);

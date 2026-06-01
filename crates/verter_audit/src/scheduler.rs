@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// request. Populated on native (where the scheduler runs); always
 /// `None` on WASM at the envelope level.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct SchedulerAudit {
     /// String form of the worker thread id (e.g. `"ThreadId(7)"`)
     /// taken via `std::thread::current().id()` on the worker that
@@ -42,7 +42,7 @@ pub struct SchedulerAudit {
 /// Discriminator naming the scheduler pool that dispatched the
 /// audited stage.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum WorkerPool {
     /// CPU pool (Rayon-backed, parse / analysis / artifact stages).
     Cpu,
@@ -52,7 +52,7 @@ pub enum WorkerPool {
 
 /// Snapshot of scheduler-internal queue depths at dispatch time.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct SchedulerDepths {
     /// Number of pending submissions in the inbox channel.
     pub inbox: u32,

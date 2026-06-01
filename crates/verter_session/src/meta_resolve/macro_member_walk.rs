@@ -13,6 +13,10 @@ use crate::types::FileAnalysisSnapshot;
 /// `component_meta_slot_binding_skip_tests` to discriminate the
 /// positive case (counter > 0) from the counterfixtures (counter == 0)
 /// via `CaptureToken::start_for_query` / `CaptureToken::end()`.
+///
+/// Test/debug instrumentation only — gated to match the capture-token
+/// module (absent in release).
+#[cfg(any(test, debug_assertions))]
 pub(crate) const SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER: &str =
     "slot_binding_registry_collection_skips";
 
@@ -26,6 +30,10 @@ pub(crate) const SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER: &str =
 /// (asserts `== 0` for package-backed param) and
 /// `pick_callback_workspace_local_param_still_descends` (asserts
 /// `>= 1` for workspace-local param).
+///
+/// Test/debug instrumentation only — gated to match the capture-token
+/// module (absent in release).
+#[cfg(any(test, debug_assertions))]
 pub(crate) const PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER: &str =
     "pick_member_route_callable_descent_count";
 

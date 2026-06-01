@@ -17,7 +17,7 @@ use crate::structured_event::StructuredAuditEvent;
 
 /// Semantic footprint attached to an audited request.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct RequestFootprintAudit {
     /// Fresh `IndexedReady` builds observed during the request.
     pub indexed_ready_builds: Vec<IndexedReadyBuildRecord>,
@@ -160,7 +160,7 @@ impl IncidentalFields for RequestFootprintAudit {
 
 /// Fresh `IndexedReady` build observed during the request.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct IndexedReadyBuildRecord {
     /// Canonical id of the file whose `IndexedReady` entry was freshly
     /// populated during the request.
@@ -172,7 +172,7 @@ pub struct IndexedReadyBuildRecord {
 /// One VFS read fanned out from the workspace sink to this request's
 /// accumulator.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct VfsReadRecord {
     /// Canonical id of the file that was read.
     pub canonical_id: Arc<str>,
@@ -193,7 +193,7 @@ pub struct VfsReadRecord {
 /// Joiner record — this request attached to a winner's in-flight
 /// cache slot instead of starting fresh.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct SharedLoadReuseRecord {
     /// Canonical id of the shared artifact.
     pub canonical_id: Arc<str>,
@@ -208,7 +208,7 @@ pub struct SharedLoadReuseRecord {
 
 /// One type-instantiation step in the derivation subgraph.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct InstantiationRecord {
     /// In-audit `NodeId` of the instantiated type.
     pub result: NodeId,
@@ -224,7 +224,7 @@ pub struct InstantiationRecord {
 
 /// One projection step.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct ProjectionRecord {
     /// In-audit `NodeId` of the projected result.
     pub result: NodeId,
@@ -236,7 +236,7 @@ pub struct ProjectionRecord {
 
 /// One conditional-select decision.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct ConditionalRecord {
     /// In-audit `NodeId` of the selected branch's result.
     pub result: NodeId,
@@ -246,7 +246,7 @@ pub struct ConditionalRecord {
 
 /// One type-parameter substitution step.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct SubstitutionRecord {
     /// In-audit `NodeId` of the post-substitution type.
     pub result: NodeId,
@@ -258,7 +258,7 @@ pub struct SubstitutionRecord {
 
 /// One alias-resolve step.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct AliasResolveRecord {
     /// In-audit `NodeId` of the type on the right-hand side of the
     /// alias.
@@ -269,7 +269,7 @@ pub struct AliasResolveRecord {
 
 /// One materialization envelope.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct MaterializationRecord {
     /// What was being materialized — see [`MaterializationSubject`].
     pub subject: MaterializationSubject,
@@ -281,7 +281,7 @@ pub struct MaterializationRecord {
 /// are EXACT per-request because they come from the request's own
 /// atomic counters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct CacheOutcomeTally {
     /// Cold builds this request triggered.
     pub cold_builds: u32,
@@ -300,7 +300,7 @@ pub struct CacheOutcomeTally {
 
 /// Report covering derivation-subgraph completeness.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct GraphCompletenessReport {
     /// Set when the miner truncated derivation edges at
     /// `HostConfig::max_derivation_edges`.
@@ -331,7 +331,7 @@ pub struct GraphCompletenessReport {
 /// [`u64_as_decimal_string`] / `#[ts(type = "string")]` so JS-side
 /// consumers can carry values above 2^53 without precision loss.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct TruncationCounters {
     /// Number of structured events dropped after the
     /// `structured_events` cap was reached.
@@ -410,7 +410,7 @@ pub struct TruncationCounters {
 /// All counters are zero by default; consumers diff them against
 /// other components' audits to attribute cost spikes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct ResolverHotPathCounters {
     /// Total invocations of
     /// `run_external_type_frontier_closure_with_view` during the

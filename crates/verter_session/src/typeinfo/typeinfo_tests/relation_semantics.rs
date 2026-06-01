@@ -563,7 +563,7 @@ fn relation_infer_tail_of_tuple_pattern() {
         ProjectionMode::Expanded,
     );
 
-    let TypeExpr::Tuple { elements, readonly } = expr else {
+    let TypeExpr::Tuple { elements, readonly } = &expr else {
         panic!("expected tuple, got {expr:?}");
     };
     assert!(!readonly);
@@ -611,7 +611,7 @@ fn relation_infer_params_of_function_preserves_optional_undefined() {
         ProjectionMode::Expanded,
     );
 
-    let TypeExpr::Tuple { elements, readonly } = expr else {
+    let TypeExpr::Tuple { elements, readonly } = &expr else {
         panic!("expected tuple, got {expr:?}");
     };
     assert!(!readonly);

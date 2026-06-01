@@ -1,12 +1,9 @@
 //! Consolidated integration-test group `misc2`: each module below was
 //! a separate top-level tests/*.rs binary, merged to cut test-link count.
 //!
-//! Consolidation intentionally pulls sibling submodules that each
-//! `#[path = "../<shared-dir>/harness.rs"]`-include the same harness file
-//! into one binary, so `clippy::duplicate_mod` fires at every load after
-//! the first. The duplication is an intentional consequence of merging
-//! formerly-independent test binaries to amortise link cost.
-#![allow(clippy::duplicate_mod)]
+//! The shared `component_meta_audit` harness is declared ONCE at the binary
+//! root so leaf modules import it via `use crate::harness` instead of each
+//! `#[path]`-loading the same file (which trips `clippy::duplicate_mod`).
 #[path = "g_misc2/corpus_regression_capture_harness.rs"]
 mod corpus_regression_capture_harness;
 #[path = "g_misc2/cross_file_provenance_fixtures_tests.rs"]
@@ -21,6 +18,8 @@ mod derived_raw_state_cached_meta_payload_matrix_module_aug_index_shape;
 mod derived_raw_state_cached_resolved_meta_matrix_member;
 #[path = "g_misc2/dispatch_cold_build_has_one_call_site.rs"]
 mod dispatch_cold_build_has_one_call_site;
+#[path = "component_meta_audit/harness.rs"]
+mod harness;
 #[path = "g_misc2/host_store_view_validates_real.rs"]
 mod host_store_view_validates_real;
 #[path = "g_misc2/is_facts_irrelevant_eligibility.rs"]

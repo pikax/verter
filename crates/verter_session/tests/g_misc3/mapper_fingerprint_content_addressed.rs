@@ -54,10 +54,16 @@
 //!   modifiers + different source must always produce different
 //!   fingerprints.
 //! - `fingerprint_handles_deeply_nested_value_without_stack_overflow`
-//!   — stack-safety regression: post-fix only; PASSES on the
-//!   iterative-worklist walker, would FAIL on a recursive
-//!   `Hash::hash(&type_expr)` walker over a 10K-deep
-//!   `Array<Array<...>>` value.
+//!   — stack-safety regression over a 10K-deep `Array<Array<...>>`
+//!   value. The mapper fingerprint walker
+//!   (`hash_type_expr_structurally`) is already iterative, so it is
+//!   NOT the overflow risk here — the deep `value` itself overflows
+//!   the stack on DROP, because `TypeExpr`'s drop glue is recursive
+//!   over its `Arc<TypeExpr>` children. The test passes only because
+//!   `verter_type_expr::TypeExpr` now has a manual iterative `Drop`
+//!   (see `verter_type_expr/tests/deep_drop_is_iterative.rs`). With
+//!   that `Drop` removed, this test aborts with `STATUS_STACK_OVERFLOW`
+//!   on a default stack.
 
 #![allow(clippy::too_many_lines)]
 
@@ -67,9 +73,8 @@ use std::sync::Arc;
 // other test files in this dir consume. This test only needs
 // `build_hermetic_host`; suppress dead-code warnings for the rest
 // of the shared surface to keep the file's signal clean.
-#[allow(dead_code, unused_imports)]
-#[path = "../component_meta_audit/harness.rs"]
-mod harness;
+#[allow(unused_imports)]
+use crate::harness;
 
 use verter_session::audited_request::AuditedRequest;
 use verter_session::test_only::mapper_fingerprint::MapperFingerprintProbe;
@@ -305,16 +310,23 @@ fn fingerprint_distinguishes_structurally_distinct_mappers() {
 // ---------------------------------------------------------------------------
 
 /// Build a mapper whose `value` is 10,000 levels of
-/// `Array<Array<Array<...>>>` and confirm that
-/// `MapperFingerprint::from_components` returns without
-/// stack-overflowing. The iterative-worklist walker tolerates
-/// arbitrary depths; a naïve recursive `Hash::hash(&type_expr)`
-/// would blow the Rust call stack on a depth this large.
+/// `Array<Array<Array<...>>>` and confirm the whole flow —
+/// `MapperFingerprint::from_components` AND the subsequent drop of
+/// the deep value at end of scope — completes without
+/// stack-overflowing.
 ///
-/// This pins R27 (stack-safe). The test runs under
-/// `RUST_MIN_STACK=134217728` like the rest of the suite, but
-/// the iterative walker should pass even on the default 2 MiB
-/// thread stack.
+/// Two independent depth hazards exist over a deep `TypeExpr`:
+/// (1) hashing it, and (2) dropping it. The mapper fingerprint
+/// walker (`hash_type_expr_structurally`) is already iterative, so
+/// (1) is safe. (2) — the recursive drop of the `Arc<TypeExpr>`
+/// chain — was the actual overflow this test originally caught; it
+/// is now safe because `verter_type_expr::TypeExpr` carries a manual
+/// iterative `Drop` (pinned in
+/// `verter_type_expr/tests/deep_drop_is_iterative.rs`).
+///
+/// This pins R27 (stack-safe). It passes on the default thread stack
+/// (no `RUST_MIN_STACK`); with `TypeExpr`'s iterative `Drop` removed
+/// it aborts with `STATUS_STACK_OVERFLOW`.
 #[test]
 fn fingerprint_handles_deeply_nested_value_without_stack_overflow() {
     const DEPTH: usize = 10_000;
@@ -332,10 +344,10 @@ fn fingerprint_handles_deeply_nested_value_without_stack_overflow() {
     let source = Arc::new(TypeExpr::Primitive(PrimitiveName::String));
     let value_deep = current;
 
-    // The call MUST NOT panic / stack-overflow / hang. If the
-    // walker were recursive (as the derived `Hash` on `TypeExpr`
-    // is), this would blow the default thread stack long before
-    // returning.
+    // Neither the hash nor the end-of-scope drop of `value_deep`
+    // may panic / stack-overflow / hang. The hash walker is
+    // iterative; the deep drop is made safe by `TypeExpr`'s manual
+    // iterative `Drop`.
     let fp = MapperFingerprintProbe::from_components(
         &source,
         &value_deep,

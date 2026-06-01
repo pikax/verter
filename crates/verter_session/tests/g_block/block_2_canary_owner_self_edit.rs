@@ -35,10 +35,7 @@
 use verter_session::{CompileProfile, FileKind};
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
-#[path = "../block_2_canary/harness.rs"]
-mod harness;
-
-use harness::{compile_main, prime_compile, standalone_host, upsert};
+use crate::canary_harness::{compile_main, prime_compile, standalone_host, upsert};
 
 /// The named prop's evaluated `TypeExpr` from a `get_component_meta`
 /// result.

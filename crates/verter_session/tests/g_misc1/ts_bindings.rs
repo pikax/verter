@@ -1,23 +1,28 @@
 //! Integration tests for the committed `packages/types/audit.generated.ts`.
 //!
+//! The audit DTOs derive `ts_rs::TS` and carry
+//! `#[ts(export_to = "audit.generated.ts")]` WITHOUT the `export`
+//! keyword, so a normal `cargo test` does NOT auto-write any tracked
+//! file. The committed `packages/types/audit.generated.ts` is the
+//! single source of truth; these tests regenerate it hermetically into
+//! a tempdir and compare, never mutating the tracked file on a default
+//! run.
+//!
 //! Two tests, distinct roles:
 //!
 //! * `ts_bindings_export_succeeds_for_every_audit_record_type` —
-//!   smoke / sentinel check that the committed file exists and
-//!   contains the top-level type names. It does NOT attempt to
-//!   regenerate; automatic `#[ts(export)]` tests emitted by ts-rs
-//!   keep `packages/types/audit.generated.ts` in sync during
-//!   `cargo test` via the workspace `.cargo/config.toml`
-//!   `TS_RS_EXPORT_DIR = packages/types` env.
+//!   smoke / sentinel check that a hermetic regeneration contains the
+//!   top-level type names.
 //!
 //! * `audit_ts_bindings_are_in_sync` — the **discriminating** sync
 //!   guard. Regenerates every audit record type into a tempdir via
-//!   `TS::export_all(&ts_rs::Config)`, reads the committed file, and
-//!   fails with a unified diff if the two differ. A genuine mismatch
-//!   means the Rust source changed and the TS file has not yet been
-//!   regenerated; the test output instructs the dev how to refresh.
-//!
-//! Plan §3 Commit 3 + §3.A Commit 6.C.
+//!   `TS::export_all(&ts_rs::Config::new().with_out_dir(..))`, reads
+//!   the committed file, and FAILS with a unified diff if the two
+//!   differ. It is READ-ONLY by default: a genuine mismatch means the
+//!   Rust source changed and the TS file has not yet been regenerated.
+//!   Set `VERTER_UPDATE_TS_BINDINGS=1` (or `VERTER_TS_BINDINGS_DUMP=<path>`)
+//!   to refresh the tracked file — the write goes to a temp file in the
+//!   target directory then atomic-renames into place (no torn writes).
 
 use std::fs;
 use std::path::PathBuf;
@@ -37,9 +42,11 @@ fn workspace_root() -> PathBuf {
         }
         if !p.pop() {
             panic!(
-                "unable to locate `packages/types/audit.generated.ts` by walking up \
-                 from `{}`; has the ts-rs auto-export run yet? The `#[ts(export)]` \
-                 derives emit their own tests during `cargo test`.",
+                "unable to locate the committed `packages/types/audit.generated.ts` \
+                 by walking up from `{}`. The file is tracked and is the single \
+                 source of truth; regenerate it via \
+                 `VERTER_UPDATE_TS_BINDINGS=1 cargo test -p verter_session \
+                 --test g_misc1 audit_ts_bindings_are_in_sync` if it is missing.",
                 env!("CARGO_MANIFEST_DIR"),
             );
         }
@@ -52,152 +59,104 @@ fn normalize_lf(s: &str) -> String {
     s.replace("\r\n", "\n")
 }
 
-/// Strip trailing whitespace from every line. `ts-rs` emits
-/// `field: Type, ` with a trailing space before the newline; the
-/// committed file is post-processed to strip that whitespace so
-/// `git diff --check` stays clean. The sync gate normalises both
-/// the committed baseline and the freshly regenerated content
-/// through this helper so they compare equivalently regardless of
-/// the trailing-space idiosyncrasy.
-fn strip_trailing_whitespace(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut first = true;
-    for line in s.split('\n') {
-        if !first {
-            out.push('\n');
-        }
-        out.push_str(line.trim_end());
-        first = false;
-    }
-    out
-}
-
 #[test]
 fn audit_ts_bindings_are_in_sync() {
-    use ts_rs::TS;
-
-    // Discriminating sync gate: regenerate the merged audit-record
-    // dependency closure into a tempdir AND simultaneously refresh
-    // the on-disk `packages/types/audit.generated.ts`. Compare the
-    // regenerated content against the *git-committed* baseline
-    // (snapshotted via `git show HEAD:<rel>` when available). The
-    // auto-export tests emitted by `#[ts(export)]` derives each
-    // overwrite the on-disk file with their own dependency closure
-    // during workspace-wide `cargo test`; that race makes the
-    // on-disk file unstable mid-suite, so the test compares
-    // against the git-tracked baseline rather than the live file.
+    // Discriminating sync gate. READ-ONLY by default: regenerate the
+    // merged audit-record dependency closure into a tempdir, read the
+    // committed on-disk `packages/types/audit.generated.ts`, and FAIL
+    // with a unified diff if the two differ. The default run NEVER
+    // mutates the tracked file — there is no longer a ts-rs
+    // auto-export racing it, so the live committed file is a stable
+    // comparison target (a hand-edit to the committed file is detected
+    // directly, which is what makes this test discriminating).
     //
-    // Known limitation: when the bindings file is *introduced*
-    // alongside the change under review (the `git show HEAD:<rel>`
-    // baseline IS the version under review, not a prior pinned
-    // version), this test can only detect drift between the
-    // committed file and a fresh ts-rs regen — it cannot validate
-    // that the *initial* committed file came from a clean ts-rs
-    // regen. The protection covers ongoing drift after landing,
-    // not the inception commit itself. A reviewer must therefore
-    // verify the inception commit's bindings file was regenerated
-    // from the canonical ts-rs derives.
+    // To refresh after a deliberate schema change, set
+    // `VERTER_UPDATE_TS_BINDINGS=1` (writes the tracked file) or
+    // `VERTER_TS_BINDINGS_DUMP=<path>` (writes an arbitrary path). The
+    // write is atomic: a temp file in the target directory followed by
+    // a rename, so a torn/partial bindings file can never be observed.
     let root = workspace_root();
     let committed_path = root.join("packages/types/audit.generated.ts");
-    // Capture the git-committed baseline BEFORE refreshing.
-    // Strip trailing whitespace per-line so a ts-rs-emitted trailing
-    // space (which the committed file does not carry — post-processed
-    // away) does not surface as a spurious diff.
-    let committed = strip_trailing_whitespace(&normalize_lf(
-        &read_git_committed_baseline(&committed_path)
-            .or_else(|| fs::read_to_string(&committed_path).ok())
-            .unwrap_or_default(),
-    ));
+    let generated_raw = regenerate_audit_bindings_into_tempdir();
+    let generated = normalize_lf(&generated_raw);
 
-    // Regenerate into a tempdir. `export_all(&Config::new().with_out_dir(...))`
-    // explicitly disregards `TS_RS_EXPORT_DIR` (per ts-rs docs) and
-    // uses the given path. Because every audit record shares
-    // `#[ts(export_to = "audit.generated.ts")]`, every type merges
-    // into the single file `<tempdir>/audit.generated.ts`.
-    //
-    // `export_all(&Config)` walks the dependency graph reachable from
-    // the root type. Types not transitively reachable from
-    // `RequestAuditRecord` (the walker types in `assertions.rs`,
-    // `StructuredAuditEvent`, `RequestPhaseAudit`) need their
-    // own `export_all(&Config)` call. All four calls write into the
-    // SAME `audit.generated.ts` (ts-rs merges by file path).
-    let tempdir = tempfile::tempdir().expect("create tempdir for ts-rs regeneration");
-    RequestAuditRecord::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate RequestAuditRecord graph via ts-rs export_all");
-    StructuredAuditEvent::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate StructuredAuditEvent graph via ts-rs export_all");
-    ProvenanceChain::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate ProvenanceChain graph via ts-rs export_all");
-    ChainTermination::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate ChainTermination graph via ts-rs export_all");
-    ProvenanceStep::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate ProvenanceStep graph via ts-rs export_all");
-    RequestPhaseAudit::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate RequestPhaseAudit graph via ts-rs export_all");
-    // `DerivationEdgeRaw` is the accumulator-side mirror of the
-    // canonicalised `DerivationEdgeRecord`; it is exported by the
-    // substrate but not transitively reachable from
-    // `RequestAuditRecord` (the record carries
-    // `DerivationEdgeRecord` only). Pull it in explicitly so the
-    // committed file stays in sync.
-    verter_audit::DerivationEdgeRaw::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate DerivationEdgeRaw graph via ts-rs export_all");
-    // R20 Phase D `PublishedSurfacePolicy` registry — the three
-    // projection-policy surface types are leaf roots (not reachable
-    // from `RequestAuditRecord`), so they need their own
-    // `export_all(&Config)` calls. `AnalyzedSurface` transitively
-    // pulls `AnalyzedSurfaceItem`.
-    verter_audit::PublishedSurfacePolicy::export_all(
-        &ts_rs::Config::new().with_out_dir(tempdir.path()),
-    )
-    .expect("regenerate PublishedSurfacePolicy graph via ts-rs export_all");
-    verter_audit::AnalyzedSurface::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate AnalyzedSurface graph via ts-rs export_all");
-    verter_audit::PolicyNamesResult::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate PolicyNamesResult graph via ts-rs export_all");
+    // Explicit refresh path — only when a refresh env flag is set.
+    if let Some(refresh_target) = refresh_target(&committed_path) {
+        atomic_write(&refresh_target, generated_raw.as_bytes());
+        // After an explicit refresh, the tracked file now equals the
+        // regenerated content by construction; nothing left to assert.
+        return;
+    }
 
-    let generated_path = tempdir.path().join("audit.generated.ts");
-    let generated_raw = fs::read_to_string(&generated_path)
-        .unwrap_or_else(|e| panic!("read regenerated `{generated_path:?}`: {e}"));
-    // Strip trailing whitespace so the on-disk refresh AND the
-    // sync-gate compare stay clean (ts-rs emits a trailing space
-    // before every newline; the committed file is post-processed
-    // to strip them).
-    let generated_clean = strip_trailing_whitespace(&normalize_lf(&generated_raw));
-    let generated = generated_clean.clone();
-
-    // Always refresh the on-disk file (or the
-    // `VERTER_TS_BINDINGS_DUMP` override). The discriminating
-    // assertion below compares the git-committed baseline
-    // (captured BEFORE the refresh) against the regenerated
-    // content. The on-disk file gets the whitespace-stripped
-    // variant so `git diff --check` stays clean.
-    let refresh_target = std::env::var("VERTER_TS_BINDINGS_DUMP")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| committed_path.to_string_lossy().into_owned());
-    std::fs::write(&refresh_target, &generated_clean)
-        .unwrap_or_else(|e| panic!("refresh `{refresh_target}`: {e}"));
+    // Default READ-ONLY comparison against the live committed file.
+    let committed = normalize_lf(
+        &fs::read_to_string(&committed_path)
+            .unwrap_or_else(|e| panic!("read committed `{committed_path:?}`: {e}")),
+    );
 
     if committed != generated {
         let diff = similar::TextDiff::from_lines(&committed, &generated);
         let rendered = diff
             .unified_diff()
             .context_radius(3)
-            .header("git-committed", "regenerated")
+            .header("committed", "regenerated")
             .to_string();
         panic!(
-            "`packages/types/audit.generated.ts` is out of sync with the \n             Rust source. The test has refreshed the on-disk file; \n             review and commit the new content. Unified diff against the \n             git-committed baseline:
-{rendered}"
+            "`packages/types/audit.generated.ts` is out of sync with the \
+             Rust audit DTOs. This test is read-only by default and did NOT \
+             modify the tracked file. To refresh it, run:\n  \
+             VERTER_UPDATE_TS_BINDINGS=1 cargo test -p verter_session --test \
+             g_misc1 audit_ts_bindings_are_in_sync\nthen review and commit the \
+             new content. Unified diff (committed -> regenerated):\n{rendered}"
         );
     }
 }
 
+/// Resolve the explicit refresh target, or `None` for the default
+/// read-only run. `VERTER_TS_BINDINGS_DUMP=<path>` writes the given
+/// path; `VERTER_UPDATE_TS_BINDINGS=1` writes the committed bindings
+/// file. Neither set -> `None` (no write).
+fn refresh_target(committed_path: &std::path::Path) -> Option<PathBuf> {
+    if let Some(dump) = std::env::var("VERTER_TS_BINDINGS_DUMP")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        return Some(PathBuf::from(dump));
+    }
+    if std::env::var("VERTER_UPDATE_TS_BINDINGS")
+        .ok()
+        .filter(|s| !s.is_empty() && s != "0")
+        .is_some()
+    {
+        return Some(committed_path.to_path_buf());
+    }
+    None
+}
+
+/// Write `bytes` to `target` atomically: stage into a uniquely-named
+/// temp file in the SAME directory (so the rename stays on one
+/// filesystem), then rename over `target`. A concurrent reader sees
+/// either the old or the new complete file, never a torn one.
+fn atomic_write(target: &std::path::Path, bytes: &[u8]) {
+    use std::io::Write as _;
+    let dir = target.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".audit.generated.ts.")
+        .suffix(".tmp")
+        .tempfile_in(dir)
+        .unwrap_or_else(|e| panic!("create temp file in `{dir:?}`: {e}"));
+    tmp.write_all(bytes)
+        .unwrap_or_else(|e| panic!("write temp bindings file: {e}"));
+    tmp.flush()
+        .unwrap_or_else(|e| panic!("flush temp bindings file: {e}"));
+    tmp.persist(target)
+        .unwrap_or_else(|e| panic!("atomic-rename temp bindings into `{target:?}`: {e}"));
+}
+
 /// Regenerate the merged audit-record dependency closure into a
-/// fresh tempdir and return its contents. Decouples the assertion
-/// suite from the (potentially stale or partially-written) committed
-/// `packages/types/audit.generated.ts` so concurrent `cargo test`
-/// auto-export clobbers do not race the integration tests.
+/// fresh tempdir and return its contents. The bindings are always
+/// regenerated into a tempdir — never the tracked path — so the
+/// integration suite never mutates `packages/types/audit.generated.ts`.
 fn regenerate_audit_bindings_into_tempdir() -> String {
     use ts_rs::TS;
     let tempdir = tempfile::tempdir().expect("create tempdir for ts-rs regeneration");
@@ -229,12 +188,9 @@ fn regenerate_audit_bindings_into_tempdir() -> String {
 
 #[test]
 fn ts_bindings_export_succeeds_for_every_audit_record_type() {
-    // Regenerate into a tempdir so this test does not race the
-    // auto-export tests in the rest of the workspace. Each
-    // `#[ts(export)]` derive auto-test overwrites
-    // `packages/types/audit.generated.ts` with its own dependency
-    // closure; reading the committed file mid-`cargo test` would
-    // surface flaky failures.
+    // Regenerate into a tempdir (never the tracked path) and assert
+    // the top-level type names are present. The regeneration is
+    // hermetic and side-effect-free on the working tree.
     let contents = regenerate_audit_bindings_into_tempdir();
     assert!(!contents.is_empty(), "generated TS file must be non-empty");
     assert!(
@@ -367,35 +323,10 @@ fn audit_ts_bindings_are_in_sync_actually_regenerates_and_diffs() {
     // output, run the same diff, and verify we detect the
     // mismatch. If this test ever passes trivially, the parent sync
     // test has regressed into a compare-to-itself stub.
-    use ts_rs::TS;
-
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    // Same root list as `audit_ts_bindings_are_in_sync` — keep them
-    // in lock-step so this meta-test actually validates the same
-    // regeneration path.
-    RequestAuditRecord::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate RequestAuditRecord");
-    StructuredAuditEvent::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate StructuredAuditEvent");
-    ProvenanceChain::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate ProvenanceChain");
-    ChainTermination::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate ChainTermination");
-    ProvenanceStep::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate ProvenanceStep");
-    RequestPhaseAudit::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate RequestPhaseAudit");
-    verter_audit::PublishedSurfacePolicy::export_all(
-        &ts_rs::Config::new().with_out_dir(tempdir.path()),
-    )
-    .expect("regenerate PublishedSurfacePolicy");
-    verter_audit::AnalyzedSurface::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate AnalyzedSurface");
-    verter_audit::PolicyNamesResult::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
-        .expect("regenerate PolicyNamesResult");
-    let regenerated_raw =
-        fs::read_to_string(tempdir.path().join("audit.generated.ts")).expect("read regenerated");
-    let regenerated = normalize_lf(&regenerated_raw);
+    // Use the SAME regeneration path as `audit_ts_bindings_are_in_sync`
+    // (the canonical root list incl. `DerivationEdgeRaw`) so this meta-test
+    // validates the real sync path instead of a drifting duplicate list.
+    let regenerated = normalize_lf(&regenerate_audit_bindings_into_tempdir());
 
     // A trivially altered "committed" file — adds a marker line.
     let altered = format!(
@@ -876,25 +807,215 @@ fn audit_generated_ts_uses_string_for_every_u64_field() {
     }
 }
 
-/// Read the git-committed baseline of `path` via `git show HEAD:<rel>`.
-/// Returns `None` when git is unavailable, the path is untracked, or
-/// the read otherwise fails.
-fn read_git_committed_baseline(path: &std::path::Path) -> Option<String> {
-    let root = workspace_root();
-    let rel = path
-        .strip_prefix(&root)
-        .ok()?
-        .to_string_lossy()
-        .into_owned();
-    let rel_unix = rel.replace('\\', "/");
-    let output = std::process::Command::new("git")
-        .arg("show")
-        .arg(format!("HEAD:{rel_unix}"))
-        .current_dir(&root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+/// Directories whose `.rs` files carry the audit-DTO `ts_rs::TS`
+/// derives. The guard below scans these for any re-introduction of the
+/// `#[ts(export)]` auto-export flag.
+const AUDIT_DTO_DIRS: &[&str] = &[
+    "crates/verter_audit/src",
+    "crates/verter_session/src/component_meta_audit",
+];
+
+/// Collect every `*.rs` file under `dir` (recursively) into `out`.
+fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => panic!("read_dir `{dir:?}`: {e}"),
+    };
+    for entry in entries {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+            out.push(path);
+        }
     }
-    String::from_utf8(output.stdout).ok()
+}
+
+/// True for ASCII identifier bytes, so `export_to` reads as one token and
+/// `reexport` is not mistaken for a bare `export`.
+fn is_ident_byte(b: u8) -> bool {
+    b == b'_' || b.is_ascii_alphanumeric()
+}
+
+/// Scan the FULL file `content` for any `#[ts(...)]` attribute — INCLUDING
+/// multi-line attributes — that carries a bare `export` flag (as opposed to
+/// `export_to`). Returns the 1-based line number of each offending `export`
+/// token. A per-line scan is insufficient: ts-rs accepts the bare flag split
+/// across lines, e.g.
+///
+/// ```ignore
+/// #[ts(
+///     export,
+///     export_to = "audit.generated.ts"
+/// )]
+/// ```
+///
+/// The bare flag is what makes ts-rs emit a hidden `#[test]` that writes the
+/// configured output dir during `cargo test`. `export_to` (the path attribute)
+/// is allowed; a standalone `export` token is not.
+fn bare_ts_export_offenders(content: &str) -> Vec<usize> {
+    let cb = content.as_bytes();
+    let mut offenders = Vec::new();
+    let mut base = 0usize;
+    while let Some(rel) = content[base..].find("#[ts(") {
+        let open = base + rel + "#[ts(".len();
+        // Find the matching close paren of `#[ts( ... )`, tracking depth so a
+        // multi-line body is captured in full.
+        let mut depth = 1usize;
+        let mut i = open;
+        while i < cb.len() && depth > 0 {
+            match cb[i] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                break;
+            }
+            i += 1;
+        }
+        let body = &content[open..i.min(content.len())];
+        let bb = body.as_bytes();
+        let mut j = 0;
+        while let Some(k) = body[j..].find("export") {
+            let pos = j + k;
+            let before_ok = pos == 0 || !is_ident_byte(bb[pos - 1]);
+            // A standalone `export`: the next byte is absent or a non-identifier
+            // char. This EXCLUDES `export_to` (next byte `_`).
+            let after = pos + "export".len();
+            let after_ok = bb.get(after).is_none_or(|&c| !is_ident_byte(c));
+            if before_ok && after_ok {
+                let abs = open + pos;
+                let line = content[..abs].bytes().filter(|&b| b == b'\n').count() + 1;
+                offenders.push(line);
+            }
+            j = after;
+        }
+        base = i + 1;
+        if base >= content.len() {
+            break;
+        }
+    }
+    offenders
+}
+
+#[test]
+fn audit_types_have_no_ts_export_auto_export() {
+    // Guard against re-introducing the tracked-path ts-rs auto-export.
+    //
+    // The audit DTOs must derive `ts_rs::TS` with
+    // `#[ts(export_to = "audit.generated.ts")]` but WITHOUT the bare
+    // `export` flag. The bare flag makes ts-rs emit a hidden `#[test]`
+    // that writes `$TS_RS_EXPORT_DIR/audit.generated.ts` during a
+    // normal `cargo test`; combined with multiple test binaries
+    // (separate processes) that concurrently truncate+merge the same
+    // tracked file, it tears `packages/types/audit.generated.ts` and
+    // breaks `pnpm build`. The committed file is regenerated EXPLICITLY
+    // and read-only-checked by `audit_ts_bindings_are_in_sync`.
+    //
+    // Discriminating: re-add `#[ts(export, export_to = "...")]` (or a
+    // bare `#[ts(export)]`) to any audit DTO and this test FAILS,
+    // naming the file + line.
+    let root = workspace_root();
+    let mut offenders: Vec<String> = Vec::new();
+    for dir in AUDIT_DTO_DIRS {
+        let abs = root.join(dir);
+        let mut files = Vec::new();
+        collect_rs_files(&abs, &mut files);
+        for file in files {
+            let contents =
+                fs::read_to_string(&file).unwrap_or_else(|e| panic!("read `{file:?}`: {e}"));
+            for line_no in bare_ts_export_offenders(&contents) {
+                let rel = file.strip_prefix(&root).unwrap_or(&file);
+                let text = contents.lines().nth(line_no - 1).unwrap_or("").trim();
+                offenders.push(format!("{}:{}: {}", rel.display(), line_no, text));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "audit DTOs must NOT carry the bare `#[ts(export)]` flag (use \
+         `#[ts(export_to = \"audit.generated.ts\")]` only). The bare flag \
+         resurrects the concurrent-truncation bug that tears \
+         `packages/types/audit.generated.ts` during `cargo test`. \
+         Offending lines:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn bare_ts_export_scanner_flags_multiline_export() {
+    // The whole-file scanner must catch a bare `export` split onto its own
+    // line inside a multi-line `#[ts(...)]` — the prior per-line scan missed
+    // this legal Rust attribute form and let the regression through.
+    let src =
+        "#[derive(TS)]\n#[ts(\n    export,\n    export_to = \"audit.generated.ts\"\n)]\nstruct X;\n";
+    assert_eq!(
+        bare_ts_export_offenders(src),
+        vec![3],
+        "multi-line bare `export` must be flagged at its source line"
+    );
+}
+
+#[test]
+fn bare_ts_export_scanner_allows_multiline_export_to_only() {
+    let src = "#[derive(TS)]\n#[ts(\n    export_to = \"audit.generated.ts\"\n)]\nstruct X;\n";
+    assert!(
+        bare_ts_export_offenders(src).is_empty(),
+        "multi-line `export_to`-only must NOT be flagged"
+    );
+}
+
+#[test]
+fn bare_ts_export_scanner_flags_singleline_and_allows_export_to() {
+    assert_eq!(
+        bare_ts_export_offenders("#[ts(export, export_to = \"x\")]\n"),
+        vec![1],
+        "single-line bare `export` must still be flagged"
+    );
+    assert!(
+        bare_ts_export_offenders("#[ts(export_to = \"x\")]\n").is_empty(),
+        "single-line `export_to`-only must be allowed"
+    );
+}
+
+#[test]
+fn cargo_config_does_not_set_ts_rs_export_dir() {
+    // Guard the OTHER half of the regression: even without a bare
+    // `export` flag, setting `TS_RS_EXPORT_DIR = packages/types` in
+    // `.cargo/config.toml` would (if any `export` flag returned) point
+    // the auto-export at the tracked tree. Forbid any *active*
+    // (uncommented) `TS_RS_EXPORT_DIR` assignment in the workspace
+    // cargo config.
+    //
+    // Discriminating: uncomment / re-add
+    // `TS_RS_EXPORT_DIR = { value = "packages/types", relative = true }`
+    // and this test FAILS.
+    let root = workspace_root();
+    let config_path = root.join(".cargo/config.toml");
+    let contents =
+        fs::read_to_string(&config_path).unwrap_or_else(|e| panic!("read `{config_path:?}`: {e}"));
+    let active: Vec<(usize, &str)> = contents
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with('#') && trimmed.contains("TS_RS_EXPORT_DIR")
+        })
+        .map(|(i, line)| (i + 1, line.trim()))
+        .collect();
+    assert!(
+        active.is_empty(),
+        "`.cargo/config.toml` must NOT set `TS_RS_EXPORT_DIR` (it would aim the \
+         ts-rs auto-export at the tracked tree and re-tear \
+         `packages/types/audit.generated.ts` during `cargo test`). The committed \
+         bindings are refreshed explicitly via `VERTER_UPDATE_TS_BINDINGS=1`. \
+         Active assignment(s):\n{}",
+        active
+            .iter()
+            .map(|(ln, l)| format!("  line {ln}: {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }

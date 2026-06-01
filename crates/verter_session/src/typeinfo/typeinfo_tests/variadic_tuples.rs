@@ -45,7 +45,7 @@ fn variadic_tuple_tail_of_sample_resolves_to_remaining_tuple() {
         ProjectionMode::Expanded,
     );
 
-    let TypeExpr::Tuple { elements, readonly } = expr else {
+    let TypeExpr::Tuple { elements, readonly } = &expr else {
         panic!("expected tuple, got {expr:?}");
     };
     assert!(!readonly);
@@ -89,7 +89,7 @@ fn variadic_tuple_init_of_sample_resolves_to_prefix_tuple() {
         ProjectionMode::Expanded,
     );
 
-    let TypeExpr::Tuple { elements, readonly } = expr else {
+    let TypeExpr::Tuple { elements, readonly } = &expr else {
         panic!("expected tuple, got {expr:?}");
     };
     assert!(!readonly);
@@ -115,7 +115,7 @@ fn variadic_tuple_concat_alias_produces_joined_literal_tuple() {
         ProjectionMode::Expanded,
     );
 
-    let TypeExpr::Tuple { elements, readonly } = expr else {
+    let TypeExpr::Tuple { elements, readonly } = &expr else {
         panic!("expected tuple, got {expr:?}");
     };
     assert!(!readonly);
@@ -145,7 +145,7 @@ fn variadic_tuple_variadic_function_with_explicit_type_args_concatenates_tuples(
         ProjectionMode::Expanded,
     );
 
-    let TypeExpr::Tuple { elements, readonly } = expr else {
+    let TypeExpr::Tuple { elements, readonly } = &expr else {
         panic!("expected tuple, got {expr:?}");
     };
     assert!(!readonly);

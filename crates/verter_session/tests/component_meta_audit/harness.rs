@@ -22,6 +22,13 @@
 //! - Standalone — each exercises one audit-surface facet
 //!   (generics, external types, barrel chains, conditionals, path
 //!   projection) with a minimal fixture.
+//!
+//! This is a SHARED harness: it is declared once at each consuming test
+//! binary's root (`component_meta_audit`, `g_block`, `g_misc2`, `g_misc3`)
+//! and intentionally exposes a superset of fixtures + helpers + re-exports.
+//! No single binary exercises every entry, so dead-code / unused-import
+//! analysis is suppressed at the module level rather than per consumer.
+#![allow(dead_code, unused_imports)]
 
 use std::sync::Arc;
 

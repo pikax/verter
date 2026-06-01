@@ -75,7 +75,7 @@ fn typescript_rules_tuples_arrays_and_functions_publish_structured_shapes() {
         &[],
         ProjectionMode::Expanded,
     );
-    let TypeExpr::Tuple { elements, readonly } = tuple else {
+    let TypeExpr::Tuple { elements, readonly } = &tuple else {
         panic!("expected tuple, got {tuple:?}");
     };
     assert!(!readonly);
@@ -92,7 +92,7 @@ fn typescript_rules_tuples_arrays_and_functions_publish_structured_shapes() {
         &[],
         ProjectionMode::Expanded,
     );
-    let TypeExpr::Tuple { elements, readonly } = readonly_tuple else {
+    let TypeExpr::Tuple { elements, readonly } = &readonly_tuple else {
         panic!("expected readonly tuple, got {readonly_tuple:?}");
     };
     assert!(readonly);
@@ -136,7 +136,7 @@ fn typescript_rules_tuple_rest_element_resolves_array_element_type() {
         ProjectionMode::Expanded,
     );
 
-    let TypeExpr::Tuple { elements, .. } = tuple else {
+    let TypeExpr::Tuple { elements, .. } = &tuple else {
         panic!("expected tuple, got {tuple:?}");
     };
     assert!(elements[2].rest);
@@ -296,7 +296,7 @@ fn typescript_rules_constructor_parameters_resolve_tuple() {
         ProjectionMode::Expanded,
     );
 
-    let TypeExpr::Tuple { elements, .. } = expr else {
+    let TypeExpr::Tuple { elements, .. } = &expr else {
         panic!("expected constructor parameter tuple, got {expr:?}");
     };
     assert_eq!(elements.len(), 1);

@@ -626,7 +626,7 @@ export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootP
     )
     .expect("nested indexed-access helper should project");
 
-    let TypeExpr::Union(members) = projected else {
+    let TypeExpr::Union(members) = &projected else {
         panic!(
             "nested indexed-access helper should materialize as a literal union, got {projected:?}"
         );
@@ -685,7 +685,7 @@ export interface LinkProps extends NuxtLinkProps {
         &route,
     )
     .expect("member-viable inherited pick route should project to the requested members only");
-    let TypeExpr::Object(object) = projected else {
+    let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
     let member_names: std::collections::BTreeSet<_> = object
@@ -764,7 +764,7 @@ export interface LinkProps extends NuxtLinkProps {
         &route,
     )
     .expect("package-backed inherited pick route should project");
-    let TypeExpr::Object(object) = projected else {
+    let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
     let to_member = object
@@ -867,7 +867,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     .expect(
         "local inherited members should project without deepening unrelated imported utility bases",
     );
-    let TypeExpr::Object(object) = projected else {
+    let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
     let member_names: std::collections::BTreeSet<_> = object
@@ -994,7 +994,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         &route,
     )
     .expect("realistic inherited pick route should project to the requested members only");
-    let TypeExpr::Object(object) = projected else {
+    let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
     let member_names: std::collections::BTreeSet<_> = object
@@ -1124,7 +1124,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         &route,
     )
     .expect("module-routed inherited pick route should project to the requested members only");
-    let TypeExpr::Object(object) = projected else {
+    let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
     let member_names: std::collections::BTreeSet<_> = object
@@ -1276,7 +1276,7 @@ export type EditorToolbarProps<T extends ArrayOrNested<EditorToolbarItem> = Arra
         "EditorToolbarProps",
     )
     .expect("generic union alias should project a type surface");
-    let TypeExpr::Object(object) = projected else {
+    let TypeExpr::Object(object) = &projected else {
         panic!("projected surface should materialize as an object");
     };
     let member_names: std::collections::BTreeSet<_> = object
@@ -1402,7 +1402,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         "ColorModeSelectProps",
     )
     .expect("nested pick/omit generic interface should project a type surface");
-    let TypeExpr::Object(object) = projected else {
+    let TypeExpr::Object(object) = &projected else {
         panic!("projected surface should materialize as an object");
     };
     let member_names: std::collections::BTreeSet<_> = object
@@ -1510,7 +1510,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     )
     .expect("nested pick/omit generic interface should project the routed object surface");
 
-    let TypeExpr::Object(object) = projected else {
+    let TypeExpr::Object(object) = &projected else {
         panic!("prepared projection should still materialize the routed object surface");
     };
     let member_names: std::collections::BTreeSet<_> = object
@@ -2316,7 +2316,7 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
     )
     .expect("component-config indexed access route should project");
 
-    let TypeExpr::Union(members) = projected else {
+    let TypeExpr::Union(members) = &projected else {
         panic!(
             "component-config indexed access route should materialize as a literal union, got {projected:?}"
         );

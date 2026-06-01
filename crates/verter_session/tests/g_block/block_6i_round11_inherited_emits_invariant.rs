@@ -29,8 +29,7 @@
 
 #![allow(clippy::too_many_lines, dead_code, unused_imports)]
 
-#[path = "../component_meta_audit/harness.rs"]
-mod harness;
+use crate::harness;
 
 const PARENT_VUE: &str = r#"<script setup lang="ts">
 import Child from './child.vue';

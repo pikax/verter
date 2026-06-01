@@ -267,7 +267,12 @@ where
         // count so `invalidate_canonical_touches_only_indexed_entries`
         // can assert visited == K (NOT N). No-op on the production
         // hot path (no token bound).
+        // Per-canonical visit-count hook — test/debug instrumentation
+        // only; gated to match the capture-token module (absent in
+        // release).
+        #[cfg(any(test, debug_assertions))]
         let visited = keys.len() as u64;
+        #[cfg(any(test, debug_assertions))]
         crate::capture_token::with_active_capture(|t| {
             t.record_counter("invalidate_canonical_entries_visited", visited);
         });

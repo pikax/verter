@@ -16,7 +16,7 @@ use crate::record::u64_as_decimal_string;
 /// the cache's get/insert boundary when a `RequestContext` is
 /// installed in TLS.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct CacheLayerHitMiss {
     /// Hits observed on this cache layer during the request.
     #[serde(with = "u64_as_decimal_string")]
@@ -40,7 +40,7 @@ pub struct CacheLayerHitMiss {
 ///   and bumps the cache layer's `hits` counter once on its TLS
 ///   context.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct CacheLayerBreakdown {
     /// `FileArtifactStore` — canonical post-parse artifact cache.
     pub indexed: CacheLayerHitMiss,
@@ -92,7 +92,7 @@ pub struct CacheLayerBreakdown {
 /// request finalisation, so the values are exact deltas for THIS
 /// request only (no host-global accumulation).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct BypassDiagnostics {
     /// `HostStoreView::from_host` invocation count on this request.
     /// The per-request hoist expects this to drop to a
@@ -121,7 +121,7 @@ pub struct BypassDiagnostics {
 
 /// Generic store/view counters that apply across request kinds.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct RequestStoreAudit {
     /// Store-view cache hits.
     pub store_view_hits: u32,

@@ -9,7 +9,7 @@ use crate::record::u64_as_decimal_string;
 
 /// Compile request payload.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct CompilePayload {
     /// Which codegen target ran (VDOM / Vapor / IDE).
     pub target: CompileTargetTag,

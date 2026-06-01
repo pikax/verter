@@ -101,7 +101,7 @@ pub mod i64_as_decimal_string {
 /// Top-level audit record for one logical request — the envelope every
 /// consumer (NAPI, WASM, LSP, MCP, bundler) reads.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct RequestAuditRecord {
     /// Monotonic request id stamped at the public audited entry-point.
     /// Decimal-string transport — non-zero, unique per audited request.
@@ -278,7 +278,7 @@ impl RequestAuditRecord {
 /// ad-hoc kind set the stringly name and document why their concern
 /// did not warrant a first-class variant.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub enum RequestKind {
     /// `getComponentMeta(canonicalId)` — the original audit surface.
     ComponentMeta,
@@ -357,7 +357,7 @@ impl RequestKind {
 /// `RequestAuditRecord` envelope still carries the generic timing /
 /// memory / store / footprint data in that case).
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 #[serde(tag = "kind")]
 pub enum RequestKindPayload {
     /// Producer has not populated a typed payload yet. Generic
@@ -392,7 +392,7 @@ pub enum RequestKindPayload {
 /// instrumented in detail; other phases are timed via the top-level
 /// `RequestTimingAudit` blocks.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "audit.generated.ts")]
+#[ts(export_to = "audit.generated.ts")]
 pub struct RequestPhaseAudit {
     /// Total milliseconds spent inside the imported-root-proof phase
     /// for the current request. Accumulated against the top-of-stack

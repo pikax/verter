@@ -298,7 +298,7 @@ fn variance_annotation_in_substitution_through_consumer_consume_parameters() {
         ProjectionMode::Expanded,
     );
 
-    let TypeExpr::Tuple { elements, readonly } = expr else {
+    let TypeExpr::Tuple { elements, readonly } = &expr else {
         panic!(
             "expected Parameters<NumberConsumer[\"consume\"]> to project to a tuple, got {expr:?}"
         );

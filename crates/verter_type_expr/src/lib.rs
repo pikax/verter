@@ -27,6 +27,11 @@ use verter_span::Span;
 /// ([`TypeExpr::shift_spans`] / [`TypeExpr::clear_spans`]).
 mod span_transform;
 
+/// Depth-safe iterative `Drop` + byte-identical-to-derive iterative
+/// `Hash` for [`TypeExpr`] (orphan-rule-permitted in this crate-local
+/// module; kept out of the crate root for file-size hygiene).
+mod recursive_traversal;
+
 // ---------------------------------------------------------------------------
 // Send + Sync invariant
 // ---------------------------------------------------------------------------
@@ -103,7 +108,16 @@ pub struct SyntheticCarrierKey {
 ///
 /// Syntax-preserving — captures TypeScript type annotation structure
 /// without evaluating or normalizing it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// `Hash` is implemented by hand (NOT derived) as a depth-safe
+/// continuation-frame iterative walker — see the `impl Hash for TypeExpr`
+/// in the [`recursive_traversal`] module. The derived `Hash` was
+/// recursive over the `Arc<TypeExpr>` tree
+/// and overflowed the stack on deeply-nested types (e.g.
+/// `cycle_guard::hash_type_expr` routes a `TypeExpr` through `Hash`). The
+/// manual impl emits a BYTE-IDENTICAL stream to the former derive
+/// (pinned by `tests/hash_byte_stream_contract.rs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeExpr {
     // -- Terminals --
     /// A primitive type name: `string`, `number`, `boolean`, `symbol`,

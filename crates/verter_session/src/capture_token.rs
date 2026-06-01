@@ -22,14 +22,16 @@
 //!
 //! Integration tests in `crates/verter_session/tests/*.rs` build as a
 //! separate crate target. Cargo compiles the lib for those tests with
-//! `cfg(test)` UNSET, so a `cfg(test)`-gated module would be invisible
-//! to integration tests. The production-cost discipline is preserved by:
+//! `cfg(test)` UNSET but `debug_assertions` SET, so the whole module is
+//! gated `cfg(any(test, debug_assertions))` (declared in `lib.rs`):
 //! 1. `pub(crate)` keeps the API out of the public crate surface.
-//! 2. The `for_tests` re-export is gated `cfg(any(test, debug_assertions))`
-//!    so release-build downstream consumers cannot access it.
-//! 3. The hot-path overhead is one thread-local lookup per hook — the
-//!    `with_active_capture` fast path returns on `None`, no lock, no
-//!    allocation.
+//! 2. The same gate covers the `for_tests` re-export, so release-build
+//!    downstream consumers cannot access it.
+//! 3. `cargo build --release` has `debug_assertions` OFF, so neither this
+//!    module nor its recording hooks are compiled — release pays zero
+//!    cost. Every production `with_active_capture(..)` recording site
+//!    carries the matching `#[cfg(any(test, debug_assertions))]` so the
+//!    hook simply does not exist in release (no thread-local lookup).
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
