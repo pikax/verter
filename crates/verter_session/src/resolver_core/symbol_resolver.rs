@@ -161,6 +161,10 @@ impl SymbolResolverState {
             Ok(StableExecutionValue {
                 value: result,
                 stable,
+                // This singleflight closure always runs `compute_fn`
+                // (no in-closure warm-hit short-circuit), so the winner
+                // always performed a cold build.
+                computed: true,
             })
         });
 

@@ -257,21 +257,32 @@ impl VerterHost {
             workspace_before_bytes,
         )) = audit
         {
-            // Joiner-accounting: when the singleflight identified
-            // this request as a Follower, the request received its
-            // result from the dedup-join (semantically a warm hit on
-            // the in-flight computation, not a cold compute). Flip
-            // the speculative miss bumped by the warm-cache check
-            // into a hit on the active TLS context, and mark
-            // `from_cache=true` so the audit record carries the
-            // contract-correct attribution. The cold winner stays at
-            // the default (`from_cache=false`, miss recorded) and
-            // pays for the cold work it actually performed.
-            if let RequestSource::Flight {
-                role: SingleflightRole::Follower,
-                ..
-            } = result.source
-            {
+            // Joiner-accounting: a request is a JOINER exactly when it
+            // did NOT perform cold compute — i.e. every source other
+            // than a compute-performing one. Two non-compute sources
+            // reach here under concurrency:
+            //
+            //   - `Flight { Follower }` — the request dedup-joined an
+            //     in-flight cold build and woke onto the leader's
+            //     published result.
+            //   - `Cache` — the request's resolver-node-cache peek
+            //     served a result a concurrent (or just-completed)
+            //     leader had already published. This is just as much a
+            //     warm hit as a Follower join: no cold work was done.
+            //     Before the cold-concurrent singleflight became a
+            //     durable rendezvous, late callers in the leader's
+            //     post-compute gap spawned fresh leaders; now they
+            //     Follower-join or hit the node cache, and BOTH must
+            //     attribute as joiners or the per-joiner contract
+            //     (`from_cache=false` count <= 1) breaks under load.
+            //
+            // The joiner flips the speculative miss bumped by the
+            // warm-cache check into a hit on the active TLS context and
+            // marks `from_cache=true`. Only a compute-performing source
+            // (`Flight { Leader }` / `Fallback`) stays the cold winner
+            // (`from_cache=false`, miss recorded) and pays for the work
+            // it actually performed.
+            if !request_source_performed_compute(result.source) {
                 audit_builder.mark_joined_inflight();
             }
             let (store_audit, cm_counters) = self.component_meta_audit_store_snapshot(None);

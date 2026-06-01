@@ -186,6 +186,9 @@ impl VerterHost {
                 return Ok(crate::resolver_core::StableExecutionValue {
                     value: Some((*bundle).clone()),
                     stable: true,
+                    // Served from the bundle cache inside the flight — no
+                    // cold materialisation performed.
+                    computed: false,
                 });
             }
             // Per-request audit attribution: cold materialisation of
@@ -203,6 +206,8 @@ impl VerterHost {
             Ok(crate::resolver_core::StableExecutionValue {
                 value: result.map(|arc| (*arc).clone()),
                 stable,
+                // Reached the cold materialisation branch.
+                computed: true,
             })
         });
         match flight {

@@ -525,6 +525,17 @@ pub struct ResolverDiagnostic {
 pub struct StableExecutionValue<V> {
     pub value: V,
     pub stable: bool,
+    /// `true` when the singleflight winner produced this value by
+    /// running `executor.compute()` (a genuine cold build); `false`
+    /// when the winner's flight closure instead served a warm hit from
+    /// the executor's own cache (`try_get_cached` succeeded inside the
+    /// flight). A winner that served a cache hit performed NO cold work,
+    /// so [`run_stable_request`] reports [`RequestSource::Cache`] for it
+    /// rather than [`RequestSource::Flight`] — which keeps a late caller
+    /// that wins a fresh flight lane (because the prior burst already
+    /// completed and reaped its lane) but immediately reads the warm
+    /// result attributed as a cache hit, not as a second cold winner.
+    pub computed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -559,6 +570,18 @@ where
     fn is_stable(&mut self, view: &Self::View) -> bool;
     fn store_stable(&mut self, value: &V);
 
+    /// The singleflight lane token for THIS request, used to pin the
+    /// flight lane (via [`SingleflightGroup::participate`]) across the
+    /// whole request — including the pre-flight cache peek — so a
+    /// concurrent burst deterministically collapses onto one cold
+    /// leader. It MUST equal the `compat_token()` the per-attempt
+    /// `snapshot_view()` reports, so the pin and the inner `run` claim
+    /// land on the same lane. The default snapshots a view to read its
+    /// token; executors with a cheaper token source should override.
+    fn lane_token(&mut self) -> StoreViewCompatToken {
+        self.snapshot_view().compat_token()
+    }
+
     fn max_attempts(&self) -> usize {
         3
     }
@@ -576,6 +599,26 @@ where
     let cache_key = executor.cache_key();
     let max_attempts = executor.max_attempts();
 
+    // Pin the singleflight lane for THIS request's whole lifetime, BEFORE
+    // the pre-flight cache peek. Without this pin, a concurrent burst can
+    // tear down the leader's lane in the gap between a straggler's
+    // "cache-miss" decision (the peek below) and its `singleflight.run`
+    // claim, so the straggler finds a vacant lane and spawns a second
+    // cold leader. The participation pin keeps the lane alive across the
+    // whole burst — every concurrent caller pins before it peeks — so the
+    // leader's published `Done` rendezvous is still joinable when a
+    // straggler finally reaches `run`, and it Follower-joins instead of
+    // recomputing. The token folds into the lane key, so the pin only
+    // coalesces callers that share the same store-view identity (R20).
+    //
+    // The pin token is the caller's current store-view compat token. If a
+    // mid-request project mutation bumps the store-view epoch, the inner
+    // `run` lands on a fresh lane keyed by the new token (correct: the
+    // pre-bump result is no longer interchangeable), and this stale pin
+    // simply releases its now-unrelated lane on drop.
+    let pin_token = executor.lane_token();
+    let _participation = singleflight.participate(cache_key.clone(), pin_token);
+
     for attempt in 0..max_attempts {
         let store_view = executor.snapshot_view();
         if let Some(cached) = executor.try_get_cached(&store_view) {
@@ -586,30 +629,59 @@ where
             });
         }
 
-        let flight = singleflight.run(cache_key.clone(), store_view.compat_token(), || {
-            if let Some(cached) = executor.try_get_cached(&store_view) {
-                return Ok(StableExecutionValue {
-                    value: cached,
-                    stable: true,
-                });
-            }
+        let flight = singleflight.run_retaining(
+            cache_key.clone(),
+            store_view.compat_token(),
+            || {
+                if let Some(cached) = executor.try_get_cached(&store_view) {
+                    return Ok(StableExecutionValue {
+                        value: cached,
+                        stable: true,
+                        computed: false,
+                    });
+                }
 
-            let value = executor.compute(&store_view)?;
-            let stable = executor.is_stable(&store_view);
-            if stable {
-                executor.store_stable(&value);
-            }
+                let value = executor.compute(&store_view)?;
+                let stable = executor.is_stable(&store_view);
+                if stable {
+                    executor.store_stable(&value);
+                }
 
-            Ok(StableExecutionValue { value, stable })
-        })?;
+                Ok(StableExecutionValue {
+                    value,
+                    stable,
+                    computed: true,
+                })
+            },
+            // Retain ONLY stable results as a joinable rendezvous. An
+            // unstable result (the snapshot view moved mid-compute) must
+            // NOT be retained, or the stability-retry loop below — and any
+            // concurrent sibling — would join the torn result instead of
+            // recomputing against fresh state.
+            |sev| sev.stable,
+        )?;
 
         if flight.value.stable {
-            return Ok(RequestRunResult {
-                value: flight.value.value.clone(),
-                source: RequestSource::Flight {
-                    role: flight.role,
+            // A flight LEADER whose closure served a warm hit (did NOT
+            // run `compute`) performed no cold work — attribute it as a
+            // cache hit, not a cold flight winner. This is the
+            // post-burst straggler case: under load, a caller can claim
+            // a fresh flight lane after the prior burst's leader already
+            // completed and reaped its lane, then immediately read the
+            // warm result the prior leader published. Reporting `Cache`
+            // (instead of `Flight { Leader }`) lets the joiner-accounting
+            // layer classify it as a joiner rather than a spurious second
+            // cold winner. Followers always carry the leader's role.
+            let source = match flight.role {
+                SingleflightRole::Leader if !flight.value.computed => RequestSource::Cache,
+                role => RequestSource::Flight {
+                    role,
                     forked_lane: flight.forked_lane,
                 },
+            };
+            return Ok(RequestRunResult {
+                value: flight.value.value.clone(),
+                source,
                 attempts: attempt + 1,
             });
         }
@@ -1278,12 +1350,69 @@ where
 struct FlightState<V, E> {
     inner: Mutex<FlightInner<V, E>>,
     ready: Condvar,
+    /// Count of threads currently pinning this flight lane — the
+    /// per-request participation guards held across a whole
+    /// [`run_stable_request`] plus the transient self-pin every
+    /// [`SingleflightGroup::run`] caller takes. Mutated ONLY under the
+    /// group's `flights` map lock (incremented when a pin is acquired,
+    /// decremented + reaped when it is released), so every increment is
+    /// serialized against the decrement-and-reap.
+    ///
+    /// The leader keeps its published `Done` result in the map as a
+    /// joinable rendezvous and the slot is reaped only when the LAST
+    /// pin is released (count reaches zero). This is what makes a
+    /// concurrent burst collapse onto ONE cold leader deterministically:
+    /// every caller pins the lane via [`SingleflightGroup::participate`]
+    /// BEFORE it even peeks its cache, so the lane stays alive for the
+    /// whole burst — a straggler that decided "miss" but has not yet
+    /// reached the `run` claim still observes the leader's retained
+    /// `Done` (because its own participation pin, and every sibling's,
+    /// keeps the slot from being reaped) and joins as a `Follower`
+    /// instead of spawning a second cold `Leader`.
+    ///
+    /// Because the slot is dropped once the burst fully drains, the
+    /// flight is a per-burst dedup rendezvous, NOT a result cache: a
+    /// later independent call re-enters the cold path (preserving the
+    /// "non-cacheable / empty-fact results are not persisted" contract
+    /// the validated caches own).
+    pins: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug, Clone)]
 enum FlightInner<V, E> {
-    Running { owner: std::thread::ThreadId },
+    /// Lane pinned by a participation guard but no [`SingleflightGroup::run`]
+    /// caller has claimed leadership yet. The first `run` caller
+    /// transitions this to `Running` and becomes the leader.
+    Pending,
+    Running {
+        owner: std::thread::ThreadId,
+    },
     Done(Result<Arc<V>, E>),
+}
+
+/// RAII pin that keeps a flight lane alive for the duration of a
+/// participating request. Acquired by [`SingleflightGroup::participate`]
+/// at the very start of [`run_stable_request`] — BEFORE the pre-flight
+/// cache peek — so the lane a leader publishes into is not reaped out
+/// from under a concurrent straggler that is still between its own
+/// cache-miss decision and its `run` claim. Dropping the guard releases
+/// the pin and reaps the lane when it was the last one.
+pub struct FlightParticipation<'a, K, V, E>
+where
+    K: Eq + Hash + Clone,
+{
+    group: &'a SingleflightGroup<K, V, E>,
+    lane_key: (K, StoreViewCompatToken),
+    state: Arc<FlightState<V, E>>,
+}
+
+impl<'a, K, V, E> Drop for FlightParticipation<'a, K, V, E>
+where
+    K: Eq + Hash + Clone,
+{
+    fn drop(&mut self) {
+        self.group.unpin(&self.lane_key, &self.state);
+    }
 }
 
 impl<K, V, E> Default for SingleflightGroup<K, V, E>
@@ -1293,6 +1422,76 @@ where
     fn default() -> Self {
         Self {
             flights: Mutex::new(FxHashMap::default()),
+        }
+    }
+}
+
+impl<K, V, E> SingleflightGroup<K, V, E>
+where
+    K: Eq + Hash + Clone,
+{
+    /// Pin a flight lane for the lifetime of the returned guard so the
+    /// lane a leader publishes into is not reaped while this caller is
+    /// still between its own cache-miss decision and its [`Self::run`]
+    /// claim. Acquired at the very start of [`run_stable_request`],
+    /// BEFORE the pre-flight cache peek. Creates the lane in a `Pending`
+    /// state if it does not yet exist (the first `run` caller claims
+    /// leadership of it); otherwise it pins whatever flight is already in
+    /// progress or retained.
+    pub fn participate(
+        &self,
+        key: K,
+        token: StoreViewCompatToken,
+    ) -> FlightParticipation<'_, K, V, E> {
+        let lane_key = (key, token);
+        let state = {
+            let mut flights = self.flights.lock();
+            if let Some(existing) = flights.get(&lane_key).cloned() {
+                existing
+                    .pins
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                existing
+            } else {
+                let state = Arc::new(FlightState {
+                    inner: Mutex::new(FlightInner::Pending),
+                    ready: Condvar::new(),
+                    pins: std::sync::atomic::AtomicUsize::new(1),
+                });
+                flights.insert(lane_key.clone(), state.clone());
+                state
+            }
+        };
+        FlightParticipation {
+            group: self,
+            lane_key,
+            state,
+        }
+    }
+
+    /// Release one pin on a flight lane and reap the slot when the last
+    /// pin is released.
+    ///
+    /// The decrement and the conditional removal run together under the
+    /// `flights` map lock so they are serialized against every pin-side
+    /// increment ([`Self::run`]'s self-pin and [`Self::participate`]):
+    /// the slot can only be reaped at the instant `pins` reaches zero,
+    /// which is also the instant no thread can be mid-claim (a claimer
+    /// increments under the same lock before it ever reads the slot). The
+    /// removal is `ptr_eq`-guarded so a fresh leader that already
+    /// re-inserted a new slot for the same `lane_key` (after this one
+    /// drained) is not evicted.
+    fn unpin(&self, lane_key: &(K, StoreViewCompatToken), state: &Arc<FlightState<V, E>>) {
+        let mut flights = self.flights.lock();
+        let remaining = state
+            .pins
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+            - 1;
+        if remaining == 0 {
+            if let Some(existing) = flights.get(lane_key) {
+                if Arc::ptr_eq(existing, state) {
+                    flights.remove(lane_key);
+                }
+            }
         }
     }
 }
@@ -1311,22 +1510,82 @@ where
     where
         F: FnOnce() -> Result<V, E>,
     {
+        // Default: a successful result is retained as a joinable
+        // rendezvous for the burst. Errors are never retained (see
+        // `run_retaining`).
+        self.run_retaining(key, token, compute, |_| true)
+    }
+
+    /// Like [`Self::run`] but the caller decides — via `retain`,
+    /// evaluated on the leader's freshly-computed value — whether the
+    /// result is retained as a joinable `Done` rendezvous for late burst
+    /// members, or discarded immediately so every subsequent claim
+    /// (including the same request's own stability retry) recomputes.
+    ///
+    /// [`run_stable_request`] passes `retain = |v| v.stable`: a STABLE
+    /// result is retained for the burst (a concurrent straggler joins it
+    /// instead of cold-recomputing); an UNSTABLE result (the snapshot
+    /// view moved mid-compute) is NOT retained, so the retry loop — and
+    /// any sibling — recomputes against fresh state rather than joining a
+    /// torn result. Errors are never retained.
+    pub fn run_retaining<F, R>(
+        &self,
+        key: K,
+        token: StoreViewCompatToken,
+        compute: F,
+        retain: R,
+    ) -> Result<SingleflightRunResult<V>, E>
+    where
+        F: FnOnce() -> Result<V, E>,
+        R: FnOnce(&V) -> bool,
+    {
         let lane_key = (key.clone(), token);
         let current_thread = std::thread::current().id();
 
+        // Take a self-pin and either claim leadership or take a reference
+        // to an existing flight, ALL under the map lock. `pins` is
+        // incremented here for the self-pin; `participate` pins are added
+        // and released under the same lock, so every increment is
+        // serialized against the decrement-and-reap (`unpin`). The lane
+        // is never reaped while any pin is held — so a caller arriving in
+        // the leader's post-compute gap (but pinned via `participate`)
+        // observes the retained `Done` slot rather than a vacant lane.
+        //
+        // `leader` is `true` when this caller is responsible for running
+        // `compute`: either it created the slot, or it found a
+        // `Pending` slot a participation pin had created and claimed
+        // leadership of it.
         let (state, leader, forked_lane) = {
             let mut flights = self.flights.lock();
-            let forked_lane = flights.keys().any(|(existing_key, existing_token)| {
-                existing_key == &key && *existing_token != token
+            let forked_lane = flights.iter().any(|((existing_key, existing_token), s)| {
+                existing_key == &key
+                    && *existing_token != token
+                    && !matches!(&*s.inner.lock(), FlightInner::Done(_))
             });
             if let Some(existing) = flights.get(&lane_key).cloned() {
-                (existing, false, forked_lane)
+                existing
+                    .pins
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Claim a Pending lane (created by a participation pin)
+                // by transitioning it to Running under this thread.
+                let mut leader = false;
+                {
+                    let mut inner = existing.inner.lock();
+                    if matches!(&*inner, FlightInner::Pending) {
+                        *inner = FlightInner::Running {
+                            owner: current_thread,
+                        };
+                        leader = true;
+                    }
+                }
+                (existing, leader, forked_lane)
             } else {
                 let state = Arc::new(FlightState {
                     inner: Mutex::new(FlightInner::Running {
                         owner: current_thread,
                     }),
                     ready: Condvar::new(),
+                    pins: std::sync::atomic::AtomicUsize::new(1),
                 });
                 flights.insert(lane_key.clone(), state.clone());
                 (state, true, forked_lane)
@@ -1335,12 +1594,40 @@ where
 
         if leader {
             let result = compute().map(Arc::new);
+            // Decide retention from the freshly-computed value. An error,
+            // or a value the caller declines to retain (e.g. an unstable
+            // result), is published to current waiters but the lane is
+            // then dropped immediately so subsequent claims — including
+            // this request's own retry — recompute instead of joining a
+            // non-reusable result.
+            let keep = matches!(&result, Ok(value) if retain(value));
             {
                 let mut inner = state.inner.lock();
                 *inner = FlightInner::Done(result.clone());
                 state.ready.notify_all();
             }
-            self.flights.lock().remove(&lane_key);
+            if keep {
+                // Retain the published result as a joinable rendezvous;
+                // the slot is reclaimed by `unpin` once the last pin is
+                // released, so a burst member still mid-claim joins it
+                // instead of finding a vacant lane.
+                self.unpin(&lane_key, &state);
+            } else {
+                // Drop the lane now (releasing this self-pin first so the
+                // count stays balanced) so it is not joined again. A
+                // concurrent participation pin still outstanding becomes a
+                // no-op on `unpin` via its `ptr_eq` guard.
+                state
+                    .pins
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                let mut flights = self.flights.lock();
+                if flights
+                    .get(&lane_key)
+                    .is_some_and(|existing| Arc::ptr_eq(existing, &state))
+                {
+                    flights.remove(&lane_key);
+                }
+            }
             return result.map(|value| SingleflightRunResult {
                 value,
                 role: SingleflightRole::Leader,
@@ -1352,16 +1639,28 @@ where
         loop {
             match &*inner {
                 FlightInner::Running { owner } if *owner == current_thread => {
+                    // Same-thread re-entry on a flight this thread itself
+                    // leads (recursion sentinel): compute inline as a
+                    // nested leader. Release the self-pin taken above.
                     drop(inner);
+                    self.unpin(&lane_key, &state);
                     return compute().map(|value| SingleflightRunResult {
                         value: Arc::new(value),
                         role: SingleflightRole::Leader,
                         forked_lane,
                     });
                 }
+                // A `Pending` lane is claimed by the first `run` caller in
+                // the block above; any thread that reaches the loop in
+                // `Pending` state is racing a sibling that is about to
+                // claim leadership — wait for the transition.
+                FlightInner::Pending => state.ready.wait(&mut inner),
                 FlightInner::Running { .. } => state.ready.wait(&mut inner),
                 FlightInner::Done(result) => {
-                    return result.clone().map(|value| SingleflightRunResult {
+                    let result = result.clone();
+                    drop(inner);
+                    self.unpin(&lane_key, &state);
+                    return result.map(|value| SingleflightRunResult {
                         value,
                         role: SingleflightRole::Follower,
                         forked_lane,
@@ -1806,28 +2105,32 @@ mod tests {
     }
 
     /// A caller that arrives AFTER the leader has fully completed —
-    /// strictly outside the leader's compute window — must still join
-    /// the leader's published result as a `Follower`, NOT spawn a fresh
-    /// cold `Leader`.
+    /// strictly outside the leader's compute window — still joins the
+    /// leader's published result as a `Follower` (NOT a second cold
+    /// `Leader`) as long as a participation pin keeps the lane alive.
     ///
     /// This is the deterministic, load-independent characterization of
     /// the cold-concurrent singleflight race that
     /// `cache_layer_cold_concurrent_attribution::sixteen_cold_concurrent_…`
     /// hits non-deterministically under CPU contention. The earlier
     /// `singleflight_coalesces_same_key_and_token` test only proves
-    /// coalescing for callers that OVERLAP the leader's compute (the
-    /// leader sleeps 50ms and both threads are barrier-released into
-    /// that window). It does NOT exercise the post-compute gap: a
-    /// caller whose claim lands after the leader returned.
+    /// coalescing for callers that OVERLAP the leader's compute window.
+    /// It does NOT exercise the post-compute gap: a caller whose claim
+    /// lands after the leader returned. `run_stable_request` holds a
+    /// [`SingleflightGroup::participate`] pin across that whole window
+    /// (every concurrent request pins before it peeks), so the lane the
+    /// leader published into stays joinable; this test models that pin
+    /// explicitly.
     ///
     /// DISCRIMINATES: pre-fix, the leader removed its flight slot the
-    /// instant `compute()` returned, so the second caller found an
-    /// empty lane and became a second `Leader` (`computes == 2`).
-    /// Post-fix, the leader retains its `Done` result as a joinable
-    /// rendezvous, so the second caller joins as `Follower`
+    /// instant `compute()` returned, so a caller arriving in the
+    /// post-compute gap found an empty lane and became a second `Leader`
+    /// (`computes == 2`) — even though a sibling request was still in
+    /// flight. Post-fix, the participation pin keeps the leader's `Done`
+    /// rendezvous alive, so the late caller joins as `Follower`
     /// (`computes == 1`).
     #[test]
-    fn singleflight_late_caller_joins_completed_leader_as_follower() {
+    fn singleflight_late_caller_joins_pinned_completed_leader_as_follower() {
         let group = SingleflightGroup::<String, usize, &'static str>::default();
         let token = StoreViewCompatToken {
             epoch: 9,
@@ -1835,9 +2138,15 @@ mod tests {
         };
         let computes = AtomicUsize::new(0);
 
-        // Leader runs to completion synchronously on this thread and
-        // returns BEFORE the second call is even issued — the second
-        // call therefore lands strictly in the post-compute gap.
+        // A sibling request pins the lane (as `run_stable_request` does
+        // before its pre-flight peek) and holds the pin across the whole
+        // window below — modelling a concurrent burst member that has not
+        // yet reached its own `run` claim.
+        let _pin = group.participate("node".to_string(), token);
+
+        // Leader runs to completion synchronously and returns BEFORE the
+        // late call is issued — the late call lands strictly in the
+        // post-compute gap.
         let leader = group
             .run("node".to_string(), token, || {
                 computes.fetch_add(1, Ordering::SeqCst);
@@ -1847,9 +2156,10 @@ mod tests {
         assert_eq!(leader.role, SingleflightRole::Leader);
         assert_eq!(computes.load(Ordering::SeqCst), 1);
 
-        // Second caller, same key + token, issued only now. It must
-        // observe the leader's retained `Done` result and join as a
-        // Follower WITHOUT recomputing.
+        // Late caller, same key + token, issued only now. Because the
+        // sibling pin kept the lane alive, it observes the leader's
+        // retained `Done` result and joins as a Follower WITHOUT
+        // recomputing.
         let late = group
             .run("node".to_string(), token, || {
                 computes.fetch_add(1, Ordering::SeqCst);
@@ -1860,29 +2170,30 @@ mod tests {
         assert_eq!(
             computes.load(Ordering::SeqCst),
             1,
-            "late caller must NOT recompute — it joins the completed leader's published result",
+            "late caller must NOT recompute — it joins the pinned leader's published result",
         );
         assert_eq!(
             late.role,
             SingleflightRole::Follower,
-            "a caller arriving after the leader finished must be a Follower, not a second cold Leader",
+            "a caller arriving after the leader finished, while the lane is pinned, must be a Follower",
         );
         assert_eq!(*late.value, 7, "late caller receives the leader's value");
     }
 
-    /// The retained `Done` rendezvous must not leak: once every
-    /// participant of a completed flight has returned, the slot is
-    /// reaped so a SUBSEQUENT independent request (e.g. after the value
-    /// was evicted from the durable cache) cold-computes as a fresh
-    /// Leader instead of forever returning the stale retained result.
+    /// The retained `Done` rendezvous is a per-burst dedup primitive,
+    /// NOT a result cache: once the last pin on the lane is released the
+    /// slot is reaped, so a SUBSEQUENT independent request re-enters the
+    /// cold path as a fresh `Leader` instead of forever returning the
+    /// stale retained result. This preserves the "non-cacheable /
+    /// empty-fact results are not persisted" contract the validated
+    /// caches own.
     ///
-    /// DISCRIMINATES a naive "never remove Done" fix: that fix would
-    /// keep returning the original value (`computes` would stay at 1 on
-    /// the third call and the role would be `Follower`). The correct
-    /// reap drops the slot after the last waiter leaves, so the third
-    /// call is a fresh Leader (`computes == 2`).
+    /// DISCRIMINATES a naive "retain Done forever" fix: that fix would
+    /// keep `computes == 1` and return the stale value on the post-drain
+    /// call. The correct reap drops the slot once the last pin leaves, so
+    /// the later call cold-computes again (`computes == 2`).
     #[test]
-    fn singleflight_done_rendezvous_is_reaped_after_last_participant() {
+    fn singleflight_done_rendezvous_is_reaped_after_last_pin() {
         let group = SingleflightGroup::<String, usize, &'static str>::default();
         let token = StoreViewCompatToken {
             epoch: 3,
@@ -1890,24 +2201,30 @@ mod tests {
         };
         let computes = AtomicUsize::new(0);
 
-        // Leader completes and a single late follower joins; after both
-        // have returned the slot must be empty.
-        let _leader = group
-            .run("node".to_string(), token, || {
-                computes.fetch_add(1, Ordering::SeqCst);
-                Ok(1)
-            })
-            .unwrap();
-        let _follower = group
-            .run("node".to_string(), token, || {
-                computes.fetch_add(1, Ordering::SeqCst);
-                Ok(2)
-            })
-            .unwrap();
-        assert_eq!(computes.load(Ordering::SeqCst), 1, "follower joined leader");
+        // A leader completes while a sibling pin is held, and a late
+        // caller joins the retained rendezvous.
+        {
+            let _pin = group.participate("node".to_string(), token);
+            let _leader = group
+                .run("node".to_string(), token, || {
+                    computes.fetch_add(1, Ordering::SeqCst);
+                    Ok(1)
+                })
+                .unwrap();
+            let joiner = group
+                .run("node".to_string(), token, || {
+                    computes.fetch_add(1, Ordering::SeqCst);
+                    Ok(2)
+                })
+                .unwrap();
+            assert_eq!(computes.load(Ordering::SeqCst), 1, "joiner joined leader");
+            assert_eq!(joiner.role, SingleflightRole::Follower);
+            assert_eq!(*joiner.value, 1);
+            // `_pin` drops here, releasing the last pin and reaping the
+            // lane.
+        }
 
-        // The Done slot was reaped once the last participant left, so a
-        // fresh request re-enters the cold path as a Leader.
+        // A fresh request after the lane drained re-enters the cold path.
         let fresh = group
             .run("node".to_string(), token, || {
                 computes.fetch_add(1, Ordering::SeqCst);

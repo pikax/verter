@@ -125,6 +125,25 @@ where
         ))
     }
 
+    fn lane_token(&mut self) -> crate::resolver_core::StoreViewCompatToken {
+        // Cheap lane token that matches `snapshot_view().compat_token()`
+        // WITHOUT building a full `HostStoreView` (which also captures
+        // inputs and runs the epoch-stability retry loop). A fixed view
+        // (overlay session) carries its own token; the snapshot path
+        // tokenises on the live store-view epoch with no session
+        // overlay, exactly as `host.snapshot_store_view().compat_token()`
+        // would. Used only to pin the singleflight lane across the
+        // request — a token mismatch would merely disable the burst-dedup
+        // optimisation, never affect correctness.
+        match self.fixed_store_view.as_ref() {
+            Some(view) => view.compat_token(),
+            None => crate::resolver_core::StoreViewCompatToken {
+                epoch: self.host.current_store_view_epoch(),
+                session: None,
+            },
+        }
+    }
+
     fn is_stable(&mut self, _view: &Self::View) -> bool {
         if self.fixed_store_view.is_some() {
             return true;
