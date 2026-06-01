@@ -542,11 +542,11 @@ fn compile_many_throughput_smoke() {
                 .map(|p| p.join("target"))
                 .unwrap_or_else(|| PathBuf::from("target"))
         })
-        .join("phase09b");
+        .join("compile-throughput");
     let _ = std::fs::create_dir_all(&out_dir);
-    let out_path = out_dir.join("phase09b-bench.json");
+    let out_path = out_dir.join("compile-throughput-bench.json");
     std::fs::write(&out_path, serde_json::to_vec_pretty(&json_blob).unwrap())
-        .expect("write phase09b-bench.json");
+        .expect("write compile-throughput-bench.json");
     eprintln!(
         "throughput smoke wrote: {} (cold={:.2}ms, warm={:.2}ms, hit_ratio={})",
         out_path.display(),

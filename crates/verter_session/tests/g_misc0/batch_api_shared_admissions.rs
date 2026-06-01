@@ -23,12 +23,13 @@
 //!    other N-1 results succeed.
 //!
 //! Test environment note: files are loaded via `MetaProject::upsert_base`
-//! BEFORE the batch dispatch so the scheduler's cpu_pool is free during
-//! the batch's `dispatch_meta_jobs` call. With `cpu_threads = 1` and
-//! the rayon worker busy running the batch closure, recursive scheduler
-//! work would deadlock — `upsert_base` ensures the host's file caches
-//! are warm so the cold-compute paths inside the batch dispatch do not
-//! re-enter the scheduler.
+//! BEFORE the batch dispatch so these tests exercise the warm shared-
+//! admission + single-submission-accounting path rather than cold
+//! cross-file loading. The batch's outer fan-out runs on the host
+//! coordinator pool (via the host batch coordinator); the scheduler
+//! accounts the submission once through `account_batch_submission`. The
+//! cold-dependency starvation path is covered separately by
+//! `batch_meta_cold_deps_no_pool_starvation`.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -194,10 +195,11 @@ fn batch_preserves_input_order() {
 
 /// **Test 3 — `submit_count` increases by exactly 1 per batch.**
 ///
-/// Pre-Stage-8 the loop in `dispatch_meta_jobs` incremented
-/// `submit_count` once per job (N times for N inputs). The
-/// architecture contract is now O(1) per batch — a single scheduler
-/// submission with N jobs fanned out internally.
+/// The contract is O(1) scheduler submission accounting per batch: the
+/// host batch coordinator calls `Scheduler::account_batch_submission`
+/// exactly once for a non-empty batch (the N jobs share one submission
+/// context and fan out on the host coordinator pool), so `submit_count`
+/// bumps by 1 regardless of input count.
 #[test]
 fn batch_scheduler_submit_count_is_o1() {
     let n: usize = 10;

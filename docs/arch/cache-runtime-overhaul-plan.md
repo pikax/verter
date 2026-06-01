@@ -3450,6 +3450,15 @@ fan-out at `:360`) is preserved verbatim with the one-line change
 `self.scheduler_cpu_pool.install_non_driver(...)`.
 Behavior, counters, and the existing tests stay green.
 
+> Update: `Scheduler::dispatch_meta_jobs` has since been DISSOLVED by
+> the host-batch-coordinator change. The scheduler no longer performs
+> any outer batch fan-out; the host/runtime layer owns batch fan-out on
+> its coordinator pool, and the scheduler exposes only the pool-free
+> `Scheduler::account_batch_submission` for per-batch submission
+> accounting. There is no `cpu_pool.install` meta-batch site left to
+> migrate here — this Block 7 step now applies only to the driver-
+> internal parse closures, not to a `dispatch_meta_jobs` method.
+
 **`verter_session::host_construction.rs`:**
 
 ```rust
