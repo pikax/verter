@@ -887,13 +887,20 @@ impl Scheduler {
     ///
     /// Uses `wait_or_drive` so both native (driver thread) and
     /// single-threaded callers share the same completion semantics.
-    /// Borrows the batch so the caller may inspect the handles
-    /// afterward (e.g. for per-request audit attribution).
-    pub fn wait_batch(
+    ///
+    /// Generic over `Borrow<BatchHandle>` so BOTH a by-value
+    /// `wait_batch(batch)` and a borrowed `wait_batch(&batch)` compile
+    /// unchanged. The waiter only reads the handles, so a caller that
+    /// wants to inspect the batch afterward (e.g. for per-request audit
+    /// attribution) passes `&batch` and keeps ownership; a caller that
+    /// is done with the batch passes it by value. The pre-existing
+    /// by-value public signature is preserved by construction.
+    pub fn wait_batch<B: std::borrow::Borrow<BatchHandle>>(
         self: &Arc<Self>,
-        batch: &BatchHandle,
+        batch: B,
     ) -> Vec<crate::job::CompletionState<RequestResult>> {
         batch
+            .borrow()
             .handles
             .iter()
             .map(|handle| self.wait_or_drive(handle))
@@ -15053,5 +15060,47 @@ mod tests {
             22,
             "result[2] must correspond to input handle 2"
         );
+    }
+
+    /// `wait_batch` accepts a batch BY VALUE — the pre-existing public
+    /// signature. This is a compile-AND-runtime proof of the additive
+    /// boundary (P1a): the `Borrow<BatchHandle>` generic must keep the
+    /// original `sched.wait_batch(batch)` call shape working so off-tree
+    /// by-value callers are not source-broken. A regression that
+    /// narrowed the parameter back to `&BatchHandle` would fail to
+    /// COMPILE this `move`-style call (the `batch` binding is consumed,
+    /// not borrowed), so the test cannot be reverted silently.
+    #[test]
+    fn wait_batch_accepts_batch_by_value() {
+        let loader = Arc::new(MemorySourceLoader::new());
+        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+
+        let (h0, s0) = completion_pair::<RequestResult>();
+        let (h1, s1) = completion_pair::<RequestResult>();
+        let batch = BatchHandle {
+            handles: vec![h0, h1],
+        };
+
+        let mk = |gen: u64| {
+            RequestResult::Source(Arc::new(crate::node::SourceSnapshot::new_empty(
+                Arc::from("x"),
+                gen,
+            )))
+        };
+        s0.send(CompletionState::Ready(mk(7)));
+        s1.send(CompletionState::Ready(mk(9)));
+
+        // BY VALUE — `batch` is moved into `wait_batch`. This is the
+        // pre-existing call shape the `Borrow` generic preserves.
+        let results = sched.wait_batch(batch);
+        assert_eq!(results.len(), 2, "one result per input handle");
+        let gen_of = |state: &CompletionState<RequestResult>| -> u64 {
+            match state {
+                CompletionState::Ready(RequestResult::Source(snap)) => snap.generation,
+                other => panic!("expected Ready(Source), got {other:?}"),
+            }
+        };
+        assert_eq!(gen_of(&results[0]), 7, "by-value result[0] follows input 0");
+        assert_eq!(gen_of(&results[1]), 9, "by-value result[1] follows input 1");
     }
 }
