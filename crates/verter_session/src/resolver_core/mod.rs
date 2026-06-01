@@ -570,18 +570,6 @@ where
     fn is_stable(&mut self, view: &Self::View) -> bool;
     fn store_stable(&mut self, value: &V);
 
-    /// The singleflight lane token for THIS request, used to pin the
-    /// flight lane (via [`SingleflightGroup::participate`]) across the
-    /// whole request — including the pre-flight cache peek — so a
-    /// concurrent burst deterministically collapses onto one cold
-    /// leader. It MUST equal the `compat_token()` the per-attempt
-    /// `snapshot_view()` reports, so the pin and the inner `run` claim
-    /// land on the same lane. The default snapshots a view to read its
-    /// token; executors with a cheaper token source should override.
-    fn lane_token(&mut self) -> StoreViewCompatToken {
-        self.snapshot_view().compat_token()
-    }
-
     fn max_attempts(&self) -> usize {
         3
     }
@@ -599,28 +587,37 @@ where
     let cache_key = executor.cache_key();
     let max_attempts = executor.max_attempts();
 
-    // Pin the singleflight lane for THIS request's whole lifetime, BEFORE
-    // the pre-flight cache peek. Without this pin, a concurrent burst can
-    // tear down the leader's lane in the gap between a straggler's
-    // "cache-miss" decision (the peek below) and its `singleflight.run`
-    // claim, so the straggler finds a vacant lane and spawns a second
-    // cold leader. The participation pin keeps the lane alive across the
-    // whole burst — every concurrent caller pins before it peeks — so the
-    // leader's published `Done` rendezvous is still joinable when a
-    // straggler finally reaches `run`, and it Follower-joins instead of
-    // recomputing. The token folds into the lane key, so the pin only
-    // coalesces callers that share the same store-view identity (R20).
-    //
-    // The pin token is the caller's current store-view compat token. If a
-    // mid-request project mutation bumps the store-view epoch, the inner
-    // `run` lands on a fresh lane keyed by the new token (correct: the
-    // pre-bump result is no longer interchangeable), and this stale pin
-    // simply releases its now-unrelated lane on drop.
-    let pin_token = executor.lane_token();
-    let _participation = singleflight.participate(cache_key.clone(), pin_token);
-
     for attempt in 0..max_attempts {
         let store_view = executor.snapshot_view();
+
+        // Pin the singleflight lane for THIS attempt's whole lifetime,
+        // BEFORE the pre-flight cache peek and the inner `run` claim, on
+        // the SAME lane those steps run on — the actual snapshotted view's
+        // `compat_token()`. Without this pin, a concurrent burst can tear
+        // down the leader's lane in the gap between a straggler's
+        // "cache-miss" decision (the peek below) and its `singleflight.run`
+        // claim, so the straggler finds a vacant lane and spawns a second
+        // cold leader. The participation pin keeps the lane alive across the
+        // whole burst — every concurrent caller pins before it peeks — so the
+        // leader's published `Done` rendezvous is still joinable when a
+        // straggler finally reaches `run`, and it Follower-joins instead of
+        // recomputing. The token folds into the lane key, so the pin only
+        // coalesces callers that share the same store-view identity (R20).
+        //
+        // The pin is taken from the per-attempt `store_view.compat_token()`
+        // rather than a separately-derived token, so the PINNED lane is
+        // exactly the lane the inner `run` claims for BOTH base
+        // (`session: None`) and session (`session: Some(id)`) hosts. This
+        // closes two ways the pin lane could drift from the run lane: a
+        // session host whose view carries `session: Some(id)` while a
+        // cheaper token source reports `session: None`, and a mid-request
+        // store-view epoch bump. If the epoch (or session) changes across
+        // attempts, the next attempt snapshots a fresh view and re-pins the
+        // new lane; the prior attempt's pin releases its now-unrelated lane
+        // on drop (a leader landing on the new lane is correct — the
+        // pre-bump result is no longer interchangeable).
+        let _participation = singleflight.participate(cache_key.clone(), store_view.compat_token());
+
         if let Some(cached) = executor.try_get_cached(&store_view) {
             return Ok(RequestRunResult {
                 value: cached,
@@ -2238,6 +2235,392 @@ mod tests {
         );
         assert_eq!(fresh.role, SingleflightRole::Leader);
         assert_eq!(*fresh.value, 3);
+    }
+
+    /// Shared backing state for a session-scoped component-meta request
+    /// modelled through the real [`run_stable_request`] entry point. Every
+    /// caller snapshots a view whose `compat_token` carries
+    /// `session: Some(id)` — exactly what
+    /// `SessionRequestHost::snapshot_store_view` ->
+    /// `HostStoreView::from_session_id` produces. The cache + cold-compute
+    /// counter are shared across the request so a correct dedup collapses
+    /// to ONE cold compute.
+    struct SessionBurstState {
+        cache: ValidatedFactCache<String, usize>,
+        valid_fact: FactVersionRef,
+        computes: AtomicUsize,
+        /// Released by the test driver to let a leader's `compute` return.
+        /// Models a leader that is still mid-flight (holding its run-lane
+        /// self-pin) until the test has lined up the post-compute gap.
+        leader_gate: Mutex<bool>,
+        leader_gate_cv: Condvar,
+        /// Signalled by the leader once it has entered `compute` (so the
+        /// driver knows a leader exists and which thread it is).
+        leader_entered: Mutex<bool>,
+        leader_entered_cv: Condvar,
+    }
+
+    /// Per-thread executor reading the shared [`SessionBurstState`] through
+    /// [`run_stable_request`]. The `session: Some(id)` token is the whole
+    /// point: pre-fix, `run_stable_request` pinned the lane from a separate
+    /// `lane_token` that hardcoded `session: None`, so the pin lane drifted
+    /// off the `session: Some(id)` run lane and the post-compute-gap race
+    /// was NOT closed for session callers.
+    struct SessionBurstExecutor<'a> {
+        shared: &'a SessionBurstState,
+        session_id: u64,
+        /// When `true`, this caller's `compute` blocks on
+        /// `shared.leader_gate` (used to PIN the leader mid-flight while
+        /// the driver lines up a straggler). When `false`, `compute`
+        /// returns immediately.
+        gated_leader: bool,
+    }
+
+    impl<'a> StableRequestExecutor<String, usize> for SessionBurstExecutor<'a> {
+        type View = TestView;
+        type Error = &'static str;
+
+        fn cache_key(&self) -> String {
+            "node".to_string()
+        }
+
+        fn snapshot_view(&mut self) -> Self::View {
+            TestView {
+                token: StoreViewCompatToken {
+                    epoch: 1,
+                    session: Some(self.session_id),
+                },
+                valid_facts: [self.shared.valid_fact.clone()].into_iter().collect(),
+            }
+        }
+
+        fn try_get_cached(&mut self, view: &Self::View) -> Option<usize> {
+            self.shared
+                .cache
+                .get_if_valid(&"node".to_string(), view)
+                .map(|cached| *cached)
+        }
+
+        fn compute(&mut self, _view: &Self::View) -> Result<usize, Self::Error> {
+            self.shared.computes.fetch_add(1, Ordering::SeqCst);
+            if self.gated_leader {
+                // Announce that a leader has entered compute …
+                {
+                    let mut entered = self.shared.leader_entered.lock();
+                    *entered = true;
+                    self.shared.leader_entered_cv.notify_all();
+                }
+                // … and stay mid-flight (holding the run-lane self-pin)
+                // until the driver releases the gate.
+                let mut open = self.shared.leader_gate.lock();
+                while !*open {
+                    self.shared.leader_gate_cv.wait(&mut open);
+                }
+            }
+            Ok(42)
+        }
+
+        fn is_stable(&mut self, _view: &Self::View) -> bool {
+            true
+        }
+
+        fn store_stable(&mut self, value: &usize) {
+            self.shared.cache.insert(
+                "node".to_string(),
+                *value,
+                vec![self.shared.valid_fact.clone()],
+            );
+        }
+
+        fn max_attempts(&self) -> usize {
+            3
+        }
+    }
+
+    /// SESSION-lane cold-concurrent dedup contract, deterministic
+    /// post-compute-gap form (P1a).
+    ///
+    /// Models two concurrent session-scoped component-meta requests on the
+    /// SAME `session: Some(id)` lane, BOTH flowing through the real
+    /// [`run_stable_request`] entry point:
+    ///
+    /// 1. A **sibling** request enters `compute` as the leader and parks
+    ///    there (holding its run-lane self-pin AND its participation pin).
+    /// 2. A **straggler** request is then released. It snapshots its view,
+    ///    pins, peeks (miss), and reaches `run_retaining`. Because the
+    ///    sibling is still mid-flight, the straggler joins the in-flight
+    ///    leader as a Follower rather than spawning a second cold leader.
+    ///
+    /// The participation pin the straggler itself takes is on the lane its
+    /// `run_retaining` claims — and that is the whole fix.
+    ///
+    /// DISCRIMINATES P1a: pre-fix, `run_stable_request` pinned the lane via
+    /// a `lane_token()` override hardcoding `session: None`, while the
+    /// inner `run_retaining` claimed `store_view.compat_token()` =
+    /// `session: Some(id)`. Both requests therefore pinned the WRONG
+    /// (`None`) lane; the `Some(id)` run lane carried only the leader's
+    /// transient self-pin, so a straggler arriving in the leader's
+    /// post-compute gap found a vacant `Some(id)` lane and spawned a SECOND
+    /// cold leader (`computes == 2`). Post-fix, the pin is taken from the
+    /// actual `store_view.compat_token()`, so pin lane == run lane ==
+    /// `Some(id)`, the straggler joins as a Follower, and the burst
+    /// collapses to exactly one cold compute (`computes == 1`).
+    #[test]
+    fn session_cold_concurrent_requests_collapse_to_single_leader() {
+        const SESSION_ID: u64 = 7;
+
+        let singleflight = Arc::new(SingleflightGroup::<
+            String,
+            StableExecutionValue<usize>,
+            &'static str,
+        >::default());
+        let shared = Arc::new(SessionBurstState {
+            cache: ValidatedFactCache::default(),
+            valid_fact: FactVersionRef::FileWholeHash {
+                canonical_id: "/src/App.vue".to_string(),
+                hash: [7; 16],
+            },
+            computes: AtomicUsize::new(0),
+            leader_gate: Mutex::new(false),
+            leader_gate_cv: Condvar::new(),
+            leader_entered: Mutex::new(false),
+            leader_entered_cv: Condvar::new(),
+        });
+
+        // Sibling/leader: enters `compute`, parks mid-flight holding its
+        // run-lane pin.
+        let sibling = {
+            let singleflight = Arc::clone(&singleflight);
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                let mut executor = SessionBurstExecutor {
+                    shared: &shared,
+                    session_id: SESSION_ID,
+                    gated_leader: true,
+                };
+                run_stable_request(&singleflight, &mut executor).unwrap()
+            })
+        };
+
+        // Wait until the leader is provably inside `compute` (so the lane
+        // is `Running` and the straggler will not itself become leader by
+        // racing the claim).
+        {
+            let mut entered = shared.leader_entered.lock();
+            while !*entered {
+                shared.leader_entered_cv.wait(&mut entered);
+            }
+        }
+
+        // Straggler: now reaches `run_stable_request` while the leader is
+        // still mid-flight. It must Follower-join the leader's flight.
+        let straggler = {
+            let singleflight = Arc::clone(&singleflight);
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                let mut executor = SessionBurstExecutor {
+                    shared: &shared,
+                    session_id: SESSION_ID,
+                    gated_leader: false,
+                };
+                run_stable_request(&singleflight, &mut executor).unwrap()
+            })
+        };
+
+        // Give the straggler time to commit onto the singleflight (admit
+        // its participation pin + reach the condvar wait inside
+        // `run_retaining`). Poll the run-lane strong count deterministically
+        // rather than sleeping a fixed wall-clock duration: while the
+        // leader holds the lane, the straggler raising the count proves it
+        // joined the SAME `session: Some(id)` lane.
+        let run_lane = StoreViewCompatToken {
+            epoch: 1,
+            session: Some(SESSION_ID),
+        };
+        let mut spins = 0;
+        loop {
+            let count = singleflight.test_flight_strong_count(&"node".to_string(), run_lane);
+            // Leader's `state` binding + map entry + straggler's clone +
+            // straggler's participation `state` = the straggler has fully
+            // committed onto the lane.
+            if count >= 3 {
+                break;
+            }
+            spins += 1;
+            assert!(
+                spins < 100_000,
+                "straggler never committed onto the `session: Some(id)` run lane (count stuck). \
+                 This means the straggler pinned/joined a DIFFERENT lane than the leader's run \
+                 lane (P1a: pin lane drifted off the run lane).",
+            );
+            std::thread::yield_now();
+        }
+
+        // Release the leader; both requests complete.
+        {
+            let mut open = shared.leader_gate.lock();
+            *open = true;
+            shared.leader_gate_cv.notify_all();
+        }
+
+        let sibling_result = sibling.join().unwrap();
+        let straggler_result = straggler.join().unwrap();
+
+        // The decisive assertion: exactly ONE cold compute across both
+        // session requests.
+        let computes = shared.computes.load(Ordering::SeqCst);
+        assert_eq!(
+            computes, 1,
+            "two cold-concurrent session requests on the same `session: Some(id)` lane must \
+             collapse to exactly ONE cold compute (got {computes}). A count of 2 means the \
+             straggler spawned a second cold leader because the participate-pin lane drifted off \
+             the `session: Some(id)` run lane (P1a regression).",
+        );
+
+        // Role attribution: one Leader winner, the straggler a Follower
+        // joiner.
+        assert_eq!(
+            sibling_result.source,
+            RequestSource::Flight {
+                role: SingleflightRole::Leader,
+                forked_lane: false,
+            },
+            "the sibling that ran `compute` is the cold Leader winner",
+        );
+        assert_eq!(
+            straggler_result.source,
+            RequestSource::Flight {
+                role: SingleflightRole::Follower,
+                forked_lane: false,
+            },
+            "the straggler must Follower-join the in-flight leader, not lead a second flight",
+        );
+        assert_eq!(sibling_result.value, 42);
+        assert_eq!(straggler_result.value, 42);
+
+        // Non-cache contract: the lane fully drains after both pins
+        // release.
+        assert_eq!(
+            singleflight.test_flight_strong_count(&"node".to_string(), run_lane),
+            0,
+            "the `session: Some(id)` lane must be reaped after the last pin releases \
+             (per-burst rendezvous, not a cache)",
+        );
+    }
+
+    /// Post-compute-gap dedup for a SESSION lane requires the participation
+    /// pin and the `run` claim to share the SAME `session: Some(id)` lane
+    /// (P1a, primitive form).
+    ///
+    /// This is the session-token analogue of
+    /// [`singleflight_late_caller_joins_pinned_completed_leader_as_follower`],
+    /// and it reproduces the exact composition `run_stable_request`
+    /// performs — `participate(view_token)` held across a
+    /// `run_retaining(view_token)` claim — for the post-compute gap a
+    /// burst opens when a straggler's claim lands AFTER the leader fully
+    /// returned.
+    ///
+    /// DISCRIMINATES P1a directly on the `participate`/`run` lane pairing:
+    /// when the pin lane MATCHES the run lane (`session: Some(id)`, the
+    /// fix), the leader's published `Done` stays joinable across the gap
+    /// and the late session caller is a Follower (`computes == 1`). When
+    /// the pin lane is the pre-fix `session: None` while the run lane is
+    /// `session: Some(id)`, the run lane carries no surviving pin once the
+    /// leader returns, its `Done` is reaped, and the late session caller
+    /// finds a vacant lane and cold-computes a SECOND time
+    /// (`computes == 2`). The test asserts the matched-lane dedup and, as a
+    /// guard, that the mismatched-lane pairing does NOT dedup — pinning the
+    /// invariant from both sides.
+    #[test]
+    fn session_post_compute_gap_dedup_requires_pin_lane_equals_run_lane() {
+        const SESSION_ID: u64 = 11;
+        let run_lane = StoreViewCompatToken {
+            epoch: 4,
+            session: Some(SESSION_ID),
+        };
+
+        // --- Matched lane (the fix): pin lane == run lane == Some(id). ---
+        {
+            let group = SingleflightGroup::<String, usize, &'static str>::default();
+            let computes = AtomicUsize::new(0);
+
+            // A concurrent sibling session request pins the run lane — this
+            // is exactly the pin `run_stable_request` holds, on the actual
+            // view token, post-fix.
+            let _sibling_pin = group.participate("node".to_string(), run_lane);
+
+            // Leader session request runs to completion and returns BEFORE
+            // the straggler claims — opening the post-compute gap.
+            let leader = group
+                .run("node".to_string(), run_lane, || {
+                    computes.fetch_add(1, Ordering::SeqCst);
+                    Ok(7)
+                })
+                .unwrap();
+            assert_eq!(leader.role, SingleflightRole::Leader);
+            assert_eq!(computes.load(Ordering::SeqCst), 1);
+
+            // Straggler session request claims only now. The sibling pin on
+            // the SAME lane kept the leader's `Done` joinable.
+            let straggler = group
+                .run("node".to_string(), run_lane, || {
+                    computes.fetch_add(1, Ordering::SeqCst);
+                    Ok(999)
+                })
+                .unwrap();
+            assert_eq!(
+                computes.load(Ordering::SeqCst),
+                1,
+                "matched-lane session straggler must Follower-join the retained `Done`, not recompute",
+            );
+            assert_eq!(straggler.role, SingleflightRole::Follower);
+            assert_eq!(*straggler.value, 7);
+        }
+
+        // --- Mismatched lane (the pre-fix bug): pin on `session: None`,
+        // run on `session: Some(id)`. The run lane loses its rendezvous in
+        // the gap, so the straggler cold-computes again. This guards the
+        // invariant from the other side — proving the matched-lane dedup
+        // above genuinely depends on the pin landing on the run lane. ---
+        {
+            let none_lane = StoreViewCompatToken {
+                epoch: 4,
+                session: None,
+            };
+            let group = SingleflightGroup::<String, usize, &'static str>::default();
+            let computes = AtomicUsize::new(0);
+
+            // Pre-fix pin: on the WRONG (`None`) lane.
+            let _sibling_pin = group.participate("node".to_string(), none_lane);
+
+            let leader = group
+                .run("node".to_string(), run_lane, || {
+                    computes.fetch_add(1, Ordering::SeqCst);
+                    Ok(7)
+                })
+                .unwrap();
+            assert_eq!(leader.role, SingleflightRole::Leader);
+            assert_eq!(computes.load(Ordering::SeqCst), 1);
+
+            // The run lane (`Some(id)`) had only the leader's transient
+            // self-pin; it was reaped on the leader's `keep` unpin. The
+            // straggler finds a vacant run lane and leads a SECOND flight.
+            let straggler = group
+                .run("node".to_string(), run_lane, || {
+                    computes.fetch_add(1, Ordering::SeqCst);
+                    Ok(999)
+                })
+                .unwrap();
+            assert_eq!(
+                computes.load(Ordering::SeqCst),
+                2,
+                "mismatched-lane session straggler must recompute (the WRONG-lane pin did not keep \
+                 the `Some(id)` run-lane rendezvous alive) — this is precisely the P1a harm the \
+                 matched-lane case above avoids",
+            );
+            assert_eq!(straggler.role, SingleflightRole::Leader);
+            assert_eq!(*straggler.value, 999);
+        }
     }
 
     #[test]
