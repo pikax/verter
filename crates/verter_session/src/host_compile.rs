@@ -583,7 +583,10 @@ fn compile_panic_entry(
         canonical_id: input.canonical_id.clone(),
         code: Arc::from(""),
         source_map: None,
-        errors: vec![format!("[{}] compiler panic: {}", input.canonical_id, message)],
+        errors: vec![format!(
+            "[{}] compiler panic: {}",
+            input.canonical_id, message
+        )],
         duration_ms: 0.0,
         cache_hit: false,
         requested_mode: effective_mode,

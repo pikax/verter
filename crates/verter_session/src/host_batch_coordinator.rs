@@ -310,8 +310,8 @@ impl<'a> HostBatchCoordinator<'a> {
         // One per-batch tracing span carrying the client's label + the
         // fan-out width, so the batch is attributable without each call
         // site wiring its own span.
-        let _span = tracing::debug_span!("host_batch", label = policy.label, items = items.len())
-            .entered();
+        let _span =
+            tracing::debug_span!("host_batch", label = policy.label, items = items.len()).entered();
 
         // Per-batch scheduler submission accounting: the N items share
         // one submission context, so the counter bumps exactly once per
@@ -403,8 +403,8 @@ impl<'a> HostBatchCoordinator<'a> {
             return Vec::new();
         }
         // Same per-batch tracing span as the native path.
-        let _span = tracing::debug_span!("host_batch", label = policy.label, items = items.len())
-            .entered();
+        let _span =
+            tracing::debug_span!("host_batch", label = policy.label, items = items.len()).entered();
         // Same once-per-non-empty-batch accounting as the native path
         // (pool-free; the nested guard prevents double-counting).
         if !IN_HOST_BATCH.with(Cell::get) {

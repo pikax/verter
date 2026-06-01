@@ -776,8 +776,9 @@ impl MetaSession {
             label: "component_meta_batch_payloads",
             on_item_panic: &on_item_panic,
         };
-        let results = self.with_overlay_view(|_view| {
-            host.batch_coordinator().run_batch(&jobs, &policy, move |job| {
+        let results =
+            self.with_overlay_view(|_view| {
+                host.batch_coordinator().run_batch(&jobs, &policy, move |job| {
                 let verter_scheduler::stage::SchedulerJobKind::ComponentMeta { canonical_id } = job;
                 let canonical_or_alias = canonical_id.as_ref();
                 let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
@@ -823,7 +824,7 @@ impl MetaSession {
                 host.store_meta_payload(canonical.as_str(), &facts, payload.clone());
                 Some(payload)
             })
-        });
+            });
         Ok(results)
     }
 
