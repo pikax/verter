@@ -42,8 +42,23 @@ pub struct CpuConcurrencySemaphore {
 
 impl CpuConcurrencySemaphore {
     /// Creates a semaphore with `capacity` permits.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity == 0`. A zero-capacity CPU-concurrency cap is a
+    /// caller-contract violation: every `acquire()` would block forever
+    /// (no permit can ever become free), deadlocking the CPU pool. The
+    /// assert is RELEASE-ACTIVE — the cap is configured once at pool
+    /// construction, so the check is off the hot path and a misconfigured
+    /// cap must fail loudly in release builds, not silently deadlock.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
+        assert!(
+            capacity >= 1,
+            "CpuConcurrencySemaphore capacity must be >= 1; a 0-permit \
+             semaphore would deadlock every acquire (no permit can ever \
+             become available)"
+        );
         Self {
             available: Mutex::new(capacity),
             permit_returned: Condvar::new(),
@@ -114,6 +129,15 @@ mod tests {
             assert_eq!(*sem.available.lock(), 0, "permit taken");
         }
         assert_eq!(*sem.available.lock(), 1, "permit returned on drop");
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity must be >= 1")]
+    fn new_zero_capacity_panics() {
+        // A 0-permit semaphore would deadlock every acquire; `new` must
+        // reject it loudly (RELEASE-ACTIVE assert), not construct a
+        // permanently-blocking limiter.
+        let _ = CpuConcurrencySemaphore::new(0);
     }
 
     #[test]
