@@ -1651,7 +1651,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // lower to `TypeParamDecl` — constraints/defaults lower
             // recursively. `RecursiveRef`, `Infer`, `Rest`, and
             // `Unknown` remain scratch-only per §7.14.
-            TypeExpr::Function(func) => {
+            //
+            // `ConstructorType` (a bare `new (...) => R`) lowers through the
+            // SAME `SemanticNodeData::Function` path: it carries an identical
+            // `FunctionExpr` payload, and the constructor-vs-function
+            // distinction is consumed BEFORE this query-time dispatch (by the
+            // Vue runtime-constructor reducer and the wire-graph builder). At
+            // query time a bare constructor type is treated function-like, so
+            // it shares the canonical Function carrier and raises back as
+            // `TypeExpr::Function`. Without this explicit arm the wildcard
+            // `_ => opaque(QueryError::Miss)` below would regress constructor-
+            // type props to `Unknown("semanticMiss")`.
+            TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
                 use crate::semantic_query::{FunctionParam, TypeParamDecl};
                 // Function generic shadowing: a function type's OWN
                 // `<T>` shadows an identically-named outer generic

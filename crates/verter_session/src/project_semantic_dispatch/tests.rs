@@ -8020,6 +8020,115 @@ fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
     );
 }
 
+/// Discriminating regression for the `TypeExpr::ConstructorType` lowering arm
+/// in `shallow_lower_type_expr_with_context` (lower.rs).
+///
+/// A bare constructor type `new (x: Foo) => Bar` lowers through the SAME
+/// `SemanticNodeData::Function` carrier as `TypeExpr::Function` (conservative
+/// function-like treatment; the constructor-vs-function distinction is consumed
+/// by the Vue runtime-ctor reducer + the wire-graph builder BEFORE query-time
+/// dispatch). It MUST NOT route to the wildcard `_ => opaque(QueryError::Miss)`
+/// arm.
+///
+/// Discrimination: before the explicit `ConstructorType` arm existed, the
+/// wildcard absorbed it and produced `SemanticNodeData::Opaque(QueryError::Miss)`
+/// — so query-time projection of `defineProps<{ f: new () => Foo }>()` regressed
+/// `f` to `Unknown("semanticMiss")`. This test asserts (a) the lowered node is
+/// `SemanticNodeData::Function` (NOT `Opaque`), preserving the parameter, and
+/// (b) it raises back to `TypeExpr::Function`. Both assertions FAIL against the
+/// pre-fix wildcard.
+#[test]
+fn constructor_type_lowers_function_like_not_opaque_miss() {
+    use verter_type_expr::{FunctionExpr, FunctionParam, PrimitiveName, TypeExpr};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // `new (x: string) => number` — a bare constructor type carrying ONE named
+    // parameter (so the raised round-trip can be verified to preserve it).
+    let ctor = TypeExpr::ConstructorType(Arc::new(FunctionExpr::synthetic(
+        vec![FunctionParam::synthetic(
+            Some("x".to_string()),
+            TypeExpr::Primitive(PrimitiveName::String),
+            false,
+            false,
+        )],
+        Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Number))),
+        Vec::new(),
+    )));
+
+    // Minimal hermetic lowering context (mirrors the `build_instantiate` call
+    // site; primitives + the constructor type lower without host routing).
+    let origin = "/ctor.ts";
+    let env: rustc_hash::FxHashMap<String, SemanticNodeId> = rustc_hash::FxHashMap::default();
+    let name_resolution: rustc_hash::FxHashMap<String, ResolvedRootIdentity> =
+        rustc_hash::FxHashMap::default();
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(origin),
+        whole_hash: [0u8; 16],
+        local_scope: None,
+    };
+    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+    let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+    let context = crate::semantic_query::ProjectionReductionContext::published(
+        ProjectionMode::Shallow,
+    );
+
+    let lowered = dispatch.shallow_lower_type_expr_with_context(
+        &ctor,
+        &env,
+        &scope,
+        &name_resolution,
+        None,
+        &shadowing,
+        &mut substitutions,
+        context,
+    );
+
+    // (a) The lowered node is a Function carrier — NOT an Opaque(Miss). Pin the
+    // single parameter survives lowering.
+    let data = graph.node_data(lowered).expect("constructor type interned");
+    match data.as_ref() {
+        SemanticNodeData::Function { params, .. } => {
+            assert_eq!(
+                params.len(),
+                1,
+                "constructor-type parameter must survive lowering through the \
+                 shared Function carrier",
+            );
+            assert_eq!(
+                params[0].name.as_deref(),
+                Some("x"),
+                "constructor-type parameter name must be preserved",
+            );
+        }
+        SemanticNodeData::Opaque(err) => panic!(
+            "constructor type REGRESSED to Opaque({err:?}) — the wildcard arm \
+             absorbed it instead of the explicit ConstructorType arm lowering it \
+             function-like",
+        ),
+        other => panic!("expected SemanticNodeData::Function, got {other:?}"),
+    }
+
+    // (b) Raising the carrier back yields `TypeExpr::Function` (the bound
+    // function-like wire decision: the constructor distinction is erased at the
+    // query-time round-trip boundary, never surfaced as `semanticMiss`).
+    let raised = dispatch
+        .raise_node_to_type_expr(lowered)
+        .expect("function carrier must raise back to a TypeExpr");
+    match &raised {
+        TypeExpr::Function(func) => {
+            assert_eq!(
+                func.parameters.len(),
+                1,
+                "raised function must preserve the constructor-type parameter",
+            );
+        }
+        other => panic!("expected raised TypeExpr::Function, got {other:?}"),
+    }
+}
+
 /// Discriminating: when a HERITAGE arm is a cross-file
 /// `Omit<Base, K>` (`interface Derived extends Omit<Base, K>`), `Base` is
 /// reached through `object_filter_source_surface`'s CARRIER branch (a
