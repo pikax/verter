@@ -8071,9 +8071,8 @@ fn constructor_type_lowers_function_like_not_opaque_miss() {
     };
     let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
     let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-    let context = crate::semantic_query::ProjectionReductionContext::published(
-        ProjectionMode::Shallow,
-    );
+    let context =
+        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow);
 
     let lowered = dispatch.shallow_lower_type_expr_with_context(
         &ctor,
