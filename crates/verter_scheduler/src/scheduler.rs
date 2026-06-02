@@ -15898,13 +15898,13 @@ mod tests {
         /// the transport capacity must dominate that budget so the DAG
         /// ledger stays the sole admission gate.
         ///
-        /// Discriminator: pre-cutover the scheduler built
-        /// `IoPool::new(io_threads)` = `bounded(io_threads * 4)`, IGNORING
-        /// the explicit budget. With `io_threads = 1, dag_budget.io = 16`
-        /// the old transport was `4 < 16` — the channel was a TIGHTER gate
-        /// than the ledger (a second admission authority). Post-cutover the
-        /// host sizes the transport from `resolved_dag_budget().io`, so it
-        /// is `>= 16`.
+        /// Discriminator: a transport sized only as `bounded(io_threads
+        /// * 4)` ignores the explicit budget — with `io_threads = 1,
+        /// dag_budget.io = 16` that transport is `4 < 16`, a TIGHTER gate
+        /// than the ledger (a second admission authority). Sizing the
+        /// transport from `resolved_dag_budget().io` keeps it `>= 16` so
+        /// the ledger stays the sole gate; an `io_threads * 4`-only
+        /// transport (capacity 4) FAILS this assertion.
         #[test]
         fn injected_io_transport_dominates_explicit_dag_budget_io() {
             let config = SchedulerConfig {
@@ -15923,7 +15923,7 @@ mod tests {
                 cap >= 16,
                 "injected IO transport capacity ({cap}) must dominate the resolved \
                  dag_budget.io (16) so the channel never becomes a second admission \
-                 authority; pre-cutover io_threads*4 = 4 would FAIL this"
+                 authority; an io_threads*4-only transport (capacity 4) would FAIL this"
             );
         }
 
@@ -16117,24 +16117,25 @@ mod tests {
 
         /// DRIVER NONBLOCKING (P0 #1, the load-bearing discriminator):
         /// with `io_threads = 1` and an explicit `dag_budget.io` LARGER
-        /// than the legacy `io_threads * 4` channel headroom, the driver
-        /// must dispatch many Source jobs WITHOUT blocking — even while
-        /// the single IO worker is parked inside one Source stage.
+        /// than an `io_threads * 4` channel headroom, the driver must
+        /// dispatch many Source jobs WITHOUT blocking — even while the
+        /// single IO worker is parked inside one Source stage.
         ///
-        /// Discriminator: pre-cutover the IO transport was `bounded(4)`
-        /// and `io_pool.execute` did a BLOCKING `send`. The DAG admitted
-        /// up to `dag_budget.io = 8` IO jobs; the single worker parked on
-        /// job #1, so the channel filled at 4 and the driver's 6th
-        /// blocking `send` HUNG — no further dispatch, the test would time
-        /// out. Post-cutover the transport is sized to `>= 8` and
-        /// `try_submit` uses `try_send`, so all admitted Source jobs are
-        /// enqueued and the driver returns promptly. We assert every
-        /// blocked job's Source stage was ENTERED (the closures reached
-        /// the worker) within a bounded wait — proving the driver did not
-        /// block partway through dispatching them.
+        /// Discriminator: a `bounded(io_threads * 4)` transport (capacity
+        /// 4) combined with a BLOCKING `send` would hang the driver here.
+        /// The DAG admits up to `dag_budget.io = 8` IO jobs; the single
+        /// worker parks on job #1, so the channel fills at 4 and a
+        /// blocking `send` of the 6th job would BLOCK the driver — no
+        /// further dispatch, the test would time out. Sizing the
+        /// transport to `>= 8` and using `try_send` (`try_submit`) instead
+        /// enqueues all admitted Source jobs and the driver returns
+        /// promptly. We assert every blocked job's Source stage was
+        /// ENTERED (the closures reached the worker) within a bounded wait
+        /// — proving the driver did not block partway through dispatching
+        /// them.
         #[test]
         fn driver_does_not_block_dispatching_many_source_jobs_on_one_io_worker() {
-            // 8 files, each gated. io_threads = 1 → legacy transport was
+            // 8 files, each gated. io_threads = 1 → an io_threads*4 transport
             // bounded(4). Explicit dag_budget.io = 8 admits all 8 at once.
             const N: usize = 8;
             let gates = dashmap::DashMap::new();
@@ -16190,10 +16191,11 @@ mod tests {
             // Release each gate as its Source stage is entered. Because
             // there is ONE IO worker, the stages enter one-at-a-time; the
             // discriminator is that EVERY one is reached without the
-            // driver hanging on a full transport. A pre-cutover blocking
-            // send would stall after the 5th admitted job (channel full),
-            // so fewer than N "entered" signals would ever arrive and the
-            // bounded recv below would time out → test failure.
+            // driver hanging on a full transport. A blocking `send` onto a
+            // capacity-4 transport would stall after the 5th admitted job
+            // (channel full), so fewer than N "entered" signals would ever
+            // arrive and the bounded recv below would time out → test
+            // failure.
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
             for (i, erx) in entered_rxs.iter().enumerate() {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -16201,7 +16203,7 @@ mod tests {
                     panic!(
                         "Source stage #{i} was never entered within the deadline — the \
                          driver blocked dispatching Source jobs onto the single IO \
-                         worker (pre-cutover blocking send regression)"
+                         worker (a blocking-send transport regression)"
                     )
                 });
                 // Release this gate so the worker can pick up the next.
