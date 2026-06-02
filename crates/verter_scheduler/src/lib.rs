@@ -82,6 +82,8 @@
 pub mod audit_publish;
 pub mod cache_id;
 pub mod caller_kind;
+pub mod cancellation;
+pub mod cpu_concurrency;
 pub mod dag;
 pub mod driver;
 pub mod edges;
