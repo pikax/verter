@@ -1,3 +1,5 @@
+> **Status (2026-06-02):** Remaining work from this plan is now tracked in [`semantic-db-overhaul-unified-remaining-plan.md`](./semantic-db-overhaul-unified-remaining-plan.md), which merges + sequences the remaining items of this plan with the other track. Drive new work from the unified plan; this file remains as historical/detail reference.
+
 # Verter TypeInfo Semantic Graph Plan — Revision 17
 
 ## 0. Identity
