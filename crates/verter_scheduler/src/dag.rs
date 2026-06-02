@@ -36,6 +36,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
+use crate::cache_id::SchedulerCacheId;
 use crate::job::{CompletionSender, CompletionState, RequestResult, SchedulerError};
 use crate::stage::{Priority, TargetStage, TaskKind};
 
@@ -129,14 +130,6 @@ pub enum FileStageKey {
 /// scheduler does not interpret the bytes — the typed variant is
 /// the discriminator.
 pub type Hash16 = [u8; 16];
-
-/// Opaque session-owned cache identity for [`WorkNodeIdentity::CacheNode`].
-///
-/// The cache layer above the scheduler issues these ids; the scheduler
-/// only uses them as discriminators on the work node identity. The
-/// type is `Copy` so it composes cheaply into hash keys.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SchedulerCacheId(pub u64);
 
 /// Snapshot pin id for cache-node work. Same opacity contract as
 /// [`SchedulerCacheId`].

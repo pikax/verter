@@ -5074,7 +5074,8 @@ mod tests {
     /// re-admit when it wires up.
     #[test]
     fn cache_node_identity_silently_skipped_by_dispatch() {
-        use crate::dag::{PinId, SchedulerCacheId, WorkKind};
+        use crate::cache_id::SchedulerCacheId;
+        use crate::dag::{PinId, WorkKind};
         let loader = Arc::new(MemorySourceLoader::new());
         let sched = test_scheduler_with_loader(loader);
 
@@ -5117,7 +5118,8 @@ mod tests {
     /// releases through its by-value consume.
     #[test]
     fn cachenode_defensive_skip_releases_cpu_permit() {
-        use crate::dag::{PinId, SchedulerCacheId, WorkKind};
+        use crate::cache_id::SchedulerCacheId;
+        use crate::dag::{PinId, WorkKind};
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/follow.vue".to_string(), Arc::from("content"));
         // Tight {cpu:1, io:1} budget: a leaked CPU permit pins the

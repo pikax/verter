@@ -80,6 +80,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod audit_publish;
+pub mod cache_id;
 pub mod caller_kind;
 pub mod dag;
 pub mod driver;
