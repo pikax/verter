@@ -10,7 +10,6 @@ use crate::cache_id::SchedulerCacheId;
 use crate::cancellation::CancellationToken;
 use crate::dag::{Hash16, PinId};
 use crate::node::{AnalysisSnapshot, ArtifactSnapshot, FileKind, SourceSnapshot};
-use crate::stage::TaskKind;
 
 /// Errors from stage execution.
 #[derive(Debug, Clone)]
@@ -37,50 +36,6 @@ pub struct ExtractedDeps {
     pub forward_deps: Vec<String>,
     /// Files that must reach Analysis before this file's Artifact can proceed.
     pub blocker_ids: Vec<String>,
-}
-
-/// Borrowed context handed to [`StageExecutor::dispatch_cpu_task`] — the
-/// CPU-path unifier for `Parse` / `Analysis` / `Artifact` / `CacheNode` work.
-///
-/// The scheduler dispatch path constructs this from the dequeued
-/// [`ReadyJob`](crate::dag::ReadyJob): the canonical id and generation address
-/// the file node, the available source/analysis snapshots feed the CPU stages
-/// that need upstream state, and the cancellation token lets a long-running CPU
-/// task observe supersession. The struct borrows for the dispatch lifetime
-/// only — it never enters a host-owned cache.
-pub struct CpuTaskContext<'a> {
-    /// Canonical id of the file this CPU task is for. Empty for
-    /// [`TaskKind::CacheNode`](crate::stage::TaskKind) work, which is not
-    /// addressed by a file node.
-    pub canonical_id: &'a str,
-    /// Generation the work was admitted at.
-    pub generation: u64,
-    /// Committed source snapshot, when available (present for `Parse` /
-    /// `Analysis` / `Artifact`; absent for `CacheNode`).
-    pub source: Option<&'a SourceSnapshot>,
-    /// Committed analysis snapshot, when available (present for `Artifact`).
-    pub analysis: Option<&'a AnalysisSnapshot>,
-    /// Cooperative cancellation flag for this work item.
-    pub cancellation: &'a CancellationToken,
-}
-
-/// Result of a [`StageExecutor::dispatch_cpu_task`] CPU stage.
-///
-/// The scheduler treats the produced snapshot as opaque — it commits whichever
-/// snapshot variant the stage produced and fans out completion. `Parse` and
-/// `Analysis` produce an [`AnalysisSnapshot`]-bearing outcome path, `Artifact`
-/// an [`ArtifactSnapshot`], and `CacheNode` produces no snapshot (the cache
-/// layer owns its own storage).
-#[derive(Debug)]
-pub enum CpuTaskOutcome {
-    /// A source/parse stage committed a [`SourceSnapshot`].
-    Source(Arc<SourceSnapshot>),
-    /// An analysis stage committed an [`AnalysisSnapshot`].
-    Analysis(Arc<AnalysisSnapshot>),
-    /// An artifact stage committed an [`ArtifactSnapshot`].
-    Artifact(Arc<ArtifactSnapshot>),
-    /// Cache-node materialisation completed; the cache layer owns the result.
-    CacheNode,
 }
 
 /// Trait for plugging host-specific stage logic into the scheduler.
@@ -151,10 +106,13 @@ pub trait StageExecutor: Send + Sync + 'static {
 
     /// Downcast hook on the scheduler's `dyn StageExecutor` trait object.
     ///
-    /// The cache layer above the scheduler recovers its concrete executor
-    /// through this hook so it can run a cache node without the scheduler ever
-    /// importing or naming a session-side type — the scheduler exposes the
-    /// hook only; it does not depend on `verter_session`.
+    /// The hook exists so a cache layer owned above the scheduler can recover
+    /// its concrete executor from the erased trait object and run a cache node
+    /// without the scheduler ever importing or naming a session-side type — the
+    /// scheduler exposes the downcast point only; it does not depend on
+    /// `verter_session`. No in-tree caller downcasts through it yet; the host
+    /// cache-materialisation layer that owns the concrete executor will be that
+    /// caller.
     ///
     /// This is a required method (mirroring [`SnapshotData::as_any`]) rather
     /// than a provided one: a `{ self }` default body cannot coerce `&Self`
@@ -188,25 +146,6 @@ pub trait StageExecutor: Send + Sync + 'static {
         Err(StageError {
             message: "execute_cache_node is not implemented by this StageExecutor — \
                       cache-node dispatch requires an executor that overrides it"
-                .to_string(),
-        })
-    }
-
-    /// CPU-path unifier for `Parse` / `Analysis` / `Artifact` / `CacheNode`
-    /// work. `Load` stays on the I/O path and never reaches this method.
-    ///
-    /// The default is a loud, typed "unsupported" error (not a silent
-    /// success): an executor that has not opted into the unified CPU dispatch
-    /// must fail explicitly. The host executor overrides this to drive its CPU
-    /// stages through one entry point.
-    fn dispatch_cpu_task(
-        &self,
-        _task_kind: &TaskKind,
-        _ctx: CpuTaskContext<'_>,
-    ) -> Result<CpuTaskOutcome, StageError> {
-        Err(StageError {
-            message: "dispatch_cpu_task is not implemented by this StageExecutor — \
-                      unified CPU dispatch requires an executor that overrides it"
                 .to_string(),
         })
     }
