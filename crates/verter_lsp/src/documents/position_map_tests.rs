@@ -1196,29 +1196,32 @@ fn test_tsx_range_cross_source_same_geometry_returns_none() {
 }
 
 // ========================================================================
-// No-`sourcesContent` position-preserving provenance. The `(next_dst_bound,
-// None)` extent-inference arm relies on the position-preserving invariant
-// (source extent == generated extent). A content-less map whose tokens are NOT
-// position-preserving (the source delta between consecutive same-line tokens
-// disagrees with the generated delta) must NOT silently produce inferred
-// source extents — those interior runs are rejected (map to None).
+// No-`sourcesContent` source-extent inference is proven PER-RUN. The
+// `(next_dst_bound, None)` extent-inference arm trusts `next_dst_bound` as the
+// source extent ONLY when a per-run lockstep WITNESS — a mapped token sitting
+// exactly at the run's generated boundary, same source id + source line, whose
+// source column advanced by EXACTLY the generated delta — positively proves it.
+// A run whose boundary witness disagrees (or is missing/unmapped) has no proven
+// extent and is dropped (maps to None). A neighbouring run that DOES have a
+// matching witness still maps: the proof is per-run, not all-or-nothing.
 // ========================================================================
 
-/// A content-less, NON-position-preserving map: consecutive same-(gen-line)-same-(src-line)
-/// mapped tokens whose source-column delta disagrees with their generated-column delta.
-/// Interior runs that would rely on the position-preserving inference must be rejected.
+/// Per-run granularity of the content-less proof: of two adjacent content-less runs, the one
+/// whose boundary witness DISAGREES with its source delta is dropped, while the one whose
+/// boundary witness MATCHES still maps. The proof is per-run, never a single global verdict.
 ///
 /// Discriminating: a permissive arm that always trusts `next_dst_bound` as the source extent
-/// when content is absent maps the first run's interior to some `Some(src ...)`. The
-/// provenance gate detects the non-lockstep deltas and drops the inference -> `None`.
+/// when content is absent maps the FIRST run's interior to `Some(src ...)`; the per-run witness
+/// check rejects it (the boundary token at gen col 3 carries src col 10, not the lockstep
+/// `0 + 3 = 3`). Symmetrically, an all-or-nothing global flag that drops EVERY content-less run
+/// the moment any same-line pair is non-lockstep would also drop the SECOND run — but the second
+/// run's boundary witness (gen col 6 -> src col 13 == `10 + 3`) is exact lockstep, so it must map.
 #[test]
-fn test_no_sources_content_non_position_preserving_is_rejected() {
-    // No `sourcesContent`. Tokens on one generated line, one source line, with a generated
-    // delta of 3 but a SOURCE delta of 10 between the first two tokens (non-lockstep ->
-    // NOT position-preserving):
-    //   gen(0,0)->src(0,0)   bounded by gen 3 (generated delta 3)
-    //   gen(0,3)->src(0,10)  (source delta 10 != generated delta 3)  bounded by gen 6
-    //   gen(0,6)->src(0,13)  last-on-line
+fn test_no_sources_content_extent_proof_is_per_run() {
+    // No `sourcesContent`. Three tokens on one generated line, one source line:
+    //   gen(0,0)->src(0,0)   boundary at gen 3; witness src col 10 != lockstep 0+3=3  -> DROP
+    //   gen(0,3)->src(0,10)  boundary at gen 6; witness src col 13 == lockstep 10+3=13 -> MAPS
+    //   gen(0,6)->src(0,13)  last-on-line (no following extent signal)               -> dropped
     let json =
         build_source_map_without_content("App.vue", &[(0, 0, 0, 0), (0, 3, 0, 10), (0, 6, 0, 13)]);
     let mapper = PositionMapper::from_json(&json).unwrap();
@@ -1231,23 +1234,32 @@ fn test_no_sources_content_non_position_preserving_is_rejected() {
             .all(|c| c.is_none()),
         "precondition: the map carries no sourcesContent"
     );
-    // The first run's interior (col 1) must NOT map: the non-position-preserving deltas mean
-    // the inferred source extent is unsound, so the content-less inference is rejected.
+    // First run: its boundary witness disagrees (src 10 != lockstep 3) -> no proven extent ->
+    // dropped, so its would-be interior (col 1) maps to nothing.
     assert!(
         mapper.tsx_to_vue(ts(0, 1)).is_none(),
-        "a non-position-preserving content-less map must not infer a source extent: {:?}",
+        "a content-less run whose boundary witness is non-lockstep must be dropped: {:?}",
         mapper.tsx_to_vue(ts(0, 1))
     );
+    // Second run: its boundary witness (gen 6 -> src 13) advances in EXACT lockstep with the
+    // generated delta (3), positively proving the run [3,6) -> [10,13). Its interior (col 4)
+    // maps to src col 10 + (4 - 3) = 11. (An all-or-nothing global flag would wrongly drop it.)
+    assert_eq!(
+        mapper.tsx_to_vue(ts(0, 4)).unwrap().pos,
+        LspPosition::new(0, 11),
+        "a content-less run WITH a matching lockstep witness must still map (per-run proof)"
+    );
+    // The last-on-line token (gen 6) has no following extent signal -> dropped.
     assert!(
-        mapper.tsx_to_vue(ts(0, 4)).is_none(),
-        "a non-position-preserving content-less map must not infer a source extent: {:?}",
-        mapper.tsx_to_vue(ts(0, 4))
+        mapper.tsx_to_vue(ts(0, 6)).is_none(),
+        "a last-on-line content-less run has no extent signal and must be dropped: {:?}",
+        mapper.tsx_to_vue(ts(0, 6))
     );
 }
 
 /// Companion guard: a content-less map whose tokens ARE position-preserving (lockstep source
 /// and generated deltas) still maps its interior runs via the invariant inference — the
-/// provenance gate does not over-reject legitimate position-preserving content-less maps.
+/// per-run witness check does not over-reject legitimate position-preserving content-less maps.
 /// (This is the in-bounds counterpart that keeps `test_no_sources_content_interior_*` green.)
 #[test]
 fn test_no_sources_content_position_preserving_still_maps() {
@@ -1259,5 +1271,162 @@ fn test_no_sources_content_position_preserving_still_maps() {
     assert_eq!(
         mapper.tsx_to_vue(ts(0, 1)).unwrap().pos,
         LspPosition::new(0, 1)
+    );
+}
+
+/// Build a content-less source map (no `sourcesContent`) that ALSO carries unmapped tokens.
+/// Reuses the proven mapped+unmapped encoder, then strips the embedded source content so the
+/// decoded map exercises the `(next_dst_bound, None)` content-less extent arm.
+fn build_source_map_without_content_with_unmapped(
+    source_name: &str,
+    mapped: &[(u32, u32, u32, u32)],
+    unmapped: &[(u32, u32)],
+) -> String {
+    let with_content =
+        build_source_map_with_unmapped(source_name, &" ".repeat(80), mapped, unmapped);
+    let mut value: serde_json::Value = serde_json::from_str(&with_content).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("sourcesContent")
+        .expect("builder JSON should carry sourcesContent to strip");
+    serde_json::to_string(&value).unwrap()
+}
+
+/// A content-less run bounded by an UNMAPPED token has NO lockstep witness at its generated
+/// boundary, so its source extent is unproven and the run is DROPPED — an in-run query past the
+/// (non-existent) proven prefix maps to nothing.
+///
+/// Discriminating: with no source content AND no comparable adjacent same-line mapped pair, a
+/// vacuous global position-preserving flag passes (`true`), so the OLD arm fabricated
+/// `run_len = next_dst_bound` and mapped gen col 4 to `Some(src 0,4)`. The per-run witness check
+/// finds only an UNMAPPED token at the boundary (gen col 5), proves nothing, and drops the run.
+#[test]
+fn test_no_sources_content_run_bounded_by_unmapped_is_dropped() {
+    // No `sourcesContent`. One mapped token, then an unmapped token that bounds it at gen 5:
+    //   gen(0,0)->src(0,0)   boundary at gen 5 is an UNMAPPED token -> no witness -> DROP
+    //   unmapped gen(0,5)
+    let json =
+        build_source_map_without_content_with_unmapped("App.vue", &[(0, 0, 0, 0)], &[(0, 5)]);
+    let mapper = PositionMapper::from_json(&json).unwrap();
+
+    // Sanity: the map really is content-less (the arm under test).
+    assert!(
+        mapper
+            .source_map()
+            .get_source_contents()
+            .all(|c| c.is_none()),
+        "precondition: the map carries no sourcesContent"
+    );
+    // The boundary token is unmapped -> the run's extent is unproven -> dropped. A vacuously
+    // "position-preserving" global flag would instead have fabricated the run [0,5) and mapped
+    // col 4 to Some(src 0,4); the per-run witness check forbids that.
+    assert!(
+        mapper.tsx_to_vue(ts(0, 4)).is_none(),
+        "a content-less run bounded by an unmapped token has no lockstep witness and must be \
+         dropped, not fabricated: {:?}",
+        mapper.tsx_to_vue(ts(0, 4))
+    );
+    // Even the run's own start column maps to nothing (the whole run is dropped).
+    assert!(
+        mapper.tsx_to_vue(ts(0, 0)).is_none(),
+        "a dropped content-less run covers no columns at all: {:?}",
+        mapper.tsx_to_vue(ts(0, 0))
+    );
+}
+
+/// A content-less map whose only same-(dst-line)-same-(src-line) witness shows BACKWARD source
+/// movement on a co-located generated column must NOT be treated as position-preserving.
+/// `saturating_sub` masks that backward move to a zero delta (so a global flag built on it would
+/// stay `true` and fabricate extents); the per-run witness uses EXACT, signed equality, so a
+/// boundary witness that does not advance by precisely the generated delta proves nothing and the
+/// run is dropped.
+///
+/// Discriminating: the OLD `tokens_are_position_preserving` flag computes
+/// `src_delta = b.src_col.saturating_sub(a.src_col)`; for the co-located backward pair
+/// `gen(0,2)->src(1,5)` / `gen(0,2)->src(1,1)` both deltas saturate to 0, so the pair fails to
+/// disprove PP and the flag returns `true` — the OLD arm then fabricates the first run and maps
+/// gen col 1 to `Some(src 0,1)`. The per-run check sees the first run's boundary witnesses (at
+/// gen col 2) are on src line 1, not the run's src line 0, so none is a lockstep witness -> the
+/// run is dropped -> `None`.
+#[test]
+fn test_no_sources_content_backward_source_movement_is_rejected() {
+    // No `sourcesContent`. The first run is on src line 0; its boundary (gen col 2) holds two
+    // co-located mapped tokens on src line 1 whose source columns MOVE BACKWARD (5 -> 1):
+    //   gen(0,0)->src(0,0)   boundary at gen 2; witnesses are on src line 1 -> no lockstep
+    //   gen(0,2)->src(1,5)   co-located at gen col 2
+    //   gen(0,2)->src(1,1)   co-located at gen col 2, source col moves BACKWARD (1 < 5)
+    let json =
+        build_source_map_without_content("App.vue", &[(0, 0, 0, 0), (0, 2, 1, 5), (0, 2, 1, 1)]);
+    let mapper = PositionMapper::from_json(&json).unwrap();
+
+    // Sanity: content-less (the arm under test).
+    assert!(
+        mapper
+            .source_map()
+            .get_source_contents()
+            .all(|c| c.is_none()),
+        "precondition: the map carries no sourcesContent"
+    );
+    // The first run has no lockstep witness at its boundary (the co-located boundary tokens are
+    // on a DIFFERENT source line, and one moves backward). A flag fooled by `saturating_sub`
+    // would have fabricated the run and mapped col 1 to Some; the exact per-run check drops it.
+    assert!(
+        mapper.tsx_to_vue(ts(0, 1)).is_none(),
+        "a backward / cross-src-line co-located witness must not be treated as \
+         position-preserving — the content-less run must be dropped: {:?}",
+        mapper.tsx_to_vue(ts(0, 1))
+    );
+}
+
+// ========================================================================
+// `last_on_dst_line` is a TOKEN-ORDER property, not the extent bound. A later
+// token at the SAME generated column (which the strictly-greater-column extent
+// scan skips) still counts as "follows on this generated line", so a run with
+// such a co-located successor must NOT line-wrap-join the next-line run.
+// ========================================================================
+
+/// A mapped run is followed by an UNMAPPED token at the SAME generated column on the same line,
+/// then a mapped run wraps to line+1 col 0 (source wrapping too). The two mapped runs must land
+/// in DIFFERENT compatibility components — the co-located successor means the first run is NOT
+/// last-on-its-generated-line, so the line-wrap join is blocked and a range across them drops.
+///
+/// Discriminating: `last_on_dst_line = next_dst_token_col.is_none()` is `true` here because the
+/// extent scan seeks a STRICTLY-greater column and skips the co-located token, inheriting its
+/// `None`. That falsely marks the first run last-on-line and lets the line-wrap rule join it to
+/// the line-1 run, so a range across them composes (Some). Computing `last_on_dst_line` from
+/// token order (the next token shares the generated line) blocks the join -> `None`.
+#[test]
+fn test_tsx_range_line_wrap_blocked_by_colocated_successor_returns_none() {
+    // Generated line 0: mapped run at gen col 3, then an UNMAPPED token co-located at gen col 3
+    // (same generated column). Source line 0 is "abcdef" (len 6) so the run [3,6) reaches its
+    // source line end (isolating the cause to the co-located successor, not a short src line).
+    // Generated line 1: a mapped run wrapping to src line 1 col 0.
+    //   mapped   gen(0,3)->src(0,3)   run [3,6) (reaches src line 0 end)
+    //   unmapped gen(0,3)             co-located successor on the SAME generated line
+    //   mapped   gen(1,0)->src(1,0)   wraps to the next line, col 0, on both sides
+    let json = build_source_map_with_unmapped(
+        "App.vue",
+        "abcdef\nabc",
+        &[(0, 3, 0, 3), (1, 0, 1, 0)],
+        &[(0, 3)],
+    );
+    let mapper = PositionMapper::from_json(&json).unwrap();
+
+    // Both endpoints individually map (start inside the line-0 run, end inside the line-1 run).
+    assert!(
+        mapper.tsx_to_vue(ts(0, 4)).is_some(),
+        "precondition: start endpoint maps in the line-0 run"
+    );
+    assert!(
+        mapper.tsx_to_vue(ts(1, 1)).is_some(),
+        "precondition: end endpoint maps in the line-1 run"
+    );
+    // The line-0 run has a co-located successor at gen col 3, so it is NOT last-on-its-line and
+    // must not line-wrap-join the line-1 run -> the range across them is dropped.
+    assert!(
+        mapper.tsx_range_to_vue(ts(0, 4), ts(1, 1)).is_none(),
+        "a line-wrap join across a co-located same-column successor must not compose a range: {:?}",
+        mapper.tsx_range_to_vue(ts(0, 4), ts(1, 1))
     );
 }

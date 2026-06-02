@@ -6,11 +6,15 @@ use verter_span::{LspPosition, TsPosition};
 /// A run is one mapped source-map token's contiguous mapped extent. The `.vue` eval source is
 /// **position-preserving** (`IndexedReady.eval_source`), so the generated and source extents
 /// of a run have the SAME length by construction: `dst_end - dst_col == src_end - src_col`.
-/// That position-preserving assumption is only *relied upon* (to infer a source extent the
-/// source map does not spell out) when the map carries no embedded source content; in that
-/// case it is verified mechanically against the token stream before being trusted (see the
-/// content-less inference arm + [`PositionMapper::tokens_are_position_preserving`]), and an
-/// independent `debug_assert!` pins it for the content-present interior case.
+/// When the map carries embedded source content the source extent is observed DIRECTLY (the
+/// source line is ground truth, so the run length clamps to it via `a.min(b)` — no
+/// position-preserving assumption is needed, and the bound is robust to non-position-preserving
+/// `MoveOriginal`/reorder maps). When the map carries NO source content the source extent is
+/// inferred from the generated reach ONLY for a run whose extent is positively PROVEN by a
+/// per-run lockstep witness — a mapped token at the run's generated boundary, on the same source
+/// id and source line, whose source column advanced by EXACTLY the generated delta (see
+/// [`PositionMapper::content_less_extent_proven`]). A content-less run with no such witness has
+/// no proven source extent and is dropped (covers no columns) rather than fabricating one.
 ///
 /// The run's length is the TRUE extent of the token's mapped content — NOT "to the next
 /// mapped token" and NOT "to end-of-line". It is bounded by both:
@@ -46,8 +50,11 @@ struct MappedRun {
     /// the contiguity predicate must reject it.
     source_id: u32,
     /// Whether the token that produced this run is the LAST token of ANY kind on its generated
-    /// line (its `next_dst_bound` is `None`). A run that is NOT last-on-line has synthetic/
-    /// unmapped generated content after it, so it must not line-wrap-join the next-line run.
+    /// line. This is a TOKEN-ORDER property (the next token in source-map order is on a different
+    /// generated line, or there is none) — NOT derived from the extent bound, which seeks a
+    /// STRICTLY-greater generated column and would skip a co-located same-column successor. A run
+    /// that is NOT last-on-line has synthetic/unmapped or co-located generated content after it,
+    /// so it must not line-wrap-join the next-line run.
     last_on_dst_line: bool,
     /// Whether this run's source extent reaches its source line's true content end
     /// (`src_end == source-line length`). Required for a line-wrap join so the source side is
@@ -178,19 +185,12 @@ impl PositionMapper {
     fn precompute_runs(map: &OwnedSourceMap) -> (Vec<MappedRun>, Vec<Vec<u32>>, Vec<Vec<u32>>) {
         let tokens: Vec<_> = map.get_tokens().collect();
 
-        // The next-token-on-the-same-generated-line column for every token, precomputed in one
-        // O(n) backward pass (not an O(n²) forward scan per token). `None` means the token is
-        // the LAST token of ANY kind on its generated line.
+        // The next-token-on-the-same-generated-line column (STRICTLY greater) for every token,
+        // precomputed in one O(n) backward pass (not an O(n²) forward scan per token). `None`
+        // means the token has no later token with a strictly-greater column on its generated
+        // line. This is the run's EXTENT bound; last-on-line is computed separately from token
+        // order (a co-located same-column successor must still count as "follows on this line").
         let next_dst_bounds = Self::next_dst_bounds(&tokens);
-
-        // Whether the WHOLE map is position-preserving (the source column advances in lockstep
-        // with the generated column). When the map carries NO embedded source content, an
-        // interior run's source extent is inferred from `next_dst_bound` via this invariant; if
-        // the map is NOT position-preserving that inference is unsound, so the content-less
-        // inference arm is taken only when this holds (else the run is dropped). Derived from an
-        // INDEPENDENT comparison of consecutive same-line tokens' source-vs-generated deltas —
-        // not a tautology over a single run's own (equal-by-construction) extents.
-        let position_preserving = Self::tokens_are_position_preserving(&tokens);
 
         // UTF-16 length of each line of each source, indexed [source_id][line].
         let source_line_lens: Vec<Vec<u32>> = {
@@ -223,22 +223,30 @@ impl PositionMapper {
             let dst_line = token.get_dst_line();
             let dst_col = token.get_dst_col();
 
-            // Bound 1: the next token of ANY kind on the same generated line (precomputed in
-            // one backward pass). A gap to the next mapped token is therefore NOT swallowed (an
-            // unmapped token in between, or the next mapped token itself, caps this run at its
-            // own start). `None` => this token is the last of any kind on its generated line.
+            // Bound 1: the next token of ANY kind on the same generated line with a STRICTLY
+            // greater column (precomputed in one backward pass) — the run's EXTENT bound. A gap
+            // to the next mapped token is therefore NOT swallowed (an unmapped token in between,
+            // or the next mapped token itself, caps this run at its own start).
             let next_dst_token_col = next_dst_bounds[idx];
             let next_dst_bound = next_dst_token_col.map(|c| c - dst_col);
-            let last_on_dst_line = next_dst_token_col.is_none();
+
+            // Last-on-generated-line is a TOKEN-ORDER property, independent of the extent bound:
+            // a token is last on its generated line iff the NEXT token in source-map order is on
+            // a different generated line (or there is none). Tokens are sorted by `(dst_line,
+            // dst_col)`, so a later token at the SAME `dst_col` — which the strictly-greater
+            // extent scan skips — still counts as "follows on this generated line" here. It MUST,
+            // else a line-wrap join could bridge across that co-located successor.
+            let last_on_dst_line = match tokens.get(idx + 1) {
+                Some(next) => next.get_dst_line() != dst_line,
+                None => true,
+            };
 
             // Bound 2: the token's own source line's true content length remaining. This
             // caps a last-on-line run so it cannot extend past real source text into a
             // synthetic suffix or to EOL. It is ABSENT only when the map carries no embedded
-            // `sourcesContent`: an INTERIOR run is then bounded exactly by `next_dst_bound`,
-            // which — by the position-preserving invariant `src_end - src_col == dst_end -
-            // dst_col` — is the TRUE source extent (taken ONLY when the map is provably
-            // position-preserving); a LAST-on-line run has no extent signal and is
-            // conservatively dropped below (`run_len == 0`).
+            // `sourcesContent`: a content-less run is then bounded by `next_dst_bound` ONLY when
+            // a per-run lockstep witness proves that bound IS the true source extent (see the
+            // content-less arm below); otherwise the run has no proven extent and is dropped.
             let src_line = token.get_src_line();
             let src_col = token.get_src_col();
             let src_line_total = src_line_len(source_id, src_line);
@@ -251,13 +259,20 @@ impl PositionMapper {
                 // inference is needed here — the source line is ground truth — so this arm is
                 // robust to non-position-preserving maps (`MoveOriginal`, reorder, repeat).
                 (Some(a), Some(b)) => a.min(b),
-                // No source-line length available (no embedded source content): take the
-                // position-preserving inference (`next_dst_bound` IS the source extent) ONLY
-                // when the map is provably position-preserving — the mechanical provenance gate.
-                // Otherwise the inference is unsound and the run is dropped: a malformed,
-                // non-lockstep content-less map yields `None`, never a fabricated source extent.
-                (Some(a), None) if position_preserving => a,
-                (Some(_), None) => 0,
+                // No source-line length available (no embedded source content): the generated
+                // reach `a` is the source extent ONLY when a per-run lockstep WITNESS positively
+                // proves it — a mapped token at this run's generated boundary, on the same source
+                // id + source line, whose source column advanced by EXACTLY `a` (the generated
+                // delta). With no such witness the run's extent is UNPROVEN and the run is dropped
+                // (`run_len == 0`): a sparse / non-lockstep / backward content-less map yields
+                // `None`, never a fabricated source extent. The boundary column is `dst_col + a`.
+                (Some(a), None) => {
+                    if Self::content_less_extent_proven(&tokens, idx, dst_col + a) {
+                        a
+                    } else {
+                        0
+                    }
+                }
                 (None, Some(b)) => b,
                 // No following token and no source-line info: a last-on-line run with no
                 // content has no extent signal at all. Drop it (covers no columns) rather than
@@ -328,8 +343,12 @@ impl PositionMapper {
     }
 
     /// For each token (by index), the `dst_col` of the next token of ANY kind on the SAME
-    /// generated line whose column is STRICTLY greater — or `None` when the token is the last
-    /// of any kind on its generated line.
+    /// generated line whose column is STRICTLY greater — or `None` when no such token exists.
+    ///
+    /// `None` is NOT the same as "last token on its generated line": a later token at the SAME
+    /// `dst_col` (a co-located successor) is skipped by this strictly-greater scan and can leave
+    /// the result `None` even though a token still follows on the line. This is purely the run's
+    /// EXTENT bound; the last-on-generated-line property is computed separately from token order.
     ///
     /// Computed in a SINGLE backward pass: tokens arrive sorted by `(dst_line,
     /// dst_col)`, so the next strictly-greater-column boundary of token `i` is either
@@ -362,37 +381,61 @@ impl PositionMapper {
         bounds
     }
 
-    /// Whether the token stream is position-preserving: the source column advances in LOCKSTEP
-    /// with the generated column between consecutive mapped tokens that share a generated line
-    /// AND a source line AND a source id. For every such adjacent pair the source-column delta
-    /// must equal the generated-column delta.
+    /// Whether the content-less source extent of the run starting at token `idx` is positively
+    /// PROVEN by a per-run lockstep witness.
     ///
-    /// This is an INDEPENDENT check (it compares two distinct tokens' source-vs-generated
-    /// deltas — never a single run's own equal-by-construction extents), and it gates the
-    /// content-less source-extent inference: when the map carries no source content the
-    /// inferred extent is sound only if this holds. A pair that violates lockstep makes the
-    /// whole map non-position-preserving, so the content-less inference is rejected outright
-    /// (the conservative, non-permissive choice) rather than fabricating a wrong source extent.
-    fn tokens_are_position_preserving(tokens: &[oxc_sourcemap::Token]) -> bool {
-        for pair in tokens.windows(2) {
-            let (a, b) = (&pair[0], &pair[1]);
-            let (Some(sa), Some(sb)) = (a.get_source_id(), b.get_source_id()) else {
-                continue; // an unmapped token breaks adjacency; no lockstep claim across it
-            };
-            if sa != sb
-                || a.get_dst_line() != b.get_dst_line()
-                || a.get_src_line() != b.get_src_line()
-            {
-                continue; // different gen line / src line / source: not a same-line lockstep pair
+    /// A witness is a MAPPED token sitting exactly at the run's generated boundary
+    /// (`boundary_dst_col`, the next strictly-greater generated column on the run's line — so the
+    /// run length is `boundary_dst_col - run.dst_col`), on the SAME source id and the SAME source
+    /// line, whose source column has advanced by EXACTLY the generated delta:
+    /// `witness.src_col == run.src_col + (boundary_dst_col - run.dst_col)`. That proves the run's
+    /// whole extent maps in lockstep, so the generated reach IS the true source extent.
+    ///
+    /// The equality is EXACT and signed (no `saturating_sub`): a witness whose source column did
+    /// not advance by precisely the generated delta — including BACKWARD source movement, where
+    /// `witness.src_col < run.src_col` — fails the equality and proves nothing. With no matching
+    /// witness (the boundary token is unmapped, on a different source line/id, or non-lockstep)
+    /// the run's content-less extent is UNPROVEN and the caller drops the run rather than
+    /// fabricating a source extent. The check is PER-RUN: a neighbouring run with its own
+    /// matching witness still maps.
+    ///
+    /// Tokens are sorted by `(dst_line, dst_col)`, and `boundary_dst_col` is the next
+    /// strictly-greater column, so between the run and the boundary there are only co-located
+    /// (same-column) tokens; the scan skips those and inspects the boundary-column tokens, of
+    /// which any single matching mapped one is a sufficient witness.
+    fn content_less_extent_proven(
+        tokens: &[oxc_sourcemap::Token],
+        idx: usize,
+        boundary_dst_col: u32,
+    ) -> bool {
+        let run = &tokens[idx];
+        let Some(run_source_id) = run.get_source_id() else {
+            return false; // the run's own token must be mapped to have a source extent at all
+        };
+        let run_dst_line = run.get_dst_line();
+        let run_dst_col = run.get_dst_col();
+        let run_src_line = run.get_src_line();
+        let run_src_col = run.get_src_col();
+        // The generated delta the source column must match EXACTLY to be in lockstep.
+        let dst_delta = boundary_dst_col - run_dst_col;
+        for witness in &tokens[idx + 1..] {
+            if witness.get_dst_line() != run_dst_line || witness.get_dst_col() > boundary_dst_col {
+                break; // past the boundary column (or onto a later line): no witness remains
             }
-            // Both deltas are non-negative (tokens sorted by dst_col; same-source same-line).
-            let dst_delta = b.get_dst_col().saturating_sub(a.get_dst_col());
-            let src_delta = b.get_src_col().saturating_sub(a.get_src_col());
-            if dst_delta != src_delta {
-                return false;
+            if witness.get_dst_col() != boundary_dst_col {
+                continue; // a co-located token before the boundary column: not the witness slot
+            }
+            let Some(witness_source_id) = witness.get_source_id() else {
+                continue; // an unmapped token at the boundary proves nothing
+            };
+            if witness_source_id == run_source_id
+                && witness.get_src_line() == run_src_line
+                && witness.get_src_col() == run_src_col + dst_delta
+            {
+                return true; // exact lockstep witness → the run's source extent is proven
             }
         }
-        true
+        false
     }
 
     /// Find the mapped run whose GENERATED extent contains `(line, col)`, by binary search
