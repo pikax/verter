@@ -5,6 +5,7 @@
 //! source may be absent (graceful fallback).
 
 use tower_lsp_server::ls_types::*;
+use verter_span::{LspPosition, TsPosition};
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
@@ -52,12 +53,12 @@ pub fn vue_position_to_tsx_offset(
     mapper: &PositionMapper,
     tsx_line_index: &LineIndex,
 ) -> Option<u32> {
-    let vue_line = position.line;
-    let vue_col = position.character;
-    let tsx_pos = mapper.vue_to_tsx(vue_line, vue_col)?;
+    let tsx_pos = mapper
+        .vue_to_tsx(LspPosition::new(position.line, position.character))?
+        .pos;
     tsx_line_index.position_to_offset(&Position {
         line: tsx_pos.line,
-        character: tsx_pos.column,
+        character: tsx_pos.character,
     })
 }
 
@@ -81,7 +82,9 @@ pub fn vue_position_to_tsx_offset_validated(
 
     // Round-trip: TSX offset → TSX position → Vue position
     let tsx_pos = tsx_line_index.offset_to_position(tsx_offset)?;
-    let vue_roundtrip = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.character)?;
+    let vue_roundtrip = mapper
+        .tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character))?
+        .pos;
 
     // The round-trip Vue position should be on the same line as the original.
     // If not, the TSX offset is in a synthetic region with no valid source correlation.
@@ -107,8 +110,10 @@ fn find_exact_roundtrip_offset(
         if tsx_pos.line != initial_pos.line {
             return Some(false);
         }
-        let vue_pos = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.character)?;
-        Some(vue_pos.line == position.line && vue_pos.column == position.character)
+        let vue_pos = mapper
+            .tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character))?
+            .pos;
+        Some(vue_pos.line == position.line && vue_pos.character == position.character)
     };
 
     if roundtrips_exact(initial_offset)? {
@@ -145,17 +150,21 @@ pub fn tsx_range_to_vue_range(
     let start_pos = tsx_line_index.offset_to_position(tsx_start)?;
     let end_pos = tsx_line_index.offset_to_position(tsx_end)?;
 
-    let vue_start = mapper.tsx_to_vue(start_pos.line, start_pos.character)?;
-    let vue_end = mapper.tsx_to_vue(end_pos.line, end_pos.character)?;
+    let vue_start = mapper
+        .tsx_to_vue(TsPosition::new(start_pos.line, start_pos.character))?
+        .pos;
+    let vue_end = mapper
+        .tsx_to_vue(TsPosition::new(end_pos.line, end_pos.character))?
+        .pos;
 
     // Validate the mapped positions produce valid byte offsets
     let start_lsp = Position {
         line: vue_start.line,
-        character: vue_start.column,
+        character: vue_start.character,
     };
     let end_lsp = Position {
         line: vue_end.line,
-        character: vue_end.column,
+        character: vue_end.character,
     };
     vue_line_index.position_to_offset(&start_lsp)?;
     vue_line_index.position_to_offset(&end_lsp)?;
@@ -1181,11 +1190,14 @@ pub fn merge_semantic_tokens(
         let start_pos = tsx_line_index.offset_to_position(token.start);
 
         if let Some(start_lsp) = start_pos {
-            if let Some(vs) = mapper.tsx_to_vue(start_lsp.line, start_lsp.character) {
+            if let Some(vs) = mapper
+                .tsx_to_vue(TsPosition::new(start_lsp.line, start_lsp.character))
+                .map(|m| m.pos)
+            {
                 // Validate start offset is within the Vue source
                 let start_lsp_pos = Position {
                     line: vs.line,
-                    character: vs.column,
+                    character: vs.character,
                 };
                 if vue_line_index.position_to_offset(&start_lsp_pos).is_none() {
                     continue;
@@ -1196,9 +1208,12 @@ pub fn merge_semantic_tokens(
                 let end_offset = token.start + token.length;
                 let vue_length =
                     if let Some(end_lsp) = tsx_line_index.offset_to_position(end_offset) {
-                        if let Some(ve) = mapper.tsx_to_vue(end_lsp.line, end_lsp.character) {
-                            if ve.line == vs.line && ve.column >= vs.column {
-                                ve.column - vs.column
+                        if let Some(ve) = mapper
+                            .tsx_to_vue(TsPosition::new(end_lsp.line, end_lsp.character))
+                            .map(|m| m.pos)
+                        {
+                            if ve.line == vs.line && ve.character >= vs.character {
+                                ve.character - vs.character
                             } else {
                                 // Cross-line or backward mapping — skip token
                                 continue;
@@ -1219,7 +1234,7 @@ pub fn merge_semantic_tokens(
 
                 mapped.push((
                     vs.line,
-                    vs.column,
+                    vs.character,
                     vue_length,
                     token.token_type,
                     token.token_modifiers,
@@ -1281,13 +1296,16 @@ pub fn merge_inlay_hints(
         };
 
         // Map TSX line/col → Vue line/col via sourcemap
-        let Some(vue_mapped) = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.character) else {
+        let Some(vue_mapped) = mapper
+            .tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character))
+            .map(|m| m.pos)
+        else {
             continue;
         };
 
         let vue_pos = Position {
             line: vue_mapped.line,
-            character: vue_mapped.column,
+            character: vue_mapped.character,
         };
 
         // Validate the Vue position is within bounds

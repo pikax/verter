@@ -16,12 +16,26 @@ All Rust span types are defined in `crates/verter_span/src/lib.rs`. Each type en
 | `PartialGeneratedSpan` | Unresolved position in generated output (TSX)     | **No**                          | TSGO response parsing before PositionMapper resolution                                            |
 | `GeneratedSpan`        | Resolved mapping: generated position + SFC origin | **No**                          | TSGO diagnostics after resolution, codegen error mapping                                          |
 
+### Typed LSP / generated-TSX coordinate wrappers
+
+Intra-process boundary newtypes (also in `verter_span`, **no serde**) used by the LSP `PositionMapper` and the cross-file navigation stack. Like the span types, **there is no `From` between a source-side and a generated-side type** (no `From<GeneratedByteRange> for SourceByteRange`), and `LspPosition`/`TsPosition` are distinct so a TSX position can never be passed where a Vue LSP position is expected.
+
+| Type                                          | Meaning                                                              |
+| --------------------------------------------- | -------------------------------------------------------------------- |
+| `SourceByteOffset` / `SourceByteRange`        | byte offset / `[start,end)` range into the original `.vue` source    |
+| `GeneratedByteOffset` / `GeneratedByteRange`  | byte offset / `[start,end)` range into the generated TSX             |
+| `GeneratedByteLen`                            | length of a generated-TSX content region (`content_offset` domain)   |
+| `SourceUtf16Offset` / `GeneratedUtf16Offset`  | UTF-16 code-unit offsets (source / generated)                        |
+| `LspPosition { line, character }`             | 0-based Vue source position, LSP-negotiated encoding (Vue side)      |
+| `TsPosition { line, character }`              | 0-based generated-TSX position (TSX side)                            |
+
 ## Typed Span Rules
 
 1. **All data crossing a serialization boundary (serde, MCP, LSP custom protocol, FFI) MUST use `Span` (SFC-absolute).** `RelativeSpan`, `PartialGeneratedSpan`, and `GeneratedSpan` do not implement `Serialize`/`Deserialize`. Attempting to put them in a serializable struct is a compile error. Convert with `to_absolute(base)` before serialization.
 2. **Inter-crate stored types prefer `Span`.** Types in analysis snapshots, host results, and diagnostic structs that cross crate boundaries use `Span`. `RelativeSpan` is for intra-crate processing only (e.g., CSS scanner working on a style block, OXC binding extraction within an expression).
 3. **`RelativeSpan` is 8 bytes, same as `Span`.** The base offset lives in context (field on parent struct, function parameter). The value of `RelativeSpan` is compile-time type safety, not runtime data.
 4. **`PartialGeneratedSpan` → `GeneratedSpan` via resolution.** Use `PartialGeneratedSpan` for raw TSGO byte offsets. After PositionMapper lookup resolves the SFC origin, use `partial.resolve(origin_span)` to get a `GeneratedSpan`. For display (LSP diagnostics), use `generated_span.origin`.
+5. **`PositionMapper` is a STRICT in-run mapper** (`crates/verter_lsp/src/documents/position_map.rs`). `tsx_to_vue(TsPosition) -> Option<SourceMapped>` and `vue_to_tsx(LspPosition) -> Option<GeneratedMapped>` return `Some` **only** when the query lies strictly inside ONE mapped token's run (the next token on the line starts strictly after the query). There is NO cross-token extrapolation and NO snap-to-closest-preceding fallback — a query in unmapped/synthetic content (`_ctx.`/`$setup.` prefixes), in a gap, or bridging into the next token returns `None`. Within-run character precision IS preserved (the in-run offset is added to the run's mapped start), but only inside a single mapped run; a range maps only when BOTH endpoints independently resolve inside compatible runs. Guard: `crates/verter_lsp/tests/position_mapper_strict.rs` (behavioural + static `ban_cross_token_extrapolation`).
 
 ## Key APIs
 
@@ -32,7 +46,8 @@ All Rust span types are defined in `crates/verter_span/src/lib.rs`. Each type en
 - `GeneratedSpan::new(generated: Span, origin: Span)` — create resolved mapping directly
 - `slice(&self, source: &str) -> &str` — on `Span`, `RelativeSpan`, `PartialGeneratedSpan`
 - `From<oxc_span::Span>` for both `Span` and `RelativeSpan`
-- **No `From` conversions between span types** — type safety enforced at compile time
+- `LspPosition::new(line, character)` / `TsPosition::new(line, character)`; `SourceByteRange::new(..)` / `GeneratedByteRange::new(..)` (typed LSP/TSX coordinate wrappers)
+- **No `From` conversions between span types, nor between source-side and generated-side coordinate wrappers** — type safety enforced at compile time
 
 ## CSS Variable Analysis Spans
 

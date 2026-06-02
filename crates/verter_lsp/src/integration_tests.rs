@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use tower_lsp_server::ls_types::*;
 use verter_session::{HostConfig, VerterHost};
+use verter_span::{LspPosition, TsPosition};
 
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::documents::DocumentRegistry;
@@ -740,13 +741,13 @@ const msg = 'hello'
     let msg_col = (msg_offset - msg_line_start) as u32;
 
     // Map Vue position → TSX position
-    let tsx_pos = mapper.vue_to_tsx(msg_line, msg_col);
+    let tsx_pos = mapper.vue_to_tsx(LspPosition::new(msg_line, msg_col));
     assert!(
         tsx_pos.is_some(),
         "Should map Vue position (line {msg_line}, col {msg_col}) to TSX"
     );
 
-    let tsx_pos = tsx_pos.unwrap();
+    let tsx_pos = tsx_pos.unwrap().pos;
     // Verify the TSX position is reasonable (not out of bounds)
     let tsx_lines: Vec<&str> = tsx.code.lines().collect();
     assert!(
@@ -757,10 +758,10 @@ const msg = 'hello'
     );
 
     // Map TSX position back → Vue position
-    let vue_pos = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.column);
+    let vue_pos = mapper.tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character));
     assert!(vue_pos.is_some(), "Should map TSX position back to Vue");
 
-    let vue_pos = vue_pos.unwrap();
+    let vue_pos = vue_pos.unwrap().pos;
     // The roundtrip should land on the same line
     assert_eq!(
         vue_pos.line, msg_line,
@@ -809,8 +810,9 @@ const count = 0
 
     // Forward map: start of "count" in Vue
     let tsx_start = mapper
-        .vue_to_tsx(template_count_line, template_count_col)
-        .expect("Start of 'count' in template should map to TSX");
+        .vue_to_tsx(LspPosition::new(template_count_line, template_count_col))
+        .expect("Start of 'count' in template should map to TSX")
+        .pos;
 
     // Verify: the character at the mapped TSX position should be 'c' (start of "count")
     assert!(
@@ -821,16 +823,16 @@ const count = 0
     );
     let tsx_line_chars: Vec<char> = tsx_lines[tsx_start.line as usize].chars().collect();
     assert!(
-        (tsx_start.column as usize) < tsx_line_chars.len(),
+        (tsx_start.character as usize) < tsx_line_chars.len(),
         "TSX column {} out of bounds for line '{}' (len: {})",
-        tsx_start.column,
+        tsx_start.character,
         tsx_lines[tsx_start.line as usize],
         tsx_line_chars.len()
     );
     assert_eq!(
-        tsx_line_chars[tsx_start.column as usize], 'c',
+        tsx_line_chars[tsx_start.character as usize], 'c',
         "TSX position should point to 'c' of 'count', got '{}' in line '{}'",
-        tsx_line_chars[tsx_start.column as usize], tsx_lines[tsx_start.line as usize]
+        tsx_line_chars[tsx_start.character as usize], tsx_lines[tsx_start.line as usize]
     );
 
     // Forward map + character verify for each character of "count" (c=0, o=1, u=2, n=3, t=4)
@@ -838,21 +840,22 @@ const count = 0
     for (i, expected_char) in expected_chars.iter().enumerate() {
         let vue_col = template_count_col + i as u32;
         let tsx_pos = mapper
-            .vue_to_tsx(template_count_line, vue_col)
+            .vue_to_tsx(LspPosition::new(template_count_line, vue_col))
             .unwrap_or_else(|| {
                 panic!(
                     "vue_to_tsx failed for 'count'[{i}] at Vue ({}, {vue_col})",
                     template_count_line
                 )
-            });
+            })
+            .pos;
 
         let actual_char = tsx_lines[tsx_pos.line as usize]
             .chars()
-            .nth(tsx_pos.column as usize)
+            .nth(tsx_pos.character as usize)
             .unwrap_or_else(|| {
                 panic!(
                     "TSX position ({}, {}) out of bounds for 'count'[{i}]",
-                    tsx_pos.line, tsx_pos.column
+                    tsx_pos.line, tsx_pos.character
                 )
             });
         assert_eq!(
@@ -861,39 +864,42 @@ const count = 0
             "'count'[{i}]: expected '{}' at TSX ({}, {}), got '{}' in line '{}'",
             expected_char,
             tsx_pos.line,
-            tsx_pos.column,
+            tsx_pos.character,
             actual_char,
             tsx_lines[tsx_pos.line as usize]
         );
 
         // Reverse: TSX → Vue should return the same Vue column
         let vue_roundtrip = mapper
-            .tsx_to_vue(tsx_pos.line, tsx_pos.column)
+            .tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character))
             .unwrap_or_else(|| {
                 panic!(
                     "tsx_to_vue failed for TSX ({}, {})",
-                    tsx_pos.line, tsx_pos.column
+                    tsx_pos.line, tsx_pos.character
                 )
-            });
+            })
+            .pos;
         assert_eq!(
             vue_roundtrip.line, template_count_line,
             "'count'[{i}] roundtrip: line mismatch"
         );
         assert_eq!(
-            vue_roundtrip.column, vue_col,
+            vue_roundtrip.character, vue_col,
             "'count'[{i}] roundtrip: column mismatch (expected Vue col {vue_col}, got {})",
-            vue_roundtrip.column
+            vue_roundtrip.character
         );
     }
 
     // Verify: the prefix region (positions before 'c' in TSX) maps to unmapped or different location
-    if tsx_start.column > 0 {
-        let prefix_pos = mapper.tsx_to_vue(tsx_start.line, tsx_start.column - 1);
+    if tsx_start.character > 0 {
+        let prefix_pos =
+            mapper.tsx_to_vue(TsPosition::new(tsx_start.line, tsx_start.character - 1));
         // Inside the prepended prefix: should either be None (unmapped) or map to a
         // different Vue position (not the same as "count")
-        if let Some(pos) = prefix_pos {
+        if let Some(m) = prefix_pos {
+            let pos = m.pos;
             assert!(
-                pos.line != template_count_line || pos.column != template_count_col,
+                pos.line != template_count_line || pos.character != template_count_col,
                 "Position inside prefix should NOT map back to 'count' start"
             );
         }
@@ -933,27 +939,31 @@ const count = 42
     let expected_chars = ['m', 'e', 's', 's', 'a', 'g', 'e'];
     for (i, expected_char) in expected_chars.iter().enumerate() {
         let vue_col = msg_col + i as u32;
-        let tsx_pos = mapper.vue_to_tsx(msg_line, vue_col).unwrap_or_else(|| {
-            panic!("vue_to_tsx failed for 'message'[{i}] at ({msg_line}, {vue_col})")
-        });
+        let tsx_pos = mapper
+            .vue_to_tsx(LspPosition::new(msg_line, vue_col))
+            .unwrap_or_else(|| {
+                panic!("vue_to_tsx failed for 'message'[{i}] at ({msg_line}, {vue_col})")
+            })
+            .pos;
 
         // Character at TSX position should match
         if let Some(tsx_line) = tsx_lines.get(tsx_pos.line as usize) {
-            if let Some(actual) = tsx_line.chars().nth(tsx_pos.column as usize) {
+            if let Some(actual) = tsx_line.chars().nth(tsx_pos.character as usize) {
                 assert_eq!(
                     actual, *expected_char,
                     "'message'[{i}]: expected '{}' got '{}' at TSX ({}, {})",
-                    expected_char, actual, tsx_pos.line, tsx_pos.column
+                    expected_char, actual, tsx_pos.line, tsx_pos.character
                 );
             }
         }
 
         // Roundtrip
-        let vue_roundtrip = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.column);
-        if let Some(pos) = vue_roundtrip {
+        let vue_roundtrip = mapper.tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character));
+        if let Some(m) = vue_roundtrip {
+            let pos = m.pos;
             assert_eq!(pos.line, msg_line, "'message'[{i}] roundtrip line mismatch");
             assert_eq!(
-                pos.column, vue_col,
+                pos.character, vue_col,
                 "'message'[{i}] roundtrip column mismatch"
             );
         }
@@ -993,7 +1003,10 @@ fn integration_utf16_source_map_with_multibyte_chars() {
     let template_cafe_col_utf16 = line_prefix.encode_utf16().count() as u32;
 
     // Forward map: "café" in Vue should map to a valid TSX position
-    let tsx_pos = mapper.vue_to_tsx(template_cafe_line, template_cafe_col_utf16);
+    let tsx_pos = mapper.vue_to_tsx(LspPosition::new(
+        template_cafe_line,
+        template_cafe_col_utf16,
+    ));
     assert!(
         tsx_pos.is_some(),
         "Start of 'café' at Vue ({}, {}) should map to TSX. Source line: '{}'",
@@ -1005,7 +1018,7 @@ fn integration_utf16_source_map_with_multibyte_chars() {
                 .map(|p| template_cafe_line_start + p)
                 .unwrap_or(source.len())]
     );
-    let tsx_pos = tsx_pos.unwrap();
+    let tsx_pos = tsx_pos.unwrap().pos;
 
     // The TSX should contain "café" and the character at the mapped position should be 'c'
     let tsx_lines: Vec<&str> = tsx_code.lines().collect();
@@ -1014,7 +1027,7 @@ fn integration_utf16_source_map_with_multibyte_chars() {
         let mut utf16_count = 0u32;
         let mut char_at_col = None;
         for ch in tsx_line.chars() {
-            if utf16_count == tsx_pos.column {
+            if utf16_count == tsx_pos.character {
                 char_at_col = Some(ch);
                 break;
             }
@@ -1025,7 +1038,7 @@ fn integration_utf16_source_map_with_multibyte_chars() {
             Some('c'),
             "TSX position ({}, {}) should point to 'c' of 'café', got {:?} in line '{}'",
             tsx_pos.line,
-            tsx_pos.column,
+            tsx_pos.character,
             char_at_col,
             tsx_line
         );
@@ -1036,13 +1049,16 @@ fn integration_utf16_source_map_with_multibyte_chars() {
     let expected_chars = ['c', 'a', 'f', 'é'];
     for (i, expected_char) in expected_chars.iter().enumerate() {
         let vue_col = template_cafe_col_utf16 + i as u32;
-        if let Some(tsx_mapped) = mapper.vue_to_tsx(template_cafe_line, vue_col) {
+        if let Some(tsx_mapped) = mapper
+            .vue_to_tsx(LspPosition::new(template_cafe_line, vue_col))
+            .map(|m| m.pos)
+        {
             // Verify character at TSX position
             if let Some(tsx_line) = tsx_lines.get(tsx_mapped.line as usize) {
                 let mut utf16_count = 0u32;
                 let mut actual_char = None;
                 for ch in tsx_line.chars() {
-                    if utf16_count == tsx_mapped.column {
+                    if utf16_count == tsx_mapped.character {
                         actual_char = Some(ch);
                         break;
                     }
@@ -1054,19 +1070,22 @@ fn integration_utf16_source_map_with_multibyte_chars() {
                     "café[{i}]: expected '{}' at TSX ({}, {}), got {:?}",
                     expected_char,
                     tsx_mapped.line,
-                    tsx_mapped.column,
+                    tsx_mapped.character,
                     actual_char
                 );
             }
 
             // Roundtrip: TSX -> Vue
-            if let Some(vue_roundtrip) = mapper.tsx_to_vue(tsx_mapped.line, tsx_mapped.column) {
+            if let Some(vue_roundtrip) = mapper
+                .tsx_to_vue(TsPosition::new(tsx_mapped.line, tsx_mapped.character))
+                .map(|m| m.pos)
+            {
                 assert_eq!(
                     vue_roundtrip.line, template_cafe_line,
                     "café[{i}] roundtrip line mismatch"
                 );
                 assert_eq!(
-                    vue_roundtrip.column, vue_col,
+                    vue_roundtrip.character, vue_col,
                     "café[{i}] roundtrip column mismatch"
                 );
             }
@@ -1096,13 +1115,17 @@ fn integration_utf16_surrogate_pair_position_accuracy() {
         let script_line = 1u32;
         let msg_utf16_col = 8u32; // "const " (6) + 😀 (2)
 
-        if let Some(tsx_pos) = mapper.vue_to_tsx(script_line, msg_utf16_col) {
-            let vue_roundtrip = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.column);
-            if let Some(pos) = vue_roundtrip {
+        if let Some(tsx_pos) = mapper
+            .vue_to_tsx(LspPosition::new(script_line, msg_utf16_col))
+            .map(|m| m.pos)
+        {
+            let vue_roundtrip = mapper.tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character));
+            if let Some(m) = vue_roundtrip {
+                let pos = m.pos;
                 assert_eq!(pos.line, script_line, "😀msg roundtrip: line should match");
                 // Column should be exact or on the same line
                 assert_eq!(
-                    pos.column, msg_utf16_col,
+                    pos.character, msg_utf16_col,
                     "😀msg roundtrip: column should match (UTF-16)"
                 );
             }
@@ -1369,8 +1392,8 @@ const c = 3
 
     // Mappers should be independent — mapping line 1 in each file should give different results
     // (because the script blocks have different content and line counts)
-    let a_tsx = mapper_a.unwrap().vue_to_tsx(1, 0);
-    let b_tsx = mapper_b.unwrap().vue_to_tsx(1, 0);
+    let a_tsx = mapper_a.unwrap().vue_to_tsx(LspPosition::new(1, 0));
+    let b_tsx = mapper_b.unwrap().vue_to_tsx(LspPosition::new(1, 0));
     // Both should produce some mapping (not None)
     assert!(
         a_tsx.is_some() || b_tsx.is_some(),
@@ -2074,7 +2097,7 @@ const outerLabel = 'outer'
         for delta in 0..=12 {
             let candidate = slot_idx as u32 + delta;
             if let Some(tsx_pos) = tsx_li.offset_to_position(candidate) {
-                let vue_pos = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.character);
+                let vue_pos = mapper.tsx_to_vue(TsPosition::new(tsx_pos.line, tsx_pos.character));
                 eprintln!(
                     "candidate offset={candidate} tsx={}:{} vue={vue_pos:?} text={:?}",
                     tsx_pos.line,
@@ -5439,7 +5462,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
     eprintln!("Vue '.' position: line={}, col={}", vue_line, vue_col);
 
     // Map Vue position to TSX position
-    let tsx_pos = mapper.vue_to_tsx(vue_line, vue_col);
+    let tsx_pos = mapper.vue_to_tsx(LspPosition::new(vue_line, vue_col));
     assert!(
         tsx_pos.is_some(),
         "Vue position (line={}, col={}) should map to TSX. \
@@ -5447,10 +5470,10 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         vue_line,
         vue_col
     );
-    let tsx_pos = tsx_pos.unwrap();
+    let tsx_pos = tsx_pos.unwrap().pos;
     eprintln!(
         "TSX mapped position: line={}, col={}",
-        tsx_pos.line, tsx_pos.column
+        tsx_pos.line, tsx_pos.character
     );
 
     // Find the TSX byte offset of the mapped position
@@ -5458,7 +5481,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
     let mut current_line = 0u32;
     for (i, &b) in tsx.as_bytes().iter().enumerate() {
         if current_line == tsx_pos.line {
-            tsx_offset = i as u32 + tsx_pos.column;
+            tsx_offset = i as u32 + tsx_pos.character;
             break;
         }
         if b == b'\n' {
@@ -5479,7 +5502,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         vue_line,
         vue_col,
         tsx_pos.line,
-        tsx_pos.column,
+        tsx_pos.character,
         tsx_offset,
         tsx_char,
         tsx
