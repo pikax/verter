@@ -9,12 +9,13 @@
 //!
 //! Pre-fix the predicates matched only `TypeExpr::Function` and absorbed a
 //! `ConstructorType` through the `_ => false` wildcard, so a raw
-//! constructor-valued member silently:
-//!   * was not recognised as a callable surface, and
-//!   * never had its package-backed parameter roots checked,
+//! constructor-valued member silently (a) was not recognised as a callable
+//! surface, and (b) never had its package-backed parameter roots checked —
 //! defeating the suppression that keeps package-backed callable params
-//! symbolic. Each test below FAILS against the pre-fix tree and PASSES
-//! against the post-fix tree (Function/ConstructorType parity).
+//! symbolic.
+//!
+//! Each test below FAILS against the pre-fix tree and PASSES against the
+//! post-fix tree (Function/ConstructorType parity).
 
 use std::sync::Arc;
 
