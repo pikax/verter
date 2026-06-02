@@ -83,6 +83,13 @@ pub mod audit_publish;
 pub mod cache_id;
 pub mod caller_kind;
 pub mod cancellation;
+// Blocking + native-only: `cpu_concurrency` is a `parking_lot::Condvar`
+// counting semaphore that caps SCHEDULER CPU-pool concurrency. On wasm the
+// scheduler runs inline / single-threaded with no CPU pools, so the cap has
+// no consumer there (and the blocking primitive does not belong on wasm).
+// Gated for parity with the other blocking native-only modules
+// (`audit_publish`, `host_cpu_pool`, `pool`).
+#[cfg(not(target_arch = "wasm32"))]
 pub mod cpu_concurrency;
 pub mod dag;
 pub mod dedupe_hook;

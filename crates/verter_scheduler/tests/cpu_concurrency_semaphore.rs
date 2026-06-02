@@ -1,5 +1,10 @@
 //! `CpuConcurrencySemaphore` capacity + RAII + panic-release guards.
 //!
+//! Native-only: `cpu_concurrency` is gated `#[cfg(not(target_arch =
+//! "wasm32"))]` in the crate root (the limiter caps the SCHEDULER CPU pool,
+//! which is native-only — wasm runs the scheduler inline). This test file
+//! therefore compiles only on native targets.
+//!
 //! The semaphore is a hand-rolled `parking_lot::Mutex<usize>` + `Condvar`
 //! permit counter (NOT `parking_lot::Semaphore`). It LAYERS on top of the
 //! scheduler pool size + DAG capacity: workers acquire a fresh permit per
@@ -14,6 +19,8 @@
 //!    frees the slot (the RAII `Drop` runs on unwind). A non-RAII
 //!    implementation would leak the slot and deadlock the recovery
 //!    acquire.
+
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
