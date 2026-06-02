@@ -182,7 +182,7 @@ impl VerterHost {
         .unwrap_or_else(|| expr.clone())
     }
 
-    fn materialize_project_intrinsic_member_surface_expr(
+    pub(crate) fn materialize_project_intrinsic_member_surface_expr(
         expr: &verter_type_expr::TypeExpr,
         engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
         scope_canonical_id: &str,
@@ -632,5 +632,148 @@ impl VerterHost {
                 .then_with(|| left.name.cmp(&right.name))
         });
         members
+    }
+}
+
+#[cfg(test)]
+mod intrinsic_projection_tests {
+    use crate::types::{AnalysisLevel, HostConfig};
+    use crate::VerterHost;
+    use std::sync::Arc;
+    use verter_type_expr::{FunctionExpr, FunctionParam, ObjectMember, PrimitiveName, TypeExpr};
+
+    fn host_with_inner_alias() -> VerterHost {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/inner.ts".to_string(),
+            Arc::from("export type Inner = { x: number };\n"),
+        );
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/inner.ts"));
+        host
+    }
+
+    /// A bare constructor type (`new (props: Inner) => Inner`) reaching the
+    /// intrinsic member-surface materialiser must (a) stay a
+    /// `ConstructorType` (never flatten to a plain `Function`) AND (b) have
+    /// its parameter / return surfaces RECURSIVELY materialised — exactly as
+    /// the function-typed equivalent does.
+    ///
+    /// Discriminator: pre-fix the `match` matched only `TypeExpr::Function`
+    /// and a `ConstructorType` fell through the `_ => expr.clone()` arm, so it
+    /// was returned VERBATIM — its parameter `Ref { name: "Inner" }` was NOT
+    /// projected to the resolved `{ x: number }` object body. Post-fix the
+    /// `Function | ConstructorType` arm recurses into params/return (so
+    /// `Inner` is projected) and reconstructs the `ConstructorType` variant.
+    #[test]
+    fn intrinsic_member_surface_materialises_constructor_type_like_function() {
+        let host = host_with_inner_alias();
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
+
+        let inner_ref = || TypeExpr::Ref {
+            name: Arc::from("Inner"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let build = |ctor: bool| {
+            let func = Arc::new(FunctionExpr::synthetic(
+                vec![FunctionParam::synthetic(
+                    Some("props".to_string()),
+                    inner_ref(),
+                    false,
+                    false,
+                )],
+                Some(Arc::new(inner_ref())),
+                Vec::new(),
+            ));
+            if ctor {
+                TypeExpr::ConstructorType(func)
+            } else {
+                TypeExpr::Function(func)
+            }
+        };
+
+        // Structural assertion that ignores incidental OXC spans: the surface
+        // is the resolved `{ x: number }` object body, NOT the bare `Inner`
+        // ref. Returns the sole property's (name, primitive) when the surface
+        // was projected; `None` (with a distinguishing panic) otherwise.
+        fn assert_projected_to_inner_object(surface: Option<&TypeExpr>, role: &str) {
+            match surface {
+                Some(TypeExpr::Object(object)) => {
+                    let names: Vec<_> = object
+                        .properties
+                        .iter()
+                        .filter_map(|member| match member {
+                            ObjectMember::Property(property) => {
+                                assert!(
+                                    matches!(
+                                        property.ty,
+                                        TypeExpr::Primitive(PrimitiveName::Number)
+                                    ),
+                                    "{role}: projected `Inner.x` must be `number`, got {:?}",
+                                    property.ty
+                                );
+                                Some(property.name.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        names,
+                        vec!["x".to_string()],
+                        "{role}: projected `Inner` object body must expose exactly `x`",
+                    );
+                }
+                Some(TypeExpr::Ref { name, .. }) => panic!(
+                    "{role}: surface left as the BARE, un-projected `Ref {{ name: {name:?} }}` — \
+                     the recursion into the signature was skipped (the pre-fix `_ => expr.clone()` \
+                     defect)"
+                ),
+                other => panic!("{role}: expected a projected `Inner` object body, got {other:?}"),
+            }
+        }
+
+        // Sanity: the function-typed equivalent projects its `Inner` ref to the
+        // resolved object body (this is the behaviour the ctor case must match).
+        let function_result = VerterHost::materialize_project_intrinsic_member_surface_expr(
+            &build(false),
+            &mut engine,
+            "/src/inner.ts",
+            false,
+        );
+        let TypeExpr::Function(function_inner) = &function_result else {
+            panic!("function input must stay a Function, got {function_result:?}");
+        };
+        assert_projected_to_inner_object(
+            function_inner.parameters.first().map(|p| &p.ty),
+            "function param",
+        );
+
+        // The constructor-typed input must behave IDENTICALLY: stay a
+        // ConstructorType AND have its param/return `Inner` ref projected.
+        let ctor_result = VerterHost::materialize_project_intrinsic_member_surface_expr(
+            &build(true),
+            &mut engine,
+            "/src/inner.ts",
+            false,
+        );
+        let TypeExpr::ConstructorType(ctor_inner) = &ctor_result else {
+            panic!(
+                "constructor-type input must stay a ConstructorType (never flatten to Function), \
+                 got {ctor_result:?}"
+            );
+        };
+        assert_projected_to_inner_object(
+            ctor_inner.parameters.first().map(|p| &p.ty),
+            "constructor param",
+        );
+        assert_projected_to_inner_object(ctor_inner.return_type.as_deref(), "constructor return");
     }
 }
