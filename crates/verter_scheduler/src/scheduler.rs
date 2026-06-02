@@ -352,6 +352,33 @@ pub struct Request {
     pub request_context: Option<crate::request_context::OpaqueRequestContext>,
 }
 
+/// Typed result of a submission attempt.
+///
+/// Generic over the success-handle type `T` (the handle the submission
+/// path hands back on admission). The three variants are exactly the
+/// admission outcomes — there is no speculative fourth case:
+///
+/// - [`Admitted`](SubmissionResult::Admitted) — the submission was
+///   admitted into the DAG; carries the caller's handle.
+/// - [`DedupeJoined`](SubmissionResult::DedupeJoined) — a caller-side
+///   [`DedupeHook`](crate::dedupe_hook::DedupeHook) probe matched an
+///   already-in-flight equivalent, so the submission collapsed onto it
+///   before reaching the DAG; carries the opaque
+///   [`DedupeJoiner`](crate::dedupe_hook::DedupeJoiner).
+/// - [`Backpressured`](SubmissionResult::Backpressured) — admission was
+///   declined under the existing capacity ledger WITHOUT mutating
+///   readiness. The caller retries or blocks on capacity.
+#[derive(Debug)]
+pub enum SubmissionResult<T> {
+    /// Admitted into the DAG; carries the caller's handle.
+    Admitted(T),
+    /// Collapsed onto an in-flight flight by a caller-side dedupe probe.
+    DedupeJoined(crate::dedupe_hook::DedupeJoiner),
+    /// Admission declined under capacity backpressure, with no readiness
+    /// mutation. The caller retries or blocks on capacity availability.
+    Backpressured,
+}
+
 /// Batch submission handle.
 ///
 /// Produced by [`Scheduler::submit_batch_atomic`]; drained via

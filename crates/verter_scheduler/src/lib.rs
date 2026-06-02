@@ -85,6 +85,7 @@ pub mod caller_kind;
 pub mod cancellation;
 pub mod cpu_concurrency;
 pub mod dag;
+pub mod dedupe_hook;
 pub mod driver;
 pub mod edges;
 pub mod executor;
