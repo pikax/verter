@@ -164,6 +164,17 @@ export type NativeTypeExpr =
       returnType?: NativeTypeExpr;
       typeParameters?: NativeTypeParameter[];
     }
+  | {
+      // A bare constructor type (`new (...) => R`). Rust's `to_json_value`
+      // emits the identical payload as `function` with `kind:
+      // "constructorType"`. The bridge maps it function-like — the
+      // constructor-vs-function distinction is consumed in Rust before the
+      // wire (Vue runtime-ctor reducer + wire-graph builder).
+      kind: "constructorType";
+      parameters: NativeFunctionParam[];
+      returnType?: NativeTypeExpr;
+      typeParameters?: NativeTypeParameter[];
+    }
   | { kind: "ref"; name: string; typeArguments: NativeTypeExpr[] }
   | {
       kind: "recursiveRef";
@@ -383,7 +394,13 @@ export function typeExprToDescriptor(
       });
     }
 
-    case "function": {
+    // `function` and `constructorType` share the identical native payload
+    // (parameters / returnType / typeParameters) and both map to a function-
+    // like descriptor. The bare-constructor-vs-function distinction is
+    // consumed in Rust before this bridge, so a `constructorType` node is
+    // treated function-like rather than left as an unrecognised `unknown`.
+    case "function":
+    case "constructorType": {
       const params = expr.parameters.map((p) => ({
         name: p.name ?? "",
         type: typeExprToDescriptor(p.ty, nativeRegistry, visiting, graphVisiting),
