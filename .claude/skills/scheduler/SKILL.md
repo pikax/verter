@@ -1,6 +1,6 @@
 ---
 name: scheduler
-description: Verter scheduler — Scheduler, submit_request/submit_batch/submit_batch_atomic (atomic DAG admission via driver-drained NewRequestBatch + shared admission core + deferred DedupJoinerEvent), wait_batch (input-order), live TaskKind (Source/Analysis/Artifact), CPU vs I/O pool routing, scheduler-owned cpu_pool + host-owned HostCpuPool coordinator (shared by every host batch API), account_batch_submission; plus the Block-7 design target (KeyedJob/CacheNodeDagNode/SchedulerCpuPool/submit_dag/DAG submission/dedupe-hook) demarcated as not-yet-implemented
+description: Verter scheduler — Scheduler, submit_request/submit_batch/submit_batch_atomic (atomic DAG admission via driver-drained NewRequestBatch + shared admission core + deferred DedupJoinerEvent), wait_batch (input-order), live TaskKind (Source/Analysis/Artifact), CPU vs I/O pool routing, scheduler-owned cpu_pool + host-owned HostCpuPool coordinator (shared by every host batch API), account_batch_submission; plus the landed-but-unwired leaf substrate (CpuConcurrencySemaphore/CpuConcurrencyPermit, CancellationToken, opaque SchedulerCacheId newtype, caller-side DedupeHook trait, SubmissionResult) and the not-yet-implemented cache-runtime DAG design target (KeyedJob/CacheNodeDagNode/SchedulerCpuPool/submit_dag/DAG submission)
 ---
 
 # Scheduler
@@ -50,14 +50,26 @@ parameter of `compile_many` — concurrency is the construction-time
 host-owned `HostCpuPool` (`HostConfig::host_cpu_threads`); see the *Dual
 pool ownership* section.
 
-The **Block 7 design target** (NOT yet on the tree) adds the
-`submit_dag` / `CacheNodeDag` DAG surface, the `KeyedJob` /
+A **leaf substrate** for the cache-runtime DAG design has landed
+(present on the tree but UNWIRED — no submission path takes it as an
+argument yet): the hand-rolled `CpuConcurrencySemaphore` +
+`CpuConcurrencyPermit` (`cpu_concurrency.rs`), the `CancellationToken`
+(`cancellation.rs`), the opaque `SchedulerCacheId` newtype relocated
+into `cache_id.rs`, the caller-side `DedupeHook` trait + `DedupeJoiner`
++ `NoDedupeHook` (`dedupe_hook.rs`), and the `SubmissionResult<T>`
+substrate (`Admitted` / `DedupeJoined` / `Backpressured`). These
+primitives are correct and tested in isolation, but the submission API
+does not yet consume them. The sections below describe each.
+
+The rest of the **cache-runtime DAG design target** is still NOT on the
+tree: the `submit_dag` / `CacheNodeDag` DAG surface, the `KeyedJob` /
 `CacheNodeDagNode` types, the expanded `Load` / `Parse` / `CacheNode`
-`TaskKind` variants on `SchedulerCpuPool`, DAG semantics (dependency
-gating, priority inheritance, cancellation propagation, bounded
-admission / backpressure), and the generic dedupe-hook surface. Every
-section describing those surfaces carries an explicit
-"Not yet implemented — Block 7" banner.
+`TaskKind` variants on `SchedulerCpuPool`, the `SchedulerCpuPool` /
+`SchedulerIoPool` typed pools, DAG semantics (dependency gating,
+priority inheritance, cancellation propagation, bounded admission /
+backpressure), and the wiring of `CpuConcurrencySemaphore` onto DAG
+node dispatch. Every section describing those un-landed surfaces carries
+an explicit "Not yet implemented" banner.
 
 The binding implementation spec lives in
 `docs/arch/cache-runtime-overhaul-plan.md` (Blocks 6 and 7). When in
@@ -83,57 +95,118 @@ fails the build.
 
 ## Generic dedupe-hook surface
 
-> **Not yet implemented — cache-runtime DAG design (Block 7).** The
-> `DedupeHook` trait, the `DedupKey` / `DedupeJoiner` types, and the
-> `submit_dag` dedupe argument described in this section are the Block 7
-> design target from `docs/arch/cache-runtime-overhaul-plan.md`; they are
-> NOT on the current tree (there is no `dedupe_hook.rs`, and
-> `submit_request` / `submit_batch` take no `DedupeHook` arg today). The
-> surface below describes the intended Block 7 hook.
+The `DedupeHook` trait IS on the current tree, in
+`crates/verter_scheduler/src/dedupe_hook.rs`. It is the **caller-side
+pre-admission singleflight** hook: the calling crate implements it over
+its own in-flight table and the scheduler probes it BEFORE a submission
+reaches the DAG, so a caller that already has an equivalent flight live
+can skip the scheduler round-trip entirely and attach as a joiner. The
+scheduler itself owns NO in-flight cache table — the calling crate
+deduplicates BEFORE submitting.
 
-The scheduler exposes a generic dedupe-hook trait that the calling
-crate implements over its own in-flight table. The scheduler itself
-owns NO in-flight cache table — the calling crate deduplicates
-BEFORE submitting to the scheduler.
+This is DISTINCT from the scheduler-internal post-unlock
+`DedupJoinerEvent` (`crate::dag`): that one is the waiter-notify fired,
+after the DAG lock is released, once admission has already joined a
+request onto an existing waiter group. `DedupeHook` runs on the caller's
+side before a submission is even constructed; `DedupJoinerEvent` runs
+inside admission. Two different lifecycle points, two different types.
 
 ```rust
 // crates/verter_scheduler/src/dedupe_hook.rs
 pub trait DedupeHook: Send + Sync {
-    /// Probe whether `dedup_key` is already known to the caller's
+    /// Probe whether `identity` is already known to the caller's
     /// in-flight table. If `Some`, the caller blocks on the existing
-    /// flight and the scheduler skips enqueue.
-    fn probe(&self, dedup_key: &DedupKey) -> Option<DedupeJoiner>;
+    /// flight and the scheduler skips enqueue; if `None`, the
+    /// submission proceeds to admission as usual.
+    fn probe(&self, identity: &WorkNodeIdentity) -> Option<DedupeJoiner>;
 }
 
-/// Opaque handle the caller may use to attach a completion as a
-/// joiner on an in-flight flight.
-pub struct DedupeJoiner { _opaque: () }
+/// Opaque handle the caller uses to attach a completion as a joiner
+/// on an in-flight flight (no public fields).
+#[derive(Debug)]
+pub struct DedupeJoiner { /* opaque */ }
+
+/// The genuine no-op hook used wherever a caller supplies no in-flight
+/// table — `probe` always returns `None`. NOT a stub: its contract IS
+/// "never deduplicate".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoDedupeHook;
 ```
 
-`DedupKey` is defined in `crates/verter_scheduler/src/job.rs`
-alongside `KeyedJob`. Both the trait and the joiner type are fully
-owned by `verter_scheduler`; no method signature or struct field on
-either type references any higher-level crate.
+The probe key is `crate::dag::WorkNodeIdentity` — the scheduler's own
+dedupe identity and the **single dedupe-identity authority**. There is
+NO parallel `DedupKey` type: any public dedupe key is a thin
+wrapper/derivation of `WorkNodeIdentity`, never a separate key, so there
+is one source of truth for dedupe identity (leaf-boundary invariant
+H20). The trait, `DedupeJoiner`, and `NoDedupeHook` are fully owned by
+`verter_scheduler`; no method signature or struct field on any of them
+references a higher-level crate.
 
-`Scheduler::submit_request` / `submit_dag` accept an optional
-`&dyn DedupeHook` argument. When present, the scheduler probes the
-hook before admission. When absent (e.g. unit tests, raw scheduler
-callers), the scheduler proceeds directly. The scheduler never
-imports any concrete in-flight-table type from a higher-level crate.
+The submission path probes the hook before admission. When the probe
+returns `Some`, the caller blocks on the existing flight and the
+scheduler skips enqueue (surfaced as `SubmissionResult::DedupeJoined`,
+see *SubmissionResult substrate*); when it returns `None`, the
+submission proceeds to admission. The scheduler never imports any
+concrete in-flight-table type from a higher-level crate. Wiring the hook
+into `submit_request` / `submit_dag` as an explicit `&dyn DedupeHook`
+argument on those entry points is a future sub-block — the trait
+substrate is landed and unwired.
+
+## SubmissionResult substrate
+
+`SubmissionResult<T>` (`scheduler.rs`, LANDED) is the typed result of a
+submission attempt, generic over the success-handle type `T`. Exactly
+three variants — there is no speculative fourth case:
+
+```rust
+pub enum SubmissionResult<T> {
+    /// Admitted into the DAG; carries the caller's handle.
+    Admitted(T),
+    /// Collapsed onto an in-flight flight by a caller-side
+    /// `DedupeHook` probe; carries the opaque `DedupeJoiner`.
+    DedupeJoined(crate::dedupe_hook::DedupeJoiner),
+    /// Admission declined under the capacity ledger WITHOUT mutating
+    /// readiness. The caller retries or blocks on capacity.
+    Backpressured,
+}
+```
+
+It is landed substrate, UNWIRED: the live submission entry points
+(`submit_request` / `submit_batch` / `submit_batch_atomic`) still return
+their existing `CompletionHandle` / `BatchHandle` shapes, not
+`SubmissionResult`. Routing those entry points through `SubmissionResult`
+is a future sub-block.
+
+## CancellationToken substrate
+
+`CancellationToken` (`cancellation.rs`, LANDED) is a cheap, clonable,
+thread-safe one-shot latch — a transparent `Arc<AtomicBool>`. `clone()`
+is a refcount bump, `cancel()` a single `Release` store, `is_cancelled()`
+a single `Acquire` load; all clones share one flag and `cancel()` is
+idempotent. It is the substrate the un-landed DAG design uses for
+per-node cancellation propagation
+(`CacheNodeDagNode.cancellation_token`), but on the current tree it is
+UNWIRED — no submission path or work node carries one yet.
 
 ## KeyedJob, DedupKey, and `CacheNodeDagNode` lifecycle
 
-> **Not yet implemented — cache-runtime DAG design (Block 7).** The
-> `KeyedJob` / `DedupKey` / `CacheNodeDagNode` / `CacheNodeDag` /
-> `submit_dag` types and the whole lifecycle in this section are the
-> Block 7 design target from
-> `docs/arch/cache-runtime-overhaul-plan.md`; none of them are on the
-> current tree. The live submission surface is `Scheduler::submit_request`
-> / `submit_batch` (returning a `BatchHandle`) over the live `TaskKind`
-> set `Source` / `Analysis` / `Artifact`, dispatched onto the
-> scheduler-owned `cpu_pool` via `cpu_pool.spawn(...)` (see *Dual pool
-> ownership*). The types and steps below describe the intended Block 7
-> shape.
+> **Not yet implemented — cache-runtime DAG design.** The `KeyedJob` /
+> `DedupKey` / `CacheNodeDagNode` / `CacheNodeDag` / `submit_dag` types
+> and the whole lifecycle in this section are the un-landed design
+> target from `docs/arch/cache-runtime-overhaul-plan.md`; none of them
+> are on the current tree. The live submission surface is
+> `Scheduler::submit_request` / `submit_batch` (returning a
+> `BatchHandle`) over the live `TaskKind` set `Source` / `Analysis` /
+> `Artifact`, dispatched onto the scheduler-owned `cpu_pool` via
+> `cpu_pool.spawn(...)` (see *Dual pool ownership*). The types and steps
+> below describe the intended shape.
+>
+> **Dedupe-identity reconciliation:** the LANDED dedupe authority is
+> `crate::dag::WorkNodeIdentity` (the `DedupeHook::probe` key — see
+> *Generic dedupe-hook surface*). The illustrative `DedupKey` struct
+> below is an earlier draft shape; when the DAG surface lands its dedupe
+> key MUST be `WorkNodeIdentity` (or a thin derivation of it), NOT a
+> parallel key type. There is one dedupe-identity source of truth.
 
 `KeyedJob` is the submission identity. `CacheNodeDagNode` is the
 ready-queue envelope that the driver dispatches. The inbox-level
@@ -340,14 +413,20 @@ host coordinator pool's worker count is sized once at host construction
 (from the host's CPU-thread config) and reused across every batch call,
 and the scheduler's stage `cpu_pool` runs at its configured concurrency.
 
-> **Not yet implemented — cache-runtime DAG design (Block 7).** Per-call
-> concurrency capping on `SchedulerCpuPool` admissions (the
-> `CpuConcurrencySemaphore` handle propagated through `CacheNodeDagNode`)
-> is part of the Block 7 design target in
-> `docs/arch/cache-runtime-overhaul-plan.md` and is NOT on the current
-> tree. The rest of this section describes that intended design. Once it
-> lands, callers attach the handle to every
-> `CacheNodeDagNode.cpu_concurrency_semaphore` in the batch DAG:
+The `CpuConcurrencySemaphore` / `CpuConcurrencyPermit` TYPES are LANDED
+(`crates/verter_scheduler/src/cpu_concurrency.rs`) and tested in
+isolation, but they are UNWIRED — no submission path or DAG node
+consumes a semaphore handle yet.
+
+> **Not yet implemented.** The `Scheduler::cpu_concurrency_semaphore(n)`
+> constructor method and per-call concurrency capping on
+> `SchedulerCpuPool` admissions (the `CpuConcurrencySemaphore` handle
+> propagated through `CacheNodeDagNode.cpu_concurrency_semaphore`) are
+> part of the un-landed cache-runtime DAG design target in
+> `docs/arch/cache-runtime-overhaul-plan.md`. The rest of this section
+> describes that intended design. Once it lands, callers attach the
+> handle to every `CacheNodeDagNode.cpu_concurrency_semaphore` in the
+> batch DAG:
 
 ```rust
 impl Scheduler {
@@ -362,14 +441,27 @@ impl Scheduler {
 }
 ```
 
-`CpuConcurrencySemaphore` is a hand-rolled counting primitive
-defined in `crates/verter_scheduler/src/cpu_concurrency.rs`. The
-substrate is `parking_lot::Mutex<usize>` + `parking_lot::Condvar` —
-the only synchronisation primitives `parking_lot 0.12` exports
-(`parking_lot::Semaphore` does NOT exist in that version).
-`CpuConcurrencyPermit` is the RAII guard returned by
-`semaphore.acquire()`; dropping it increments the counter and
-notifies one waiter.
+`CpuConcurrencySemaphore` (LANDED) is a hand-rolled counting primitive.
+The substrate is `parking_lot::Mutex<usize>` (the free-permit count) +
+`parking_lot::Condvar` — the only synchronisation primitives
+`parking_lot 0.12` exports (`parking_lot::Semaphore` does NOT exist in
+that version; its absence is pinned by
+`tests/no_parking_lot_semaphore.rs`). `new(capacity)` PANICS on
+`capacity == 0` (a release-active assert: a zero-permit semaphore would
+deadlock every `acquire`; the cap is configured once at construction so
+the check is off the hot path). `acquire()` BLOCKS in a
+predicate-rechecking `while *available == 0` loop until a permit is
+free, then decrements and returns the RAII `CpuConcurrencyPermit`
+(`#[must_use]`, non-`Clone` — one permit is exactly one held slot).
+`Drop` increments the count and `notify_one`s a single waiter, on BOTH
+the normal path AND stack-unwind on panic, so a panicking holder still
+frees its slot. The `Mutex<usize>` count is the single source of truth
+for available permits. Guards: `tests/cpu_concurrency_semaphore.rs`
+pins the capacity cap (deterministic channel-handshake blocking proof),
+RAII normal-drop release, and panic-unwind release; the
+`cpu_concurrency` module is `#[cfg(not(target_arch = "wasm32"))]` (the
+limiter caps the native-only scheduler CPU pool — wasm runs the
+scheduler inline), so the test file compiles native-only.
 
 Propagation model: every `CacheNodeDagNode` carries
 `cpu_concurrency_semaphore: Option<Arc<CpuConcurrencySemaphore>>` —
@@ -421,10 +513,17 @@ The scheduler routes (Block 7 design target):
   → `SchedulerCpuPool::submit`. The worker dispatches through
   `execute_cache_node(&node, &ctx) -> CacheNodeOutcome` (direct
   return, NOT `Result`-wrapped). `SchedulerCacheId` is the
-  scheduler-local enum defined in
-  `crates/verter_scheduler/src/cache_id.rs`; it is named distinctly
-  so it never silently shadows any same-short-name type from a
-  downstream consumer.
+  scheduler-local OPAQUE NEWTYPE
+  `pub struct SchedulerCacheId(pub u64)` defined in
+  `crates/verter_scheduler/src/cache_id.rs` (`Clone, Copy, Debug, Eq,
+  Hash, Ord`). It is deliberately NOT an enum — an enum would leak
+  session cache-family meaning into the scheduler and create a second
+  source of truth for cache identity. The scheduler stays
+  domain-agnostic: the opaque `u64` is the discriminator on
+  `WorkNodeIdentity::CacheNode`, and the session owns its
+  interpretation. There is no `dag.rs` re-export shim for the type —
+  it lives in `cache_id.rs` and is re-exported from the crate root
+  only.
 
 `TaskKind` is no longer `Copy` — payload-bearing variants carry
 `Arc<str>` / `Arc<SourceSnapshot>` etc. Every existing `Copy` call
@@ -678,7 +777,9 @@ in their `[dev-dependencies]`.
 - `KeyedJob::stub()`, `DedupKey::new_for_test()`,
   `CacheNodeDagNode::stub()`,
   `CacheNodeDispatchCtx::stub_with(&dedup_key, &cancellation)`,
-  `SchedulerCacheId::Test`.
+  `SchedulerCacheId(0)` (the opaque newtype constructed directly —
+  there is no `::Test` variant; `SchedulerCacheId` is
+  `pub struct SchedulerCacheId(pub u64)`, not an enum).
 
 See also:
 - `.claude/skills/host-session/SKILL.md` — host-side ownership.
