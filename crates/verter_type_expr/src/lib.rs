@@ -491,6 +491,59 @@ pub struct IndexSignatureSpans {
     pub value: Option<Span>,
 }
 
+/// Declared accessibility of a class member on the shared type-IR surface.
+///
+/// This is the canonical visibility carrier for [`ObjectProperty`] and
+/// [`MethodSignature`]. It is populated from the OXC `TSAccessibility` token
+/// (`None` / `public` → [`Public`], `protected` → [`Protected`], `private` →
+/// [`Private`]) when the analyzer lowers a class declaration; every other
+/// member origin (interface, type-literal, object-literal, mapped type,
+/// synthetic merge) is [`Public`] by default.
+///
+/// Visibility participates in node identity (Eq / Hash): a `private foo` and a
+/// `public foo` are genuinely distinct surfaces, mirroring how `spans` already
+/// extends member identity. The published-prop surface re-applies a
+/// [`Public`]-only filter at the publication boundary, so non-public members
+/// stay recorded on the shared surface without leaking as Vue props.
+///
+/// [`Public`]: MemberVisibility::Public
+/// [`Protected`]: MemberVisibility::Protected
+/// [`Private`]: MemberVisibility::Private
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberVisibility {
+    /// `public` class member, or any non-class member (interface / type-literal
+    /// / object-literal / mapped / synthetic) — the default.
+    #[default]
+    Public,
+    /// `protected` class member.
+    Protected,
+    /// `private` class member.
+    Private,
+}
+
+impl MemberVisibility {
+    /// Whether this member is publicly visible. Mirrors
+    /// `MacroVisibility::is_public` / `ResolvedMemberVisibility::is_public`.
+    #[must_use]
+    pub const fn is_public(self) -> bool {
+        matches!(self, Self::Public)
+    }
+
+    /// The lowercase wire string for this visibility, matching the
+    /// `MacroVisibility::as_wire_str` mapping the `native_props` carrier uses.
+    #[must_use]
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Protected => "protected",
+            Self::Private => "private",
+        }
+    }
+}
+
 /// A named property in an object type.
 ///
 /// `spans` carries OXC declaration-site provenance (see [`MemberSpans`]) and is
@@ -504,6 +557,13 @@ pub struct ObjectProperty {
     pub ty: TypeExpr,
     pub optional: bool,
     pub readonly: bool,
+    /// Declared accessibility of the member. `Public` for every non-class
+    /// origin; class members carry their `TSAccessibility`. Participates in
+    /// node identity (Eq / Hash). Serialized with `#[serde(default)]` so a
+    /// non-public value survives a roundtrip and pre-existing JSON without the
+    /// field deserializes as `Public`.
+    #[serde(default)]
+    pub visibility: MemberVisibility,
     /// OXC declaration-site spans (in-memory provenance; not serialized).
     #[serde(skip)]
     pub spans: MemberSpans,
@@ -512,6 +572,7 @@ pub struct ObjectProperty {
 impl ObjectProperty {
     /// Construct a property with NO source spans (a synthesized property with
     /// no single declaration site — e.g. a test fixture or a derived member).
+    /// Visibility defaults to `Public`.
     #[must_use]
     pub fn synthetic(name: String, ty: TypeExpr, optional: bool, readonly: bool) -> Self {
         Self {
@@ -519,11 +580,13 @@ impl ObjectProperty {
             ty,
             optional,
             readonly,
+            visibility: MemberVisibility::Public,
             spans: MemberSpans::default(),
         }
     }
 
-    /// Construct a property carrying its OXC declaration-site spans.
+    /// Construct a property carrying its OXC declaration-site spans. Visibility
+    /// defaults to `Public`.
     #[must_use]
     pub fn with_spans(
         name: String,
@@ -537,6 +600,29 @@ impl ObjectProperty {
             ty,
             optional,
             readonly,
+            visibility: MemberVisibility::Public,
+            spans,
+        }
+    }
+
+    /// Construct a property carrying both its declared accessibility and its
+    /// OXC declaration-site spans. Used by the analyzer's class lowerer to mint
+    /// non-public class members onto the shared surface.
+    #[must_use]
+    pub fn with_visibility(
+        name: String,
+        ty: TypeExpr,
+        optional: bool,
+        readonly: bool,
+        visibility: MemberVisibility,
+        spans: MemberSpans,
+    ) -> Self {
+        Self {
+            name,
+            ty,
+            optional,
+            readonly,
+            visibility,
             spans,
         }
     }
@@ -605,24 +691,34 @@ pub struct MethodSignature {
     pub name: String,
     pub function: FunctionExpr,
     pub optional: bool,
+    /// Declared accessibility of the member. `Public` for every non-class
+    /// origin; class methods carry their `TSAccessibility`. Participates in
+    /// node identity (Eq / Hash). Serialized with `#[serde(default)]` so a
+    /// non-public value survives a roundtrip and pre-existing JSON without the
+    /// field deserializes as `Public`.
+    #[serde(default)]
+    pub visibility: MemberVisibility,
     /// OXC declaration-site spans (in-memory provenance; not serialized).
     #[serde(skip)]
     pub spans: MemberSpans,
 }
 
 impl MethodSignature {
-    /// Construct a method signature with NO source spans.
+    /// Construct a method signature with NO source spans. Visibility defaults
+    /// to `Public`.
     #[must_use]
     pub fn synthetic(name: String, function: FunctionExpr, optional: bool) -> Self {
         Self {
             name,
             function,
             optional,
+            visibility: MemberVisibility::Public,
             spans: MemberSpans::default(),
         }
     }
 
     /// Construct a method signature carrying its OXC declaration-site spans.
+    /// Visibility defaults to `Public`.
     #[must_use]
     pub fn with_spans(
         name: String,
@@ -634,6 +730,27 @@ impl MethodSignature {
             name,
             function,
             optional,
+            visibility: MemberVisibility::Public,
+            spans,
+        }
+    }
+
+    /// Construct a method signature carrying both its declared accessibility
+    /// and its OXC declaration-site spans. Used by the analyzer's class lowerer
+    /// to mint non-public class methods onto the shared surface.
+    #[must_use]
+    pub fn with_visibility(
+        name: String,
+        function: FunctionExpr,
+        optional: bool,
+        visibility: MemberVisibility,
+        spans: MemberSpans,
+    ) -> Self {
+        Self {
+            name,
+            function,
+            optional,
+            visibility,
             spans,
         }
     }

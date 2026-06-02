@@ -47,9 +47,9 @@ use std::sync::Arc;
 use verter_span::Span;
 use verter_type_expr::{
     FunctionExpr, FunctionParam, FunctionSpans, IndexSignature, IndexSignatureSpans, LiteralValue,
-    MappedModifier, MemberSpans, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty,
-    PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame, SyntheticCarrierKey,
-    SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeParam, ValueRef,
+    MappedModifier, MemberSpans, MemberVisibility, MethodSignature, ObjectExpr, ObjectMember,
+    ObjectProperty, PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame,
+    SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeParam, ValueRef,
 };
 
 // ---------------------------------------------------------------------------
@@ -304,6 +304,7 @@ fn ref_hash_object_member<H: Hasher>(member: &ObjectMember, h: &mut H) {
             ref_hash(&p.ty, h);
             p.optional.hash(h);
             p.readonly.hash(h);
+            p.visibility.hash(h);
             p.spans.hash(h);
         }
         ObjectMember::IndexSignature(s) => {
@@ -333,6 +334,7 @@ fn ref_hash_method<H: Hasher>(m: &MethodSignature, h: &mut H) {
     m.name.hash(h);
     ref_hash_function(&m.function, h);
     m.optional.hash(h);
+    m.visibility.hash(h);
     m.spans.hash(h);
 }
 
@@ -542,6 +544,34 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
                     sample_function(false),
                     true,
                     MemberSpans::name_only(span(40, 41)),
+                )),
+            ],
+        })),
+    ));
+
+    // Object with NON-public class members — exercises the visibility field in
+    // the hash byte stream (a `protected` property + a `private` method). The
+    // live iterative impl and the frozen `ref_hash` mirror must both emit the
+    // visibility discriminant in declaration order; this item discriminates a
+    // mirror that forgets to hash visibility.
+    v.push((
+        "object-nonpublic-members",
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty::with_visibility(
+                    "prot".into(),
+                    TypeExpr::Primitive(PrimitiveName::Number),
+                    false,
+                    false,
+                    MemberVisibility::Protected,
+                    MemberSpans::default(),
+                )),
+                ObjectMember::Method(MethodSignature::with_visibility(
+                    "priv".into(),
+                    sample_function(false),
+                    false,
+                    MemberVisibility::Private,
+                    MemberSpans::default(),
                 )),
             ],
         })),

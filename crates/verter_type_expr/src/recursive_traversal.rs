@@ -304,6 +304,10 @@ enum HashStep<'a> {
     Usize(usize),
     /// Emit a trailing `bool` field.
     Bool(bool),
+    /// Emit a trailing `MemberVisibility` field (a class member's declared
+    /// accessibility, emitted in declaration order between `readonly` and
+    /// `spans` for a property / between `optional` and `spans` for a method).
+    Visibility(MemberVisibility),
     /// Emit a trailing `MappedModifier` field.
     Modifier(MappedModifier),
     /// Emit a trailing `MemberSpans` field.
@@ -345,6 +349,7 @@ impl Hash for TypeExpr {
                 },
                 HashStep::Usize(n) => n.hash(state),
                 HashStep::Bool(b) => b.hash(state),
+                HashStep::Visibility(v) => v.hash(state),
                 HashStep::Modifier(m) => m.hash(state),
                 HashStep::MemberSpans(s) => s.hash(state),
                 HashStep::IndexSpans(s) => s.hash(state),
@@ -558,8 +563,9 @@ fn hash_object_member_step<'a, H: Hasher>(
         ObjectMember::Property(p) => {
             0isize.hash(state);
             p.name.hash(state);
-            // ty, optional, readonly, spans. Push reverse.
+            // ty, optional, readonly, visibility, spans. Push reverse.
             stack.push(HashStep::MemberSpans(p.spans));
+            stack.push(HashStep::Visibility(p.visibility));
             stack.push(HashStep::Bool(p.readonly));
             stack.push(HashStep::Bool(p.optional));
             stack.push(HashStep::Node(&p.ty));
@@ -584,8 +590,9 @@ fn hash_object_member_step<'a, H: Hasher>(
         ObjectMember::Method(m) => {
             4isize.hash(state);
             m.name.hash(state);
-            // function, optional, spans. Push reverse.
+            // function, optional, visibility, spans. Push reverse.
             stack.push(HashStep::MemberSpans(m.spans));
+            stack.push(HashStep::Visibility(m.visibility));
             stack.push(HashStep::Bool(m.optional));
             stack.push(HashStep::Func(&m.function));
         }
