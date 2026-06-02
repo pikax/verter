@@ -1039,3 +1039,225 @@ fn test_utf16_surrogate_pair_in_identifier() {
     assert_eq!(mapper.vue_to_tsx(vue(0, 6)).unwrap().pos.character, 8);
     assert_eq!(mapper.tsx_to_vue(ts(0, 8)).unwrap().pos.character, 6);
 }
+
+// ========================================================================
+// Line-wrap contiguity must not bridge a synthetic/unmapped tail. A run that
+// is NOT the last token on its generated line (a synthetic tail follows it),
+// or whose source extent does not reach its source line's true end, must NOT
+// join the next-line run into one compatibility component — otherwise a range
+// from it into the next-line run composes an over-broad source span across the
+// synthetic tail.
+// ========================================================================
+
+/// A mapped run with a synthetic/unmapped TAIL on generated line N, followed by a mapped
+/// run at line N+1 col 0 (the source wrapping line+1 col 0 too), must land in DIFFERENT
+/// compatibility components — so a range across them is dropped.
+///
+/// Discriminating: a geometry-only `line_wrap` rule (`cur.dst_line==prev.dst_line+1 &&
+/// cur.dst_col==0 && cur.src_line==prev.src_line+1 && cur.src_col==0`) joins them because the
+/// unmapped tail produces no run, so `runs.last()` is still `prev` when `cur` is processed —
+/// and a range from `prev` into `cur` composes a Vue range spanning the synthetic tail. The
+/// strict rule (prev must be the LAST token of any kind on its generated line AND reach its
+/// source line's true end) rejects the join -> `tsx_range_to_vue` returns `None`.
+#[test]
+fn test_tsx_range_line_wrap_over_synthetic_tail_returns_none() {
+    // Generated line 0: mapped run [0,3) then a SYNTHETIC (unmapped) token at gen col 3
+    // (the tail). Generated line 1: mapped run starting at col 0. Source lines 0 and 1 are
+    // each "abc" (len 3), so the line-0 run [0,3) DOES reach its source line end — isolating
+    // the failure cause to the synthetic generated tail, not a short source line.
+    let json = build_source_map_with_unmapped(
+        "App.vue",
+        "abc\nabc",
+        &[(0, 0, 0, 0), (1, 0, 1, 0)],
+        &[(0, 3)], // synthetic tail after the line-0 mapped run
+    );
+    let mapper = PositionMapper::from_json(&json).unwrap();
+
+    // Both endpoints individually map (start in the line-0 run, end in the line-1 run).
+    assert!(
+        mapper.tsx_to_vue(ts(0, 1)).is_some(),
+        "precondition: start endpoint maps in the line-0 run"
+    );
+    assert!(
+        mapper.tsx_to_vue(ts(1, 2)).is_some(),
+        "precondition: end endpoint maps in the line-1 run"
+    );
+    // The line-0 run is NOT the last token on its generated line (a synthetic tail follows
+    // at gen col 3), so it must not line-wrap-join the line-1 run -> the range is dropped.
+    assert!(
+        mapper.tsx_range_to_vue(ts(0, 1), ts(1, 2)).is_none(),
+        "a line-wrap join across a synthetic tail must not compose a range: {:?}",
+        mapper.tsx_range_to_vue(ts(0, 1), ts(1, 2))
+    );
+}
+
+// ========================================================================
+// Multi-run half-open range end. A range whose half-open `end` equals the
+// exclusive generated end of a LATER run in the SAME compatibility component
+// (not just the start run's own end) must still compose, not be dropped.
+// ========================================================================
+
+/// `[1,6)` over two contiguous, compatible runs `[0,3)+[3,6)` has `end = 6` equal to the
+/// SECOND run's exclusive generated end. It must map to the correct Vue range.
+///
+/// Discriminating: a half-open special case that only accepts `end == start_run.dst_end`
+/// (here 3) falls through to `tsx_to_vue(end=6)`, which is `None` (6 is one-past-end of the
+/// second run), so the whole multi-token range is wrongly dropped. Accepting `end` at the
+/// exclusive end of ANY run in the start's component composes the range.
+#[test]
+fn test_tsx_range_end_at_later_run_exclusive_end_maps() {
+    // Two contiguous mapped runs on gen line 0 mapping to the SAME contiguous source:
+    //   gen(0,0)->src(0,0) run [0,3)
+    //   gen(0,3)->src(0,3) run [3,6)  (contiguous: A.dst_end 3 == B.dst_col 3, src too)
+    //   unmapped gen(0,6) bounds run B to [3,6).
+    let json = build_source_map_with_unmapped(
+        "App.vue",
+        &" ".repeat(40),
+        &[(0, 0, 0, 0), (0, 3, 0, 3)],
+        &[(0, 6)],
+    );
+    let mapper = PositionMapper::from_json(&json).unwrap();
+
+    // Precondition: end=6 is one-past-end of the second run, so tsx_to_vue(6) is None — the
+    // range must NOT rely on mapping the exclusive-end position directly.
+    assert!(
+        mapper.tsx_to_vue(ts(0, 6)).is_none(),
+        "precondition: the exclusive end column itself does not map (one-past run B)"
+    );
+    // Range [1,6): start inside run A, half-open end at run B's exclusive end -> Vue [1,6).
+    let (start, end) = mapper
+        .tsx_range_to_vue(ts(0, 1), ts(0, 6))
+        .expect("a range ending at a later compatible run's exclusive end must compose");
+    assert_eq!(start, LspPosition::new(0, 1));
+    assert_eq!(end, LspPosition::new(0, 6));
+}
+
+// ========================================================================
+// Source identity in run contiguity. Two runs with identical line/col geometry
+// but DIFFERENT source ids must not be treated as contiguous — an LspPosition
+// cannot represent which source won, so composing them is meaningless.
+// ========================================================================
+
+/// Build a source map with tokens drawn from TWO distinct sources.
+/// Each mapped tuple: (dst_line, dst_col, src_line, src_col, source_index) where
+/// `source_index` selects which of `sources` the token maps into.
+fn build_two_source_map(
+    sources: &[(&str, &str)], // (name, content) per source index
+    mapped: &[(u32, u32, u32, u32, usize)],
+) -> String {
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let ids: Vec<u32> = sources
+        .iter()
+        .map(|(name, content)| builder.add_source_and_content(name, content))
+        .collect();
+    let mut all = mapped.to_vec();
+    all.sort_by_key(|(dl, dc, _, _, _)| (*dl, *dc));
+    for (dl, dc, sl, sc, si) in all {
+        builder.add_token(dl, dc, sl, sc, Some(ids[si]), None);
+    }
+    builder.into_sourcemap().to_json_string()
+}
+
+/// Two runs with identical geometry but DIFFERENT `source_id` are in different compatibility
+/// components, so a range across them is dropped.
+///
+/// Discriminating: a contiguity rule that ignores `source_id` joins them (the same-line
+/// geometry `prev.dst_end == cur.dst_col && prev.src_end == cur.src_col` holds), and a range
+/// across them composes a Vue span whose endpoints come from two unrelated source files — an
+/// `LspPosition` cannot represent that. Requiring `prev.source_id == cur.source_id` rejects
+/// the join -> `None`.
+#[test]
+fn test_tsx_range_cross_source_same_geometry_returns_none() {
+    // Source 0 ("a.vue", "abcdef") and source 1 ("b.vue", "abcdef"). Run A maps gen(0,0)->
+    // src0(0,0) [0,3); run B maps gen(0,3)->src1(0,3) [3,6). The GENERATED + SOURCE
+    // line/col geometry is contiguous (A.dst_end 3 == B.dst_col 3; A.src_end 3 == B.src_col
+    // 3), but they belong to DIFFERENT source files.
+    let json = build_two_source_map(
+        &[("a.vue", "abcdef"), ("b.vue", "abcdef")],
+        &[(0, 0, 0, 0, 0), (0, 3, 0, 3, 1)],
+    );
+    let mapper = PositionMapper::from_json(&json).unwrap();
+
+    // Both endpoints individually map.
+    assert!(
+        mapper.tsx_to_vue(ts(0, 1)).is_some(),
+        "precondition: start endpoint maps (source 0)"
+    );
+    assert!(
+        mapper.tsx_to_vue(ts(0, 4)).is_some(),
+        "precondition: end endpoint maps (source 1)"
+    );
+    // Geometry matches but the sources differ -> the runs must NOT compose a range.
+    assert!(
+        mapper.tsx_range_to_vue(ts(0, 1), ts(0, 4)).is_none(),
+        "runs from different sources must not compose a range despite matching geometry: {:?}",
+        mapper.tsx_range_to_vue(ts(0, 1), ts(0, 4))
+    );
+}
+
+// ========================================================================
+// No-`sourcesContent` position-preserving provenance. The `(next_dst_bound,
+// None)` extent-inference arm relies on the position-preserving invariant
+// (source extent == generated extent). A content-less map whose tokens are NOT
+// position-preserving (the source delta between consecutive same-line tokens
+// disagrees with the generated delta) must NOT silently produce inferred
+// source extents — those interior runs are rejected (map to None).
+// ========================================================================
+
+/// A content-less, NON-position-preserving map: consecutive same-(gen-line)-same-(src-line)
+/// mapped tokens whose source-column delta disagrees with their generated-column delta.
+/// Interior runs that would rely on the position-preserving inference must be rejected.
+///
+/// Discriminating: a permissive arm that always trusts `next_dst_bound` as the source extent
+/// when content is absent maps the first run's interior to some `Some(src ...)`. The
+/// provenance gate detects the non-lockstep deltas and drops the inference -> `None`.
+#[test]
+fn test_no_sources_content_non_position_preserving_is_rejected() {
+    // No `sourcesContent`. Tokens on one generated line, one source line, with a generated
+    // delta of 3 but a SOURCE delta of 10 between the first two tokens (non-lockstep ->
+    // NOT position-preserving):
+    //   gen(0,0)->src(0,0)   bounded by gen 3 (generated delta 3)
+    //   gen(0,3)->src(0,10)  (source delta 10 != generated delta 3)  bounded by gen 6
+    //   gen(0,6)->src(0,13)  last-on-line
+    let json =
+        build_source_map_without_content("App.vue", &[(0, 0, 0, 0), (0, 3, 0, 10), (0, 6, 0, 13)]);
+    let mapper = PositionMapper::from_json(&json).unwrap();
+
+    // Sanity: the map really is content-less (the arm under test).
+    assert!(
+        mapper
+            .source_map()
+            .get_source_contents()
+            .all(|c| c.is_none()),
+        "precondition: the map carries no sourcesContent"
+    );
+    // The first run's interior (col 1) must NOT map: the non-position-preserving deltas mean
+    // the inferred source extent is unsound, so the content-less inference is rejected.
+    assert!(
+        mapper.tsx_to_vue(ts(0, 1)).is_none(),
+        "a non-position-preserving content-less map must not infer a source extent: {:?}",
+        mapper.tsx_to_vue(ts(0, 1))
+    );
+    assert!(
+        mapper.tsx_to_vue(ts(0, 4)).is_none(),
+        "a non-position-preserving content-less map must not infer a source extent: {:?}",
+        mapper.tsx_to_vue(ts(0, 4))
+    );
+}
+
+/// Companion guard: a content-less map whose tokens ARE position-preserving (lockstep source
+/// and generated deltas) still maps its interior runs via the invariant inference — the
+/// provenance gate does not over-reject legitimate position-preserving content-less maps.
+/// (This is the in-bounds counterpart that keeps `test_no_sources_content_interior_*` green.)
+#[test]
+fn test_no_sources_content_position_preserving_still_maps() {
+    // Lockstep deltas (gen delta == src delta == 3) -> position-preserving.
+    let json =
+        build_source_map_without_content("App.vue", &[(0, 0, 0, 0), (0, 3, 0, 3), (0, 6, 0, 6)]);
+    let mapper = PositionMapper::from_json(&json).unwrap();
+    // Interior run [0,3) still maps under the (valid) invariant inference.
+    assert_eq!(
+        mapper.tsx_to_vue(ts(0, 1)).unwrap().pos,
+        LspPosition::new(0, 1)
+    );
+}
