@@ -169,6 +169,28 @@ fn strict_in_run_behaviour_discriminates_each_deleted_path() {
         .expect("range inside one run must map");
     assert_eq!(s, LspPosition::new(0, 1));
     assert_eq!(e, LspPosition::new(0, 3));
+
+    // ── (e) GENERATED-ADJACENT but SOURCE-DISCONTIGUOUS runs: a range whose endpoints fall
+    //    in two runs that touch in generated space (`A.dst_end == B.dst_col`) but NOT in
+    //    source space (`A.src_end != B.src_col`) must be DROPPED. The generated output
+    //    relocates/repeats source (`MoveOriginal`, repeated v-model emission), so a
+    //    generated-only compatibility check (`left.dst_end == right.dst_col`) would compose a
+    //    bogus straddling source range. The source-contiguity component rule rejects it. ──
+    // run A gen(0,0)->src(0,0) [0,3); run B gen(0,3)->src(0,50) [3,..) bounded by an unmapped
+    // token at gen 6. A.dst_end (3) == B.dst_col (3); A.src_end (3) != B.src_col (50).
+    let reordered = build_map(&[(0, 0, 0, 0), (0, 3, 0, 50)], &[(0, 6)], &" ".repeat(80));
+    assert!(
+        reordered.tsx_to_vue(TsPosition::new(0, 1)).is_some()
+            && reordered.tsx_to_vue(TsPosition::new(0, 4)).is_some(),
+        "precondition: both endpoints individually map (start in run A, end in run B)"
+    );
+    assert!(
+        reordered
+            .tsx_range_to_vue(TsPosition::new(0, 1), TsPosition::new(0, 4))
+            .is_none(),
+        "generated-adjacent but source-discontiguous runs must NOT compose a range — a revived \
+         dst-only compatibility rule would return Some(bogus straddling range)"
+    );
 }
 
 /// Static scan: the deleted cross-token extrapolation / snap markers — and the GENERAL

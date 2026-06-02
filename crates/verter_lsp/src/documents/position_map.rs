@@ -16,6 +16,15 @@ use verter_span::{LspPosition, TsPosition};
 ///    extend past the real source text into trailing synthetic suffix / EOL).
 ///
 /// The minimum of the two is the run length.
+///
+/// Each run also carries a `component_id`: a compatibility-component label assigned at
+/// construction (see [`PositionMapper::precompute_runs`]). Two runs may compose a range iff
+/// they share a `component_id` — i.e. they are linked by an unbroken chain of runs that are
+/// contiguous in BOTH the generated and the source space (same-line adjacency, or the
+/// multiline line-wrap equivalent). This is what makes [`PositionMapper::runs_compatible`]
+/// an O(1) field comparison AND bakes source-contiguity into compatibility, so two
+/// generated-adjacent but source-discontiguous runs (the `MoveOriginal` / repeated-emission
+/// shape) never compose a bogus straddling source range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MappedRun {
     dst_line: u32,
@@ -26,6 +35,9 @@ struct MappedRun {
     src_col: u32,
     /// Exclusive source-column end of the run on `src_line` (`src_col + run_len`).
     src_end: u32,
+    /// Compatibility-component label: runs with the same id are linked by an unbroken chain
+    /// of both-space-contiguous runs and may compose a range; runs with different ids may not.
+    component_id: u32,
 }
 
 impl MappedRun {
@@ -57,9 +69,12 @@ impl MappedRun {
 /// the run's mapped start).
 ///
 /// A RANGE maps only via [`tsx_range_to_vue`](PositionMapper::tsx_range_to_vue), which
-/// requires both endpoints to resolve inside **compatible** runs (the same run, or
-/// genuinely-contiguous mapped runs with no synthetic/unmapped content between them). Two
-/// endpoints that each map but lie in runs separated by synthetic content do NOT compose.
+/// requires both endpoints to resolve inside the SAME **compatibility component** (the same
+/// run, or runs linked by an unbroken chain that is contiguous in BOTH the generated and the
+/// source space — same-line adjacency or the multiline line-wrap equivalent). Two endpoints
+/// that each map but lie in runs separated by synthetic content, or in generated-adjacent
+/// but source-discontiguous runs (the `MoveOriginal` / repeated-emission shape), do NOT
+/// compose — there is no bogus straddling source range.
 ///
 /// All positions use 0-indexed lines and UTF-16 columns (matching LSP `Position`). The typed
 /// [`TsPosition`] / [`LspPosition`] wrappers make it impossible to pass a TSX coordinate where
@@ -73,7 +88,9 @@ impl MappedRun {
 pub struct PositionMapper {
     map: OwnedSourceMap,
     /// All mapped runs, stored in `(dst_line, dst_col)` order (the source-map token order).
-    /// A run's stable identity is its index into this vec (used for endpoint-compatibility).
+    /// A run's stable identity is its index into this vec; each run also carries a
+    /// `component_id` (assigned in `precompute_runs`) so endpoint-compatibility is an O(1)
+    /// label comparison rather than a per-call chain walk.
     runs: Vec<MappedRun>,
     /// Per generated line: indices into `runs`, sorted by `dst_col`. Index = dst line.
     by_dst_line: Vec<Vec<u32>>,
@@ -156,6 +173,11 @@ impl PositionMapper {
         };
 
         let mut runs: Vec<MappedRun> = Vec::new();
+        // Compatibility-component labelling. Runs are produced in source-map token order
+        // (sorted by `(dst_line, dst_col)`), so we can assign component ids in this same pass:
+        // a run joins the previous run's component iff it is contiguous with it in BOTH spaces
+        // (`runs_both_space_contiguous`); otherwise it starts a fresh component.
+        let mut next_component: u32 = 0;
         for (idx, token) in tokens.iter().enumerate() {
             let Some(source_id) = token.get_source_id() else {
                 continue; // unmapped token: no run (it only bounds the preceding run)
@@ -176,17 +198,26 @@ impl PositionMapper {
 
             // Bound 2: the token's own source line's true content length remaining. This
             // caps a last-on-line run so it cannot extend past real source text into a
-            // synthetic suffix or to EOL.
+            // synthetic suffix or to EOL. It is ABSENT only when the map carries no embedded
+            // `sourcesContent`: an INTERIOR run is then bounded exactly by `next_dst_bound`,
+            // which — by the position-preserving invariant `src_end - src_col == dst_end -
+            // dst_col` — is the TRUE source extent, not a permissive guess; a LAST-on-line run
+            // has no extent signal and is conservatively dropped below (`run_len == 0`).
             let src_col = token.get_src_col();
             let src_remaining = src_line_len(source_id, token.get_src_line())
                 .map(|len| len.saturating_sub(src_col));
 
             let run_len = match (next_dst_bound, src_remaining) {
                 (Some(a), Some(b)) => a.min(b),
+                // No source-line length available (no embedded source content): by the
+                // position-preserving invariant an interior run's source extent equals its
+                // generated extent, so `next_dst_bound` IS the true source extent — provably
+                // exact, never permissive.
                 (Some(a), None) => a,
                 (None, Some(b)) => b,
-                // No following token and no source-line info: degenerate map with a single
-                // run and no source content. Nothing to bound it; it covers no columns.
+                // No following token and no source-line info: a last-on-line run with no
+                // content has no extent signal at all. Drop it (covers no columns) rather than
+                // extend it to EOL — the conservative, non-permissive choice.
                 (None, None) => 0,
             };
 
@@ -194,13 +225,28 @@ impl PositionMapper {
                 continue;
             }
 
-            runs.push(MappedRun {
+            let run = MappedRun {
                 dst_line,
                 dst_col,
                 dst_end: dst_col + run_len,
                 src_line: token.get_src_line(),
                 src_col,
                 src_end: src_col + run_len,
+                component_id: 0, // assigned just below
+            };
+
+            // Start a new component unless this run continues the previous run in BOTH spaces.
+            let component_id = match runs.last() {
+                Some(prev) if Self::runs_both_space_contiguous(prev, &run) => prev.component_id,
+                _ => {
+                    let id = next_component;
+                    next_component += 1;
+                    id
+                }
+            };
+            runs.push(MappedRun {
+                component_id,
+                ..run
             });
         }
 
@@ -307,16 +353,19 @@ impl PositionMapper {
     /// Map a generated TSX **range** `[start, end)` back to a Vue source range `(start, end)`,
     /// enforcing the half-open endpoint-compatibility rule.
     ///
-    /// A range maps only when both endpoints resolve inside **compatible** mapped runs:
+    /// A range maps only when both endpoints resolve inside the SAME compatibility component:
     ///  - the `start` position resolves inside some run `S`; and
     ///  - the half-open `end` either (a) equals `S`'s exclusive generated end exactly (the
     ///    range terminates at `S`'s mapped end — same run), or (b) resolves inside a run `E`
-    ///    that is contiguous with `S` (`S.dst_end == E.dst_col`, i.e. NO synthetic/unmapped
-    ///    content between them on the line).
+    ///    that shares `S`'s `component_id` (linked to `S` by an unbroken chain that is
+    ///    contiguous in BOTH the generated and the source space — see
+    ///    [`Self::runs_both_space_contiguous`]).
     ///
     /// Any range whose endpoints fall in runs separated by synthetic/unmapped content, on
-    /// different lines, or otherwise incompatible, returns `None` — never a bogus straddling
-    /// range. This is the binding "both endpoints inside compatible mapped spans" contract.
+    /// different lines, in generated-adjacent but source-discontiguous runs (the
+    /// `MoveOriginal` / repeated-emission shape), or otherwise in different components, returns
+    /// `None` — never a bogus straddling range. This is the binding "both endpoints inside
+    /// compatible mapped spans" contract.
     pub fn tsx_range_to_vue(
         &self,
         start: TsPosition,
@@ -346,44 +395,51 @@ impl PositionMapper {
         }
     }
 
-    /// Whether two mapped runs are COMPATIBLE for composing a range: the same run, or a
-    /// chain of genuinely-contiguous runs on the same generated line with NO synthetic /
-    /// unmapped content between them.
+    /// Whether `cur` directly continues `prev` in BOTH the generated and the source space —
+    /// the construction-time predicate that joins two runs into one compatibility component.
     ///
-    /// Contiguity is decided in generated space: run `A` is directly followed by run `B`
-    /// iff `A.dst_end == B.dst_col`. Because a run's `dst_end` is bounded by the next token
-    /// of ANY kind, an unmapped/synthetic token sitting between `A` and `B` forces
-    /// `A.dst_end < B.dst_col` — so any synthetic content between the runs breaks the chain
-    /// and the range is rejected.
+    /// Generated-side contiguity alone is NOT enough: the generated output relocates and
+    /// repeats source (`MoveOriginal`; a native v-model expression emitted several times), so
+    /// two generated-adjacent runs can map to reordered / repeated / non-adjacent source.
+    /// Requiring source-side contiguity too is what guarantees a well-formed SOURCE range.
+    ///
+    /// Two shapes are contiguous:
+    ///  - **Same-line**: `prev.dst_end == cur.dst_col` on one generated line AND
+    ///    `prev.src_end == cur.src_col` on one source line (no synthetic/unmapped content and
+    ///    no source reorder between them).
+    ///  - **Line-wrap** (a legitimate multiline mapped expression): `prev` ends at the EOL of
+    ///    generated line `N` and `cur` starts at column 0 of generated line `N+1`, and the
+    ///    source side wraps the same way (`cur.src_line == prev.src_line + 1 && cur.src_col ==
+    ///    0`). Because runs arrive in `(dst_line, dst_col)` order, an immediately-following run
+    ///    one generated line down at column 0 means `prev` was the last run on its line — so
+    ///    this is exactly the position-preserving wrap, not a reorder.
+    ///
+    /// Anything else (a gap, a reorder, a repeat, a different source) is a genuine
+    /// discontinuity and starts a new component.
+    fn runs_both_space_contiguous(prev: &MappedRun, cur: &MappedRun) -> bool {
+        let same_line = prev.dst_line == cur.dst_line
+            && prev.dst_end == cur.dst_col
+            && prev.src_line == cur.src_line
+            && prev.src_end == cur.src_col;
+        let line_wrap = cur.dst_line == prev.dst_line + 1
+            && cur.dst_col == 0
+            && cur.src_line == prev.src_line + 1
+            && cur.src_col == 0;
+        same_line || line_wrap
+    }
+
+    /// Whether two mapped runs are COMPATIBLE for composing a range. O(1): two runs may
+    /// compose iff they share a compatibility component — i.e. they are linked by an unbroken
+    /// chain of runs that are contiguous in BOTH spaces (see
+    /// [`Self::runs_both_space_contiguous`] and the labelling pass in
+    /// [`Self::precompute_runs`]). The same run is trivially compatible with itself.
+    ///
+    /// Because the component label already encodes source-contiguity, this catches the
+    /// generated-adjacent-but-source-discontiguous case (`MoveOriginal` / repeated emission)
+    /// that a generated-only adjacency check would wrongly accept — without any per-call
+    /// linear scan or chain walk.
     fn runs_compatible(&self, a: RunId, b: RunId) -> bool {
-        if a == b {
-            return true;
-        }
-        let (lo, hi) = if a.0 <= b.0 { (a, b) } else { (b, a) };
-        let lo_line = self.runs[lo.0 as usize].dst_line;
-        // Walk the dst-ordered run indices from lo..=hi; every adjacent pair must be exactly
-        // contiguous on the same generated line.
-        let line_runs = match self.by_dst_line.get(lo_line as usize) {
-            Some(r) => r,
-            None => return false,
-        };
-        // Positions of lo and hi within the line's sorted run list.
-        let lo_pos = match line_runs.iter().position(|&i| i == lo.0) {
-            Some(p) => p,
-            None => return false,
-        };
-        let hi_pos = match line_runs.iter().position(|&i| i == hi.0) {
-            Some(p) => p,
-            None => return false, // different generated line -> not compatible
-        };
-        for w in line_runs[lo_pos..=hi_pos].windows(2) {
-            let left = &self.runs[w[0] as usize];
-            let right = &self.runs[w[1] as usize];
-            if left.dst_end != right.dst_col {
-                return false; // a gap / synthetic content between the runs
-            }
-        }
-        true
+        self.runs[a.0 as usize].component_id == self.runs[b.0 as usize].component_id
     }
 
     /// Get the underlying source map (for advanced queries).
@@ -401,874 +457,5 @@ fn utf16_line_len(line: &str) -> u32 {
 
 #[cfg(test)]
 #[allow(clippy::type_complexity)]
-mod tests {
-    use super::*;
-
-    /// Construct a generated-TSX query position.
-    fn ts(line: u32, character: u32) -> TsPosition {
-        TsPosition::new(line, character)
-    }
-
-    /// Construct a Vue-source query position.
-    fn vue(line: u32, character: u32) -> LspPosition {
-        LspPosition::new(line, character)
-    }
-
-    /// Helper: build a source map JSON from known token positions.
-    /// Uses oxc_sourcemap's builder to produce a valid source map.
-    fn build_test_source_map(
-        source_name: &str,
-        source_content: &str,
-        // Each tuple: (dst_line, dst_col, src_line, src_col)
-        tokens: &[(u32, u32, u32, u32)],
-    ) -> String {
-        let mut builder = oxc_sourcemap::SourceMapBuilder::default();
-        let source_id = builder.set_source_and_content(source_name, source_content);
-        for &(dl, dc, sl, sc) in tokens {
-            builder.add_token(dl, dc, sl, sc, Some(source_id), None);
-        }
-        builder.into_sourcemap().to_json_string()
-    }
-
-    /// Helper: build a source map with both mapped and unmapped tokens.
-    /// Mapped tokens: (dst_line, dst_col, src_line, src_col)
-    /// Unmapped tokens: (dst_line, dst_col) — emitted with source_id=None
-    fn build_source_map_with_unmapped(
-        source_name: &str,
-        source_content: &str,
-        mapped: &[(u32, u32, u32, u32)],
-        unmapped: &[(u32, u32)],
-    ) -> String {
-        let mut builder = oxc_sourcemap::SourceMapBuilder::default();
-        let source_id = builder.set_source_and_content(source_name, source_content);
-
-        // Collect all tokens and sort by (line, col)
-        let mut all_tokens: Vec<(u32, u32, Option<(u32, u32)>)> = Vec::new();
-        for &(dl, dc, sl, sc) in mapped {
-            all_tokens.push((dl, dc, Some((sl, sc))));
-        }
-        for &(dl, dc) in unmapped {
-            all_tokens.push((dl, dc, None));
-        }
-        all_tokens.sort_by_key(|(l, c, _)| (*l, *c));
-
-        for (dl, dc, src) in all_tokens {
-            match src {
-                Some((sl, sc)) => {
-                    builder.add_token(dl, dc, sl, sc, Some(source_id), None);
-                }
-                None => {
-                    builder.add_token(dl, dc, 0, 0, None, None);
-                }
-            }
-        }
-
-        builder.into_sourcemap().to_json_string()
-    }
-
-    // ========================================================================
-    // Basic construction
-    // ========================================================================
-
-    #[test]
-    fn test_from_json_valid_source_map() {
-        let json = build_test_source_map("test.vue", "hello", &[(0, 0, 0, 0)]);
-        let mapper = PositionMapper::from_json(&json);
-        assert!(mapper.is_ok());
-    }
-
-    #[test]
-    fn test_from_json_invalid_json() {
-        let mapper = PositionMapper::from_json("not valid json");
-        assert!(mapper.is_err());
-    }
-
-    #[test]
-    fn test_from_json_empty_mappings() {
-        let json = build_test_source_map("test.vue", "", &[]);
-        let mapper = PositionMapper::from_json(&json).unwrap();
-        assert!(mapper.tsx_to_vue(ts(0, 0)).is_none());
-    }
-
-    // ========================================================================
-    // tsx_to_vue (generated -> source)
-    // ========================================================================
-
-    #[test]
-    fn test_tsx_to_vue_exact_token_match() {
-        // gen(0,0) -> src(2,5), gen(1,0) -> src(4,0)
-        let json = build_test_source_map(
-            "App.vue",
-            "<template>\n  <div>hello</div>\n</template>\n\n<script setup>\nconst x = 1;\n</script>",
-            &[(0, 0, 2, 5), (1, 0, 4, 0)],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        let m = mapper.tsx_to_vue(ts(0, 0)).unwrap();
-        assert_eq!(m.pos, LspPosition::new(2, 5));
-
-        let m = mapper.tsx_to_vue(ts(1, 0)).unwrap();
-        assert_eq!(m.pos, LspPosition::new(4, 0));
-    }
-
-    /// REPLACES the old `test_tsx_to_vue_between_tokens` extrapolation test.
-    ///
-    /// A query that lands exactly on an unmapped (`Inserted`) token start, immediately
-    /// after a mapped token, must NOT extrapolate off the preceding token. The old code
-    /// backward-scanned to the mapped token and added a column delta (`Some`); the strict
-    /// lookup returns `None` because the covering token is unmapped.
-    #[test]
-    fn test_tsx_to_vue_cross_token_no_extrapolation() {
-        // mapped gen(0,0)->src(0,0); unmapped gen(0,5) (synthetic prefix begins).
-        let json = build_source_map_with_unmapped(
-            "App.vue",
-            "const x = hello;",
-            &[(0, 0, 0, 0)],
-            &[(0, 5)],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // Query 5 columns past the mapped token, on the unmapped token -> None.
-        assert!(
-            mapper.tsx_to_vue(ts(0, 5)).is_none(),
-            "must not extrapolate across an unmapped-token boundary: {:?}",
-            mapper.tsx_to_vue(ts(0, 5))
-        );
-    }
-
-    /// Within-run character precision is PRESERVED: a query inside a single mapped
-    /// multi-character run maps to the corresponding source column. Discriminates the
-    /// other way — deleting the within-run delta would make this `None`/wrong.
-    #[test]
-    fn test_tsx_to_vue_within_run_character_precision() {
-        // mapped gen(0,0)->src(0,10) for a 6-char identifier; an unmapped token at
-        // gen(0,6) bounds the run to [0,6). Column 3 is interior.
-        let json =
-            build_source_map_with_unmapped("App.vue", &" ".repeat(40), &[(0, 0, 0, 10)], &[(0, 6)]);
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // Column 3 of the 6-char run -> src col 10 + 3 = 13.
-        let m = mapper.tsx_to_vue(ts(0, 3)).unwrap();
-        assert_eq!(m.pos, LspPosition::new(0, 13));
-        // Run start maps exactly.
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 0)).unwrap().pos,
-            LspPosition::new(0, 10)
-        );
-        // Last in-run column (5) maps; column 6 is the unmapped boundary -> None.
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 5)).unwrap().pos,
-            LspPosition::new(0, 15)
-        );
-        assert!(mapper.tsx_to_vue(ts(0, 6)).is_none());
-    }
-
-    /// Query at the `_ctx.` / `$setup.` prefix columns -> None.
-    /// Retargets the old `test_prepended_text_inside_prefix_returns_none`.
-    #[test]
-    fn test_tsx_to_vue_inside_prefix_returns_none() {
-        let json = build_source_map_with_unmapped(
-            "App.vue",
-            "<template>\n   count\n</template>",
-            &[(0, 0, 1, 0), (0, 7, 1, 3)],
-            &[(0, 2)], // "_ctx." unmapped at gen col 2
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // Inside "_ctx." prefix (gen cols 2-6) -> None.
-        assert!(mapper.tsx_to_vue(ts(0, 3)).is_none());
-        assert!(mapper.tsx_to_vue(ts(0, 5)).is_none());
-    }
-
-    /// Overwritten / synthetic punctuation interior -> None: a query inside an unmapped
-    /// token that sits BETWEEN two mapped runs returns nothing (no snap to either side).
-    #[test]
-    fn test_tsx_to_vue_unmapped_synthetic_interior_returns_none() {
-        // mapped gen(0,0)->src(0,0), unmapped gen(0,3) (synthetic), mapped gen(0,8)->src(0,20).
-        let json = build_source_map_with_unmapped(
-            "App.vue",
-            &" ".repeat(40),
-            &[(0, 0, 0, 0), (0, 8, 0, 20)],
-            &[(0, 3)],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // The mapped run gen[0,3) ends at the unmapped token; col 5 is in the synthetic
-        // interior (covered by the unmapped token) -> None.
-        assert!(mapper.tsx_to_vue(ts(0, 5)).is_none());
-        // The first mapped run is bounded to [0,3): col 2 still maps within it.
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 2)).unwrap().pos,
-            LspPosition::new(0, 2)
-        );
-        // The second mapped run starts at gen 8.
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 8)).unwrap().pos,
-            LspPosition::new(0, 20)
-        );
-    }
-
-    // ========================================================================
-    // vue_to_tsx (source -> generated)
-    // ========================================================================
-
-    #[test]
-    fn test_vue_to_tsx_exact_token_match() {
-        // gen(5,0) -> src(0,0), gen(6,4) -> src(1,2)
-        let json =
-            build_test_source_map("App.vue", "hello\n  world", &[(5, 0, 0, 0), (6, 4, 1, 2)]);
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        assert_eq!(
-            mapper.vue_to_tsx(vue(0, 0)).unwrap().pos,
-            TsPosition::new(5, 0)
-        );
-        assert_eq!(
-            mapper.vue_to_tsx(vue(1, 2)).unwrap().pos,
-            TsPosition::new(6, 4)
-        );
-    }
-
-    /// REPLACES the old `test_vue_to_tsx_offset_within_token_range` snap test.
-    ///
-    /// A source position on a line with NO mapping must return `None`. The old code
-    /// snapped to the closest preceding token (even on an earlier line) and returned
-    /// `Some`; the strict lookup requires an in-run token on the SAME source line.
-    #[test]
-    fn test_vue_to_tsx_unmapped_source_returns_none() {
-        // Only token maps src(0,0)->gen(0,0). Lines 1..=5 have no mapping.
-        let json = build_test_source_map("App.vue", "a\n\n\n\n\nb", &[(0, 0, 0, 0)]);
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // src(5,0): a Vue line with no mapped token -> None (no snap to line 0).
-        assert!(
-            mapper.vue_to_tsx(vue(5, 0)).is_none(),
-            "unmapped source line must not snap to a preceding token: {:?}",
-            mapper.vue_to_tsx(vue(5, 0))
-        );
-        // src(0,0) still maps exactly.
-        assert_eq!(
-            mapper.vue_to_tsx(vue(0, 0)).unwrap().pos,
-            TsPosition::new(0, 0)
-        );
-    }
-
-    /// Within-run character precision for `vue_to_tsx`: a target inside a single mapped
-    /// source run maps to the corresponding generated column.
-    #[test]
-    fn test_vue_to_tsx_within_run_character_precision() {
-        // Token tuples are (dst_line, dst_col, src_line, src_col):
-        //   gen(0,10) -> src(0,7)  — start of the source run
-        //   gen(0,40) -> src(0,20) — next mapped token, bounds the run to src [7,20)
-        let json =
-            build_test_source_map("App.vue", &" ".repeat(40), &[(0, 10, 0, 7), (0, 40, 0, 20)]);
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // src col 13 -> gen col 10 + (13-7) = 16.
-        assert_eq!(
-            mapper.vue_to_tsx(vue(0, 13)).unwrap().pos,
-            TsPosition::new(0, 16)
-        );
-        // Run start: src 7 -> gen 10.
-        assert_eq!(
-            mapper.vue_to_tsx(vue(0, 7)).unwrap().pos,
-            TsPosition::new(0, 10)
-        );
-        // Last in-run col (19) -> gen 22; col 20 enters the next run (maps via that token).
-        assert_eq!(
-            mapper.vue_to_tsx(vue(0, 19)).unwrap().pos,
-            TsPosition::new(0, 22)
-        );
-        assert_eq!(
-            mapper.vue_to_tsx(vue(0, 20)).unwrap().pos,
-            TsPosition::new(0, 40)
-        );
-    }
-
-    #[test]
-    fn test_vue_to_tsx_no_tokens() {
-        let json = build_test_source_map("App.vue", "", &[]);
-        let mapper = PositionMapper::from_json(&json).unwrap();
-        assert!(mapper.vue_to_tsx(vue(0, 0)).is_none());
-    }
-
-    #[test]
-    fn test_vue_to_tsx_position_before_all_tokens() {
-        // All tokens start at src(2,0) or later; query before them -> None.
-        let json = build_test_source_map("App.vue", "\n\nhello", &[(5, 0, 2, 0)]);
-        let mapper = PositionMapper::from_json(&json).unwrap();
-        assert!(mapper.vue_to_tsx(vue(0, 0)).is_none());
-    }
-
-    #[test]
-    fn test_vue_to_tsx_multiline_source() {
-        // Script block at Vue lines 5/6 mapped to TSX lines 0/1. The last-on-line run
-        // extends to the SOURCE line's true content length (position-preserving), so the
-        // queried columns must lie within the real `const x = 1;` / `const y = 2;` text.
-        let json = build_test_source_map(
-            "App.vue",
-            "<template>\n  <div/>\n</template>\n\n<script setup>\nconst x = 1;\nconst y = 2;\n</script>",
-            &[(0, 0, 5, 0), (1, 0, 6, 0)],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // src(5,6) -> gen(0,6): "x" in "const x = 1;" (col 6 < line length 12).
-        assert_eq!(
-            mapper.vue_to_tsx(vue(5, 6)).unwrap().pos,
-            TsPosition::new(0, 6)
-        );
-        // src(6,6) -> gen(1,6).
-        assert_eq!(
-            mapper.vue_to_tsx(vue(6, 6)).unwrap().pos,
-            TsPosition::new(1, 6)
-        );
-    }
-
-    // ========================================================================
-    // Within-run delta bounded by the token's TRUE extent (not EOL, not "to the
-    // next MAPPED token"). A query in a GAP between two mapped tokens, or past the
-    // real content end of the last token on a line, returns None.
-    // ========================================================================
-
-    /// `vue_to_tsx`: a source query in a GAP between two mapped tokens — where the first
-    /// token's TRUE content (bounded by the next dst token of ANY kind) ends before the
-    /// gap — must be `None`, NOT snapped into the preceding run.
-    ///
-    /// Discriminating: a source run bounded by the next *mapped* source token would span the
-    /// whole gap [0,20), so a query at src col 12 would snap into it (mapping to `gen 0+12`).
-    /// With true-extent bounding the first run is only [0,3) (an unmapped dst token at gen
-    /// col 3 bounds it), so src col 12 is in no run -> `None`.
-    #[test]
-    fn test_vue_to_tsx_gap_between_tokens_returns_none() {
-        // Position-preserving: dst col == src col here.
-        //   mapped gen(0,0)->src(0,0)   — run bounded by the unmapped dst token at gen 3
-        //   unmapped gen(0,3)           — synthetic content begins
-        //   mapped gen(0,20)->src(0,20) — the next mapped run
-        let json = build_source_map_with_unmapped(
-            "App.vue",
-            &" ".repeat(40),
-            &[(0, 0, 0, 0), (0, 20, 0, 20)],
-            &[(0, 3)],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // src col 12 is in the gap between the first run [0,3) and the second run [20,..).
-        // It belongs to NO mapped run -> None (no snap into the first run).
-        assert!(
-            mapper.vue_to_tsx(vue(0, 12)).is_none(),
-            "source query in an inter-token gap must not snap to the preceding run: {:?}",
-            mapper.vue_to_tsx(vue(0, 12))
-        );
-        // The first run's true interior (col 2, inside [0,3)) still maps.
-        assert_eq!(
-            mapper.vue_to_tsx(vue(0, 2)).unwrap().pos,
-            TsPosition::new(0, 2)
-        );
-        // The last in-run col of the first run (2) maps; col 3 is the boundary -> None.
-        assert!(mapper.vue_to_tsx(vue(0, 3)).is_none());
-        // The second run still maps at its start.
-        assert_eq!(
-            mapper.vue_to_tsx(vue(0, 20)).unwrap().pos,
-            TsPosition::new(0, 20)
-        );
-    }
-
-    /// `tsx_to_vue`: a query past the real content end of the LAST mapped token on a line
-    /// must be `None`. The run's extent is the SOURCE line's true content length, not EOL.
-    ///
-    /// Discriminating: a "last run extends to end-of-line" strategy would map a query at gen
-    /// col 5 on a 2-char source line to `Some(src 0+5)`. With true content-length bounding the
-    /// run is [0,2), so col 5 -> `None`.
-    #[test]
-    fn test_tsx_to_vue_past_last_token_content_returns_none() {
-        // Source line 0 is "ab" (length 2). One mapped token gen(0,0)->src(0,0), no
-        // following dst token of any kind -> run length = source-line-len(2) - 0 = 2.
-        let json = build_test_source_map("App.vue", "ab", &[(0, 0, 0, 0)]);
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // Within the 2-char run: cols 0 and 1 map.
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 0)).unwrap().pos,
-            LspPosition::new(0, 0)
-        );
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 1)).unwrap().pos,
-            LspPosition::new(0, 1)
-        );
-        // Col 2 is one-past the real content end -> None (not extended to EOL).
-        assert!(
-            mapper.tsx_to_vue(ts(0, 2)).is_none(),
-            "query at the content end of the last run must be None: {:?}",
-            mapper.tsx_to_vue(ts(0, 2))
-        );
-        // Col 5 (well past content) -> None.
-        assert!(mapper.tsx_to_vue(ts(0, 5)).is_none());
-    }
-
-    /// Symmetric: `vue_to_tsx` past the real content end of the last mapped token on a
-    /// source line must be `None` (true source-line-length bound, not EOL).
-    #[test]
-    fn test_vue_to_tsx_past_last_token_content_returns_none() {
-        // Source line 0 is "ab" (length 2). gen(0,5)->src(0,0); last on both lines.
-        let json = build_test_source_map("App.vue", "ab", &[(0, 5, 0, 0)]);
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        assert_eq!(
-            mapper.vue_to_tsx(vue(0, 1)).unwrap().pos,
-            TsPosition::new(0, 6)
-        );
-        assert!(
-            mapper.vue_to_tsx(vue(0, 2)).is_none(),
-            "source query past content end must be None: {:?}",
-            mapper.vue_to_tsx(vue(0, 2))
-        );
-    }
-
-    /// Over-correction guard: a legitimate multiline mapped expression — where the queried
-    /// columns ARE within the real source content of each line — still maps on every line.
-    #[test]
-    fn test_multiline_mapped_expression_in_bounds_still_maps() {
-        // Source lines 4, 5, 6 each hold real 12-char content "const v = 1;"; gen line i
-        // maps to src line 4+i. (Lines 0-3 are filler so the indices match a realistic SFC.)
-        let src = "\n\n\n\nconst v = 1;\nconst v = 1;\nconst v = 1;\n";
-        let json =
-            build_test_source_map("App.vue", src, &[(0, 0, 4, 0), (1, 0, 5, 0), (2, 0, 6, 0)]);
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // Cols 2/3/4 are all within the 12-char source lines.
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 2)).unwrap().pos,
-            LspPosition::new(4, 2)
-        );
-        assert_eq!(
-            mapper.tsx_to_vue(ts(1, 3)).unwrap().pos,
-            LspPosition::new(5, 3)
-        );
-        assert_eq!(
-            mapper.tsx_to_vue(ts(2, 4)).unwrap().pos,
-            LspPosition::new(6, 4)
-        );
-
-        // Roundtrip on the middle line.
-        let tsx = mapper.vue_to_tsx(vue(5, 3)).unwrap().pos;
-        assert_eq!(tsx, TsPosition::new(1, 3));
-        assert_eq!(
-            mapper.tsx_to_vue(ts(tsx.line, tsx.character)).unwrap().pos,
-            LspPosition::new(5, 3)
-        );
-    }
-
-    // ========================================================================
-    // Range endpoint compatibility (the strict range API). A range maps only
-    // when both endpoints resolve inside COMPATIBLE runs (same run, or
-    // genuinely-contiguous mapped runs with no synthetic content between them).
-    // Otherwise the range is DROPPED (None), never a bogus range.
-    // ========================================================================
-
-    /// A range whose two endpoints fall in two DIFFERENT mapped runs separated by
-    /// synthetic/unmapped content -> the range is DROPPED (None).
-    ///
-    /// Discriminating: a per-endpoint composer maps each endpoint independently; both
-    /// endpoints DO map (start in run A, end in run B), so it returns a (bogus) Vue range
-    /// straddling the synthetic content. The strict range API rejects incompatible runs.
-    #[test]
-    fn test_tsx_range_cross_run_with_synthetic_between_returns_none() {
-        // mapped gen(0,0)->src(0,0) run [0,3); unmapped gen(0,3) (synthetic);
-        // mapped gen(0,8)->src(0,50) run [8,..). Start in run A, end in run B.
-        let json = build_source_map_with_unmapped(
-            "App.vue",
-            &" ".repeat(80),
-            &[(0, 0, 0, 0), (0, 8, 0, 50)],
-            &[(0, 3)],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // Both endpoints individually map (start col 1 -> run A, end col 9 -> run B),
-        // but the runs are separated by synthetic content at gen col 3 -> None.
-        assert!(
-            mapper.tsx_to_vue(ts(0, 1)).is_some(),
-            "precondition: start endpoint maps"
-        );
-        assert!(
-            mapper.tsx_to_vue(ts(0, 9)).is_some(),
-            "precondition: end endpoint maps"
-        );
-        assert!(
-            mapper.tsx_range_to_vue(ts(0, 1), ts(0, 9)).is_none(),
-            "a range straddling synthetic content between two runs must be dropped: {:?}",
-            mapper.tsx_range_to_vue(ts(0, 1), ts(0, 9))
-        );
-    }
-
-    /// A range fully inside ONE mapped run maps correctly (start + half-open end).
-    #[test]
-    fn test_tsx_range_within_single_run_maps() {
-        // One mapped run gen(0,0)->src(0,10), bounded to [0,6) by an unmapped token at 6.
-        let json =
-            build_source_map_with_unmapped("App.vue", &" ".repeat(40), &[(0, 0, 0, 10)], &[(0, 6)]);
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // Range [1,4) inside the run -> Vue [11,14).
-        let (start, end) = mapper.tsx_range_to_vue(ts(0, 1), ts(0, 4)).unwrap();
-        assert_eq!(start, LspPosition::new(0, 11));
-        assert_eq!(end, LspPosition::new(0, 14));
-
-        // Half-open end exactly at the run's exclusive end (gen col 6 == run end) maps to
-        // the run's mapped source end (src col 16).
-        let (start, end) = mapper.tsx_range_to_vue(ts(0, 0), ts(0, 6)).unwrap();
-        assert_eq!(start, LspPosition::new(0, 10));
-        assert_eq!(end, LspPosition::new(0, 16));
-    }
-
-    /// A range across two GENUINELY-CONTIGUOUS mapped runs (no synthetic content between:
-    /// run A's dst end == run B's dst start) maps. The endpoints are compatible.
-    #[test]
-    fn test_tsx_range_contiguous_runs_maps() {
-        // Two adjacent mapped runs on gen line 0, mapping to the SAME contiguous source:
-        //   gen(0,0)->src(0,0) run [0,3)
-        //   gen(0,3)->src(0,3) run [3,6)  (contiguous: A.dst_end 3 == B.dst_col 3)
-        //   unmapped gen(0,6) bounds run B.
-        let json = build_source_map_with_unmapped(
-            "App.vue",
-            &" ".repeat(40),
-            &[(0, 0, 0, 0), (0, 3, 0, 3)],
-            &[(0, 6)],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // Range [1,5): start in run A, end in run B; runs are contiguous -> maps.
-        let (start, end) = mapper.tsx_range_to_vue(ts(0, 1), ts(0, 5)).unwrap();
-        assert_eq!(start, LspPosition::new(0, 1));
-        assert_eq!(end, LspPosition::new(0, 5));
-    }
-
-    // ========================================================================
-    // Roundtrips
-    // ========================================================================
-
-    #[test]
-    fn test_roundtrip_exact_token_positions() {
-        // 1:1 identity mapping (common for script blocks).
-        let json = build_test_source_map(
-            "App.vue",
-            "const x = 1;\nconst y = 2;",
-            &[(0, 0, 0, 0), (1, 0, 1, 0)],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        let tsx = mapper.vue_to_tsx(vue(0, 0)).unwrap().pos;
-        let back = mapper.tsx_to_vue(ts(tsx.line, tsx.character)).unwrap().pos;
-        assert_eq!(back, LspPosition::new(0, 0));
-
-        let tsx = mapper.vue_to_tsx(vue(1, 0)).unwrap().pos;
-        let back = mapper.tsx_to_vue(ts(tsx.line, tsx.character)).unwrap().pos;
-        assert_eq!(back, LspPosition::new(1, 0));
-    }
-
-    /// Exactly-mapped identifier: source -> generated -> source == original, for EVERY
-    /// character of the run (prefix-shifted mapping, the `$setup.count` shape).
-    #[test]
-    fn test_roundtrip_exact_mapped_text_identity() {
-        // gen "$setup.count": "$setup." unmapped at gen 0, "count" mapped gen(0,7)->src(3,14).
-        let json = build_source_map_with_unmapped(
-            "App.vue",
-            "<script setup>\nconst count = 0\n</script>\n<template>{{ count }}</template>",
-            &[(0, 7, 3, 14)],
-            &[(0, 0)],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        for i in 0..5u32 {
-            let vue_col = 14 + i;
-            let tsx = mapper.vue_to_tsx(vue(3, vue_col)).unwrap().pos;
-            assert_eq!(tsx, TsPosition::new(0, 7 + i), "forward char {i}");
-
-            let back = mapper.tsx_to_vue(ts(tsx.line, tsx.character)).unwrap().pos;
-            assert_eq!(back, LspPosition::new(3, vue_col), "roundtrip char {i}");
-        }
-    }
-
-    /// Half-open boundary: one-past-end of a mapped run resolves only when that endpoint
-    /// is itself inside a compatible mapped run; otherwise `None`.
-    #[test]
-    fn test_half_open_one_past_end() {
-        // Two adjacent mapped runs on gen line 0: [0,3) src(0,0); [3,6) src(0,20); then
-        // an unmapped token at gen 6 bounds the second run.
-        let json = build_source_map_with_unmapped(
-            "App.vue",
-            &" ".repeat(40),
-            &[(0, 0, 0, 0), (0, 3, 0, 20)],
-            &[(0, 6)],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // One past the first run's start cluster: gen col 3 is the START of the second
-        // run, so it resolves into the SECOND run (src 20), not an extrapolation of the
-        // first.
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 3)).unwrap().pos,
-            LspPosition::new(0, 20)
-        );
-        // One past the end of the (bounded) second run: gen col 6 is the unmapped
-        // boundary -> None.
-        assert!(mapper.tsx_to_vue(ts(0, 6)).is_none());
-        // Interior of the second run still maps.
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 5)).unwrap().pos,
-            LspPosition::new(0, 22)
-        );
-    }
-
-    // ========================================================================
-    // Prepended-text (e.g. _ctx. / $setup.) forward + reverse
-    // ========================================================================
-
-    #[test]
-    fn test_prepended_text_forward_mapping_start_middle_end() {
-        let json = build_source_map_with_unmapped(
-            "App.vue",
-            "<template>\n   count\n</template>",
-            &[
-                (0, 0, 1, 0), // spaces before count
-                (0, 7, 1, 3), // "count" starts (after "_ctx.")
-            ],
-            &[(0, 2)], // "_ctx." inserted at gen col 2
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // start of "count": Vue(1,3) -> TSX(0,7)
-        assert_eq!(
-            mapper.vue_to_tsx(vue(1, 3)).unwrap().pos,
-            TsPosition::new(0, 7)
-        );
-        // middle ('u', col 5) -> TSX col 9
-        assert_eq!(
-            mapper.vue_to_tsx(vue(1, 5)).unwrap().pos,
-            TsPosition::new(0, 9)
-        );
-        // end ('t', col 7) -> TSX col 11
-        assert_eq!(
-            mapper.vue_to_tsx(vue(1, 7)).unwrap().pos,
-            TsPosition::new(0, 11)
-        );
-    }
-
-    #[test]
-    fn test_prepended_text_reverse_mapping_start_middle_end() {
-        let json = build_source_map_with_unmapped(
-            "App.vue",
-            "<template>\n   count\n</template>",
-            &[(0, 0, 1, 0), (0, 7, 1, 3)],
-            &[(0, 2)],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // TSX col 7 ('c') -> Vue(1,3)
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 7)).unwrap().pos,
-            LspPosition::new(1, 3)
-        );
-        // TSX col 9 ('u') -> Vue(1,5)
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 9)).unwrap().pos,
-            LspPosition::new(1, 5)
-        );
-        // TSX col 11 ('t') -> Vue(1,7)
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 11)).unwrap().pos,
-            LspPosition::new(1, 7)
-        );
-    }
-
-    #[test]
-    fn test_prepended_text_multiple_bindings_on_same_line() {
-        // "{{ a }} {{ b }}" -> "$setup.a $setup.b"
-        let json = build_source_map_with_unmapped(
-            "App.vue",
-            "<template>\n<div>{{ a }} {{ b }}</div>\n</template>",
-            &[
-                (0, 7, 1, 9),   // "a"
-                (0, 9, 1, 11),  // " " between interpolations
-                (0, 16, 1, 18), // "b"
-            ],
-            &[
-                (0, 0), // "$setup." for a
-                (0, 8), // separator (end of a region)
-                (0, 9), // "$setup." for b
-            ],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        assert_eq!(
-            mapper.vue_to_tsx(vue(1, 9)).unwrap().pos,
-            TsPosition::new(0, 7)
-        );
-        assert_eq!(
-            mapper.vue_to_tsx(vue(1, 18)).unwrap().pos,
-            TsPosition::new(0, 16)
-        );
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 7)).unwrap().pos,
-            LspPosition::new(1, 9)
-        );
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 16)).unwrap().pos,
-            LspPosition::new(1, 18)
-        );
-    }
-
-    // ========================================================================
-    // CRLF / tabs / multiline mapped expression
-    // ========================================================================
-
-    /// CRLF line endings must not perturb the line/column mapping (positions are
-    /// line/character pairs, so the `\r` is irrelevant as long as the run is in-run).
-    #[test]
-    fn test_crlf_mapping() {
-        // Source uses CRLF; script identifier "value" at src(1,6) maps to gen(0,6).
-        let json = build_test_source_map(
-            "App.vue",
-            "<script setup>\r\nconst value = 1;\r\n</script>\r\n",
-            &[(0, 6, 1, 6), (0, 40, 1, 40)],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // Forward + within-run + roundtrip across the CRLF-terminated line.
-        assert_eq!(
-            mapper.vue_to_tsx(vue(1, 6)).unwrap().pos,
-            TsPosition::new(0, 6)
-        );
-        assert_eq!(
-            mapper.vue_to_tsx(vue(1, 8)).unwrap().pos,
-            TsPosition::new(0, 8)
-        );
-        let back = mapper.tsx_to_vue(ts(0, 8)).unwrap().pos;
-        assert_eq!(back, LspPosition::new(1, 8));
-    }
-
-    /// Tab-indented source: columns are UTF-16 code units (a tab is one unit), so a
-    /// run after tab indentation still maps by column arithmetic.
-    #[test]
-    fn test_tabs_mapping() {
-        // "\t\tconst x" — two tabs (cols 0,1), identifier run mapped at src(0,8)->gen(0,2).
-        let json = build_test_source_map(
-            "App.vue",
-            "\t\tconst x = 1;",
-            &[(0, 2, 0, 8), (0, 20, 0, 30)],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        assert_eq!(
-            mapper.vue_to_tsx(vue(0, 8)).unwrap().pos,
-            TsPosition::new(0, 2)
-        );
-        // within-run interior after the tabs
-        assert_eq!(
-            mapper.vue_to_tsx(vue(0, 10)).unwrap().pos,
-            TsPosition::new(0, 4)
-        );
-        let back = mapper.tsx_to_vue(ts(0, 4)).unwrap().pos;
-        assert_eq!(back, LspPosition::new(0, 10));
-    }
-
-    // NOTE: the legitimate multiline-mapped-expression case is covered by
-    // `test_multiline_mapped_expression_in_bounds_still_maps`, which models realistic source
-    // line content so the queried columns lie within the true source text. An earlier variant
-    // mapped columns 2-4 past a 1-char-per-line source, which is exactly the over-permissive
-    // "extend last run to EOL" behaviour the true-extent run bounding removes.
-
-    // ========================================================================
-    // UTF-16 / surrogate / astral / non-ASCII (columns are UTF-16 code units)
-    // ========================================================================
-
-    /// Emoji (😀 = 2 UTF-16 units) before a binding; the mapped "msg" run carries the
-    /// within-run delta in UTF-16 columns.
-    #[test]
-    fn test_utf16_emoji_before_binding_forward() {
-        let json = build_source_map_with_unmapped(
-            "App.vue",
-            "😀{{ msg }}",
-            &[(0, 7, 0, 5)], // "msg" start (UTF-16 col 5) -> gen col 7
-            &[(0, 0)],       // "$setup." prefix unmapped
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        assert_eq!(
-            mapper.vue_to_tsx(vue(0, 5)).unwrap().pos,
-            TsPosition::new(0, 7)
-        );
-        assert_eq!(
-            mapper.vue_to_tsx(vue(0, 6)).unwrap().pos,
-            TsPosition::new(0, 8)
-        );
-        assert_eq!(
-            mapper.vue_to_tsx(vue(0, 7)).unwrap().pos,
-            TsPosition::new(0, 9)
-        );
-    }
-
-    #[test]
-    fn test_utf16_emoji_before_binding_reverse() {
-        let json =
-            build_source_map_with_unmapped("App.vue", "😀{{ msg }}", &[(0, 7, 0, 5)], &[(0, 0)]);
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 7)).unwrap().pos,
-            LspPosition::new(0, 5)
-        );
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 8)).unwrap().pos,
-            LspPosition::new(0, 6)
-        );
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 9)).unwrap().pos,
-            LspPosition::new(0, 7)
-        );
-    }
-
-    /// Non-ASCII identifier (café — 'é' is 1 UTF-16 unit) roundtrips per character.
-    #[test]
-    fn test_utf16_non_ascii_identifier_roundtrip() {
-        let json = build_source_map_with_unmapped(
-            "App.vue",
-            "{{ café }}",
-            &[(0, 5, 0, 3)], // "café" starts
-            &[(0, 0)],       // "_ctx." prefix
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        for i in 0..4u32 {
-            let vue_col = 3 + i;
-            let tsx = mapper.vue_to_tsx(vue(0, vue_col)).unwrap().pos;
-            assert_eq!(tsx.character, 5 + i, "café[{i}] forward");
-            let back = mapper.tsx_to_vue(ts(tsx.line, tsx.character)).unwrap().pos;
-            assert_eq!(back.character, vue_col, "café[{i}] roundtrip");
-        }
-    }
-
-    /// Surrogate pair (😀 = 2 UTF-16 units) inside an identifier "a😀b".
-    #[test]
-    fn test_utf16_surrogate_pair_in_identifier() {
-        let json = build_source_map_with_unmapped(
-            "App.vue",
-            "{{ a😀b }}",
-            &[(0, 5, 0, 3)], // "a😀b" starts
-            &[(0, 0)],       // "_ctx." prefix
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // 'a' col 3 -> gen 5
-        assert_eq!(mapper.vue_to_tsx(vue(0, 3)).unwrap().pos.character, 5);
-        assert_eq!(mapper.tsx_to_vue(ts(0, 5)).unwrap().pos.character, 3);
-        // 😀 first unit col 4 -> gen 6
-        assert_eq!(mapper.vue_to_tsx(vue(0, 4)).unwrap().pos.character, 6);
-        assert_eq!(mapper.tsx_to_vue(ts(0, 6)).unwrap().pos.character, 4);
-        // 😀 second unit col 5 -> gen 7
-        assert_eq!(mapper.vue_to_tsx(vue(0, 5)).unwrap().pos.character, 7);
-        assert_eq!(mapper.tsx_to_vue(ts(0, 7)).unwrap().pos.character, 5);
-        // 'b' col 6 -> gen 8
-        assert_eq!(mapper.vue_to_tsx(vue(0, 6)).unwrap().pos.character, 8);
-        assert_eq!(mapper.tsx_to_vue(ts(0, 8)).unwrap().pos.character, 6);
-    }
-}
+#[path = "position_map_tests.rs"]
+mod position_map_tests;
