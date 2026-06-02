@@ -155,6 +155,12 @@ pub(super) fn type_expr_references_type_params(
     })
 }
 
+/// Enumerate the PUBLIC member names of a projected surface, used to derive
+/// route keys (KeyOf / Pick / Omit / member-surface). Non-public members are
+/// excluded: `keyof ClassType` and `Pick`/`Omit` over a class operate on the
+/// public keyspace only (TS semantics), so a private/protected member name must
+/// never enter a route key or a projected-name set. The keep-all native surface
+/// (`native_props`) does not route through this helper, so it is unaffected.
 pub(super) fn projected_surface_member_names(expr: &TypeExpr) -> Option<Vec<String>> {
     use verter_type_expr::ObjectMember;
 
@@ -163,8 +169,12 @@ pub(super) fn projected_surface_member_names(expr: &TypeExpr) -> Option<Vec<Stri
             let mut members = Vec::new();
             for member in object.properties.iter() {
                 match member {
-                    ObjectMember::Property(property) => members.push(property.name.clone()),
-                    ObjectMember::Method(method) => members.push(method.name.clone()),
+                    ObjectMember::Property(property) if property.visibility.is_public() => {
+                        members.push(property.name.clone())
+                    }
+                    ObjectMember::Method(method) if method.visibility.is_public() => {
+                        members.push(method.name.clone())
+                    }
                     _ => {}
                 }
             }
