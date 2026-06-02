@@ -5,6 +5,8 @@
 //! a [`CompletionHandle`] that resolves when the target stage is reached.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+use std::sync::atomic::AtomicU8;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -637,6 +639,22 @@ pub struct Scheduler {
     /// `debug_assertions`; absent from release builds.
     #[cfg(any(test, debug_assertions))]
     pub(crate) batch_admit_epoch_trace: Mutex<Option<Vec<u64>>>,
+    /// Test-only one-shot pool-submit fault injector. `0` = off, `1` =
+    /// force the next non-inline `try_submit` to report `Full`, `2` =
+    /// `Closed`. Lets a test exercise the
+    /// [`Self::terminalize_pool_submit_violation`] RELEASE path (cancel
+    /// the DAG node, release the parked reservation, surface `Failed`)
+    /// without saturating the real transport. `cfg`-gated to `test` /
+    /// `debug_assertions`; absent from release builds.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    pub(crate) pool_submit_fault: AtomicU8,
+    /// Test-only marker set when the last pool-submit fault was injected
+    /// via [`Self::pool_submit_fault`] rather than observed from a real
+    /// transport. Read (and cleared) by
+    /// [`Self::terminalize_pool_submit_violation`] to suppress its
+    /// `debug_assert!` for the deliberately-injected case.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    pub(crate) pool_submit_fault_was_injected: AtomicBool,
 }
 
 /// Classification of a recorded `FileStage::Analysis` blocker dep
@@ -788,6 +806,10 @@ impl Scheduler {
             dag_admit_epoch: AtomicU64::new(0),
             #[cfg(any(test, debug_assertions))]
             batch_admit_epoch_trace: Mutex::new(None),
+            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+            pool_submit_fault: AtomicU8::new(0),
+            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+            pool_submit_fault_was_injected: AtomicBool::new(false),
         });
 
         // Driver holds Weak so it doesn't prevent Drop.
@@ -871,6 +893,10 @@ impl Scheduler {
             dag_admit_epoch: AtomicU64::new(0),
             #[cfg(any(test, debug_assertions))]
             batch_admit_epoch_trace: Mutex::new(None),
+            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+            pool_submit_fault: AtomicU8::new(0),
+            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+            pool_submit_fault_was_injected: AtomicBool::new(false),
         })
     }
 
@@ -3698,11 +3724,11 @@ impl Scheduler {
                     );
                 }
             });
-            match self.io_pool.try_submit(task) {
+            match self.try_submit_io(task) {
                 Ok(crate::pool::SchedulerPoolSubmitResult::Submitted) => {
                     DispatchOutcome::SubmittedToPool
                 }
-                Err(err) => Self::terminalize_pool_submit_violation(
+                Err(err) => self.terminalize_pool_submit_violation(
                     err,
                     &dag_for_violation,
                     &canonical_for_violation,
@@ -3750,11 +3776,11 @@ impl Scheduler {
                     );
                 }
             });
-            match self.cpu_pool.try_submit(task) {
+            match self.try_submit_cpu(task) {
                 Ok(crate::pool::SchedulerPoolSubmitResult::Submitted) => {
                     DispatchOutcome::SubmittedToPool
                 }
-                Err(err) => Self::terminalize_pool_submit_violation(
+                Err(err) => self.terminalize_pool_submit_violation(
                     err,
                     &dag_for_violation,
                     &canonical_for_violation,
@@ -3764,6 +3790,72 @@ impl Scheduler {
                 ),
             }
         }
+    }
+
+    /// Submit a Source task to the injected I/O pool. A test-only
+    /// fault-injection seam ([`Self::pool_submit_fault`]) may force a
+    /// `Full`/`Closed` result here so the invariant-violation RELEASE
+    /// path can be characterized without the real transport ever being
+    /// saturated. Production builds compile the seam out and call
+    /// `try_submit` directly.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_submit_io(
+        &self,
+        task: crate::pool::SchedulerPoolTask,
+    ) -> Result<crate::pool::SchedulerPoolSubmitResult, crate::pool::SchedulerPoolSubmitError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(err) = self.injected_pool_submit_fault() {
+            // Drop `task` without running it (mirrors a genuine
+            // Full/Closed where the transport consumed nothing).
+            drop(task);
+            return Err(err);
+        }
+        self.io_pool.try_submit(task)
+    }
+
+    /// Submit an Analysis/Artifact task to the injected CPU pool. See
+    /// [`Self::try_submit_io`] for the test-only fault seam.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_submit_cpu(
+        &self,
+        task: crate::pool::SchedulerPoolTask,
+    ) -> Result<crate::pool::SchedulerPoolSubmitResult, crate::pool::SchedulerPoolSubmitError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(err) = self.injected_pool_submit_fault() {
+            drop(task);
+            return Err(err);
+        }
+        self.cpu_pool.try_submit(task)
+    }
+
+    /// Read + clear the one-shot test-only pool-submit fault. Returns
+    /// the forced error exactly once per arming (so a single armed fault
+    /// terminalizes one job, not every subsequent dispatch). `0` = off,
+    /// `1` = force `Full`, `2` = force `Closed`. On a hit it records that
+    /// the fault was test-injected so the downstream
+    /// `terminalize_pool_submit_violation` suppresses its `debug_assert!`
+    /// (the test is characterizing the release-build RELEASE path).
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    fn injected_pool_submit_fault(&self) -> Option<crate::pool::SchedulerPoolSubmitError> {
+        let err = match self.pool_submit_fault.swap(0, Ordering::AcqRel) {
+            1 => Some(crate::pool::SchedulerPoolSubmitError::Full),
+            2 => Some(crate::pool::SchedulerPoolSubmitError::Closed),
+            _ => None,
+        };
+        if err.is_some() {
+            self.pool_submit_fault_was_injected
+                .store(true, Ordering::Release);
+        }
+        err
+    }
+
+    /// Test-only: arm a one-shot pool-submit fault so the NEXT non-inline
+    /// dispatch observes a forced `Full` from `try_submit`, exercising
+    /// the invariant-violation terminalize/release path without ever
+    /// saturating the real transport. Consumed once (auto-clears).
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    pub(crate) fn arm_pool_submit_fault_full(&self) {
+        self.pool_submit_fault.store(1, Ordering::Release);
     }
 
     /// Handle a nonblocking pool-submit failure at the dispatch site.
@@ -3793,6 +3885,7 @@ impl Scheduler {
     /// no requeue, no double-credit.
     #[cfg(not(target_arch = "wasm32"))]
     fn terminalize_pool_submit_violation(
+        self: &Arc<Self>,
         err: crate::pool::SchedulerPoolSubmitError,
         dag: &Mutex<SchedulerDag>,
         canonical: &Arc<str>,
@@ -3800,8 +3893,27 @@ impl Scheduler {
         task_kind: &TaskKind,
         inbox_sender: &crossbeam_channel::Sender<Submission>,
     ) -> DispatchOutcome {
+        // The `debug_assert!` fires for GENUINE invariant violations
+        // (a real `Full`/`Closed` from the pool transport). It is
+        // suppressed only when a test deliberately injected the fault
+        // via the `pool_submit_fault` seam — that test is exercising the
+        // RELEASE path that runs in release builds (where the assert is
+        // compiled out), so faulting on the injected error would defeat
+        // the test rather than catch a bug. Production / debug builds
+        // with a real transport failure still fault loudly.
+        let test_injected = {
+            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+            {
+                self.pool_submit_fault_was_injected
+                    .swap(false, Ordering::AcqRel)
+            }
+            #[cfg(not(all(not(target_arch = "wasm32"), any(test, feature = "test-support"))))]
+            {
+                false
+            }
+        };
         debug_assert!(
-            false,
+            test_injected,
             "scheduler pool submit returned {err:?} at the dispatch site: the DAG \
              capacity ledger reserves the {task_kind:?} permit in next_ready_for_pump \
              before producing the ReadyJob, and the IO transport is sized to dominate \
@@ -15761,5 +15873,400 @@ mod tests {
         };
         assert_eq!(gen_of(&results[0]), 7, "by-value result[0] follows input 0");
         assert_eq!(gen_of(&results[1]), 9, "by-value result[1] follows input 1");
+    }
+
+    /// B7c — scheduler pool topology: host-injected
+    /// `SchedulerCpuPool`/`SchedulerIoPool`, nonblocking `try_submit`,
+    /// and the typed `try_submit`-full invariant-violation contract.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod b7c_pool_topology {
+        use super::*;
+        use crate::dag::DagCapacityBudget;
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomOrd};
+        use std::time::Duration;
+
+        /// CONSTRUCTION DOMINANCE (P0 #2 / capacity-loan rail): when the
+        /// host injects an IO pool sized from an EXPLICIT `dag_budget.io`,
+        /// the transport capacity must dominate that budget so the DAG
+        /// ledger stays the sole admission gate.
+        ///
+        /// Discriminator: pre-cutover the scheduler built
+        /// `IoPool::new(io_threads)` = `bounded(io_threads * 4)`, IGNORING
+        /// the explicit budget. With `io_threads = 1, dag_budget.io = 16`
+        /// the old transport was `4 < 16` — the channel was a TIGHTER gate
+        /// than the ledger (a second admission authority). Post-cutover the
+        /// host sizes the transport from `resolved_dag_budget().io`, so it
+        /// is `>= 16`.
+        #[test]
+        fn injected_io_transport_dominates_explicit_dag_budget_io() {
+            let config = SchedulerConfig {
+                cpu_threads: 1,
+                io_threads: 1,
+                dag_budget: Some(DagCapacityBudget { cpu: 8, io: 16 }),
+            };
+            let loader = Arc::new(MemorySourceLoader::new());
+            let sched = Scheduler::test_with_executor(
+                config,
+                loader,
+                Arc::new(crate::executor::DefaultExecutor),
+            );
+            let cap = sched.io_pool.transport_capacity();
+            assert!(
+                cap >= 16,
+                "injected IO transport capacity ({cap}) must dominate the resolved \
+                 dag_budget.io (16) so the channel never becomes a second admission \
+                 authority; pre-cutover io_threads*4 = 4 would FAIL this"
+            );
+        }
+
+        /// The scheduler's two pools are DISTINCT process-unique
+        /// identities (the §6a/3-pool topology). A test can therefore
+        /// prove a worker is on a SPECIFIC injected scheduler pool.
+        #[test]
+        fn scheduler_cpu_and_io_pools_have_distinct_identities() {
+            let loader = Arc::new(MemorySourceLoader::new());
+            let sched = Scheduler::test_new(SchedulerConfig::default(), loader);
+            assert_ne!(
+                sched.cpu_pool.pool_id(),
+                sched.io_pool.pool_id(),
+                "the scheduler CPU and IO pools must be distinct pools"
+            );
+        }
+
+        /// ISOLATION (§6a, P0): a scheduler stage runs on a `CpuWorker`
+        /// (Analysis/Artifact) or `IoWorker` (Source) thread — NEVER on
+        /// the host coordinator pool's `External` worker, and NEVER on a
+        /// scheduler-CPU/IO pool's identity token that is `None` (the
+        /// default-External case). Drives a real native scheduler and
+        /// probes `CallerKind` + the scheduler-pool identity tokens
+        /// inside each stage.
+        #[test]
+        fn scheduler_stages_run_on_scheduler_pools_never_external() {
+            use crate::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot};
+            use crate::pool::{scheduler_cpu_pool_token, scheduler_io_pool_token};
+
+            struct CallerKindProbe {
+                source_kind: Arc<AtomicU64>,
+                analysis_kind: Arc<AtomicU64>,
+                source_io_token: Arc<AtomicUsize>,
+                analysis_cpu_token: Arc<AtomicUsize>,
+            }
+            // Encode CallerKind as a stable u64 so the test thread can
+            // compare without importing the enum's repr.
+            fn kind_code(k: crate::caller_kind::CallerKind) -> u64 {
+                match k {
+                    crate::caller_kind::CallerKind::External => 1,
+                    crate::caller_kind::CallerKind::Driver => 2,
+                    crate::caller_kind::CallerKind::CpuWorker => 3,
+                    crate::caller_kind::CallerKind::IoWorker => 4,
+                    crate::caller_kind::CallerKind::Inline => 5,
+                }
+            }
+            impl crate::executor::StageExecutor for CallerKindProbe {
+                fn execute_source(
+                    &self,
+                    _c: &str,
+                    _k: crate::node::FileKind,
+                    content: Arc<str>,
+                    generation: u64,
+                ) -> Result<SourceSnapshot, crate::executor::StageError> {
+                    self.source_kind
+                        .store(kind_code(crate::caller_kind::CallerKind::current()), AtomOrd::SeqCst);
+                    // `usize::MAX` is the "no scheduler-IO token" sentinel.
+                    self.source_io_token
+                        .store(scheduler_io_pool_token().unwrap_or(usize::MAX), AtomOrd::SeqCst);
+                    Ok(SourceSnapshot::new_empty(content, generation))
+                }
+                fn execute_analysis(
+                    &self,
+                    _c: &str,
+                    _s: &SourceSnapshot,
+                    generation: u64,
+                ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
+                    self.analysis_kind
+                        .store(kind_code(crate::caller_kind::CallerKind::current()), AtomOrd::SeqCst);
+                    self.analysis_cpu_token
+                        .store(scheduler_cpu_pool_token().unwrap_or(usize::MAX), AtomOrd::SeqCst);
+                    Ok(AnalysisSnapshot::new_empty(generation))
+                }
+                fn execute_artifact(
+                    &self,
+                    _c: &str,
+                    _s: &SourceSnapshot,
+                    _a: &AnalysisSnapshot,
+                    profile_hash: u64,
+                    generation: u64,
+                ) -> Result<ArtifactSnapshot, crate::executor::StageError> {
+                    Ok(ArtifactSnapshot {
+                        generation,
+                        profile_hash,
+                        data: Arc::new(crate::node::EmptyData),
+                    })
+                }
+            }
+
+            let source_kind = Arc::new(AtomicU64::new(0));
+            let analysis_kind = Arc::new(AtomicU64::new(0));
+            let source_io_token = Arc::new(AtomicUsize::new(usize::MAX));
+            let analysis_cpu_token = Arc::new(AtomicUsize::new(usize::MAX));
+            let probe = Arc::new(CallerKindProbe {
+                source_kind: Arc::clone(&source_kind),
+                analysis_kind: Arc::clone(&analysis_kind),
+                source_io_token: Arc::clone(&source_io_token),
+                analysis_cpu_token: Arc::clone(&analysis_cpu_token),
+            });
+
+            let loader: Arc<MemorySourceLoader> = Arc::new(MemorySourceLoader::new());
+            // Force pool dispatch (not inline): the External test thread
+            // is parked by `wait_or_drive`, so the driver dispatches onto
+            // the scheduler pools.
+            let sched = Scheduler::test_with_executor(
+                SchedulerConfig {
+                    cpu_threads: 2,
+                    io_threads: 2,
+                    dag_budget: None,
+                },
+                Arc::clone(&loader) as Arc<dyn crate::source_loader::SourceLoader>,
+                probe as Arc<dyn crate::executor::StageExecutor>,
+            );
+
+            let handle = sched.submit_request(Request {
+                file_id: "/x.vue".to_string(),
+                target: TargetStage::Analysis,
+                priority: Priority::Interactive,
+                source: Some(Arc::from("<template>x</template>")),
+                file_kind: None,
+                request_context: None,
+            });
+            let state = handle.wait();
+            assert!(
+                matches!(state, CompletionState::Ready(_)),
+                "request must complete: {state:?}"
+            );
+
+            // Source ran on an IoWorker (code 4) — NOT External (1).
+            assert_eq!(
+                source_kind.load(AtomOrd::SeqCst),
+                4,
+                "Source stage must run on a scheduler IoWorker, never the External \
+                 host coordinator pool"
+            );
+            // Analysis ran on a CpuWorker (code 3) — NOT External (1).
+            assert_eq!(
+                analysis_kind.load(AtomOrd::SeqCst),
+                3,
+                "Analysis stage must run on a scheduler CpuWorker, never the External \
+                 host coordinator pool"
+            );
+            // And it ran on THIS scheduler's specific pools (tokens set,
+            // not the usize::MAX no-token sentinel) — proving the work
+            // landed on the injected scheduler pools, not some other
+            // CpuWorker/IoWorker-defaulting thread.
+            assert_eq!(
+                source_io_token.load(AtomOrd::SeqCst),
+                sched.io_pool.pool_id(),
+                "Source worker must carry THIS scheduler IO pool's identity token"
+            );
+            assert_eq!(
+                analysis_cpu_token.load(AtomOrd::SeqCst),
+                sched.cpu_pool.pool_id(),
+                "Analysis worker must carry THIS scheduler CPU pool's identity token"
+            );
+        }
+
+        /// Per-file gate so the test can park the single IO worker inside
+        /// Source and observe that the driver keeps making progress.
+        struct SourceGate {
+            entered_tx: crossbeam_channel::Sender<()>,
+            release_rx: crossbeam_channel::Receiver<()>,
+        }
+        struct GatedSourceExecutor {
+            gates: dashmap::DashMap<String, SourceGate>,
+        }
+        impl crate::executor::StageExecutor for GatedSourceExecutor {
+            fn execute_source(
+                &self,
+                canonical_id: &str,
+                _file_kind: crate::node::FileKind,
+                content: Arc<str>,
+                generation: u64,
+            ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
+                if let Some(gate) = self.gates.get(canonical_id) {
+                    let _ = gate.entered_tx.send(());
+                    let _ = gate.release_rx.recv();
+                }
+                Ok(crate::node::SourceSnapshot::new_empty(content, generation))
+            }
+        }
+
+        /// DRIVER NONBLOCKING (P0 #1, the load-bearing discriminator):
+        /// with `io_threads = 1` and an explicit `dag_budget.io` LARGER
+        /// than the legacy `io_threads * 4` channel headroom, the driver
+        /// must dispatch many Source jobs WITHOUT blocking — even while
+        /// the single IO worker is parked inside one Source stage.
+        ///
+        /// Discriminator: pre-cutover the IO transport was `bounded(4)`
+        /// and `io_pool.execute` did a BLOCKING `send`. The DAG admitted
+        /// up to `dag_budget.io = 8` IO jobs; the single worker parked on
+        /// job #1, so the channel filled at 4 and the driver's 6th
+        /// blocking `send` HUNG — no further dispatch, the test would time
+        /// out. Post-cutover the transport is sized to `>= 8` and
+        /// `try_submit` uses `try_send`, so all admitted Source jobs are
+        /// enqueued and the driver returns promptly. We assert every
+        /// blocked job's Source stage was ENTERED (the closures reached
+        /// the worker) within a bounded wait — proving the driver did not
+        /// block partway through dispatching them.
+        #[test]
+        fn driver_does_not_block_dispatching_many_source_jobs_on_one_io_worker() {
+            // 8 files, each gated. io_threads = 1 → legacy transport was
+            // bounded(4). Explicit dag_budget.io = 8 admits all 8 at once.
+            const N: usize = 8;
+            let gates = dashmap::DashMap::new();
+            let mut entered_rxs = Vec::with_capacity(N);
+            let mut release_txs = Vec::with_capacity(N);
+            let loader = Arc::new(MemorySourceLoader::new());
+            for i in 0..N {
+                let id = format!("/f{i}.vue");
+                loader.insert(id.clone(), Arc::from("<template>x</template>"));
+                let (etx, erx) = crossbeam_channel::bounded::<()>(1);
+                let (rtx, rrx) = crossbeam_channel::bounded::<()>(1);
+                gates.insert(
+                    id,
+                    SourceGate {
+                        entered_tx: etx,
+                        release_rx: rrx,
+                    },
+                );
+                entered_rxs.push(erx);
+                release_txs.push(rtx);
+            }
+            let executor = Arc::new(GatedSourceExecutor { gates });
+            let config = SchedulerConfig {
+                cpu_threads: 2,
+                io_threads: 1,
+                dag_budget: Some(DagCapacityBudget { cpu: 8, io: N as u32 }),
+            };
+            let sched = Scheduler::test_with_executor(
+                config,
+                loader as Arc<dyn crate::source_loader::SourceLoader>,
+                executor as Arc<dyn crate::executor::StageExecutor>,
+            );
+
+            // Submit all N Source requests. With one IO worker parked on
+            // the first job it picks up, the remaining jobs must still be
+            // enqueued by the driver (try_submit, nonblocking) rather than
+            // blocking the driver's send.
+            let mut handles = Vec::with_capacity(N);
+            for i in 0..N {
+                handles.push(sched.submit_request(Request {
+                    file_id: format!("/f{i}.vue"),
+                    target: TargetStage::Source,
+                    priority: Priority::Interactive,
+                    source: None,
+                    file_kind: None,
+                    request_context: None,
+                }));
+            }
+
+            // Release each gate as its Source stage is entered. Because
+            // there is ONE IO worker, the stages enter one-at-a-time; the
+            // discriminator is that EVERY one is reached without the
+            // driver hanging on a full transport. A pre-cutover blocking
+            // send would stall after the 5th admitted job (channel full),
+            // so fewer than N "entered" signals would ever arrive and the
+            // bounded recv below would time out → test failure.
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            for (i, erx) in entered_rxs.iter().enumerate() {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                erx.recv_timeout(remaining).unwrap_or_else(|_| {
+                    panic!(
+                        "Source stage #{i} was never entered within the deadline — the \
+                         driver blocked dispatching Source jobs onto the single IO \
+                         worker (pre-cutover blocking send regression)"
+                    )
+                });
+                // Release this gate so the worker can pick up the next.
+                let _ = release_txs[i].send(());
+            }
+
+            for (i, h) in handles.into_iter().enumerate() {
+                let state = h.wait();
+                assert!(
+                    matches!(state, CompletionState::Ready(_)),
+                    "Source request #{i} must complete Ready: {state:?}"
+                );
+            }
+        }
+
+        /// TRY_SUBMIT-FULL INVARIANT VIOLATION (P1): a fault-injected
+        /// `Full` from `try_submit` at the dispatch site must terminalize
+        /// the job (caller observes `Failed`, NOT a hang), release the
+        /// parked DAG reservation (no permit leak), and NOT
+        /// requeue/double-credit. After the faulted job terminalizes, a
+        /// SUBSEQUENT request in the same resource class must still admit
+        /// and complete — proving the permit was returned to the ledger.
+        ///
+        /// The fault is injected via the test-only one-shot
+        /// `arm_pool_submit_fault_full` seam, which also suppresses the
+        /// `terminalize_pool_submit_violation` `debug_assert!` (the test
+        /// characterizes the RELEASE path that runs in release builds).
+        #[test]
+        fn try_submit_full_terminalizes_releases_reservation_no_leak() {
+            // Single CPU permit so a leaked reservation would PERMANENTLY
+            // stall the CPU class — the second request would then hang
+            // instead of completing. Analysis is CPU-class work.
+            let loader = Arc::new(MemorySourceLoader::new());
+            loader.insert("/a.vue".to_string(), Arc::from("<template>a</template>"));
+            loader.insert("/b.vue".to_string(), Arc::from("<template>b</template>"));
+            let config = SchedulerConfig {
+                cpu_threads: 1,
+                io_threads: 1,
+                dag_budget: Some(DagCapacityBudget { cpu: 1, io: 4 }),
+            };
+            let sched = Scheduler::test_with_executor(
+                config,
+                loader as Arc<dyn crate::source_loader::SourceLoader>,
+                Arc::new(crate::executor::DefaultExecutor),
+            );
+
+            // Arm a one-shot Full fault: the NEXT non-inline pool submit
+            // observes Full. Source (/a.vue) dispatches to the IO pool;
+            // the first non-inline submit hits the fault and terminalizes.
+            sched.arm_pool_submit_fault_full();
+
+            let h_a = sched.submit_request(Request {
+                file_id: "/a.vue".to_string(),
+                target: TargetStage::Analysis,
+                priority: Priority::Interactive,
+                source: None,
+                file_kind: None,
+                request_context: None,
+            });
+            // The faulted job terminalizes as Failed — NOT a hang.
+            let state_a = h_a.wait();
+            assert!(
+                matches!(state_a, CompletionState::Failed(_)),
+                "the try_submit-Full job must terminalize as Failed (no silent drop, \
+                 no hang): {state_a:?}"
+            );
+
+            // The reservation must have been released: a fresh request in
+            // the same (CPU) class still admits and completes. A leaked
+            // permit on a cpu:1 budget would stall this forever.
+            let h_b = sched.submit_request(Request {
+                file_id: "/b.vue".to_string(),
+                target: TargetStage::Analysis,
+                priority: Priority::Interactive,
+                source: None,
+                file_kind: None,
+                request_context: None,
+            });
+            let state_b = h_b.wait();
+            assert!(
+                matches!(state_b, CompletionState::Ready(_)),
+                "a subsequent request must complete after the faulted job released its \
+                 reservation (no permit leak, no double-credit stall): {state_b:?}"
+            );
+        }
     }
 }
