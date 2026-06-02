@@ -1,6 +1,45 @@
 use oxc_sourcemap::OwnedSourceMap;
 use verter_span::{LspPosition, TsPosition};
 
+/// A single mapped run, precomputed once at [`PositionMapper`] construction.
+///
+/// A run is one mapped source-map token's contiguous mapped extent. Because `.vue` eval
+/// sources are **position-preserving** (`IndexedReady.eval_source`), the generated and
+/// source extents of a run have the SAME length: `dst_end - dst_col == src_end - src_col`.
+///
+/// The run's length is the TRUE extent of the token's mapped content — NOT "to the next
+/// mapped token" and NOT "to end-of-line". It is bounded by both:
+///  - the next token of ANY kind on the same generated line (so an unmapped/synthetic
+///    token immediately after the run caps it, and a gap to the next *mapped* token is
+///    NOT swallowed); and
+///  - the token's own source line's true content length (so a last-on-line run cannot
+///    extend past the real source text into trailing synthetic suffix / EOL).
+///
+/// The minimum of the two is the run length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MappedRun {
+    dst_line: u32,
+    dst_col: u32,
+    /// Exclusive generated-column end of the run on `dst_line`.
+    dst_end: u32,
+    src_line: u32,
+    src_col: u32,
+    /// Exclusive source-column end of the run on `src_line` (`src_col + run_len`).
+    src_end: u32,
+}
+
+impl MappedRun {
+    #[inline]
+    fn dst_contains(&self, line: u32, col: u32) -> bool {
+        line == self.dst_line && col >= self.dst_col && col < self.dst_end
+    }
+
+    #[inline]
+    fn src_contains(&self, line: u32, col: u32) -> bool {
+        line == self.src_line && col >= self.src_col && col < self.src_end
+    }
+}
+
 /// Bidirectional position mapper between Vue source positions and generated IDE positions.
 ///
 /// Consumes an `oxc_sourcemap::OwnedSourceMap` (from `verter_session.get_ide()`) and provides
@@ -11,40 +50,211 @@ use verter_span::{LspPosition, TsPosition};
 ///   generated TSX position ([`TsPosition`], wrapped in [`GeneratedMapped`]).
 ///
 /// Both directions return `None` unless the query falls **strictly inside a single mapped
-/// token's run**. There is NO cross-token extrapolation and NO snap-to-nearest: a query in
-/// unmapped/synthetic content, or in a gap between tokens, or that would bridge into the next
-/// token, maps to nothing. Character-level precision is preserved ONLY within one mapped run
-/// (the query's offset from the run start is added to the run's mapped start). A range maps
-/// only when BOTH endpoints independently resolve inside compatible mapped runs.
+/// run** (a `MappedRun` precomputed at construction). There is NO cross-token extrapolation
+/// and NO snap-to-nearest: a query in unmapped/synthetic content, in a gap between runs, or
+/// that would bridge into the next run, maps to nothing. Character-level precision is
+/// preserved ONLY within one mapped run (the query's offset from the run start is added to
+/// the run's mapped start).
+///
+/// A RANGE maps only via [`tsx_range_to_vue`](PositionMapper::tsx_range_to_vue), which
+/// requires both endpoints to resolve inside **compatible** runs (the same run, or
+/// genuinely-contiguous mapped runs with no synthetic/unmapped content between them). Two
+/// endpoints that each map but lie in runs separated by synthetic content do NOT compose.
 ///
 /// All positions use 0-indexed lines and UTF-16 columns (matching LSP `Position`). The typed
 /// [`TsPosition`] / [`LspPosition`] wrappers make it impossible to pass a TSX coordinate where
 /// a Vue coordinate is expected.
+///
+/// Performance: the mapped runs and the per-line sorted indices used for lookup are
+/// precomputed ONCE in [`from_json`](PositionMapper::from_json). Both public lookups are then
+/// O(log n) (binary search within a line) + O(1) bound — no per-call table rebuild and no
+/// quadratic re-scan, which matters on hot per-token paths (semantic tokens, inlay hints).
 #[derive(Clone)]
 pub struct PositionMapper {
     map: OwnedSourceMap,
+    /// All mapped runs, stored in `(dst_line, dst_col)` order (the source-map token order).
+    /// A run's stable identity is its index into this vec (used for endpoint-compatibility).
+    runs: Vec<MappedRun>,
+    /// Per generated line: indices into `runs`, sorted by `dst_col`. Index = dst line.
+    by_dst_line: Vec<Vec<u32>>,
+    /// Per source line: indices into `runs`, sorted by `src_col`. Index = src line.
+    by_src_line: Vec<Vec<u32>>,
 }
 
-/// Result of [`PositionMapper::tsx_to_vue`]: an original-`.vue` position.
+/// Result of [`PositionMapper::tsx_to_vue`]: an original-`.vue` position plus the identity of
+/// the mapped run it resolved inside (so a range composer can prove endpoint compatibility).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceMapped {
     /// The resolved Vue source position (LSP-negotiated encoding).
     pub pos: LspPosition,
+    /// Stable identity of the mapped run the query resolved inside.
+    pub run: RunId,
 }
 
-/// Result of [`PositionMapper::vue_to_tsx`]: a generated-TSX position.
+/// Result of [`PositionMapper::vue_to_tsx`]: a generated-TSX position plus the identity of the
+/// mapped run it resolved inside (so a range composer can prove endpoint compatibility).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GeneratedMapped {
     /// The resolved generated-TSX position.
     pub pos: TsPosition,
+    /// Stable identity of the mapped run the query resolved inside.
+    pub run: RunId,
 }
+
+/// Stable identity of a single mapped run within one [`PositionMapper`].
+///
+/// It is opaque on purpose: callers compare two `RunId`s only through
+/// [`PositionMapper::tsx_range_to_vue`] (which decides endpoint compatibility), never by
+/// reaching into the underlying index. Two `RunId`s from DIFFERENT mappers are meaningless
+/// together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RunId(u32);
 
 impl PositionMapper {
     /// Create a position mapper from a source map JSON string.
+    ///
+    /// Precomputes the mapped runs (true-extent bounded) and the per-line sorted lookup
+    /// indices once, so subsequent lookups are O(log n) without rebuilding any table.
     pub fn from_json(json: &str) -> Result<Self, String> {
         let map = OwnedSourceMap::from_json_string(json)
             .map_err(|e| format!("invalid source map: {e}"))?;
-        Ok(Self { map })
+        let (runs, by_dst_line, by_src_line) = Self::precompute_runs(&map);
+        Ok(Self {
+            map,
+            runs,
+            by_dst_line,
+            by_src_line,
+        })
+    }
+
+    /// Build the mapped runs and per-line indices from the source map's tokens.
+    ///
+    /// Tokens arrive sorted by `(dst_line, dst_col)` (the source-map invariant). Each MAPPED
+    /// token starts a run whose true length is `min(next-dst-token-delta, source-line-
+    /// remaining)` — see [`MappedRun`]. Unmapped tokens produce no run but still bound the
+    /// preceding run (their `dst_col` is the next-dst-token boundary).
+    #[allow(clippy::type_complexity)]
+    fn precompute_runs(map: &OwnedSourceMap) -> (Vec<MappedRun>, Vec<Vec<u32>>, Vec<Vec<u32>>) {
+        let tokens: Vec<_> = map.get_tokens().collect();
+
+        // UTF-16 length of each line of each source, indexed [source_id][line].
+        let source_line_lens: Vec<Vec<u32>> = {
+            let mut per_source = Vec::new();
+            for content in map.get_source_contents() {
+                let lens = content
+                    .map(|c| c.split('\n').map(utf16_line_len).collect::<Vec<u32>>())
+                    .unwrap_or_default();
+                per_source.push(lens);
+            }
+            per_source
+        };
+        let src_line_len = |source_id: u32, line: u32| -> Option<u32> {
+            source_line_lens
+                .get(source_id as usize)
+                .and_then(|lens| lens.get(line as usize))
+                .copied()
+        };
+
+        let mut runs: Vec<MappedRun> = Vec::new();
+        for (idx, token) in tokens.iter().enumerate() {
+            let Some(source_id) = token.get_source_id() else {
+                continue; // unmapped token: no run (it only bounds the preceding run)
+            };
+            let dst_line = token.get_dst_line();
+            let dst_col = token.get_dst_col();
+
+            // Bound 1: the next token of ANY kind on the same generated line. A gap to the
+            // next mapped token is therefore NOT swallowed (an unmapped token in between, or
+            // the next mapped token itself, caps this run at its own start).
+            let next_dst_bound = tokens
+                .iter()
+                .skip(idx + 1)
+                .take_while(|t| t.get_dst_line() == dst_line)
+                .map(|t| t.get_dst_col())
+                .find(|&c| c > dst_col)
+                .map(|c| c - dst_col);
+
+            // Bound 2: the token's own source line's true content length remaining. This
+            // caps a last-on-line run so it cannot extend past real source text into a
+            // synthetic suffix or to EOL.
+            let src_col = token.get_src_col();
+            let src_remaining = src_line_len(source_id, token.get_src_line())
+                .map(|len| len.saturating_sub(src_col));
+
+            let run_len = match (next_dst_bound, src_remaining) {
+                (Some(a), Some(b)) => a.min(b),
+                (Some(a), None) => a,
+                (None, Some(b)) => b,
+                // No following token and no source-line info: degenerate map with a single
+                // run and no source content. Nothing to bound it; it covers no columns.
+                (None, None) => 0,
+            };
+
+            if run_len == 0 {
+                continue;
+            }
+
+            runs.push(MappedRun {
+                dst_line,
+                dst_col,
+                dst_end: dst_col + run_len,
+                src_line: token.get_src_line(),
+                src_col,
+                src_end: src_col + run_len,
+            });
+        }
+
+        // Per-line indices. `runs` is already in (dst_line, dst_col) order, so by_dst_line is
+        // naturally sorted by dst_col; by_src_line must be explicitly sorted by src_col.
+        let max_dst_line = runs.iter().map(|r| r.dst_line).max();
+        let max_src_line = runs.iter().map(|r| r.src_line).max();
+
+        let mut by_dst_line: Vec<Vec<u32>> = match max_dst_line {
+            Some(m) => vec![Vec::new(); m as usize + 1],
+            None => Vec::new(),
+        };
+        let mut by_src_line: Vec<Vec<u32>> = match max_src_line {
+            Some(m) => vec![Vec::new(); m as usize + 1],
+            None => Vec::new(),
+        };
+        for (i, run) in runs.iter().enumerate() {
+            by_dst_line[run.dst_line as usize].push(i as u32);
+            by_src_line[run.src_line as usize].push(i as u32);
+        }
+        for line in &mut by_src_line {
+            line.sort_by_key(|&i| runs[i as usize].src_col);
+        }
+
+        (runs, by_dst_line, by_src_line)
+    }
+
+    /// Find the mapped run whose GENERATED extent contains `(line, col)`, by binary search
+    /// within the line's runs (sorted by `dst_col`). O(log n).
+    fn run_at_dst(&self, line: u32, col: u32) -> Option<RunId> {
+        let line_runs = self.by_dst_line.get(line as usize)?;
+        // greatest run whose dst_col <= col, then verify in-run containment (col < dst_end).
+        let pos = line_runs.partition_point(|&i| self.runs[i as usize].dst_col <= col);
+        let run_idx = *line_runs.get(pos.checked_sub(1)?)?;
+        let run = &self.runs[run_idx as usize];
+        if run.dst_contains(line, col) {
+            Some(RunId(run_idx))
+        } else {
+            None
+        }
+    }
+
+    /// Find the mapped run whose SOURCE extent contains `(line, col)`, by binary search
+    /// within the line's runs (sorted by `src_col`). O(log n).
+    fn run_at_src(&self, line: u32, col: u32) -> Option<RunId> {
+        let line_runs = self.by_src_line.get(line as usize)?;
+        let pos = line_runs.partition_point(|&i| self.runs[i as usize].src_col <= col);
+        let run_idx = *line_runs.get(pos.checked_sub(1)?)?;
+        let run = &self.runs[run_idx as usize];
+        if run.src_contains(line, col) {
+            Some(RunId(run_idx))
+        } else {
+            None
+        }
     }
 
     /// Map a generated TSX position back to the original Vue source position.
@@ -53,45 +263,23 @@ impl PositionMapper {
     /// in the generated TSX, and we need the corresponding Vue source position.
     ///
     /// Strict in-run lookup: returns `Some` ONLY when the query lies strictly inside a
-    /// single mapped token's generated run. A query on an unmapped/synthetic token (e.g.
-    /// the `_ctx.` / `$setup.` prefix), in a gap between tokens, or bridging into the next
-    /// token returns `None`. Within the run, character precision is preserved by adding the
-    /// query's offset from the run start to the mapped source column.
+    /// single mapped run's generated extent. A query on an unmapped/synthetic token (e.g.
+    /// the `_ctx.` / `$setup.` prefix), in a gap between runs, past the run's true content
+    /// end, or bridging into the next run returns `None`. Within the run, character precision
+    /// is preserved by adding the query's offset from the run start to the mapped source
+    /// column.
     pub fn tsx_to_vue(&self, pos: TsPosition) -> Option<SourceMapped> {
-        let line = pos.line;
-        let column = pos.character;
-
-        let lookup_table = self.map.generate_lookup_table();
-        let token = self.map.lookup_token(&lookup_table, line, column)?;
-
-        // The covering token must itself be mapped. A query that lands on an
-        // unmapped / `Inserted` token (synthetic text such as `_ctx.` / `$setup.`)
-        // has no source position -> None.
-        token.get_source_id()?;
-
-        // In-run containment: the query must lie strictly inside THIS token's mapped
-        // run on this generated line. The run ends where the next token on the same
-        // generated line starts (or at end-of-line if none). `lookup_token` already
-        // guarantees the token covers the query, but we re-assert the lower bound and
-        // reject any query that bridges into the next/unmapped token's run.
-        let dst_col = token.get_dst_col();
-        if token.get_dst_line() != line || column < dst_col {
-            return None;
-        }
-        if let Some(next_dst_col) = self.next_dst_col_on_line(line, dst_col) {
-            if column >= next_dst_col {
-                return None;
-            }
-        }
-
-        // Within-run character precision: Original chunks are byte-identical between
-        // source and generated, so adding the in-run offset to the mapped source column
-        // is exact. This delta is applied ONLY here, inside one mapped run.
+        let run_id = self.run_at_dst(pos.line, pos.character)?;
+        let run = &self.runs[run_id.0 as usize];
+        // Within-run character precision: the run's generated and source extents are
+        // byte-identical (position-preserving), so adding the in-run offset to the mapped
+        // source column is exact. This delta is applied ONLY here, inside one mapped run.
         Some(SourceMapped {
             pos: LspPosition {
-                line: token.get_src_line(),
-                character: token.get_src_col() + (column - dst_col),
+                line: run.src_line,
+                character: run.src_col + (pos.character - run.dst_col),
             },
+            run: run_id,
         })
     }
 
@@ -101,78 +289,114 @@ impl PositionMapper {
     /// to query TSGO at the corresponding TSX offset.
     ///
     /// Strict in-run lookup (no snap-to-previous): returns `Some` ONLY when the target
-    /// source position lies strictly inside a single mapped token's source run — i.e. the
-    /// run starts at or before the target and the next token on the same source line starts
-    /// strictly after the target. A target in a gap, or in a later/unmapped run, returns
-    /// `None`. Within the run, the in-run offset is added to the mapped generated column.
+    /// source position lies strictly inside a single mapped run's source extent. A target in
+    /// a gap, past the run's true content end, or in a later/unmapped run returns `None`.
+    /// Within the run, the in-run offset is added to the mapped generated column.
     pub fn vue_to_tsx(&self, pos: LspPosition) -> Option<GeneratedMapped> {
-        let line = pos.line;
-        let column = pos.character;
+        let run_id = self.run_at_src(pos.line, pos.character)?;
+        let run = &self.runs[run_id.0 as usize];
+        Some(GeneratedMapped {
+            pos: TsPosition {
+                line: run.dst_line,
+                character: run.dst_col + (pos.character - run.src_col),
+            },
+            run: run_id,
+        })
+    }
 
-        // Find the single mapped token whose own source run contains the target:
-        // `src_col <= column` and the next source token on this line starts strictly
-        // after `column`. This is interval containment, not a closest-preceding snap —
-        // a target that falls past a token's run (into a gap or a later run) matches no
-        // token and returns `None`.
-        for token in self.map.get_tokens() {
-            if token.get_source_id().is_none() {
-                continue;
-            }
-            if token.get_src_line() != line {
-                continue;
-            }
-            let src_col = token.get_src_col();
-            if column < src_col {
-                continue;
-            }
-            let run_end = self.next_src_col_on_line(line, src_col);
-            let contained = match run_end {
-                Some(next_src_col) => column < next_src_col,
-                None => true, // last mapped run on the line extends to end-of-line
-            };
-            if contained {
-                return Some(GeneratedMapped {
-                    pos: TsPosition {
-                        line: token.get_dst_line(),
-                        character: token.get_dst_col() + (column - src_col),
-                    },
-                });
-            }
+    /// Map a generated TSX **range** `[start, end)` back to a Vue source range `(start, end)`,
+    /// enforcing the half-open endpoint-compatibility rule.
+    ///
+    /// A range maps only when both endpoints resolve inside **compatible** mapped runs:
+    ///  - the `start` position resolves inside some run `S`; and
+    ///  - the half-open `end` either (a) equals `S`'s exclusive generated end exactly (the
+    ///    range terminates at `S`'s mapped end — same run), or (b) resolves inside a run `E`
+    ///    that is contiguous with `S` (`S.dst_end == E.dst_col`, i.e. NO synthetic/unmapped
+    ///    content between them on the line).
+    ///
+    /// Any range whose endpoints fall in runs separated by synthetic/unmapped content, on
+    /// different lines, or otherwise incompatible, returns `None` — never a bogus straddling
+    /// range. This is the binding "both endpoints inside compatible mapped spans" contract.
+    pub fn tsx_range_to_vue(
+        &self,
+        start: TsPosition,
+        end: TsPosition,
+    ) -> Option<(LspPosition, LspPosition)> {
+        let start_mapped = self.tsx_to_vue(start)?;
+        let start_run = &self.runs[start_mapped.run.0 as usize];
+
+        // Half-open end exactly at the start run's exclusive generated end: the range
+        // terminates at this run's mapped content end (same run, no bridging).
+        if end.line == start_run.dst_line && end.character == start_run.dst_end {
+            return Some((
+                start_mapped.pos,
+                LspPosition {
+                    line: start_run.src_line,
+                    character: start_run.src_end,
+                },
+            ));
         }
 
-        None
+        // Otherwise the end must resolve inside a run compatible with the start run.
+        let end_mapped = self.tsx_to_vue(end)?;
+        if self.runs_compatible(start_mapped.run, end_mapped.run) {
+            Some((start_mapped.pos, end_mapped.pos))
+        } else {
+            None
+        }
     }
 
-    /// Smallest generated column strictly greater than `dst_col` among tokens on
-    /// generated `line`. `None` means `dst_col` starts the last run on the line (the run
-    /// extends to end-of-line). Used to bound a mapped run for in-run containment; it
-    /// considers ALL tokens (mapped and unmapped) so a run never bleeds into synthetic
-    /// (`Inserted`) content that follows it on the same generated line.
-    fn next_dst_col_on_line(&self, line: u32, dst_col: u32) -> Option<u32> {
-        self.map
-            .get_tokens()
-            .filter(|t| t.get_dst_line() == line && t.get_dst_col() > dst_col)
-            .map(|t| t.get_dst_col())
-            .min()
-    }
-
-    /// Smallest source column strictly greater than `src_col` among mapped tokens on
-    /// source `line`. `None` means `src_col` starts the last mapped run on the line.
-    /// Used to bound a mapped source run for in-run containment.
-    fn next_src_col_on_line(&self, line: u32, src_col: u32) -> Option<u32> {
-        self.map
-            .get_tokens()
-            .filter(|t| {
-                t.get_source_id().is_some() && t.get_src_line() == line && t.get_src_col() > src_col
-            })
-            .map(|t| t.get_src_col())
-            .min()
+    /// Whether two mapped runs are COMPATIBLE for composing a range: the same run, or a
+    /// chain of genuinely-contiguous runs on the same generated line with NO synthetic /
+    /// unmapped content between them.
+    ///
+    /// Contiguity is decided in generated space: run `A` is directly followed by run `B`
+    /// iff `A.dst_end == B.dst_col`. Because a run's `dst_end` is bounded by the next token
+    /// of ANY kind, an unmapped/synthetic token sitting between `A` and `B` forces
+    /// `A.dst_end < B.dst_col` — so any synthetic content between the runs breaks the chain
+    /// and the range is rejected.
+    fn runs_compatible(&self, a: RunId, b: RunId) -> bool {
+        if a == b {
+            return true;
+        }
+        let (lo, hi) = if a.0 <= b.0 { (a, b) } else { (b, a) };
+        let lo_line = self.runs[lo.0 as usize].dst_line;
+        // Walk the dst-ordered run indices from lo..=hi; every adjacent pair must be exactly
+        // contiguous on the same generated line.
+        let line_runs = match self.by_dst_line.get(lo_line as usize) {
+            Some(r) => r,
+            None => return false,
+        };
+        // Positions of lo and hi within the line's sorted run list.
+        let lo_pos = match line_runs.iter().position(|&i| i == lo.0) {
+            Some(p) => p,
+            None => return false,
+        };
+        let hi_pos = match line_runs.iter().position(|&i| i == hi.0) {
+            Some(p) => p,
+            None => return false, // different generated line -> not compatible
+        };
+        for w in line_runs[lo_pos..=hi_pos].windows(2) {
+            let left = &self.runs[w[0] as usize];
+            let right = &self.runs[w[1] as usize];
+            if left.dst_end != right.dst_col {
+                return false; // a gap / synthetic content between the runs
+            }
+        }
+        true
     }
 
     /// Get the underlying source map (for advanced queries).
     pub fn source_map(&self) -> &OwnedSourceMap {
         &self.map
     }
+}
+
+/// UTF-16 code-unit length of a single line (the slice already excludes the `\n`). A trailing
+/// `\r` (CRLF) is counted as one unit, matching how an LSP `LineIndex` measures columns.
+#[inline]
+fn utf16_line_len(line: &str) -> u32 {
+    line.chars().map(|c| c.len_utf16() as u32).sum()
 }
 
 #[cfg(test)]
@@ -478,7 +702,9 @@ mod tests {
 
     #[test]
     fn test_vue_to_tsx_multiline_source() {
-        // Script block at Vue lines 5/6 mapped to TSX lines 0/1.
+        // Script block at Vue lines 5/6 mapped to TSX lines 0/1. The last-on-line run
+        // extends to the SOURCE line's true content length (position-preserving), so the
+        // queried columns must lie within the real `const x = 1;` / `const y = 2;` text.
         let json = build_test_source_map(
             "App.vue",
             "<template>\n  <div/>\n</template>\n\n<script setup>\nconst x = 1;\nconst y = 2;\n</script>",
@@ -486,7 +712,7 @@ mod tests {
         );
         let mapper = PositionMapper::from_json(&json).unwrap();
 
-        // src(5,6) -> gen(0,6): "x" in "const x = 1;" (run extends to EOL on line 5).
+        // src(5,6) -> gen(0,6): "x" in "const x = 1;" (col 6 < line length 12).
         assert_eq!(
             mapper.vue_to_tsx(vue(5, 6)).unwrap().pos,
             TsPosition::new(0, 6)
@@ -496,6 +722,224 @@ mod tests {
             mapper.vue_to_tsx(vue(6, 6)).unwrap().pos,
             TsPosition::new(1, 6)
         );
+    }
+
+    // ========================================================================
+    // Within-run delta bounded by the token's TRUE extent (not EOL, not "to the
+    // next MAPPED token"). A query in a GAP between two mapped tokens, or past the
+    // real content end of the last token on a line, returns None.
+    // ========================================================================
+
+    /// `vue_to_tsx`: a source query in a GAP between two mapped tokens — where the first
+    /// token's TRUE content (bounded by the next dst token of ANY kind) ends before the
+    /// gap — must be `None`, NOT snapped into the preceding run.
+    ///
+    /// Discriminating: a source run bounded by the next *mapped* source token would span the
+    /// whole gap [0,20), so a query at src col 12 would snap into it (mapping to `gen 0+12`).
+    /// With true-extent bounding the first run is only [0,3) (an unmapped dst token at gen
+    /// col 3 bounds it), so src col 12 is in no run -> `None`.
+    #[test]
+    fn test_vue_to_tsx_gap_between_tokens_returns_none() {
+        // Position-preserving: dst col == src col here.
+        //   mapped gen(0,0)->src(0,0)   — run bounded by the unmapped dst token at gen 3
+        //   unmapped gen(0,3)           — synthetic content begins
+        //   mapped gen(0,20)->src(0,20) — the next mapped run
+        let json = build_source_map_with_unmapped(
+            "App.vue",
+            &" ".repeat(40),
+            &[(0, 0, 0, 0), (0, 20, 0, 20)],
+            &[(0, 3)],
+        );
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // src col 12 is in the gap between the first run [0,3) and the second run [20,..).
+        // It belongs to NO mapped run -> None (no snap into the first run).
+        assert!(
+            mapper.vue_to_tsx(vue(0, 12)).is_none(),
+            "source query in an inter-token gap must not snap to the preceding run: {:?}",
+            mapper.vue_to_tsx(vue(0, 12))
+        );
+        // The first run's true interior (col 2, inside [0,3)) still maps.
+        assert_eq!(
+            mapper.vue_to_tsx(vue(0, 2)).unwrap().pos,
+            TsPosition::new(0, 2)
+        );
+        // The last in-run col of the first run (2) maps; col 3 is the boundary -> None.
+        assert!(mapper.vue_to_tsx(vue(0, 3)).is_none());
+        // The second run still maps at its start.
+        assert_eq!(
+            mapper.vue_to_tsx(vue(0, 20)).unwrap().pos,
+            TsPosition::new(0, 20)
+        );
+    }
+
+    /// `tsx_to_vue`: a query past the real content end of the LAST mapped token on a line
+    /// must be `None`. The run's extent is the SOURCE line's true content length, not EOL.
+    ///
+    /// Discriminating: a "last run extends to end-of-line" strategy would map a query at gen
+    /// col 5 on a 2-char source line to `Some(src 0+5)`. With true content-length bounding the
+    /// run is [0,2), so col 5 -> `None`.
+    #[test]
+    fn test_tsx_to_vue_past_last_token_content_returns_none() {
+        // Source line 0 is "ab" (length 2). One mapped token gen(0,0)->src(0,0), no
+        // following dst token of any kind -> run length = source-line-len(2) - 0 = 2.
+        let json = build_test_source_map("App.vue", "ab", &[(0, 0, 0, 0)]);
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // Within the 2-char run: cols 0 and 1 map.
+        assert_eq!(
+            mapper.tsx_to_vue(ts(0, 0)).unwrap().pos,
+            LspPosition::new(0, 0)
+        );
+        assert_eq!(
+            mapper.tsx_to_vue(ts(0, 1)).unwrap().pos,
+            LspPosition::new(0, 1)
+        );
+        // Col 2 is one-past the real content end -> None (not extended to EOL).
+        assert!(
+            mapper.tsx_to_vue(ts(0, 2)).is_none(),
+            "query at the content end of the last run must be None: {:?}",
+            mapper.tsx_to_vue(ts(0, 2))
+        );
+        // Col 5 (well past content) -> None.
+        assert!(mapper.tsx_to_vue(ts(0, 5)).is_none());
+    }
+
+    /// Symmetric: `vue_to_tsx` past the real content end of the last mapped token on a
+    /// source line must be `None` (true source-line-length bound, not EOL).
+    #[test]
+    fn test_vue_to_tsx_past_last_token_content_returns_none() {
+        // Source line 0 is "ab" (length 2). gen(0,5)->src(0,0); last on both lines.
+        let json = build_test_source_map("App.vue", "ab", &[(0, 5, 0, 0)]);
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        assert_eq!(
+            mapper.vue_to_tsx(vue(0, 1)).unwrap().pos,
+            TsPosition::new(0, 6)
+        );
+        assert!(
+            mapper.vue_to_tsx(vue(0, 2)).is_none(),
+            "source query past content end must be None: {:?}",
+            mapper.vue_to_tsx(vue(0, 2))
+        );
+    }
+
+    /// Over-correction guard: a legitimate multiline mapped expression — where the queried
+    /// columns ARE within the real source content of each line — still maps on every line.
+    #[test]
+    fn test_multiline_mapped_expression_in_bounds_still_maps() {
+        // Source lines 4, 5, 6 each hold real 12-char content "const v = 1;"; gen line i
+        // maps to src line 4+i. (Lines 0-3 are filler so the indices match a realistic SFC.)
+        let src = "\n\n\n\nconst v = 1;\nconst v = 1;\nconst v = 1;\n";
+        let json =
+            build_test_source_map("App.vue", src, &[(0, 0, 4, 0), (1, 0, 5, 0), (2, 0, 6, 0)]);
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // Cols 2/3/4 are all within the 12-char source lines.
+        assert_eq!(
+            mapper.tsx_to_vue(ts(0, 2)).unwrap().pos,
+            LspPosition::new(4, 2)
+        );
+        assert_eq!(
+            mapper.tsx_to_vue(ts(1, 3)).unwrap().pos,
+            LspPosition::new(5, 3)
+        );
+        assert_eq!(
+            mapper.tsx_to_vue(ts(2, 4)).unwrap().pos,
+            LspPosition::new(6, 4)
+        );
+
+        // Roundtrip on the middle line.
+        let tsx = mapper.vue_to_tsx(vue(5, 3)).unwrap().pos;
+        assert_eq!(tsx, TsPosition::new(1, 3));
+        assert_eq!(
+            mapper.tsx_to_vue(ts(tsx.line, tsx.character)).unwrap().pos,
+            LspPosition::new(5, 3)
+        );
+    }
+
+    // ========================================================================
+    // Range endpoint compatibility (the strict range API). A range maps only
+    // when both endpoints resolve inside COMPATIBLE runs (same run, or
+    // genuinely-contiguous mapped runs with no synthetic content between them).
+    // Otherwise the range is DROPPED (None), never a bogus range.
+    // ========================================================================
+
+    /// A range whose two endpoints fall in two DIFFERENT mapped runs separated by
+    /// synthetic/unmapped content -> the range is DROPPED (None).
+    ///
+    /// Discriminating: a per-endpoint composer maps each endpoint independently; both
+    /// endpoints DO map (start in run A, end in run B), so it returns a (bogus) Vue range
+    /// straddling the synthetic content. The strict range API rejects incompatible runs.
+    #[test]
+    fn test_tsx_range_cross_run_with_synthetic_between_returns_none() {
+        // mapped gen(0,0)->src(0,0) run [0,3); unmapped gen(0,3) (synthetic);
+        // mapped gen(0,8)->src(0,50) run [8,..). Start in run A, end in run B.
+        let json = build_source_map_with_unmapped(
+            "App.vue",
+            &" ".repeat(80),
+            &[(0, 0, 0, 0), (0, 8, 0, 50)],
+            &[(0, 3)],
+        );
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // Both endpoints individually map (start col 1 -> run A, end col 9 -> run B),
+        // but the runs are separated by synthetic content at gen col 3 -> None.
+        assert!(
+            mapper.tsx_to_vue(ts(0, 1)).is_some(),
+            "precondition: start endpoint maps"
+        );
+        assert!(
+            mapper.tsx_to_vue(ts(0, 9)).is_some(),
+            "precondition: end endpoint maps"
+        );
+        assert!(
+            mapper.tsx_range_to_vue(ts(0, 1), ts(0, 9)).is_none(),
+            "a range straddling synthetic content between two runs must be dropped: {:?}",
+            mapper.tsx_range_to_vue(ts(0, 1), ts(0, 9))
+        );
+    }
+
+    /// A range fully inside ONE mapped run maps correctly (start + half-open end).
+    #[test]
+    fn test_tsx_range_within_single_run_maps() {
+        // One mapped run gen(0,0)->src(0,10), bounded to [0,6) by an unmapped token at 6.
+        let json =
+            build_source_map_with_unmapped("App.vue", &" ".repeat(40), &[(0, 0, 0, 10)], &[(0, 6)]);
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // Range [1,4) inside the run -> Vue [11,14).
+        let (start, end) = mapper.tsx_range_to_vue(ts(0, 1), ts(0, 4)).unwrap();
+        assert_eq!(start, LspPosition::new(0, 11));
+        assert_eq!(end, LspPosition::new(0, 14));
+
+        // Half-open end exactly at the run's exclusive end (gen col 6 == run end) maps to
+        // the run's mapped source end (src col 16).
+        let (start, end) = mapper.tsx_range_to_vue(ts(0, 0), ts(0, 6)).unwrap();
+        assert_eq!(start, LspPosition::new(0, 10));
+        assert_eq!(end, LspPosition::new(0, 16));
+    }
+
+    /// A range across two GENUINELY-CONTIGUOUS mapped runs (no synthetic content between:
+    /// run A's dst end == run B's dst start) maps. The endpoints are compatible.
+    #[test]
+    fn test_tsx_range_contiguous_runs_maps() {
+        // Two adjacent mapped runs on gen line 0, mapping to the SAME contiguous source:
+        //   gen(0,0)->src(0,0) run [0,3)
+        //   gen(0,3)->src(0,3) run [3,6)  (contiguous: A.dst_end 3 == B.dst_col 3)
+        //   unmapped gen(0,6) bounds run B.
+        let json = build_source_map_with_unmapped(
+            "App.vue",
+            &" ".repeat(40),
+            &[(0, 0, 0, 0), (0, 3, 0, 3)],
+            &[(0, 6)],
+        );
+        let mapper = PositionMapper::from_json(&json).unwrap();
+
+        // Range [1,5): start in run A, end in run B; runs are contiguous -> maps.
+        let (start, end) = mapper.tsx_range_to_vue(ts(0, 1), ts(0, 5)).unwrap();
+        assert_eq!(start, LspPosition::new(0, 1));
+        assert_eq!(end, LspPosition::new(0, 5));
     }
 
     // ========================================================================
@@ -727,47 +1171,11 @@ mod tests {
         assert_eq!(back, LspPosition::new(0, 10));
     }
 
-    /// A mapped expression spanning multiple TSX lines: each generated line maps back to
-    /// its own source line, and a roundtrip on each line is exact.
-    #[test]
-    fn test_multiline_mapped_expression() {
-        // gen line 0 -> src line 4, gen line 1 -> src line 5, gen line 2 -> src line 6.
-        let json = build_test_source_map(
-            "App.vue",
-            &"x\n".repeat(10),
-            &[
-                (0, 0, 4, 0),
-                (0, 5, 4, 5),
-                (1, 0, 5, 0),
-                (1, 5, 5, 5),
-                (2, 0, 6, 0),
-            ],
-        );
-        let mapper = PositionMapper::from_json(&json).unwrap();
-
-        // Each generated line maps to its source line, within-run column preserved.
-        assert_eq!(
-            mapper.tsx_to_vue(ts(0, 2)).unwrap().pos,
-            LspPosition::new(4, 2)
-        );
-        assert_eq!(
-            mapper.tsx_to_vue(ts(1, 3)).unwrap().pos,
-            LspPosition::new(5, 3)
-        );
-        // gen(2,*) is the last mapped run -> extends to EOL on gen line 2.
-        assert_eq!(
-            mapper.tsx_to_vue(ts(2, 4)).unwrap().pos,
-            LspPosition::new(6, 4)
-        );
-
-        // Roundtrip on the middle line.
-        let tsx = mapper.vue_to_tsx(vue(5, 3)).unwrap().pos;
-        assert_eq!(tsx, TsPosition::new(1, 3));
-        assert_eq!(
-            mapper.tsx_to_vue(ts(tsx.line, tsx.character)).unwrap().pos,
-            LspPosition::new(5, 3)
-        );
-    }
+    // NOTE: the legitimate multiline-mapped-expression case is covered by
+    // `test_multiline_mapped_expression_in_bounds_still_maps`, which models realistic source
+    // line content so the queried columns lie within the true source text. An earlier variant
+    // mapped columns 2-4 past a 1-char-per-line source, which is exactly the over-permissive
+    // "extend last run to EOL" behaviour the true-extent run bounding removes.
 
     // ========================================================================
     // UTF-16 / surrogate / astral / non-ASCII (columns are UTF-16 code units)

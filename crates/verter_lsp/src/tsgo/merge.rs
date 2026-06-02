@@ -139,7 +139,13 @@ fn find_exact_roundtrip_offset(
 
 /// Map a TSX byte offset range back to an LSP `Range` in the Vue source.
 ///
-/// Returns `None` if any mapping step fails.
+/// Routes through the mapper's strict [`PositionMapper::tsx_range_to_vue`], which enforces
+/// the half-open endpoint-compatibility rule: the range maps ONLY when both endpoints resolve
+/// inside compatible mapped runs (the same run, or genuinely-contiguous runs with no
+/// synthetic/unmapped content between them). A range whose endpoints fall in two runs
+/// separated by synthetic content — even though each endpoint individually maps — is dropped.
+///
+/// Returns `None` if any mapping step fails or the endpoints are incompatible.
 pub fn tsx_range_to_vue_range(
     tsx_start: u32,
     tsx_end: u32,
@@ -150,12 +156,10 @@ pub fn tsx_range_to_vue_range(
     let start_pos = tsx_line_index.offset_to_position(tsx_start)?;
     let end_pos = tsx_line_index.offset_to_position(tsx_end)?;
 
-    let vue_start = mapper
-        .tsx_to_vue(TsPosition::new(start_pos.line, start_pos.character))?
-        .pos;
-    let vue_end = mapper
-        .tsx_to_vue(TsPosition::new(end_pos.line, end_pos.character))?
-        .pos;
+    let (vue_start, vue_end) = mapper.tsx_range_to_vue(
+        TsPosition::new(start_pos.line, start_pos.character),
+        TsPosition::new(end_pos.line, end_pos.character),
+    )?;
 
     // Validate the mapped positions produce valid byte offsets
     let start_lsp = Position {
@@ -1183,64 +1187,45 @@ pub fn merge_semantic_tokens(
     mapper: &PositionMapper,
     vue_line_index: &LineIndex,
 ) -> Vec<tower_lsp_server::ls_types::SemanticToken> {
-    // Map each token from TSX to Vue positions, filtering unmapped ones
+    // Map each token's whole half-open range `[start, start+length)` from TSX to Vue
+    // through the strict run-compatible range API. A token is emitted ONLY when both
+    // endpoints resolve inside compatible mapped runs; otherwise it is dropped. There is
+    // NO fallback to the original TSX `token.length` when the end does not map — such a
+    // fallback could emit a Vue token whose length straddled synthetic content.
     let mut mapped: Vec<(u32, u32, u32, u32, u32)> = Vec::new(); // (line, char, length, type, mods)
 
     for token in type_tokens {
-        let start_pos = tsx_line_index.offset_to_position(token.start);
+        let Some(vue_range) = tsx_range_to_vue_range(
+            token.start,
+            token.start + token.length,
+            tsx_line_index,
+            mapper,
+            vue_line_index,
+        ) else {
+            continue;
+        };
 
-        if let Some(start_lsp) = start_pos {
-            if let Some(vs) = mapper
-                .tsx_to_vue(TsPosition::new(start_lsp.line, start_lsp.character))
-                .map(|m| m.pos)
-            {
-                // Validate start offset is within the Vue source
-                let start_lsp_pos = Position {
-                    line: vs.line,
-                    character: vs.character,
-                };
-                if vue_line_index.position_to_offset(&start_lsp_pos).is_none() {
-                    continue;
-                }
-
-                // Map end position too to compute correct Vue-space length.
-                // If the end maps to a different line, filter the token out.
-                let end_offset = token.start + token.length;
-                let vue_length =
-                    if let Some(end_lsp) = tsx_line_index.offset_to_position(end_offset) {
-                        if let Some(ve) = mapper
-                            .tsx_to_vue(TsPosition::new(end_lsp.line, end_lsp.character))
-                            .map(|m| m.pos)
-                        {
-                            if ve.line == vs.line && ve.character >= vs.character {
-                                ve.character - vs.character
-                            } else {
-                                // Cross-line or backward mapping — skip token
-                                continue;
-                            }
-                        } else {
-                            // End doesn't map — fall back to original length
-                            token.length
-                        }
-                    } else {
-                        // End offset out of TSX bounds — skip token
-                        continue;
-                    };
-
-                // Skip zero-length tokens (collapsed by mapping)
-                if vue_length == 0 {
-                    continue;
-                }
-
-                mapped.push((
-                    vs.line,
-                    vs.character,
-                    vue_length,
-                    token.token_type,
-                    token.token_modifiers,
-                ));
-            }
+        // The strict range API only composes compatible runs, but a multi-line token would
+        // produce a cross-line range; semantic tokens are single-line, so require it.
+        if vue_range.start.line != vue_range.end.line
+            || vue_range.end.character < vue_range.start.character
+        {
+            continue;
         }
+        let vue_length = vue_range.end.character - vue_range.start.character;
+
+        // Skip zero-length tokens (collapsed by mapping)
+        if vue_length == 0 {
+            continue;
+        }
+
+        mapped.push((
+            vue_range.start.line,
+            vue_range.start.character,
+            vue_length,
+            token.token_type,
+            token.token_modifiers,
+        ));
     }
 
     // Sort by (line, character) for correct delta encoding
@@ -1394,6 +1379,66 @@ mod tests {
             &tsx_li,
         );
         assert!(offset.is_none());
+    }
+
+    /// Range endpoint compatibility: build a mapper with TWO mapped runs separated by
+    /// synthetic/unmapped content. A TSX range whose endpoints fall in the two DIFFERENT
+    /// runs must be DROPPED by `tsx_range_to_vue_range` (the strict run-compatibility
+    /// check), while a range fully inside ONE run maps correctly.
+    ///
+    /// Discriminating: a per-endpoint composer maps each endpoint independently and returns
+    /// `Some` whenever both endpoints individually map — so the cross-run range produces a
+    /// bogus Vue range straddling the synthetic content. The strict API returns `None`.
+    #[test]
+    fn tsx_range_rejects_cross_run_endpoints_with_synthetic_between() {
+        // TSX single line "abcXXXXdef" (byte offset == UTF-16 col).
+        let tsx_source = "abcXXXXdef";
+        // Vue single line, long enough to hold the mapped source columns.
+        let vue_source = &" ".repeat(80);
+
+        let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+        let source_id = builder.set_source_and_content("App.vue", vue_source);
+        // mapped run A: gen(0,0)->src(0,0), bounded to [0,3) by the unmapped token at 3.
+        builder.add_token(0, 0, 0, 0, Some(source_id), None);
+        // unmapped synthetic token at gen col 3 ("XXXX").
+        builder.add_token(0, 3, 0, 0, None, None);
+        // mapped run B: gen(0,7)->src(0,50).
+        builder.add_token(0, 7, 0, 50, Some(source_id), None);
+        let json = builder.into_sourcemap().to_json_string();
+
+        let mapper = PositionMapper::from_json(&json).unwrap();
+        let tsx_li = LineIndex::new_utf16(tsx_source);
+        let vue_li = LineIndex::new_utf16(vue_source);
+
+        // Precondition: both endpoints individually map (start byte 1 -> run A,
+        // end byte 9 -> run B), so the *old* per-endpoint composer returned Some.
+        assert!(mapper.tsx_to_vue(TsPosition::new(0, 1)).is_some());
+        assert!(mapper.tsx_to_vue(TsPosition::new(0, 9)).is_some());
+
+        // Cross-run range straddling the synthetic "XXXX" -> dropped.
+        assert!(
+            tsx_range_to_vue_range(1, 9, &tsx_li, &mapper, &vue_li).is_none(),
+            "a TSX range whose endpoints land in two runs separated by synthetic content \
+             must be dropped, not composed into a bogus Vue range"
+        );
+
+        // In-run range fully inside run A [0,3) -> maps.
+        let r = tsx_range_to_vue_range(1, 3, &tsx_li, &mapper, &vue_li)
+            .expect("range fully inside one mapped run must map");
+        assert_eq!(
+            r.start,
+            Position {
+                line: 0,
+                character: 1
+            }
+        );
+        assert_eq!(
+            r.end,
+            Position {
+                line: 0,
+                character: 3
+            }
+        );
     }
 
     // ── Hover merge tests ──────────────────────────────────────────
