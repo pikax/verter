@@ -132,6 +132,13 @@ pub struct TypeInfoSurfaceMember {
     pub readonly: bool,
     /// Method-style member (`name(): T`) vs property-style (`name: T`).
     pub is_method: bool,
+    /// Declared accessibility of the member, carried verbatim from the graph
+    /// [`SurfaceMember::visibility`]. `Public` for every non-class origin; a
+    /// class member carries its `TSAccessibility`. The shared surface RECORDS
+    /// non-public members (they participate in node identity); the published-
+    /// prop projection re-applies a `Public`-only filter at the publication
+    /// boundary so non-public class members do not leak as Vue props.
+    pub visibility: verter_type_expr::MemberVisibility,
     /// Whether the member was declared in a Vue macro type argument's OWN body
     /// (vs reached via heritage / Omit / intersection). Display/provenance
     /// flag carried verbatim from the graph member.
@@ -450,6 +457,9 @@ fn build_member(graph: &SemanticGraphStore, member: &SurfaceMember) -> TypeInfoS
         optional: member.optional,
         readonly: member.readonly,
         is_method: member.is_method,
+        // Carry the graph member's declared accessibility onto the typeinfo
+        // surface (Public for every non-class origin).
+        visibility: member.visibility,
         declared_in_macro_type_arg: member.declared_in_macro_type_arg,
         // JSDoc spans require the declaring file's source to locate the leading
         // comment block, which the pure graph projection does NOT hold. The host

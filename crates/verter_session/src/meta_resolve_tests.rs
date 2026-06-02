@@ -8313,6 +8313,7 @@ defineProps<{ value: Foo }>()
             members: StdArc::from(
                 vec![
                     SurfaceMember {
+                        visibility: verter_type_expr::MemberVisibility::Public,
                         name: StdArc::from("a"),
                         value: pkg_ref,
                         optional: false,
@@ -8324,6 +8325,7 @@ defineProps<{ value: Foo }>()
                         declaration_origin: None,
                     },
                     SurfaceMember {
+                        visibility: verter_type_expr::MemberVisibility::Public,
                         name: StdArc::from("b"),
                         value: local_ref,
                         optional: false,
@@ -8335,6 +8337,7 @@ defineProps<{ value: Foo }>()
                         declaration_origin: None,
                     },
                     SurfaceMember {
+                        visibility: verter_type_expr::MemberVisibility::Public,
                         name: StdArc::from("c"),
                         value: prim_string,
                         optional: false,
@@ -8365,6 +8368,7 @@ defineProps<{ value: Foo }>()
             members: StdArc::from(
                 vec![
                     SurfaceMember {
+                        visibility: verter_type_expr::MemberVisibility::Public,
                         name: StdArc::from("a"),
                         value: prim_number,
                         optional: false,
@@ -8376,6 +8380,7 @@ defineProps<{ value: Foo }>()
                         declaration_origin: None,
                     },
                     SurfaceMember {
+                        visibility: verter_type_expr::MemberVisibility::Public,
                         name: StdArc::from("b"),
                         value: prim_number,
                         optional: false,
@@ -8387,6 +8392,7 @@ defineProps<{ value: Foo }>()
                         declaration_origin: None,
                     },
                     SurfaceMember {
+                        visibility: verter_type_expr::MemberVisibility::Public,
                         name: StdArc::from("c"),
                         value: prim_number,
                         optional: false,

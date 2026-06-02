@@ -542,6 +542,7 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
             optional,
             readonly,
             is_method,
+            visibility,
             declared_in_macro_type_arg,
             jsdoc_description_span,
             jsdoc_tag_spans,
@@ -562,6 +563,9 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
         let _optional: &bool = optional;
         let _readonly: &bool = readonly;
         let _is_method: &bool = is_method;
+        // Visibility is a small `Copy` enum (a declared-accessibility fact),
+        // never an owned `String`.
+        let _visibility: &verter_type_expr::MemberVisibility = visibility;
         let _declared_in_macro_type_arg: &bool = declared_in_macro_type_arg;
         // Origin carries the declaration file id + spans + merge role — no owned
         // type text.

@@ -656,6 +656,9 @@ pub(crate) fn preserve_package_backed_symbolic_refs_node(
                         optional: materialised_member.optional,
                         readonly: materialised_member.readonly,
                         is_method: materialised_member.is_method,
+                        // Value-node rewrite preserves the member's declared
+                        // accessibility verbatim.
+                        visibility: materialised_member.visibility,
                         spans: materialised_member.spans,
                         declaration_origin: materialised_member.declaration_origin.clone(),
                         declared_in_macro_type_arg: materialised_member.declared_in_macro_type_arg,
@@ -679,6 +682,9 @@ pub(crate) fn preserve_package_backed_symbolic_refs_node(
                     optional: materialised_member.optional,
                     readonly: materialised_member.readonly,
                     is_method: materialised_member.is_method,
+                    // Value-node rewrite preserves the member's declared
+                    // accessibility verbatim.
+                    visibility: materialised_member.visibility,
                     spans: materialised_member.spans,
                     declaration_origin: materialised_member.declaration_origin.clone(),
                     declared_in_macro_type_arg: materialised_member.declared_in_macro_type_arg,

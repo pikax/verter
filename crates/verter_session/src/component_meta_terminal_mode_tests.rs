@@ -50,6 +50,7 @@ fn intern_four_hop_object(host: &VerterHost) -> SemanticNodeId {
     let mut current = leaf;
     for name in ["bar", "full", "b", "a"] {
         let member = SurfaceMember {
+            visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from(name),
             value: current,
             optional: false,

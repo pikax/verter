@@ -707,6 +707,7 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
     );
 
     let built_member = SurfaceMember {
+        visibility: verter_type_expr::MemberVisibility::Public,
         name: std::sync::Arc::from("present"),
         value: value_node,
         optional: false,

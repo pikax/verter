@@ -316,6 +316,7 @@ fn project_member_reads_object_surface() {
     let surface = SurfaceView {
         members: Arc::from(
             vec![SurfaceMember {
+                visibility: verter_type_expr::MemberVisibility::Public,
                 name: Arc::from("foo"),
                 value: string_id,
                 optional: false,
@@ -381,6 +382,7 @@ fn key_of_object_yields_string_union() {
         members: Arc::from(
             vec![
                 SurfaceMember {
+                    visibility: verter_type_expr::MemberVisibility::Public,
                     name: Arc::from("a"),
                     value: string_id,
                     optional: false,
@@ -392,6 +394,7 @@ fn key_of_object_yields_string_union() {
                     declaration_origin: None,
                 },
                 SurfaceMember {
+                    visibility: verter_type_expr::MemberVisibility::Public,
                     name: Arc::from("b"),
                     value: num_id,
                     optional: false,
@@ -443,6 +446,7 @@ fn project_path_of_length_one_dedups_with_project_member_at_memo() {
     let surface = SurfaceView {
         members: Arc::from(
             vec![SurfaceMember {
+                visibility: verter_type_expr::MemberVisibility::Public,
                 name: Arc::from("foo"),
                 value: string_id,
                 optional: false,
@@ -524,6 +528,7 @@ fn indexed_access_canonicalises_to_project_path_before_admission() {
     let surface = SurfaceView {
         members: Arc::from(
             vec![SurfaceMember {
+                visibility: verter_type_expr::MemberVisibility::Public,
                 name: Arc::from("k"),
                 value: num_id,
                 optional: false,
@@ -943,6 +948,7 @@ fn surface_view_carries_surface_member_optional_readonly_is_method() {
         members: Arc::from(
             vec![
                 SurfaceMember {
+                    visibility: verter_type_expr::MemberVisibility::Public,
                     name: Arc::from("optional_readonly_method"),
                     value: string_id,
                     optional: true,
@@ -954,6 +960,7 @@ fn surface_view_carries_surface_member_optional_readonly_is_method() {
                     declaration_origin: None,
                 },
                 SurfaceMember {
+                    visibility: verter_type_expr::MemberVisibility::Public,
                     name: Arc::from("plain"),
                     value: string_id,
                     optional: false,
@@ -1256,6 +1263,7 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
     let surface = SurfaceView {
         members: Arc::from(
             vec![SurfaceMember {
+                visibility: verter_type_expr::MemberVisibility::Public,
                 name: Arc::from("foo"),
                 value: string_id,
                 optional: false,
@@ -2259,6 +2267,7 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
     let true_surface = SurfaceView {
         members: Arc::from(
             vec![SurfaceMember {
+                visibility: verter_type_expr::MemberVisibility::Public,
                 name: Arc::from("x"),
                 value: string_node,
                 optional: false,
@@ -2280,6 +2289,7 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
     let false_surface = SurfaceView {
         members: Arc::from(
             vec![SurfaceMember {
+                visibility: verter_type_expr::MemberVisibility::Public,
                 name: Arc::from("x"),
                 value: number_node,
                 optional: false,
@@ -2378,6 +2388,7 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
         members: Arc::from(
             vec![
                 SurfaceMember {
+                    visibility: verter_type_expr::MemberVisibility::Public,
                     name: Arc::from("a"),
                     value: string_node,
                     optional: false,
@@ -2389,6 +2400,7 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
                     declaration_origin: None,
                 },
                 SurfaceMember {
+                    visibility: verter_type_expr::MemberVisibility::Public,
                     name: Arc::from("b"),
                     value: number_node,
                     optional: false,
@@ -2400,6 +2412,7 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
                     declaration_origin: None,
                 },
                 SurfaceMember {
+                    visibility: verter_type_expr::MemberVisibility::Public,
                     name: Arc::from("c"),
                     value: array_node,
                     optional: false,
@@ -2893,6 +2906,7 @@ fn simple_object(
     let members: Vec<SurfaceMember> = members
         .iter()
         .map(|(n, v)| SurfaceMember {
+            visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from(*n),
             value: *v,
             optional: false,
@@ -5571,6 +5585,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
         members: Arc::from(
             vec![
                 SurfaceMember {
+                    visibility: verter_type_expr::MemberVisibility::Public,
                     name: Arc::from("loadingAnimation"),
                     value: string_id,
                     optional: false,
@@ -5582,6 +5597,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
                     declaration_origin: None,
                 },
                 SurfaceMember {
+                    visibility: verter_type_expr::MemberVisibility::Public,
                     name: Arc::from("loadingColor"),
                     value: string_id,
                     optional: false,
@@ -5607,6 +5623,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     let table_surface = SurfaceView {
         members: Arc::from(
             vec![SurfaceMember {
+                visibility: verter_type_expr::MemberVisibility::Public,
                 name: Arc::from("variants"),
                 value: variants_obj,
                 optional: false,
@@ -6456,6 +6473,7 @@ fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
     let base_view = SurfaceView {
         members: Arc::from(
             vec![SurfaceMember {
+                visibility: verter_type_expr::MemberVisibility::Public,
                 name: Arc::from("foo"),
                 value: inner,
                 optional: false,
@@ -6699,6 +6717,7 @@ fn execute_pick_dispatches_through_instantiate_pick_builtin() {
     let base = graph.intern_node(SemanticNodeData::Object(SurfaceView {
         members: Arc::from(
             vec![SurfaceMember {
+                visibility: verter_type_expr::MemberVisibility::Public,
                 name: Arc::from("foo"),
                 value: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
                 optional: false,
@@ -6758,6 +6777,7 @@ fn execute_omit_dispatches_through_instantiate_omit_builtin() {
     let base = graph.intern_node(SemanticNodeData::Object(SurfaceView {
         members: Arc::from(
             vec![SurfaceMember {
+                visibility: verter_type_expr::MemberVisibility::Public,
                 name: Arc::from("foo"),
                 value: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
                 optional: false,
@@ -7000,6 +7020,7 @@ fn surface_member(
     readonly: bool,
 ) -> SurfaceMember {
     SurfaceMember {
+        visibility: verter_type_expr::MemberVisibility::Public,
         name: Arc::from(name),
         value,
         optional,

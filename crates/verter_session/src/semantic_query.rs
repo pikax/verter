@@ -1057,6 +1057,16 @@ pub struct SurfaceMember {
     pub optional: bool,
     pub readonly: bool,
     pub is_method: bool,
+    /// Declared accessibility of the member, carried verbatim from the IR
+    /// ([`verter_type_expr::MemberVisibility`]). `Public` for every non-class
+    /// origin (interface / type-literal / object-literal / mapped / synthetic
+    /// merge); a class member carries its `TSAccessibility`. Participates in
+    /// node interning / graph identity (eq + hash) — a `private foo` and a
+    /// `public foo` intern to DISTINCT nodes, mirroring how `spans` already
+    /// extends member identity. The published-prop surface re-applies a
+    /// `Public`-only filter at the publication boundary, so non-public class
+    /// members stay recorded here without leaking as Vue props.
+    pub visibility: verter_type_expr::MemberVisibility,
     /// OXC declaration-site spans for this member, stamped during shallow
     /// lowering and carried verbatim from the `verter_type_expr` IR
     /// ([`verter_type_expr::MemberSpans`]). Coordinates are in the member's

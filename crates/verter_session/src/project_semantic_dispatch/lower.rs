@@ -702,6 +702,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 optional: prop.optional,
                                 readonly: prop.readonly,
                                 is_method: false,
+                                // Carry the IR member's declared accessibility
+                                // verbatim onto the graph payload (Public for
+                                // every non-class origin).
+                                visibility: prop.visibility,
                                 // Carry the IR member's OXC declaration-site
                                 // spans verbatim onto the graph payload.
                                 spans: prop.spans,
@@ -762,6 +766,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 optional: method.optional,
                                 readonly: false,
                                 is_method: true,
+                                // Carry the IR method's declared accessibility
+                                // (Public for every non-class origin).
+                                visibility: method.visibility,
                                 // Carry the IR method's OXC member spans.
                                 spans: method.spans,
                                 // Declaration file of THIS method (see the

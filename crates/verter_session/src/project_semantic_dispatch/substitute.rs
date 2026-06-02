@@ -345,6 +345,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         optional: member.optional,
                         readonly: member.readonly,
                         is_method: member.is_method,
+                        // Type-parameter substitution preserves the source
+                        // member's declared accessibility (substitution changes
+                        // only the value's type-param occurrences).
+                        visibility: member.visibility,
                         // Type-parameter substitution preserves the
                         // source member's structural shape — only the
                         // value's type-param occurrences change.

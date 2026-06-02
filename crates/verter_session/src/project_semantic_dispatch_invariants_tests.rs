@@ -922,6 +922,7 @@ fn empty_surface(members: Vec<SurfaceMember>) -> SurfaceView {
 
 fn required_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> SurfaceMember {
     SurfaceMember {
+        visibility: verter_type_expr::MemberVisibility::Public,
         name: Arc::from(name),
         value,
         optional: false,
@@ -936,6 +937,7 @@ fn required_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> 
 
 fn optional_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> SurfaceMember {
     SurfaceMember {
+        visibility: verter_type_expr::MemberVisibility::Public,
         name: Arc::from(name),
         value,
         optional: true,
@@ -2914,6 +2916,7 @@ fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
     let b_value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let object = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
         SurfaceMember {
+            visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from("a"),
             value: a_value,
             optional: false,
@@ -2925,6 +2928,7 @@ fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
             declaration_origin: None,
         },
         SurfaceMember {
+            visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from("b"),
             value: b_value,
             optional: false,
@@ -3004,6 +3008,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
     let b_value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
         SurfaceMember {
+            visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from("a"),
             value: a_value,
             optional: false,
@@ -3015,6 +3020,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
             declaration_origin: None,
         },
         SurfaceMember {
+            visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from("b"),
             value: b_value,
             optional: false,
@@ -3128,6 +3134,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
     let a_value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
         SurfaceMember {
+            visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from("a"),
             value: a_value,
             optional: false,

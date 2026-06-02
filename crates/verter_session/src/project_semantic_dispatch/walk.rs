@@ -259,6 +259,13 @@ pub struct ShallowSurfaceMember {
     pub optional: bool,
     pub readonly: bool,
     pub is_method: bool,
+    /// Declared accessibility, carried verbatim from the source
+    /// [`SurfaceMember`] through the walker's intermediate state so the
+    /// empty-path Shallow projection round-trip is lossless. For a member
+    /// selected from a SINGLE source contributor during an intersection /
+    /// inherited merge, that contributor's accessibility is carried; a
+    /// synthetic / no-single-origin merged member is `Public`.
+    pub visibility: verter_type_expr::MemberVisibility,
     pub declared_in_macro_type_arg: bool,
     pub merge_role: crate::semantic_query::MemberMergeRole,
     /// OXC declaration-site spans, carried verbatim from the source
@@ -303,6 +310,8 @@ impl ShallowSurface {
                     optional: m.optional,
                     readonly: m.readonly,
                     is_method: m.is_method,
+                    // Carry the source member's declared accessibility verbatim.
+                    visibility: m.visibility,
                     declared_in_macro_type_arg: m.declared_in_macro_type_arg,
                     merge_role: m.merge_role,
                     // Carry the source member's OXC spans verbatim.
@@ -3012,6 +3021,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     optional,
                     readonly,
                     is_method: false,
+                    // Mapped-produced member: synthesized from a key domain by
+                    // the mapper (a structural transform), with no single source
+                    // declaration — `Public`, per the no-single-origin merge
+                    // rule (mirrors the Expanded path in `build.rs`).
+                    visibility: verter_type_expr::MemberVisibility::Public,
                     // Mapped-type synthesis produces a member from a key
                     // domain via `[K in keyof T]: ...`. The produced
                     // member is not literally written in the consuming
@@ -3277,6 +3291,15 @@ struct MergedMemberAccum {
     /// Declaration file of the first contributor of ANY role — paired with
     /// `first_spans`.
     first_origin: Option<Arc<str>>,
+    /// Declared accessibility of the first `OwnBody` contributor — selected in
+    /// LOCKSTEP with `own_body_spans` when the surviving member is a single
+    /// own-body contributor.
+    own_body_visibility: Option<verter_type_expr::MemberVisibility>,
+    /// Declared accessibility of the first contributor of ANY role — selected
+    /// in LOCKSTEP with `first_spans` when the surviving member is a single
+    /// contributor. A genuine multi-contributor merge collapses to `Public`
+    /// (no single source accessibility), per the codex merge rule.
+    first_visibility: Option<verter_type_expr::MemberVisibility>,
 }
 
 impl MergedMemberAccum {
@@ -3297,6 +3320,8 @@ impl MergedMemberAccum {
             first_spans: None,
             own_body_origin: None,
             first_origin: None,
+            own_body_visibility: None,
+            first_visibility: None,
         }
     }
 
@@ -3315,10 +3340,12 @@ impl MergedMemberAccum {
         if self.first_spans.is_none() {
             self.first_spans = Some(member.spans);
             self.first_origin = member.declaration_origin.clone();
+            self.first_visibility = Some(member.visibility);
         }
         if matches!(member.merge_role, MemberMergeRole::OwnBody) && self.own_body_spans.is_none() {
             self.own_body_spans = Some(member.spans);
             self.own_body_origin = member.declaration_origin.clone();
+            self.own_body_visibility = Some(member.visibility);
         }
         match member.merge_role {
             MemberMergeRole::OwnBody => {
@@ -3371,9 +3398,26 @@ impl MergedMemberAccum {
                 };
                 (values, role)
             };
+        let single_contributor = values.len() == 1;
         let value = match values.as_slice() {
             [single] => *single,
             _ => merge_value_nodes_recursive(graph, &values),
+        };
+        // Visibility follows the value-selection rule, in LOCKSTEP with spans:
+        // a single surviving contributor carries its source accessibility (the
+        // own-body site when the result is own-body, else the first
+        // contributor); a genuine multi-contributor merge has no single source
+        // accessibility and collapses to `Public` (codex merge rule).
+        let visibility = if single_contributor {
+            if matches!(role, MemberMergeRole::OwnBody) {
+                self.own_body_visibility
+                    .or(self.first_visibility)
+                    .unwrap_or_default()
+            } else {
+                self.first_visibility.unwrap_or_default()
+            }
+        } else {
+            verter_type_expr::MemberVisibility::Public
         };
         // The surviving member's spans follow the value-selection rule: an
         // own-body result references the own-body declaration site; otherwise
@@ -3393,6 +3437,7 @@ impl MergedMemberAccum {
             optional: self.optional,
             readonly: self.readonly,
             is_method: self.is_method,
+            visibility,
             declared_in_macro_type_arg: self.declared_in_macro_type_arg,
             merge_role: role,
             spans,
@@ -3520,6 +3565,10 @@ fn merge_union_surfaces(
             optional: optional_in_any,
             readonly: readonly_in_all,
             is_method: false,
+            // Union common-member: synthesized across arms with no single
+            // source declaration — `Public`, per the no-single-origin merge
+            // rule.
+            visibility: verter_type_expr::MemberVisibility::Public,
             declared_in_macro_type_arg: false,
             merge_role: MemberMergeRole::Authored,
             // Union common-member: the name appears in every arm, so there is
@@ -3598,9 +3647,19 @@ fn merge_union_surfaces_for_macro(
         let mut optional_in_any = false;
         let mut readonly_in_all = true;
         let mut declaring_arms = 0usize;
+        // Track the lone declaring arm's accessibility so a member contributed
+        // by exactly ONE arm carries that single source's visibility (codex
+        // single-source rule); a member declared by multiple arms is a genuine
+        // union merge with no single source accessibility.
+        let mut single_arm_visibility: Option<verter_type_expr::MemberVisibility> = None;
         for arm in &live {
             if let Some(arm_member) = arm.members.iter().find(|m| &m.name == name) {
                 declaring_arms += 1;
+                single_arm_visibility = if declaring_arms == 1 {
+                    Some(arm_member.visibility)
+                } else {
+                    None
+                };
                 per_arm_values.push(arm_member.value);
                 optional_in_any |= arm_member.optional;
                 readonly_in_all &= arm_member.readonly;
@@ -3624,6 +3683,10 @@ fn merge_union_surfaces_for_macro(
             optional: optional_in_any,
             readonly: readonly_in_all,
             is_method: false,
+            // A member contributed by a single arm carries that arm's declared
+            // accessibility; a member merged across multiple arms has no single
+            // source accessibility and is `Public` (codex merge rule).
+            visibility: single_arm_visibility.unwrap_or_default(),
             declared_in_macro_type_arg: false,
             merge_role: MemberMergeRole::Authored,
             // Union arm-member: reached THROUGH the union, no single source
@@ -3661,6 +3724,9 @@ fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
             optional: m.optional,
             readonly: m.readonly,
             is_method: m.is_method,
+            // Carry the walker's preserved declared accessibility back onto the
+            // graph member (round-trip through ShallowSurface is lossless).
+            visibility: m.visibility,
             declared_in_macro_type_arg: m.declared_in_macro_type_arg,
             merge_role: m.merge_role,
             // Carry the walker's preserved OXC spans back onto the graph member.

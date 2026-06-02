@@ -58,6 +58,7 @@ fn intern_three_member_object(host: &VerterHost) -> SemanticNodeId {
     // then { deep_0: prev_2 } at the top.
     for name in ["deep_2", "deep_1", "deep_0"] {
         let member = SurfaceMember {
+            visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from(name),
             value: leaf,
             optional: false,
@@ -91,6 +92,7 @@ fn intern_single_member_object(host: &VerterHost, name: &'static str) -> Semanti
         has_index_signature: false,
     }));
     let member = SurfaceMember {
+        visibility: verter_type_expr::MemberVisibility::Public,
         name: Arc::from(name),
         value: leaf,
         optional: false,

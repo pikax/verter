@@ -1435,6 +1435,10 @@ fn materialize_object_surface(
             optional: member.optional,
             readonly: member.readonly,
             is_method: member.is_method,
+            // Materialisation preserves member structure — only the value is
+            // materialised; the member's declared accessibility is carried
+            // through unchanged from the upstream `SurfaceMember`.
+            visibility: member.visibility,
             // Materialisation preserves member structure — only the
             // value is materialised, the structural fact (the member's
             // OXC spans and its declaration file) is carried through

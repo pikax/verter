@@ -1469,6 +1469,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     optional: member.optional,
                     readonly: member.readonly,
                     is_method: member.is_method,
+                    // The `PreparedMember` carries the IR member's declared
+                    // accessibility verbatim, so the overlay append preserves
+                    // it (Public for every non-class origin).
+                    visibility: member.visibility,
                     // The `PreparedMember` (the `member_index` entry) now
                     // carries the IR member's OXC declaration-site spans + the
                     // declaration's defining file, so the append is span-rich.
@@ -2926,6 +2930,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 optional,
                 readonly,
                 is_method: false,
+                // Mapped-type produced member: synthesized from a key domain
+                // by the mapped construction (a structural, heritage-equivalent
+                // transform), with no single source declaration — `Public`, per
+                // the no-single-origin merge rule.
+                visibility: verter_type_expr::MemberVisibility::Public,
                 declared_in_macro_type_arg: false,
                 // Mapped-type produced members are synthesized by the mapped
                 // construction, never an interface/class heritage overlay —
