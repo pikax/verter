@@ -1879,3 +1879,7 @@ pub use task_keys::{dag_keys_for_task, profile_hash_from_bytes, profile_hash_to_
 #[cfg(test)]
 #[path = "dag_tests.rs"]
 mod dag_tests;
+
+#[cfg(test)]
+#[path = "dag_lanes_tests.rs"]
+mod dag_lanes_tests;
