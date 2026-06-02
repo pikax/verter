@@ -1068,8 +1068,9 @@ pub struct SurfaceMember {
     /// nodes, mirroring how `spans` already extends member identity. EVERY
     /// published-member surface (props / emits / slots / slot-bindings /
     /// options / exposed) re-applies a `Public`-only filter at the publication
-    /// boundary, so non-public class members stay recorded here (so B5 can
-    /// populate `native_props`) without leaking onto any published Vue surface.
+    /// boundary, so non-public class members stay recorded here (the keep-all
+    /// `native_props` carrier reads the full recorded member set) without leaking
+    /// onto any published Vue surface.
     pub visibility: verter_type_expr::MemberVisibility,
     /// OXC declaration-site spans for this member, stamped during shallow
     /// lowering and carried verbatim from the `verter_type_expr` IR

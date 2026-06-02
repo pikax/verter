@@ -84,8 +84,8 @@ pub(crate) fn project_props(
         members
             .into_iter()
             // Publication-boundary visibility filter: the shared surface RECORDS
-            // non-public class members (B5 reads the full set for
-            // `native_props`), but Vue does NOT publish `private` / `protected`
+            // non-public class members (the keep-all `native_props` carrier reads
+            // the full set), but Vue does NOT publish `private` / `protected`
             // class fields as props. Filter to Public-only here, where surface
             // members become published `ExpandedField`s. Every non-class origin
             // is `Public`, so this is a no-op for interface / type-literal /
