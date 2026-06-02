@@ -479,16 +479,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `keyof T` whose `T` is a literal Object surface that the walker
     /// already lowered) without paying the emission cost of a
     /// keyspace-wide enumeration.
-    fn base_member_admission_non_emitting(
+    ///
+    /// `pub(super)` so the dispatch test module can assert the
+    /// public-keyspace + fact-fast-path admission contract directly
+    /// (a non-public member of an `Object` base is refuted; a present
+    /// member of a cross-file `DeclRef` base is INCONCLUSIVE because the
+    /// `MemberPresence` fact carries no visibility — binding ruling §4).
+    pub(super) fn base_member_admission_non_emitting(
         &self,
         base: SemanticNodeId,
         needle: &str,
     ) -> Option<bool> {
         let data = self.graph().node_data(base)?;
         match data.as_ref() {
-            SemanticNodeData::Object(view) => {
-                Some(view.members.iter().any(|m| m.name.as_ref() == needle))
-            }
+            // Public-keyspace admission: this predicate backs `keyof` / mapped /
+            // indexed-access membership over `base`'s already-resolved surface.
+            // A protected/private class member is NOT part of `keyof`, so it is
+            // not an admissible key — admit a name only when it matches a PUBLIC
+            // member. The full member set stays recorded for `native_props`.
+            SemanticNodeData::Object(view) => Some(
+                view.members
+                    .iter()
+                    .any(|m| m.visibility.is_public() && m.name.as_ref() == needle),
+            ),
             // Consult the parse-fact `MemberPresence` substrate for
             // `DeclRef` / `InstantiationRef` bases.
             //
@@ -736,9 +749,78 @@ impl<'a> ProjectSemanticDispatch<'a> {
             name: InternedName::from(needle),
             space: SymbolSpace::Type,
         };
-        // `lookup` returns `Some(&Fact)` when the presence fact exists
-        // — admit. `None` means the type's declared body has no member
-        // named `needle` in its shallow inventory — refute.
-        Some(artifacts.facts.lookup(&presence_key).is_some())
+        // Visibility-aware admission (binding ruling §4: inconclusive-and-
+        // resolve, NOT a `MemberPresence` schema change). `MemberPresence`
+        // records presence/key only — it carries NO visibility. So:
+        //
+        // - PRESENT (`lookup(..).is_some()`): the member exists, but the fact
+        //   cannot prove it is PUBLIC. Admitting it would leak a potentially
+        //   protected/private member into the public keyspace (the `keyof` /
+        //   mapped / indexed-access derivation this predicate feeds is
+        //   public-only). Return `None` (INCONCLUSIVE) so the caller falls
+        //   through to full resolution, which carries visibility and applies the
+        //   public gate at the resolved-surface chokepoints
+        //   (`base_member_admission_non_emitting`'s Object arm, `build_key_of`,
+        //   the mapped/Pick/Omit derivations). Public members are admitted by
+        //   that resolution (and its result is cached), so correctness is
+        //   restored without a fact-schema change.
+        // - ABSENT (`is_none()`): the member is provably absent regardless of
+        //   visibility — refute structurally (`Some(false)`), unchanged.
+        // Visibility-aware admission (binding ruling §4: inconclusive-and-
+        // resolve, NOT a `MemberPresence` schema change). `MemberPresence`
+        // records presence/key only — it carries NO visibility. So:
+        //
+        // - PRESENT (`lookup(..).is_some()`): the member exists, but the fact
+        //   cannot prove it is PUBLIC. Admitting it would leak a potentially
+        //   protected/private member into the public keyspace (the `keyof` /
+        //   mapped / indexed-access derivation this predicate feeds is
+        //   public-only). Return `None` (INCONCLUSIVE) so the caller falls
+        //   through to full resolution, which carries visibility and applies the
+        //   public gate at the resolved-surface chokepoints
+        //   (`base_member_admission_non_emitting`'s Object arm, `build_key_of`,
+        //   the mapped/Pick/Omit derivations). Public members are admitted by
+        //   that resolution (and its result is cached), so correctness is
+        //   restored without a fact-schema change.
+        // - ABSENT (`is_none()`): the member is provably absent regardless of
+        //   visibility — refute structurally (`Some(false)`), unchanged.
+        // Visibility-aware admission (binding ruling §4: inconclusive-and-
+        // resolve, NOT a `MemberPresence` schema change). `MemberPresence`
+        // records presence/key only — it carries NO visibility. So:
+        //
+        // - PRESENT (`lookup(..).is_some()`): the member exists, but the fact
+        //   cannot prove it is PUBLIC. Admitting it would leak a potentially
+        //   protected/private member into the public keyspace (the `keyof` /
+        //   mapped / indexed-access derivation this predicate feeds is
+        //   public-only). Return `None` (INCONCLUSIVE) so the caller falls
+        //   through to full resolution, which carries visibility and applies the
+        //   public gate at the resolved-surface chokepoints
+        //   (`base_member_admission_non_emitting`'s Object arm, `build_key_of`,
+        //   the mapped/Pick/Omit derivations). Public members are admitted by
+        //   that resolution (and its result is cached), so correctness is
+        //   restored without a fact-schema change.
+        // - ABSENT (`is_none()`): the member is provably absent regardless of
+        //   visibility — refute structurally (`Some(false)`), unchanged.
+        // Visibility-aware admission (binding ruling §4: inconclusive-and-
+        // resolve, NOT a `MemberPresence` schema change). `MemberPresence`
+        // records presence/key only — it carries NO visibility. So:
+        //
+        // - PRESENT (`lookup(..).is_some()`): the member exists, but the fact
+        //   cannot prove it is PUBLIC. Admitting it would leak a potentially
+        //   protected/private member into the public keyspace (the `keyof` /
+        //   mapped / indexed-access derivation this predicate feeds is
+        //   public-only). Return `None` (INCONCLUSIVE) so the caller falls
+        //   through to full resolution, which carries visibility and applies the
+        //   public gate at the resolved-surface chokepoints
+        //   (`base_member_admission_non_emitting`'s Object arm, `build_key_of`,
+        //   the mapped/Pick/Omit derivations). Public members are admitted by
+        //   that resolution (and its result is cached), so correctness is
+        //   restored without a fact-schema change.
+        // - ABSENT (`is_none()`): the member is provably absent regardless of
+        //   visibility — refute structurally (`Some(false)`), unchanged.
+        if artifacts.facts.lookup(&presence_key).is_some() {
+            None
+        } else {
+            Some(false)
+        }
     }
 }

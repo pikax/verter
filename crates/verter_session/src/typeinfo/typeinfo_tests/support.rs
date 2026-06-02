@@ -234,6 +234,20 @@ pub(super) fn object_props(expr: &TypeExpr) -> BTreeMap<String, ObjectProperty> 
     props
 }
 
+/// Like [`object_props`], but treats a non-object terminal surface (an empty /
+/// degenerate object surface that the projector raises to
+/// `Unknown { raw: "semanticObjectSurface" }`, or any other non-object expr) as
+/// an EMPTY member set instead of panicking. Used by the public-keyspace
+/// derivation tests where a `Pick` / `Omit` over a class can legitimately
+/// reduce to an empty surface (no public key survives the projection), which is
+/// not a representable object literal.
+pub(super) fn object_props_or_empty(expr: &TypeExpr) -> BTreeMap<String, ObjectProperty> {
+    match expr {
+        TypeExpr::Object(_) | TypeExpr::Intersection(_) => object_props(expr),
+        _ => BTreeMap::new(),
+    }
+}
+
 fn collect_object_props(expr: &TypeExpr, props: &mut BTreeMap<String, ObjectProperty>) {
     match expr {
         TypeExpr::Object(object) => {

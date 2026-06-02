@@ -368,6 +368,210 @@ fn project_member_reads_object_surface() {
     );
 }
 
+/// DISCRIMINATING (fix #2, direct object member projection): a NON-public
+/// member is NOT reachable by `ProjectMember` / `ProjectPath` over the external
+/// public-keyspace surface. `C['privateKey']` / `C['protectedKey']` is a miss in
+/// TS — `keyof C` excludes non-public members, and so does member projection.
+/// The non-public member stays RECORDED on the surface (for the keep-all
+/// `native_props` carrier), but the DERIVING projection (`advance_step`'s object
+/// member lookup) must reject it.
+///
+/// Discrimination: FAILS on the pre-fix tree where `advance_step` finds the
+/// member by NAME only and hands back its value node (`string_id`). PASSES once
+/// the lookup filters non-public members — the projection resolves to an Opaque
+/// miss, exactly like an absent member.
+#[test]
+fn project_member_rejects_non_public_members_from_external_surface() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let bool_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let mk_member = |name: &str,
+                     value: SemanticNodeId,
+                     visibility: verter_type_expr::MemberVisibility| {
+        SurfaceMember {
+            visibility,
+            name: Arc::from(name),
+            value,
+            optional: false,
+            readonly: false,
+            is_method: false,
+            declared_in_macro_type_arg: false,
+            merge_role: crate::semantic_query::MemberMergeRole::Authored,
+            spans: Default::default(),
+            declaration_origin: None,
+        }
+    };
+    let surface = SurfaceView {
+        members: Arc::from(
+            vec![
+                mk_member("pub", string_id, verter_type_expr::MemberVisibility::Public),
+                mk_member(
+                    "prot",
+                    number_id,
+                    verter_type_expr::MemberVisibility::Protected,
+                ),
+                mk_member("priv", bool_id, verter_type_expr::MemberVisibility::Private),
+            ]
+            .into_boxed_slice(),
+        ),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    };
+    let obj = graph.intern_node(SemanticNodeData::Object(surface));
+
+    // The public member projects to its value node.
+    let pub_hit = dispatch.execute(SemanticQueryKey::ProjectMember {
+        base: obj,
+        member: Arc::from("pub"),
+        mode: ProjectionMode::Identity,
+    });
+    assert!(
+        matches!(pub_hit, QueryResult::Value(id) if id == string_id),
+        "public member must still project to its value node: {pub_hit:?}"
+    );
+
+    // The protected/private members resolve to an Opaque miss — NOT their value.
+    for (member, leaked_value) in [("prot", number_id), ("priv", bool_id)] {
+        let projected = dispatch.execute(SemanticQueryKey::ProjectMember {
+            base: obj,
+            member: Arc::from(member),
+            mode: ProjectionMode::Identity,
+        });
+        let id = match projected {
+            QueryResult::Value(id) => id,
+            other => panic!("expected a value (opaque) node for `{member}`, got {other:?}"),
+        };
+        assert_ne!(
+            id, leaked_value,
+            "non-public member `{member}` must NOT project to its value node (leak)"
+        );
+        let data = graph.node_data(id).unwrap();
+        assert!(
+            matches!(*data, SemanticNodeData::Opaque(_)),
+            "non-public member `{member}` must resolve to an Opaque miss, got {data:?}"
+        );
+    }
+
+    // The same holds for the canonical ProjectPath form (single Member hop).
+    let path_priv = dispatch.execute(SemanticQueryKey::ProjectPath {
+        base: obj,
+        path: Arc::from(vec![PathSegment::Member(Arc::from("priv"))].into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    });
+    let path_id = match path_priv {
+        QueryResult::Value(id) => id,
+        other => panic!("expected a value (opaque) node, got {other:?}"),
+    };
+    assert_ne!(
+        path_id, bool_id,
+        "ProjectPath of a private member must NOT yield its value node (leak)"
+    );
+    let path_data = graph.node_data(path_id).unwrap();
+    assert!(
+        matches!(*path_data, SemanticNodeData::Opaque(_)),
+        "ProjectPath of a private member must resolve to an Opaque miss, got {path_data:?}"
+    );
+}
+
+/// DISCRIMINATING (fix #4, fact-backed member admission inconclusive-and-
+/// resolve): the non-emitting `base_member_admission_non_emitting` predicate
+/// over a cross-file `DeclRef` base consults the `MemberPresence` fact fast
+/// path. `MemberPresence` records presence/key but carries NO visibility, so a
+/// PRESENT member (public OR non-public) is INCONCLUSIVE (`None`) — the fact
+/// cannot prove the member is public, and admitting it would risk leaking a
+/// non-public member into the public keyspace. Only a PROVABLY ABSENT member is
+/// refuted (`Some(false)`).
+///
+/// Discrimination: FAILS on the pre-fix tree where the fact fast path returned
+/// `Some(true)` for any present member (admitting it from presence alone, with
+/// no visibility check). PASSES once a present member is inconclusive, forcing
+/// full resolution (which carries visibility and applies the public gate).
+#[test]
+fn base_member_admission_fact_fast_path_is_inconclusive_for_present_members() {
+    use crate::semantic_query::{DeclIdentity, QueryError};
+
+    let host = host();
+    // The class members reference a declared type (`Dep`) so they enter the
+    // shallow `member_deps` skeleton and therefore receive `MemberPresence`
+    // facts (the fact emitter derives presence facts from `member_deps`). A
+    // primitive-typed member carries no dependency edge and would have no
+    // presence fact, so the fact fast path would refute it before reaching the
+    // visibility-relevant present-member branch this test pins.
+    upsert_ts(
+        &host,
+        "/w/fact_cls.ts",
+        "export interface Dep { x: number }\n\
+         export class C {\n\
+           public a: Dep;\n\
+           protected b: Dep;\n\
+           private c: Dep;\n\
+           constructor() { this.a = { x: 0 }; this.b = { x: 0 }; this.c = { x: 0 }; }\n\
+         }",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    // Recover the class declaration's content-version identity from the resolved
+    // placeholder so the constructed `DeclRef` keys the same content-addressed
+    // artifact the fact lookup reads.
+    let placeholder = match dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+        "/w/fact_cls.ts",
+        "C",
+    ))) {
+        QueryResult::Value(node) => node,
+        other => panic!("ResolveDecl(C) must resolve, got {other:?}"),
+    };
+    let whole_hash = match graph.node_data(placeholder).as_deref() {
+        Some(SemanticNodeData::Opaque(QueryError::DeclPlaceholder { whole_hash, .. })) => {
+            *whole_hash
+        }
+        other => panic!("expected DeclPlaceholder, got {other:?}"),
+    };
+    let declref = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: DeclIdentity {
+            canonical_id: Arc::from("/w/fact_cls.ts"),
+            whole_hash,
+            decl_name: Arc::from("C"),
+        },
+    });
+
+    // PRESENT members — public AND non-public — are INCONCLUSIVE: the fact has
+    // no visibility, so the predicate refuses to decide and forces full
+    // resolution (where the public gate applies).
+    assert_eq!(
+        dispatch.base_member_admission_non_emitting(declref, "a"),
+        None,
+        "present PUBLIC member must be inconclusive via the fact fast path \
+         (visibility unprovable from MemberPresence)"
+    );
+    assert_eq!(
+        dispatch.base_member_admission_non_emitting(declref, "b"),
+        None,
+        "present PROTECTED member must be inconclusive (not admitted from presence alone)"
+    );
+    assert_eq!(
+        dispatch.base_member_admission_non_emitting(declref, "c"),
+        None,
+        "present PRIVATE member must be inconclusive (not admitted from presence alone)"
+    );
+
+    // A provably ABSENT member is still refuted structurally.
+    assert_eq!(
+        dispatch.base_member_admission_non_emitting(declref, "definitely_absent"),
+        Some(false),
+        "absent member is refuted regardless of visibility (the fact registry has no entry)"
+    );
+}
+
 /// `KeyOf` on an `Object` surface folds to a union of
 /// `Primitive(String)` anchors (one per member). On a primitive base
 /// it returns an `Opaque` node.

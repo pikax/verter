@@ -2052,9 +2052,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 };
                 let pick_set: FxHashSet<&str> = pick_names.iter().map(|s| s.as_ref()).collect();
+                // `Pick<C, K>` is a PUBLIC-keyspace projection (TS:
+                // `Pick<T, K extends keyof T>`, and `keyof ClassType` excludes
+                // protected/private members). Filter non-public source members
+                // BEFORE the name predicate so a `Pick` whose key names a
+                // non-public class member yields an empty surface rather than
+                // re-minting the non-public member — the same public-only
+                // keyspace `source_members_for_published_projection` /
+                // `build_key_of` apply. The full member set (incl. non-public)
+                // stays recorded on the source surface for the keep-all
+                // `native_props` carrier; only this DERIVATION is gated.
                 let picked: Vec<SurfaceMember> = surface
                     .members
                     .iter()
+                    .filter(|m| m.visibility.is_public())
                     .filter(|m| pick_set.contains(m.name.as_ref()))
                     .cloned()
                     .collect();
@@ -2096,9 +2107,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 };
                 let omit_set: FxHashSet<&str> = omit_names.iter().map(|s| s.as_ref()).collect();
+                // `Omit<C, K>` = `Pick<C, Exclude<keyof C, K>>` — a PUBLIC-keyspace
+                // projection. Filter non-public source members BEFORE the name
+                // predicate so an `Omit` over a class never LEAVES a non-public
+                // member published (the keyspace `Omit` derives from is
+                // public-only). The non-public members stay recorded on the
+                // source surface for the keep-all `native_props` carrier; only
+                // this derivation is gated.
                 let kept: Vec<SurfaceMember> = surface
                     .members
                     .iter()
+                    .filter(|m| m.visibility.is_public())
                     .filter(|m| !omit_set.contains(m.name.as_ref()))
                     .cloned()
                     .collect();

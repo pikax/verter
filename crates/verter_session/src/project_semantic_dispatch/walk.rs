@@ -677,10 +677,21 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             }
                         }
                     };
+                    // Public-keyspace member projection: `C['k']` / `C.k` at the
+                    // type level reaches only PUBLIC members — TS rejects
+                    // external indexed / property access of a protected/private
+                    // class member (`C['privateKey']` is an error), exactly as
+                    // `keyof C` excludes them. The non-public members stay
+                    // recorded on the source surface for the keep-all
+                    // `native_props` carrier, but the DERIVING projection here
+                    // must not resolve their value type. A non-public match is
+                    // therefore treated as a miss (the member is not on the
+                    // public surface this walker projects).
                     let member = surface
                         .members
                         .iter()
                         .find(|m| m.name.as_ref() == needle.as_str())
+                        .filter(|m| m.visibility.is_public())
                         .cloned();
                     match member {
                         Some(m) => {
@@ -1066,10 +1077,18 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         };
                         let needle: &str = needle_text.as_str();
                         // Tier 1: source surface is an enumerable Object.
+                        // Public-keyspace admission: `M[K]` mapped narrowing over
+                        // a class admits only PUBLIC member names (a mapped type
+                        // iterates `keyof`, which excludes protected/private).
+                        // A non-public member name is not an admissible key, so
+                        // it must not narrow to that member's value.
                         if let Some(SemanticNodeData::Object(view)) =
                             self.graph().node_data(*source).as_deref()
                         {
-                            return view.members.iter().any(|m| m.name.as_ref() == needle);
+                            return view
+                                .members
+                                .iter()
+                                .any(|m| m.visibility.is_public() && m.name.as_ref() == needle);
                         }
                         // Tier 2: **non-emitting** key-domain
                         // membership predicate.

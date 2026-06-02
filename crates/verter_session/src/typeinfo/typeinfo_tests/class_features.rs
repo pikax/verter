@@ -473,12 +473,15 @@ fn class_features_partial_over_mixed_visibility_excludes_non_public_members() {
 
 #[test]
 fn class_features_pick_over_mixed_visibility_materialises_only_public_key() {
-    // TS7 contract: `Pick<MixedVis, "a">` materialises only the public member
-    // `a`. (A non-public key is not a valid keyof member, so it could not be
-    // picked.)
-    //
-    // Discrimination: FAILS if Pick/member-route reconstruction surfaces a
-    // non-public member, or if the keyspace gate is absent and `b`/`c` leak in.
+    // POSITIVE CONTROL (non-discriminating by design): `Pick<MixedVis, "a">`
+    // materialises the public member `a`. This does NOT discriminate the Pick
+    // public-keyspace gate — `a` is public and `b` / `c` are not in the pick key
+    // set, so it passes whether or not Pick public-filters its source members.
+    // It is retained to prove the happy-path public Pick still materialises. The
+    // DISCRIMINATING coverage for the Pick gate (a `Pick` whose key names a
+    // NON-public member must materialise an EMPTY surface) lives in
+    // `class_features_pick_over_mixed_visibility_protected_key_is_empty` /
+    // `..._private_key_is_empty` below.
     let host = make_host_with_footprint();
     upsert(&host);
 
@@ -502,6 +505,267 @@ fn class_features_pick_over_mixed_visibility_materialises_only_public_key() {
         "the picked member `a` is public"
     );
     assert_query_mode(&record, ProjectionModeTag::Expanded);
+}
+
+#[test]
+fn class_features_pick_over_mixed_visibility_protected_key_is_empty() {
+    // DISCRIMINATING (fix #1, Pick public-keyspace gate): `Pick<MixedVis, "b">`
+    // where `b` is PROTECTED. `b` ∉ `keyof MixedVis` (public-only), so the
+    // picked surface is EMPTY — no member is materialised.
+    //
+    // Discrimination: FAILS on the pre-fix tree where `build_builtin_utility`'s
+    // Pick arm filters `object_filter_source_surface`'s FULL surface (all
+    // members, including non-public) by NAME only — `b` matches and is re-minted
+    // onto the surface. PASSES once Pick public-filters its source members before
+    // the name predicate.
+    let host = make_host_with_footprint();
+    upsert(&host);
+
+    let (expr, record) = resolve_expr(
+        &host,
+        "/fixtures/class_features.ts",
+        "MixedVisPickProtected",
+        &[],
+        ProjectionMode::Expanded,
+    );
+
+    let props = object_props_or_empty(&expr);
+    assert!(
+        !props.contains_key("b"),
+        "Pick<MixedVis, \"b\"> over a PROTECTED key must NOT materialise `b`: {expr:?}"
+    );
+    assert!(
+        props.is_empty(),
+        "Pick<MixedVis, \"b\"> materialises an EMPTY surface (b ∉ keyof MixedVis): {expr:?}"
+    );
+    assert_query_mode(&record, ProjectionModeTag::Expanded);
+}
+
+#[test]
+fn class_features_pick_over_mixed_visibility_private_key_is_empty() {
+    // DISCRIMINATING (fix #1, Pick public-keyspace gate): `Pick<MixedVis, "c">`
+    // where `c` is PRIVATE. `c` ∉ `keyof MixedVis`, so the picked surface is
+    // EMPTY.
+    //
+    // Discrimination: FAILS on the pre-fix tree (private `c` leaks through the
+    // name-only Pick filter); PASSES once Pick public-filters its source members.
+    let host = make_host_with_footprint();
+    upsert(&host);
+
+    let (expr, record) = resolve_expr(
+        &host,
+        "/fixtures/class_features.ts",
+        "MixedVisPickPrivate",
+        &[],
+        ProjectionMode::Expanded,
+    );
+
+    let props = object_props_or_empty(&expr);
+    assert!(
+        !props.contains_key("c"),
+        "Pick<MixedVis, \"c\"> over a PRIVATE key must NOT materialise `c`: {expr:?}"
+    );
+    assert!(
+        props.is_empty(),
+        "Pick<MixedVis, \"c\"> materialises an EMPTY surface (c ∉ keyof MixedVis): {expr:?}"
+    );
+    assert_query_mode(&record, ProjectionModeTag::Expanded);
+}
+
+#[test]
+fn class_features_omit_over_mixed_visibility_does_not_leave_non_public() {
+    // DISCRIMINATING (fix #1, Omit public-keyspace gate): `Omit<MixedVis, "a">`
+    // = `Pick<MixedVis, Exclude<keyof MixedVis, "a">>`. `keyof MixedVis` is `"a"`
+    // only (public), so excluding `"a"` leaves the EMPTY public keyspace — the
+    // non-public `b` / `c` must NOT survive into the omitted surface.
+    //
+    // Discrimination: FAILS on the pre-fix tree where Omit keeps every source
+    // member whose name is not omitted — `b` / `c` survive the name-only filter
+    // and are re-minted onto the surface. PASSES once Omit public-filters its
+    // source members before the name predicate.
+    let host = make_host_with_footprint();
+    upsert(&host);
+
+    let (expr, record) = resolve_expr(
+        &host,
+        "/fixtures/class_features.ts",
+        "MixedVisOmitPublic",
+        &[],
+        ProjectionMode::Expanded,
+    );
+
+    let props = object_props_or_empty(&expr);
+    assert!(
+        !props.contains_key("b"),
+        "Omit<MixedVis, \"a\"> must NOT leave protected `b` on the surface: {expr:?}"
+    );
+    assert!(
+        !props.contains_key("c"),
+        "Omit<MixedVis, \"a\"> must NOT leave private `c` on the surface: {expr:?}"
+    );
+    assert!(
+        props.is_empty(),
+        "Omit<MixedVis, \"a\"> over a public-only keyspace yields an EMPTY surface: {expr:?}"
+    );
+    assert_query_mode(&record, ProjectionModeTag::Expanded);
+}
+
+#[test]
+fn class_features_direct_indexed_access_private_key_does_not_leak_value() {
+    // NON-LEAK CHARACTERIZATION (fix #2 surface; the discriminating unit test is
+    // `project_semantic_dispatch::tests::
+    //  project_member_rejects_non_public_members_from_external_surface`):
+    // `MixedVis["c"]` indexes a PRIVATE class member. External index access of a
+    // non-public member is not allowed in TS. The current resolver leaves a
+    // direct indexed access over a BARE class reference (`MixedVis` resolves to a
+    // `DeclRef` carrier, not yet an Object) as a DEFERRED `IndexedAccess` carrier
+    // — the same pre-existing behavior the `Dog["sound"]` /
+    // `ProtectedConsumer["bumped"]` tests carry `#[ignore]` for (class-member
+    // indexed access does not reduce on a bare class ref here). The B4.5-relevant
+    // invariant this test pins is the NON-LEAK property: the private member's
+    // value type (`boolean`) must NEVER be the result.
+    //
+    // The DISCRIMINATING coverage for fix #2 (the `advance_step` object member
+    // lookup rejecting a non-public member once the base IS an Object) is the
+    // dispatch-level unit test named above, which builds the Object surface
+    // directly and asserts the Opaque miss.
+    let host = make_host_with_footprint();
+    upsert(&host);
+
+    let (expr, _record) = resolve_expr(
+        &host,
+        "/fixtures/class_features.ts",
+        "MixedVisIndexedPrivate",
+        &[],
+        ProjectionMode::Expanded,
+    );
+
+    // The result must NOT be the private member's value type, and must carry no
+    // `c` member anywhere — it stays an opaque/deferred carrier.
+    assert!(
+        !matches!(&expr, TypeExpr::Primitive(PrimitiveName::Boolean)),
+        "MixedVis[\"c\"] must NOT resolve to the private member's value type `boolean`: {expr:?}"
+    );
+    assert!(
+        !object_props_or_empty(&expr).contains_key("c"),
+        "MixedVis[\"c\"] must not surface the private member `c`: {expr:?}"
+    );
+}
+
+#[test]
+fn class_features_imported_class_fact_fast_path_excludes_non_public_keyspace() {
+    // END-TO-END REGRESSION (fix #4 fact fast path + fix #2 backstop): a class
+    // IMPORTED from another file resolves to a cross-file `DeclRef` carrier that
+    // the mapped-narrowing walker does NOT eagerly enumerate. Indexing a mapped
+    // type over that import (`Partial<Imported>["secret"]`) routes key admission
+    // through the NON-EMITTING `MemberPresence` fact fast path (walk.rs Tier-2 →
+    // `keyspace_admits_literal_non_emitting` → `base_member_admission_non_emitting`
+    // → `member_presence_fact_admission`). The private member `secret` must NOT
+    // narrow to a value.
+    //
+    // This test pins the cross-file construct staying CLEAN end-to-end. It does
+    // NOT discriminate fix #4 in ISOLATION: even if the fact fast path wrongly
+    // admitted `secret` from presence alone, the narrowing then re-dispatches
+    // `Imported["secret"]`, which hits fix #2's `advance_step` public gate and
+    // still misses — fix #2 is the architectural backstop. The DISCRIMINATING
+    // unit test that pins fix #4's behavior in isolation (a present member is
+    // INCONCLUSIVE, not `Some(true)`) is `project_semantic_dispatch::tests::
+    // base_member_admission_fact_fast_path_is_inconclusive_for_present_members`.
+    let host = make_host_with_footprint();
+    upsert_ts(
+        &host,
+        "/fixtures/imported_class.ts",
+        r#"export class Imported {
+  public open: string = "";
+  protected guarded: number = 0;
+  private secret: boolean = false;
+}
+"#,
+    );
+    upsert_ts(
+        &host,
+        "/fixtures/imported_class_consumer.ts",
+        r#"import { Imported } from "./imported_class";
+// @ts-expect-error 'secret' is private; not a public key of Partial<Imported>
+export type ImportedIndexedSecret = Partial<Imported>["secret"];
+// @ts-expect-error 'guarded' is protected; not a public key of Partial<Imported>
+export type ImportedIndexedGuarded = Partial<Imported>["guarded"];
+export type ImportedIndexedOpen = Partial<Imported>["open"];
+"#,
+    );
+
+    // `Partial<Imported>["open"]` (public) narrows to the public member's value
+    // — positive control that the cross-file mapped+indexed path works.
+    let (open_expr, _r0) = resolve_expr(
+        &host,
+        "/fixtures/imported_class_consumer.ts",
+        "ImportedIndexedOpen",
+        &[],
+        ProjectionMode::Expanded,
+    );
+    assert!(
+        !open_expr.is_unknown(),
+        "Partial<Imported>[\"open\"] (public) must narrow, not miss: {open_expr:?}"
+    );
+
+    // `Partial<Imported>["secret"]` (private) / `["guarded"]` (protected): the
+    // non-public key is not in `keyof Imported`, so the mapped narrowing must NOT
+    // produce the member's value type — it is a miss.
+    for (alias, leaked) in [
+        ("ImportedIndexedSecret", PrimitiveName::Boolean),
+        ("ImportedIndexedGuarded", PrimitiveName::Number),
+    ] {
+        let (expr, _r) = resolve_expr(
+            &host,
+            "/fixtures/imported_class_consumer.ts",
+            alias,
+            &[],
+            ProjectionMode::Expanded,
+        );
+        assert!(
+            !matches!(&expr, TypeExpr::Primitive(p) if *p == leaked),
+            "{alias} (non-public key via the fact fast path) must NOT narrow to the \
+             member's value type {leaked:?}: {expr:?}"
+        );
+        assert!(
+            expr.is_unknown(),
+            "{alias} (non-public key out of a public-only mapped surface) must be a \
+             semanticMiss: {expr:?}"
+        );
+    }
+}
+
+#[test]
+fn class_features_nested_mapped_indexed_access_private_key_is_miss() {
+    // DISCRIMINATING (fix #3, mapped/indexed admission): `Partial<MixedVis>["c"]`
+    // indexes a PRIVATE key out of a mapped surface over a class. `Partial<…>`
+    // maps over `keyof MixedVis` (public-only), so it carries no `c` member and
+    // the indexed access is a miss.
+    //
+    // Discrimination: FAILS on a tree where the mapped/indexed admission
+    // (`walk.rs` Tier-1 Object membership or `base_member_admission_non_emitting`)
+    // admits `c` by NAME only and forges a value type. PASSES once the object
+    // admission requires `is_public()`.
+    let host = make_host_with_footprint();
+    upsert(&host);
+
+    let (expr, _record) = resolve_expr(
+        &host,
+        "/fixtures/class_features.ts",
+        "MixedVisPartialIndexedPrivate",
+        &[],
+        ProjectionMode::Expanded,
+    );
+
+    assert!(
+        !matches!(&expr, TypeExpr::Primitive(PrimitiveName::Boolean)),
+        "Partial<MixedVis>[\"c\"] must NOT resolve to the private member's value type: {expr:?}"
+    );
+    assert!(
+        expr.is_unknown(),
+        "Partial<MixedVis>[\"c\"] (private key out of a public-only mapped surface) \
+         must be a semanticMiss: {expr:?}"
+    );
 }
 
 #[test]

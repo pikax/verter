@@ -196,6 +196,34 @@ export type MixedVisPick = Pick<MixedVis, "a">;
 // produced keys are directly observable; only the public key `a` survives.
 export type MixedVisRecord = Record<keyof MixedVis, 1>;
 
+// DISCRIMINATING public-keyspace derivation fixtures (B4.5 derivation half).
+// TS rejects each of these constraint/index positions because the named key is
+// not a member of `keyof MixedVis` (public-only) — `b` is protected, `c` is
+// private. The shared typed-IR derivation must therefore yield an EMPTY surface
+// (Pick/Omit) or a miss (indexed access), never re-mint the non-public member.
+// These fixtures are resolver inputs; they intentionally encode the TS-error
+// positions to characterise the derivation, so the file is not expected to pass
+// `tsc --noEmit`.
+//
+// `Pick<MixedVis, K>` over a NON-public key: empty surface (K ∉ keyof MixedVis).
+// @ts-expect-error 'b' is protected and not in keyof MixedVis
+export type MixedVisPickProtected = Pick<MixedVis, "b">;
+// @ts-expect-error 'c' is private and not in keyof MixedVis
+export type MixedVisPickPrivate = Pick<MixedVis, "c">;
+// `Omit<MixedVis, "a">` = `Pick<MixedVis, Exclude<keyof MixedVis, "a">>`. Since
+// `keyof MixedVis` is `"a"` only, the result is the EMPTY surface — the
+// non-public `b` / `c` must NOT survive into the omitted surface.
+export type MixedVisOmitPublic = Omit<MixedVis, "a">;
+// Direct indexed access of a NON-public key: a miss (the value type of a
+// private/protected member is not externally accessible via index).
+// @ts-expect-error 'c' is private; external index access is not allowed
+export type MixedVisIndexedPrivate = MixedVis["c"];
+// Nested mapped-then-indexed access of a NON-public key over a class: the mapped
+// surface (`Partial<MixedVis>`) carries only public keys, so indexing `["c"]`
+// is a miss.
+// @ts-expect-error 'c' is not a public key of Partial<MixedVis>
+export type MixedVisPartialIndexedPrivate = Partial<MixedVis>["c"];
+
 // 12. Ordinary (non-macro) UNION common-member surface. The TS member-access
 // surface of `UnionA | UnionB` is the COMMON members only, and each common
 // member's accessibility folds to the MOST RESTRICTIVE across the arms. `shared`
