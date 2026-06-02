@@ -74,7 +74,10 @@ pub(crate) fn collect_type_expr_ref_names(
             collect_type_expr_ref_names(index, out);
         }
         TypeExpr::Parenthesized(inner) => collect_type_expr_ref_names(inner, out),
-        TypeExpr::Function(func) => {
+        // A function type and a bare constructor type (`new (...) => R`) carry
+        // the same `FunctionExpr` payload; both contribute their parameter and
+        // return Refs to the cross-file dependency closure.
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
             for param in &func.parameters {
                 collect_type_expr_ref_names(&param.ty, out);
             }
@@ -83,5 +86,63 @@ pub(crate) fn collect_type_expr_ref_names(
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_type_expr_ref_names;
+    use std::sync::Arc;
+    use verter_type_expr::{FunctionExpr, FunctionParam, TypeExpr};
+
+    /// A constructor type's parameter and return Refs must be collected
+    /// exactly like a function type's — the registry-name closure in
+    /// `component_meta_methods` relies on this to track cross-file
+    /// dependencies reachable through a `new (...) => R` shape. Discriminating:
+    /// before `ConstructorType` joined the `Function` arm, the value fell to
+    /// the wildcard `_ => {}` and BOTH refs were silently dropped.
+    #[test]
+    fn constructor_type_param_and_return_refs_are_collected() {
+        // `new (a: ParamRef) => ReturnRef`
+        let ctor = TypeExpr::ConstructorType(Arc::new(FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some("a".to_string()),
+                TypeExpr::named("ParamRef"),
+                false,
+                false,
+            )],
+            Some(Arc::new(TypeExpr::named("ReturnRef"))),
+            Vec::new(),
+        )));
+        let mut out = rustc_hash::FxHashSet::default();
+        collect_type_expr_ref_names(&ctor, &mut out);
+        assert!(
+            out.contains("ParamRef"),
+            "constructor-type parameter Ref must be collected, got {out:?}",
+        );
+        assert!(
+            out.contains("ReturnRef"),
+            "constructor-type return Ref must be collected, got {out:?}",
+        );
+    }
+
+    /// Negative control: a function type with the same payload collects the
+    /// same refs (pins the parity the constructor arm must match).
+    #[test]
+    fn function_type_param_and_return_refs_are_collected() {
+        let function = TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some("a".to_string()),
+                TypeExpr::named("ParamRef"),
+                false,
+                false,
+            )],
+            Some(Arc::new(TypeExpr::named("ReturnRef"))),
+            Vec::new(),
+        )));
+        let mut out = rustc_hash::FxHashSet::default();
+        collect_type_expr_ref_names(&function, &mut out);
+        assert!(out.contains("ParamRef"));
+        assert!(out.contains("ReturnRef"));
     }
 }
