@@ -151,7 +151,9 @@ fn count_type_expr_nodes(ty: &TypeExpr) -> usize {
                     }
                 }
             }
-            TypeExpr::Function(func) => {
+            // A constructor type carries the same `FunctionExpr` payload as a
+            // function type; its nodes are counted identically.
+            TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
                 for p in func.parameters.iter() {
                     walk(&p.ty, n);
                 }

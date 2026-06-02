@@ -999,6 +999,39 @@ mod tests {
     }
 
     #[test]
+    fn constructor_type_and_function_with_same_signature_hash_differently() {
+        // A constructor type `new (...) => R` and the function type `(...) => R`
+        // are DISTINCT types — they must never collide in a content-addressed
+        // cache key, even when they carry an identical `FunctionExpr`. The
+        // walker emits a distinct discriminator (`0x73`) for `ConstructorType`
+        // before the shared function body, so the two semantic hashes differ.
+        // Pre-fix (no dedicated variant / no discriminator) the two would hash
+        // identically; this test FAILS on that regression.
+        let signature = verter_type_expr::FunctionExpr::synthetic(
+            vec![],
+            Some(Arc::new(name_ref("Foo"))),
+            vec![],
+        );
+        let function = TypeExpr::Function(Arc::new(signature.clone()));
+        let constructor = TypeExpr::ConstructorType(Arc::new(signature));
+
+        let function_hash = compute_semantic_hash(&function, SymbolSpace::Type, &UnresolvedLens);
+        let constructor_hash =
+            compute_semantic_hash(&constructor, SymbolSpace::Type, &UnresolvedLens);
+
+        assert_ne!(
+            function_hash.hash, constructor_hash.hash,
+            "a constructor type and a function type with the same signature must hash differently",
+        );
+        // Both must hash deterministically (re-hash matches).
+        assert_eq!(
+            constructor_hash.hash,
+            compute_semantic_hash(&constructor, SymbolSpace::Type, &UnresolvedLens).hash,
+            "constructor-type hash must be deterministic",
+        );
+    }
+
+    #[test]
     fn object_member_order_does_not_affect_hash() {
         // R16: alpha-normalised — member declaration order MUST NOT
         // change the semantic_hash.

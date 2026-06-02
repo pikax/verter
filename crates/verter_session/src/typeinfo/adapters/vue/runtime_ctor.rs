@@ -298,7 +298,7 @@ fn runtime_constructors_from_ref(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use verter_type_expr::{FunctionExpr, ObjectExpr, TupleElement, TypeParam};
+    use verter_type_expr::{FunctionExpr, ObjectExpr, ObjectMember, TupleElement, TypeParam};
 
     fn prim(name: PrimitiveName) -> TypeExpr {
         TypeExpr::Primitive(name)
@@ -553,6 +553,75 @@ mod tests {
         assert_eq!(
             runtime_constructors_from_type_expr(&ty),
             vec![RuntimeCtorKind::Function]
+        );
+    }
+
+    // -- ConstructorType vs construct-signature type literal --
+
+    #[test]
+    fn constructor_type_maps_to_function() {
+        // A bare constructor type `new (...) => R` lowers to
+        // `TypeExpr::ConstructorType`. Legacy `infer_runtime_type` maps
+        // `TSConstructorType` to Function (infer.rs:61), the same arm as a plain
+        // function type — so the reducer yields `[Function]`, NOT `[Object]`.
+        let ty = TypeExpr::ConstructorType(Arc::new(FunctionExpr::synthetic(
+            vec![],
+            Some(Arc::new(TypeExpr::named("Foo"))),
+            vec![],
+        )));
+        assert_eq!(
+            runtime_constructors_from_type_expr(&ty),
+            vec![RuntimeCtorKind::Function],
+            "a bare constructor type must reduce to [Function], not [Object]",
+        );
+    }
+
+    #[test]
+    fn construct_signature_type_literal_maps_to_object_not_function() {
+        // The companion distinction the dedicated `ConstructorType` variant
+        // exists to preserve: a `{ new (): Foo }` type literal lowers to
+        // `TypeExpr::Object` (carrying an `ObjectMember::ConstructSignature`),
+        // and an object surface reduces to `[Object]` (infer.rs:55) — NOT
+        // `[Function]`. This guards that the two surfaces stay distinct end to
+        // end: bare ctor type -> Function, ctor-signature type literal -> Object.
+        let ty = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::ConstructSignature(FunctionExpr::synthetic(
+                vec![],
+                Some(Arc::new(TypeExpr::named("Foo"))),
+                vec![],
+            ))],
+        }));
+        assert_eq!(
+            runtime_constructors_from_type_expr(&ty),
+            vec![RuntimeCtorKind::Object],
+            "a construct-signature type literal must reduce to [Object], not [Function]",
+        );
+    }
+
+    // -- Signed bigint literals both reduce to Number --
+
+    #[test]
+    fn negative_bigint_literal_maps_to_number() {
+        // `-1n` lowers to `Literal(BigInt("-1"))`; a bigint literal => Number
+        // (infer.rs:164), regardless of sign.
+        let ty = TypeExpr::Literal(LiteralValue::BigInt("-1".to_string()));
+        assert_eq!(
+            runtime_constructors_from_type_expr(&ty),
+            vec![RuntimeCtorKind::Number]
+        );
+    }
+
+    #[test]
+    fn positive_bigint_literal_maps_to_number() {
+        // `+1n` lowers to `Literal(BigInt("1"))` (the lowering is operator-aware
+        // and does NOT negate `+1n` to `-1n`); a bigint literal => Number
+        // (infer.rs:164). Both signs reduce identically here — the sign
+        // correctness itself is pinned in the lowering test
+        // (`verter_type_expr_oxc::constructor_type_lowering`).
+        let ty = TypeExpr::Literal(LiteralValue::BigInt("1".to_string()));
+        assert_eq!(
+            runtime_constructors_from_type_expr(&ty),
+            vec![RuntimeCtorKind::Number]
         );
     }
 

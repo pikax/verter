@@ -457,6 +457,12 @@ fn write_type_expr(buf: &mut String, expr: &TypeExpr) {
         TypeExpr::Function(sig) => {
             write_function(buf, sig);
         }
+        // A constructor type renders as its function signature with a leading
+        // `new ` so the snapshot distinguishes `new () => R` from `() => R`.
+        TypeExpr::ConstructorType(sig) => {
+            buf.push_str("new ");
+            write_function(buf, sig);
+        }
         TypeExpr::Ref {
             name,
             type_arguments,
@@ -727,6 +733,9 @@ fn needs_parens_for_array(expr: &TypeExpr) -> bool {
         TypeExpr::Union(_)
             | TypeExpr::Intersection(_)
             | TypeExpr::Function(_)
+            // A constructor type `new () => R` needs parens as an array element
+            // exactly like a function type.
+            | TypeExpr::ConstructorType(_)
             | TypeExpr::Conditional { .. }
     )
 }

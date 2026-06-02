@@ -174,6 +174,7 @@ fn typeexpr_kind(ty: &TypeExpr) -> &'static str {
         TypeExpr::Union(_) => "Union",
         TypeExpr::Intersection(_) => "Intersection",
         TypeExpr::Function(_) => "Function",
+        TypeExpr::ConstructorType(_) => "ConstructorType",
         TypeExpr::Ref { .. } => "Ref",
         TypeExpr::IndexedAccess { .. } => "IndexedAccess",
         TypeExpr::KeyOf(_) => "KeyOf",

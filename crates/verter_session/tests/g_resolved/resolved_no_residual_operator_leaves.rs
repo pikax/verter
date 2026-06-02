@@ -137,7 +137,9 @@ fn contains_free_type_parameter(expr: &TypeExpr) -> bool {
             }
             ObjectMember::IndexSignature(idx) => contains_free_type_parameter(&idx.value_type),
         }),
-        TypeExpr::Function(func) => {
+        // A constructor type's signature is searched identically to a function
+        // type's (same `FunctionExpr` payload).
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
             func.parameters
                 .iter()
                 .any(|p| contains_free_type_parameter(&p.ty))
@@ -304,7 +306,9 @@ fn walk(expr: &TypeExpr, path: &str, out: &mut Vec<String>) {
                 }
             }
         }
-        TypeExpr::Function(func) => {
+        // A constructor type's signature is walked identically to a function
+        // type's (same `FunctionExpr` payload).
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
             for (i, p) in func.parameters.iter().enumerate() {
                 walk(&p.ty, &format!("{path}.param{i}"), out);
             }
