@@ -1685,8 +1685,10 @@ regressions to avoid:
 Block 6 turns `compile_many` into a transaction over the cache
 runtime + host CPU pool.
 
-> **Status (current tree).** §6a–§6c are LANDED: the dual host-owned
-> CPU pools (`HostCpuPool` / `SchedulerCpuPool`), the construction-time
+> **Status (current tree).** §6a–§6c are LANDED: the host-owned
+> CPU pool (`HostCpuPool`, which on the current tree coordinates every
+> host batch API) alongside the scheduler's pre-existing internal stage
+> `cpu_pool` field, the construction-time
 > `HostConfig::host_cpu_threads` worker sizing, the removal of the
 > per-call `CompileBatchOptions.threads` option, the per-input
 > `requested_mode` + classifier-owned `actual_mode`, and the atomic
