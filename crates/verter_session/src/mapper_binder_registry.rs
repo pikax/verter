@@ -416,6 +416,7 @@ fn hash_object_member<'a, H: Hasher>(
             p.name.hash(hasher);
             (p.optional as u8).hash(hasher);
             (p.readonly as u8).hash(hasher);
+            hash_member_visibility(p.visibility, hasher);
             worklist.push(&p.ty);
         }
         ObjectMember::IndexSignature(s) => {
@@ -437,7 +438,33 @@ fn hash_object_member<'a, H: Hasher>(
             4u8.hash(hasher);
             m.name.hash(hasher);
             (m.optional as u8).hash(hasher);
+            hash_member_visibility(m.visibility, hasher);
             hash_function_expr(&m.function, hasher, worklist);
+        }
+    }
+}
+
+/// Fold a member-visibility marker into the mapper content-hash, emitting bytes
+/// ONLY for a non-public member. A class's externally-visible member set
+/// (`keyof T`) depends on accessibility, so a mapped source differing only in a
+/// member's visibility is a genuinely different mapper and must not share an
+/// ordinal. `Public` emits NOTHING, so an all-public mapper hash is unchanged
+/// from before visibility existed (zero ordinal churn) — the SAME
+/// marker-only-for-non-public scheme as the `TypeExpr` `Hash` + facts hasher.
+fn hash_member_visibility<H: Hasher>(
+    visibility: verter_type_expr::MemberVisibility,
+    hasher: &mut H,
+) {
+    use verter_type_expr::MemberVisibility;
+    match visibility {
+        MemberVisibility::Public => {}
+        MemberVisibility::Protected => {
+            0x65u8.hash(hasher);
+            1u8.hash(hasher);
+        }
+        MemberVisibility::Private => {
+            0x65u8.hash(hasher);
+            2u8.hash(hasher);
         }
     }
 }
@@ -814,6 +841,86 @@ mod tests {
         assert_eq!(
             fp_1, fp_2,
             "structurally-identical mappers must share a fingerprint regardless of Arc identity"
+        );
+    }
+
+    /// A mapper `source` object differing ONLY in a member's visibility is a
+    /// genuinely different mapper (a class's `keyof T` set depends on
+    /// accessibility), so it must get a DISTINCT fingerprint — otherwise two
+    /// structurally-different sources would collide on one binder ordinal. An
+    /// all-public source's fingerprint is unchanged (marker-only-for-non-public).
+    ///
+    /// Discriminating: against the tree where `hash_object_member` omits
+    /// visibility, the public / protected / private sources collide and the
+    /// `assert_ne!`s FAIL.
+    #[test]
+    fn mapper_fingerprint_discriminates_member_visibility() {
+        use verter_type_expr::{
+            MemberSpans, MemberVisibility, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
+        };
+
+        let source_with = |vis: MemberVisibility| {
+            Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty::with_visibility(
+                    "x".to_string(),
+                    TypeExpr::Primitive(PrimitiveName::Number),
+                    false,
+                    false,
+                    vis,
+                    MemberSpans::default(),
+                ))],
+            })))
+        };
+        let value = Arc::new(TypeExpr::Primitive(PrimitiveName::String));
+
+        let fp = |vis| {
+            MapperFingerprint::from_components(
+                &source_with(vis),
+                &value,
+                MappedModifier::None,
+                MappedModifier::None,
+                None,
+            )
+        };
+
+        let pub_fp = fp(MemberVisibility::Public);
+        let prot_fp = fp(MemberVisibility::Protected);
+        let priv_fp = fp(MemberVisibility::Private);
+
+        assert_ne!(
+            pub_fp, prot_fp,
+            "a public vs protected member source must fingerprint distinctly",
+        );
+        assert_ne!(
+            pub_fp, priv_fp,
+            "a public vs private member source must fingerprint distinctly",
+        );
+        assert_ne!(
+            prot_fp, priv_fp,
+            "a protected vs private member source must fingerprint distinctly",
+        );
+
+        // An all-public source built via the explicit-Public constructor must
+        // fingerprint identically to one built via `synthetic` (both Public) —
+        // the marker is only-for-non-public.
+        let via_synthetic = Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                "x".to_string(),
+                TypeExpr::Primitive(PrimitiveName::Number),
+                false,
+                false,
+            ))],
+        })));
+        let synthetic_fp = MapperFingerprint::from_components(
+            &via_synthetic,
+            &value,
+            MappedModifier::None,
+            MappedModifier::None,
+            None,
+        );
+        assert_eq!(
+            pub_fp, synthetic_fp,
+            "an all-public source's fingerprint must not depend on how Public was constructed",
         );
     }
 }
