@@ -63,11 +63,29 @@ fn strip_comment(line: &str) -> &str {
     }
 }
 
+/// Drops the `#`-introduced TOML comment tail. A commented-out dependency
+/// line (`# verter_session = ...`) must NOT false-fire the manifest scan,
+/// mirroring the `//`-stripping applied to the src scan. Conservative: it
+/// only ever removes text, never adds a false dependency reference.
+fn strip_toml_comment(line: &str) -> &str {
+    match line.find('#') {
+        Some(idx) => &line[..idx],
+        None => line,
+    }
+}
+
 /// H20 (BLOCKING): the scheduler `Cargo.toml` must not name
-/// `verter_session` in any dependency table.
+/// `verter_session` in any dependency table. The scan strips `#` TOML
+/// comments first, so a commented-out `# verter_session` line cannot
+/// false-fire — only a live dependency entry trips the guard.
 #[test]
 fn scheduler_does_not_depend_on_verter_session() {
-    let manifest = fs::read_to_string(manifest_dir().join("Cargo.toml")).expect("read Cargo.toml");
+    let raw = fs::read_to_string(manifest_dir().join("Cargo.toml")).expect("read Cargo.toml");
+    let manifest: String = raw
+        .lines()
+        .map(strip_toml_comment)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         !manifest.contains("verter_session"),
         "H20: `verter_scheduler/Cargo.toml` must NOT name `verter_session` — \
