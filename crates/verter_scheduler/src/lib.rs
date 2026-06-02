@@ -15,13 +15,22 @@
 //!
 //! # Worker pools
 //!
-//! Two CPU pools coexist in the host process:
+//! Three native pools coexist in the host process — all
+//! host-constructed and injected; the scheduler owns no pool
+//! construction:
 //!
-//! - The scheduler-owned CPU pool (`Scheduler::cpu_pool`) executes
-//!   `TaskKind::{Source, Analysis, Artifact}` stage work. Its workers
+//! - [`SchedulerCpuPool`](pool::SchedulerCpuPool) — executes
+//!   `TaskKind::{Analysis, Artifact}` stage CPU work. Its workers
 //!   register as [`CallerKind::CpuWorker`](caller_kind::CallerKind) so
 //!   the cooperative pump may inline-execute ready dependencies on the
 //!   same thread.
+//! - [`SchedulerIoPool`](pool::SchedulerIoPool) — executes
+//!   `TaskKind::Source` (load) work. Workers register as
+//!   [`CallerKind::IoWorker`](caller_kind::CallerKind). Separate from
+//!   the CPU pool so blocking disk reads cannot starve parse/analyze
+//!   work. Dispatch uses nonblocking
+//!   [`try_submit`](pool::SchedulerIoPool::try_submit) — the driver
+//!   never blocks on a full transport.
 //! - [`HostCpuPool`](host_cpu_pool::HostCpuPool) — owned by the external
 //!   host/runtime layer and shared by every host batch API's outer
 //!   coordinator (batch component-meta, batch SFC compile, and any
@@ -112,6 +121,14 @@ pub mod stage;
 #[cfg(not(target_arch = "wasm32"))]
 pub use host_cpu_pool::HostCpuPool;
 
+/// Host-constructed scheduler worker pools (native-only). The host
+/// builds these and injects them into every `Scheduler` constructor.
+#[cfg(not(target_arch = "wasm32"))]
+pub use pool::{
+    SchedulerCpuPool, SchedulerIoPool, SchedulerPoolSubmitError, SchedulerPoolSubmitResult,
+    SchedulerPoolTask,
+};
+
 /// Re-export of the test-only `host_cpu_pool_token` reader. Gated behind
 /// the `test-support` feature so production binaries cannot reach the
 /// TLS reader; cross-crate tests (e.g. `verter_session`) opt in via
@@ -119,3 +136,8 @@ pub use host_cpu_pool::HostCpuPool;
 /// `[dev-dependencies]`.
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
 pub use host_cpu_pool::host_cpu_pool_token;
+
+/// Re-export of the test-only scheduler-pool identity-token readers.
+/// Gated behind the `test-support` feature like `host_cpu_pool_token`.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+pub use pool::{scheduler_cpu_pool_token, scheduler_io_pool_token};

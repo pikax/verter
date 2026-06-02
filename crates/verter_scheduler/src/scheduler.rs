@@ -70,13 +70,23 @@ impl Default for SchedulerConfig {
     }
 }
 
-/// Resolve the effective DAG budget from a scheduler config — the
-/// explicit override if set, otherwise derived from the pool sizes.
-fn dag_budget_for_config(config: &SchedulerConfig) -> DagCapacityBudget {
-    config.dag_budget.unwrap_or(DagCapacityBudget {
-        cpu: config.cpu_threads.max(1) as u32,
-        io: config.io_threads.max(1) as u32,
-    })
+impl SchedulerConfig {
+    /// Resolve the effective DAG admission budget — the explicit
+    /// override if set, otherwise derived from the pool sizes.
+    ///
+    /// This is the SINGLE budget-resolution authority. Both
+    /// [`SchedulerDag::with_budget`] (admission ceiling) and the host's
+    /// [`SchedulerIoPool`](crate::pool::SchedulerIoPool) transport
+    /// sizing read it, so the IO transport capacity always dominates the
+    /// same `io` budget the ledger admits against — keeping the DAG
+    /// ledger the sole admission gate (the IO channel never becomes a
+    /// second admission authority).
+    pub fn resolved_dag_budget(&self) -> DagCapacityBudget {
+        self.dag_budget.unwrap_or(DagCapacityBudget {
+            cpu: self.cpu_threads.max(1) as u32,
+            io: self.io_threads.max(1) as u32,
+        })
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -539,14 +549,17 @@ pub struct Scheduler {
     pub(crate) executor: Arc<dyn StageExecutor>,
     /// Configuration (read at construction for pool sizing).
     pub(crate) config: SchedulerConfig,
-    /// Dedicated rayon thread pool for CPU-bound work (parse, analysis, compile).
-    /// Separate from the global rayon pool so per-scheduler sizing takes effect.
+    /// Host-constructed, injected scheduler CPU pool for stage work
+    /// (parse, analysis, compile). Workers tag `CallerKind::CpuWorker`.
+    /// Distinct from the host coordinator pool (`HostCpuPool`, tagged
+    /// `External`) — host fan-out work never runs here.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) cpu_pool: rayon::ThreadPool,
-    /// Bounded I/O pool for file reads. Separate from CPU pool so blocking
-    /// disk reads don't starve parse/analyze work.
+    pub(crate) cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
+    /// Host-constructed, injected scheduler I/O pool for file reads.
+    /// Separate from the CPU pool so blocking disk reads don't starve
+    /// parse/analyze work. Workers tag `CallerKind::IoWorker`.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) io_pool: crate::pool::IoPool,
+    pub(crate) io_pool: Arc<crate::pool::SchedulerIoPool>,
     /// Tombstones for removed files. Value is a monotonic removal counter.
     /// A `source: Some(...)` submission only clears the tombstone if it was
     /// submitted AFTER the removal (checked via an atomic counter on the
@@ -711,41 +724,46 @@ const AUTO_INGESTED_RECENT_STALE_THRESHOLD: std::time::Duration =
 
 impl Scheduler {
     /// Create a new scheduler with a driver thread (native).
+    ///
+    /// The host constructs and injects the scheduler's CPU and I/O
+    /// pools (mirroring the `HostCpuPool` construction/injection
+    /// pattern). The scheduler owns no pool construction.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn new(config: SchedulerConfig, source_loader: Arc<dyn SourceLoader>) -> Arc<Self> {
-        Self::with_executor(config, source_loader, Arc::new(DefaultExecutor))
+    pub fn new(
+        config: SchedulerConfig,
+        source_loader: Arc<dyn SourceLoader>,
+        cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
+        io_pool: Arc<crate::pool::SchedulerIoPool>,
+    ) -> Arc<Self> {
+        Self::with_executor(
+            config,
+            source_loader,
+            Arc::new(DefaultExecutor),
+            cpu_pool,
+            io_pool,
+        )
     }
 
     /// Create a new scheduler with a custom stage executor and driver thread (native).
     ///
     /// The driver thread holds a `Weak<Scheduler>`, so dropping the last caller
     /// `Arc` allows `Drop` to run (sets shutdown, joins driver, drains pending).
+    ///
+    /// `cpu_pool` / `io_pool` are host-constructed and injected — see
+    /// [`crate::pool`]. The scheduler owns no pool construction.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_executor(
         config: SchedulerConfig,
         source_loader: Arc<dyn SourceLoader>,
         executor: Arc<dyn StageExecutor>,
+        cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
+        io_pool: Arc<crate::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
-        let cpu_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.cpu_threads)
-            .thread_name(|i| format!("verter-cpu-{i}"))
-            .start_handler(|_| {
-                // Mark every rayon worker as a scheduler CPU worker
-                // so cooperative-pump callers reached via the
-                // session-side `wait_or_drive` entry can detect that
-                // they are running inside the scheduler's owned pool.
-                let _ =
-                    crate::caller_kind::CallerKind::set(crate::caller_kind::CallerKind::CpuWorker);
-            })
-            .build()
-            .expect("failed to build rayon CPU pool");
-        let io_pool = crate::pool::IoPool::new(config.io_threads);
-
         let scheduler = Arc::new(Self {
             nodes: DashMap::new(),
             edges: EdgeManager::new(),
             dag: Arc::new(Mutex::new(SchedulerDag::with_budget(
-                dag_budget_for_config(&config),
+                config.resolved_dag_budget(),
             ))),
             inbox: SubmissionInbox::new(),
             overlay: Arc::new(OverlayMap::new()),
@@ -789,37 +807,43 @@ impl Scheduler {
 
     /// Create a new scheduler for sync/test use (no driver thread).
     /// Use `drive_one()` / `drive_all()` to process manually.
-    pub fn new_sync(config: SchedulerConfig, source_loader: Arc<dyn SourceLoader>) -> Arc<Self> {
-        Self::new_sync_with_executor(config, source_loader, Arc::new(DefaultExecutor))
+    ///
+    /// On native, the host injects the scheduler's CPU and I/O pools
+    /// (see [`crate::pool`]); on WASM there are no pools (stages run
+    /// inline on the calling thread).
+    pub fn new_sync(
+        config: SchedulerConfig,
+        source_loader: Arc<dyn SourceLoader>,
+        #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
+        #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::pool::SchedulerIoPool>,
+    ) -> Arc<Self> {
+        Self::new_sync_with_executor(
+            config,
+            source_loader,
+            Arc::new(DefaultExecutor),
+            #[cfg(not(target_arch = "wasm32"))]
+            cpu_pool,
+            #[cfg(not(target_arch = "wasm32"))]
+            io_pool,
+        )
     }
 
     /// Create a sync scheduler with a custom stage executor.
+    ///
+    /// On native, the host injects the scheduler's CPU and I/O pools
+    /// (see [`crate::pool`]); on WASM there are no pools.
     pub fn new_sync_with_executor(
         config: SchedulerConfig,
         source_loader: Arc<dyn SourceLoader>,
         executor: Arc<dyn StageExecutor>,
+        #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
+        #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
-        #[cfg(not(target_arch = "wasm32"))]
-        let cpu_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.cpu_threads)
-            .thread_name(|i| format!("verter-cpu-{i}"))
-            .start_handler(|_| {
-                // Mark every rayon worker as a scheduler CPU worker
-                // (see `with_executor` for the parallel handler on
-                // the native-driver variant).
-                let _ =
-                    crate::caller_kind::CallerKind::set(crate::caller_kind::CallerKind::CpuWorker);
-            })
-            .build()
-            .expect("failed to build rayon CPU pool");
-        #[cfg(not(target_arch = "wasm32"))]
-        let io_pool = crate::pool::IoPool::new(config.io_threads);
-
         Arc::new(Self {
             nodes: DashMap::new(),
             edges: EdgeManager::new(),
             dag: Arc::new(Mutex::new(SchedulerDag::with_budget(
-                dag_budget_for_config(&config),
+                config.resolved_dag_budget(),
             ))),
             inbox: SubmissionInbox::new(),
             overlay: Arc::new(OverlayMap::new()),
@@ -848,6 +872,91 @@ impl Scheduler {
             #[cfg(any(test, debug_assertions))]
             batch_admit_epoch_trace: Mutex::new(None),
         })
+    }
+
+    // ── Test-only constructors (build default pools + inject) ──
+    //
+    // Production code constructs `SchedulerCpuPool`/`SchedulerIoPool` in
+    // the host and injects them. Tests rarely care about pool identity,
+    // so these helpers build default pools sized from `config` (the IO
+    // transport derived from `config.resolved_dag_budget().io`, matching
+    // the host) and delegate to the injected constructors. Gated behind
+    // `cfg(any(test, feature = "test-support"))` so production binaries
+    // never link them; cross-crate tests opt in via the `test-support`
+    // feature in `[dev-dependencies]`.
+
+    /// Build default scheduler pools sized from `config`, matching the
+    /// host's construction (CPU pool = `cpu_threads`; IO pool =
+    /// `io_threads` workers with transport capacity ≥
+    /// `resolved_dag_budget().io`).
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    fn default_test_pools(
+        config: &SchedulerConfig,
+    ) -> (
+        Arc<crate::pool::SchedulerCpuPool>,
+        Arc<crate::pool::SchedulerIoPool>,
+    ) {
+        let io_budget = config.resolved_dag_budget().io as usize;
+        (
+            crate::pool::SchedulerCpuPool::new(config.cpu_threads),
+            crate::pool::SchedulerIoPool::new(config.io_threads, io_budget),
+        )
+    }
+
+    /// Test analogue of [`Scheduler::new`] that builds default pools.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    pub fn test_new(config: SchedulerConfig, source_loader: Arc<dyn SourceLoader>) -> Arc<Self> {
+        let (cpu_pool, io_pool) = Self::default_test_pools(&config);
+        Self::new(config, source_loader, cpu_pool, io_pool)
+    }
+
+    /// Test analogue of [`Scheduler::with_executor`] that builds default
+    /// pools.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    pub fn test_with_executor(
+        config: SchedulerConfig,
+        source_loader: Arc<dyn SourceLoader>,
+        executor: Arc<dyn StageExecutor>,
+    ) -> Arc<Self> {
+        let (cpu_pool, io_pool) = Self::default_test_pools(&config);
+        Self::with_executor(config, source_loader, executor, cpu_pool, io_pool)
+    }
+
+    /// Test analogue of [`Scheduler::new_sync`] that builds default
+    /// pools (native) / no pools (WASM).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_new_sync(
+        config: SchedulerConfig,
+        source_loader: Arc<dyn SourceLoader>,
+    ) -> Arc<Self> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (cpu_pool, io_pool) = Self::default_test_pools(&config);
+            Self::new_sync(config, source_loader, cpu_pool, io_pool)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::new_sync(config, source_loader)
+        }
+    }
+
+    /// Test analogue of [`Scheduler::new_sync_with_executor`] that builds
+    /// default pools (native) / no pools (WASM).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_new_sync_with_executor(
+        config: SchedulerConfig,
+        source_loader: Arc<dyn SourceLoader>,
+        executor: Arc<dyn StageExecutor>,
+    ) -> Arc<Self> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (cpu_pool, io_pool) = Self::default_test_pools(&config);
+            Self::new_sync_with_executor(config, source_loader, executor, cpu_pool, io_pool)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::new_sync_with_executor(config, source_loader, executor)
+        }
     }
 
     // ── Request Submission ──
@@ -3539,12 +3648,22 @@ impl Scheduler {
             return DispatchOutcome::ExecutedInline;
         }
 
+        // Capture the terminalization inputs BEFORE moving the worker
+        // payload into the closure. If `try_submit` reports
+        // `Full`/`Closed` the closure is consumed without running, so
+        // the invariant-violation path needs its own copies of
+        // `(canonical, dag, inbox_sender)` to release the parked
+        // reservation through the normal DAG cancel path.
+        let canonical_for_violation: Arc<str> = Arc::from(node.canonical_id.as_str());
+        let dag_for_violation = Arc::clone(&dag_handle);
+        let inbox_for_violation = inbox_sender.clone();
+
         if matches!(task_kind, TaskKind::Source) {
             // Source jobs: I/O pool loads content, then hands off
             // to CPU pool for parse.
             let node_for_panic = Arc::clone(&node);
             let dag_for_panic = Arc::clone(&dag_handle);
-            self.io_pool.execute(move || {
+            let task: crate::pool::SchedulerPoolTask = Box::new(move || {
                 let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
                     winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
                 Self::publish_scheduler_dispatch(
@@ -3579,11 +3698,24 @@ impl Scheduler {
                     );
                 }
             });
+            match self.io_pool.try_submit(task) {
+                Ok(crate::pool::SchedulerPoolSubmitResult::Submitted) => {
+                    DispatchOutcome::SubmittedToPool
+                }
+                Err(err) => Self::terminalize_pool_submit_violation(
+                    err,
+                    &dag_for_violation,
+                    &canonical_for_violation,
+                    generation,
+                    &task_kind,
+                    &inbox_for_violation,
+                ),
+            }
         } else {
             // Analysis/Artifact jobs: pure CPU work.
             let node_for_panic = Arc::clone(&node);
             let dag_for_panic = Arc::clone(&dag_handle);
-            self.cpu_pool.spawn(move || {
+            let task: crate::pool::SchedulerPoolTask = Box::new(move || {
                 let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
                     winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
                 Self::publish_scheduler_dispatch(
@@ -3618,8 +3750,72 @@ impl Scheduler {
                     );
                 }
             });
+            match self.cpu_pool.try_submit(task) {
+                Ok(crate::pool::SchedulerPoolSubmitResult::Submitted) => {
+                    DispatchOutcome::SubmittedToPool
+                }
+                Err(err) => Self::terminalize_pool_submit_violation(
+                    err,
+                    &dag_for_violation,
+                    &canonical_for_violation,
+                    generation,
+                    &task_kind,
+                    &inbox_for_violation,
+                ),
+            }
         }
-        DispatchOutcome::SubmittedToPool
+    }
+
+    /// Handle a nonblocking pool-submit failure at the dispatch site.
+    ///
+    /// Under the DAG capacity-ledger invariant the pool is NOT genuinely
+    /// full when `dispatch_ready_job` runs: `next_ready_for_pump`
+    /// reserves the CPU/IO permit (dag.rs:1762) before producing the
+    /// `ReadyJob`, credit commits only after the reservation succeeds
+    /// (dag.rs:1775), and the reservation is parked on the node
+    /// (dag.rs:1801). Inline-eligible loans (`IoWorker`×Source,
+    /// `CpuWorker`×CPU) run on the caller thread and never enter a pool
+    /// transport, so non-inline submissions are bounded by the resolved
+    /// `dag_budget` — and the host sizes the IO transport to dominate
+    /// `dag_budget.io`. A `Full`/`Closed` result is therefore an
+    /// INVARIANT VIOLATION, not backpressure.
+    ///
+    /// The violation is `debug_assert!`ed (so debug/test builds fault
+    /// loudly), then the job is terminalized via the SAME path the
+    /// worker-panic recovery uses ([`Self::terminalize_failure`] +
+    /// [`Self::requeue_terminalize_stranded`]): the DAG node is
+    /// cancelled, releasing the parked reservation through the by-value
+    /// `release(self)` consume — no permit leak. Credit was committed
+    /// exactly once at admission and is NOT re-committed (the job is not
+    /// requeued or re-admitted). The job is surfaced `Failed` with a
+    /// typed [`crate::job::SchedulerError::StageFailed`] so the caller
+    /// observes a terminal failure rather than a hang. No silent drop,
+    /// no requeue, no double-credit.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn terminalize_pool_submit_violation(
+        err: crate::pool::SchedulerPoolSubmitError,
+        dag: &Mutex<SchedulerDag>,
+        canonical: &Arc<str>,
+        generation: u64,
+        task_kind: &TaskKind,
+        inbox_sender: &crossbeam_channel::Sender<Submission>,
+    ) -> DispatchOutcome {
+        debug_assert!(
+            false,
+            "scheduler pool submit returned {err:?} at the dispatch site: the DAG \
+             capacity ledger reserves the {task_kind:?} permit in next_ready_for_pump \
+             before producing the ReadyJob, and the IO transport is sized to dominate \
+             dag_budget.io, so the pool is never genuinely full here — a Full/Closed \
+             result is an invariant violation, not backpressure"
+        );
+        let error = crate::job::SchedulerError::StageFailed {
+            file_id: canonical.to_string(),
+            stage: format!("{task_kind:?}"),
+            message: format!("scheduler pool submit failed: {err:?}"),
+        };
+        let stranded = Self::terminalize_failure(dag, canonical, generation, task_kind, error);
+        Self::requeue_terminalize_stranded(inbox_sender, &stranded);
+        DispatchOutcome::Skipped
     }
 
     /// Publish a single scheduler-dispatch fact through the audit
@@ -4951,11 +5147,11 @@ mod tests {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("<template>hi</template>"));
         loader.insert("/b.vue".to_string(), Arc::from("<template>bye</template>"));
-        Scheduler::new_sync(SchedulerConfig::default(), loader)
+        Scheduler::test_new_sync(SchedulerConfig::default(), loader)
     }
 
     fn test_scheduler_with_loader(loader: Arc<MemorySourceLoader>) -> Arc<Scheduler> {
-        Scheduler::new_sync(SchedulerConfig::default(), loader)
+        Scheduler::test_new_sync(SchedulerConfig::default(), loader)
     }
 
     // ── Basic Pipeline ──
@@ -5157,7 +5353,7 @@ mod tests {
             io_threads: 1,
             dag_budget: Some(DagCapacityBudget { cpu: 1, io: 1 }),
         };
-        let sched = Scheduler::new_sync(config, loader);
+        let sched = Scheduler::test_new_sync(config, loader);
 
         // Inject a CacheNode identity directly into the DAG so the
         // dispatch path encounters the defensive skip.
@@ -5228,7 +5424,7 @@ mod tests {
     fn external_commit_artifact_terminalizes_dag_identity() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("content"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Step 1: drive Source + Analysis to ready state by submitting
         // an Analysis request and draining.
@@ -5353,7 +5549,7 @@ mod tests {
 
     #[test]
     fn submit_with_source_uses_provided_content() {
-        let sched = Scheduler::new_sync(
+        let sched = Scheduler::test_new_sync(
             SchedulerConfig::default(),
             Arc::new(MemorySourceLoader::new()),
         );
@@ -5381,7 +5577,7 @@ mod tests {
 
     #[test]
     fn newer_source_supersedes_older_request() {
-        let sched = Scheduler::new_sync(
+        let sched = Scheduler::test_new_sync(
             SchedulerConfig::default(),
             Arc::new(MemorySourceLoader::new()),
         );
@@ -5526,7 +5722,7 @@ mod tests {
 
     #[test]
     fn close_file_clears_overlay() {
-        let sched = Scheduler::new_sync(
+        let sched = Scheduler::test_new_sync(
             SchedulerConfig::default(),
             Arc::new(MemorySourceLoader::new()),
         );
@@ -5558,7 +5754,7 @@ mod tests {
     fn shutdown_signals_pending_handles() {
         let loader = Arc::new(MemorySourceLoader::new());
         // Don't insert the file — so source stage can't complete
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         let handle = sched.submit_request(Request {
             file_id: "/missing.vue".to_string(),
@@ -5635,7 +5831,7 @@ mod tests {
     fn native_driver_processes_request() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("content"));
-        let sched = Scheduler::new(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new(SchedulerConfig::default(), loader);
 
         let handle = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
@@ -5655,7 +5851,7 @@ mod tests {
     #[test]
     fn native_driver_shutdown_clean() {
         let loader = Arc::new(MemorySourceLoader::new());
-        let sched = Scheduler::new(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new(SchedulerConfig::default(), loader);
 
         // Just drop it — should not hang or panic
         drop(sched);
@@ -5695,7 +5891,7 @@ mod tests {
         blockers.insert("/a.vue".to_string(), vec!["/dep.ts".to_string()]);
 
         let executor = Arc::new(BlockingExecutor { blockers });
-        let sched = Scheduler::new_sync_with_executor(SchedulerConfig::default(), loader, executor);
+        let sched = Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader, executor);
 
         // Request Artifact for A
         let handle = sched.submit_request(Request {
@@ -5745,7 +5941,7 @@ mod tests {
         let executor = Arc::new(BlockingExecutor {
             blockers: std::collections::HashMap::new(),
         });
-        let sched = Scheduler::new_sync_with_executor(SchedulerConfig::default(), loader, executor);
+        let sched = Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader, executor);
 
         let handle = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
@@ -5768,7 +5964,7 @@ mod tests {
 
     #[test]
     fn file_not_found_signals_failed() {
-        let sched = Scheduler::new_sync(
+        let sched = Scheduler::test_new_sync(
             SchedulerConfig::default(),
             Arc::new(MemorySourceLoader::new()), // empty — no files
         );
@@ -5880,7 +6076,7 @@ mod tests {
             io_threads: 1,
             dag_budget: Some(DagCapacityBudget { cpu: 1, io: 1 }),
         };
-        Scheduler::new_sync_with_executor(config, loader, executor)
+        Scheduler::test_new_sync_with_executor(config, loader, executor)
     }
 
     /// Source executor Err must release the IO permit and let a
@@ -6114,7 +6310,7 @@ mod tests {
             io_threads: 1,
             dag_budget: Some(DagCapacityBudget { cpu: 1, io: 1 }),
         };
-        let sched = Scheduler::with_executor(config, loader, Arc::new(PanickingSourceExecutor));
+        let sched = Scheduler::test_with_executor(config, loader, Arc::new(PanickingSourceExecutor));
 
         let h_panic = sched.submit_request(Request {
             file_id: "/panic.vue".to_string(),
@@ -6158,7 +6354,7 @@ mod tests {
     fn remove_and_readd_uses_higher_generation() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("v1"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader.clone());
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader.clone());
 
         // Upsert v1 → Source + Analysis at gen 1
         let h = sched.submit_request(Request {
@@ -6207,7 +6403,7 @@ mod tests {
         loader.insert("/a.vue".to_string(), Arc::from("a"));
         loader.insert("/dep1.ts".to_string(), Arc::from("dep1"));
         loader.insert("/dep2.ts".to_string(), Arc::from("dep2"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // File exists but at gen 0 (not yet admitted)
         // First call: blockers = [dep1]
@@ -6242,7 +6438,7 @@ mod tests {
     fn source_completion_merges_exact_resolved_deps() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a content"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Submit and drive to get a node at gen > 0
         let h = sched.submit_request(Request {
@@ -6289,7 +6485,7 @@ mod tests {
     #[test]
     fn removed_file_deferred_blockers_cleared() {
         let loader = Arc::new(MemorySourceLoader::new());
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Register deferred blockers for a file at gen 0
         sched.register_resolved_deps(
@@ -6313,7 +6509,7 @@ mod tests {
     fn tombstone_rejects_pre_remove_source_submission() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("content"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Submit a request (stamped with current epoch=0)
         let h1 = sched.submit_request(Request {
@@ -6356,7 +6552,7 @@ mod tests {
         let executor = Arc::new(BlockingExecutor {
             blockers: blockers_map,
         });
-        let sched = Scheduler::new_sync_with_executor(SchedulerConfig::default(), loader, executor);
+        let sched = Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader, executor);
 
         // Tombstone the dep (simulating a prior deletion)
         sched.remove("/deleted-dep.ts");
@@ -6397,7 +6593,7 @@ mod tests {
             blockers: blockers_map,
         });
         let sched =
-            Scheduler::new_sync_with_executor(SchedulerConfig::default(), loader.clone(), executor);
+            Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader.clone(), executor);
 
         // Submit /a.vue which depends on /dep.ts
         let h = sched.submit_request(Request {
@@ -6423,7 +6619,7 @@ mod tests {
     fn reset_clears_all_state() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
-        let sched = Scheduler::new(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new(SchedulerConfig::default(), loader);
 
         // Populate state
         let h = sched.submit_request(Request {
@@ -6486,7 +6682,7 @@ mod tests {
     fn reset_clears_auto_ingest_tracking() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
-        let sched = Scheduler::new(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new(SchedulerConfig::default(), loader);
 
         // Step 1: bring /a.vue to Source-committed so a subsequent
         // `register_resolved_deps` exercises the auto-ingest path
@@ -6592,7 +6788,7 @@ mod tests {
     fn reset_seeds_generation_floors_for_cleared_nodes() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
-        let sched = Scheduler::new(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new(SchedulerConfig::default(), loader);
 
         // Build up to gen N
         let h = sched.submit_request(Request {
@@ -6655,7 +6851,7 @@ mod tests {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
         loader.insert("/dep.ts".to_string(), Arc::from("dep"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Upsert + drive to get real generation
         let h = sched.submit_request(Request {
@@ -6710,7 +6906,7 @@ mod tests {
         // not whatever generation is current when it finishes.
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Get to a stable generation
         let h = sched.submit_request(Request {
@@ -6774,7 +6970,7 @@ mod tests {
         let executor = Arc::new(BlockingExecutor {
             blockers: blockers_map,
         });
-        let sched = Scheduler::new_sync_with_executor(SchedulerConfig::default(), loader, executor);
+        let sched = Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader, executor);
 
         // Step 1: Initial upsert → drive to gen G
         sched.submit_request(Request {
@@ -6836,7 +7032,7 @@ mod tests {
         // at the matching generation — not just node.generation().
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Submit and drive exactly ONE job (Source) — don't let Analysis run.
         sched.submit_request(Request {
@@ -6883,7 +7079,7 @@ mod tests {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
         // /bare-dep.ts intentionally NOT in loader
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Step 1: Initial upsert → drive to gen G
         sched.submit_request(Request {
@@ -6926,7 +7122,7 @@ mod tests {
         // Verify that when the scheduler hasn't committed Source yet (async lag),
         // commit_artifact is a no-op rather than committing at gen 0.
         let loader = Arc::new(MemorySourceLoader::new());
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Create a node but don't run Source
         sched.submit_request(Request {
@@ -6993,7 +7189,7 @@ mod tests {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
         loader.insert("/bare-dep.ts".to_string(), Arc::from("dep"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Step 1: upsert + drive to Analysis (Source + Analysis committed).
         sched.submit_request(Request {
@@ -7171,7 +7367,7 @@ mod tests {
             },
         );
 
-        let sched = Scheduler::with_executor(SchedulerConfig::default(), loader, executor);
+        let sched = Scheduler::test_with_executor(SchedulerConfig::default(), loader, executor);
 
         // Submit an Artifact request for /a.vue — drives Source →
         // Analysis. Analysis dispatches and blocks inside the gated
@@ -7340,7 +7536,7 @@ mod tests {
             dep_id: "/dep.ts".to_string(),
         });
 
-        let sched = Scheduler::with_executor(SchedulerConfig::default(), loader, executor);
+        let sched = Scheduler::test_with_executor(SchedulerConfig::default(), loader, executor);
 
         let handle = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
@@ -7441,7 +7637,7 @@ mod tests {
             io_threads: 1,
             dag_budget: Some(DagCapacityBudget { cpu: 1, io: 1 }),
         };
-        let sched = Scheduler::with_executor(config, loader, executor);
+        let sched = Scheduler::test_with_executor(config, loader, executor);
 
         let _h = sched.submit_request(Request {
             file_id: "/panic.vue".to_string(),
@@ -7585,7 +7781,7 @@ mod tests {
             },
         );
 
-        let sched = Scheduler::with_executor(SchedulerConfig::default(), loader, executor);
+        let sched = Scheduler::test_with_executor(SchedulerConfig::default(), loader, executor);
 
         let handle = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
@@ -7806,7 +8002,7 @@ mod tests {
     fn async_scheduler_with_executor(executor: Arc<dyn StageExecutor>) -> Arc<Scheduler> {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/ctx.vue".to_string(), Arc::from("<template>x</template>"));
-        Scheduler::with_executor(SchedulerConfig::default(), loader, executor)
+        Scheduler::test_with_executor(SchedulerConfig::default(), loader, executor)
     }
 
     /// A CPU-worker stage (`Analysis` at minimum) must observe the
@@ -8211,7 +8407,7 @@ mod tests {
             parent_analysis_observed: Arc::clone(&parent_observed),
             dep_source_observed: Arc::clone(&dep_observed),
         });
-        let sched = Scheduler::with_executor(SchedulerConfig::default(), loader, executor);
+        let sched = Scheduler::test_with_executor(SchedulerConfig::default(), loader, executor);
 
         let ctx = TestContext::new(PARENT_REQ_ID, true);
         let opaque = OpaqueRequestContext(Arc::clone(&ctx) as Arc<dyn RequestContextLike>);
@@ -8289,7 +8485,7 @@ mod tests {
         let executor: Arc<dyn StageExecutor> = Arc::new(PerFileProbe {
             slots: Arc::clone(&observed),
         });
-        let sched = Scheduler::with_executor(SchedulerConfig::default(), loader, executor);
+        let sched = Scheduler::test_with_executor(SchedulerConfig::default(), loader, executor);
 
         let handles: Vec<_> = (0..THREADS)
             .map(|i| {
@@ -8379,7 +8575,7 @@ mod tests {
     fn remove_artifact_if_not_newer_than_preserves_newer_generation_artifact() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a v1"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader.clone());
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader.clone());
 
         // Drive the node to a stable generation N with Source +
         // Analysis committed.
@@ -8503,7 +8699,7 @@ mod tests {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
         loader.insert("/dep.ts".to_string(), Arc::from("dep"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Drive /a.vue + /dep.ts to Analysis so register_resolved_deps
         // records its blocker set in the live (non-zero-generation)
@@ -8568,7 +8764,7 @@ mod tests {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
         loader.insert("/dep.ts".to_string(), Arc::from("dep"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
@@ -8630,7 +8826,7 @@ mod tests {
     fn pending_artifact_blockers_cleared_on_artifact_completion() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Drive /a.vue to Analysis so a_gen settles.
         sched.submit_request(Request {
@@ -8715,7 +8911,7 @@ mod tests {
     fn external_commit_artifact_clears_blocker_registry() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Drive /a.vue to Analysis so the node has both Source and
         // Analysis committed (the `commit_artifact` coherence gate
@@ -8786,7 +8982,7 @@ mod tests {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
         loader.insert("/dep.ts".to_string(), Arc::from("dep"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Drive /a.vue + /dep.ts to Analysis.
         sched.submit_request(Request {
@@ -8854,7 +9050,7 @@ mod tests {
     fn register_resolved_deps_skips_dead_producer_deps() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Drive /a.vue to Analysis.
         sched.submit_request(Request {
@@ -8925,7 +9121,7 @@ mod tests {
         // and routes through the FileNotFound terminalize_failure
         // path. The FileNode is created and bumped (gen 1) by
         // register_resolved_deps' auto-ingest pass.
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
@@ -9020,7 +9216,7 @@ mod tests {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
         loader.insert("/dep.ts".to_string(), Arc::from("dep"));
-        let sched = Scheduler::new_sync_with_executor(
+        let sched = Scheduler::test_new_sync_with_executor(
             SchedulerConfig::default(),
             loader,
             Arc::new(ErrAnalysisExecutor),
@@ -9119,7 +9315,7 @@ mod tests {
         // owner's register_resolved_deps call (otherwise the
         // auto-ingest creates the node at gen 1 inside the same
         // call, races with the test's expectations).
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         sched.submit_request(Request {
             file_id: "/dep.ts".to_string(),
@@ -9233,7 +9429,7 @@ mod tests {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
         loader.insert("/dep.ts".to_string(), Arc::from("dep"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Drive owner /a.vue to Analysis so subsequent
         // register_resolved_deps does not early-return on the
@@ -9391,7 +9587,7 @@ mod tests {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
         loader.insert("/dep.ts".to_string(), Arc::from("dep"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
@@ -9455,7 +9651,7 @@ mod tests {
     #[test]
     fn matrix_stale_gen_arm_opportunistically_cleans_tracking_entry() {
         let loader = Arc::new(MemorySourceLoader::new());
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         let dep_id = "/dep.ts";
         let dep_arc: Arc<str> = Arc::from(dep_id);
@@ -9525,7 +9721,7 @@ mod tests {
     #[test]
     fn matrix_stale_gen_cleanup_preserves_newer_gen_tracking_entry() {
         let loader = Arc::new(MemorySourceLoader::new());
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         let dep_id = "/dep.ts";
         let dep_arc: Arc<str> = Arc::from(dep_id);
@@ -9605,7 +9801,7 @@ mod tests {
     #[test]
     fn matrix_classifier_returns_gating_for_post_swap_intermediate_states() {
         let loader = Arc::new(MemorySourceLoader::new());
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         let dep_id = "/dep.ts";
         let dep_arc: Arc<str> = Arc::from(dep_id);
@@ -9703,7 +9899,7 @@ mod tests {
     #[test]
     fn auto_ingest_tracking_cleanup_preserves_newer_gen_reinsertion() {
         let loader = Arc::new(MemorySourceLoader::new());
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         let canonical: Arc<str> = Arc::from("/dep.ts");
 
@@ -9962,7 +10158,7 @@ mod tests {
             },
         );
 
-        let sched = Scheduler::with_executor(SchedulerConfig::default(), loader, executor);
+        let sched = Scheduler::test_with_executor(SchedulerConfig::default(), loader, executor);
 
         // Helper: poll-with-budget for handle resolution.
         fn poll_resolved<T: Clone>(
@@ -10225,7 +10421,7 @@ mod tests {
 
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/race.vue".to_string(), Arc::from("r"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
         let node = sched
             .nodes
             .entry("/race.vue".to_string())
@@ -10381,7 +10577,7 @@ mod tests {
 
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/race.vue".to_string(), Arc::from("r"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Seed a node at generation 1.
         sched.submit_request(Request {
@@ -10505,7 +10701,7 @@ mod tests {
         for i in 0..8 {
             loader.insert(format!("/race-{i}.vue"), Arc::from("v"));
         }
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Seed nodes for each /race-{i}.vue at gen >= 1.
         for i in 0..8 {
@@ -10704,7 +10900,7 @@ mod tests {
         // and records the terminal-dep-failure entry under the
         // Analysis DepKey BEFORE any Artifact admission for /a.vue.
 
-        let sched = Scheduler::new(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new(SchedulerConfig::default(), loader);
 
         // Drive /a.vue Source + Analysis to committed so a later
         // Artifact request finds the owner ready.
@@ -10881,7 +11077,7 @@ mod tests {
         let executor = Arc::new(CountingAnalysisExecutor {
             analysis_hits: AtomicU64::new(0),
         });
-        let sched = Scheduler::new_sync_with_executor(
+        let sched = Scheduler::test_new_sync_with_executor(
             SchedulerConfig::default(),
             loader,
             Arc::clone(&executor) as Arc<dyn crate::executor::StageExecutor>,
@@ -11070,7 +11266,7 @@ mod tests {
         // with FileNotFound, populating terminal_dep_failures.
 
         let executor: Arc<dyn crate::executor::StageExecutor> = Arc::new(OwnerWithDepExtractor);
-        let sched = Scheduler::with_executor(SchedulerConfig::default(), loader, executor);
+        let sched = Scheduler::test_with_executor(SchedulerConfig::default(), loader, executor);
 
         // Step 1: submit /dep.ts directly and drive to terminal
         // FileNotFound BEFORE /a.vue Source extracts deps. This
@@ -11290,7 +11486,7 @@ mod tests {
         // terminalize it via FileNotFound BEFORE
         // register_resolved_deps fires.
 
-        let sched = Scheduler::new(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new(SchedulerConfig::default(), loader);
 
         // Step 1: independently fail /dep.ts FIRST so
         // terminal_dep_failures carries the record at its (gen=1,
@@ -11564,7 +11760,7 @@ mod tests {
             },
         );
 
-        let sched = Scheduler::with_executor(SchedulerConfig::default(), loader, executor);
+        let sched = Scheduler::test_with_executor(SchedulerConfig::default(), loader, executor);
 
         fn poll_resolved<T: Clone>(
             handle: &CompletionHandle<T>,
@@ -11743,7 +11939,7 @@ mod tests {
     fn signal_stage_complete_clears_terminal_dep_failure_for_same_gen_recovery() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/dep.ts".to_string(), Arc::from("dep content"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         let dep_arc: Arc<str> = Arc::from("/dep.ts");
         // Plant a FileNode for /dep.ts and bump to gen=1 so we have
@@ -11884,7 +12080,7 @@ mod tests {
         loader.insert("/dep.ts".to_string(), Arc::from("dep content"));
         // Use new_sync so we can deterministically observe the
         // cleanup sweeps without driver-thread timing.
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Plant a FileNode for /dep.ts so the matrix / cleanup
         // sweeps have something to operate on. Then plant a
@@ -12022,7 +12218,7 @@ mod tests {
         // /dep.ts deliberately NOT inserted — Source terminalizes
         // via FileNotFound.
 
-        let sched = Scheduler::new(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new(SchedulerConfig::default(), loader);
 
         // Drive /a.vue Analysis ready.
         let analysis_handle = sched.submit_request(Request {
@@ -12181,7 +12377,7 @@ mod tests {
             },
         );
 
-        let sched = Scheduler::with_executor(SchedulerConfig::default(), loader, executor);
+        let sched = Scheduler::test_with_executor(SchedulerConfig::default(), loader, executor);
 
         // Drive /a.vue Source + Analysis to committed.
         let analysis_handle = sched.submit_request(Request {
@@ -12350,7 +12546,7 @@ mod tests {
         loader.insert("/a.vue".to_string(), Arc::from("a content"));
         // /dep.ts has NO content — we stage the failure directly
         // via terminal_dep_failures.
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Plant /a.vue and /dep.ts FileNodes at gen=1.
         let a_node = sched.create_node("/a.vue", None);
@@ -12556,7 +12752,7 @@ mod tests {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a content"));
         loader.insert("/dep.ts".to_string(), Arc::from("dep content"));
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Plant /a.vue and /dep.ts FileNodes at gen=1, with full
         // Source+Analysis committed for both (recovery state).
@@ -12783,7 +12979,7 @@ mod tests {
             }
         });
 
-        let sched = Scheduler::with_executor(
+        let sched = Scheduler::test_with_executor(
             SchedulerConfig {
                 cpu_threads: 1,
                 io_threads: 1,
@@ -12889,7 +13085,7 @@ mod tests {
             }
         });
 
-        let sched = Scheduler::with_executor(
+        let sched = Scheduler::test_with_executor(
             SchedulerConfig {
                 cpu_threads: 1,
                 io_threads: 1,
@@ -12964,7 +13160,7 @@ mod tests {
         use crate::job::{completion_pair, CompletionState, CompletionTarget, SchedulerError};
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/x.vue".to_string(), Arc::from("<template>x</template>"));
-        let sched = Scheduler::with_executor(
+        let sched = Scheduler::test_with_executor(
             SchedulerConfig {
                 cpu_threads: 1,
                 io_threads: 1,
@@ -13039,7 +13235,7 @@ mod tests {
                 Arc::from(format!("<template>s{i}</template>")),
             );
         }
-        let sched = Scheduler::with_executor(
+        let sched = Scheduler::test_with_executor(
             SchedulerConfig {
                 cpu_threads: 2,
                 io_threads: 2,
@@ -13414,7 +13610,7 @@ mod tests {
         loader.insert("/a.vue".to_string(), Arc::from("a content"));
         loader.insert("/b.vue".to_string(), Arc::from("b content"));
 
-        let sched = StdArc::new(Scheduler::with_executor(
+        let sched = StdArc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
             StdArc::new(crate::executor::DefaultExecutor),
@@ -13544,7 +13740,7 @@ mod tests {
 
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a content"));
-        let sched = Arc::new(Scheduler::with_executor(
+        let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
             Arc::new(crate::executor::DefaultExecutor),
@@ -13665,7 +13861,7 @@ mod tests {
             }
         });
 
-        let sched = Scheduler::with_executor(
+        let sched = Scheduler::test_with_executor(
             SchedulerConfig {
                 cpu_threads: 1,
                 io_threads: 1,
@@ -13733,7 +13929,7 @@ mod tests {
 
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a content"));
-        let sched = Arc::new(Scheduler::with_executor(
+        let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
             Arc::new(crate::executor::DefaultExecutor),
@@ -13876,7 +14072,7 @@ mod tests {
             }
         });
 
-        let sched = Scheduler::with_executor(
+        let sched = Scheduler::test_with_executor(
             SchedulerConfig {
                 cpu_threads: 1,
                 io_threads: 1,
@@ -14058,7 +14254,7 @@ mod tests {
             }
         });
 
-        let sched = Scheduler::with_executor(
+        let sched = Scheduler::test_with_executor(
             SchedulerConfig {
                 cpu_threads: 1,
                 io_threads: 1,
@@ -14198,7 +14394,7 @@ mod tests {
             }
         });
 
-        let sched = Scheduler::with_executor(
+        let sched = Scheduler::test_with_executor(
             SchedulerConfig {
                 cpu_threads: 1,
                 io_threads: 1,
@@ -14353,7 +14549,7 @@ mod tests {
 
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/x.vue".to_string(), Arc::from("<template>x</template>"));
-        let sched = Arc::new(Scheduler::with_executor(
+        let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
             Arc::new(crate::executor::DefaultExecutor),
@@ -14420,7 +14616,7 @@ mod tests {
 
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/x.vue".to_string(), Arc::from("<template>x</template>"));
-        let sched = Arc::new(Scheduler::with_executor(
+        let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
             Arc::new(crate::executor::DefaultExecutor),
@@ -14481,7 +14677,7 @@ mod tests {
 
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/x.vue".to_string(), Arc::from("<template>x</template>"));
-        let sched = Arc::new(Scheduler::with_executor(
+        let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
             Arc::new(crate::executor::DefaultExecutor),
@@ -14536,7 +14732,7 @@ mod tests {
 
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/x.vue".to_string(), Arc::from("<template>x</template>"));
-        let sched = Arc::new(Scheduler::with_executor(
+        let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
             Arc::new(crate::executor::DefaultExecutor),
@@ -14669,7 +14865,7 @@ mod tests {
 
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/x.vue".to_string(), Arc::from("<template>x</template>"));
-        let sched = Arc::new(Scheduler::with_executor(
+        let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
             Arc::new(crate::executor::DefaultExecutor),
@@ -14764,7 +14960,7 @@ mod tests {
 
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/x.vue".to_string(), Arc::from("<template>x</template>"));
-        let sched = Arc::new(Scheduler::with_executor(
+        let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig {
                 cpu_threads: 2,
                 io_threads: 1,
@@ -15282,7 +15478,7 @@ mod tests {
         let ids = ["/cap0.vue", "/cap1.vue"];
         let loader = batch_loader(&ids);
         // io budget = 1 so the second Source dequeue is budget-blocked.
-        let sched = Scheduler::new_sync(
+        let sched = Scheduler::test_new_sync(
             SchedulerConfig {
                 cpu_threads: 1,
                 io_threads: 1,
@@ -15473,7 +15669,7 @@ mod tests {
     #[test]
     fn wait_batch_returns_input_order() {
         let loader = Arc::new(MemorySourceLoader::new());
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         // Build three handles directly so the test fully controls the
         // completion order. Each is tagged with a distinct generation
@@ -15536,7 +15732,7 @@ mod tests {
     #[test]
     fn wait_batch_accepts_batch_by_value() {
         let loader = Arc::new(MemorySourceLoader::new());
-        let sched = Scheduler::new_sync(SchedulerConfig::default(), loader);
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
         let (h0, s0) = completion_pair::<RequestResult>();
         let (h1, s1) = completion_pair::<RequestResult>();
