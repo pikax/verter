@@ -435,7 +435,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .map(|(name, ty)| {
                         // Enum-member synthetic property — the prepared enum
                         // member map carries no per-member source span.
-                        ObjectMember::Property(ObjectProperty::synthetic(
+                        ObjectMember::Property(ObjectProperty::synthetic_public(
                             name.clone(),
                             ty.clone(),
                             false,

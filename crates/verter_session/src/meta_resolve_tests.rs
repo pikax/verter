@@ -160,7 +160,7 @@ fn imported_registry_seed_refresh_does_not_engage_skip_under_graph_only_authorit
     };
     let object = verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
         properties: vec![verter_type_expr::ObjectMember::Property(
-            verter_type_expr::ObjectProperty::synthetic(
+            verter_type_expr::ObjectProperty::synthetic_public(
                 "label".to_string(),
                 verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
                 true,
@@ -6528,13 +6528,13 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     // The macro shell: `PricingPlansSlots<{ id: string; tier: 'pro' }>`.
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
         properties: vec![
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic_public(
                 "id".to_string(),
                 TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
                 false,
                 false,
             )),
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic_public(
                 "tier".to_string(),
                 TypeExpr::string_literal("pro"),
                 false,
@@ -6728,13 +6728,13 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
         properties: vec![
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic_public(
                 "id".to_string(),
                 TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
                 false,
                 false,
             )),
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic_public(
                 "tier".to_string(),
                 TypeExpr::string_literal("pro"),
                 false,

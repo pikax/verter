@@ -1289,7 +1289,7 @@ fn build_public_instance_slot_type(
                 .iter()
                 .map(|binding| {
                     verter_type_expr::ObjectMember::Property(
-                        verter_type_expr::ObjectProperty::synthetic(
+                        verter_type_expr::ObjectProperty::synthetic_public(
                             binding.name.clone(),
                             binding.type_expr.clone(),
                             false,
@@ -1339,7 +1339,7 @@ fn build_public_instance_slots_member(
     let slot_properties = slots
         .iter()
         .map(|slot| {
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic_public(
                 slot.name.clone(),
                 build_public_instance_slot_type(slot),
                 !slot.is_required,

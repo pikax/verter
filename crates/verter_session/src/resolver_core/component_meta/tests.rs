@@ -988,7 +988,7 @@ type LocalItem = {
                 name: "Props".to_string(),
                 expanded: "{ item?: LocalItem }".to_string(),
                 type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                         "item".to_string(),
                         TypeExpr::Ref {
                             name: "LocalItem".into(),
@@ -1125,7 +1125,7 @@ type Props = Pick<ImportedBase, 'href'>
                 name: "Props".to_string(),
                 expanded: "{ href?: string }".to_string(),
                 type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                         "href".to_string(),
                         TypeExpr::Primitive(PrimitiveName::String),
                         true,
@@ -1238,7 +1238,7 @@ type Props = Pick<ImportedBase, 'href'>
                 name: "Props".to_string(),
                 expanded: "{ href?: string }".to_string(),
                 type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                         "href".to_string(),
                         TypeExpr::Primitive(PrimitiveName::String),
                         true,
@@ -1339,7 +1339,7 @@ type Props = {
                 name: "Props".to_string(),
                 expanded: "{ href?: ImportedBase['href'] }".to_string(),
                 type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                         "href".to_string(),
                         TypeExpr::IndexedAccess {
                             object: std::sync::Arc::new(TypeExpr::Ref {
@@ -1450,7 +1450,7 @@ type Props = {
                 name: "Props".to_string(),
                 expanded: "{ tooltip?: ImportedBase }".to_string(),
                 type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                         "tooltip".to_string(),
                         TypeExpr::Ref {
                             name: "ImportedBase".into(),
@@ -1935,7 +1935,7 @@ interface Helper {
                     name: "Helper".to_string(),
                     expanded: "{ label?: string }".to_string(),
                     type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                             "label".to_string(),
                             TypeExpr::Primitive(PrimitiveName::String),
                             true,

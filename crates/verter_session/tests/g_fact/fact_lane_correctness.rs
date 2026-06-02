@@ -92,7 +92,7 @@ fn property_value_change_shifts_semantic_hash() {
     // Discrimination: a real type-shape change (string → number)
     // DOES shift the semantic_hash.
     let body_a = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
             "x".to_string(),
             TypeExpr::Primitive(PrimitiveName::String),
             false,
@@ -100,7 +100,7 @@ fn property_value_change_shifts_semantic_hash() {
         ))],
     }));
     let body_b = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
             "x".to_string(),
             TypeExpr::Primitive(PrimitiveName::Number),
             false,

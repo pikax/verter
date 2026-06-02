@@ -245,7 +245,7 @@ fn collect_object_props(expr: &TypeExpr, props: &mut BTreeMap<String, ObjectProp
                     ObjectMember::Method(method) => {
                         props.insert(
                             method.name.clone(),
-                            ObjectProperty::synthetic(
+                            ObjectProperty::synthetic_public(
                                 method.name.clone(),
                                 TypeExpr::Function(Arc::new(method.function.clone())),
                                 method.optional,

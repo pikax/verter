@@ -311,7 +311,7 @@ fn component_meta_type_registry_prefers_resolved_registry_type_expr_when_availab
                 type_expr: verter_type_expr::TypeExpr::Object(Arc::new(
                     verter_type_expr::ObjectExpr {
                         properties: vec![verter_type_expr::ObjectMember::Property(
-                            verter_type_expr::ObjectProperty::synthetic(
+                            verter_type_expr::ObjectProperty::synthetic_public(
                                 "variants".to_string(),
                                 verter_type_expr::TypeExpr::Object(Arc::new(
                                     verter_type_expr::ObjectExpr { properties: vec![] },

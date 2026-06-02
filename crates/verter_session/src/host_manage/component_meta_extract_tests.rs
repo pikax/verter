@@ -510,7 +510,7 @@ mod walker_coverage_tests {
         let mut node = participating_ref();
         for _ in 0..100 {
             let obj = ObjectExpr {
-                properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                     "a".to_string(),
                     node,
                     false,
@@ -579,7 +579,7 @@ mod walker_coverage_tests {
 
         // `() => { wrapped: Target }`
         let object = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                 "wrapped".to_string(),
                 participating_ref(),
                 false,
@@ -655,7 +655,7 @@ mod walker_coverage_tests {
 
         // `new () => { wrapped: Target }`
         let object = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                 "wrapped".to_string(),
                 participating_ref(),
                 false,

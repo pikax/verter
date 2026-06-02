@@ -493,13 +493,13 @@ fn make_indexed_access_foo_k() -> Arc<TypeExpr> {
 fn make_object_with_two_props() -> Arc<TypeExpr> {
     Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic(
+            ObjectMember::Property(ObjectProperty::synthetic_public(
                 "a".into(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
                 false,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic(
+            ObjectMember::Property(ObjectProperty::synthetic_public(
                 "b".into(),
                 TypeExpr::Primitive(PrimitiveName::Number),
                 false,

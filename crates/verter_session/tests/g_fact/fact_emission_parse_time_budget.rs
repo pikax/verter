@@ -47,7 +47,7 @@ fn build_large_indexed(decl_count: usize) -> Arc<IndexedReady> {
     for i in 0..decl_count {
         let name = format!("Decl{i}");
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                 "a".to_string(),
                 TypeExpr::Primitive(if i % 2 == 0 {
                     PrimitiveName::String

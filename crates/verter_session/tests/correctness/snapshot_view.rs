@@ -756,7 +756,7 @@ mod self_tests {
             properties: props
                 .into_iter()
                 .map(|(name, ty, optional)| {
-                    ObjectMember::Property(ObjectProperty::synthetic(
+                    ObjectMember::Property(ObjectProperty::synthetic_public(
                         name.to_string(),
                         ty,
                         optional,

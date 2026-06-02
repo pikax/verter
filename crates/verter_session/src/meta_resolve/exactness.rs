@@ -213,7 +213,7 @@ mod tests {
         // `{ ctor: new () => string }` — a closed object whose only member is
         // a constructor type stays concrete (the member value is concrete).
         let expr = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                 "ctor".to_string(),
                 constructor_type_returning_string(),
                 false,
@@ -255,13 +255,13 @@ mod tests {
     fn closed_object_with_primitive_members_is_concrete() {
         let expr = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::synthetic(
+                ObjectMember::Property(ObjectProperty::synthetic_public(
                     "msg".to_string(),
                     TypeExpr::Primitive(PrimitiveName::String),
                     false,
                     false,
                 )),
-                ObjectMember::Property(ObjectProperty::synthetic(
+                ObjectMember::Property(ObjectProperty::synthetic_public(
                     "count".to_string(),
                     TypeExpr::Primitive(PrimitiveName::Number),
                     false,
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn open_object_with_ref_member_is_symbolic() {
         let expr = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                 "msg".to_string(),
                 TypeExpr::Ref {
                     name: Arc::from("Unresolved"),
@@ -302,7 +302,7 @@ mod tests {
         // { msg: { inner: T } } — outer object has a non-concrete
         // value; classification must surface symbolic.
         let inner = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                 "inner".to_string(),
                 TypeExpr::TypeParameter(verter_type_expr::TypeParam {
                     name: "T".to_string(),
@@ -314,7 +314,7 @@ mod tests {
             ))],
         }));
         let outer = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                 "msg".to_string(),
                 inner,
                 false,

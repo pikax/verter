@@ -46,7 +46,7 @@ fn build_foo(members: Vec<(&str, TypeExpr)>) -> Arc<IndexedReady> {
         properties: members
             .iter()
             .map(|(name, ty)| {
-                ObjectMember::Property(ObjectProperty::synthetic(
+                ObjectMember::Property(ObjectProperty::synthetic_public(
                     (*name).to_string(),
                     ty.clone(),
                     false,
@@ -154,13 +154,13 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
     // gets edited.
     let body_a = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic(
+            ObjectMember::Property(ObjectProperty::synthetic_public(
                 "id".to_string(),
                 TypeExpr::Primitive(PrimitiveName::Number),
                 false,
                 false,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic(
+            ObjectMember::Property(ObjectProperty::synthetic_public(
                 "name".to_string(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
@@ -169,7 +169,7 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
         ],
     }));
     let body_b_v1 = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
             "other".to_string(),
             TypeExpr::Primitive(PrimitiveName::String),
             false,
@@ -178,7 +178,7 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
     }));
     let body_b_v2 = TypeExpr::Object(Arc::new(ObjectExpr {
         // Edit: `string` → `number`.
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
             "other".to_string(),
             TypeExpr::Primitive(PrimitiveName::Number),
             false,
@@ -186,7 +186,7 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
         ))],
     }));
     let body_c = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
             "extra".to_string(),
             TypeExpr::Primitive(PrimitiveName::Boolean),
             false,

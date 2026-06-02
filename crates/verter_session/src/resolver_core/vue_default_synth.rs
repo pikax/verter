@@ -109,7 +109,7 @@ pub fn synthesise_vue_default_value_symbol(macros: &[AnalyzedMacro]) -> Option<S
 
         // Synthesized public-instance member (`$props` / `$slots` / …) — no
         // source declaration site for the synthetic member name.
-        members.push(ObjectMember::Property(ObjectProperty::synthetic(
+        members.push(ObjectMember::Property(ObjectProperty::synthetic_public(
             member_name.to_string(),
             type_arg.as_ref().clone(),
             false,

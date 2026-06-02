@@ -95,13 +95,13 @@ export type LiteralKeyedSlots<TPlan extends PricingPlan = PricingPlan> = {
 fn literal_keyed_slots_with_concrete_plan() -> TypeExpr {
     let plan_object = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic(
+            ObjectMember::Property(ObjectProperty::synthetic_public(
                 "id".to_string(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
                 false,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic(
+            ObjectMember::Property(ObjectProperty::synthetic_public(
                 "tier".to_string(),
                 TypeExpr::Literal(LiteralValue::String("pro".to_string())),
                 false,

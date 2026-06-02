@@ -57,7 +57,7 @@ fn build_with_merged_foo(parts: Vec<Vec<(&str, TypeExpr)>>) -> Arc<IndexedReady>
                 properties: p
                     .iter()
                     .map(|(n, ty)| {
-                        ObjectMember::Property(ObjectProperty::synthetic(
+                        ObjectMember::Property(ObjectProperty::synthetic_public(
                             (*n).to_string(),
                             ty.clone(),
                             false,

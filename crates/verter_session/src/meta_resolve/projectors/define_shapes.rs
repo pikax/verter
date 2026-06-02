@@ -409,7 +409,7 @@ pub(crate) fn slot_field_function_type_expr(
                     "AnalyzedSlotFieldBinding.binding_expr populated by analyzer (W0.2 invariant)",
                 );
                 // The analyzed binding tracks the NAME span only.
-                ObjectMember::Property(ObjectProperty::with_spans(
+                ObjectMember::Property(ObjectProperty::with_spans_public(
                     binding.name.clone(),
                     ty,
                     false,

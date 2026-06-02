@@ -135,7 +135,7 @@ fn meta_entry(name: &str, canonical_source: &str) -> ResolvedTypeRegistryMeta {
 
 fn object_with_property(prop_name: &str, ty: TypeExpr) -> TypeExpr {
     TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
             prop_name.to_string(),
             ty,
             false,
@@ -366,7 +366,7 @@ fn policy_active_refs_breaks_anonymous_indirect_cycle() {
     // recognise the re-entry through the anonymous shape and
     // terminate.
     let inner_object = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
             "y".to_string(),
             ref_zero("A"),
             false,
@@ -451,7 +451,7 @@ fn policy_active_refs_distinguishes_pick_with_different_type_args() {
     // `combined: { a_branch: Pick<X, 'a'>, b_branch: Pick<X, 'b'> }`
     let outer = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic(
+            ObjectMember::Property(ObjectProperty::synthetic_public(
                 "a_branch".to_string(),
                 ref_with_args(
                     "Pick",
@@ -463,7 +463,7 @@ fn policy_active_refs_distinguishes_pick_with_different_type_args() {
                 false,
                 false,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic(
+            ObjectMember::Property(ObjectProperty::synthetic_public(
                 "b_branch".to_string(),
                 ref_with_args(
                     "Pick",
@@ -483,13 +483,13 @@ fn policy_active_refs_distinguishes_pick_with_different_type_args() {
     // members reach this body via different type arguments.
     let x_body = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::synthetic(
+            ObjectMember::Property(ObjectProperty::synthetic_public(
                 "a".to_string(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
                 false,
             )),
-            ObjectMember::Property(ObjectProperty::synthetic(
+            ObjectMember::Property(ObjectProperty::synthetic_public(
                 "b".to_string(),
                 TypeExpr::Primitive(PrimitiveName::Number),
                 false,

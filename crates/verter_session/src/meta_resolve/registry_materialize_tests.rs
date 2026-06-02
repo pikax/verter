@@ -164,7 +164,7 @@ fn preserve_routes_object_raw_constructor_property_seeds_method_param_route() {
     // RAW: `{ make: new (x: Foo['bar']) => void }` — `make` is a PROPERTY
     // whose value is a bare constructor type carrying the public route.
     let raw = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
             "make".to_string(),
             TypeExpr::ConstructorType(Arc::new(function_expr_with_param(indexed_access_route()))),
             false,
@@ -175,7 +175,7 @@ fn preserve_routes_object_raw_constructor_property_seeds_method_param_route() {
     // MATERIALISED: `{ make(x: string): void }` — `make` is a METHOD whose
     // parameter was inlined to a primitive at query time.
     let materialized = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Method(MethodSignature::synthetic(
+        properties: vec![ObjectMember::Method(MethodSignature::synthetic_public(
             "make".to_string(),
             function_expr_with_param(TypeExpr::Primitive(PrimitiveName::String)),
             false,

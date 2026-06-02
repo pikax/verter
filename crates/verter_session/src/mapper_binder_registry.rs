@@ -904,7 +904,7 @@ mod tests {
         // fingerprint identically to one built via `synthetic` (both Public) —
         // the marker is only-for-non-public.
         let via_synthetic = Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                 "x".to_string(),
                 TypeExpr::Primitive(PrimitiveName::Number),
                 false,

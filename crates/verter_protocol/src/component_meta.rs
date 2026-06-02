@@ -1398,13 +1398,13 @@ fn build_test_meta() -> FfiComponentMeta {
     };
     let tree_node = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            TypeObjectMember::Property(ObjectProperty::synthetic(
+            TypeObjectMember::Property(ObjectProperty::synthetic_public(
                 "label".to_string(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
                 false,
             )),
-            TypeObjectMember::Property(ObjectProperty::synthetic(
+            TypeObjectMember::Property(ObjectProperty::synthetic_public(
                 "next".to_string(),
                 TypeExpr::union(vec![
                     tree_ref.clone(),
