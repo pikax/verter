@@ -1531,16 +1531,6 @@ impl SchedulerDag {
         (count, stranded)
     }
 
-    /// Mark a node as dispatched (its work is now executing on a
-    /// pool). Future `iter_ready` calls skip the node; final removal
-    /// goes through [`Self::complete`] or [`Self::cancel`] depending
-    /// on outcome.
-    pub fn mark_dispatched(&mut self, token: SubmissionToken) {
-        if let Some(node) = self.nodes.get_mut(&token) {
-            node.dispatched = true;
-        }
-    }
-
     /// Number of non-cancelled, non-dispatched nodes.
     pub fn pending_len(&self) -> usize {
         self.nodes
