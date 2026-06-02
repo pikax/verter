@@ -1288,16 +1288,20 @@ defineProps<C>()
 /// visibility) onto the published surface and a missing publication filter would
 /// leak them into props.
 ///
-/// NOTE on `native_props`: native_props is populated by the SEPARATE parser-side
-/// macro analyzer (`verter_compiler` `resolve_type` → `collect_native_props`),
-/// which enumerates the referenced class surface directly and currently records
-/// the raw class members even under a `Partial<…>` wrapper. That parser-side
-/// path is outside the typed-IR keyspace chokepoints this change gates (and the
-/// site inventory explicitly scoped it out as a non-published-filter carrier),
-/// so this test does NOT assert native_props exclusion under the mapped wrapper.
-/// See `native_props_fidelity_for_directly_declared_class_keeps_all_visibilities`
-/// for the in-scope native_props contract (direct class enumeration, keep-all
-/// with faithful visibility).
+/// CHARACTERIZATION on `native_props` (honest pin of CURRENT legacy behavior,
+/// NOT an aspirational assertion): native_props is populated by the SEPARATE
+/// parser-side macro analyzer (`verter_compiler` `resolve_type` →
+/// `collect_native_props`), which enumerates the referenced class surface
+/// DIRECTLY and currently records the raw class members even under a
+/// `Partial<…>` wrapper — bypassing the typed-IR keyspace chokepoints this
+/// change gates. native_props re-sources from the shared (visibility-gated)
+/// surface in B5 (roadmap); B11 deletes the legacy eager-OXC rail. Until then
+/// this test PINS the current legacy behavior (native_props keeps `b`/`c` under
+/// the wrapper, with faithful visibility) so the divergence between the gated
+/// published surface and the keep-all legacy native_props is explicit and not
+/// silently skipped. The in-scope native_props contract (direct class
+/// enumeration, keep-all with faithful visibility) is asserted by
+/// `native_props_fidelity_for_directly_declared_class_keeps_all_visibilities`.
 #[test]
 fn mapped_over_class_excludes_non_public_from_published_props() {
     let project = make_project();
@@ -1342,15 +1346,53 @@ defineProps<Partial<C>>()
         !prop_names.contains(&"c".to_string()),
         "private `c` must NOT be published through Partial<C>: {prop_names:?}"
     );
+
+    // CHARACTERIZATION (honest pin of current legacy native_props behavior;
+    // see doc-comment): the parser-side eager-OXC rail enumerates the class
+    // directly, so under the `Partial<…>` wrapper native_props STILL records
+    // the non-public members `b`/`c` (keep-all, with faithful visibility),
+    // unlike the visibility-gated PUBLISHED props above. This pins the B5/B11
+    // gap explicitly rather than skipping the native_props invariant. When B5
+    // re-sources native_props from the shared surface, this characterization
+    // flips and must be updated alongside that change.
+    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility;
+    let macro_meta = state
+        .resolved_macros
+        .iter()
+        .find(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .expect("resolved defineProps macro should be present");
+    let native_visibility_of = |name: &str| -> Option<ResolvedMemberVisibility> {
+        macro_meta
+            .native_props
+            .iter()
+            .find(|prop| prop.name == name)
+            .map(|prop| prop.visibility)
+    };
+    assert_eq!(
+        native_visibility_of("b"),
+        Some(ResolvedMemberVisibility::Protected),
+        "legacy native_props keeps protected `b` (with visibility) under Partial<C> \
+         until B5 re-sources native_props from the shared surface"
+    );
+    assert_eq!(
+        native_visibility_of("c"),
+        Some(ResolvedMemberVisibility::Private),
+        "legacy native_props keeps private `c` (with visibility) under Partial<C> \
+         until B5 re-sources native_props from the shared surface"
+    );
 }
 
-/// `defineProps<Pick<C, 'a'>>()` over a class materialises ONLY the picked
-/// public key. A `Pick` of a non-public key would not be a valid keyspace
-/// member (keyof excludes it), so only `a` survives.
+/// POSITIVE CONTROL (non-discriminating by design): `defineProps<Pick<C,
+/// 'a'>>()` over a class publishes the picked PUBLIC key `a` and nothing else.
 ///
-/// Discrimination: FAILS if `Pick`/member-route reconstruction re-mints the
-/// picked member without honouring the public-only keyspace (a `Pick<C, 'a'>`
-/// that pulled in `b`/`c` would surface them).
+/// This test does NOT discriminate the visibility fix: `a` is public, and `b` /
+/// `c` are not in the pick key set, so it passes whether or not Pick public-
+/// filters its source members. It is retained as a positive control that the
+/// happy-path public Pick still materialises. The DISCRIMINATING coverage for
+/// the Pick public-keyspace gate lives in
+/// `pick_over_class_excludes_picked_protected_key` /
+/// `pick_over_class_excludes_picked_private_key` below (a `Pick` whose key is a
+/// NON-public member must be empty).
 #[test]
 fn pick_over_class_publishes_only_picked_public_key() {
     let project = make_project();
@@ -1394,6 +1436,209 @@ defineProps<Pick<C, 'a'>>()
     assert!(
         !prop_names.contains(&"c".to_string()),
         "Pick<C, 'a'> must NOT publish private `c`: {prop_names:?}"
+    );
+}
+
+/// DISCRIMINATING (fix #1, Pick public-keyspace gate): `defineProps<Pick<C,
+/// 'b'>>()` where `b` is a PROTECTED class member. TS `Pick<C, K>` is a
+/// public-keyspace projection — `b` is not a member of `keyof C`, so the picked
+/// surface is EMPTY and no prop is published.
+///
+/// Discrimination: FAILS on the pre-fix tree where Pick reconstruction
+/// (`build_builtin_utility`'s Pick arm) filters `object_filter_source_surface`'s
+/// FULL surface by NAME only — `b` matches the pick name and leaks onto the
+/// published props as a non-public member. PASSES once Pick public-filters its
+/// source members before the name predicate.
+#[test]
+fn pick_over_class_excludes_picked_protected_key() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export class C {
+  public a: string = ""
+  protected b: number = 0
+  private c: boolean = false
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { C } from './types'
+defineProps<Pick<C, 'b'>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let state = project
+        .host()
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
+
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
+    assert!(
+        !prop_names.contains(&"b".to_string()),
+        "Pick<C, 'b'> over a PROTECTED key must publish NO prop (b ∉ keyof C): {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"a".to_string()) && !prop_names.contains(&"c".to_string()),
+        "Pick<C, 'b'> must not publish any other member either: {prop_names:?}"
+    );
+}
+
+/// DISCRIMINATING (fix #1, Pick public-keyspace gate): `defineProps<Pick<C,
+/// 'c'>>()` where `c` is a PRIVATE class member. `c` is not a member of
+/// `keyof C`, so the picked surface is EMPTY.
+///
+/// Discrimination: FAILS on the pre-fix tree (private `c` leaks through the
+/// name-only Pick filter); PASSES once Pick public-filters its source members.
+#[test]
+fn pick_over_class_excludes_picked_private_key() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export class C {
+  public a: string = ""
+  protected b: number = 0
+  private c: boolean = false
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { C } from './types'
+defineProps<Pick<C, 'c'>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let state = project
+        .host()
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
+
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
+    assert!(
+        !prop_names.contains(&"c".to_string()),
+        "Pick<C, 'c'> over a PRIVATE key must publish NO prop (c ∉ keyof C): {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"a".to_string()) && !prop_names.contains(&"b".to_string()),
+        "Pick<C, 'c'> must not publish any other member either: {prop_names:?}"
+    );
+}
+
+/// DISCRIMINATING (fix #1, Omit public-keyspace gate): `defineProps<Omit<C,
+/// 'a'>>()` over a class omits the PUBLIC key `a`. The remaining surface must
+/// publish NOTHING — TS `Omit<C, K> = Pick<C, Exclude<keyof C, K>>`, and
+/// `keyof C` is `'a'` only (public), so omitting `'a'` leaves an empty
+/// public keyspace. The non-public `b` / `c` must NOT be left published.
+///
+/// Discrimination: FAILS on the pre-fix tree where Omit keeps every source
+/// member whose name is not omitted — `b` / `c` survive the name-only filter
+/// and leak onto the published props. PASSES once Omit public-filters its
+/// source members before the name predicate.
+#[test]
+fn omit_over_class_does_not_leave_non_public_members_published() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export class C {
+  public a: string = ""
+  protected b: number = 0
+  private c: boolean = false
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { C } from './types'
+defineProps<Omit<C, 'a'>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let state = project
+        .host()
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
+
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
+    assert!(
+        !prop_names.contains(&"b".to_string()),
+        "Omit<C, 'a'> must NOT leave protected `b` published: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"c".to_string()),
+        "Omit<C, 'a'> must NOT leave private `c` published: {prop_names:?}"
+    );
+}
+
+/// DISCRIMINATING (fix #2/#3, indexed-access public-keyspace gate):
+/// `defineProps<Partial<C>['c']>()` indexes the PRIVATE key `c` out of a mapped
+/// surface over a class. `c` ∉ `keyof C` (public-only), so `Partial<C>` carries
+/// no `c` member and the indexed access is a miss — no prop is published.
+///
+/// Discrimination: FAILS on the pre-fix tree where the mapped/indexed admission
+/// (`walk.rs` Tier-1 Object membership, `base_member_admission_non_emitting`)
+/// admits `c` by NAME only, forging a value type for the private member.
+/// PASSES once the object admission requires `is_public()`.
+#[test]
+fn partial_then_indexed_private_key_is_miss() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export class C {
+  public a: string = ""
+  protected b: number = 0
+  private c: boolean = false
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { C } from './types'
+defineProps<Partial<C>['c']>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let state = project
+        .host()
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
+
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
+    assert!(
+        !prop_names.contains(&"c".to_string()),
+        "Partial<C>['c'] over a PRIVATE key must not publish `c`: {prop_names:?}"
+    );
+    assert!(
+        prop_names.is_empty() || prop_names.iter().all(|n| n == "constructor"),
+        "Partial<C>['c'] indexes a non-existent public key; surface must be empty: {prop_names:?}"
     );
 }
 
