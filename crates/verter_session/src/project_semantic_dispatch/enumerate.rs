@@ -523,20 +523,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // observed content version, so the answer matches the
             // node's interned `DeclIdentity.whole_hash` exactly.
             //
-            // - `Some(true)`  — the parse fact says the declared type
-            //   has a member named `needle`. The walker admits the
-            //   segment structurally; the narrowing path runs and
-            //   never falls through to the whole-surface dispatch.
-            // - `Some(false)` — the artifact for `(canonical,
-            //   whole_hash)` exists and lacks a `MemberPresence` for
-            //   `needle`. The walker refutes the segment; the
-            //   admission predicate returns `Some(false)` so the
-            //   walker's `can_narrow == false` path stops at an
-            //   `opaque_miss` instead of triggering the leak.
-            // - `None`        — the artifact is not recoverable for
-            //   the observed whole_hash (evicted, schema mismatch,
-            //   tombstoned). The predicate returns `None` and the
-            //   caller falls through to the existing tiers.
+            // Admission follows the inconclusive-and-resolve ruling
+            // (`MemberPresence` carries presence/key only, NO
+            // visibility — see [`Self::member_presence_fact_admission`]):
+            //
+            // - PRESENT — the parse fact records a member named `needle`,
+            //   but cannot prove it is PUBLIC. The predicate returns
+            //   `None` (INCONCLUSIVE) so the caller falls through to full
+            //   resolution, which carries visibility and applies the
+            //   public gate at the resolved-surface chokepoints. A
+            //   non-public member can therefore never be admitted on the
+            //   strength of a bare presence fact.
+            // - ABSENT — the artifact for `(canonical, whole_hash)`
+            //   exists and lacks a `MemberPresence` for `needle`. The
+            //   member is provably absent regardless of visibility; the
+            //   predicate returns `Some(false)` (refute) so the walker's
+            //   `can_narrow == false` path stops at an `opaque_miss`
+            //   instead of triggering the leak.
+            // - UNRECOVERABLE — the artifact is not recoverable for the
+            //   observed whole_hash (evicted, schema mismatch,
+            //   tombstoned). The predicate returns `None` and the caller
+            //   falls through to the existing tiers.
             //
             // The fact lookup is non-emitting by construction — it
             // reads from `FileFacts`'s registry, never dispatches an
@@ -749,57 +756,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             name: InternedName::from(needle),
             space: SymbolSpace::Type,
         };
-        // Visibility-aware admission (binding ruling §4: inconclusive-and-
-        // resolve, NOT a `MemberPresence` schema change). `MemberPresence`
-        // records presence/key only — it carries NO visibility. So:
-        //
-        // - PRESENT (`lookup(..).is_some()`): the member exists, but the fact
-        //   cannot prove it is PUBLIC. Admitting it would leak a potentially
-        //   protected/private member into the public keyspace (the `keyof` /
-        //   mapped / indexed-access derivation this predicate feeds is
-        //   public-only). Return `None` (INCONCLUSIVE) so the caller falls
-        //   through to full resolution, which carries visibility and applies the
-        //   public gate at the resolved-surface chokepoints
-        //   (`base_member_admission_non_emitting`'s Object arm, `build_key_of`,
-        //   the mapped/Pick/Omit derivations). Public members are admitted by
-        //   that resolution (and its result is cached), so correctness is
-        //   restored without a fact-schema change.
-        // - ABSENT (`is_none()`): the member is provably absent regardless of
-        //   visibility — refute structurally (`Some(false)`), unchanged.
-        // Visibility-aware admission (binding ruling §4: inconclusive-and-
-        // resolve, NOT a `MemberPresence` schema change). `MemberPresence`
-        // records presence/key only — it carries NO visibility. So:
-        //
-        // - PRESENT (`lookup(..).is_some()`): the member exists, but the fact
-        //   cannot prove it is PUBLIC. Admitting it would leak a potentially
-        //   protected/private member into the public keyspace (the `keyof` /
-        //   mapped / indexed-access derivation this predicate feeds is
-        //   public-only). Return `None` (INCONCLUSIVE) so the caller falls
-        //   through to full resolution, which carries visibility and applies the
-        //   public gate at the resolved-surface chokepoints
-        //   (`base_member_admission_non_emitting`'s Object arm, `build_key_of`,
-        //   the mapped/Pick/Omit derivations). Public members are admitted by
-        //   that resolution (and its result is cached), so correctness is
-        //   restored without a fact-schema change.
-        // - ABSENT (`is_none()`): the member is provably absent regardless of
-        //   visibility — refute structurally (`Some(false)`), unchanged.
-        // Visibility-aware admission (binding ruling §4: inconclusive-and-
-        // resolve, NOT a `MemberPresence` schema change). `MemberPresence`
-        // records presence/key only — it carries NO visibility. So:
-        //
-        // - PRESENT (`lookup(..).is_some()`): the member exists, but the fact
-        //   cannot prove it is PUBLIC. Admitting it would leak a potentially
-        //   protected/private member into the public keyspace (the `keyof` /
-        //   mapped / indexed-access derivation this predicate feeds is
-        //   public-only). Return `None` (INCONCLUSIVE) so the caller falls
-        //   through to full resolution, which carries visibility and applies the
-        //   public gate at the resolved-surface chokepoints
-        //   (`base_member_admission_non_emitting`'s Object arm, `build_key_of`,
-        //   the mapped/Pick/Omit derivations). Public members are admitted by
-        //   that resolution (and its result is cached), so correctness is
-        //   restored without a fact-schema change.
-        // - ABSENT (`is_none()`): the member is provably absent regardless of
-        //   visibility — refute structurally (`Some(false)`), unchanged.
         // Visibility-aware admission (binding ruling §4: inconclusive-and-
         // resolve, NOT a `MemberPresence` schema change). `MemberPresence`
         // records presence/key only — it carries NO visibility. So:
