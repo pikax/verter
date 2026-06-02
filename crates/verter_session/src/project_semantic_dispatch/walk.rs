@@ -3559,6 +3559,8 @@ fn merge_union_surfaces(
     let mut members: Vec<ShallowSurfaceMember> = Vec::new();
     for first_member in &live[0].members {
         let mut per_arm_values: Vec<SemanticNodeId> = Vec::with_capacity(live.len());
+        let mut per_arm_visibilities: Vec<verter_type_expr::MemberVisibility> =
+            Vec::with_capacity(live.len());
         let mut optional_in_any = false;
         let mut readonly_in_all = true;
         let mut present_in_all = true;
@@ -3566,6 +3568,7 @@ fn merge_union_surfaces(
             match arm.members.iter().find(|m| m.name == first_member.name) {
                 Some(arm_member) => {
                     per_arm_values.push(arm_member.value);
+                    per_arm_visibilities.push(arm_member.visibility);
                     optional_in_any |= arm_member.optional;
                     readonly_in_all &= arm_member.readonly;
                 }
@@ -3593,10 +3596,14 @@ fn merge_union_surfaces(
             optional: optional_in_any,
             readonly: readonly_in_all,
             is_method: false,
-            // Union common-member: synthesized across arms with no single
-            // source declaration — `Public`, per the no-single-origin merge
-            // rule.
-            visibility: verter_type_expr::MemberVisibility::Public,
+            // Union common-member (`(A|B)['k']`): aggregate the MOST-RESTRICTIVE
+            // accessibility across the per-arm contributors via the shared fold,
+            // so a member non-public in any arm is never synthesized as `Public`
+            // (matching the `_for_macro` sibling and TS member-access rules). For
+            // a single declaring arm the fold returns that arm's accessibility.
+            visibility: verter_type_expr::MemberVisibility::merge_member_visibility(
+                per_arm_visibilities,
+            ),
             declared_in_macro_type_arg: false,
             merge_role: MemberMergeRole::Authored,
             // Union common-member: the name appears in every arm, so there is
@@ -3672,28 +3679,27 @@ fn merge_union_surfaces_for_macro(
     let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(ordered_names.len());
     for name in &ordered_names {
         let mut per_arm_values: Vec<SemanticNodeId> = Vec::with_capacity(live.len());
+        let mut per_arm_visibilities: Vec<verter_type_expr::MemberVisibility> =
+            Vec::with_capacity(live.len());
         let mut optional_in_any = false;
         let mut readonly_in_all = true;
         let mut declaring_arms = 0usize;
-        // Aggregate the MOST-RESTRICTIVE accessibility across EVERY arm that
-        // declares this member (the shared merge rule): the merged member is
-        // `Public` only when it is Public in EVERY declaring arm; a member
-        // non-public in any arm stays non-public (never synthesized Public). For
-        // a member declared by exactly one arm the aggregate is that arm's
-        // accessibility, so the single-source case is preserved.
-        let mut merged_visibility: Option<verter_type_expr::MemberVisibility> = None;
         for arm in &live {
             if let Some(arm_member) = arm.members.iter().find(|m| &m.name == name) {
                 declaring_arms += 1;
-                merged_visibility = Some(match merged_visibility {
-                    Some(existing) => existing.most_restrictive(arm_member.visibility),
-                    None => arm_member.visibility,
-                });
+                per_arm_visibilities.push(arm_member.visibility);
                 per_arm_values.push(arm_member.value);
                 optional_in_any |= arm_member.optional;
                 readonly_in_all &= arm_member.readonly;
             }
         }
+        // Aggregate the MOST-RESTRICTIVE accessibility across EVERY declaring arm
+        // via the shared fold: the merged member is `Public` only when it is
+        // Public in EVERY declaring arm; a member non-public in any arm stays
+        // non-public (never synthesized Public). For a member declared by exactly
+        // one arm the fold returns that arm's accessibility.
+        let merged_visibility =
+            verter_type_expr::MemberVisibility::merge_member_visibility(per_arm_visibilities);
         // Absent from at least one arm (a live arm without it, or a
         // non-Object arm) ⇒ optional on the merged surface.
         if declaring_arms < arm_count || has_non_object_arm {
@@ -3715,7 +3721,7 @@ fn merge_union_surfaces_for_macro(
             // Most-restrictive accessibility across all declaring arms (the
             // shared merge rule): Public only when Public in every declaring
             // arm.
-            visibility: merged_visibility.unwrap_or_default(),
+            visibility: merged_visibility,
             declared_in_macro_type_arg: false,
             merge_role: MemberMergeRole::Authored,
             // Union arm-member: reached THROUGH the union, no single source

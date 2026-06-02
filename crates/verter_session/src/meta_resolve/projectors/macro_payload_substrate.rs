@@ -467,18 +467,40 @@ pub(crate) fn resolve_payload_surface_with_scope(
     match (true_members, false_members) {
         (Some(t), Some(f)) => {
             // Merge — union by member name. Members from the true
-            // branch take precedence on collision (TS conditional
-            // semantics: when `Mode extends 'editor'` is true, the
-            // EditorEmits row is the canonical one; the false-
-            // branch row only surfaces when its name is unique to
-            // that branch). Inherited `accepted_events` is the set
+            // branch take precedence on collision for the VALUE (TS
+            // conditional semantics: when `Mode extends 'editor'` is
+            // true, the EditorEmits row is the canonical one; the
+            // false-branch row only surfaces when its name is unique
+            // to that branch). Inherited `accepted_events` is the set
             // union; identical event names across branches dedup
             // naturally.
+            //
+            // VISIBILITY is NOT first-branch-wins: a name present in
+            // both branches folds its accessibility to the MOST
+            // RESTRICTIVE across both via the shared merge rule (an
+            // open conditional `T extends U ? {public x} : {private x}`
+            // can resolve to either branch, so `x` is only safely
+            // public when public in BOTH). A copy that kept the
+            // true-branch visibility would leak a private false-branch
+            // member as public.
             let mut merged: Vec<SurfaceMember> = Vec::with_capacity(t.len() + f.len());
-            let mut seen_names: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
+            let mut name_to_index: rustc_hash::FxHashMap<Arc<str>, usize> =
+                rustc_hash::FxHashMap::default();
             for member in t.iter().chain(f.iter()) {
-                if seen_names.insert(Arc::clone(&member.name)) {
-                    merged.push(member.clone());
+                match name_to_index.get(&member.name) {
+                    Some(&existing_idx) => {
+                        // Already represented (true-branch row wins for the
+                        // value/optional/readonly fields); fold in this
+                        // contributor's visibility to the most restrictive.
+                        let folded = merged[existing_idx]
+                            .visibility
+                            .most_restrictive(member.visibility);
+                        merged[existing_idx].visibility = folded;
+                    }
+                    None => {
+                        name_to_index.insert(Arc::clone(&member.name), merged.len());
+                        merged.push(member.clone());
+                    }
                 }
             }
             let view = crate::semantic_query::SurfaceView {

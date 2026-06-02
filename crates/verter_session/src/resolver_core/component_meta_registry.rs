@@ -485,6 +485,45 @@ fn merge_component_meta_registry_candidates_bounded(
                         ));
                     }
                 }
+                ObjectMember::Method(right_method) => {
+                    if let Some(ObjectMember::Method(existing_method)) =
+                        merged_members.iter_mut().find(|member| {
+                            matches!(
+                                member,
+                                ObjectMember::Method(method)
+                                    if method.name == right_method.name
+                            )
+                        })
+                    {
+                        // Duplicate method (same name in both sides): aggregate
+                        // to the MOST-RESTRICTIVE visibility via the shared merge
+                        // rule, exactly as the duplicate-property arm does. A
+                        // merged method is Public only when Public in BOTH
+                        // contributors, so a method non-public in either side
+                        // stays non-public — never synthesized Public. `optional`
+                        // ANDs (present-without-`?` in either side ⇒ required);
+                        // the existing (left) signature is retained.
+                        existing_method.optional =
+                            existing_method.optional && right_method.optional;
+                        existing_method.visibility = existing_method
+                            .visibility
+                            .most_restrictive(right_method.visibility);
+                    } else {
+                        // RHS-only method: carry the right-hand method's OXC spans
+                        // AND its declared accessibility verbatim (rebuild of an
+                        // existing member — a source-less constructor would
+                        // default it to Public).
+                        merged_members.push(ObjectMember::Method(
+                            verter_type_expr::MethodSignature::with_visibility(
+                                right_method.name.clone(),
+                                right_method.function.clone(),
+                                right_method.optional,
+                                right_method.visibility,
+                                right_method.spans,
+                            ),
+                        ));
+                    }
+                }
                 _ => {
                     if !merged_members.contains(right_member) {
                         merged_members.push(right_member.clone());
