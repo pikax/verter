@@ -569,6 +569,24 @@ impl MemberVisibility {
             self
         }
     }
+
+    /// Fold a set of contributor visibilities to the MOST restrictive of them
+    /// via [`most_restrictive`](Self::most_restrictive). This is the single
+    /// shared multi-contributor merge rule: every merge that aggregates a
+    /// member from more than one source (ordinary union common-member,
+    /// intersection merge, registry duplicate property/method merge, conditional
+    /// macro-payload branch merge) MUST route through this fold rather than
+    /// re-implementing the loop, so a member that is non-public in ANY
+    /// contributor can never be synthesized as `Public`. An empty contributor
+    /// set folds to `Public` (the identity: nothing restricts visibility).
+    #[must_use]
+    pub fn merge_member_visibility(
+        contributors: impl IntoIterator<Item = MemberVisibility>,
+    ) -> MemberVisibility {
+        contributors
+            .into_iter()
+            .fold(MemberVisibility::Public, MemberVisibility::most_restrictive)
+    }
 }
 
 /// A named property in an object type.

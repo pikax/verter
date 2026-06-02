@@ -225,3 +225,47 @@ fn method_signature_serde_roundtrip_preserves_non_public_visibility() {
     assert_eq!(decoded.visibility, MemberVisibility::Protected);
     assert_eq!(protected, decoded);
 }
+
+#[test]
+fn merge_member_visibility_folds_to_most_restrictive() {
+    use MemberVisibility::{Private, Protected, Public};
+
+    // Empty contributor set folds to the identity `Public`.
+    assert_eq!(MemberVisibility::merge_member_visibility([]), Public);
+
+    // All-public stays public (the hash-identity-preserving common case).
+    assert_eq!(
+        MemberVisibility::merge_member_visibility([Public, Public, Public]),
+        Public
+    );
+
+    // A single non-public contributor pulls the whole fold non-public — this is
+    // the discriminating property the ordinary-union / conditional / duplicate-
+    // method mergers rely on. A copy-paste that picked first-wins (Public) would
+    // fail these.
+    assert_eq!(
+        MemberVisibility::merge_member_visibility([Public, Protected]),
+        Protected
+    );
+    assert_eq!(
+        MemberVisibility::merge_member_visibility([Protected, Public]),
+        Protected
+    );
+    assert_eq!(
+        MemberVisibility::merge_member_visibility([Public, Public, Private]),
+        Private
+    );
+    // Private dominates Protected regardless of order.
+    assert_eq!(
+        MemberVisibility::merge_member_visibility([Protected, Private, Protected]),
+        Private
+    );
+    assert_eq!(
+        MemberVisibility::merge_member_visibility([Private, Protected, Public]),
+        Private
+    );
+    // Single contributor returns exactly that visibility (preserves the
+    // single-source case).
+    assert_eq!(MemberVisibility::merge_member_visibility([Protected]), Protected);
+    assert_eq!(MemberVisibility::merge_member_visibility([Private]), Private);
+}
