@@ -951,6 +951,66 @@ fn resolved_macro_surfaces_full_contract() {
         }
         other => panic!("expected TypeText props_type, got {other:?}"),
     }
+    // A MAPPED / INDEX-SIGNATURE root (`{ [key: string]: T }`) is the same
+    // TypeText variant. It is source-backed, so it carries a real span and a
+    // dependency closure for the value-type name (`T`) — here an import so both
+    // closure halves are exercised. Asserted field-by-field so a wrong ts/deps/
+    // span fails discriminatingly.
+    let index_signature_root = MacroPropsTypeDto::TypeText {
+        ts: "{ [key: string]: T }".to_string(),
+        deps: MacroTypeDepsDto {
+            imports: vec![MacroTypeImportDto {
+                source: "./value".to_string(),
+                bindings: vec![MacroTypeImportBindingDto::Named {
+                    imported: "T".to_string(),
+                    local: None,
+                }],
+            }],
+            local_declarations: vec![],
+        },
+        span: Some(MacroSourceSpanDto { start: 50, end: 70 }),
+    };
+    match &index_signature_root {
+        MacroPropsTypeDto::TypeText { ts, deps, span } => {
+            assert_eq!(ts, "{ [key: string]: T }");
+            assert_eq!(deps.imports.len(), 1);
+            assert_eq!(deps.imports[0].source, "./value");
+            assert_eq!(
+                deps.imports[0].bindings[0],
+                MacroTypeImportBindingDto::Named {
+                    imported: "T".to_string(),
+                    local: None,
+                }
+            );
+            assert!(deps.local_declarations.is_empty());
+            let span = span.expect("source-backed index-signature root carries a span");
+            assert_eq!(span.start, 50);
+            assert_eq!(span.end, 70);
+            assert!(span.start < span.end);
+        }
+        other => panic!("expected TypeText props_type, got {other:?}"),
+    }
+    // An UNRESOLVED RAW root is also the TypeText variant: the producer could not
+    // resolve the root to a named ref, so it emits the raw type text verbatim
+    // with an empty dependency closure. The fallback is source-less synthetic, so
+    // `span` is `None` per the source-less-synthetic convention.
+    let unresolved_raw_root = MacroPropsTypeDto::TypeText {
+        ts: "ThisTypeDoesNotResolve<Whatever>".to_string(),
+        deps: MacroTypeDepsDto::default(),
+        span: None,
+    };
+    match &unresolved_raw_root {
+        MacroPropsTypeDto::TypeText { ts, deps, span } => {
+            assert_eq!(ts, "ThisTypeDoesNotResolve<Whatever>");
+            assert!(deps.imports.is_empty());
+            assert!(deps.local_declarations.is_empty());
+            assert!(
+                span.is_none(),
+                "unresolved synthetic raw root has no source span"
+            );
+        }
+        other => panic!("expected TypeText props_type, got {other:?}"),
+    }
 
     let inline_root = MacroPropsTypeDto::Inline {
         ts: None,
@@ -966,9 +1026,17 @@ fn resolved_macro_surfaces_full_contract() {
         }
         other => panic!("expected Inline props_type, got {other:?}"),
     }
-    // The three variants are distinct values.
+    // The variants — and the distinct TypeText roots within the variant — are
+    // distinct values: TypeText vs Inline, and each raw root text differs.
     assert_ne!(raw_root, inline_root);
     assert_ne!(raw_root, empty_object_root);
+    assert_ne!(raw_root, index_signature_root);
+    assert_ne!(raw_root, unresolved_raw_root);
+    assert_ne!(empty_object_root, index_signature_root);
+    assert_ne!(empty_object_root, unresolved_raw_root);
+    assert_ne!(index_signature_root, unresolved_raw_root);
+    assert_ne!(index_signature_root, inline_root);
+    assert_ne!(unresolved_raw_root, inline_root);
 
     // The emits surface carries the `defineEmits<T>()` type argument: rendered
     // `<T>` text + dependency closure + span, so emit diagnostics are DTO-owned.
