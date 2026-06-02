@@ -655,6 +655,15 @@ pub struct Scheduler {
     /// `debug_assert!` for the deliberately-injected case.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) pool_submit_fault_was_injected: AtomicBool,
+    /// Test-only count of I/O pool submit ATTEMPTS made by the driver
+    /// (incremented at the top of [`Self::try_submit_io`], before the
+    /// nonblocking `try_send`). A test parks the single I/O worker inside
+    /// a Source stage and then asserts this counter reaches the full
+    /// admitted fan-out WHILE the worker is still parked — proving the
+    /// driver kept dispatching past the stuck worker rather than blocking
+    /// on it. `cfg`-gated to `test`; absent from release builds.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) io_submit_attempts: std::sync::atomic::AtomicUsize,
 }
 
 /// Classification of a recorded `FileStage::Analysis` blocker dep
@@ -810,6 +819,8 @@ impl Scheduler {
             pool_submit_fault: AtomicU8::new(0),
             #[cfg(all(test, not(target_arch = "wasm32")))]
             pool_submit_fault_was_injected: AtomicBool::new(false),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            io_submit_attempts: std::sync::atomic::AtomicUsize::new(0),
         });
 
         // Driver holds Weak so it doesn't prevent Drop.
@@ -897,6 +908,8 @@ impl Scheduler {
             pool_submit_fault: AtomicU8::new(0),
             #[cfg(all(test, not(target_arch = "wasm32")))]
             pool_submit_fault_was_injected: AtomicBool::new(false),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            io_submit_attempts: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -3803,6 +3816,13 @@ impl Scheduler {
         &self,
         task: crate::pool::SchedulerPoolTask,
     ) -> Result<crate::pool::SchedulerPoolSubmitResult, crate::pool::SchedulerPoolSubmitError> {
+        // Record the submit ATTEMPT before doing anything else: a test
+        // that parks the single I/O worker asserts the driver reaches
+        // every admitted submit attempt while the worker is stuck. The
+        // count is incremented for the attempt itself, independent of
+        // whether the nonblocking `try_send` below succeeds.
+        #[cfg(test)]
+        self.io_submit_attempts.fetch_add(1, Ordering::AcqRel);
         #[cfg(test)]
         if let Some(err) = self.injected_pool_submit_fault() {
             // Drop `task` without running it (mirrors a genuine
@@ -3856,6 +3876,15 @@ impl Scheduler {
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn arm_pool_submit_fault_full(&self) {
         self.pool_submit_fault.store(1, Ordering::Release);
+    }
+
+    /// Test-only: number of I/O pool submit attempts the driver has made
+    /// so far (see [`Self::io_submit_attempts`]). A test parks the single
+    /// I/O worker and polls this until it reaches the full admitted
+    /// fan-out, proving the driver kept dispatching past the stuck worker.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn io_submit_attempts(&self) -> usize {
+        self.io_submit_attempts.load(Ordering::Acquire)
     }
 
     /// Handle a nonblocking pool-submit failure at the dispatch site.
@@ -15893,18 +15922,18 @@ mod tests {
         use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomOrd};
         use std::time::Duration;
 
-        /// CONSTRUCTION DOMINANCE (P0 #2 / capacity-loan rail): when the
-        /// host injects an IO pool sized from an EXPLICIT `dag_budget.io`,
-        /// the transport capacity must dominate that budget so the DAG
-        /// ledger stays the sole admission gate.
+        /// CONSTRUCTION DOMINANCE (capacity-loan rail): when the host
+        /// injects an IO pool sized from an EXPLICIT `dag_budget.io`, the
+        /// transport capacity must dominate that budget so the DAG ledger
+        /// stays the sole admission gate.
         ///
-        /// Discriminator: a transport sized only as `bounded(io_threads
-        /// * 4)` ignores the explicit budget — with `io_threads = 1,
-        /// dag_budget.io = 16` that transport is `4 < 16`, a TIGHTER gate
-        /// than the ledger (a second admission authority). Sizing the
-        /// transport from `resolved_dag_budget().io` keeps it `>= 16` so
-        /// the ledger stays the sole gate; an `io_threads * 4`-only
-        /// transport (capacity 4) FAILS this assertion.
+        /// Discriminator: a transport sized only as the legacy
+        /// `io_threads * 4` headroom ignores the explicit budget. With
+        /// `io_threads = 1` and `dag_budget.io = 16` that headroom is
+        /// `4 < 16`, a TIGHTER gate than the ledger (a second admission
+        /// authority). Sizing the transport from `resolved_dag_budget().io`
+        /// keeps the capacity `>= 16` so the ledger stays the sole gate; a
+        /// headroom-only transport of capacity `4` FAILS this assertion.
         #[test]
         fn injected_io_transport_dominates_explicit_dag_budget_io() {
             let config = SchedulerConfig {
@@ -16115,28 +16144,44 @@ mod tests {
             }
         }
 
-        /// DRIVER NONBLOCKING (P0 #1, the load-bearing discriminator):
-        /// with `io_threads = 1` and an explicit `dag_budget.io` LARGER
-        /// than an `io_threads * 4` channel headroom, the driver must
-        /// dispatch many Source jobs WITHOUT blocking — even while the
-        /// single IO worker is parked inside one Source stage.
+        /// DRIVER NONBLOCKING (the load-bearing discriminator): with
+        /// `io_threads = 1` the single I/O worker parks INSIDE the first
+        /// Source stage it picks up. The driver must keep dispatching
+        /// every other admitted Source job onto the pool WITHOUT waiting
+        /// for that stuck worker to drain.
         ///
-        /// Discriminator: a `bounded(io_threads * 4)` transport (capacity
-        /// 4) combined with a BLOCKING `send` would hang the driver here.
-        /// The DAG admits up to `dag_budget.io = 8` IO jobs; the single
-        /// worker parks on job #1, so the channel fills at 4 and a
-        /// blocking `send` of the 6th job would BLOCK the driver — no
-        /// further dispatch, the test would time out. Sizing the
-        /// transport to `>= 8` and using `try_send` (`try_submit`) instead
-        /// enqueues all admitted Source jobs and the driver returns
-        /// promptly. We assert every blocked job's Source stage was
-        /// ENTERED (the closures reached the worker) within a bounded wait
-        /// — proving the driver did not block partway through dispatching
-        /// them.
+        /// The discriminator is a driver-side submit counter
+        /// ([`Scheduler::io_submit_attempts`], bumped at the top of
+        /// `try_submit_io`). We pin worker job #0 with its gate held
+        /// CLOSED, then poll the counter and require it to reach all `N`
+        /// admitted submit attempts WHILE worker job #0 is still parked.
+        /// The driver runs the dispatch loop on its own thread and calls
+        /// `try_submit_io` per ready job; a `try_send` (`try_submit`)
+        /// returns immediately whether or not the worker is draining, so
+        /// the counter climbs to `N` even though job #0 never finishes.
+        /// Only AFTER the counter proves the driver dispatched the whole
+        /// fan-out do we release the gates and assert completion.
+        ///
+        /// Why it fails against a BLOCKING bounded `send` (the pre-B7c
+        /// regression): the driver thread itself is the caller of
+        /// `try_submit_io`, so a blocking `send` onto a transport that
+        /// fills behind the parked worker would PARK THE DRIVER THREAD
+        /// mid-dispatch — the counter would stall below `N` and the
+        /// bounded wait below would time out. The nonblocking `try_send`
+        /// never parks the driver, so the counter reaches `N` promptly.
+        /// (With the production transport sizing — capacity ≥
+        /// `dag_budget.io` — a blocking send is masked because the
+        /// channel never fills with one worker; the regression is
+        /// exercised directly by temporarily shrinking the transport and
+        /// swapping `try_send`→`send`, which then stalls the driver here.
+        /// The transport-sizing half of the invariant is pinned
+        /// separately by `injected_io_transport_dominates_explicit_dag_budget_io`.)
         #[test]
         fn driver_does_not_block_dispatching_many_source_jobs_on_one_io_worker() {
-            // 8 files, each gated. io_threads = 1 → an io_threads*4 transport
-            // bounded(4). Explicit dag_budget.io = 8 admits all 8 at once.
+            // N files, each gated. io_threads = 1 so a single worker can
+            // be pinned inside Source job #0. Explicit dag_budget.io = N
+            // admits all N at once; the transport (capacity ≥ N) holds the
+            // N-1 jobs queued behind the parked worker without overflow.
             const N: usize = 8;
             let gates = dashmap::DashMap::new();
             let mut entered_rxs = Vec::with_capacity(N);
@@ -16172,10 +16217,10 @@ mod tests {
                 executor as Arc<dyn crate::executor::StageExecutor>,
             );
 
-            // Submit all N Source requests. With one IO worker parked on
-            // the first job it picks up, the remaining jobs must still be
-            // enqueued by the driver (try_submit, nonblocking) rather than
-            // blocking the driver's send.
+            // Submit all N Source requests. The single IO worker picks up
+            // ONE of them and parks inside its gate (gate never released
+            // yet); every other admitted job must still be dispatched by
+            // the driver onto the pool transport.
             let mut handles = Vec::with_capacity(N);
             for i in 0..N {
                 handles.push(sched.submit_request(Request {
@@ -16188,25 +16233,66 @@ mod tests {
                 }));
             }
 
-            // Release each gate as its Source stage is entered. Because
-            // there is ONE IO worker, the stages enter one-at-a-time; the
-            // discriminator is that EVERY one is reached without the
-            // driver hanging on a full transport. A blocking `send` onto a
-            // capacity-4 transport would stall after the 5th admitted job
-            // (channel full), so fewer than N "entered" signals would ever
-            // arrive and the bounded recv below would time out → test
-            // failure.
+            // Wait until exactly ONE Source stage has been entered (the
+            // worker is now parked on that gate, NOT released). Do not
+            // release it — we want the worker stuck while we observe the
+            // driver dispatch the rest.
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            let mut parked_idx = None;
             for (i, erx) in entered_rxs.iter().enumerate() {
+                if erx.recv_timeout(Duration::from_millis(50)).is_ok() {
+                    parked_idx = Some(i);
+                    break;
+                }
+            }
+            let parked_idx = parked_idx
+                .expect("the single IO worker must enter SOME Source stage and park there");
+
+            // THE DISCRIMINATOR: with the worker still parked on
+            // `parked_idx`, the driver must have dispatched ALL N submit
+            // attempts onto the pool. Poll the driver-side counter until
+            // it reaches N. A blocking `send` that filled behind the
+            // parked worker would have parked the DRIVER thread, so this
+            // count would stall below N and the loop would time out.
+            loop {
+                if sched.io_submit_attempts() >= N {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the driver only reached {} of {N} I/O submit attempts while the \
+                     single worker was parked on Source #{parked_idx} — it blocked \
+                     mid-dispatch instead of dispatching the whole admitted fan-out \
+                     (a blocking-send driver regression)",
+                    sched.io_submit_attempts()
+                );
+                std::thread::yield_now();
+            }
+            // The worker must STILL be parked (we never released its
+            // gate): the driver reached the full fan-out without the
+            // worker draining a single job.
+            assert_eq!(
+                sched.io_submit_attempts(),
+                N,
+                "the driver should dispatch exactly N Source jobs, all while the worker \
+                 was parked"
+            );
+
+            // Now release every gate (starting with the parked one) so the
+            // single worker drains all N jobs in turn and each request
+            // completes.
+            let _ = release_txs[parked_idx].send(());
+            for (i, erx) in entered_rxs.iter().enumerate() {
+                if i == parked_idx {
+                    continue;
+                }
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 erx.recv_timeout(remaining).unwrap_or_else(|_| {
                     panic!(
-                        "Source stage #{i} was never entered within the deadline — the \
-                         driver blocked dispatching Source jobs onto the single IO \
-                         worker (a blocking-send transport regression)"
+                        "Source stage #{i} was never entered within the deadline after \
+                         release — the queued jobs did not drain"
                     )
                 });
-                // Release this gate so the worker can pick up the next.
                 let _ = release_txs[i].send(());
             }
 
@@ -16219,30 +16305,52 @@ mod tests {
             }
         }
 
-        /// TRY_SUBMIT-FULL INVARIANT VIOLATION (P1): a fault-injected
-        /// `Full` from `try_submit` at the dispatch site must terminalize
-        /// the job (caller observes `Failed`, NOT a hang), release the
-        /// parked DAG reservation (no permit leak), and NOT
-        /// requeue/double-credit. After the faulted job terminalizes, a
-        /// SUBSEQUENT request in the same resource class must still admit
-        /// and complete — proving the permit was returned to the ledger.
+        /// TRY_SUBMIT-FULL INVARIANT VIOLATION (the reservation-leak
+        /// discriminator): a fault-injected `Full` from `try_submit` at
+        /// the dispatch site must terminalize the job (caller observes
+        /// `Failed`, NOT a hang), release the parked DAG reservation (no
+        /// permit leak), and NOT requeue/double-credit. After the faulted
+        /// job terminalizes, a SUBSEQUENT request in the SATURATED faulted
+        /// class must still admit and complete — proving the permit was
+        /// returned to the ledger.
+        ///
+        /// The leak must be discriminated, so the FAULTED resource class
+        /// is sized to exactly ONE permit and a same-class follow-up is
+        /// submitted. The one-shot fault fires on the FIRST non-inline
+        /// dispatch, which for a Source-target request is the Source job's
+        /// `try_submit_io` — an I/O-class submission. So the budget gives
+        /// `io: 1`: the faulted job reserved the single I/O permit; if
+        /// `terminalize_pool_submit_violation` failed to release it, the
+        /// I/O class stays saturated forever and the second Source request
+        /// could never dispatch (hang/timeout). With the by-value release
+        /// in `cancel`, the permit returns to the ledger and the second
+        /// request admits. (`cpu: 1` is incidental — only the I/O permit
+        /// is exercised by Source-target work.)
         ///
         /// The fault is injected via the test-only one-shot
         /// `arm_pool_submit_fault_full` seam, which also suppresses the
         /// `terminalize_pool_submit_violation` `debug_assert!` (the test
         /// characterizes the RELEASE path that runs in release builds).
+        ///
+        /// Discrimination proof (performed once, then reverted): skipping
+        /// the cancel/release inside `terminalize_pool_submit_violation`
+        /// (so the I/O reservation leaks) makes the second Source request
+        /// below STALL — `h_b.wait()` never returns Ready and the test
+        /// hangs to its timeout. Restoring the release makes it pass.
         #[test]
         fn try_submit_full_terminalizes_releases_reservation_no_leak() {
-            // Single CPU permit so a leaked reservation would PERMANENTLY
-            // stall the CPU class — the second request would then hang
-            // instead of completing. Analysis is CPU-class work.
+            // Single I/O permit so a LEAKED reservation permanently
+            // saturates the I/O class — the second Source request would
+            // then never admit. Source loading is I/O-class work, and the
+            // one-shot fault fires on the first non-inline dispatch (the
+            // Source `try_submit_io`).
             let loader = Arc::new(MemorySourceLoader::new());
             loader.insert("/a.vue".to_string(), Arc::from("<template>a</template>"));
             loader.insert("/b.vue".to_string(), Arc::from("<template>b</template>"));
             let config = SchedulerConfig {
                 cpu_threads: 1,
                 io_threads: 1,
-                dag_budget: Some(DagCapacityBudget { cpu: 1, io: 4 }),
+                dag_budget: Some(DagCapacityBudget { cpu: 1, io: 1 }),
             };
             let sched = Scheduler::test_with_executor(
                 config,
@@ -16251,13 +16359,14 @@ mod tests {
             );
 
             // Arm a one-shot Full fault: the NEXT non-inline pool submit
-            // observes Full. Source (/a.vue) dispatches to the IO pool;
-            // the first non-inline submit hits the fault and terminalizes.
+            // observes Full. Source (/a.vue) dispatches to the IO pool via
+            // `try_submit_io`; that first non-inline submit hits the fault
+            // and terminalizes, exercising the I/O reservation release.
             sched.arm_pool_submit_fault_full();
 
             let h_a = sched.submit_request(Request {
                 file_id: "/a.vue".to_string(),
-                target: TargetStage::Analysis,
+                target: TargetStage::Source,
                 priority: Priority::Interactive,
                 source: None,
                 file_kind: None,
@@ -16271,12 +16380,13 @@ mod tests {
                  no hang): {state_a:?}"
             );
 
-            // The reservation must have been released: a fresh request in
-            // the same (CPU) class still admits and completes. A leaked
-            // permit on a cpu:1 budget would stall this forever.
+            // The reservation must have been released: a fresh Source
+            // request in the SATURATED I/O class (io:1) still admits and
+            // completes. A leaked I/O permit would saturate the class and
+            // stall this request forever.
             let h_b = sched.submit_request(Request {
                 file_id: "/b.vue".to_string(),
-                target: TargetStage::Analysis,
+                target: TargetStage::Source,
                 priority: Priority::Interactive,
                 source: None,
                 file_kind: None,
@@ -16285,8 +16395,9 @@ mod tests {
             let state_b = h_b.wait();
             assert!(
                 matches!(state_b, CompletionState::Ready(_)),
-                "a subsequent request must complete after the faulted job released its \
-                 reservation (no permit leak, no double-credit stall): {state_b:?}"
+                "a subsequent same-class (I/O) request must complete after the faulted \
+                 job released its reservation (no permit leak, no double-credit stall): \
+                 {state_b:?}"
             );
         }
     }
