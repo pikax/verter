@@ -164,7 +164,9 @@ fn has_owner_whole_hash_fact(facts: &[FactVersionRef], owner: &str) -> bool {
     })
 }
 
-fn prop_names(meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis) -> Vec<String> {
+fn prop_names(
+    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+) -> Vec<String> {
     let mut names: Vec<String> = meta.props.iter().map(|p| p.name.clone()).collect();
     names.sort_unstable();
     names
@@ -182,7 +184,10 @@ fn prime_with_route_owned(host: &VerterHost) {
         "route-only read must materialise a route_owned_shallow entry for the owner SFC",
     );
     let resolved = host.resolve_component_meta(OWNER, ProjectionMode::Expanded);
-    assert!(resolved.is_some(), "cold resolve_component_meta must resolve");
+    assert!(
+        resolved.is_some(),
+        "cold resolve_component_meta must resolve"
+    );
 }
 
 #[test]

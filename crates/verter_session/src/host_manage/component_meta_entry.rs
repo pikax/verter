@@ -53,7 +53,12 @@ use super::{
 ///
 /// Returns the input unchanged (cloned into a fresh `Arc`) when no
 /// owner-Route fact is present.
-fn strip_owner_route_fact(
+///
+/// `pub(crate)` so the `resolve_component_meta` warm-cache publish
+/// boundaries (`component_meta_methods.rs`) apply the identical filter —
+/// the two cache paths must reach the same warm-validation outcome for
+/// the same owner.
+pub(crate) fn strip_owner_route_fact(
     owner_canonical: &str,
     facts: &[crate::resolver_core::FactVersionRef],
 ) -> Arc<[crate::resolver_core::FactVersionRef]> {

@@ -3389,13 +3389,27 @@ impl VerterHost {
             ),
         );
         let state = Arc::new(state.clone());
+        // Drop the owner's own non-round-tripping `DerivedFactHash{Route}`
+        // fact before admission, mirroring the `ComponentMetaResultDb`
+        // publish path (see `component_meta_entry::strip_owner_route_fact`).
+        // The owner Route hash is dual-sourced on
+        // `HostStoreView::derived_hashes` (indexed surface vs
+        // `route_owned_shallow`), so it does not round-trip warm
+        // validation; under concurrency a straggler false-misses on it and
+        // re-leads as a second cold `Flight::Leader`. The owner
+        // `FileWholeHash` fact (retained) already covers owner-content
+        // edits, and cross-file route facts (retained) gate dep edits.
+        let admitted = crate::host_manage::component_meta_entry::strip_owner_route_fact(
+            canonical,
+            fact_versions,
+        );
         // Strict admission. Cold-publish path: empty signatures
         // are skipped (the publish caller passes an empty slice
         // when the cold compute didn't observe any facts — strict
         // admission would refuse and emit
         // `FactSignatureAdmissionRefused`, which would inflate the
         // refused counter on the steady-state baseline).
-        if !fact_versions.is_empty() {
+        if !admitted.is_empty() {
             self.resolver_runtime().component_meta.insert_arc_with_kind(
                 crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
                     canonical,
@@ -3403,7 +3417,7 @@ impl VerterHost {
                     view_fingerprint,
                 ),
                 state.clone(),
-                fact_versions.to_vec(),
+                admitted.to_vec(),
                 "component_meta.results",
             );
         }
@@ -3426,7 +3440,7 @@ impl VerterHost {
         // R3/R26/R28: capture the resolved state's observed fact set
         // as an `Arc<[FactVersionRef]>` so the wrapper's warm-hit
         // validator can clone the handle without copying the slice.
-        let fact_versions: Arc<[crate::resolver_core::FactVersionRef]> =
+        let full_fact_versions: Arc<[crate::resolver_core::FactVersionRef]> =
             Arc::from(state.fact_versions.clone().into_boxed_slice());
         // Fan-out to any active outer fact-tracer scope so transitive
         // CROSS-FILE observations bubble through the mirror site. The
@@ -3447,16 +3461,27 @@ impl VerterHost {
         // `HostStoreView::build`), so it does not round-trip on warm
         // validation. Excluding owner-scoped facts from the tracer
         // fan-out keeps that non-dependency noise out of the
-        // tracer-owned signature. The stored
-        // `ResolvedComponentMetaCacheEntry` below retains the FULL
-        // `fact_versions` (its own `cached_resolved_meta` warm
-        // validation depends on the owner whole-hash).
-        let cross_file_facts: Vec<crate::resolver_core::FactVersionRef> = fact_versions
+        // tracer-owned signature.
+        let cross_file_facts: Vec<crate::resolver_core::FactVersionRef> = full_fact_versions
             .iter()
             .filter(|fact| fact.canonical_id() != Some(canonical))
             .cloned()
             .collect();
         crate::fact_signature_helpers::observe_fact_signature(&cross_file_facts);
+        // Drop the owner's own non-round-tripping `DerivedFactHash{Route}`
+        // fact from the STORED signature, mirroring the validated cache
+        // above and the `ComponentMetaResultDb` publish path (see
+        // `component_meta_entry::strip_owner_route_fact`). The owner
+        // `FileWholeHash` fact is retained, so `cached_resolved_meta` warm
+        // validation still rejects on owner-content edits; cross-file
+        // route facts are retained, so dep edits still invalidate. Only
+        // the owner self-Route fact — which a later warm-validation view
+        // may source differently (or not at all) — is removed. Idempotent:
+        // a warm-hit re-mirror passes an already-stripped signature.
+        let fact_versions = crate::host_manage::component_meta_entry::strip_owner_route_fact(
+            canonical,
+            &full_fact_versions,
+        );
         let cached = crate::types::ResolvedComponentMetaCacheEntry {
             fact_versions,
             state,
