@@ -25,11 +25,18 @@ use verter_scheduler::stage::Priority;
 /// One per-request outcome from the shared upsert engine
 /// [`VerterHost::upsert_many_with_priority`]. `result` is the same
 /// `Result<HostUpdateResult, HostError>` the single-file
-/// [`VerterHost::upsert`] returns; `canonical_id` is the request's
-/// resolved canonical, carried so callers (`compile_many`'s Stage B)
-/// can fold a failure into a per-canonical error map without re-deriving
-/// it.
+/// [`VerterHost::upsert`] returns.
+///
+/// `canonical_id` is the request's resolved canonical on every arm —
+/// including the failure arms, whose `result` `HostError` carries no
+/// canonical of its own — so callers can fold a failure into a
+/// per-canonical error map without re-deriving it. Its only consumer is
+/// `compile_many`'s Stage B error-folding, which lives in `host_compile`
+/// (the whole module is `not(target_arch = "wasm32")`). The field tracks
+/// that same target gate: on wasm there is no compile-batch path to read
+/// it, so carrying it would be dead storage.
 pub(crate) struct UpsertBatchOutcome {
+    #[cfg(not(target_arch = "wasm32"))]
     pub canonical_id: String,
     pub result: Result<HostUpdateResult, HostError>,
 }
@@ -106,6 +113,12 @@ impl UpsertBatchTxn {
             .into_iter()
             .zip(states)
             .map(|(prepared, state)| {
+                // Capture the canonical BEFORE the `Ready` arm moves
+                // `prepared` into `finish_upsert_post_commit`. Only
+                // `compile_many`'s Stage B (native-only) reads it back, so
+                // it is bound — like the field it feeds — under the same
+                // target gate as its sole consumer.
+                #[cfg(not(target_arch = "wasm32"))]
                 let canonical_id = prepared.canonical_id.clone();
                 let result = match state {
                     CompletionState::Ready(ready) => {
@@ -116,6 +129,7 @@ impl UpsertBatchTxn {
                     CompletionState::Shutdown => Err(HostError::Shutdown),
                 };
                 UpsertBatchOutcome {
+                    #[cfg(not(target_arch = "wasm32"))]
                     canonical_id,
                     result,
                 }
