@@ -1250,4 +1250,118 @@ mod tests {
             "repeat node_id() on the same expression should hit the front cache instead of rebuilding the graph node"
         );
     }
+
+    /// The graph wire is a public surface and `GraphObjectMember` carries no
+    /// visibility field, so a non-public class member must never be encoded onto
+    /// it. The object-node sanitizer drops non-public Property / Method members
+    /// (recursively, since nested member value types serialize through the same
+    /// path); index signatures (no accessibility) are kept.
+    ///
+    /// Discrimination: FAILS on a tree where the object-node builder encodes
+    /// every member — the protected `b` / private `c` members (and the nested
+    /// private member) would appear in the emitted `GraphNode::Object` member
+    /// list.
+    #[test]
+    fn object_node_wire_omits_non_public_members() {
+        use verter_type_expr::{
+            FunctionExpr, MemberVisibility, MethodSignature, ObjectExpr, ObjectMember,
+            ObjectProperty,
+        };
+
+        // Inner object surface with a non-public member, used as the value type
+        // of the public outer member `a` — exercises recursive sanitisation.
+        let inner = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty::with_visibility(
+                    "pub_inner".to_string(),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    false,
+                    false,
+                    MemberVisibility::Public,
+                    Default::default(),
+                )),
+                ObjectMember::Property(ObjectProperty::with_visibility(
+                    "priv_inner".to_string(),
+                    TypeExpr::Primitive(PrimitiveName::Number),
+                    false,
+                    false,
+                    MemberVisibility::Private,
+                    Default::default(),
+                )),
+            ],
+        }));
+
+        let outer = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty::with_visibility(
+                    "a".to_string(),
+                    inner,
+                    false,
+                    false,
+                    MemberVisibility::Public,
+                    Default::default(),
+                )),
+                ObjectMember::Property(ObjectProperty::with_visibility(
+                    "b".to_string(),
+                    TypeExpr::Primitive(PrimitiveName::Number),
+                    false,
+                    false,
+                    MemberVisibility::Protected,
+                    Default::default(),
+                )),
+                ObjectMember::Method(MethodSignature::with_visibility(
+                    "c".to_string(),
+                    FunctionExpr::synthetic(Vec::new(), None, Vec::new()),
+                    false,
+                    MemberVisibility::Private,
+                    Default::default(),
+                )),
+            ],
+        }));
+
+        let mut builder = GraphBuilder::new();
+        let outer_id = builder.node_id(&outer);
+        let nodes = builder.nodes();
+
+        // Resolve a string id back to its source string for name assertions.
+        let strings = builder.strings();
+        let name_of = |id: u32| -> Option<&str> {
+            if id == 0 {
+                None
+            } else {
+                strings.get((id - 1) as usize).map(String::as_str)
+            }
+        };
+
+        let GraphNode::Object { members } = &nodes[(outer_id - 1) as usize] else {
+            panic!("outer must encode to GraphNode::Object");
+        };
+        let outer_member_names: Vec<&str> =
+            members.iter().filter_map(|m| name_of(m.name)).collect();
+        assert_eq!(
+            outer_member_names,
+            vec!["a"],
+            "outer object wire must carry ONLY the public member `a` \
+             (protected `b` / private method `c` dropped): {outer_member_names:?}"
+        );
+
+        // The nested object (value type of `a`) must also be sanitised.
+        let inner_member = &members[0];
+        let GraphNode::Object {
+            members: inner_members,
+        } = &nodes[(inner_member.ty - 1) as usize]
+        else {
+            panic!("the value type of `a` must encode to GraphNode::Object");
+        };
+        let inner_member_names: Vec<&str> = inner_members
+            .iter()
+            .filter_map(|m| name_of(m.name))
+            .collect();
+        assert_eq!(
+            inner_member_names,
+            vec!["pub_inner"],
+            "nested object wire must carry ONLY `pub_inner` (private `priv_inner` \
+             dropped recursively): {inner_member_names:?}"
+        );
+    }
 }
