@@ -255,21 +255,25 @@ guards**. Sequence is faithful to §A; do not reorder.
 
 - **Source track:** semantic-graph (R-0a).
 - **Scope:** Close the contract gaps A0a left.
-  - Add the `AuditedResult<T, E>` carrier
-    (`crates/verter_protocol/src/typeinfo/audited_result.rs` + TS mirror) — it
-    does not exist anywhere in the tree (genuinely net-new, 0 hits).
+  - Add the `AuditedResult<T, E>` carrier in **`crates/verter_audit/src/audited_result.rs`**
+    (NOT `verter_protocol`: it is generic over `T`/`E`, which protobuf cannot
+    express, and embeds the audit-substrate `RequestAuditRecord`, so it rides the
+    ts-rs export into `audit.generated.ts` rather than forcing a dependency
+    inversion). It does not exist anywhere in the tree (genuinely net-new, 0 hits).
+    `packages/typeinfo` imports the generated TS type; there is no hand-written
+    mirror.
   - **Unignore-manifest — EXTEND/RECONCILE the A0a-landed manifest, do NOT create a
     second one.** A0a already landed the manifest as a Rust test, not a doc:
     `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs` +
     `tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs` (363 rows, schema
     `IgnoredTestRow { file, function, substrate: TargetSubstrate, unblocker }`,
     `EXPECTED_TOTAL_IGNORED_COUNT = 363`), with ~10 backing guards. U0 EXTENDS this
-    landed manifest + its guards to cover any new Phase-0a contract scope and
-    **reconciles its schema deliberately** — keep the landed `target_substrate` /
-    `unblocker` columns (do NOT introduce a competing `target_phase` / `unblocked_by`
-    schema at a different path), or migrate the schema in place under a documented
-    rename. There is no separate `typeinfo_tests_unignore_plan.md` doc — the manifest
-    IS the `.rs` test.
+    landed manifest + its guards to cover any new Phase-0a contract scope. The
+    schema is already the intended one — keep the landed `substrate` /
+    `unblocker` columns (do NOT introduce a competing `target_phase` /
+    `target_substrate` / `unblocked_by` schema at a different path). There is no
+    separate `typeinfo_tests_unignore_plan.md` doc — the manifest IS the `.rs`
+    test, so the reconciliation is a no-op schema confirm.
   - Add the remaining Phase-0a static guards not covered by A0a (symbol-node
     invariants, origin-edge taxonomy, closure-bound, substitution-canonicalisation,
     request-uniformity, the schema-version closed-surface pins) — see the Guards
@@ -286,8 +290,9 @@ guards**. Sequence is faithful to §A; do not reorder.
   unignore-manifest is a reconciliation, not a fresh add: do NOT create a duplicate
   manifest at a second path with a competing schema — the A0a-landed
   `typeinfo_ignored_test_manifest.rs` + its `manifest_data/` rows + its backing
-  guards are EXTENDED/RENAMED in place (reconcile the `target_substrate` / `unblocker`
-  schema or migrate it deliberately). `AuditedResult` is genuinely net-new.
+  guards stay in place under the already-landed `substrate` / `unblocker`
+  schema (a no-op confirm; do NOT migrate to a competing schema). `AuditedResult`
+  is genuinely net-new.
 - **Guards (the exhaustive Phase-0a remaining set per §R-0a / §8.0 / §A.23 — no
   silent "subset + etc."):**
   - **Dependency / projection:** `dependency_direction_one_way` (the typeinfo

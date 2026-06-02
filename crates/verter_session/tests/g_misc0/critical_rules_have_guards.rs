@@ -267,6 +267,26 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // exhaustive per-variant structured-expression
             // coverage.
             "typeinfo_request_validation",
+            // (5) Wire-surface static pins: dependency direction,
+            // proto-authoritative DTOs, no ts-rs on the wire,
+            // closed-enum discriminants declared (not raw uint32),
+            // no duplicate enums, no phase archaeology.
+            "typeinfo_wire_surface_guards",
+            // (6) Graph node/symbol/origin taxonomy pins: node
+            // taxonomy completeness, the three OriginEdgeKind
+            // taxonomies, symbol-node namespace + decl-slot
+            // identity, literal/string-table independence, cycle
+            // carrier, closure-policy surface, R21 split env hashes.
+            "typeinfo_graph_contract_guards",
+            // (7) Request-envelope contract: schema-version carriage,
+            // mode presence, the closed error union, per-request
+            // context/closure exemptions, scalar listSymbols,
+            // closure-free relate, concrete closure bounds.
+            "typeinfo_request_contract_guards",
+            // (8) Audit-surface contract: graph diagnostics live only
+            // on TypeInfoGraphPayload; AuditedResult lives in
+            // verter_audit and exports through audit.generated.ts.
+            "typeinfo_audit_contract_guards",
         ],
     ),
     (

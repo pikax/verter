@@ -15,7 +15,7 @@ Audit state is split between a leaf substrate crate (`verter_audit`) and the ses
 
 | Layer | Crate | Owns |
 | --- | --- | --- |
-| **Substrate** (DTOs + observer trait) | `verter_audit` | `RequestAuditRecord`, `RequestKind`, `RequestKindPayload`, per-kind payload structs, `AuditObserver` trait, `current_observer()` TLS accessor, `NoOpObserver`, `AuditConfig` + `AuditConsumerFilter`, `BatchAuditAggregator` + `AuditRecordSource`, `IncidentalFields` masking trait, `WALKER_DEPTH_CAP` |
+| **Substrate** (DTOs + observer trait) | `verter_audit` | `RequestAuditRecord`, `RequestKind`, `RequestKindPayload`, per-kind payload structs, `AuditedResult<T, E>` (audit-bearing execution carrier), `AuditObserver` trait, `current_observer()` TLS accessor, `NoOpObserver`, `AuditConfig` + `AuditConsumerFilter`, `BatchAuditAggregator` + `AuditRecordSource`, `IncidentalFields` masking trait, `WALKER_DEPTH_CAP` |
 | **Session** (lifecycle + runtime) | `verter_session` | `HostAuditRuntime`, `AuditRequestRegistration::{Active, Noop}`, `AuditRecordsStore`, `RequestContext` (implements `AuditObserver`), `RequestContextGuard`, peak-RSS sampler thread, `LspAuditSession`, audited entry-points (`compile_with_audit`, `analyze_with_audit`, `resolve_type_with_audit`, `audit_workspace_op`, `audit_mcp_tool_call`, `get_component_meta_with_resolution`) |
 
 Substrate/session isolation is mechanically enforced by the `verter_audit_no_upward_deps` guard (rejects any `verter_*` dependency in `verter_audit/Cargo.toml` other than `verter_span`) and the `audit_substrate_isolation` guard (rejects any `use verter_*` reference under `crates/verter_audit/src/` other than `verter_span`).
@@ -66,8 +66,17 @@ The top-level record (`crates/verter_audit/src/record.rs`) is the single shape e
 - `lsp_payload() -> Option<&LspRequestPayload>`
 - `mcp_payload() -> Option<&McpToolPayload>`
 - `bundler_batch_payload() -> Option<&BundlerBatchPayload>`
+- `typeinfo_graph_payload() -> Option<&TypeInfoGraphPayload>`
 
 Each returns `None` when `kind_payload` is not the matching variant.
+
+## `AuditedResult<T, E>` Carrier
+
+`AuditedResult<T, E>` (`crates/verter_audit/src/audited_result.rs`) is the audit-bearing execution envelope: it pairs the outcome of an audited request — success `T` or typed error `E` — with the `RequestAuditRecord` captured while producing it. It is a `#[serde(tag = "kind")]` discriminated enum (`Ok { value, audit }` / `Err { error, audit }`); both arms carry the record so the observability envelope survives regardless of outcome.
+
+It lives in `verter_audit`, **not** `verter_protocol`: it is generic over `T`/`E` (which protobuf cannot express) and embeds `RequestAuditRecord` (an audit-substrate type). Putting it in the protobuf-authoritative `verter_protocol` would invert the dependency or force a hand-written TS mirror. Instead it rides the existing ts-rs path, exporting as a generic `export type AuditedResult<T, E>` into `packages/types/audit.generated.ts`; `packages/typeinfo` imports that generated type. The typeinfo native session's `_with_audit` methods return `AuditedResult<Arc<...>, TypeInfoRequestError>`.
+
+Surface: `ok(value, audit)` / `err(error, audit)` constructors; `audit()`, `as_result()`, `into_parts()`, `into_result()`, `map()`, `map_err()`. The home + export rule is pinned by `audited_result_lives_in_audit_and_exports_through_generated_ts` (`crates/verter_session/tests/typeinfo_audit_contract_guards.rs`).
 
 ## Producer Entry-Points
 
