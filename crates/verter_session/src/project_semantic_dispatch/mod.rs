@@ -1170,19 +1170,6 @@ pub(crate) fn node_data_for(
     ctx.project_type_store().semantic_graph().node_data(node)
 }
 
-// Small helper to let the dispatcher express "this node has no member of
-// name N on a concrete surface" without the call-site pattern-matching
-// boilerplate leaking into the build_* functions. Not part of the public
-// API; `SurfaceView` itself owns the traversal structure.
-#[allow(dead_code)]
-fn find_member(surface: &SurfaceView, needle: &str) -> Option<SemanticNodeId> {
-    surface
-        .members
-        .iter()
-        .find(|m| m.name.as_ref() == needle)
-        .map(|m| m.value)
-}
-
 // ──────────────────────────────────────────────────────────────────────────
 // Dispatch helpers (NON-variant; compose existing variants
 // + read sidecars). These are the 3 helpers that replace the 3 originally
