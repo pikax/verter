@@ -1166,19 +1166,22 @@ pub(crate) fn component_meta_registry_raw_member_path_surface(
     expr: &verter_type_expr::TypeExpr,
     path: &[String],
 ) -> Option<verter_type_expr::TypeExpr> {
-    use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
+    use verter_type_expr::{MemberVisibility, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
-    /// Inlined replacement for the
-    /// retired free helper. Navigates into a `TypeExpr::Object` by a
-    /// single property name, unwrapping `Parenthesized`. Returns
-    /// `None` if `expr` is not an Object or no member matches.
-    fn navigate_object_member<'a>(expr: &'a TypeExpr, member_name: &str) -> Option<&'a TypeExpr> {
+    /// Navigate into a `TypeExpr::Object` by a single property name,
+    /// unwrapping `Parenthesized`. Returns the matched source
+    /// `ObjectProperty` (value + declared visibility) so the member-path
+    /// wrapper can thread the navigated member's visibility rather than
+    /// silently re-minting it as `Public`. Returns `None` if `expr` is not
+    /// an Object or no member matches.
+    fn navigate_object_member<'a>(
+        expr: &'a TypeExpr,
+        member_name: &str,
+    ) -> Option<&'a ObjectProperty> {
         match expr {
             TypeExpr::Parenthesized(inner) => navigate_object_member(inner, member_name),
             TypeExpr::Object(object) => object.properties.iter().find_map(|member| match member {
-                ObjectMember::Property(property) if property.name == member_name => {
-                    Some(&property.ty)
-                }
+                ObjectMember::Property(property) if property.name == member_name => Some(property),
                 _ => None,
             }),
             _ => None,
@@ -1190,22 +1193,37 @@ pub(crate) fn component_meta_registry_raw_member_path_surface(
     }
 
     let mut leaf = expr;
+    // Record each hop's declared visibility (aligned with `path`) so the
+    // rebuilt wrapper preserves the source member's accessibility.
+    let mut hop_visibilities: Vec<MemberVisibility> = Vec::with_capacity(path.len());
     for member_name in path {
-        leaf = navigate_object_member(leaf, member_name)?;
+        let property = navigate_object_member(leaf, member_name)?;
+        hop_visibilities.push(property.visibility);
+        leaf = &property.ty;
     }
 
-    Some(path.iter().rfold(leaf.clone(), |child, member_name| {
-        // Synthesized nested-object wrapper from a navigation path of member
-        // names — no source declaration site.
-        TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
-                member_name.clone(),
-                child,
-                true,
-                false,
-            ))],
-        }))
-    }))
+    Some(
+        path.iter().zip(hop_visibilities).rev().fold(
+            leaf.clone(),
+            |child, (member_name, visibility)| {
+                // Nested-object wrapper for one navigation hop. The member name
+                // comes from the path; its visibility is the source member's
+                // declared accessibility (threaded above) so a non-public hop is
+                // never re-minted as `Public`.
+                TypeExpr::Object(Arc::new(ObjectExpr {
+                    properties: vec![ObjectMember::Property(
+                        ObjectProperty::synthetic_with_visibility(
+                            member_name.clone(),
+                            child,
+                            true,
+                            false,
+                            visibility,
+                        ),
+                    )],
+                }))
+            },
+        ),
+    )
 }
 
 pub(crate) fn component_meta_registry_expr_references_name(
@@ -2572,7 +2590,7 @@ mod tests {
             properties: names
                 .iter()
                 .map(|name| {
-                    ObjectMember::Property(ObjectProperty::synthetic(
+                    ObjectMember::Property(ObjectProperty::synthetic_public(
                         (*name).to_string(),
                         TypeExpr::Primitive(PrimitiveName::String),
                         false,
@@ -2604,7 +2622,7 @@ mod tests {
             TypeExpr::Function(func)
         };
         TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                 "cb".to_string(),
                 cb,
                 false,
@@ -2727,7 +2745,7 @@ mod tests {
     #[test]
     fn merge_registry_candidates_combines_partial_object_routes() {
         let left = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                 "slots".to_string(),
                 object_with_props(&["base", "label"]),
                 true,
@@ -2735,10 +2753,10 @@ mod tests {
             ))],
         }));
         let right = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                 "variants".to_string(),
                 TypeExpr::Object(Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                         "color".to_string(),
                         TypeExpr::union(vec![
                             TypeExpr::string_literal("primary"),
@@ -3102,19 +3120,19 @@ export interface AvatarProps {
         let resolved_body = Some(object_with_props(&["next"]));
         let decl_body = Some(TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::synthetic(
+                ObjectMember::Property(ObjectProperty::synthetic_public(
                     "base".to_string(),
                     TypeExpr::Primitive(PrimitiveName::String),
                     true,
                     false,
                 )),
-                ObjectMember::Property(ObjectProperty::synthetic(
+                ObjectMember::Property(ObjectProperty::synthetic_public(
                     "current".to_string(),
                     TypeExpr::named("T"),
                     true,
                     false,
                 )),
-                ObjectMember::Property(ObjectProperty::synthetic(
+                ObjectMember::Property(ObjectProperty::synthetic_public(
                     "next".to_string(),
                     TypeExpr::Primitive(PrimitiveName::Number),
                     true,
@@ -3134,7 +3152,7 @@ export interface AvatarProps {
     #[test]
     fn choose_preferred_imported_type_body_keeps_meaningful_top_level_union_surface() {
         let flattened_object = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                 "path".to_string(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 false,
@@ -3163,7 +3181,7 @@ export interface AvatarProps {
             vec![FunctionParam::synthetic(
                 Some("props".to_string()),
                 TypeExpr::Object(Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                         "ui".to_string(),
                         TypeExpr::Primitive(PrimitiveName::String),
                         false,
@@ -3177,7 +3195,7 @@ export interface AvatarProps {
             vec![],
         );
         let property_object = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                 "default".to_string(),
                 TypeExpr::Function(Arc::new(function.clone())),
                 true,
@@ -3185,7 +3203,7 @@ export interface AvatarProps {
             ))],
         }));
         let method_object = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Method(MethodSignature::synthetic(
+            properties: vec![ObjectMember::Method(MethodSignature::synthetic_public(
                 "default".to_string(),
                 function,
                 true,
@@ -3203,10 +3221,10 @@ export interface AvatarProps {
     fn raw_member_path_surface_projects_explicit_object_members_without_widening() {
         let raw = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::synthetic(
+                ObjectMember::Property(ObjectProperty::synthetic_public(
                     "ui".to_string(),
                     TypeExpr::Object(Arc::new(ObjectExpr {
-                        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                             "base".to_string(),
                             TypeExpr::Primitive(PrimitiveName::String),
                             true,
@@ -3216,7 +3234,7 @@ export interface AvatarProps {
                     true,
                     false,
                 )),
-                ObjectMember::Property(ObjectProperty::synthetic(
+                ObjectMember::Property(ObjectProperty::synthetic_public(
                     "label".to_string(),
                     TypeExpr::Primitive(PrimitiveName::String),
                     true,
@@ -3475,12 +3493,12 @@ export interface AvatarProps {
         // Pick<Foo, "methodA"> equivalent — Include("methodA"). The
         // Method arm must skip `methodB` and walk `methodA`'s nested
         // refs.
-        let method_a = ObjectMember::Method(MethodSignature::synthetic(
+        let method_a = ObjectMember::Method(MethodSignature::synthetic_public(
             "methodA".to_string(),
             fn_returning("MethodAReturnRef"),
             false,
         ));
-        let method_b = ObjectMember::Method(MethodSignature::synthetic(
+        let method_b = ObjectMember::Method(MethodSignature::synthetic_public(
             "methodB".to_string(),
             fn_returning("MethodBReturnRef"),
             false,

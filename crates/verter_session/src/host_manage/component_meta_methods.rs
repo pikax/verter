@@ -1638,11 +1638,18 @@ impl VerterHost {
             leaf: verter_type_expr::TypeExpr,
         ) -> verter_type_expr::TypeExpr {
             path.iter().rfold(leaf, |child, member| {
-                // Synthesized nested-object wrapper from a member-name path.
+                // Structural nested-object wrapper synthesized from a member-name
+                // path with NO source object (the route fallback: `raw_body` was
+                // not an Object surface, so no source member visibility exists to
+                // thread). This fallback is reached only with public member names
+                // — non-public class members are gated out of the keyspace and
+                // out of route keys upstream — so `synthetic_public` is correct.
+                // The primary `component_meta_registry_raw_member_path_surface`
+                // path threads real source visibility when an Object body exists.
                 verter_type_expr::TypeExpr::Object(std::sync::Arc::new(
                     verter_type_expr::ObjectExpr {
                         properties: vec![verter_type_expr::ObjectMember::Property(
-                            verter_type_expr::ObjectProperty::synthetic(
+                            verter_type_expr::ObjectProperty::synthetic_public(
                                 member.clone(),
                                 child,
                                 true,
@@ -1672,19 +1679,23 @@ impl VerterHost {
             type_expr_contains_callable_surface_impl(expr)
         }
 
-        /// Issue #10 / extract the raw type of `member`
-        /// from `raw_body` when `raw_body` is an Object surface (the
-        /// resolved body of the picked alias). Returns `None` when
-        /// `raw_body` is not an Object or no property matches.
+        /// Issue #10 / extract the raw type AND declared visibility of
+        /// `member` from `raw_body` when `raw_body` is an Object surface (the
+        /// resolved body of the picked alias). Returns `None` when `raw_body`
+        /// is not an Object or no property matches. The visibility is threaded
+        /// so the Pick member-route reconstruction preserves the source
+        /// member's accessibility rather than re-minting it as `Public`.
         fn raw_pick_member_leaf(
             raw_body: &verter_type_expr::TypeExpr,
             member: &str,
-        ) -> Option<verter_type_expr::TypeExpr> {
+        ) -> Option<(verter_type_expr::TypeExpr, verter_type_expr::MemberVisibility)> {
             use verter_type_expr::{ObjectMember, TypeExpr};
             match raw_body {
                 TypeExpr::Parenthesized(inner) => raw_pick_member_leaf(inner, member),
                 TypeExpr::Object(object) => object.properties.iter().find_map(|m| match m {
-                    ObjectMember::Property(p) if p.name == member => Some(p.ty.clone()),
+                    ObjectMember::Property(p) if p.name == member => {
+                        Some((p.ty.clone(), p.visibility))
+                    }
                     _ => None,
                 }),
                 _ => None,
@@ -1783,6 +1794,16 @@ impl VerterHost {
                 crate::resolver_core::RouteDemand::Pick(members) => {
                     let mut properties = Vec::new();
                     for member in members {
+                        // Source visibility of the picked member (when the
+                        // resolved alias body is an Object surface). Threaded
+                        // into the reconstructed member so a Pick of a class
+                        // member preserves its declared accessibility instead of
+                        // re-minting it as `Public`. `Public` only when the
+                        // origin is genuinely source-less (no Object body / no
+                        // matching member — e.g. a route-only Pick).
+                        let member_visibility = raw_body
+                            .and_then(|body| raw_pick_member_leaf(body, member.as_str()))
+                            .map_or(verter_type_expr::MemberVisibility::Public, |(_, vis)| vis);
                         // Issue #10 / when the picked
                         // member's raw leaf contains a callable
                         // surface AND any callable parameter root
@@ -1799,7 +1820,7 @@ impl VerterHost {
                         // through `materialize_member_surface_expr`
                         // so package-backed param roots stay
                         // symbolic.
-                        if let Some(raw_leaf) =
+                        if let Some((raw_leaf, _)) =
                             raw_body.and_then(|body| raw_pick_member_leaf(body, member.as_str()))
                         {
                             if pick_member_route_should_skip_callable_descent(
@@ -1812,14 +1833,17 @@ impl VerterHost {
                                     &raw_leaf,
                                     true,
                                 );
-                                // Synthesized Pick-member projection from a
-                                // member-name string — no source member value.
-                                properties.push(ObjectMember::Property(ObjectProperty::synthetic(
-                                    member.clone(),
-                                    projected_leaf,
-                                    true,
-                                    false,
-                                )));
+                                // Pick-member projection — preserve the picked
+                                // member's declared visibility.
+                                properties.push(ObjectMember::Property(
+                                    ObjectProperty::synthetic_with_visibility(
+                                        member.clone(),
+                                        projected_leaf,
+                                        true,
+                                        false,
+                                        member_visibility,
+                                    ),
+                                ));
                                 continue;
                             }
                         }
@@ -1861,8 +1885,7 @@ impl VerterHost {
                         // through callable parameters).
                         if raw_body
                             .and_then(|body| raw_pick_member_leaf(body, member.as_str()))
-                            .as_ref()
-                            .is_some_and(type_expr_contains_callable_surface)
+                            .is_some_and(|(leaf, _)| type_expr_contains_callable_surface(&leaf))
                         {
                             #[cfg(any(test, debug_assertions))]
                             crate::capture_token::with_active_capture(|t| {
@@ -1950,16 +1973,19 @@ impl VerterHost {
                         } else {
                             stabilized_surface
                         };
-                        properties.push(ObjectMember::Property(ObjectProperty::synthetic(
-                            member.clone(),
-                            if compare_type_expr_improvement(&best_surface, &member_surface) {
-                                best_surface
-                            } else {
-                                member_surface
-                            },
-                            true,
-                            false,
-                        )));
+                        properties.push(ObjectMember::Property(
+                            ObjectProperty::synthetic_with_visibility(
+                                member.clone(),
+                                if compare_type_expr_improvement(&best_surface, &member_surface) {
+                                    best_surface
+                                } else {
+                                    member_surface
+                                },
+                                true,
+                                false,
+                                member_visibility,
+                            ),
+                        ));
                     }
                     (!properties.is_empty())
                         .then(|| TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties })))
