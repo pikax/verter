@@ -13,7 +13,7 @@
 //!   dedicated coordinator pool ([`verter_scheduler::HostCpuPool`]),
 //!   never on the scheduler's stage-execution `cpu_pool`. This is the
 //!   load-bearing isolation: a coordinator job may park waiting for
-//!   scheduler-owned `TaskKind::Source` work (the cross-file load+parse
+//!   scheduler-owned `TaskKind::Load` work (the cross-file load+parse
 //!   step) without ever occupying a worker that the scheduler's driver
 //!   needs to dispatch that very work. Routing the outer wait onto the
 //!   stage pool is exactly the

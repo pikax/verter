@@ -36,6 +36,9 @@ const THREADS: usize = 16;
 struct PassthroughExecutor;
 
 impl StageExecutor for PassthroughExecutor {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     fn execute_source(
         &self,
         _canonical_id: &str,

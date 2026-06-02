@@ -410,7 +410,7 @@ impl MetaProject {
 /// they fan out on the host-owned `HostCpuPool`, on wasm they run
 /// inline/sequentially (the scheduler only accounts the submission once
 /// per non-empty batch; its stage pool stays free for the items'
-/// cross-file `TaskKind::Source` load+parse work).
+/// cross-file `TaskKind::Load` load+parse work).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExecutionMode {

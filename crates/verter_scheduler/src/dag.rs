@@ -1974,10 +1974,14 @@ impl SchedulerDag {
         }
         // Same-generation recovery: clear any terminal failure
         // record for this canonical at this generation. A
-        // previously-failed Source/Analysis that succeeds at the
+        // previously-failed source/analysis stage that succeeds at the
         // same generation must not pin future matrix consults as
-        // `Failed`.
-        if matches!(completed, TaskKind::Source | TaskKind::Analysis) {
+        // `Failed`. The source stage completes under the `Load` label
+        // (with `Parse` reserved for the future split).
+        if matches!(
+            completed,
+            TaskKind::Load | TaskKind::Parse | TaskKind::Analysis
+        ) {
             self.clear_terminal_dep_failure_for_gen(canonical, generation);
         }
     }

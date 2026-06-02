@@ -20,12 +20,12 @@
 //! construction:
 //!
 //! - [`SchedulerCpuPool`](pool::SchedulerCpuPool) — executes
-//!   `TaskKind::{Analysis, Artifact}` stage CPU work. Its workers
+//!   `TaskKind::{Parse, Analysis, Artifact}` stage CPU work. Its workers
 //!   register as [`CallerKind::CpuWorker`](caller_kind::CallerKind) so
 //!   the cooperative pump may inline-execute ready dependencies on the
 //!   same thread.
 //! - [`SchedulerIoPool`](pool::SchedulerIoPool) — executes
-//!   `TaskKind::Source` (load) work. Workers register as
+//!   `TaskKind::Load` (source-content load) work. Workers register as
 //!   [`CallerKind::IoWorker`](caller_kind::CallerKind). Separate from
 //!   the CPU pool so blocking disk reads cannot starve parse/analyze
 //!   work. Dispatch uses nonblocking

@@ -140,6 +140,9 @@ struct GatedSourceExecutor {
 }
 
 impl StageExecutor for GatedSourceExecutor {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     fn execute_source(
         &self,
         _canonical_id: &str,

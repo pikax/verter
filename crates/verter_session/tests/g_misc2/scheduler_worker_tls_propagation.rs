@@ -223,6 +223,9 @@ fn scheduler_winner_thread_propagates_session_context_via_install_tls() {
     }
 
     impl StageExecutor for SessionProbeExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         fn execute_source(
             &self,
             _canonical_id: &str,

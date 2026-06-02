@@ -55,6 +55,9 @@ struct InlineReentryExecutor {
 }
 
 impl StageExecutor for InlineReentryExecutor {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     fn execute_source(
         &self,
         _canonical_id: &str,

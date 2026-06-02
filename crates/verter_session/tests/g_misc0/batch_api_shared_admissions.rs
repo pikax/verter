@@ -42,7 +42,7 @@ use verter_session::{HostConfig, VerterHost};
 /// shared-admission + single-submission-accounting path: the host batch
 /// coordinator fans the jobs out on the host coordinator pool and bumps
 /// `account_batch_submission` once, while the scheduler's stage pool
-/// stays free for any residual cross-file `TaskKind::Source` (load+parse)
+/// stays free for any residual cross-file `TaskKind::Load` (load+parse)
 /// work. The cold
 /// cross-file starvation path is exercised separately by
 /// `batch_meta_cold_deps_no_pool_starvation`.

@@ -141,6 +141,9 @@ impl HostStageExecutor {
 }
 
 impl StageExecutor for HostStageExecutor {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn execute_source(
         &self,

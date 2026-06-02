@@ -16,15 +16,15 @@ use crate::stage::TaskKind;
 
 /// Convert a [`TaskKind`] to its [`WorkKind`]/[`FileStageKey`] pair.
 ///
-/// `Source` lowers to a `Load`+`Parse` superset; the driver's I/O pool
-/// runs the load and the CPU pool runs the parse, but for DAG
-/// admission they share one identity (the `Source` file-stage). The
-/// adapter returns `WorkKind::Load` so dispatch routes through the I/O
-/// pool first; the parse step is intrinsic to the executor's source
-/// stage and does not re-enter the DAG as a separate node.
+/// The source stage is the load+parse pair sharing one DAG identity (the
+/// `Source` file-stage): `Load` routes through the I/O pool first and `Parse`
+/// is the CPU label for the same stage; both map to `FileStageKey::Source`.
+/// The parse step is intrinsic to the executor's source stage and does not
+/// re-enter the DAG as a separate node.
 pub fn dag_keys_for_task(task: TaskKind) -> (Option<Hash16>, FileStageKey, WorkKind) {
     match task {
-        TaskKind::Source => (None, FileStageKey::Source, WorkKind::Load),
+        TaskKind::Load => (None, FileStageKey::Source, WorkKind::Load),
+        TaskKind::Parse => (None, FileStageKey::Source, WorkKind::Parse),
         TaskKind::Analysis => (None, FileStageKey::Analysis, WorkKind::Analysis),
         TaskKind::Artifact { profile_hash } => (
             Some(profile_hash_to_bytes(profile_hash)),
@@ -34,6 +34,12 @@ pub fn dag_keys_for_task(task: TaskKind) -> (Option<Hash16>, FileStageKey, WorkK
             // artifact site never reads it.
             FileStageKey::Analysis,
             WorkKind::Artifact,
+        ),
+        // A cache node has no file-stage identity; it is submitted into the
+        // DAG directly by the cache layer, never lowered through this helper.
+        TaskKind::CacheNode { .. } => unreachable!(
+            "dag_keys_for_task lowers file-stage tasks; CacheNode carries no FileStageKey \
+             and is admitted into the DAG directly by the cache layer"
         ),
     }
 }
