@@ -24,7 +24,8 @@ use tokio::sync::mpsc;
 use verter_session::{CompileProfile, FileKind, UpsertRequest, VerterHost};
 
 use crate::provider_sync::{
-    commit_sync_transition, prepare_sync_transition, ProviderPathKind, ProviderSyncState,
+    commit_sync_transition, genuinely_stale_after_sync, prepare_sync_transition,
+    revert_unsynced_kinds, ProviderPathKind, ProviderSyncState,
 };
 use crate::tsgo::project_sync::ProjectSync;
 
@@ -775,41 +776,55 @@ async fn sync_file_to_provider(
         crate::server::configure_provider_paths_for_source(sync, &snapshot, canonical_id, true)
             .await;
     }
+    // Close-AFTER-successful-sync (per-kind, skip-active): capture prior state +
+    // stale paths, sync each kind, then commit and close only genuinely-stale
+    // paths. A failed replacement sync must never close the prior live path nor
+    // commit an unsynced path.
+    let previous_state = sync_states.get(canonical_id).map(|entry| entry.clone());
     let transition = prepare_sync_transition(sync_states, canonical_id, next_state);
-    close_stale_paths(sync, &transition.stale_paths).await;
+    let stale_paths = transition.stale_paths;
     let mut committed_state = transition.next;
+    let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
 
     // Sync DTS (both TSGO and tsserver)
     if let Some(api) = host.get_public_api(canonical_id) {
-        let Some(dts_path) = committed_state.api_path.clone() else {
-            return;
-        };
-        let result = if is_tsgo {
-            sync.open_dts(&dts_path, &api.code).await
-        } else {
-            sync.load_dts(&dts_path, &api.code).await
-        };
-        if result.is_ok() {
-            committed_state.set_background_loaded(ProviderPathKind::Api, true);
+        if let Some(dts_path) = committed_state.api_path.clone() {
+            let result = if is_tsgo {
+                sync.open_dts(&dts_path, &api.code).await
+            } else {
+                sync.load_dts(&dts_path, &api.code).await
+            };
+            if result.is_ok() {
+                committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                synced_kinds.push(ProviderPathKind::Api);
+            }
         }
     }
 
     // Sync IDE artifact (both TSGO and tsserver)
     if let Some(ide) = ide {
-        let Some(tsx_path) = committed_state.ide_path.clone() else {
-            return;
-        };
-        let result = if is_tsgo {
-            sync.open_tsx(&tsx_path, &ide.code).await
-        } else {
-            sync.load_tsx(&tsx_path, &ide.code).await
-        };
-        if result.is_ok() {
-            committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+        if let Some(tsx_path) = committed_state.ide_path.clone() {
+            let result = if is_tsgo {
+                sync.open_tsx(&tsx_path, &ide.code).await
+            } else {
+                sync.load_tsx(&tsx_path, &ide.code).await
+            };
+            if result.is_ok() {
+                committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                synced_kinds.push(ProviderPathKind::Ide);
+            }
         }
     }
 
-    commit_sync_transition(sync_states, canonical_id, committed_state);
+    if !synced_kinds.is_empty() {
+        revert_unsynced_kinds(&mut committed_state, previous_state.as_ref(), &synced_kinds);
+        let genuinely_stale =
+            genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
+        commit_sync_transition(sync_states, canonical_id, committed_state);
+        close_stale_paths(sync, &genuinely_stale).await;
+    }
+    // On total failure nothing is committed and nothing is closed: the previous
+    // state + provider paths are retained intact.
 }
 
 async fn close_stale_paths(sync: &ProjectSync, stale_paths: &[(ProviderPathKind, String)]) {
@@ -1753,6 +1768,104 @@ import Child from '@/Child.vue'
             classified[0].1,
             Tier::Other,
             "node_modules should be excluded by configured project defaults"
+        );
+    }
+
+    #[tokio::test]
+    async fn scanner_sync_retains_stale_paths_when_owner_change_sync_fails() {
+        // AUDIT (workspace_scanner, invariant b): the initial-scan background
+        // sync must sync the NEW paths first and close stale paths only AFTER a
+        // successful sync. Pre-fix it closed `transition.stale_paths` BEFORE
+        // syncing, so a failed sync left the prior live paths closed.
+        let canonical_id = "/workspace/src/App.vue";
+        let host = VerterHost::new_standalone(verter_session::HostConfig::default());
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(canonical_id.to_string()),
+            input_id: canonical_id.to_string(),
+            source: Arc::<str>::from(
+                r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+            ),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        });
+        let profile = CompileProfile {
+            target: verter_session::CompileTarget::BUNDLER | verter_session::CompileTarget::TSX,
+            ..CompileProfile::default()
+        };
+        assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
+
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.json".to_string()),
+            ),
+        ]);
+        let snapshot = crate::test_utils::make_test_vfs_workspace_with_resolver_and_projects(
+            resolver,
+            &[("/workspace", "/workspace", Some("/workspace/tsconfig.json"))],
+        );
+
+        let ide_path = format!("{canonical_id}.tsx");
+        let api_path = format!("{canonical_id}.ts");
+        let sync_states = DashMap::new();
+        // Prior Owned state from a DIFFERENT owner → owner-change force-rebind
+        // marks the same IDE/API paths stale.
+        sync_states.insert(
+            canonical_id.to_string(),
+            ProviderSyncState {
+                owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                    "/old/tsconfig.json".to_string(),
+                ),
+                ide_path: Some(ide_path.clone()),
+                api_path: Some(api_path.clone()),
+                ide_background_loaded: true,
+                api_background_loaded: true,
+                shadow_path: None,
+                shadow_background_loaded: false,
+            },
+        );
+
+        let provider = Arc::new(MockTypeProvider::new());
+        provider.set_fail_file_ops(true);
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+
+        sync_file_to_provider(
+            canonical_id,
+            &host,
+            &profile,
+            &sync,
+            &snapshot,
+            false,
+            &sync_states,
+        )
+        .await;
+
+        let calls = provider.file_sync_calls();
+        // Reach (R3-2): the scanner sync must have ATTEMPTED to sync the new
+        // owner's IDE `.tsx` (the failing mock records the open/update before
+        // erroring) before the no-close assertion. A no-op impl that returned
+        // before syncing would pass the absence-of-close assertion vacuously.
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. }
+                    | MockCall::UpdateFile { path, .. }
+                    | MockCall::LoadFile { path, .. }
+                if path == &ide_path
+            )),
+            "failed scanner sync must REACH the sync and attempt the new `.tsx`, calls={calls:?}"
+        );
+        // Discriminator: with the new sync failing, NOTHING must be closed.
+        // Pre-fix the stale-paths loop closed both paths before the failing sync.
+        assert!(
+            !calls
+                .iter()
+                .any(|call| matches!(call, MockCall::CloseFile { .. })),
+            "a failed owner-change scanner sync must not close any provider path, calls={calls:?}"
         );
     }
 }

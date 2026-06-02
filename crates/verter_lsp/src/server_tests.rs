@@ -4835,7 +4835,7 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
         .map(|entry| entry.clone())
         .expect("drained sync should commit owner-aware provider state");
     assert!(
-        !state.is_provisional(),
+        !state.is_unresolved(),
         "drain must set an owner-aware binding on provider state"
     );
 
@@ -4857,7 +4857,80 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn background_init_drain_removes_stale_provisional_state_when_ready_snapshot_has_no_owner() {
+async fn drain_keeps_partially_failed_vue_file_queued_for_retry() {
+    // R2-6: a per-file sync that PARTIALLY succeeds (one kind syncs, another
+    // fails and reverts) must NOT be dequeued — the failed kind would otherwise
+    // never be retried (permanent suppression). Here the API `.vue.ts` sync is
+    // injected to fail while the IDE `.tsx` succeeds; the file must STAY queued.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div /></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    // Fail ONLY the API `.vue.ts` sync; the IDE `.tsx` succeeds → PARTIAL.
+    provider.set_fail_sync_path("/workspace/src/App.vue.ts");
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+    );
+    let provider_sync_states = DashMap::new();
+    let pending_snapshot_provider_sync = DashSet::new();
+    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+
+    drain_pending_snapshot_provider_sync(
+        Some(&sync),
+        &documents,
+        &vfs_workspace,
+        &provider_sync_states,
+        &pending_snapshot_provider_sync,
+        false,
+        None,
+    )
+    .await;
+
+    // Discriminator (RED pre-fix): the partial success returned `true`, so the
+    // drain removed the file and the failed API kind was never retried.
+    assert!(
+        pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
+        "a partially-failed Vue sync must STAY queued so the failed kind is retried"
+    );
+    // Positive: the IDE `.tsx` kind DID sync this pass (the partial success).
+    let calls = provider.file_sync_calls();
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "the IDE TSX kind should have synced (the partial success), calls={calls:?}"
+    );
+    // Positive: the API `.vue.ts` was attempted (recorded before the injected Err).
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == "/workspace/src/App.vue.ts"
+        )),
+        "the API `.vue.ts` kind should have been attempted (then failed), calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_vue_provider_state_survives_owner_none_snapshot_drain() {
+    // Editor-liveness invariant: an OPEN Vue document's provider state must
+    // NOT be removed (nor its TSX closed) merely because the ready ownership
+    // snapshot resolves no owner for it. The drain may keep it queued for a
+    // future owner, but it must preserve the open file's unresolved state and
+    // keep its IDE TSX live so hover/completion keep working.
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let documents = DocumentRegistry::new(Arc::clone(&host));
     let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
@@ -4870,6 +4943,8 @@ async fn background_init_drain_removes_stale_provisional_state_when_ready_snapsh
 
     let provider = Arc::new(MockTypeProvider::new());
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    // Ready snapshot whose only project lives at `/other` — it does NOT own
+    // the open `/workspace/src/App.vue`, so owner resolution returns None.
     let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
         "/other",
         Some("/other/tsconfig.json"),
@@ -4878,7 +4953,7 @@ async fn background_init_drain_removes_stale_provisional_state_when_ready_snapsh
     provider_sync_states.insert(
         "/workspace/src/App.vue".to_string(),
         ProviderSyncState {
-            owner_binding: crate::provider_sync::ProviderOwnerBinding::Provisional,
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
             api_path: Some("/workspace/src/App.vue.ts".to_string()),
             ide_background_loaded: true,
@@ -4901,37 +4976,1367 @@ async fn background_init_drain_removes_stale_provisional_state_when_ready_snapsh
     )
     .await;
 
+    // Positive: the open file's provider state SURVIVES, still unresolved.
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("open Vue file must keep its provider sync state across an owner-None drain");
+    assert!(
+        state.is_unresolved(),
+        "ownership-None must not upgrade the binding; it stays unresolved, got {:?}",
+        state.owner_binding
+    );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "the open file's IDE TSX path must be preserved"
+    );
+
+    // Positive: stays queued for a future owner reconciliation.
     assert!(
         pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
-        "ready-but-unowned files should stay queued for future rebuilds"
-    );
-    assert!(
-        provider_sync_states.get("/workspace/src/App.vue").is_none(),
-        "ready-but-unowned drain must remove stale provisional provider state"
+        "open unresolved files should stay queued for future owner reconciliation"
     );
 
     let calls = provider.file_sync_calls();
+    // Negative: the drain must NOT close the open file's live IDE/API paths.
     assert!(
-        calls.iter().any(|call| matches!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path }
+                if path == "/workspace/src/App.vue.tsx" || path == "/workspace/src/App.vue.ts"
+        )),
+        "owner-None drain must NOT close an open Vue file's live provider paths, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
+    // FIX-1 + R2-8: an OPEN Vue file that was previously `Owned` becomes unowned
+    // when a ready snapshot resolves no owner for it. The drain MUST convert the
+    // committed state to `Unresolved` (so `needs_owner_reconcile` can later
+    // re-bind it) — it must NOT reuse the stale `Owned` binding (which would
+    // panic the debug_assert and strand the file on a dead owner) and must NOT
+    // carry the stale owner-derived `.vue.ts` API path. The live IDE TSX is
+    // preserved and never closed; the dropped owner-derived `.vue.ts` IS closed
+    // (R2-8 — it is an orphaned provider artifact once unowned).
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    // Ready snapshot at `/other` — it does NOT own the open `/workspace` file.
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/other",
+        Some("/other/tsconfig.json"),
+    );
+
+    let provider_sync_states = DashMap::new();
+    // Prior committed state is OWNED (the FIX-1 trigger) with a stale API path.
+    provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+    let pending_snapshot_provider_sync = DashSet::new();
+    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+
+    // No panic (pre-fix the debug_assert!(is_unresolved) fires on the Owned reuse).
+    drain_pending_snapshot_provider_sync(
+        Some(&sync),
+        &documents,
+        &vfs_workspace,
+        &provider_sync_states,
+        &pending_snapshot_provider_sync,
+        false,
+        None,
+    )
+    .await;
+
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("owned→unowned open Vue file must keep provider sync state");
+    // Discriminator: pre-fix this would still be Owned("/old/tsconfig.json").
+    assert!(
+        state.is_unresolved(),
+        "owned→unowned open Vue file must be converted to Unresolved, got {:?}",
+        state.owner_binding
+    );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "the live IDE TSX path must be preserved across the conversion"
+    );
+    // Discriminator: the stale owner-derived API path must be dropped.
+    assert!(
+        state.api_path.is_none(),
+        "the stale owner-derived `.vue.ts` API path must be dropped, got {:?}",
+        state.api_path
+    );
+
+    let calls = provider.file_sync_calls();
+    // Negative: the owner-INDEPENDENT live IDE TSX must NOT be closed
+    // (editor-liveness keeps the open document's hover/completion working).
+    assert!(
+        !calls.iter().any(|call| matches!(
             call,
             MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
         )),
-        "drain should close the stale provisional IDE path, calls={calls:?}"
+        "owned→unowned conversion must NOT close the open file's live IDE TSX, calls={calls:?}"
     );
+    // Positive (R2-8): the dropped owner-derived `.vue.ts` IS closed — once
+    // unowned no project provides it, so leaving it open leaks an orphan.
     assert!(
         calls.iter().any(|call| matches!(
             call,
             MockCall::CloseFile { path } if path == "/workspace/src/App.vue.ts"
         )),
-        "drain should close the stale provisional API path, calls={calls:?}"
+        "owned→unowned conversion must CLOSE the dropped owner-derived `.vue.ts`, calls={calls:?}"
     );
+
+    // Positive: stays queued so a future snapshot can re-bind an owner.
+    assert!(
+        pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
+        "converted unresolved file must stay queued for future owner reconciliation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_unresolved_vue_no_ide_output_commits_forced_unresolved_binding() {
+    // R2-1: the no-IDE branch of `sync_open_unresolved_vue_provider_file` must
+    // still COMMIT the forced-`Unresolved` state when a prior committed state
+    // exists — never abandon the conversion and leave a stale `Owned` binding.
+    // An owned→unowned OPEN Vue file with a transient IDE compile miss (ide=None)
+    // would otherwise stay stuck on a dead owner: its committed binding stays
+    // `Owned` → `needs_owner_reconcile` (is_unresolved && ownership_ready) is
+    // false → the file can never re-bind. The fix converts the binding to
+    // `Unresolved` and drops the stale owner-derived `.vue.ts` API path while
+    // preserving the live IDE TSX path (and NEVER closing it — there is no new
+    // IDE code to re-sync this pass).
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+
+    let provider_sync_states = DashMap::new();
+    // Prior committed state is OWNED with a live `.tsx` IDE path AND a stale
+    // owner-derived `.vue.ts` API path (the owned→unowned trigger).
+    provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    // Drive the no-IDE branch directly: no compiled IDE output this pass.
+    let synced = sync_open_unresolved_vue_provider_file(
+        &sync,
+        &provider_sync_states,
+        "/workspace/src/App.vue",
+        false,
+        None,
+    )
+    .await;
+    assert!(
+        !synced,
+        "no-IDE preserve pass must return false so the file stays queued"
+    );
+
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("the open file's provider state must be preserved, not removed");
+    // Discriminator: pre-fix this branch returned WITHOUT committing, so the
+    // stale `Owned("/old/tsconfig.json")` binding survived.
+    assert!(
+        state.is_unresolved(),
+        "no-IDE owned→unowned pass must commit a forced-Unresolved binding, got {:?}",
+        state.owner_binding
+    );
+    // The live IDE TSX path is preserved (owner-independent artifact).
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "the live IDE TSX path must be preserved across the no-IDE conversion"
+    );
+    // The stale owner-derived API path must be dropped (no project provides it).
+    assert!(
+        state.api_path.is_none(),
+        "the stale owner-derived `.vue.ts` API path must be dropped, got {:?}",
+        state.api_path
+    );
+
+    // Negative: with no new IDE code, the live IDE TSX is NEITHER re-opened/
+    // updated NOR closed — the editor-liveness invariant keeps it alive and
+    // there is no fresh code to re-sync this pass.
+    let calls = provider.file_sync_calls();
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+                | MockCall::CloseFile { path }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "no-IDE preserve pass must not touch the live IDE TSX, calls={calls:?}"
+    );
+    // R2-8: but the stale owner-derived `.vue.ts` dropped by the conversion MUST
+    // be closed even on the no-IDE branch — the provider still holds it open and
+    // it is invalid once unowned.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.ts"
+        )),
+        "no-IDE owned→unowned conversion must close the dropped `.vue.ts`, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_unresolved_vue_closes_dropped_owner_api_path_keeps_ide_tsx() {
+    // R2-8: converting an OPEN Vue file owned→unowned drops the owner-derived
+    // `.vue.ts` API path from the committed state, but the provider still holds
+    // that `.vue.ts` open. The conversion MUST close the stale `.vue.ts`
+    // (orphaned artifact — no project provides it once unowned) while NEVER
+    // closing the owner-independent IDE `.vue.tsx` (the editor-liveness
+    // invariant keeps the open document's TSX live). Drives the IDE-present
+    // branch (fresh `Some(ide)` code) so the TSX is re-synced and the conversion
+    // commits.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+
+    let provider_sync_states = DashMap::new();
+    // Prior committed state is OWNED with a live `.tsx` IDE path AND a stale
+    // owner-derived `.vue.ts` API path (both background-loaded → the provider
+    // genuinely holds both open).
+    provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    // Fresh IDE output this pass → the TSX is re-synced and the conversion
+    // commits the forced-Unresolved state.
+    let ide = verter_session::IdeResponse {
+        code: std::sync::Arc::from("export default {}"),
+        source_map: None,
+        is_jsx: false,
+        destructured_block: None,
+    };
+    let synced = sync_open_unresolved_vue_provider_file(
+        &sync,
+        &provider_sync_states,
+        "/workspace/src/App.vue",
+        false,
+        Some(&ide),
+    )
+    .await;
+    assert!(
+        !synced,
+        "open unresolved preserve pass returns false so the file stays queued"
+    );
+
+    // The committed state must be the converted Unresolved state: IDE TSX kept,
+    // owner-derived API dropped.
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("the open file's provider state must be preserved");
+    assert!(state.is_unresolved(), "binding must be forced Unresolved");
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "the live IDE TSX path must be preserved"
+    );
+    assert!(
+        state.api_path.is_none(),
+        "the owner-derived API path is dropped"
+    );
+
+    let calls = provider.file_sync_calls();
+    // Discriminator (RED pre-fix): the dropped owner-derived `.vue.ts` must be
+    // CLOSED in the provider — otherwise it leaks as an untracked artifact.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.ts"
+        )),
+        "owned→unowned conversion must CLOSE the stale `.vue.ts`, calls={calls:?}"
+    );
+    // Discriminator: the owner-independent IDE `.vue.tsx` must NEVER be closed
+    // (closing it would kill the open document's hover/completion).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
+        )),
+        "owned→unowned conversion must NOT close the live IDE TSX, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserve_open_unresolved_vue_failed_first_open_commits_no_dead_ide_path() {
+    // R3-1 (a) [P0]: an OPEN unowned `.vue` with NO prior live IDE state whose
+    // first `open_tsx` FAILS must NOT commit a `ide_path` the provider never
+    // opened. A committed `ide_path = Some(p)` is a promise that hover/completion
+    // can route to `p` — `active_ide_path_for_uri` hands it to the type provider.
+    // Pre-fix the preserve helper committed `ide_path = Some(.tsx)` even though
+    // the open failed, so `active_ide_path_for_uri` returned an UNOPENED `.tsx`
+    // and queries routed to a dead TSX (the `no ide_context` failure class).
+    //
+    // Driven through the real foreground entry `ensure_current_file_synced`
+    // under a ready snapshot that does NOT own the file, so the owner-None
+    // preserve branch (which also queues the file) is exercised end to end.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    // Ready snapshot at `/other` — it does NOT own the open `/workspace` file.
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    // No prior committed provider state for this file (the open→unowned first
+    // pass). Force the IDE `.tsx` open to FAIL (records the call, returns Err).
+    provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+
+    server.ensure_current_file_synced(&uri).await;
+
+    // Reach (R3-2 discipline): the pass MUST have ATTEMPTED to open the new
+    // `.tsx` (the failing mock records the open before erroring). A no-op impl
+    // that returned before syncing would vacuously pass the dead-path assertion.
+    let calls = provider.file_sync_calls();
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "preserve must ATTEMPT to open the unresolved `.tsx` before failing, calls={calls:?}"
+    );
+
+    // The committed binding is forced Unresolved (it is an open unowned file)…
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("the open file's provider state must be committed");
+    assert!(
+        state.is_unresolved(),
+        "an open unowned file must commit an Unresolved binding, got {:?}",
+        state.owner_binding
+    );
+    // …and it must NOT advertise a dead IDE path: the failed open never went
+    // live, so the committed `ide_path` must be None (no dead TSX to route to).
+    assert!(
+        state.ide_path.is_none(),
+        "a failed first-open must NOT commit a dead `ide_path`, got {:?}",
+        state.ide_path
+    );
+
+    // Discriminator (RED pre-fix): `active_ide_path_for_uri` must return None —
+    // pre-fix it returned the unopened `/workspace/src/App.vue.tsx`.
+    assert_eq!(
+        server.active_ide_path_for_uri(&uri),
+        None,
+        "active IDE path must be None when the provider never opened the TSX (no dead path)"
+    );
+
+    // The file stays queued for a future retry (a later snapshot owner upgrade
+    // or a successful re-open).
+    assert!(
+        server.pending_snapshot_provider_sync.contains(canonical_id),
+        "a failed preserve open must keep the file queued for retry"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserve_open_unresolved_vue_failed_update_keeps_prior_live_ide_path() {
+    // R3-1 (b): an OPEN unowned `.vue` with a prior LIVE IDE path whose UPDATE
+    // fails must KEEP the prior live path — it is still open in the provider
+    // (only the in-place update failed; the document stays usable with its
+    // last-good content). The live path's loaded flag stays true, so the
+    // committed state and `active_ide_path_for_uri` both retain it.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    // Seed a prior LIVE unresolved state: the `.tsx` is already background-loaded
+    // (the provider genuinely holds it open from a prior successful pass).
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    // Fail the in-place update of the live `.tsx`.
+    provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+
+    server
+        .preserve_open_unresolved_vue(
+            canonical_id,
+            false,
+            Some("export default { updated: true }"),
+        )
+        .await;
+
+    // Reach: the helper attempted the in-place UPDATE of the live `.tsx`.
+    let calls = provider.file_sync_calls();
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::UpdateFile { path, .. } if path == "/workspace/src/App.vue.tsx"
+        )),
+        "preserve must ATTEMPT to update the live `.tsx`, calls={calls:?}"
+    );
+
+    // The prior LIVE path is preserved — it is still open in the provider.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("the open file's provider state must survive");
+    assert!(state.is_unresolved(), "binding stays Unresolved");
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "a prior live IDE path must be preserved across a failed update, got {:?}",
+        state.ide_path
+    );
+    assert!(
+        state.ide_background_loaded,
+        "the preserved live IDE path keeps its background-loaded flag"
+    );
+    assert_eq!(
+        server.active_ide_path_for_uri(&uri),
+        Some("/workspace/src/App.vue.tsx".to_string()),
+        "a prior live IDE path stays the active IDE path after a failed update"
+    );
+
+    // The live `.tsx` must NEVER be closed (the document stays usable).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
+        )),
+        "a failed update must not close the live IDE TSX, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserve_open_unresolved_vue_jsx_flip_syncs_new_tsx_and_closes_old_jsx_after_success() {
+    // R3-4 [P1]: an OPEN unowned `.vue` with a prior LIVE `.jsx` that flips to TS
+    // (`is_jsx == false`) must sync the NEW code into the desired `.tsx`, NEVER
+    // into the stale `.jsx`, and close the old `.jsx` ONLY AFTER the new `.tsx`
+    // syncs (close-after-success). Pre-fix the preserve helper reused the prior
+    // `.jsx` path (ignoring `is_jsx`), so the new TS code was synced into the
+    // wrong (JSX) provider artifact and the `.tsx` was never opened.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    // Seed a prior LIVE `.jsx` unresolved state (the document was previously JS).
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+            api_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    // Flip to TS: is_jsx = false → desired path is `.tsx`. Fresh IDE code; the
+    // new `.tsx` open SUCCEEDS (no failure injection).
+    server
+        .preserve_open_unresolved_vue(canonical_id, false, Some("export default { ts: true }"))
+        .await;
+
+    let calls = provider.file_sync_calls();
+
+    // Discriminator: the NEW `.tsx` must have been opened/synced…
+    let new_tsx_idx = calls.iter().position(|call| {
+        matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path == "/workspace/src/App.vue.tsx"
+        )
+    });
+    let new_tsx_idx = new_tsx_idx
+        .unwrap_or_else(|| panic!("the is_jsx flip must sync the new `.tsx`, calls={calls:?}"));
+
+    // Discriminator (RED pre-fix): the new TS code must NEVER be synced into the
+    // stale `.jsx` artifact (pre-fix it was, because the prior path was reused).
     assert!(
         !calls.iter().any(|call| matches!(
             call,
             MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
-                if path.ends_with(".vue.ts") || path.ends_with(".vue.tsx")
+                if path == "/workspace/src/App.vue.jsx"
         )),
-        "ready-but-unowned drain must not keep syncing guessed provider paths, calls={calls:?}"
+        "the flip must NOT sync new code into the stale `.jsx`, calls={calls:?}"
+    );
+
+    // The old `.jsx` is closed AFTER the new `.tsx` syncs (close-after-success).
+    let old_jsx_close_idx = calls.iter().position(|call| {
+        matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.jsx"
+        )
+    });
+    let old_jsx_close_idx = old_jsx_close_idx.unwrap_or_else(|| {
+        panic!("the flipped-away `.jsx` must be closed after the new `.tsx` syncs, calls={calls:?}")
+    });
+    assert!(
+        old_jsx_close_idx > new_tsx_idx,
+        "old `.jsx` must close AFTER the new `.tsx` syncs (close-after-success), \
+         tsx_idx={new_tsx_idx}, jsx_close_idx={old_jsx_close_idx}, calls={calls:?}"
+    );
+
+    // The committed state now points at the live `.tsx`.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("flip must commit the new `.tsx` state");
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "committed IDE path must be the new `.tsx`, got {:?}",
+        state.ide_path
+    );
+    assert!(
+        state.ide_background_loaded,
+        "the new `.tsx` is live after a successful flip sync"
+    );
+    assert_eq!(
+        server.active_ide_path_for_uri(&uri),
+        Some("/workspace/src/App.vue.tsx".to_string()),
+        "the active IDE path follows the flip to `.tsx`"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserve_open_unresolved_vue_jsx_flip_no_ide_output_retains_prior_live_jsx() {
+    // R5-1 ROW 7 (REGRESSION, P0): an OPEN unowned `.vue` with a prior LIVE
+    // `.jsx` that flips to TS (`is_jsx == false`) but has NO compiled IDE output
+    // this pass (a transient compile miss) must RETAIN the prior live `.jsx` —
+    // it is still physically open in the provider and is the ONLY usable TSX.
+    // The desired `.tsx` is queued for a later pass.
+    //
+    // Pre-unification the no-IDE branch ran `drop_unloaded_ide_path()` on the
+    // freshly-rebuilt `.tsx` (loaded=false, since the prior `.jsx` ≠ `.tsx`),
+    // committing `ide_path = None` while the `.jsx` stayed physically open →
+    // `active_ide_path_for_uri` returned None → hover died, even though a live
+    // `.jsx` was still serving the document.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    // Seed a prior LIVE `.jsx` unresolved state (the document was previously JS).
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+            api_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    // Flip to TS (is_jsx = false → desired `.tsx`) but with NO IDE code this pass.
+    server
+        .preserve_open_unresolved_vue(canonical_id, false, None)
+        .await;
+
+    let calls = provider.file_sync_calls();
+
+    // The committed state RETAINS the prior live `.jsx`, still loaded.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("the open file's provider state must survive a no-IDE flip pass");
+    assert!(state.is_unresolved(), "binding stays Unresolved");
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.jsx"),
+        "a no-IDE flip must RETAIN the prior live `.jsx` (not drop to None), got {:?}",
+        state.ide_path
+    );
+    assert!(
+        state.ide_background_loaded,
+        "the retained prior live `.jsx` keeps its background-loaded flag"
+    );
+
+    // Discriminator (RED pre-fix): `active_ide_path_for_uri` must return the
+    // prior live `.jsx` — pre-fix it returned None (the committed `ide_path` was
+    // dropped while the `.jsx` stayed physically open → hover dead).
+    assert_eq!(
+        server.active_ide_path_for_uri(&uri),
+        Some("/workspace/src/App.vue.jsx".to_string()),
+        "the prior live `.jsx` must stay the active IDE path through a no-IDE flip pass"
+    );
+
+    // The prior live `.jsx` must NEVER be closed (no successful new path synced).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.jsx"
+        )),
+        "a no-IDE flip must not close the prior live `.jsx`, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserve_open_unresolved_vue_jsx_flip_failed_tsx_sync_retains_prior_live_jsx() {
+    // R5-1 ROW 9 (REGRESSION, P0): an OPEN unowned `.vue` with a prior LIVE
+    // `.jsx` that flips to TS (`is_jsx == false`) whose new `.tsx` sync FAILS
+    // must RETAIN the prior live `.jsx` — it is still physically open in the
+    // provider and is the only usable TSX. The `.jsx` must NEVER be closed (no
+    // successful replacement), and the desired `.tsx` is queued.
+    //
+    // Pre-unification the failed-sync branch ran `drop_unloaded_ide_path()` on
+    // the failed `.tsx` (loaded=false), committing `ide_path = None` while the
+    // `.jsx` stayed physically open → `active_ide_path_for_uri` returned None →
+    // hover died. This is the exact P0 both codex reviewers flagged.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    // Seed a prior LIVE `.jsx` unresolved state (the document was previously JS).
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+            api_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    // Flip to TS with fresh IDE code, but FAIL the new `.tsx` first-open.
+    provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+    server
+        .preserve_open_unresolved_vue(canonical_id, false, Some("export default { ts: true }"))
+        .await;
+
+    let calls = provider.file_sync_calls();
+
+    // Reach: the pass MUST have ATTEMPTED to open the new `.tsx` (the failing
+    // mock records the open before erroring) — a no-op return would vacuously
+    // pass the retention assertion below.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "the flip must ATTEMPT to open the new `.tsx` before failing, calls={calls:?}"
+    );
+
+    // The committed state RETAINS the prior live `.jsx`, still loaded.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("the open file's provider state must survive a failed flip");
+    assert!(state.is_unresolved(), "binding stays Unresolved");
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.jsx"),
+        "a failed `.tsx` flip must RETAIN the prior live `.jsx` (not drop to None), got {:?}",
+        state.ide_path
+    );
+    assert!(
+        state.ide_background_loaded,
+        "the retained prior live `.jsx` keeps its background-loaded flag"
+    );
+
+    // Discriminator (RED pre-fix): `active_ide_path_for_uri` must return the
+    // prior live `.jsx` — pre-fix it returned None (committed `ide_path` dropped
+    // while the `.jsx` stayed physically open → hover dead).
+    assert_eq!(
+        server.active_ide_path_for_uri(&uri),
+        Some("/workspace/src/App.vue.jsx".to_string()),
+        "the prior live `.jsx` must stay the active IDE path through a failed flip"
+    );
+
+    // The prior live `.jsx` must NEVER be closed when the replacement failed.
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.jsx"
+        )),
+        "a failed flip must not close the prior live `.jsx`, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserve_open_unresolved_vue_prior_owned_jsx_flip_failed_drops_api_retains_jsx() {
+    // R5-1 prior-Owned row (combined with row 9): when the prior binding was
+    // `Owned` and the new `.tsx` flip sync FAILS, the owner `.vue.ts` is dropped
+    // from state AND closed (R2-8, independent of the IDE outcome), while the
+    // owner-INDEPENDENT prior live `.jsx` IDE path is RETAINED (still the active
+    // path) and is NEVER closed.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    // Seed a prior OWNED state with a LIVE `.jsx` IDE path + a LIVE owner-derived
+    // `.vue.ts` API path (the file was previously owned and JS).
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    // Flip to TS with fresh IDE code, but FAIL the new `.tsx` first-open.
+    provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+    server
+        .preserve_open_unresolved_vue(canonical_id, false, Some("export default { ts: true }"))
+        .await;
+
+    let calls = provider.file_sync_calls();
+
+    // Binding forced Unresolved; owner-derived API dropped from committed state.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("the open file's provider state must survive");
+    assert!(
+        state.is_unresolved(),
+        "an owned→unowned open file must commit an Unresolved binding, got {:?}",
+        state.owner_binding
+    );
+    assert!(
+        state.api_path.is_none(),
+        "the owner-derived API path must be dropped from the committed state, got {:?}",
+        state.api_path
+    );
+
+    // The owner-derived `.vue.ts` is CLOSED (R2-8, independent of the IDE failure).
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.ts"
+        )),
+        "the dropped owner-derived `.vue.ts` must be CLOSED even on a failed flip, calls={calls:?}"
+    );
+
+    // The owner-INDEPENDENT prior live `.jsx` is RETAINED and is the active path.
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.jsx"),
+        "the owner-independent prior live `.jsx` must be retained on a failed flip, got {:?}",
+        state.ide_path
+    );
+    assert_eq!(
+        server.active_ide_path_for_uri(&uri),
+        Some("/workspace/src/App.vue.jsx".to_string()),
+        "the prior live `.jsx` stays the active IDE path"
+    );
+
+    // The IDE `.jsx`/`.tsx` are NEVER closed (the failed `.tsx` never went live;
+    // the `.jsx` is the only usable TSX).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path }
+                if path == "/workspace/src/App.vue.jsx" || path == "/workspace/src/App.vue.tsx"
+        )),
+        "the IDE TSX/JSX must NEVER be closed on an owned→unowned failed flip, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_open_unresolved_vue_no_ide_no_prior_commits_empty_unresolved() {
+    // R6-3 (row 1, drain caller): with NO prior committed state AND no IDE
+    // output this pass, the drain commits an EMPTY `Unresolved` state
+    // (ide_path=None, binding=Unresolved) — recording the open file's
+    // unresolved status (queued for retry), UNIFIED with the two
+    // `preserve_open_unresolved_vue` callers (which already commit this).
+    //
+    // Discriminator (RED pre-fix): the drain guarded the commit behind
+    // `if previous.is_some()`, so row 1 committed NOTHING (state map empty) —
+    // an open file's unresolved status was untracked on this path while the
+    // preserve callers tracked it. The committed empty `Unresolved` advertises
+    // NO live path (so `active_ide_path_for_uri` stays None — nothing is open)
+    // and is `is_unresolved()` so `needs_owner_reconcile` picks it up.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+
+    let synced = sync_open_unresolved_vue_provider_file(
+        &sync,
+        &provider_sync_states,
+        "/workspace/src/App.vue",
+        false,
+        None,
+    )
+    .await;
+    assert!(!synced, "no prior state + no IDE output must return false");
+
+    // UNIFIED: an empty `Unresolved` state is committed for the open file.
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("row 1 must commit an empty Unresolved state (unified with preserve callers)");
+    assert!(
+        state.is_unresolved(),
+        "row 1 commits a forced-Unresolved binding, got {:?}",
+        state.owner_binding
+    );
+    assert!(
+        state.ide_path.is_none(),
+        "row 1 has no live IDE path to advertise, got {:?}",
+        state.ide_path
+    );
+    assert!(state.api_path.is_none(), "row 1 has no API path");
+    assert!(
+        !state.ide_background_loaded,
+        "row 1 advertises nothing as live in the provider"
+    );
+
+    // No prior + no IDE → nothing to open, update, or close.
+    assert!(
+        provider.file_sync_calls().is_empty(),
+        "no prior state + no IDE output must not touch any provider file path, calls={:?}",
+        provider.file_sync_calls()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserve_open_unresolved_vue_no_ide_no_prior_commits_empty_unresolved() {
+    // R6-3 (row 1, server preserve caller): with NO prior committed state AND no
+    // IDE code (`ide_code = None`), `Server::preserve_open_unresolved_vue`
+    // commits an EMPTY `Unresolved` state (ide_path=None, binding=Unresolved) —
+    // recording the open file's unresolved status. This pins the SAME row-1
+    // behavior as the drain + sync_coordinator callers (all three unified).
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    // No prior committed state seeded; no IDE code this pass.
+    server
+        .preserve_open_unresolved_vue(canonical_id, false, None)
+        .await;
+
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("row 1 must commit an empty Unresolved state");
+    assert!(
+        state.is_unresolved(),
+        "row 1 commits a forced-Unresolved binding, got {:?}",
+        state.owner_binding
+    );
+    assert!(
+        state.ide_path.is_none(),
+        "row 1 has no live IDE path to advertise, got {:?}",
+        state.ide_path
+    );
+    assert!(state.api_path.is_none(), "row 1 has no API path");
+    assert!(!state.ide_background_loaded);
+    // Read-side gate agrees there is nothing live to serve.
+    assert_eq!(
+        server.active_ide_path_for_uri(&uri),
+        None,
+        "row 1 advertises no live IDE path"
+    );
+
+    // No prior + no IDE → nothing to open, update, or close in the provider.
+    assert!(
+        provider.file_sync_calls().is_empty(),
+        "row 1 must not touch any provider file path, calls={:?}",
+        provider.file_sync_calls()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_owner_transition_retains_prior_state_when_new_owner_sync_fails() {
+    // FINAL DESIGN 7: owner reconciliation may move provider paths, but a
+    // FAILED reconciliation must leave the previous open path alive. The drain
+    // must sync the NEW owner's paths first and only close the stale paths
+    // AFTER a successful sync — never close-then-sync. Here every provider
+    // file-op fails, so nothing must be closed and the prior state must be
+    // retained unchanged.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    // Resolver owns the file at `/workspace` → new owner-aware state with a
+    // `.tsx` IDE path (DIFFERENT from the seeded `.jsx`).
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+    );
+
+    let provider_sync_states = DashMap::new();
+    // Prior committed state from a stale owner: a DIFFERENT IDE path (.jsx)
+    // plus the same API path (.ts), both already background-loaded.
+    let prior_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/old/tsconfig.json".to_string(),
+        ),
+        ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        ide_background_loaded: true,
+        api_background_loaded: true,
+        shadow_path: None,
+        shadow_background_loaded: false,
+    };
+    provider_sync_states.insert("/workspace/src/App.vue".to_string(), prior_state.clone());
+
+    let pending_snapshot_provider_sync = DashSet::new();
+    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+
+    // Every provider file-op records its call AND fails.
+    provider.set_fail_file_ops(true);
+
+    drain_pending_snapshot_provider_sync(
+        Some(&sync),
+        &documents,
+        &vfs_workspace,
+        &provider_sync_states,
+        &pending_snapshot_provider_sync,
+        false,
+        None,
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    // Reach (R3-2): the drain must have ATTEMPTED to sync the NEW owner's `.tsx`
+    // (the failing mock records the open/update BEFORE returning Err) before any
+    // no-close assertion. A no-op impl that returned before syncing would pass
+    // the absence-of-close + state-unchanged asserts vacuously.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "failed owner transition must REACH the sync and attempt the new `.tsx`, calls={calls:?}"
+    );
+    // Negative: the stale `.jsx` IDE path must NOT be closed, because the
+    // replacement `.tsx` sync FAILED. (Pre-fix the drain closed stale paths
+    // BEFORE syncing, so a CloseFile for the stale path was recorded.)
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.jsx"
+        )),
+        "failed owner transition must NOT close the prior IDE path, calls={calls:?}"
+    );
+    // Negative: nothing at all should be closed on a fully-failed transition.
+    assert!(
+        !calls
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { .. })),
+        "a fully-failed owner transition must not close any provider path, calls={calls:?}"
+    );
+
+    // Positive: the prior state is retained UNCHANGED (not committed/removed).
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("a failed owner transition must retain the prior provider state");
+    assert_eq!(
+        state, prior_state,
+        "failed owner transition must leave the prior state byte-for-byte unchanged, got {state:?}"
+    );
+
+    // Positive: stays queued for a future (successful) reconciliation.
+    assert!(
+        pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
+        "a failed owner transition should stay queued for a future reconciliation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_owner_transition_closes_stale_path_only_after_successful_sync() {
+    // FINAL DESIGN 7: on a SUCCESSFUL owner transition the drain syncs the new
+    // paths first, commits, THEN closes genuinely-stale paths — and it skips
+    // any stale path the new committed state still uses (a same-path rebind of
+    // an owner-independent Vue artifact must never be closed).
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    // Resolver owns the file at `/workspace` → new IDE path `.tsx`, API `.ts`.
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+    );
+
+    let provider_sync_states = DashMap::new();
+    // Prior committed state from a stale owner: IDE `.jsx` (DIFFERENT → genuinely
+    // stale), API `.ts` (SAME → owner-independent rebind, must NOT be closed).
+    provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    let pending_snapshot_provider_sync = DashSet::new();
+    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+
+    drain_pending_snapshot_provider_sync(
+        Some(&sync),
+        &documents,
+        &vfs_workspace,
+        &provider_sync_states,
+        &pending_snapshot_provider_sync,
+        false,
+        None,
+    )
+    .await;
+
+    let calls = provider.calls();
+
+    // Negative: the API path `.ts` is owner-independent (same in old + new
+    // state) — a same-path rebind must NOT close it. (Pre-fix the stale-set
+    // included `.ts` on owner change and it was closed before sync.)
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.ts"
+        )),
+        "a same-path API rebind must NOT close the live .ts path, calls={calls:?}"
+    );
+
+    // Find the ordering anchors: the new IDE `.tsx` sync (open or update) and
+    // the stale `.jsx` close.
+    let new_tsx_sync_idx = calls.iter().position(|call| {
+        matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path == "/workspace/src/App.vue.tsx"
+        )
+    });
+    let stale_jsx_close_idx = calls.iter().position(|call| {
+        matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.jsx"
+        )
+    });
+
+    let new_tsx_sync_idx = new_tsx_sync_idx.unwrap_or_else(|| {
+        panic!("drain must sync the new IDE .tsx path on a successful transition, calls={calls:?}")
+    });
+    let stale_jsx_close_idx = stale_jsx_close_idx.unwrap_or_else(|| {
+        panic!("drain must close the genuinely-stale .jsx IDE path, calls={calls:?}")
+    });
+
+    // Positive: the stale `.jsx` close happens AFTER the new `.tsx` sync.
+    // (Pre-fix close_stale ran BEFORE the sync, so this ordering was inverted.)
+    assert!(
+        stale_jsx_close_idx > new_tsx_sync_idx,
+        "stale .jsx must close AFTER the new .tsx sync (close-after-sync), \
+         tsx_sync_idx={new_tsx_sync_idx}, jsx_close_idx={stale_jsx_close_idx}, calls={calls:?}"
+    );
+
+    // Positive: the new owner-aware state is committed.
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("successful transition should commit the new owner-aware state");
+    assert!(
+        !state.is_unresolved(),
+        "successful transition should commit an owner-aware binding, got {:?}",
+        state.owner_binding
+    );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "committed IDE path should be the new .tsx path"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_owner_transition_partial_failure_retains_stale_path_of_failed_kind() {
+    // FIX-2: on an owner transition where the IDE path genuinely changes
+    // (.jsx→.tsx), the API sync succeeds but the new IDE `.tsx` sync FAILS.
+    // The drain must NOT close the old live `.jsx` (its kind did not sync) and
+    // must NOT leave committed state pointing at the unsynced `.tsx`. Pre-fix
+    // `synced_any` was true (API synced) → it committed `.tsx` and closed the
+    // genuinely-stale `.jsx`, losing the file's only live TSX.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    // Fail ONLY the new IDE `.tsx` sync; the API `.ts` sync succeeds.
+    provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    // New owner at `/workspace` → IDE `.tsx`, API `.ts`.
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+    );
+
+    let provider_sync_states = DashMap::new();
+    // Prior owner-aware state: IDE `.jsx` (DIFFERENT → genuinely stale on the
+    // owner change), API `.ts` (same), both live.
+    provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+    let pending_snapshot_provider_sync = DashSet::new();
+    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+
+    drain_pending_snapshot_provider_sync(
+        Some(&sync),
+        &documents,
+        &vfs_workspace,
+        &provider_sync_states,
+        &pending_snapshot_provider_sync,
+        false,
+        None,
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    // Discriminator: the stale `.jsx` IDE path must NOT be closed because its
+    // replacement `.tsx` did not sync. (Pre-fix: closed because synced_any.)
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.jsx"
+        )),
+        "stale IDE `.jsx` must NOT close when the new `.tsx` sync failed, calls={calls:?}"
+    );
+
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("partial transition must retain a committed state");
+    // Discriminator: committed IDE path must NOT be the unsynced `.tsx`; it must
+    // revert to the previous live `.jsx`.
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.jsx"),
+        "failed IDE kind must keep the previous live `.jsx`, not the unsynced `.tsx`, got {:?}",
+        state.ide_path
+    );
+    assert!(
+        state.ide_background_loaded,
+        "the retained `.jsx` IDE path keeps its loaded flag"
+    );
+    // Positive: the API kind that DID sync advanced + is marked loaded.
+    assert_eq!(
+        state.api_path.as_deref(),
+        Some("/workspace/src/App.vue.ts"),
+        "the synced API path is committed"
+    );
+    assert!(
+        state.api_background_loaded,
+        "the synced API path is marked loaded"
     );
 }
 
@@ -5007,7 +6412,7 @@ async fn background_init_drain_clears_stale_macro_type_diagnostic_for_package_ex
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_imported_vue_api_lightweight_uses_provisional_api_path_before_snapshot() {
+async fn sync_imported_vue_api_lightweight_uses_unresolved_api_path_before_snapshot() {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
@@ -5053,26 +6458,26 @@ defineProps<{ msg: string }>()
                 call,
                 MockCall::OpenFile { path, .. } if path == &expected_api_path
             )),
-            "pre-snapshot imported Vue API sync should open the provisional .vue.ts path, calls={calls:?}"
+            "pre-snapshot imported Vue API sync should open the unresolved .vue.ts path, calls={calls:?}"
         );
 
     let state = server
         .provider_sync_states
         .get(&child_id)
         .map(|entry| entry.clone())
-        .expect("provisional API sync should commit provider state");
+        .expect("unresolved API sync should commit provider state");
     assert!(
-        state.is_provisional(),
-        "pre-snapshot imported sync should mark the owner as provisional"
+        state.is_unresolved(),
+        "pre-snapshot imported sync should mark the owner as unresolved"
     );
     assert_eq!(
         state.api_path.as_deref(),
         Some(expected_api_path.as_str()),
-        "imported Vue API should use the canonical provisional .vue.ts path"
+        "imported Vue API should use the canonical unresolved .vue.ts path"
     );
     assert!(
         state.api_background_loaded,
-        "provisional imported API sync should mark the API path as loaded"
+        "unresolved imported API sync should mark the API path as loaded"
     );
     assert!(
         server.pending_snapshot_provider_sync.contains(&child_id),
@@ -5129,6 +6534,340 @@ defineProps<{ msg: string }>()
     assert!(
         state.api_background_loaded,
         "snapshot imported API sync should mark the API path as loaded"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_vue_ide_unresolved_forces_unresolved_over_prior_owned() {
+    // R2-3: `sync_vue_ide_unresolved` is a bootstrap "unresolved" sync — it is
+    // unresolved BY DEFINITION. It reuses a prior committed state (to keep the
+    // background-loaded bookkeeping) but must FORCE the binding to `Unresolved`.
+    // Pre-fix it only defaulted to `Unresolved` when NO state existed; a prior
+    // `Owned` state was reused with its `Owned` binding and committed, which is
+    // wrong for an unresolved bootstrap sync.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+
+    let canonical_id = "/workspace/src/App.vue";
+    // Seed a prior committed OWNED state (the R2-3 trigger).
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some(format!("{canonical_id}.tsx")),
+            api_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    server
+        .sync_vue_ide_unresolved(canonical_id, "export const x = 1;", false)
+        .await;
+
+    let state = server
+        .provider_sync_states
+        .get(canonical_id)
+        .map(|entry| entry.clone())
+        .expect("bootstrap IDE sync should commit provider state");
+    // Discriminator: pre-fix the binding stays `Owned("/old/tsconfig.json")`.
+    assert!(
+        state.is_unresolved(),
+        "bootstrap sync_vue_ide_unresolved must force an Unresolved binding, got {:?}",
+        state.owner_binding
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_vue_api_unresolved_forces_unresolved_over_prior_owned() {
+    // R2-3: `sync_vue_api_unresolved` mirror — a bootstrap unresolved API sync
+    // must force the binding to `Unresolved` even when reusing a prior `Owned`
+    // committed state.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+
+    let canonical_id = "/workspace/src/App.vue";
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some(format!("{canonical_id}.tsx")),
+            api_path: Some(format!("{canonical_id}.ts")),
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    server
+        .sync_vue_api_unresolved(canonical_id, "export {};")
+        .await;
+
+    let state = server
+        .provider_sync_states
+        .get(canonical_id)
+        .map(|entry| entry.clone())
+        .expect("bootstrap API sync should commit provider state");
+    // Discriminator: pre-fix the binding stays `Owned("/old/tsconfig.json")`.
+    assert!(
+        state.is_unresolved(),
+        "bootstrap sync_vue_api_unresolved must force an Unresolved binding, got {:?}",
+        state.owner_binding
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_api_sync_never_closes_the_live_ide_tsx_on_owner_change() {
+    // R2-2: the `_in_background` API twin manages ONLY the API kind. An owner-key
+    // change marks the (same-path) IDE `.tsx` stale via force-rebind. The pre-fix
+    // path looped EVERY stale path and closed it — including the live IDE `.tsx`
+    // — BEFORE syncing the API, killing hover even though it never re-syncs IDE.
+    // The fix routes through the per-kind close-after-successful-sync discipline
+    // with synced_kinds=[Api]: the IDE kind is reverted to its prior live path
+    // and is NEVER closed here; only a genuinely-stale API path is closed (and a
+    // same-path API rebind is not stale).
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
+    std::fs::write(
+        workspace.join("src/App.vue"),
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    )
+    .expect("write App.vue");
+
+    let host = crate::test_utils::make_filesystem_test_host(&workspace);
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let canonical_id = crate::test_utils::canonical_test_path(&workspace.join("src/App.vue"));
+    assert!(host.ensure_loaded(&canonical_id), "App.vue should load");
+    let _ = host.ensure_compiled(&canonical_id, &documents.tsx_profile.read());
+    assert!(
+        host.get_public_api(&canonical_id).is_some(),
+        "compiled .vue must expose a public API for the background API sync"
+    );
+
+    let ide_path = format!("{canonical_id}.tsx");
+    let api_path = format!("{canonical_id}.ts");
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let snapshot = PublishedResolverSnapshot {
+        resolver: crate::project_resolver::NativeProjectResolver::new(vec![]),
+        ownership_ready: true,
+    };
+
+    let provider_sync_states = Arc::new(DashMap::new());
+    // Prior committed OWNED state: live + loaded IDE `.tsx` AND API `.ts`.
+    let prior_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/old/tsconfig.json".to_string(),
+        ),
+        ide_path: Some(ide_path.clone()),
+        api_path: Some(api_path.clone()),
+        ide_background_loaded: true,
+        api_background_loaded: true,
+        shadow_path: None,
+        shadow_background_loaded: false,
+    };
+    provider_sync_states.insert(canonical_id.clone(), prior_state.clone());
+
+    // New owner (DIFFERENT key) with the SAME IDE/API paths → owner_changed
+    // force-rebind marks BOTH the IDE `.tsx` and API `.ts` stale.
+    let next_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/new/tsconfig.json".to_string(),
+        ),
+        ide_path: Some(ide_path.clone()),
+        api_path: Some(api_path.clone()),
+        ide_background_loaded: false,
+        api_background_loaded: false,
+        shadow_path: None,
+        shadow_background_loaded: false,
+    };
+    let transition = crate::provider_sync::prepare_sync_transition(
+        &provider_sync_states,
+        &canonical_id,
+        next_state,
+    );
+    // Sanity: the IDE `.tsx` IS in the stale set (this is the close trigger).
+    assert!(
+        transition
+            .stale_paths
+            .iter()
+            .any(|(kind, path)| *kind == ProviderPathKind::Ide && path == &ide_path),
+        "owner-change force-rebind must mark the same-path IDE `.tsx` stale, stale={:?}",
+        transition.stale_paths
+    );
+    sync_api_to_provider_background_task(
+        sync,
+        snapshot,
+        Arc::clone(&host),
+        Arc::clone(&provider_sync_states),
+        canonical_id.clone(),
+        transition,
+        false,
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    // Discriminator: pre-fix the IDE `.tsx` was closed in the stale-paths loop.
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &ide_path
+        )),
+        "background API sync must NEVER close the live IDE `.tsx`, calls={calls:?}"
+    );
+    // The committed state retains the live IDE `.tsx` path (reverted to prior).
+    let state = provider_sync_states
+        .get(&canonical_id)
+        .map(|entry| entry.clone())
+        .expect("successful API sync must commit state");
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some(ide_path.as_str()),
+        "background API sync must retain the prior IDE `.tsx` path"
+    );
+    assert!(
+        state.ide_background_loaded,
+        "background API sync must retain the prior IDE loaded flag"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_api_sync_failure_retains_prior_api_path_and_state() {
+    // R2-2 (b): close-before-sync also meant an API sync failure left the old API
+    // path closed. The fix syncs first; on failure nothing is committed and
+    // nothing is closed — the prior state and prior API path are retained intact.
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
+    std::fs::write(
+        workspace.join("src/App.vue"),
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    )
+    .expect("write App.vue");
+
+    let host = crate::test_utils::make_filesystem_test_host(&workspace);
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let canonical_id = crate::test_utils::canonical_test_path(&workspace.join("src/App.vue"));
+    assert!(host.ensure_loaded(&canonical_id), "App.vue should load");
+    let _ = host.ensure_compiled(&canonical_id, &documents.tsx_profile.read());
+
+    let ide_path = format!("{canonical_id}.tsx");
+    // Prior API path is DIFFERENT from the new one so a close-before-sync of the
+    // old path would be observable.
+    let prior_api_path = format!("{canonical_id}.old.ts");
+    let new_api_path = format!("{canonical_id}.ts");
+
+    let provider = Arc::new(MockTypeProvider::new());
+    // Fail the NEW API path sync only.
+    provider.set_fail_sync_path(&new_api_path);
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let snapshot = PublishedResolverSnapshot {
+        resolver: crate::project_resolver::NativeProjectResolver::new(vec![]),
+        ownership_ready: true,
+    };
+
+    let provider_sync_states = Arc::new(DashMap::new());
+    let prior_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/old/tsconfig.json".to_string(),
+        ),
+        ide_path: Some(ide_path.clone()),
+        api_path: Some(prior_api_path.clone()),
+        ide_background_loaded: true,
+        api_background_loaded: true,
+        shadow_path: None,
+        shadow_background_loaded: false,
+    };
+    provider_sync_states.insert(canonical_id.clone(), prior_state.clone());
+
+    let next_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/new/tsconfig.json".to_string(),
+        ),
+        ide_path: Some(ide_path.clone()),
+        api_path: Some(new_api_path.clone()),
+        ide_background_loaded: false,
+        api_background_loaded: false,
+        shadow_path: None,
+        shadow_background_loaded: false,
+    };
+    let transition = crate::provider_sync::prepare_sync_transition(
+        &provider_sync_states,
+        &canonical_id,
+        next_state,
+    );
+    sync_api_to_provider_background_task(
+        sync,
+        snapshot,
+        Arc::clone(&host),
+        Arc::clone(&provider_sync_states),
+        canonical_id.clone(),
+        transition,
+        false,
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    // Reach (R3-2): the background task must have ATTEMPTED to sync the NEW API
+    // path (the failing mock records the open/update before erroring) before the
+    // no-close assertion. A no-op impl that returned before syncing would pass
+    // the absence-of-close + state-unchanged asserts vacuously.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == &new_api_path
+        )),
+        "failed background API sync must REACH the sync and attempt the new API path, calls={calls:?}"
+    );
+    // Discriminator: the prior API path must NOT be closed (the new API sync
+    // failed). Pre-fix the stale-paths loop closed it BEFORE syncing.
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &prior_api_path
+        )),
+        "a failed background API sync must NOT close the prior API path, calls={calls:?}"
+    );
+    // And the IDE `.tsx` must never be closed either.
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &ide_path
+        )),
+        "a failed background API sync must NOT close the live IDE `.tsx`, calls={calls:?}"
+    );
+    // The prior state is retained UNCHANGED (not committed/removed).
+    let state = provider_sync_states
+        .get(&canonical_id)
+        .map(|entry| entry.clone())
+        .expect("a failed background API sync must retain the prior state");
+    assert_eq!(
+        state, prior_state,
+        "failed background API sync must leave the prior state byte-for-byte unchanged, got {state:?}"
     );
 }
 
@@ -5191,7 +6930,179 @@ defineProps<{ msg: string }>()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ensure_current_file_synced_queues_provisional_ide_path_for_snapshot_reconciliation() {
+async fn sync_imported_vue_api_lightweight_preserves_open_unowned_state() {
+    // FIX-5: the ready-no-owner arm of sync_imported_vue_api_lightweight must
+    // NOT clear+close+return for an OPEN `.vue` that is imported-by-an-open-file
+    // and unowned. Pre-fix it called clear_provider_sync_state (removing state +
+    // closing the live TSX) → re-triggered the no-ide_context bug on a sibling
+    // path. Post-fix: open → preserve Unresolved + keep the TSX live.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+            },
+        )
+    });
+
+    let server = service.inner();
+    // Ready snapshot at `/other` — it does NOT own the open `/workspace` child.
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+
+    let child_id = "/workspace/src/Child.vue";
+    let _child_uri = open_test_vue(
+        server,
+        child_id,
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+
+    // Seed a prior live state (as a bootstrap pass would have): unresolved with
+    // a live TSX + API. The buggy arm would close BOTH and remove the entry.
+    let child_tsx = format!("{child_id}.tsx");
+    let child_api = format!("{child_id}.ts");
+    server.commit_provider_sync_state(
+        child_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ide_path: Some(child_tsx.clone()),
+            api_path: Some(child_api.clone()),
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    server.sync_imported_vue_api_lightweight(child_id).await;
+
+    // Discriminator: the open child's state must SURVIVE (pre-fix it was
+    // removed by clear_provider_sync_state).
+    let state = server
+        .provider_sync_states
+        .get(child_id)
+        .map(|entry| entry.clone())
+        .expect("open unowned imported Vue file must keep its provider sync state");
+    assert!(
+        state.is_unresolved(),
+        "open unowned imported Vue file must stay Unresolved, got {:?}",
+        state.owner_binding
+    );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some(child_tsx.as_str()),
+        "the open child's live IDE TSX path must be preserved"
+    );
+
+    // Discriminator: the live TSX must NOT be closed.
+    let calls = provider.file_sync_calls();
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &child_tsx
+        )),
+        "open unowned imported Vue file must NOT close its live TSX, calls={calls:?}"
+    );
+
+    // Positive: stays queued for a future owner reconciliation.
+    assert!(
+        server.pending_snapshot_provider_sync.contains(child_id),
+        "open unowned imported Vue file must stay queued for future owner reconciliation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_api_to_provider_retains_prior_path_when_replacement_sync_fails() {
+    // Whole-class coverage: sync_api_to_provider (a live owner-resolved Vue sync
+    // path reachable for OPEN files via sync_vue_public_api_by_canonical_id) must
+    // use close-AFTER-successful-sync. On an owner-key change that force-rebinds
+    // the owner-independent `{src}.vue.ts`, a FAILED replacement sync must not
+    // close the prior live path and must retain the prior state.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server); // owns /workspace via tsconfig.json
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+
+    let api_path = "/workspace/src/App.vue.ts";
+    // Fail the API `.vue.ts` sync.
+    provider.set_fail_sync_path(api_path);
+    // Seed prior state from a STALE owner key: same owner-independent `.vue.ts`
+    // (force-rebind marks it stale on the owner change), already live.
+    let prior_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/stale/tsconfig.json".to_string(),
+        ),
+        ide_path: None,
+        api_path: Some(api_path.to_string()),
+        api_background_loaded: true,
+        ide_background_loaded: false,
+        shadow_path: None,
+        shadow_background_loaded: false,
+    };
+    server.commit_provider_sync_state("/workspace/src/App.vue", prior_state.clone());
+
+    server.sync_api_to_provider(&uri).await;
+
+    let calls = provider.file_sync_calls();
+    // Reach (R3-2): `sync_api_to_provider` must have ATTEMPTED to sync the
+    // `.vue.ts` (the failing mock records the open/update before erroring) before
+    // the no-close assertion. A no-op impl that returned before syncing would
+    // pass the absence-of-close + state-unchanged asserts vacuously.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == api_path
+        )),
+        "failed sync_api_to_provider must REACH the sync and attempt the `.vue.ts`, calls={calls:?}"
+    );
+    // Discriminator: the prior live `.vue.ts` must NOT be closed (its sync failed).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == api_path
+        )),
+        "failed sync_api_to_provider must NOT close the prior live `.vue.ts`, calls={calls:?}"
+    );
+    // Positive: the prior state is retained unchanged on a fully-failed sync.
+    let state = server
+        .provider_sync_state_for_source("/workspace/src/App.vue")
+        .expect("failed sync_api_to_provider must retain the prior state");
+    assert_eq!(
+        state, prior_state,
+        "failed sync_api_to_provider must leave the prior state unchanged, got {state:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ensure_current_file_synced_queues_unresolved_ide_path_for_snapshot_reconciliation() {
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -5241,22 +7152,22 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
             call,
             MockCall::OpenFile { path, .. } if path == "/workspace/src/App.vue.tsx"
         )),
-        "pre-snapshot current-file sync should open the provisional IDE path, calls={calls:?}"
+        "pre-snapshot current-file sync should open the unresolved IDE path, calls={calls:?}"
     );
 
     let state = server
         .provider_sync_states
         .get("/workspace/src/App.vue")
         .map(|entry| entry.clone())
-        .expect("provisional IDE sync should commit provider state");
+        .expect("unresolved IDE sync should commit provider state");
     assert!(
-        state.is_provisional(),
-        "pre-snapshot current-file sync should mark the IDE owner as provisional"
+        state.is_unresolved(),
+        "pre-snapshot current-file sync should mark the IDE owner as unresolved"
     );
     assert_eq!(
         state.ide_path.as_deref(),
         Some("/workspace/src/App.vue.tsx"),
-        "pre-snapshot current-file sync should use the provisional IDE path"
+        "pre-snapshot current-file sync should use the unresolved IDE path"
     );
     assert!(
         server
@@ -5267,7 +7178,11 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ensure_current_file_synced_clears_provisional_state_when_ready_snapshot_has_no_owner() {
+async fn ensure_current_file_synced_preserves_open_unresolved_vue_state_when_ready_owner_is_none() {
+    // Editor-liveness invariant on the FOREGROUND sync path: when the ready
+    // ownership snapshot resolves no owner for an OPEN Vue file, the sync must
+    // keep the file's TSX live in the provider (unresolved open-document
+    // state) and keep it queued — NOT clear the state and close the TSX.
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -5306,48 +7221,249 @@ const msg = 'hello'
     assert!(
         server
             .provider_sync_state_for_source("/workspace/src/App.vue")
-            .expect("bootstrap sync should commit provisional state")
-            .is_provisional(),
-        "bootstrap sync should start from provisional state"
+            .expect("bootstrap sync should commit unresolved state")
+            .is_unresolved(),
+        "bootstrap sync should start from unresolved state"
     );
 
     provider.clear_calls();
+    // Ready snapshot at `/other` — it does NOT own the open `/workspace` file.
     install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
 
     server.ensure_current_file_synced(&uri).await;
 
+    // Positive: the open file's provider state SURVIVES and stays unresolved.
+    let state = server
+        .provider_sync_state_for_source("/workspace/src/App.vue")
+        .expect("open Vue file must keep its provider sync state when ready owner is None");
     assert!(
-        server
-            .provider_sync_state_for_source("/workspace/src/App.vue")
-            .is_none(),
-        "ready-but-unowned current-file sync must remove stale provisional state"
+        state.is_unresolved(),
+        "ownership-None must keep the open file's binding unresolved, got {:?}",
+        state.owner_binding
     );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "the open file's IDE TSX path must be preserved"
+    );
+
+    // Positive: stays queued for a future owner reconciliation.
     assert!(
         server
             .pending_snapshot_provider_sync
             .contains("/workspace/src/App.vue"),
-        "ready-but-unowned current-file sync should stay queued for future rebuilds"
+        "open unresolved current-file sync should stay queued for future owner reconciliation"
     );
+
+    // Positive: interactive type-provider lookups still resolve from committed
+    // state (hover keeps working).
     assert!(
-        server.type_provider_context(&uri).is_none(),
-        "interactive type-provider lookups must not synthesize a live path from the resolver alone"
+        server.type_provider_context(&uri).is_some(),
+        "open unresolved Vue file must keep a live type-provider context for hover"
     );
 
     let calls = provider.file_sync_calls();
-    assert!(
-        calls.iter().any(|call| matches!(
-            call,
-            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
-        )),
-        "ready-but-unowned current-file sync should close the stale provisional IDE path, calls={calls:?}"
-    );
+    // Negative: the foreground sync must NOT close the open file's live TSX.
     assert!(
         !calls.iter().any(|call| matches!(
             call,
-            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
-                if path == "/workspace/src/App.vue.tsx"
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
         )),
-        "ready-but-unowned current-file sync must not reopen or update the guessed IDE path, calls={calls:?}"
+        "ready-but-unowned current-file sync must NOT close the open file's live IDE path, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ensure_current_file_synced_reconciles_owned_open_vue_on_owner_loss() {
+    // R2-5: the foreground freshness check computed
+    // `needs_owner_reconcile = is_unresolved() && ownership_ready`, which NEVER
+    // fires for a previously-`Owned` OPEN Vue that becomes owner-None (its
+    // binding is still `Owned`, not unresolved). With its IDE already synced and
+    // no dirty flag, it EARLY-RETURNED at the freshness check, keeping its stale
+    // `Owned` binding + owner-derived `.vue.ts`. The fix also forces reconcile on
+    // owner-loss/mismatch (ownership_ready AND committed `Owned` AND the live
+    // snapshot resolves no owner), preserving the open file as Unresolved.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+            },
+        )
+    });
+
+    let server = service.inner();
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+    );
+
+    // Ready snapshot at `/other` — does NOT own the open `/workspace` file, so
+    // its current owner resolves to None (the owner-loss arm).
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+    provider.clear_calls();
+
+    // Seed a STALE `Owned` committed state with the IDE TSX already background-
+    // loaded (so `ide_already_synced` is true) AND an owner-derived `.vue.ts`.
+    // No `needs_ide_sync` flag is set, so `needs_sync` is false — pre-fix the
+    // freshness check early-returns here.
+    server.needs_ide_sync.remove("/workspace/src/App.vue");
+    server.commit_provider_sync_state(
+        "/workspace/src/App.vue",
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/stale/tsconfig.json".to_string(),
+            ),
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    server.ensure_current_file_synced(&uri).await;
+
+    // Discriminator (RED pre-fix): the stale `Owned` binding survived the
+    // early-return. Post-fix the owner-loss forces reconciliation to Unresolved.
+    let state = server
+        .provider_sync_state_for_source("/workspace/src/App.vue")
+        .expect("open Vue file must keep its provider sync state on owner loss");
+    assert!(
+        state.is_unresolved(),
+        "owner loss on an already-synced open `.vue` must reconcile to Unresolved \
+         (not early-return on a stale Owned binding), got {:?}",
+        state.owner_binding
+    );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "the open file's live IDE TSX path must be preserved"
+    );
+    assert!(
+        state.api_path.is_none(),
+        "the stale owner-derived `.vue.ts` must be dropped on owner loss, got {:?}",
+        state.api_path
+    );
+
+    let calls = provider.file_sync_calls();
+    // Negative: the live IDE TSX must NOT be closed (editor-liveness).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
+        )),
+        "owner-loss reconcile must NOT close the open file's live TSX, calls={calls:?}"
+    );
+    // Positive: stays queued for a future owner reconciliation.
+    assert!(
+        server
+            .pending_snapshot_provider_sync
+            .contains("/workspace/src/App.vue"),
+        "owner-loss reconcile should keep the file queued for future owner reconciliation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ensure_current_file_synced_does_not_rechurn_steady_state_unowned_open_vue() {
+    // R3-3 [P1]: a steady-state OPEN unowned `.vue` (committed `Unresolved`, the
+    // current snapshot also resolves NO owner) is FRESH — its committed binding
+    // already matches the live resolution. A second foreground pass (hover /
+    // completion) with no change must NOT recompile + re-sync the TSX. Pre-fix
+    // `needs_owner_reconcile = state.is_unresolved() && ownership_ready` was true
+    // for EVERY unowned-but-synced file, so every interactive query re-opened/
+    // re-synced the provider artifact — a per-keystroke perf regression.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    // Ready snapshot at `/other` — does NOT own the open `/workspace` file.
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+
+    // First pass: syncs the unresolved TSX and commits the `Unresolved` state.
+    server.ensure_current_file_synced(&uri).await;
+    let first = server
+        .provider_sync_state_for_source("/workspace/src/App.vue")
+        .expect("first pass must commit unresolved state");
+    assert!(
+        first.is_unresolved() && first.ide_background_loaded,
+        "first pass should leave a live Unresolved IDE state, got {first:?}"
+    );
+    let first_calls = provider.file_sync_calls();
+    assert!(
+        first_calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "first pass should sync the unresolved `.tsx`, calls={first_calls:?}"
+    );
+
+    // Second pass: NOTHING changed, owner still None. The committed `Unresolved`
+    // binding matches the current (still-None) resolution → FRESH → no re-sync.
+    provider.clear_calls();
+    server.ensure_current_file_synced(&uri).await;
+
+    // Discriminator (RED pre-fix): a second pass re-opened/re-synced the `.tsx`.
+    let second_calls = provider.file_sync_calls();
+    assert!(
+        !second_calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "a steady-state unowned open `.vue` must NOT re-sync its TSX on a second \
+         no-change pass (no churn), calls={second_calls:?}"
+    );
+    // And nothing else churns either.
+    assert!(
+        second_calls.is_empty(),
+        "a steady-state no-change pass must issue NO provider file ops, calls={second_calls:?}"
+    );
+
+    // The committed state is unchanged (still live Unresolved `.tsx`).
+    let second = server
+        .provider_sync_state_for_source("/workspace/src/App.vue")
+        .expect("state survives the second pass");
+    assert!(
+        second.is_unresolved(),
+        "steady-state binding stays Unresolved, got {:?}",
+        second.owner_binding
+    );
+    assert_eq!(
+        second.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "the live IDE path is unchanged across the no-churn pass"
     );
 }
 
@@ -5504,6 +7620,103 @@ const msg = 'updated'
             MockCall::UpdateFile { path, .. } if path == "/workspace/src/App.vue.jsx"
         )),
         "path change should not treat the new JSX path as an already-open file, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn current_file_sync_retains_old_ide_path_when_new_sync_fails() {
+    // FIX-7: the FOREGROUND ensure_current_file_synced must open/sync the NEW
+    // IDE path FIRST, commit on success, THEN close the old path. On a jsx→tsx
+    // transition whose new `.tsx` sync FAILS, the old `.jsx` must NOT be closed
+    // and committed state must not be left pointing at the unsynced `.tsx`.
+    // Pre-fix it closed the old path BEFORE the (failing) open.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // Open as JS → committed live `.jsx` IDE path.
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="js">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    server.ensure_current_file_synced(&uri).await;
+    assert_eq!(
+        server
+            .provider_sync_state_for_source("/workspace/src/App.vue")
+            .and_then(|state| state.ide_path),
+        Some("/workspace/src/App.vue.jsx".to_string()),
+        "initial JS sync should materialize the .jsx IDE path"
+    );
+
+    // Change to TS → desired IDE path becomes `.tsx`. Fail the `.tsx` sync.
+    provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+    provider.clear_calls();
+    tower_lsp_server::LanguageServer::did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri.clone(),
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: r#"<script setup lang="ts">
+const msg = 'updated'
+</script>
+<template><div>{{ msg }}</div></template>
+"#
+                .to_string(),
+            }],
+        },
+    )
+    .await;
+
+    server.ensure_current_file_synced(&uri).await;
+
+    let calls = provider.file_sync_calls();
+    // Reach (R3-2): the foreground pass must have ATTEMPTED to open the new
+    // `.tsx` (the failing mock records the open before erroring) before the
+    // no-close assertion. A no-op impl that returned before the open attempt
+    // would pass the absence-of-close + state-retention asserts vacuously.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "failed foreground IDE transition must REACH the open and attempt the new `.tsx`, calls={calls:?}"
+    );
+    // Discriminator: the old live `.jsx` must NOT be closed because the new
+    // `.tsx` sync failed. (Pre-fix the close ran BEFORE the open attempt.)
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.jsx"
+        )),
+        "failed foreground IDE transition must NOT close the old .jsx path, calls={calls:?}"
+    );
+    // Discriminator: committed state must NOT be left on the unsynced `.tsx`.
+    let state = server
+        .provider_sync_state_for_source("/workspace/src/App.vue")
+        .expect("foreground sync should retain a committed state");
+    assert_ne!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "committed IDE path must not be left on the unsynced .tsx, got {:?}",
+        state.ide_path
+    );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.jsx"),
+        "the old live .jsx path must be retained as committed on failure"
     );
 }
 
@@ -6490,7 +8703,11 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
         false,
     )
     .await;
-    assert!(synced, "pending Vue sync should succeed with resolved deps");
+    assert_eq!(
+        synced,
+        SyncOutcome::FullyReconciled,
+        "pending Vue sync should fully reconcile with resolved deps (both kinds synced)"
+    );
 
     let profile = documents.tsx_profile.read().clone();
     assert!(
@@ -6575,7 +8792,11 @@ defineProps<{ msg: string }>()
     )
     .await;
 
-    assert!(synced, "pending Vue sync should succeed for TSGO");
+    assert_eq!(
+        synced,
+        SyncOutcome::FullyReconciled,
+        "pending Vue sync should fully reconcile for TSGO (both kinds synced)"
+    );
 
     let calls = provider.file_sync_calls();
     assert!(
@@ -7170,6 +9391,160 @@ import Child from '@/components/Child.vue'
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn resync_aliased_imports_retains_prior_path_when_replacement_sync_fails() {
+    // FIX-3: the aliased-import resync pass must use close-AFTER-successful-sync
+    // (skip-active, per-kind), NOT close-before-sync. An open imported `.vue`
+    // undergoing an owner-key change has its owner-INDEPENDENT `{src}.vue.ts`
+    // marked stale by the force-rebind clause; pre-fix the pass closed it BEFORE
+    // syncing, so a failed sync left the artifact gone. Post-fix: a failed sync
+    // closes nothing and retains the prior state.
+    let temp_base = std::env::temp_dir().join("verter_test_resync_aliased_retain");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }"#,
+    )
+    .expect("write tsconfig");
+    let child_source = r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#;
+    std::fs::write(workspace.join("src/components/Child.vue"), child_source)
+        .expect("write Child.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id_stripped = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    // Normalize through the production `CanonicalPath` (lowercases the Windows
+    // drive letter) so the seeded state key matches the import-resolver-derived
+    // `import_id` the aliased pass uses — otherwise the transition sees no prior
+    // state and the close-before-sync regression is not exercised.
+    let workspace_id = verter_workspace::CanonicalPath::new(&workspace_id_stripped)
+        .as_str()
+        .to_string();
+    let app_id = format!("{workspace_id}/src/App.vue");
+    let child_id = format!("{workspace_id}/src/components/Child.vue");
+    let child_api_path = format!("{child_id}.ts");
+
+    let app_source = r#"<script setup lang="ts">
+import Child from '@/components/Child.vue'
+</script>
+<template><Child msg="hello" /></template>"#
+        .to_string();
+
+    let vfs_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_access));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: app_source,
+    });
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    let registry = build_result.registry;
+    host.configure_projects(
+        registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&registry);
+
+    let provider = Arc::new(MockTypeProvider::new());
+    // Fail ONLY the child's API sync; everything else succeeds.
+    provider.set_fail_sync_path(&child_api_path);
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+
+    let provider_sync_states = DashMap::new();
+    // Prior committed state from a STALE owner key: same owner-independent
+    // `{child}.vue.ts` API path. The owner change marks that same path stale
+    // (the force-rebind clause). Pre-fix the pass closed it BEFORE the sync;
+    // the sync then FAILS, leaving the artifact gone. `api_background_loaded`
+    // is false so the aliased pass actually processes the file (it skips files
+    // already fully background-loaded).
+    let prior_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/stale/tsconfig.json".to_string(),
+        ),
+        ide_path: None,
+        api_path: Some(child_api_path.clone()),
+        api_background_loaded: false,
+        ide_background_loaded: false,
+        shadow_path: None,
+        shadow_background_loaded: false,
+    };
+    provider_sync_states.insert(child_id.clone(), prior_state.clone());
+
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        false,
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    // R2-7 reach assertion (DISCRIMINATES a no-op discovery regression): the
+    // aliased pass must actually REACH the child and ATTEMPT to sync its
+    // `{child}.vue.ts` despite the injected failure (`set_fail_sync_path` records
+    // the open/update call BEFORE returning Err). If the alias-collection
+    // pipeline regressed to a no-op, no such attempt is recorded and the
+    // absence-of-close + state-survival asserts below would PASS vacuously.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == &child_api_path
+        )),
+        "aliased resync must REACH the child and attempt its `.vue.ts` sync, calls={calls:?}"
+    );
+    // Discriminator: the prior live `{child}.vue.ts` must NOT be closed, because
+    // its replacement sync FAILED. (Pre-fix: closed before the sync attempt.)
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &child_api_path
+        )),
+        "failed aliased resync must NOT close the prior live API path, calls={calls:?}"
+    );
+    // Positive: the prior state is retained unchanged on a fully-failed sync.
+    let state = provider_sync_states
+        .get(&child_id)
+        .map(|entry| entry.clone())
+        .expect("failed aliased resync must retain the prior state");
+    assert_eq!(
+        state, prior_state,
+        "failed aliased resync must leave the prior state unchanged, got {state:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn resync_aliased_imports_syncs_vue_ide_artifact_for_tsgo() {
     let temp_base = std::env::temp_dir().join("verter_test_resync_aliased_tsgo");
     let _ = std::fs::remove_dir_all(&temp_base);
@@ -7396,6 +9771,568 @@ import { Overlay } from './components'
     );
 
     let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resync_aliased_already_loaded_open_vue_reconciled_when_owner_lost() {
+    // R2-4: the aliased-import resync skips a fully-background-loaded import
+    // BEFORE resolving its current owner. A stale-`Owned` OPEN `.vue` whose owner
+    // disappeared (snapshot now resolves None) must still be RECONCILED — pre-fix
+    // the `already_loaded` skip short-circuited it, leaving it stranded on the
+    // dead owner (the `no ide_context` class). Post-fix: the skip is gated on the
+    // committed binding still matching the live resolution, so an owner-lost open
+    // file falls through to `reconcile_unowned_vue_provider_file` → converts to
+    // Unresolved + closes the dropped owner-derived `.vue.ts`.
+    let temp_base = std::env::temp_dir().join("verter_test_r24_aliased_owner_lost");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }"#,
+    )
+    .expect("write tsconfig");
+    std::fs::write(
+        workspace.join("src/components/Child.vue"),
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    )
+    .expect("write Child.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id_stripped = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    let workspace_id = verter_workspace::CanonicalPath::new(&workspace_id_stripped)
+        .as_str()
+        .to_string();
+    let app_id = format!("{workspace_id}/src/App.vue");
+    let child_id = format!("{workspace_id}/src/components/Child.vue");
+    let child_tsx = format!("{child_id}.tsx");
+    let child_api_path = format!("{child_id}.ts");
+
+    let vfs_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_access));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let app_uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: app_uri,
+        language_id: "vue".to_string(),
+        version: 1,
+        text: r#"<script setup lang="ts">
+import Child from '@/components/Child.vue'
+</script>
+<template><Child msg="hello" /></template>"#
+            .to_string(),
+    });
+    // Open Child.vue: it is the already-loaded OPEN import whose owner was lost.
+    let child_uri = crate::uri::path_to_file_uri(&child_id).expect("child uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: child_uri,
+        language_id: "vue".to_string(),
+        version: 1,
+        text: r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#
+            .to_string(),
+    });
+
+    // Host registry owns the workspace (so the aliased import resolves Child).
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    // Ready snapshot rooted at `/other` — does NOT own the workspace's Child.vue,
+    // so its current owner resolves to None (the owner-loss arm).
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/other",
+        Some("/other/tsconfig.json"),
+    );
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+
+    let provider_sync_states = DashMap::new();
+    // Prior state: STALE `Owned` binding, BOTH kinds background-loaded so the
+    // `already_loaded` skip fires pre-fix. Carries the owner-derived `.vue.ts`.
+    let prior_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/stale/tsconfig.json".to_string(),
+        ),
+        ide_path: Some(child_tsx.clone()),
+        api_path: Some(child_api_path.clone()),
+        ide_background_loaded: true,
+        api_background_loaded: true,
+        shadow_path: None,
+        shadow_background_loaded: false,
+    };
+    provider_sync_states.insert(child_id.clone(), prior_state);
+
+    // Non-tsgo aliased pass: the skip checks `api_background_loaded` (true here).
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        false,
+    )
+    .await;
+
+    // Discriminator (RED pre-fix): the already-loaded open Child was skipped, so
+    // its stale `Owned` binding survived. Post-fix it is reconciled to Unresolved.
+    let state = provider_sync_states
+        .get(&child_id)
+        .map(|entry| entry.clone())
+        .expect("open Child.vue must keep a provider sync state");
+    assert!(
+        state.is_unresolved(),
+        "an already-loaded open `.vue` whose owner was lost must be reconciled to \
+         Unresolved (not skipped on a stale Owned binding), got {:?}",
+        state.owner_binding
+    );
+    // The owner-derived `.vue.ts` dropped by the conversion must be closed.
+    let calls = provider.file_sync_calls();
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &child_api_path
+        )),
+        "owner-loss reconciliation must close the dropped `.vue.ts`, calls={calls:?}"
+    );
+    // The live IDE TSX must NOT be closed (editor-liveness for the open file).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &child_tsx
+        )),
+        "owner-loss reconciliation must NOT close the open file's live TSX, calls={calls:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resync_barrel_vue_dep_reconciles_open_owned_overlay_on_owner_loss() {
+    // FIX-4 + R2-7: an OPEN `.vue` reached as a barrel dependency whose owner
+    // resolves to None must NOT have its provider state removed nor its IDE TSX
+    // closed (the barrel pass previously called
+    // remove_provider_sync_state_and_close_paths unconditionally for an
+    // owner-None `.vue`). It must be reconciled in place: a prior `Owned` binding
+    // is converted to `Unresolved` (R2-4 barrel-pass gate + the open-document
+    // editor-liveness path) and the dropped owner-derived `.vue.ts` is closed
+    // (R2-8), while the live IDE TSX is preserved.
+    //
+    // The binding flip Owned→Unresolved + the `.vue.ts` close are the R2-7
+    // DISCRIMINATING reach signals: they only happen if the barrel→Vue-re-export
+    // discovery actually REACHED Overlay. If discovery regressed to a no-op, the
+    // seeded `Owned` binding would survive unchanged and nothing would close, so
+    // a pure state-survival + absence-of-close assertion would pass vacuously.
+    let temp_base = std::env::temp_dir().join("verter_test_barrel_open_unowned");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }"#,
+    )
+    .expect("write tsconfig");
+    std::fs::write(
+        workspace.join("src/components/index.ts"),
+        r#"export { default as Overlay } from './Overlay.vue'"#,
+    )
+    .expect("write barrel");
+    std::fs::write(
+        workspace.join("src/components/Overlay.vue"),
+        r#"<script setup lang="ts">
+defineProps<{ show: boolean }>()
+</script>
+<template><div v-if="show">overlay</div></template>"#,
+    )
+    .expect("write Overlay.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id_stripped = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    // Verter's canonical-path normalization lowercases the Windows drive letter
+    // (the import resolver emits `c:/...`), whereas `std::fs::canonicalize`
+    // uppercases it (`C:/...`). Run it through the production `CanonicalPath`
+    // normalizer so the open-document key, the seeded state key, and the
+    // drain-discovered barrel-dep id all agree — otherwise the owner-None arm
+    // runs against a different key.
+    let workspace_id = verter_workspace::CanonicalPath::new(&workspace_id_stripped)
+        .as_str()
+        .to_string();
+    let app_id = format!("{workspace_id}/src/App.vue");
+    let overlay_id = format!("{workspace_id}/src/components/Overlay.vue");
+    let overlay_tsx = format!("{overlay_id}.tsx");
+    let overlay_api = format!("{overlay_id}.ts");
+
+    let vfs_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_access));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let app_uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: app_uri,
+        language_id: "vue".to_string(),
+        version: 1,
+        text: r#"<script setup lang="ts">
+import { Overlay } from './components'
+</script>
+<template><Overlay :show="true" /></template>"#
+            .to_string(),
+    });
+    // Open Overlay.vue too: it is the OPEN barrel-dep whose state must survive.
+    let overlay_uri = crate::uri::path_to_file_uri(&overlay_id).expect("overlay uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: overlay_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: r#"<script setup lang="ts">
+defineProps<{ show: boolean }>()
+</script>
+<template><div v-if="show">overlay</div></template>"#
+            .to_string(),
+    });
+
+    // Host registry owns everything (so the barrel resolves Overlay). The
+    // SNAPSHOT resolver below is rooted at `/other`, so ownership of Overlay
+    // resolves to None — that is the owner-None barrel arm under test.
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    // Ready snapshot at `/other` — does NOT own the workspace's Overlay.vue.
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/other",
+        Some("/other/tsconfig.json"),
+    );
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+
+    let provider_sync_states = DashMap::new();
+    // Prior committed state: STALE `Owned` binding with the live IDE TSX AND a
+    // stale owner-derived `.vue.ts` API path (as if a prior owner had synced it).
+    // The barrel pass must reconcile this owner-loss in place.
+    provider_sync_states.insert(
+        overlay_id.clone(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/stale/tsconfig.json".to_string(),
+            ),
+            ide_path: Some(overlay_tsx.clone()),
+            api_path: Some(overlay_api.clone()),
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    // TSGO barrel pass (is_tsgo = true) reaches the owner-None arm for Overlay.
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true,
+    )
+    .await;
+
+    // Discriminator: the open Overlay's state must SURVIVE (pre-fix it was
+    // removed by remove_provider_sync_state_and_close_paths) AND its stale
+    // `Owned` binding must be RECONCILED to Unresolved. The binding flip only
+    // happens if the barrel pass actually reached Overlay (R2-7 reach signal #1).
+    let state = provider_sync_states
+        .get(&overlay_id)
+        .map(|entry| entry.clone())
+        .expect("open barrel-dep Overlay.vue must keep its provider sync state when unowned");
+    assert!(
+        state.is_unresolved(),
+        "open barrel-dep must be RECONCILED to Unresolved on owner loss (proves the \
+         barrel pass reached it), got {:?}",
+        state.owner_binding
+    );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some(overlay_tsx.as_str()),
+        "open barrel-dep must preserve its live IDE TSX path"
+    );
+    assert!(
+        state.api_path.is_none(),
+        "the stale owner-derived `.vue.ts` must be dropped on owner loss, got {:?}",
+        state.api_path
+    );
+
+    let calls = provider.file_sync_calls();
+    // R2-7 reach signal #2 (DISCRIMINATES a no-op barrel-discovery regression):
+    // the dropped owner-derived `.vue.ts` must be CLOSED (R2-8). This only occurs
+    // if the barrel → Vue-re-export discovery actually REACHED Overlay; a no-op
+    // regression would leave the seeded `Owned`+`.vue.ts` state untouched and
+    // close nothing, so the assertions would NOT pass vacuously.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &overlay_api
+        )),
+        "barrel pass must REACH Overlay and close the dropped `.vue.ts`, calls={calls:?}"
+    );
+    // Discriminator: the open Overlay's live IDE TSX must NOT be closed.
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &overlay_tsx
+        )),
+        "open barrel-dep must NOT close its live IDE TSX, calls={calls:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resync_background_vue_reconciles_owner_loss_when_ide_output_is_absent() {
+    // R3-5 [P1]: the owner-None preserve/convert on the background resync path
+    // must NOT be gated behind fresh compile (`get_ide`) output. Pre-fix the sync
+    // body did `let Some(ide) = host.get_ide(..) else { return; }` BEFORE the
+    // owner check, so a transient IDE compile miss (`ide == None`) left a
+    // previously-`Owned` OPEN `.vue` stranded on its stale owner (the `no
+    // ide_context` class). The fix detects owner-None and reconciles the BINDING
+    // (force `Unresolved`, drop+close the owner-derived `.vue.ts`) before
+    // requiring IDE output.
+    //
+    // Driven through `sync_compiled_vue_to_provider` (the post-compile sync
+    // decision, separated from the destructive disk reload) with `ide = None` —
+    // the exact absent-IDE-output condition — under an owner-None snapshot for an
+    // OPEN document.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    // Ready snapshot at `/other` — does NOT own the open `/workspace` file.
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+
+    let _uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+    let app_tsx = "/workspace/src/App.vue.tsx";
+    let app_api = "/workspace/src/App.vue.ts";
+
+    // Seed a STALE `Owned` committed state with the IDE TSX live AND an owner-
+    // derived `.vue.ts`. The owner is now None and the IDE output is absent —
+    // pre-fix the binding stays stale (early return on the absent-IDE gate).
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/stale/tsconfig.json".to_string(),
+            ),
+            ide_path: Some(app_tsx.to_string()),
+            api_path: Some(app_api.to_string()),
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    // Absent IDE output: pass `ide = None` (the transient compile-miss condition).
+    server
+        .sync_compiled_vue_to_provider(canonical_id, None)
+        .await;
+
+    // Discriminator (RED pre-fix): the stale `Owned` binding survived because the
+    // body returned on the absent-IDE gate before the owner check.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("open Vue file must keep its provider sync state on owner loss");
+    assert!(
+        state.is_unresolved(),
+        "owner loss with absent IDE output must reconcile the binding to Unresolved \
+         (not return early on the IDE gate), got {:?}",
+        state.owner_binding
+    );
+    // The live IDE TSX path is preserved (owner-independent artifact).
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some(app_tsx),
+        "the open file's live IDE TSX path must be preserved across the conversion"
+    );
+    // The stale owner-derived `.vue.ts` is dropped from the committed state…
+    assert!(
+        state.api_path.is_none(),
+        "the stale owner-derived `.vue.ts` must be dropped on owner loss, got {:?}",
+        state.api_path
+    );
+
+    let calls = provider.file_sync_calls();
+    // …and CLOSED in the provider (R2-8), proving the conversion actually ran.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == app_api
+        )),
+        "owner-loss reconcile must close the dropped `.vue.ts` even with absent IDE output, calls={calls:?}"
+    );
+    // The live IDE TSX must NEVER be closed (editor-liveness).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == app_tsx
+        )),
+        "owner-loss reconcile must NOT close the live IDE TSX, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resync_background_vue_reconciles_owner_loss_before_compile_gate() {
+    // R5-2 [P1]: the owner-None reconcile must run BEFORE the destructive disk
+    // reload + compile gate in `resync_background_vue_file`. R3-5 moved the
+    // reconcile before the IDE-output requirement INSIDE
+    // `sync_compiled_vue_to_provider`, but the OUTER compile gate in
+    // `resync_background_vue_file` (`host.remove` then `ensure_loaded` then
+    // `ensure_compiled`, with an early `return` on failure) still short-circuits
+    // BEFORE `sync_compiled_vue_to_provider` is ever called. A COMPILE FAILURE
+    // (here: `host.remove` drops the in-memory source and the test harness has no
+    // disk file to reload, so the load/compile gate fails) therefore left a
+    // previously-`Owned` OPEN `.vue` stranded on its stale owner.
+    //
+    // The fix detects owner-None via the published resolver (a pure resolver
+    // query, no compile) and reconciles the binding before the destructive
+    // reload. Driven through `resync_background_vue_file` (the entry that owns
+    // the compile gate) under an owner-None snapshot for an OPEN document.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    // Ready snapshot at `/other` — does NOT own the open `/workspace` file.
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+
+    let _uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+    let app_tsx = "/workspace/src/App.vue.tsx";
+    let app_api = "/workspace/src/App.vue.ts";
+
+    // Seed a STALE `Owned` committed state with the IDE TSX live AND an owner-
+    // derived `.vue.ts`. The owner is now None; the destructive reload below
+    // will fail to recompile (no disk file) — pre-fix the binding stays stale
+    // because the compile gate returns before the owner-None reconcile.
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/stale/tsconfig.json".to_string(),
+            ),
+            ide_path: Some(app_tsx.to_string()),
+            api_path: Some(app_api.to_string()),
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    server.resync_background_vue_file(canonical_id).await;
+
+    // Discriminator (RED pre-fix): the stale `Owned` binding survived because the
+    // compile gate returned before the owner-None reconcile ran.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("open Vue file must keep its provider sync state on owner loss");
+    assert!(
+        state.is_unresolved(),
+        "owner loss with a failing compile gate must reconcile the binding to \
+         Unresolved (not return early on the compile gate), got {:?}",
+        state.owner_binding
+    );
+    // The live IDE TSX path is preserved (owner-independent artifact).
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some(app_tsx),
+        "the open file's live IDE TSX path must be preserved across the conversion"
+    );
+    // The stale owner-derived `.vue.ts` is dropped from the committed state…
+    assert!(
+        state.api_path.is_none(),
+        "the stale owner-derived `.vue.ts` must be dropped on owner loss, got {:?}",
+        state.api_path
+    );
+
+    let calls = provider.file_sync_calls();
+    // …and CLOSED in the provider (R2-8), proving the conversion actually ran
+    // even though the compile gate would have failed.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == app_api
+        )),
+        "owner-loss reconcile must close the dropped `.vue.ts` even when the compile \
+         gate fails, calls={calls:?}"
+    );
+    // The live IDE TSX must NEVER be closed (editor-liveness).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == app_tsx
+        )),
+        "owner-loss reconcile must NOT close the live IDE TSX, calls={calls:?}"
+    );
 }
 
 // ── VFS workspace integration ──

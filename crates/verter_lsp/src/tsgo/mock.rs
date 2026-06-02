@@ -13,6 +13,17 @@ mod inner {
     use crate::tsgo::protocol::*;
     use crate::tsgo::traits::{ProviderFuture, TypeProvider};
 
+    /// Return `Err` when failure injection is enabled, otherwise `Ok(())`.
+    fn fail_or_ok(fail: bool, op: &str) -> Result<(), TypeProviderError> {
+        if fail {
+            Err(TypeProviderError::new(format!(
+                "MockTypeProvider: injected {op} failure"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
     /// A recorded call to the mock type provider.
     #[derive(Debug, Clone)]
     pub enum MockCall {
@@ -97,6 +108,20 @@ mod inner {
     #[derive(Default)]
     struct MockState {
         calls: Vec<MockCall>,
+        /// When `true`, the file-op methods (`open_file`/`load_file`/
+        /// `update_file`/`close_file`) RECORD their call and then return
+        /// `Err`, simulating a provider whose file I/O fails (e.g. a crashed
+        /// child). Used to exercise failure-retain behaviour in the drain.
+        fail_file_ops: bool,
+        /// Per-path failure injection: any `open_file`/`load_file`/
+        /// `update_file` against a path in this set RECORDS its call and then
+        /// returns `Err`. This is the only way to fail a specific KIND of sync
+        /// (IDE vs API), because `*_tsx` and `*_dts` both map to the same
+        /// underlying `open_file`/`update_file` primitive — they differ only by
+        /// path. `close_file` is intentionally NOT gated by this set: tests
+        /// that fail a kind's sync still want to observe whether a stale path of
+        /// that kind was (wrongly) closed.
+        fail_sync_paths: std::collections::HashSet<String>,
         hover_responses: Vec<(String, u32, Option<HoverInfo>)>,
         completion_responses: Vec<(String, u32, Vec<Completion>)>,
         diagnostic_responses: Vec<(String, Vec<TypeDiagnostic>)>,
@@ -282,6 +307,31 @@ mod inner {
         pub fn clear_calls(&self) {
             self.state.lock().unwrap().calls.clear();
         }
+
+        /// Make every subsequent file-op (`open_file`/`load_file`/
+        /// `update_file`/`close_file`) RECORD its call and then return `Err`.
+        ///
+        /// The call is still recorded so a test can assert which provider
+        /// operations were attempted while verifying that none of them
+        /// succeeded.
+        pub fn set_fail_file_ops(&self, fail: bool) {
+            self.state.lock().unwrap().fail_file_ops = fail;
+        }
+
+        /// Make any `open_file`/`load_file`/`update_file` against `path` RECORD
+        /// its call and then return `Err`, while every other path succeeds.
+        ///
+        /// Used to inject a per-KIND sync failure (e.g. fail the IDE `.tsx`
+        /// while the API `.ts` succeeds) so tests can prove a kind's stale path
+        /// is retained when only that kind's replacement sync fails. `close_file`
+        /// is NOT gated, so a wrongful close of the stale path is still observed.
+        pub fn set_fail_sync_path(&self, path: &str) {
+            self.state
+                .lock()
+                .unwrap()
+                .fail_sync_paths
+                .insert(path.to_string());
+        }
     }
 
     /// A `TypeProvider` that always returns errors.
@@ -450,7 +500,8 @@ mod inner {
                 path: path.to_string(),
                 content: content.to_string(),
             });
-            Box::pin(async { Ok(()) })
+            let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
+            Box::pin(async move { fail_or_ok(fail, "open_file") })
         }
 
         fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
@@ -459,7 +510,8 @@ mod inner {
                 path: path.to_string(),
                 content: content.to_string(),
             });
-            Box::pin(async { Ok(()) })
+            let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
+            Box::pin(async move { fail_or_ok(fail, "load_file") })
         }
 
         fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
@@ -468,7 +520,8 @@ mod inner {
                 path: path.to_string(),
                 content: content.to_string(),
             });
-            Box::pin(async { Ok(()) })
+            let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
+            Box::pin(async move { fail_or_ok(fail, "update_file") })
         }
 
         fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
@@ -476,7 +529,11 @@ mod inner {
             state.calls.push(MockCall::CloseFile {
                 path: path.to_string(),
             });
-            Box::pin(async { Ok(()) })
+            // `close_file` is intentionally NOT gated by `fail_sync_paths`:
+            // failure-injection tests want to observe whether a stale path was
+            // (wrongly) closed even while a sibling kind's sync fails.
+            let fail = state.fail_file_ops;
+            Box::pin(async move { fail_or_ok(fail, "close_file") })
         }
 
         fn get_completions(

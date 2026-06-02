@@ -11,7 +11,9 @@ use crate::documents::{uri_to_canonical_id, DocumentRegistry};
 use crate::features::cursor_context::ExpressionContext;
 use crate::features::diagnostics::map_diagnostics;
 use crate::provider_sync::{
-    commit_sync_transition, prepare_sync_transition, ProviderPathKind, ProviderSyncState,
+    commit_sync_transition, genuinely_stale_after_sync, open_unresolved_vue_commit,
+    open_unresolved_vue_state, prepare_sync_transition, revert_unsynced_kinds, ProviderPathKind,
+    ProviderSyncState,
 };
 use crate::statistics::Statistics;
 use crate::tsgo::project_sync::ProjectSync;
@@ -55,7 +57,7 @@ mod component_resolve;
 
 // Provider-sync orchestration. Inherent-impl extension
 // methods on `VerterLanguageServer` covering diagnostics publishing,
-// IDE/API/non-Vue sync, ensure_*_synced family, provisional sync,
+// IDE/API/non-Vue sync, ensure_*_synced family, unresolved (pre-snapshot) sync,
 // target_ide_path helpers, and the background-init bootstrap.
 mod sync_orchestration;
 
@@ -116,12 +118,16 @@ pub(crate) use self::server_utils::{
     compute_verter_diagnostics_for_with_views, prepare_non_vue_provider_sync,
 };
 
+#[path = "../background_drain.rs"]
+mod background_drain;
 #[path = "../background_init.rs"]
 mod background_init;
 // Glob re-export so `server_tests.rs` (a child of `server`) sees
 // `drain_pending_snapshot_provider_sync`, `sync_pending_vue_provider_file`,
 // `is_generated_verter_types_event`, etc. via its `use super::*;`.
-pub(crate) use self::background_init::configure_provider_paths_for_source;
+pub(crate) use self::background_drain::configure_provider_paths_for_source;
+#[cfg(test)]
+use self::background_drain::*;
 #[cfg(test)]
 use self::background_init::*;
 

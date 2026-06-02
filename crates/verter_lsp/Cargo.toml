@@ -60,3 +60,8 @@ path = "src/main.rs"
 futures-util = "0.3.32"
 paste = "1.0.15"
 tempfile = "3.27"
+# Used by `tests/editor_liveness_guards.rs` to AST-parse the LSP provider-sync
+# source so the delegated-stale-close detector is robust against multiline call
+# spans, bare-local stale sets, and aliased delegation (a line-based scan is
+# trivially evadable). Mirrors `verter_session`'s syn-based architecture guards.
+syn = { version = "2.0", features = ["full", "visit", "parsing"] }

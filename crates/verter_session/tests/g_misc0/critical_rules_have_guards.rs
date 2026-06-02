@@ -394,6 +394,27 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "Editor-Liveness Provider-Sync Invariant",
+        &[
+            // The static editor-liveness architecture guard
+            // (`crates/verter_lsp/tests/editor_liveness_guards.rs`) source-scans
+            // every LSP provider-sync file and FAILS if any function OTHER THAN
+            // the approved leaf close-dispatch primitives contains an inline
+            // provider-close loop (close-before-sync), which would close the live
+            // editor TSX on an owner change or lose the prior path on a failed
+            // sync. A second guard (`vue_sync_functions_never_delegate_raw_stale_close`)
+            // closes the delegated-close evasion: a `.vue`-syncing function that
+            // hands the RAW `transition.stale_paths` to a close helper before
+            // syncing (no inline loop, so it slips past the first guard). Both
+            // companion meta-guards pin the detectors' discrimination.
+            "editor_liveness_guards",
+            "vue_sync_functions_never_inline_close_the_stale_set",
+            "guard_detector_discriminates_inline_close_from_delegation",
+            "vue_sync_functions_never_delegate_raw_stale_close",
+            "delegated_close_detector_discriminates_vue_evasion_from_approved_and_non_vue",
+        ],
+    ),
+    (
         "Typed SignatureAdmission gate",
         &[
             // `ReadSetSignature` is the typed admission carrier:

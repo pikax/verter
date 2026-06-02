@@ -137,6 +137,72 @@ impl VerterLanguageServer {
         }
     }
 
+    /// Preserve (or create) an OPEN Vue document's unresolved provider state
+    /// when no project owns it, keeping its IDE TSX live in the provider.
+    ///
+    /// Editor-liveness invariant: an open Vue document keeps a usable TSX in the
+    /// provider even while its owning project is unresolved. Builds the commit
+    /// state through the shared [`open_unresolved_vue_state`] primitive (forces
+    /// `Unresolved`, preserves the owner-independent live IDE path, drops the
+    /// owner-derived API path), syncs the IDE TSX when fresh `ide_code` is
+    /// available, and commits. It NEVER removes the state or closes the TSX.
+    pub(super) async fn preserve_open_unresolved_vue(
+        &self,
+        canonical_id: &str,
+        is_jsx: bool,
+        ide_code: Option<&str>,
+    ) {
+        let previous = self.provider_sync_state_for_source(canonical_id);
+        // The DESIRED Unresolved target: owner-independent desired-extension IDE
+        // path + the open-vs-update syncability hint. Binding forced
+        // `Unresolved`, owner-derived API dropped.
+        let target = crate::provider_sync::open_unresolved_vue_state(
+            previous.as_ref(),
+            canonical_id,
+            is_jsx,
+        );
+
+        // Attempt the desired IDE sync when fresh code is available (update-in-
+        // place when the desired path is already live, else first-open).
+        let mut ide_synced = false;
+        if let (Some(sync), Some(ide_code), Some(ide_path)) =
+            (&self.project_sync, ide_code, target.ide_path.clone())
+        {
+            let result = if target.ide_background_loaded {
+                sync.sync_tsx(&ide_path, ide_code).await
+            } else {
+                sync.open_tsx(&ide_path, ide_code).await
+            };
+            match result {
+                Ok(()) => ide_synced = true,
+                Err(error) => {
+                    tracing::warn!(
+                        "preserve_open_unresolved_vue: failed to sync open unresolved IDE path \
+                         {ide_path}: {error}"
+                    );
+                }
+            }
+        }
+
+        // Build the committed state + close targets through the SAME per-kind
+        // discipline the owner-resolved path uses: a non-synced IDE kind RETAINS
+        // the prior LIVE path (never dropped to a dead/None path while the prior
+        // is still open in the provider — rows 7 & 9), the owner-derived API is
+        // dropped+closed unconditionally, and the orphaned prior IDE path is
+        // closed ONLY after a successful flip (close-after-success).
+        let commit =
+            crate::provider_sync::open_unresolved_vue_commit(previous.as_ref(), target, ide_synced);
+        self.commit_provider_sync_state(canonical_id, commit.committed);
+        if let Some(dropped) = commit.dropped_api {
+            self.close_provider_paths(std::slice::from_ref(&dropped))
+                .await;
+        }
+        if let Some(stale) = commit.stale_ide_after_success {
+            self.close_provider_paths(std::slice::from_ref(&stale))
+                .await;
+        }
+    }
+
     pub(super) fn is_background_loaded_for_source_kind(
         &self,
         canonical_id: &str,
@@ -145,6 +211,41 @@ impl VerterLanguageServer {
         self.provider_sync_state_for_source(canonical_id)
             .map(|state| state.background_loaded_for_kind(kind))
             .unwrap_or(false)
+    }
+
+    /// Commit a (possibly partial) Vue provider-sync result with the
+    /// close-AFTER-successful-sync discipline, shared by every owner-resolved
+    /// `.vue` foreground/background sync method.
+    ///
+    /// Per-kind partial-failure gated: a kind whose replacement did NOT sync
+    /// reverts to its previous live path (so the committed state never
+    /// advertises an unsynced path); then the new state is committed and ONLY
+    /// the genuinely-stale paths are closed (kind synced AND not active). On a
+    /// total failure (`synced_kinds` empty) nothing is committed or closed —
+    /// the previous state + provider paths are retained intact.
+    pub(super) async fn commit_and_close_after_sync(
+        &self,
+        canonical_id: &str,
+        previous_state: Option<&ProviderSyncState>,
+        mut committed_state: ProviderSyncState,
+        stale_paths: &[(ProviderPathKind, String)],
+        synced_kinds: &[ProviderPathKind],
+    ) {
+        if synced_kinds.is_empty() {
+            return;
+        }
+        crate::provider_sync::revert_unsynced_kinds(
+            &mut committed_state,
+            previous_state,
+            synced_kinds,
+        );
+        let genuinely_stale = crate::provider_sync::genuinely_stale_after_sync(
+            stale_paths,
+            &committed_state,
+            synced_kinds,
+        );
+        self.commit_provider_sync_state(canonical_id, committed_state);
+        self.close_provider_paths(&genuinely_stale).await;
     }
 
     pub(super) async fn close_provider_paths(&self, paths: &[(ProviderPathKind, String)]) {
