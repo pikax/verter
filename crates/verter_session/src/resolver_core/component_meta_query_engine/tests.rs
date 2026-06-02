@@ -4174,3 +4174,240 @@ fn projected_surface_to_type_expr_keeps_synthetic_index_signature_span_none() {
         "synthetic open-surface index signature value has no source site"
     );
 }
+
+/// DISCRIMINATING (fix-cycle-4 Site A — `route_keys.rs`
+/// `enumerate_member_surface_keys_via_route`): a `keyof X['member']` route key
+/// source where `member` is a NON-PUBLIC (private/protected) class member must
+/// NOT derive route keys from that member. `keyof C` excludes
+/// protected/private members (TS: `keyof ClassType` is public-only), so
+/// `keyof C['privateObj']` may not be reached by external indexed access — the
+/// member's surface keys must not feed the Pick/Omit route key set.
+///
+/// Discrimination: FAILS on the pre-fix tree where the `TypeExpr::Object` arm
+/// of `enumerate_member_surface_keys_via_route` matches the member by NAME
+/// only (`property.name == member_name` / `method.name == member_name`) with no
+/// visibility gate — `privateObj` matches, its `{ secretKey }` surface is
+/// projected, and `["secretKey"]` leaks into the key set. PASSES once the arm
+/// requires `visibility.is_public()` (a non-public match is a miss).
+#[test]
+fn enumerate_member_surface_keys_via_route_gates_non_public_member() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+export class C {
+  public publicObj: { openKey: string } = { openKey: "" }
+  private privateObj: { secretKey: string } = { secretKey: "" }
+}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    // Positive control: `keyof C['publicObj']` (PUBLIC member) enumerates its
+    // surface keys.
+    let public_source = TypeExpr::KeyOf(Arc::new(TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::named("C")),
+        index: Arc::new(TypeExpr::string_literal("publicObj")),
+    }));
+    if let Some(keys) =
+        query_engine.enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &public_source)
+    {
+        assert!(
+            keys.iter().any(|k| k == "openKey"),
+            "keyof C['publicObj'] (public member) must enumerate `openKey`: {keys:?}"
+        );
+    }
+
+    // DISCRIMINATING: `keyof C['privateObj']` (PRIVATE member) must NOT derive
+    // route keys from the non-public member's surface.
+    let private_source = TypeExpr::KeyOf(Arc::new(TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::named("C")),
+        index: Arc::new(TypeExpr::string_literal("privateObj")),
+    }));
+    let private_keys =
+        query_engine.enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &private_source);
+    if let Some(keys) = private_keys {
+        assert!(
+            !keys.iter().any(|k| k == "secretKey"),
+            "keyof C['privateObj'] (non-public member) must NOT derive route keys from the \
+             private member's surface, got {keys:?}"
+        );
+    }
+}
+
+/// DISCRIMINATING (fix-cycle-4 Site A end-to-end): `Pick<C, keyof
+/// C['privateObj']>` projected through `project_direct_utility_surface_shape`
+/// must publish NOTHING — the key set derives from a non-public member's
+/// surface, which is not on `keyof C`.
+///
+/// Discrimination: FAILS pre-fix (the private member's `secretKey` enters the
+/// Pick key set and — if `C` carried a same-named public member — would be
+/// retained). PASSES once the route-key enumeration gates non-public members.
+#[test]
+fn pick_with_keyof_indexed_private_member_keys_publishes_nothing() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+export class C {
+  public secretKey: string = ""
+  private privateObj: { secretKey: string } = { secretKey: "" }
+}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    // `Pick<C, keyof C['privateObj']>` — the key set is `keyof { secretKey }`
+    // = `'secretKey'`, derived from the PRIVATE `privateObj` member. `C` also
+    // has a PUBLIC `secretKey` member whose name collides. If the private
+    // member's surface is allowed to feed the key set, `secretKey` would be
+    // picked. The non-public-derived key must NOT select the public member.
+    let expr = TypeExpr::named_with_args(
+        "Pick",
+        vec![
+            TypeExpr::named("C"),
+            TypeExpr::KeyOf(Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::named("C")),
+                index: Arc::new(TypeExpr::string_literal("privateObj")),
+            })),
+        ],
+    );
+
+    let shape = query_engine.project_direct_utility_surface_shape("/src/App.vue", &expr);
+    if let Some(shape) = shape {
+        let names: std::collections::BTreeSet<&str> = shape
+            .properties
+            .iter()
+            .map(|property| property.name.as_str())
+            .collect();
+        assert!(
+            !names.contains("secretKey"),
+            "Pick<C, keyof C['privateObj']> must not select a key derived from the non-public \
+             `privateObj` surface: {names:?}"
+        );
+    }
+}
+
+/// DISCRIMINATING (fix-cycle-4 Site B — `route_keys.rs`
+/// `project_direct_utility_surface_shape` nested-utility fallback):
+/// `Pick<Partial<C>, 'c'>` / `Omit<Partial<C>, 'a'>` over a class `C` with a
+/// PRIVATE / PROTECTED member must NOT leave the non-public member on the
+/// projected utility surface. `Partial<C>` keeps every member name, then the
+/// local Pick/Omit fallback `retain`s by name — without a public gate, a
+/// non-public member survives.
+///
+/// Discrimination: FAILS on the pre-fix tree where the `Pick`/`Omit` arms of
+/// `project_direct_utility_surface_shape` filter the `ExpandedObjectShape` by
+/// NAME only (`:627` / `:641`) and the shape's `ExpandedProperty` carries no
+/// visibility — `Pick<Partial<C>, 'c'>` retains the private `c`. PASSES once
+/// `ExpandedProperty` carries visibility and the `retain` gates on
+/// `visibility.is_public()`.
+#[test]
+fn project_direct_utility_pick_omit_over_partial_class_excludes_non_public() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+export class C {
+  public a: string = ""
+  protected b: number = 0
+  private c: boolean = false
+}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let names_of = |shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape| {
+        shape
+            .properties
+            .iter()
+            .map(|property| property.name.clone())
+            .collect::<std::collections::BTreeSet<String>>()
+    };
+
+    // DISCRIMINATING: `Pick<Partial<C>, 'c'>` over a PRIVATE key.
+    let pick_private = TypeExpr::named_with_args(
+        "Pick",
+        vec![
+            TypeExpr::named_with_args("Partial", vec![TypeExpr::named("C")]),
+            TypeExpr::string_literal("c"),
+        ],
+    );
+    if let Some(shape) =
+        query_engine.project_direct_utility_surface_shape("/src/App.vue", &pick_private)
+    {
+        assert!(
+            !names_of(&shape).contains("c"),
+            "Pick<Partial<C>, 'c'> (private `c`) must NOT keep `c`: {:?}",
+            names_of(&shape)
+        );
+    }
+
+    // DISCRIMINATING: `Omit<Partial<C>, 'a'>` over the PUBLIC key `a` must NOT
+    // leave the non-public `b` / `c` on the surface (keyof C is public-only =
+    // `'a'`; omitting it leaves an empty public keyspace).
+    let omit_public = TypeExpr::named_with_args(
+        "Omit",
+        vec![
+            TypeExpr::named_with_args("Partial", vec![TypeExpr::named("C")]),
+            TypeExpr::string_literal("a"),
+        ],
+    );
+    if let Some(shape) =
+        query_engine.project_direct_utility_surface_shape("/src/App.vue", &omit_public)
+    {
+        let names = names_of(&shape);
+        assert!(
+            !names.contains("b") && !names.contains("c"),
+            "Omit<Partial<C>, 'a'> must NOT leave the non-public `b` / `c` published: {names:?}"
+        );
+    }
+}

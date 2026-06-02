@@ -172,6 +172,9 @@ fn define_props_shape(
                 ty: field.r#type.clone(),
                 optional: field.optional,
                 readonly: false,
+                // A macro-published prop has no class accessibility origin —
+                // `Public` by construction.
+                visibility: verter_type_expr::MemberVisibility::Public,
                 declared_in_macro_type_arg: field.declared_in_macro_type_arg,
             });
         } else {
@@ -189,6 +192,9 @@ fn define_props_shape(
                 ty,
                 optional: prop.is_optional,
                 readonly: false,
+                // A macro-published prop has no class accessibility origin —
+                // `Public` by construction.
+                visibility: verter_type_expr::MemberVisibility::Public,
                 declared_in_macro_type_arg: prop.declared_in_macro_type_arg,
             });
         }
@@ -253,6 +259,9 @@ fn define_emits_shape(
                 ty: field.r#type.clone(),
                 optional: false,
                 readonly: false,
+                // A macro-published emit has no class accessibility origin —
+                // `Public` by construction.
+                visibility: verter_type_expr::MemberVisibility::Public,
                 // Emit shape members do not carry own-body-vs-heritage
                 // provenance (a props-axis concern); the producer type does not
                 // encode it.
@@ -272,6 +281,9 @@ fn define_emits_shape(
                 ty,
                 optional: false,
                 readonly: false,
+                // A macro-published emit has no class accessibility origin —
+                // `Public` by construction.
+                visibility: verter_type_expr::MemberVisibility::Public,
                 declared_in_macro_type_arg: false,
             });
         }
@@ -324,6 +336,9 @@ fn define_slots_shape(
             ty: slot_field_function_type_expr(slot),
             optional: !slot.is_required,
             readonly: false,
+            // A macro-published slot has no class accessibility origin —
+            // `Public` by construction.
+            visibility: verter_type_expr::MemberVisibility::Public,
             declared_in_macro_type_arg: false,
         })
         .collect();

@@ -208,6 +208,10 @@ fn object_to_shape(obj: &verter_type_expr::ObjectExpr) -> ExpandedObjectShape {
                 ty: p.ty.clone(),
                 optional: p.optional,
                 readonly: p.readonly,
+                // Carry the IR property's declared accessibility verbatim so a
+                // downstream key-filtering derivation can re-apply the
+                // public-keyspace gate.
+                visibility: p.visibility,
                 declared_in_macro_type_arg: false,
             }),
             ObjectMember::IndexSignature(idx) => index_signatures.push(ExpandedIndexSignature {
@@ -240,6 +244,8 @@ fn object_to_shape(obj: &verter_type_expr::ObjectExpr) -> ExpandedObjectShape {
                 ty: TypeExpr::Function(std::sync::Arc::new(method.function.clone())),
                 optional: method.optional,
                 readonly: false,
+                // Carry the IR method's declared accessibility verbatim.
+                visibility: method.visibility,
                 declared_in_macro_type_arg: false,
             }),
         }

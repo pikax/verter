@@ -30,6 +30,23 @@ pub struct ExpandedProperty {
     pub ty: TypeExpr,
     pub optional: bool,
     pub readonly: bool,
+    /// Declared accessibility of the member, carried verbatim from the source
+    /// member ([`verter_type_expr::MemberVisibility`] on the IR
+    /// `ObjectProperty` / `MethodSignature`, or the graph
+    /// `SurfaceMember::visibility` / `ProjectedMember::visibility`). `Public`
+    /// for every non-class origin; a class member carries its
+    /// `TSAccessibility`. This is the visibility carrier the shallow-by-default
+    /// shape projection MUST preserve so any DERIVATION that filters by key
+    /// (`Pick` / `Omit` over a `Partial<C>` mapped surface in the utility-route
+    /// fallback) can re-apply the public-keyspace gate — a `keyof` / `Pick` /
+    /// `Omit` derivation is public-only, so a non-public member must never be
+    /// retained on the derived surface. The full member set (incl. non-public)
+    /// stays recorded for the keep-all `native_props` carrier; only the
+    /// derivations gate. Serialized with `#[serde(default)]` so a non-public
+    /// value survives a roundtrip and pre-existing JSON without the field
+    /// deserializes as `Public`.
+    #[serde(default)]
+    pub visibility: verter_type_expr::MemberVisibility,
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source). See

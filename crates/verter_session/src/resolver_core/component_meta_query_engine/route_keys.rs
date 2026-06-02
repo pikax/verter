@@ -214,13 +214,28 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
         match &projected_expr {
             TypeExpr::Object(object) => {
+                // Public-keyspace member lookup: `keyof X['member']` reaches a
+                // member's surface only when that member is on `X`'s PUBLIC
+                // surface — TS rejects external indexed access of a
+                // protected/private class member (`X['privateMember']` is an
+                // error), exactly as `keyof X` excludes non-public members. A
+                // non-public match is therefore a miss (the member is not on
+                // the public surface this route-key enumeration derives from);
+                // the full member set stays recorded on the source surface for
+                // the keep-all `native_props` carrier.
                 let member_ty = object.properties.iter().find_map(|member| match member {
-                    ObjectMember::Property(property) if property.name == member_name => {
+                    ObjectMember::Property(property)
+                        if property.name == member_name && property.visibility.is_public() =>
+                    {
                         Some(property.ty.clone())
                     }
-                    ObjectMember::Method(method) if method.name == member_name => Some(
-                        TypeExpr::Function(std::sync::Arc::new(method.function.clone())),
-                    ),
+                    ObjectMember::Method(method)
+                        if method.name == member_name && method.visibility.is_public() =>
+                    {
+                        Some(TypeExpr::Function(std::sync::Arc::new(
+                            method.function.clone(),
+                        )))
+                    }
                     _ => None,
                 })?;
                 let projected_member = self
@@ -624,10 +639,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     keys,
                 )?;
                 let mut shape = projected_target_shape(self, scope_canonical_id, target)?;
+                // `Pick<X, K>` is a PUBLIC-keyspace projection (TS:
+                // `Pick<T, K extends keyof T>`, and `keyof` excludes
+                // protected/private class members). Gate on
+                // `visibility.is_public()` BEFORE the name predicate so a
+                // `Pick` whose key names a non-public member (e.g.
+                // `Pick<Partial<C>, 'privateMember'>`) yields an empty surface
+                // rather than re-minting the non-public member — the same
+                // public-keyspace gate the shared builtin Pick engine applies.
+                // The full member set stays recorded on the source shape for
+                // the keep-all `native_props` carrier; only this DERIVATION
+                // gates.
                 shape.properties.retain(|property| {
-                    requested
-                        .iter()
-                        .any(|candidate| candidate == property.name.as_str())
+                    property.visibility.is_public()
+                        && requested
+                            .iter()
+                            .any(|candidate| candidate == property.name.as_str())
                 });
                 shape_has_surface(&shape).then_some(shape)
             }
@@ -638,10 +665,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     keys,
                 )?;
                 let mut shape = projected_target_shape(self, scope_canonical_id, target)?;
+                // `Omit<X, K>` = `Pick<X, Exclude<keyof X, K>>` — a
+                // PUBLIC-keyspace projection. Gate on `visibility.is_public()`
+                // BEFORE the name predicate so an `Omit` over a class never
+                // LEAVES a non-public member published (the keyspace `Omit`
+                // derives from is public-only). The full member set stays
+                // recorded on the source shape for the keep-all `native_props`
+                // carrier; only this DERIVATION gates.
                 shape.properties.retain(|property| {
-                    !omitted
-                        .iter()
-                        .any(|candidate| candidate == property.name.as_str())
+                    property.visibility.is_public()
+                        && !omitted
+                            .iter()
+                            .any(|candidate| candidate == property.name.as_str())
                 });
                 shape_has_surface(&shape).then_some(shape)
             }

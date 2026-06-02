@@ -466,6 +466,10 @@ pub(crate) fn projected_surface_to_expanded_shape(
             ty: member.ty.clone(),
             optional: member.optional,
             readonly: member.readonly,
+            // Carry the projected member's declared accessibility verbatim so a
+            // downstream key-filtering derivation (`Pick`/`Omit` over the
+            // shape) can re-apply the public-keyspace gate.
+            visibility: member.visibility,
             declared_in_macro_type_arg: member.declared_in_macro_type_arg,
         })
         .collect::<Vec<_>>();
