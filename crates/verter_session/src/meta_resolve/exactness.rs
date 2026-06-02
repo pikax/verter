@@ -71,7 +71,10 @@ pub(crate) fn classify_node(
 pub(crate) fn classify_type_expr(expr: &TypeExpr) -> ExpansionExactness {
     match strip_parens(expr) {
         TypeExpr::Primitive(_) | TypeExpr::Literal(_) => ExpansionExactness::ExactConcrete,
-        TypeExpr::Function(_) => ExpansionExactness::ExactConcrete,
+        // A bare constructor type (`new (...) => R`) is as concrete as its
+        // sibling function type — both are fully-resolved shapes with no open
+        // generic variables.
+        TypeExpr::Function(_) | TypeExpr::ConstructorType(_) => ExpansionExactness::ExactConcrete,
         TypeExpr::Object(obj) if object_is_closed_expr(obj.properties.as_slice()) => {
             ExpansionExactness::ExactConcrete
         }
@@ -153,7 +156,72 @@ fn strip_parens(expr: &TypeExpr) -> &TypeExpr {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use verter_type_expr::{LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName};
+    use verter_type_expr::{
+        FunctionExpr, LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
+    };
+
+    /// `new () => string` — a bare constructor type carrying a primitive
+    /// return. Helper shared by the constructor-type exactness tests.
+    fn constructor_type_returning_string() -> TypeExpr {
+        TypeExpr::ConstructorType(Arc::new(FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+            Vec::new(),
+        )))
+    }
+
+    #[test]
+    fn function_is_concrete() {
+        // Characterises the existing `Function` arm: a function type is a
+        // fully-resolved shape with no open generic variables → concrete.
+        let function = TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+            Vec::new(),
+        )));
+        assert_eq!(
+            classify_type_expr(&function),
+            ExpansionExactness::ExactConcrete,
+        );
+    }
+
+    #[test]
+    fn constructor_type_is_concrete_like_function() {
+        // A bare constructor type (`new () => R`) is as concrete as its
+        // sibling `Function`: it carries no open generic variables. It must
+        // NOT fall through to the wildcard `ExactSymbolic` arm — that would
+        // mis-classify a fully-resolved constructor-type prop as symbolic and
+        // diverge from the `Function` classification.
+        assert_eq!(
+            classify_type_expr(&constructor_type_returning_string()),
+            ExpansionExactness::ExactConcrete,
+        );
+    }
+
+    #[test]
+    fn parenthesized_constructor_type_is_concrete() {
+        // Parenthesised constructor type strips to the same concrete shape.
+        let wrapped = TypeExpr::Parenthesized(Arc::new(constructor_type_returning_string()));
+        assert_eq!(
+            classify_type_expr(&wrapped),
+            ExpansionExactness::ExactConcrete,
+        );
+    }
+
+    #[test]
+    fn closed_object_with_constructor_type_member_is_concrete() {
+        // `{ ctor: new () => string }` — a closed object whose only member is
+        // a constructor type stays concrete (the member value is concrete).
+        let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                "ctor".to_string(),
+                constructor_type_returning_string(),
+                false,
+                false,
+            ))],
+        }));
+        assert_eq!(classify_type_expr(&expr), ExpansionExactness::ExactConcrete,);
+    }
 
     #[test]
     fn primitive_is_concrete() {
