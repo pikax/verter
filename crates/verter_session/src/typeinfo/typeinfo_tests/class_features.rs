@@ -503,3 +503,41 @@ fn class_features_pick_over_mixed_visibility_materialises_only_public_key() {
     );
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
+
+#[test]
+fn class_features_union_common_member_folds_to_most_restrictive_visibility() {
+    // TS member-access surface of an ordinary (non-macro) union `UnionA | UnionB`
+    // is the COMMON members only, and each common member's accessibility folds to
+    // the MOST RESTRICTIVE across the arms. `shared` is public in UnionA but
+    // private in UnionB, so the merged `shared` is private. Arm-only members
+    // (`onlyA` / `onlyB`) are not common and are absent.
+    //
+    // Discrimination: FAILS on a tree where `merge_union_surfaces` hardcodes
+    // `Public` for the union common-member (the pre-fix walk.rs behaviour) — the
+    // merged `shared` would be Public instead of Private.
+    let host = make_host_with_footprint();
+    upsert(&host);
+
+    let expr = shallow_surface_expr(&host, "/fixtures/class_features.ts", "UnionAB");
+
+    let props = object_props(&expr);
+    assert!(
+        props.contains_key("shared"),
+        "the common member `shared` survives the union surface: {props:?}"
+    );
+    assert!(
+        !props.contains_key("onlyA"),
+        "arm-only `onlyA` is not a common member: {props:?}"
+    );
+    assert!(
+        !props.contains_key("onlyB"),
+        "arm-only `onlyB` is not a common member: {props:?}"
+    );
+    assert_eq!(
+        props["shared"].visibility,
+        verter_type_expr::MemberVisibility::Private,
+        "union common-member `shared` folds to the most-restrictive (Private) \
+         visibility — public in UnionA, private in UnionB: {:?}",
+        props["shared"]
+    );
+}

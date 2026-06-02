@@ -195,3 +195,24 @@ export type MixedVisPick = Pick<MixedVis, "a">;
 // `Record<keyof MixedVis, 1>` reifies the keyspace into an object surface so the
 // produced keys are directly observable; only the public key `a` survives.
 export type MixedVisRecord = Record<keyof MixedVis, 1>;
+
+// 12. Ordinary (non-macro) UNION common-member surface. The TS member-access
+// surface of `UnionA | UnionB` is the COMMON members only, and each common
+// member's accessibility folds to the MOST RESTRICTIVE across the arms. `shared`
+// is public in `UnionA` but private in `UnionB`, so the merged `shared` is
+// private. The arm-only members (`onlyA` / `onlyB`) are not common and do not
+// appear.
+//
+// TS7 contract: the common-member surface of `UnionA | UnionB` is `{ shared }`,
+// and `shared` is private (so it does not reach any published surface).
+export class UnionA {
+  shared: string = "";
+  onlyA: number = 0;
+}
+
+export class UnionB {
+  private shared: string = "";
+  onlyB: boolean = false;
+}
+
+export type UnionAB = UnionA | UnionB;
