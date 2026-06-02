@@ -6055,6 +6055,151 @@ mod foundations_guards {
         }
     }
 
+    // ── Same-crate member struct-literal guard (B4.5 by-construction) ──
+    //
+    // `ObjectProperty` / `MethodSignature` are `#[non_exhaustive]` and carry a
+    // mandatory `visibility` field with no `Default`, so DOWNSTREAM crates
+    // cannot construct them with a struct literal (they must route through the
+    // visibility-threading constructors `synthetic_public` /
+    // `synthetic_with_visibility` / `with_spans_public` / `with_visibility`).
+    // `#[non_exhaustive]` does NOT apply WITHIN the defining crate, so a future
+    // SAME-CRATE site in `verter_type_expr` could still write
+    // `ObjectProperty { .. }` / `MethodSignature { .. }` directly and silently
+    // mint a member with an unconsidered visibility — re-opening the leak class
+    // the downstream guard closed. This guard pins the same-crate gap: inside
+    // `crates/verter_type_expr/src/**`, the ONLY permitted occurrence of
+    // `ObjectProperty {` / `MethodSignature {` is the `pub struct <Name> {`
+    // type DEFINITION; the constructors build via `Self { .. }`, so a named
+    // struct literal anywhere in the crate is a violation. Together with the
+    // downstream constructor guard above, the member-visibility construction
+    // surface is now COMPLETE (no construction/struct-literal bypass, in any
+    // crate).
+
+    /// Predicate: returns `true` when `line` is a SAME-CRATE named struct
+    /// literal of `ObjectProperty` / `MethodSignature` (the banned construction
+    /// form inside `verter_type_expr`), and `false` for the `pub struct <Name>
+    /// {` type definition (the sole allowed `<Name> {` occurrence) and for any
+    /// other line. The constructors use `Self { .. }`, which shares no needle
+    /// with `ObjectProperty {` / `MethodSignature {`.
+    pub fn line_has_same_crate_member_struct_literal(line: &str) -> bool {
+        let trimmed = line.trim_start();
+        // The type DEFINITION (`pub struct <Name> {`) and the inherent-impl
+        // opener (`impl <Name> {`) are the allowed `<Name> {` occurrences — the
+        // constructors inside the impl build via `Self { .. }`, never the named
+        // form. Allow both `struct` and `impl` headers for either type.
+        for header in ["pub struct ", "struct ", "impl "] {
+            if trimmed.starts_with(&format!("{header}ObjectProperty"))
+                || trimmed.starts_with(&format!("{header}MethodSignature"))
+            {
+                return false;
+            }
+        }
+        // A function RETURN type whose body opens on the same line
+        // (`fn foo() -> ObjectProperty {`) names the type, it does not construct
+        // it — the `{` is the fn body brace, not a struct-literal opener. Allow
+        // `-> <Name> {`.
+        if trimmed.contains("-> ObjectProperty {") || trimmed.contains("-> MethodSignature {") {
+            return false;
+        }
+        // Any other line containing a named struct-literal opener is banned.
+        // `ObjectProperty {` does NOT substring-match `ObjectProperty::`
+        // (constructor calls) because the byte after the name is `:`, not
+        // ` {`, and does NOT match `ObjectPropertyOrigin {` because the needle
+        // includes the trailing space + brace.
+        line.contains("ObjectProperty {") || line.contains("MethodSignature {")
+    }
+
+    /// Walk `crates/verter_type_expr/src/**` production files and return
+    /// `(rel_path, line_no, line)` triples for every same-crate member
+    /// struct-literal violation.
+    pub fn same_crate_member_struct_literal_violations() -> Vec<(String, usize, String)> {
+        let src_dir = workspace_root()
+            .join("crates")
+            .join("verter_type_expr")
+            .join("src");
+        let mut violations = Vec::new();
+        for file in walk_production_rs(&src_dir) {
+            let src = match fs::read_to_string(&file) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let rel = relative_to_root(&file);
+            for (idx, line) in src.lines().enumerate() {
+                if line_has_same_crate_member_struct_literal(line) {
+                    violations.push((rel.clone(), idx + 1, line.to_string()));
+                }
+            }
+        }
+        violations.sort();
+        violations
+    }
+
+    #[test]
+    fn no_same_crate_member_struct_literals_in_verter_type_expr() {
+        let violations = same_crate_member_struct_literal_violations();
+        assert!(
+            violations.is_empty(),
+            "Same-crate member struct-literal guard violations: a file in\n\
+             `crates/verter_type_expr/src/**` constructs `ObjectProperty` /\n\
+             `MethodSignature` with a NAMED struct literal. `#[non_exhaustive]`\n\
+             does not block same-crate struct literals, so this would let a\n\
+             member be minted with an unconsidered `visibility` — the recurring\n\
+             non-public-member leak class. Construct through the\n\
+             visibility-threading constructors instead (`synthetic_public` /\n\
+             `synthetic_with_visibility` / `with_spans_public` /\n\
+             `with_visibility`), whose bodies use `Self {{ .. }}`.\n\n\
+             Violations:\n  {}",
+            violations
+                .iter()
+                .map(|(rel, lineno, line)| format!("{rel}:{lineno}: {}", line.trim()))
+                .collect::<Vec<_>>()
+                .join("\n  "),
+        );
+    }
+
+    #[test]
+    fn same_crate_member_struct_literal_predicate_discriminates() {
+        // BANNED — every named struct-literal construction form.
+        let banned = [
+            "let p = ObjectProperty { name, ty, optional: false, readonly: false, visibility, spans };",
+            "ObjectMember::Property(ObjectProperty { name, ty, optional, readonly, visibility, spans })",
+            "        MethodSignature { name, function, optional, visibility, spans }",
+            "Some(MethodSignature { name, function, optional, visibility, spans })",
+        ];
+        for line in banned {
+            assert!(
+                line_has_same_crate_member_struct_literal(line),
+                "guard must FLAG same-crate struct literal: {line:?}",
+            );
+        }
+
+        // ALLOWED — the type definitions (the sole `<Name> {` occurrence), the
+        // `Self { .. }` constructor bodies, constructor CALLS (`::synthetic*`),
+        // and prose / field accesses that merely name the types.
+        let allowed = [
+            "pub struct ObjectProperty {",
+            "pub struct MethodSignature {",
+            "impl ObjectProperty {",
+            "impl MethodSignature {",
+            "        Self {",
+            "        ObjectProperty::synthetic_public(name, ty, false, false)",
+            "        MethodSignature::with_visibility(n, f, false, vis, spans)",
+            "    pub visibility: MemberVisibility,",
+            "/// Construct an `ObjectProperty` carrying its declared visibility.",
+            "let names: Vec<ObjectProperty> = members.clone();",
+            // Function RETURN type with an inline body brace names, not
+            // constructs, the type.
+            "    fn rebuild(&self) -> ObjectProperty {",
+            "fn make_method() -> MethodSignature {",
+        ];
+        for line in allowed {
+            assert!(
+                !line_has_same_crate_member_struct_literal(line),
+                "guard must NOT flag allowed line: {line:?}",
+            );
+        }
+    }
+
     /// Cache-runtime overhaul plan-vocabulary ban (H19).
     ///
     /// The three new patterns added under the H19 rule must:
