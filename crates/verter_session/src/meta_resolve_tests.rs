@@ -1278,6 +1278,211 @@ defineProps<C>()
     );
 }
 
+/// `defineProps<Partial<C>>()` over a class with mixed accessibility excludes
+/// the non-public members from the PUBLISHED props — TS `keyof ClassType`
+/// yields only public keys, so a mapped type (`Partial`) over a class does not
+/// carry the private/protected members onto the published macro surface.
+///
+/// Discrimination: this FAILS on a tree where the typed-IR keyof/mapped keyspace
+/// is NOT visibility-gated — `Partial<C>` would carry `b`/`c` (with non-public
+/// visibility) onto the published surface and a missing publication filter would
+/// leak them into props.
+///
+/// NOTE on `native_props`: native_props is populated by the SEPARATE parser-side
+/// macro analyzer (`verter_compiler` `resolve_type` → `collect_native_props`),
+/// which enumerates the referenced class surface directly and currently records
+/// the raw class members even under a `Partial<…>` wrapper. That parser-side
+/// path is outside the typed-IR keyspace chokepoints this change gates (and the
+/// site inventory explicitly scoped it out as a non-published-filter carrier),
+/// so this test does NOT assert native_props exclusion under the mapped wrapper.
+/// See `native_props_fidelity_for_directly_declared_class_keeps_all_visibilities`
+/// for the in-scope native_props contract (direct class enumeration, keep-all
+/// with faithful visibility).
+#[test]
+fn mapped_over_class_excludes_non_public_from_published_props() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export class C {
+  public a: string = ""
+  protected b: number = 0
+  private c: boolean = false
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { C } from './types'
+defineProps<Partial<C>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let state = project
+        .host()
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
+
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
+    assert!(
+        prop_names.contains(&"a".to_string()),
+        "public field `a` must be published through Partial<C>: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"b".to_string()),
+        "protected `b` must NOT be published through Partial<C>: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"c".to_string()),
+        "private `c` must NOT be published through Partial<C>: {prop_names:?}"
+    );
+}
+
+/// `defineProps<Pick<C, 'a'>>()` over a class materialises ONLY the picked
+/// public key. A `Pick` of a non-public key would not be a valid keyspace
+/// member (keyof excludes it), so only `a` survives.
+///
+/// Discrimination: FAILS if `Pick`/member-route reconstruction re-mints the
+/// picked member without honouring the public-only keyspace (a `Pick<C, 'a'>`
+/// that pulled in `b`/`c` would surface them).
+#[test]
+fn pick_over_class_publishes_only_picked_public_key() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export class C {
+  public a: string = ""
+  protected b: number = 0
+  private c: boolean = false
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { C } from './types'
+defineProps<Pick<C, 'a'>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let state = project
+        .host()
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
+
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
+    assert!(
+        prop_names.contains(&"a".to_string()),
+        "Pick<C, 'a'> must publish `a`: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"b".to_string()),
+        "Pick<C, 'a'> must NOT publish protected `b`: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"c".to_string()),
+        "Pick<C, 'a'> must NOT publish private `c`: {prop_names:?}"
+    );
+}
+
+/// `native_props` FIDELITY: a directly-declared `defineProps<C>()` over a class
+/// retains EVERY instance member (public/protected/private) WITH its correct
+/// visibility — the native surface enumerates the class directly (NOT via
+/// keyof), so the keyspace gate does not touch it. The published props stay
+/// public-only.
+///
+/// Discrimination: FAILS if the keyspace gate wrongly reaches the native
+/// surface (then `b`/`c` would be absent from native_props), or if the
+/// reconstruction dropped visibility (then `b`/`c` would be present but marked
+/// Public).
+#[test]
+fn native_props_fidelity_for_directly_declared_class_keeps_all_visibilities() {
+    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export class C {
+  public a: string = ""
+  protected b: number = 0
+  private c: boolean = false
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { C } from './types'
+defineProps<C>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let state = project
+        .host()
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
+
+    let macro_meta = state
+        .resolved_macros
+        .iter()
+        .find(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .expect("resolved defineProps macro should be present");
+
+    // Published props: public only.
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
+    assert_eq!(
+        {
+            let mut p: Vec<&String> = prop_names.iter().filter(|n| *n != "constructor").collect();
+            p.sort();
+            p
+        },
+        vec![&"a".to_string()],
+        "published props over a directly-declared class are public-only: {prop_names:?}"
+    );
+
+    // native_props: ALL three members, each with its true visibility.
+    let visibility_of = |name: &str| -> Option<ResolvedMemberVisibility> {
+        macro_meta
+            .native_props
+            .iter()
+            .find(|prop| prop.name == name)
+            .map(|prop| prop.visibility)
+    };
+    assert_eq!(
+        visibility_of("a"),
+        Some(ResolvedMemberVisibility::Public),
+        "native_props must keep public `a` as Public"
+    );
+    assert_eq!(
+        visibility_of("b"),
+        Some(ResolvedMemberVisibility::Protected),
+        "native_props must keep protected `b` as Protected"
+    );
+    assert_eq!(
+        visibility_of("c"),
+        Some(ResolvedMemberVisibility::Private),
+        "native_props must keep private `c` as Private"
+    );
+}
+
 #[test]
 fn imported_interface_extending_class_uses_shared_resolver_path() {
     let project = make_project();

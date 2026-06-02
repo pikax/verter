@@ -172,3 +172,26 @@ export class PrivateHolder {
 }
 
 export type PrivateHolderInstance = InstanceType<typeof PrivateHolder>;
+
+// 11. TS `public` / `protected` / `private` keyword accessibility on a class.
+// `keyof MixedVis` yields ONLY the public key `"a"` (TS excludes
+// protected/private from the keyspace). A mapped type over the class
+// (`Partial<MixedVis>`) carries ONLY the public member, and `Pick<MixedVis, 'a'>`
+// materialises only `a`. These exercise the keyof/mapped/Pick keyspace gate.
+//
+// TS7 contract:
+//   keyof MixedVis = "a"
+//   Partial<MixedVis> = { a?: string }
+//   Pick<MixedVis, "a"> = { a: string }
+export class MixedVis {
+  public a: string = "";
+  protected b: number = 0;
+  private c: boolean = false;
+}
+
+export type MixedVisKeyof = keyof MixedVis;
+export type MixedVisPartial = Partial<MixedVis>;
+export type MixedVisPick = Pick<MixedVis, "a">;
+// `Record<keyof MixedVis, 1>` reifies the keyspace into an object surface so the
+// produced keys are directly observable; only the public key `a` survives.
+export type MixedVisRecord = Record<keyof MixedVis, 1>;

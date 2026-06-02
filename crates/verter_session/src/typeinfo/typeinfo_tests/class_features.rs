@@ -388,3 +388,118 @@ fn class_features_private_field_is_absent_from_published_instance_surface() {
     );
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
+
+#[test]
+fn class_features_keyof_mixed_visibility_reifies_only_public_keys() {
+    // TS7 contract: `keyof MixedVis` excludes protected/private members from the
+    // keyspace. `Record<keyof MixedVis, 1>` reifies that keyspace into an object
+    // surface whose keys are exactly the keyof keys — only the public key `a`.
+    //
+    // Discrimination: FAILS on a tree where the keyof keyspace enumeration is
+    // not visibility-gated — `b` / `c` would enter the keyspace and become keys
+    // of the reified Record object.
+    let host = make_host_with_footprint();
+    upsert(&host);
+
+    let (expr, record) = resolve_expr(
+        &host,
+        "/fixtures/class_features.ts",
+        "MixedVisRecord",
+        &[],
+        ProjectionMode::Expanded,
+    );
+
+    let props = object_props(&expr);
+    assert_eq!(
+        prop_names(&props),
+        vec!["a"],
+        "Record<keyof MixedVis, 1> keys = the public keyof keyspace `a` only: {props:?}"
+    );
+    assert!(
+        !props.contains_key("b"),
+        "protected `b` must NOT be a keyof key: {props:?}"
+    );
+    assert!(
+        !props.contains_key("c"),
+        "private `c` must NOT be a keyof key: {props:?}"
+    );
+    assert_query_mode(&record, ProjectionModeTag::Expanded);
+}
+
+#[test]
+fn class_features_partial_over_mixed_visibility_excludes_non_public_members() {
+    // TS7 contract: `Partial<MixedVis>` maps over `keyof MixedVis` (public-only),
+    // so the produced surface carries ONLY the public member `a` (optional). The
+    // protected/private members are not part of the keyspace and never appear.
+    //
+    // Discrimination: FAILS on a tree where the mapped-type keyspace is not
+    // visibility-gated — `b` / `c` would be produced onto the mapped surface
+    // (carried with their non-public visibility).
+    let host = make_host_with_footprint();
+    upsert(&host);
+
+    let (expr, record) = resolve_expr(
+        &host,
+        "/fixtures/class_features.ts",
+        "MixedVisPartial",
+        &[],
+        ProjectionMode::Expanded,
+    );
+
+    let props = object_props(&expr);
+    let mut names = prop_names(&props);
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["a"],
+        "Partial<MixedVis> must produce only the public member `a`: {props:?}"
+    );
+    assert!(
+        !props.contains_key("b"),
+        "protected `b` must be absent from Partial<MixedVis>: {props:?}"
+    );
+    assert!(
+        !props.contains_key("c"),
+        "private `c` must be absent from Partial<MixedVis>: {props:?}"
+    );
+    // The surviving member is public.
+    assert_eq!(
+        props["a"].visibility,
+        verter_type_expr::MemberVisibility::Public,
+        "the mapped member `a` is public"
+    );
+    assert_query_mode(&record, ProjectionModeTag::Expanded);
+}
+
+#[test]
+fn class_features_pick_over_mixed_visibility_materialises_only_public_key() {
+    // TS7 contract: `Pick<MixedVis, "a">` materialises only the public member
+    // `a`. (A non-public key is not a valid keyof member, so it could not be
+    // picked.)
+    //
+    // Discrimination: FAILS if Pick/member-route reconstruction surfaces a
+    // non-public member, or if the keyspace gate is absent and `b`/`c` leak in.
+    let host = make_host_with_footprint();
+    upsert(&host);
+
+    let (expr, record) = resolve_expr(
+        &host,
+        "/fixtures/class_features.ts",
+        "MixedVisPick",
+        &[],
+        ProjectionMode::Expanded,
+    );
+
+    let props = object_props(&expr);
+    assert_eq!(
+        prop_names(&props),
+        vec!["a"],
+        "Pick<MixedVis, \"a\"> must materialise only `a`: {props:?}"
+    );
+    assert_eq!(
+        props["a"].visibility,
+        verter_type_expr::MemberVisibility::Public,
+        "the picked member `a` is public"
+    );
+    assert_query_mode(&record, ProjectionModeTag::Expanded);
+}
