@@ -837,19 +837,47 @@ impl SchedulerDag {
         None
     }
 
+    /// Independent readiness oracle for the test invariant below.
+    ///
+    /// Computed DIRECTLY from a node's raw fields — deliberately NOT
+    /// via [`Self::desired_membership`] — so the invariant check is an
+    /// independent predicate against the production helper, not a
+    /// self-consistency check of the helper against the lane matrix it
+    /// itself populated. A node is ready iff it is not cancelled, not
+    /// dispatched, and has no remaining deps (terminal-failure-stranded
+    /// waiters are caught by the empty-`deps_remaining` arm — the
+    /// fan-out clears their deps, so the `FailedDepRecord` does not
+    /// alter readiness). The lane coordinate is recomputed directly
+    /// from `(base_priority, ResourceClass::for_work_kind(kind))`. If
+    /// `desired_membership` ever diverged from this predicate (a
+    /// flipped `&&`/`||`, a dropped field, a wrong class mapping) the
+    /// invariant below would FAIL — the lane matrix is populated via
+    /// `desired_membership`, so the two would disagree.
+    #[cfg(test)]
+    fn model_ready_lane(node: &DagNode) -> Option<(Priority, ResourceClass)> {
+        let ready = !node.cancelled && !node.dispatched && node.deps_remaining.is_empty();
+        ready.then(|| (node.base_priority, ResourceClass::for_work_kind(node.kind)))
+    }
+
     /// Test-only invariant check: the set of tokens present in the
     /// lane matrix EXACTLY equals the set of nodes that are
     /// dispatch-ready (`!cancelled && !dispatched && deps_remaining
     /// empty`), and every lane cell agrees with the node's
     /// `(base_priority, ResourceClass)` and its `ready_membership`
     /// mirror. Panics on any divergence.
+    ///
+    /// The readiness/lane expectation is the INDEPENDENT
+    /// [`Self::model_ready_lane`] predicate, never
+    /// [`Self::desired_membership`]; this is what gives the seeded
+    /// lifecycle model teeth against a bug *inside* `desired_membership`
+    /// itself, not merely against a lane/mirror desync.
     #[cfg(test)]
     pub(crate) fn assert_lane_membership_matches_nodes(&self) {
         use std::collections::BTreeSet as Set;
-        // Tokens the model considers ready.
+        // Tokens the independent model considers ready.
         let mut model_ready: Set<SubmissionToken> = Set::new();
         for (tok, node) in &self.nodes {
-            if let Some((prio, class)) = Self::desired_membership(node) {
+            if let Some((prio, class)) = Self::model_ready_lane(node) {
                 model_ready.insert(*tok);
                 // Mirror must agree.
                 assert_eq!(
@@ -877,7 +905,7 @@ impl SchedulerDag {
                         .nodes
                         .get(tok)
                         .unwrap_or_else(|| panic!("lane holds token {tok:?} with no live node"));
-                    let expect = Self::desired_membership(node)
+                    let expect = Self::model_ready_lane(node)
                         .unwrap_or_else(|| panic!("lane holds non-ready token {tok:?}"));
                     assert_eq!(
                         expect,
