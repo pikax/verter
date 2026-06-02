@@ -3873,6 +3873,7 @@ fn projected_surface_to_type_expr_reemits_member_spans() {
         optional: false,
         readonly: false,
         is_method: false,
+        visibility: verter_type_expr::MemberVisibility::Public,
         declared_in_macro_type_arg: false,
         spans: MemberSpans {
             declaration: Some(Span::new(10, 24)),
@@ -3911,6 +3912,111 @@ fn projected_surface_to_type_expr_reemits_member_spans() {
         property.spans.type_annotation,
         Some(Span::new(17, 23)),
         "the threaded type-annotation span must round-trip onto the IR property"
+    );
+}
+
+/// F1 visibility threading: `projected_surface_to_type_expr` reconstructs a
+/// member via `with_visibility` (NOT `with_spans`), so a non-public member
+/// projected onto the `ProjectedSurface` survives the
+/// SurfaceView -> ProjectedMember -> TypeExpr round-trip with its true
+/// accessibility. This is both leak-prevention (the reconstructed surface must
+/// not present a private member as public) and `native_props` fidelity.
+///
+/// Discriminating: against the tree where the reconstruction uses `with_spans`
+/// (which defaults Public), the `Private` / `Protected` assertions below FAIL
+/// (the reconstructed members are Public).
+#[test]
+fn projected_surface_to_type_expr_preserves_member_visibility() {
+    use crate::resolver_core::projected_surface_to_type_expr;
+    use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
+    use verter_type_expr::{FunctionExpr, MemberSpans, MemberVisibility};
+
+    let private_prop = ProjectedMember {
+        name: "secret".to_string(),
+        ty: TypeExpr::Primitive(PrimitiveName::Number),
+        optional: false,
+        readonly: false,
+        is_method: false,
+        visibility: MemberVisibility::Private,
+        declared_in_macro_type_arg: false,
+        spans: MemberSpans::default(),
+        declaration_origin: None,
+    };
+    let protected_method = ProjectedMember {
+        name: "guarded".to_string(),
+        ty: TypeExpr::Function(std::sync::Arc::new(FunctionExpr::synthetic(
+            Vec::new(),
+            None,
+            Vec::new(),
+        ))),
+        optional: false,
+        readonly: false,
+        is_method: true,
+        visibility: MemberVisibility::Protected,
+        declared_in_macro_type_arg: false,
+        spans: MemberSpans::default(),
+        declaration_origin: None,
+    };
+    let public_prop = ProjectedMember {
+        name: "open".to_string(),
+        ty: TypeExpr::Primitive(PrimitiveName::String),
+        optional: false,
+        readonly: false,
+        is_method: false,
+        visibility: MemberVisibility::Public,
+        declared_in_macro_type_arg: false,
+        spans: MemberSpans::default(),
+        declaration_origin: None,
+    };
+
+    let surface = ProjectedSurface {
+        members: vec![private_prop, protected_method, public_prop],
+        call_signatures: Vec::new(),
+        construct_signatures: Vec::new(),
+        index_signatures: Vec::new(),
+        has_index_signature: false,
+    };
+
+    let expr = projected_surface_to_type_expr(&surface).expect("multi-member surface reconstructs");
+    let TypeExpr::Object(object) = &expr else {
+        panic!("expected an object type, got {expr:?}");
+    };
+
+    let find_property = |name: &str| -> MemberVisibility {
+        object
+            .properties
+            .iter()
+            .find_map(|m| match m {
+                ObjectMember::Property(p) if p.name == name => Some(p.visibility),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("property `{name}` must be reconstructed"))
+    };
+    let find_method = |name: &str| -> MemberVisibility {
+        object
+            .properties
+            .iter()
+            .find_map(|m| match m {
+                ObjectMember::Method(m) if m.name == name => Some(m.visibility),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("method `{name}` must be reconstructed"))
+    };
+
+    assert_eq!(
+        find_property("secret"),
+        MemberVisibility::Private,
+        "a private projected property must reconstruct as Private",
+    );
+    assert_eq!(
+        find_method("guarded"),
+        MemberVisibility::Protected,
+        "a protected projected method must reconstruct as Protected",
+    );
+    assert_eq!(
+        find_property("open"),
+        MemberVisibility::Public,
+        "a public projected property stays Public",
     );
 }
 

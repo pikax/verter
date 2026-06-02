@@ -108,6 +108,11 @@ pub(crate) fn surface_view_to_projected_surface(
             optional: member.optional,
             readonly: member.readonly,
             is_method: member.is_method,
+            // Carry the graph `SurfaceMember`'s declared accessibility verbatim
+            // so the SurfaceView -> ProjectedMember -> TypeExpr round-trip is
+            // visibility-lossless: a non-public class member stays non-public
+            // through the reconstruction (`projected_surface_to_type_expr`).
+            visibility: member.visibility,
             declared_in_macro_type_arg: member.declared_in_macro_type_arg,
             // Graph `SurfaceMember` carries the real OXC declaration-site spans
             // (stamped during shallow lowering) AND the member's declaration
@@ -368,22 +373,28 @@ pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Opti
         .members
         .iter()
         .map(|member| {
+            // Reconstruct via `with_visibility` (NOT `with_spans`, which defaults
+            // Public) so a non-public class member projected onto the surface
+            // survives the reconstruction with its true accessibility — both a
+            // leak-prevention and a `native_props` fidelity requirement.
             if member.is_method {
                 if let TypeExpr::Function(function) = &member.ty {
-                    return ObjectMember::Method(MethodSignature::with_spans(
+                    return ObjectMember::Method(MethodSignature::with_visibility(
                         member.name.clone(),
                         (**function).clone(),
                         member.optional,
+                        member.visibility,
                         member.spans,
                     ));
                 }
             }
 
-            ObjectMember::Property(ObjectProperty::with_spans(
+            ObjectMember::Property(ObjectProperty::with_visibility(
                 member.name.clone(),
                 member.ty.clone(),
                 member.optional,
                 member.readonly,
+                member.visibility,
                 member.spans,
             ))
         })

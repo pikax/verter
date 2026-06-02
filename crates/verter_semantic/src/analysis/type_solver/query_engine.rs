@@ -21,6 +21,15 @@ pub struct ProjectedMember {
     pub optional: bool,
     pub readonly: bool,
     pub is_method: bool,
+    /// Declared accessibility of the member, carried verbatim from the
+    /// projection source (`SurfaceMember::visibility` / the IR member's
+    /// `visibility`). Reconstruction back to an IR
+    /// [`verter_type_expr::ObjectProperty`] / [`verter_type_expr::MethodSignature`]
+    /// (`projected_surface_to_type_expr`) MUST preserve this via
+    /// `with_visibility` — `with_spans` would silently upgrade a non-public
+    /// member to `Public`, a fidelity loss for the `native_props` carrier and a
+    /// leak on any published surface. `Public` for every non-class origin.
+    pub visibility: verter_type_expr::MemberVisibility,
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source). See [`ResolvedProp::declared_in_macro_type_arg`]
