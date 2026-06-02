@@ -18,9 +18,10 @@ use verter_compiler::compile::{
     MacroDefaultDto, MacroDefaultEntryDto, MacroDefaultKindDto, MacroDefaultsArgDto,
     MacroDefaultsFallbackDto, MacroDefaultsFallbackKindDto, MacroEmitDto, MacroEmitPayload,
     MacroEmitsSurface, MacroExposeSurface, MacroLocalTypeDeclDto, MacroNativePropDto,
-    MacroOptionsSurface, MacroPropDto, MacroPropsSurface, MacroSlotDto, MacroSlotsSurface,
-    MacroSourceSpanDto, MacroTypeDepsDto, MacroTypeImportBindingDto, MacroTypeImportDto,
-    MacroVisibility, MacroWithDefaultsDto, ResolvedMacroSurfaces, RuntimeCtorKind,
+    MacroOptionsSurface, MacroPropDto, MacroPropsSurface, MacroPropsTypeDto, MacroSlotDto,
+    MacroSlotsSurface, MacroSourceSpanDto, MacroTypeArgDto, MacroTypeDepsDto,
+    MacroTypeImportBindingDto, MacroTypeImportDto, MacroVisibility, MacroWithDefaultsDto,
+    ResolvedMacroSurfaces, RuntimeCtorKind,
 };
 
 /// Build a props list that exercises every `RuntimeCtorKind` variant exactly
@@ -113,11 +114,14 @@ fn sample_props() -> Vec<MacroPropDto> {
             name: "items".to_string(),
             optional: false,
             required: true,
+            // Method-shorthand default: `expr` is the VALUE TAIL (`() { return [] }`),
+            // not the full `items() { return [] }` property text, and the span
+            // covers that same value-tail region.
             default: Some(MacroDefaultDto {
-                expr: "items() { return [] }".to_string(),
+                expr: "() { return [] }".to_string(),
                 kind: MacroDefaultKindDto::MethodShorthand,
                 span: MacroSourceSpanDto {
-                    start: 210,
+                    start: 215,
                     end: 231,
                 },
             }),
@@ -285,11 +289,13 @@ fn sample_with_defaults() -> MacroWithDefaultsDto {
             },
             MacroDefaultEntryDto {
                 name: "items".to_string(),
+                // VALUE-TAIL form (`() { return [] }`); the full property text
+                // `items() { return [] }` stays only on `arg.expr` above.
                 default: MacroDefaultDto {
-                    expr: "items() { return [] }".to_string(),
+                    expr: "() { return [] }".to_string(),
                     kind: MacroDefaultKindDto::MethodShorthand,
                     span: MacroSourceSpanDto {
-                        start: 210,
+                        start: 215,
                         end: 231,
                     },
                 },
@@ -302,11 +308,52 @@ fn sample_with_defaults() -> MacroWithDefaultsDto {
     }
 }
 
+/// The `defineEmits<T>()` type argument carrier: rendered `<T>` text + dependency
+/// closure + source span, so emit diagnostics are fully DTO-owned.
+fn sample_emits_type_arg() -> MacroTypeArgDto {
+    MacroTypeArgDto {
+        ts: "{ (e: 'change', id: number): void }".to_string(),
+        deps: MacroTypeDepsDto {
+            imports: vec![MacroTypeImportDto {
+                source: "./events".to_string(),
+                bindings: vec![MacroTypeImportBindingDto::Named {
+                    imported: "ChangePayload".to_string(),
+                    local: None,
+                }],
+            }],
+            local_declarations: vec![],
+        },
+        span: Some(MacroSourceSpanDto {
+            start: 290,
+            end: 360,
+        }),
+    }
+}
+
 #[test]
 fn resolved_macro_surfaces_full_contract() {
     let surfaces = ResolvedMacroSurfaces {
         props: MacroPropsSurface {
             props: sample_props(),
+            // Named public root (`$props: PublicProps & Props`) — the TypeRef
+            // variant carries the rendered root text + its dependency closure.
+            props_type: Some(MacroPropsTypeDto::TypeRef {
+                ts: "PublicProps & Props".to_string(),
+                deps: MacroTypeDepsDto {
+                    imports: vec![MacroTypeImportDto {
+                        source: "./props".to_string(),
+                        bindings: vec![MacroTypeImportBindingDto::Named {
+                            imported: "Props".to_string(),
+                            local: None,
+                        }],
+                    }],
+                    local_declarations: vec![],
+                },
+                span: Some(MacroSourceSpanDto {
+                    start: 90,
+                    end: 95,
+                }),
+            }),
             root_constructors: vec![RuntimeCtorKind::Object],
             native_props: sample_native_props(),
             with_defaults: Some(sample_with_defaults()),
@@ -314,6 +361,7 @@ fn resolved_macro_surfaces_full_contract() {
         },
         emits: MacroEmitsSurface {
             emits: sample_emits(),
+            type_arg: Some(sample_emits_type_arg()),
             // A macro flagged unresolved — drives XInvalidMacroType downstream.
             unresolved: true,
         },
@@ -335,6 +383,23 @@ fn resolved_macro_surfaces_full_contract() {
     // means dropping/renaming/retyping ANY field on ANY of the DTOs fails here.
     let expected = ResolvedMacroSurfaces {
         props: MacroPropsSurface {
+            props_type: Some(MacroPropsTypeDto::TypeRef {
+                ts: "PublicProps & Props".to_string(),
+                deps: MacroTypeDepsDto {
+                    imports: vec![MacroTypeImportDto {
+                        source: "./props".to_string(),
+                        bindings: vec![MacroTypeImportBindingDto::Named {
+                            imported: "Props".to_string(),
+                            local: None,
+                        }],
+                    }],
+                    local_declarations: vec![],
+                },
+                span: Some(MacroSourceSpanDto {
+                    start: 90,
+                    end: 95,
+                }),
+            }),
             props: vec![
                 MacroPropDto {
                     name: "id".to_string(),
@@ -408,10 +473,10 @@ fn resolved_macro_surfaces_full_contract() {
                     optional: false,
                     required: true,
                     default: Some(MacroDefaultDto {
-                        expr: "items() { return [] }".to_string(),
+                        expr: "() { return [] }".to_string(),
                         kind: MacroDefaultKindDto::MethodShorthand,
                         span: MacroSourceSpanDto {
-                            start: 210,
+                            start: 215,
                             end: 231,
                         },
                     }),
@@ -506,10 +571,10 @@ fn resolved_macro_surfaces_full_contract() {
                     MacroDefaultEntryDto {
                         name: "items".to_string(),
                         default: MacroDefaultDto {
-                            expr: "items() { return [] }".to_string(),
+                            expr: "() { return [] }".to_string(),
                             kind: MacroDefaultKindDto::MethodShorthand,
                             span: MacroSourceSpanDto {
-                                start: 210,
+                                start: 215,
                                 end: 231,
                             },
                         },
@@ -562,6 +627,23 @@ fn resolved_macro_surfaces_full_contract() {
                     payload_deps: MacroTypeDepsDto::default(),
                 },
             ],
+            type_arg: Some(MacroTypeArgDto {
+                ts: "{ (e: 'change', id: number): void }".to_string(),
+                deps: MacroTypeDepsDto {
+                    imports: vec![MacroTypeImportDto {
+                        source: "./events".to_string(),
+                        bindings: vec![MacroTypeImportBindingDto::Named {
+                            imported: "ChangePayload".to_string(),
+                            local: None,
+                        }],
+                    }],
+                    local_declarations: vec![],
+                },
+                span: Some(MacroSourceSpanDto {
+                    start: 290,
+                    end: 360,
+                }),
+            }),
             unresolved: true,
         },
         slots: MacroSlotsSurface {
@@ -662,13 +744,24 @@ fn resolved_macro_surfaces_full_contract() {
     assert!(disabled_default.span.start < disabled_default.span.end);
 
     // The method-shorthand default kind is distinguishable from the expression
-    // kind (the consumer must not re-scan the text to recover this).
+    // kind (the consumer must not re-scan the text to recover this), and `expr`
+    // holds the method VALUE TAIL (`() { return [] }`) — NOT the full
+    // `items() { return [] }` property text. The span covers that same value-tail
+    // region (16 bytes, 215..231).
     let items_default = items
         .default
         .as_ref()
         .expect("items carries a withDefaults default");
     assert_eq!(items_default.kind, MacroDefaultKindDto::MethodShorthand);
     assert_ne!(items_default.kind, disabled_default.kind);
+    assert_eq!(items_default.expr, "() { return [] }");
+    assert!(!items_default.expr.starts_with("items"));
+    assert_eq!(items_default.span.start, 215);
+    assert_eq!(items_default.span.end, 231);
+    assert_eq!(
+        (items_default.span.end - items_default.span.start) as usize,
+        items_default.expr.len()
+    );
 
     // map_span is carried where the prop has a real source location and absent
     // otherwise.
@@ -781,6 +874,10 @@ fn resolved_macro_surfaces_full_contract() {
         with_defaults.entries[1].default.kind,
         MacroDefaultKindDto::MethodShorthand
     );
+    // The per-prop entry carries the method VALUE TAIL, while the raw `arg.expr`
+    // above still carries the FULL defaults-object text including `items() {...}`.
+    assert_eq!(with_defaults.entries[1].default.expr, "() { return [] }");
+    assert!(with_defaults.arg.expr.contains("items() { return [] }"));
     let fallback = with_defaults
         .fallback
         .as_ref()
@@ -794,6 +891,117 @@ fn resolved_macro_surfaces_full_contract() {
         surfaces.props.root_constructors,
         vec![RuntimeCtorKind::Object]
     );
+
+    // The props `$props` root surface is the named-public-root (TypeRef) variant;
+    // assert its text, dependency closure, and span directly.
+    match surfaces
+        .props
+        .props_type
+        .as_ref()
+        .expect("props surface carries a props_type root")
+    {
+        MacroPropsTypeDto::TypeRef { ts, deps, span } => {
+            assert_eq!(ts, "PublicProps & Props");
+            assert_eq!(deps.imports.len(), 1);
+            assert_eq!(deps.imports[0].source, "./props");
+            assert_eq!(
+                deps.imports[0].bindings[0],
+                MacroTypeImportBindingDto::Named {
+                    imported: "Props".to_string(),
+                    local: None,
+                }
+            );
+            let span = span.expect("named root carries a source span");
+            assert_eq!(span.start, 90);
+            assert_eq!(span.end, 95);
+        }
+        other => panic!("expected TypeRef props_type, got {other:?}"),
+    }
+
+    // The other two props-root variants are independently constructed and their
+    // fields asserted: TypeText carries a raw root text (`Record<string, T>`,
+    // mapped/index-signature, `{}`, or unresolved raw); Inline carries `ts: None`
+    // (the root is rendered from the per-prop surface) with an empty closure.
+    let raw_root = MacroPropsTypeDto::TypeText {
+        ts: "Record<string, T>".to_string(),
+        deps: MacroTypeDepsDto {
+            imports: vec![],
+            local_declarations: vec![MacroLocalTypeDeclDto {
+                name: "T".to_string(),
+                decl_ts: "type T = string | number;".to_string(),
+            }],
+        },
+        span: Some(MacroSourceSpanDto {
+            start: 70,
+            end: 87,
+        }),
+    };
+    match &raw_root {
+        MacroPropsTypeDto::TypeText { ts, deps, span } => {
+            assert_eq!(ts, "Record<string, T>");
+            assert_eq!(deps.local_declarations.len(), 1);
+            assert_eq!(deps.local_declarations[0].name, "T");
+            assert_eq!(span.expect("raw root carries a span").start, 70);
+        }
+        other => panic!("expected TypeText props_type, got {other:?}"),
+    }
+    // A mapped/index-signature/`{}`/unresolved raw root is also the TypeText
+    // variant — the raw text is whatever the producer rendered.
+    let empty_object_root = MacroPropsTypeDto::TypeText {
+        ts: "{}".to_string(),
+        deps: MacroTypeDepsDto::default(),
+        span: None,
+    };
+    match &empty_object_root {
+        MacroPropsTypeDto::TypeText { ts, deps, span } => {
+            assert_eq!(ts, "{}");
+            assert!(deps.imports.is_empty());
+            assert!(span.is_none(), "source-less synthetic root has no span");
+        }
+        other => panic!("expected TypeText props_type, got {other:?}"),
+    }
+
+    let inline_root = MacroPropsTypeDto::Inline {
+        ts: None,
+        deps: MacroTypeDepsDto::default(),
+        span: None,
+    };
+    match &inline_root {
+        MacroPropsTypeDto::Inline { ts, deps, span } => {
+            assert!(ts.is_none(), "inline root has no standalone text");
+            assert!(deps.imports.is_empty());
+            assert!(deps.local_declarations.is_empty());
+            assert!(span.is_none());
+        }
+        other => panic!("expected Inline props_type, got {other:?}"),
+    }
+    // The three variants are distinct values.
+    assert_ne!(raw_root, inline_root);
+    assert_ne!(raw_root, empty_object_root);
+
+    // The emits surface carries the `defineEmits<T>()` type argument: rendered
+    // `<T>` text + dependency closure + span, so emit diagnostics are DTO-owned.
+    let emits_type_arg = surfaces
+        .emits
+        .type_arg
+        .as_ref()
+        .expect("emits surface carries a type_arg");
+    assert_eq!(emits_type_arg.ts, "{ (e: 'change', id: number): void }");
+    assert_eq!(emits_type_arg.deps.imports.len(), 1);
+    assert_eq!(emits_type_arg.deps.imports[0].source, "./events");
+    assert_eq!(
+        emits_type_arg.deps.imports[0].bindings[0],
+        MacroTypeImportBindingDto::Named {
+            imported: "ChangePayload".to_string(),
+            local: None,
+        }
+    );
+    let type_arg_span = emits_type_arg
+        .span
+        .expect("emits type_arg carries a source span");
+    assert_eq!(type_arg_span.start, 290);
+    assert_eq!(type_arg_span.end, 360);
+    assert!(type_arg_span.start < type_arg_span.end);
 
     // Native props carry the visibility + span surface the FFI carrier
     // re-sources. Assert each field directly so a dropped/renamed/retyped field
@@ -835,8 +1043,12 @@ fn default_surfaces_are_empty_and_resolved() {
     assert!(surfaces.props.native_props.is_empty());
     // The withDefaults surface defaults to absent.
     assert!(surfaces.props.with_defaults.is_none());
+    // The `$props` root surface defaults to absent (no defineProps root).
+    assert!(surfaces.props.props_type.is_none());
     assert!(!surfaces.props.unresolved);
     assert!(surfaces.emits.emits.is_empty());
+    // The defineEmits<T>() type argument defaults to absent.
+    assert!(surfaces.emits.type_arg.is_none());
     assert!(!surfaces.emits.unresolved);
     assert!(surfaces.slots.slots.is_empty());
     assert!(surfaces.expose.type_ts.is_none());

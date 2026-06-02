@@ -160,31 +160,57 @@ pub struct MacroSourceSpanDto {
 /// verbatim. The consumer renders the default from [`MacroDefaultDto::expr`] +
 /// this kind; it must NOT re-scan the expression text to re-derive whether the
 /// source used method shorthand.
+///
+/// Rendering contract for the runtime default object (the consumer emits the
+/// `default` key of one prop entry):
+///
+/// - [`MacroDefaultKindDto::Expression`] — the renderer emits `default: ` +
+///   [`MacroDefaultDto::expr`] verbatim. For `expr == "() => []"` that yields
+///   `default: () => []`.
+/// - [`MacroDefaultKindDto::MethodShorthand`] — `expr` is the method VALUE TAIL
+///   (the parameter list + body that follow the method name, e.g.
+///   `() { return [] }`), NOT the full `name() { ... }` property text. The
+///   renderer emits `default: ` + an arrow-converted form of `expr` (the value
+///   tail with `=> ` inserted between the parameter list and the body), so
+///   `expr == "() { return [] }"` yields `default: () => { return [] }`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MacroDefaultKindDto {
-    /// A value expression: `{ count: 0 }`, `{ items: () => [] }`. Rendered
-    /// verbatim as the `default:` value.
+    /// A value expression: `{ count: 0 }`, `{ items: () => [] }`. The renderer
+    /// emits `default: ` + [`MacroDefaultDto::expr`] verbatim.
     Expression,
-    /// ES method shorthand: `{ items() { return [] } }`. Rendered as a function
-    /// default — the consumer reconstructs `default() { ... }` / `default: () => ...`
-    /// rather than splicing the shorthand text into a value position.
+    /// ES method shorthand: `{ items() { return [] } }`. [`MacroDefaultDto::expr`]
+    /// holds the method VALUE TAIL (`() { return [] }`), not the full
+    /// `name() { ... }` text. The renderer emits `default: ` + an arrow-converted
+    /// form of `expr` (yielding `default: () => { return [] }`), reconstructing a
+    /// function default rather than splicing shorthand into a value position.
     MethodShorthand,
 }
 
 /// A single `withDefaults` default value, resolved for one prop.
 ///
-/// - `expr` — the exact default-value source text, already normalised by the
-///   producer (no surrounding key/punctuation). Display/codegen text — the
-///   consumer splices it into the generated runtime default object and must NOT
-///   re-parse it for semantics.
+/// - `expr` — the default-value source text, already normalised by the producer
+///   (no surrounding key/punctuation). Its exact content depends on `kind`:
+///     - for [`MacroDefaultKindDto::Expression`] it is the value expression
+///       verbatim (`false`, `() => []`, `new Date()`);
+///     - for [`MacroDefaultKindDto::MethodShorthand`] it is the method VALUE TAIL
+///       — the parameter list + body that follow the method name, e.g.
+///       `() { return [] }` for the source `items() { return [] }`, NOT the full
+///       `items() { return [] }` property text.
+///   Display/codegen text — the consumer renders it per `kind` (see
+///   [`MacroDefaultKindDto`]) and must NOT re-parse it for semantics.
 /// - `kind` — [`MacroDefaultKindDto`]: whether the source wrote an expression
 ///   or method shorthand. Drives how `expr` is reconstructed in the output.
 /// - `span` — the SFC-absolute span of the default value in the original
 ///   source, so a source map can point the generated default back onto the SFC.
+///   For a method-shorthand default the span covers the same value-tail region
+///   `expr` was sliced from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MacroDefaultDto {
-    /// Default-value source text (key/punctuation stripped). Display/codegen
-    /// text — consumers must not re-parse it for semantics.
+    /// Default-value source text (key/punctuation stripped). For an
+    /// [`MacroDefaultKindDto::Expression`] this is the value expression verbatim;
+    /// for an [`MacroDefaultKindDto::MethodShorthand`] this is the method VALUE
+    /// TAIL (`() { return [] }`), not the full `name() { ... }` text.
+    /// Display/codegen text — consumers must not re-parse it for semantics.
     pub expr: String,
     /// Whether the default was written as an expression or method shorthand.
     pub kind: MacroDefaultKindDto,
@@ -375,6 +401,96 @@ pub struct MacroTypeDepsDto {
     pub imports: Vec<MacroTypeImportDto>,
     /// Local type declarations the surface depends on, in discovery order.
     pub local_declarations: Vec<MacroLocalTypeDeclDto>,
+}
+
+/// How the `defineProps` *root* props type is rendered onto the TSX `$props`
+/// surface, the owned replacement for the parser-derived `PropsTs` root text.
+///
+/// The IDE/TSX path emits the component instance's `$props` member from this
+/// surface. The three variants distinguish how that root text is sourced, so the
+/// consumer renders the right `$props` annotation without re-classifying any type
+/// text itself:
+///
+/// - [`MacroPropsTypeDto::Inline`] — there is no single named/raw root type; the
+///   root is reconstructed structurally from the per-prop surface
+///   ([`MacroPropsSurface::props`]). `ts` is `None`: the consumer renders the
+///   `$props` object from the individual props rather than emitting a root text.
+/// - [`MacroPropsTypeDto::TypeRef`] — the root is a named public root the
+///   producer already rendered (e.g. `$props: PublicProps & Props`); `ts` is that
+///   exact rendered text. The consumer emits it verbatim and re-emits `deps`.
+/// - [`MacroPropsTypeDto::TypeText`] — the root is a raw root text that is not a
+///   plain object the per-prop surface can reconstruct: a `Record<string, T>`, a
+///   mapped / index-signature type, an empty `{}`, or an unresolved raw type. `ts`
+///   is that raw text, emitted verbatim with `deps` re-emitted.
+///
+/// In every source-backed variant `deps` is the full import + local-declaration
+/// closure for the root text ([`MacroTypeDepsDto`]) so the consumer can re-render
+/// the root in a standalone TS context, and `span` is `Some` for a source-backed
+/// macro type argument — `None` only for a source-less synthetic root. The
+/// consumer renders from `ts` + structured `deps`; it must NOT re-scan the
+/// rendered root text to recover dependency structure or re-classify the variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MacroPropsTypeDto {
+    /// The root is rendered from the per-prop surface ([`MacroPropsSurface::props`]) —
+    /// there is no single root type text. `ts` is `None`.
+    Inline {
+        /// Always `None`: the root has no standalone text; render from the props.
+        ts: Option<String>,
+        /// Type-dependency closure for the root, if any names need re-emitting.
+        deps: MacroTypeDepsDto,
+        /// SFC-absolute span of the source-backed macro type argument; `None` for
+        /// a source-less synthetic root.
+        span: Option<MacroSourceSpanDto>,
+    },
+    /// The root is a named public root the producer rendered (e.g.
+    /// `$props: PublicProps & Props`). `ts` is that exact text.
+    TypeRef {
+        /// The rendered named-root text, emitted verbatim onto `$props`.
+        ts: String,
+        /// Type-dependency closure for the root text.
+        deps: MacroTypeDepsDto,
+        /// SFC-absolute span of the source-backed macro type argument; `None` for
+        /// a source-less synthetic root.
+        span: Option<MacroSourceSpanDto>,
+    },
+    /// The root is a raw root text (`Record<string, T>`, mapped / index-signature,
+    /// `{}`, or an unresolved raw type). `ts` is that raw text.
+    TypeText {
+        /// The raw root text, emitted verbatim onto `$props`.
+        ts: String,
+        /// Type-dependency closure for the root text.
+        deps: MacroTypeDepsDto,
+        /// SFC-absolute span of the source-backed macro type argument; `None` for
+        /// a source-less synthetic root.
+        span: Option<MacroSourceSpanDto>,
+    },
+}
+
+/// A macro type-argument carrier (`define*<T>()`), carrying the rendered argument
+/// text plus its dependency closure and source span.
+///
+/// This is the owned form of a macro's `<T>` type argument as written, used where
+/// a consumer needs the argument itself (not the resolved per-member surface) — in
+/// particular the `defineEmits<T>()` diagnostics path, which reports on the type
+/// argument as a whole. The producer renders `ts` once; the consumer emits it
+/// verbatim and re-emits `deps`, and must NOT re-parse `ts` for semantics.
+///
+/// - `ts` — the rendered TS text of the `<T>` type argument as written.
+/// - `deps` — the import + local-declaration closure the argument depends on
+///   ([`MacroTypeDepsDto`]), so the argument can be re-rendered in a standalone TS
+///   context.
+/// - `span` — the SFC-absolute span of the source-backed type argument; `None`
+///   only for a source-less synthetic argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroTypeArgDto {
+    /// Rendered TS text of the `<T>` type argument. Display/codegen text —
+    /// consumers must not re-parse it for semantics.
+    pub ts: String,
+    /// Type-dependency closure for the type argument.
+    pub deps: MacroTypeDepsDto,
+    /// SFC-absolute span of the source-backed type argument; `None` for a
+    /// source-less synthetic argument.
+    pub span: Option<MacroSourceSpanDto>,
 }
 
 /// A single resolved prop on the `defineProps` / `withDefaults` surface.
@@ -602,10 +718,20 @@ pub struct MacroNativePropDto {
 /// when the props were declared through a `withDefaults` call, so the runtime
 /// path can generate the merged props object and the diagnostics path can decide
 /// unresolved-import suppression without re-parsing the defaults source.
+/// `props_type` carries the owned `$props` root surface ([`MacroPropsTypeDto`])
+/// the IDE/TSX path renders in place of the parser-derived `PropsTs` root text:
+/// an inline root reconstructed from `props`, a named public root, or a raw root
+/// text. `None` when no `defineProps` root was declared.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MacroPropsSurface {
     /// Resolved props, in declaration order.
     pub props: Vec<MacroPropDto>,
+    /// The `$props` root surface the IDE/TSX path renders in place of the
+    /// parser-derived `PropsTs` root text: an inline root (rendered from `props`),
+    /// a named public root (e.g. `$props: PublicProps & Props`), or a raw root
+    /// text (`Record<string, T>`, mapped/index-signature, `{}`, or unresolved
+    /// raw). `None` when no `defineProps` root was declared.
+    pub props_type: Option<MacroPropsTypeDto>,
     /// Runtime constructor kinds inferred for the *root* type annotation.
     /// Mirrors `ResolvedElements.root_runtime_types`; an `Object` entry marks
     /// an empty-but-object-like props type as valid.
@@ -626,10 +752,20 @@ pub struct MacroPropsSurface {
 }
 
 /// The resolved `defineEmits` surface.
+///
+/// `type_arg` carries the `defineEmits<T>()` type argument itself
+/// ([`MacroTypeArgDto`] — rendered text + dependency closure + span) so the emit
+/// diagnostics path is fully DTO-owned: it reports on the type argument as written
+/// without re-reading any parser AST. `None` when emits were declared without a
+/// `<T>` type argument (e.g. the runtime array form `defineEmits([...])`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MacroEmitsSurface {
     /// Resolved emit events, in declaration order.
     pub emits: Vec<MacroEmitDto>,
+    /// The `defineEmits<T>()` type argument (rendered text + dependency closure +
+    /// span), so emit diagnostics are fully DTO-owned. `None` when emits were
+    /// declared without a `<T>` type argument.
+    pub type_arg: Option<MacroTypeArgDto>,
     /// Whether the emits type argument resolved to nothing (drives
     /// `XInvalidMacroType`). Mirrors `MacroTypeParams.unresolved_type_ref`.
     pub unresolved: bool,
