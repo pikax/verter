@@ -41,9 +41,12 @@
 //!   scheduler CPU work — `dispatch_ready_job` excludes `External` from
 //!   its inline-eligible branch.
 //!
-//! The two pools never share workers; the isolation eliminates the
-//! deadlock class where a saturated scheduler CPU pool could starve a
-//! batch coordinator that itself blocks on scheduler-queued parse work.
+//! The three pools — scheduler CPU ([`SchedulerCpuPool`](pool::SchedulerCpuPool)),
+//! scheduler IO ([`SchedulerIoPool`](pool::SchedulerIoPool)), and the host
+//! coordinator ([`HostCpuPool`](host_cpu_pool::HostCpuPool)) — never share
+//! workers; the isolation eliminates the deadlock class where a saturated
+//! scheduler CPU pool could starve a batch coordinator that itself blocks
+//! on scheduler-queued parse work.
 //!
 //! # Pump architecture
 //!

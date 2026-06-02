@@ -90,8 +90,10 @@ impl VerterHost {
                 // (mirrors the `HostCpuPool::new` injection pattern
                 // below). The two scheduler pools (CpuWorker/IoWorker)
                 // coexist with the host coordinator pool (`HostCpuPool`,
-                // tagged External) under the §6a dual-pool isolation
-                // invariant. The IO transport capacity is sized from the
+                // tagged External) under the dual-pool isolation
+                // invariant: host-coordinator work never runs scheduler
+                // stage work, and scheduler stage workers never run the
+                // outer batch fan-out. The IO transport capacity is sized from the
                 // SAME resolved DAG budget the scheduler admits against
                 // (`resolved_dag_budget().io`) so the IO channel never
                 // becomes a second admission authority.

@@ -1,34 +1,29 @@
-//! Plan §6.12 Commit Q — cross-thread RequestContext propagation tests.
+//! Cross-thread `RequestContext` propagation tests.
 //!
-//! Pre-Q: scheduler workers installed only scheduler-side TLS via
-//! `OpaqueContextGuard::install`. Session-side `CURRENT_REQUEST_CONTEXT`
-//! stayed `None` on worker threads. Session-level `record_*` helpers
-//! found no accumulator and silently no-op'd, leaving audit counters
-//! such as `dep_signature_merges` and `node_arena_lock_acquisitions`
-//! at zero on hot paths that ran inside scheduler workers.
-//!
-//! Post-Q: the production worker dispatch closures route through
-//! `RequestContextLike::install_tls`, which (for the session impl)
-//! calls `RequestContextGuard::install` — populating BOTH TLS slots.
-//! `OpaqueContextGuard::install` itself is unchanged (test fixtures
-//! continue to call it directly when only scheduler-side TLS is needed).
+//! Scheduler worker dispatch closures route through
+//! `RequestContextLike::install_tls`, which (for the session impl) calls
+//! `RequestContextGuard::install` and populates BOTH the scheduler-side
+//! and the session-side TLS slots. This is what lets session-level
+//! `record_*` helpers find their accumulator on worker threads and keep
+//! per-context audit counters (e.g. `dep_signature_merges`,
+//! `node_arena_lock_acquisitions`) accurate for work that runs inside
+//! scheduler workers rather than on the requesting thread.
 //!
 //! The IO-worker tests drive a single-worker [`SchedulerIoPool`] via the
 //! `run_on_io_worker_with_context` harness, which mirrors the production
-//! IO dispatch closure (`install_tls` guard around the work) over the
-//! surviving nonblocking `try_submit` primitive — the retired
-//! `IoPool::submit_with_context` / `IoHandle` surface is gone.
+//! IO dispatch closure (an `install_tls` guard around the work) over the
+//! nonblocking `try_submit` primitive.
 //!
 //! Tests:
 //!
 //! 1. `scheduler_worker_directly_sees_session_request_context_via_install_tls`
 //!    is the strict discriminator: run a closure on the IO worker with a
-//!    session-side `RequestContext` wrapped in `OpaqueRequestContext`
-//!    and assert that `current_request_context()` returns `Some` inside
-//!    the worker closure — pre-Q this fails because only the
-//!    scheduler-side slot was installed.
-//! 2. `opaque_context_guard_install_does_not_recurse` regression-locks
-//!    the rev-6 recursion bug — direct call to
+//!    session-side `RequestContext` wrapped in `OpaqueRequestContext` and
+//!    assert that `current_request_context()` returns `Some` inside the
+//!    worker closure — it would be `None` if only the scheduler-side slot
+//!    were installed.
+//! 2. `opaque_context_guard_install_does_not_recurse` locks down the
+//!    install recursion guard — a direct call to
 //!    `OpaqueContextGuard::install` with a session-style `install_tls`
 //!    impl in the trait must not stack-overflow.
 //! 3. `scheduler_winner_thread_propagates_session_context_via_install_tls`
@@ -36,8 +31,8 @@
 //!    cross-file resolution via the scheduler's worker pools, then
 //!    asserts the audit record's per-context counters
 //!    (`dep_signature_merges`, `node_arena_lock_acquisitions`) are
-//!    non-zero. Pre-Q both stay 0 because the bumps happen on worker
-//!    threads where session-side TLS is unset.
+//!    non-zero — they would stay 0 if the bumps on worker threads ran
+//!    without session-side TLS installed.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -57,9 +52,8 @@ use verter_session::request_context::{
 /// `dispatch_ready_job`): the worker installs the context via
 /// `install_tls` (which, for the session impl, populates BOTH the
 /// scheduler-side and session-side TLS slots) and drops the guard on
-/// return. It replaces the retired `IoPool::submit_with_context` /
-/// `IoHandle` harness with the surviving nonblocking `try_submit`
-/// primitive plus a completion channel for the synchronous wait.
+/// return. It drives the nonblocking `try_submit` primitive plus a
+/// completion channel for the synchronous wait.
 fn run_on_io_worker_with_context(
     context: Option<OpaqueRequestContext>,
     f: impl FnOnce() + Send + 'static,
@@ -78,7 +72,7 @@ fn run_on_io_worker_with_context(
         .expect("IO worker ran the task to completion");
 }
 
-/// Plan §6.12 sub-task 2 test 1 — strict discriminator.
+/// Strict discriminator: a session-side context is visible on the worker.
 ///
 /// Run a closure on the IO worker (mirroring the production IO dispatch
 /// closure's `install_tls` step) wrapping a session-side
@@ -86,14 +80,11 @@ fn run_on_io_worker_with_context(
 /// assert that `verter_session::request_context::current_request_context()`
 /// returns `Some` carrying the same `request_id`.
 ///
-/// Pre-Q: the worker installed only the scheduler-side TLS slot via
-/// `OpaqueContextGuard::install` — session-side stayed `None`,
-/// `current_request_context()` returned `None`, and the assertion would
-/// fail.
-///
-/// Post-Q: the worker calls `Arc::clone(&opaque.0).install_tls()`. For
-/// the session `RequestContext` impl this routes through
-/// `RequestContextGuard::install`, which populates both slots.
+/// The worker calls `Arc::clone(&opaque.0).install_tls()`; for the session
+/// `RequestContext` impl this routes through `RequestContextGuard::install`,
+/// which populates BOTH the scheduler-side and session-side TLS slots.
+/// Installing only the scheduler-side slot would leave
+/// `current_request_context()` returning `None` and fail the assertion.
 #[test]
 fn scheduler_worker_directly_sees_session_request_context_via_install_tls() {
     let session_ctx: Arc<RequestContext> = RequestContext::new(
@@ -133,22 +124,20 @@ fn scheduler_worker_directly_sees_session_request_context_via_install_tls() {
     );
 }
 
-/// Plan §6.12 sub-task 2 test 2 — regression for the rev-6 recursion bug.
+/// Install-recursion guard.
 ///
 /// `OpaqueContextGuard::install` must NOT route through `install_tls`
-/// itself. The bidirectional chain is:
+/// itself. The one-directional chain is:
 ///
 ///   `RequestContextGuard::install` → `OpaqueContextGuard::install`
 ///
-/// Modifying `OpaqueContextGuard::install` to chain back into
-/// `install_tls` would create infinite recursion via the trait's
-/// session-side impl. Option A keeps `OpaqueContextGuard::install`
-/// unchanged.
+/// If `OpaqueContextGuard::install` chained back into `install_tls`, it
+/// would recurse infinitely via the trait's session-side impl.
 ///
 /// This test installs an opaque context whose `install_tls` impl
 /// directly delegates to `OpaqueContextGuard::install` (the scheduler
-/// trait's TestCtx pattern). If `OpaqueContextGuard::install` had been
-/// changed to recurse, this would stack-overflow before the assertion.
+/// trait's TestCtx pattern). If `OpaqueContextGuard::install` were to
+/// recurse, this would stack-overflow before the assertion.
 #[test]
 fn opaque_context_guard_install_does_not_recurse() {
     struct TestCtx {
@@ -200,7 +189,7 @@ fn opaque_context_guard_install_does_not_recurse() {
     );
 }
 
-/// Plan §6.12 sub-task 2 test 3 — end-to-end through the scheduler.
+/// End-to-end propagation through the scheduler's worker pools.
 ///
 /// Drives a `Scheduler::submit_request` directly with a session-side
 /// `RequestContext` wrapped as `OpaqueRequestContext`. The scheduler
@@ -212,12 +201,8 @@ fn opaque_context_guard_install_does_not_recurse() {
 /// A custom `StageExecutor` probes `verter_session::request_context::
 /// current_request_context()` inside each stage and records the
 /// observed `request_id` into shared atomics. The test thread then
-/// asserts every stage observed the expected id (non-zero).
-///
-/// Pre-Q: stages observed `None` for session-side TLS because
-/// `OpaqueContextGuard::install` only populated the scheduler-side
-/// slot. Post-Q: every stage observes `Some(7)` matching the wrapping
-/// session `RequestContext.request_id`.
+/// asserts every stage observed the expected id (non-zero) — they would
+/// observe `None` if the worker populated only the scheduler-side slot.
 #[test]
 fn scheduler_winner_thread_propagates_session_context_via_install_tls() {
     use verter_scheduler::executor::{StageError, StageExecutor};
@@ -315,9 +300,10 @@ fn scheduler_winner_thread_propagates_session_context_via_install_tls() {
     });
     handle.wait();
 
-    // Strict discriminating assertions: pre-Q every observed value
-    // would be 0 because session-side TLS was not installed on the
-    // worker. Post-Q all three stages see the wrapping context's id.
+    // Strict discriminating assertions: every observed value would be 0
+    // if session-side TLS were not installed on the worker. With the
+    // dispatch-closure `install_tls` bridge, all three stages see the
+    // wrapping context's id.
     assert_eq!(
         source_observed.load(Ordering::SeqCst),
         7,

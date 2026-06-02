@@ -13938,9 +13938,9 @@ mod tests {
     /// A single I/O worker that calls `wait_or_drive` on an
     /// I/O-bound dep must inline-execute the dep on its own thread.
     /// Without the symmetric `IoWorker × Source` inline-eligibility
-    /// the dep would be dispatched back to `io_pool.execute(...)`
-    /// and sit behind the parked I/O worker forever. The I/O
-    /// capacity loan covers the budget-exhausted case.
+    /// the dep would be dispatched back onto the I/O pool via
+    /// `try_submit_io` and sit behind the parked I/O worker forever.
+    /// The I/O capacity loan covers the budget-exhausted case.
     ///
     /// Setup: `io_threads = 1, cpu_threads = 1`. A `SourceHook`
     /// executor records each Source canonical it sees, and the
