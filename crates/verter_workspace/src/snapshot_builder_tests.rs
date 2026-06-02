@@ -878,3 +878,118 @@ fn bridge_fallback_project_from_vfs_config() {
         _ => panic!("expected Fallback payload"),
     }
 }
+
+// ── extends-only base config must not own files (Q-A5 + Q-A2(d)) ──
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn extends_only_alternate_config_is_not_registered_as_file_owner_and_package_wins() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("packages/app/src")).unwrap();
+
+    // Root `tsconfig.base.json`: an extends-only base — compilerOptions only,
+    // no files/include/exclude, no references. It is reached by other configs
+    // through `extends`, but it must NOT itself become a file-owning project.
+    std::fs::write(
+        workspace.join("tsconfig.base.json"),
+        r#"{ "compilerOptions": { "strict": true, "baseUrl": "." } }"#,
+    )
+    .unwrap();
+
+    // Root `tsconfig.json`: extends the base, still no files/include/exclude.
+    // It is a project config (default name) with MatchAll membership.
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "extends": "./tsconfig.base.json" }"#,
+    )
+    .unwrap();
+
+    // Package config: extends the base and declares its own include set.
+    std::fs::write(
+        workspace.join("packages/app/tsconfig.json"),
+        r#"{ "extends": "../../tsconfig.base.json", "include": ["src/**/*"] }"#,
+    )
+    .unwrap();
+
+    let note_vue = workspace.join("packages/app/src/Note.vue");
+    std::fs::write(&note_vue, "<template><div/></template>").unwrap();
+
+    let workspace_str = workspace.to_string_lossy().replace('\\', "/");
+    // Compare against canonicalized paths — the snapshot stores tsconfig paths
+    // through `CanonicalPath::new` (lowercased drive, forward slashes).
+    let note_str = CanonicalPath::new(&note_vue.to_string_lossy().replace('\\', "/"))
+        .as_str()
+        .to_string();
+    let base_tsconfig_str = CanonicalPath::new(
+        &workspace
+            .join("tsconfig.base.json")
+            .to_string_lossy()
+            .replace('\\', "/"),
+    )
+    .as_str()
+    .to_string();
+    let pkg_tsconfig_str = CanonicalPath::new(
+        &workspace
+            .join("packages/app/tsconfig.json")
+            .to_string_lossy()
+            .replace('\\', "/"),
+    )
+    .as_str()
+    .to_string();
+
+    let vite_opts = crate::vite_config::ViteConfigOptions {
+        enabled: false,
+        ..Default::default()
+    };
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+
+    let result = build_workspace_snapshot(
+        &ws,
+        std::slice::from_ref(&workspace_str),
+        SnapshotGeneration(1),
+        &vite_opts,
+    );
+
+    let configured_tsconfigs: Vec<String> = result
+        .snapshot
+        .projects
+        .iter()
+        .filter_map(|p| match &p.payload {
+            ProjectPayload::Configured { tsconfig_path, .. } => {
+                Some(tsconfig_path.as_str().to_string())
+            }
+            ProjectPayload::Fallback { .. } => None,
+        })
+        .collect();
+
+    // Negative: the extends-only base must NOT be registered as a configured
+    // (file-owning) project.
+    assert!(
+        !configured_tsconfigs.contains(&base_tsconfig_str),
+        "extends-only tsconfig.base.json must not become a file-owning project, configured={configured_tsconfigs:?}"
+    );
+
+    // Positive: the package tsconfig IS registered.
+    assert!(
+        configured_tsconfigs.contains(&pkg_tsconfig_str),
+        "packages/app/tsconfig.json must be registered as a configured project, configured={configured_tsconfigs:?}"
+    );
+
+    // Positive: Note.vue resolves uniquely to the package config (nearest root
+    // beats the ancestor root tsconfig.json; the base never participates).
+    match result.snapshot.configured_owner_resolution_for_file(&note_str) {
+        ConfiguredOwnerResolution::Unique(id) => {
+            assert_eq!(
+                result.snapshot.tsconfig_path(id).map(|p| p.as_str()),
+                Some(pkg_tsconfig_str.as_str()),
+                "Note.vue's unique configured owner must be the package tsconfig"
+            );
+        }
+        other => panic!(
+            "Note.vue must have a unique package owner, got {other:?} (configured={configured_tsconfigs:?})"
+        ),
+    }
+}

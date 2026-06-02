@@ -266,6 +266,55 @@ fn ambiguous_configured_resolution_for_overlap() {
 }
 
 #[test]
+fn incomparable_configured_roots_overlap_is_ambiguous() {
+    // FIX-6 (snapshot reachability): the genuine incomparable-overlap branch is
+    // reachable ONLY in the snapshot path, because `ConfiguredMembership::contains`
+    // matches `materialized_files` exact entries WITHOUT a root gate (unlike the
+    // resolver path's `normalized_starts_with(file, root)`). Two configured
+    // projects with INCOMPARABLE roots (neither an ancestor of the other) whose
+    // materialized sets BOTH contain the exact same canonical file must resolve
+    // to Ambiguous — the ancestor-pruning in `configured_owner_resolution_for_file`
+    // prunes only STRICT ANCESTORS, so neither incomparable candidate is dropped.
+    let snap = snapshot_with(vec![
+        configured_project(
+            0,
+            "d:/project/packages/a",
+            "d:/project/packages/a/tsconfig.json",
+            &["d:/project/shared/util.ts"],
+        ),
+        configured_project(
+            1,
+            "d:/project/packages/b",
+            "d:/project/packages/b/tsconfig.json",
+            &["d:/project/shared/util.ts"],
+        ),
+    ]);
+
+    // Discriminator: an implementation that picks a winner for incomparable
+    // overlap (e.g. deepest/first root) would return Unique and fail here.
+    let res = snap.configured_owner_resolution_for_file("d:/project/shared/util.ts");
+    match res {
+        ConfiguredOwnerResolution::Ambiguous(ids) => {
+            assert_eq!(
+                ids.len(),
+                2,
+                "both incomparable configs must remain, got {ids:?}"
+            );
+            assert!(ids.contains(&ProjectId(0)));
+            assert!(ids.contains(&ProjectId(1)));
+        }
+        other => panic!("expected Ambiguous for incomparable-root overlap, got {other:?}"),
+    }
+
+    // single_owner_for_file must refuse to invent a winner.
+    assert_eq!(
+        snap.single_owner_for_file("d:/project/shared/util.ts"),
+        None,
+        "single_owner_for_file must be None for genuine incomparable overlap"
+    );
+}
+
+#[test]
 fn no_configured_resolution_outside_all_projects() {
     let snap = snapshot_with(vec![
         configured_project(0, "d:/project", "d:/project/tsconfig.json", &[]),

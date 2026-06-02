@@ -341,6 +341,113 @@ fn ambiguous_configured_owner_returns_none() {
 }
 
 #[test]
+fn descendant_configured_owner_wins_over_ancestor_configured_owner() {
+    // Mirrors a pnpm monorepo opened at one root: a root tsconfig whose
+    // membership (e.g. via an `extends`-driven MatchAll) reaches every
+    // descendant, plus a real package tsconfig that also claims the file.
+    // The nearest (deepest-root) configured owner wins — the ancestor must
+    // not make the package file ambiguous.
+    let resolver = ProjectResolver::new(vec![
+        project(
+            "/workspace",
+            "/workspace",
+            Some("/workspace/tsconfig.json"),
+            ProjectMembership::MatchAll,
+        ),
+        project(
+            "/workspace/packages/app",
+            "/workspace",
+            Some("/workspace/packages/app/tsconfig.json"),
+            ProjectMembership::MatchAll,
+        ),
+    ]);
+
+    let owner = resolver
+        .owner_for_file("/workspace/packages/app/src/Note.vue")
+        .expect("descendant package config must own the package file");
+    // Positive: the package config wins.
+    assert_eq!(
+        owner.tsconfig_path.as_deref(),
+        Some("/workspace/packages/app/tsconfig.json"),
+        "nearest-root configured owner must win over the ancestor root config"
+    );
+    // Negative: the ancestor root config must NOT be selected.
+    assert_ne!(
+        owner.tsconfig_path.as_deref(),
+        Some("/workspace/tsconfig.json"),
+        "ancestor root config must lose to the descendant package config"
+    );
+
+    // A file owned only by the ancestor root still resolves to the root.
+    let root_owner = resolver
+        .owner_for_file("/workspace/scripts/build.ts")
+        .expect("ancestor root config still owns files outside descendant packages");
+    assert_eq!(
+        root_owner.tsconfig_path.as_deref(),
+        Some("/workspace/tsconfig.json"),
+        "ancestor root config owns files that no descendant package claims"
+    );
+}
+
+#[test]
+fn incomparable_configured_roots_each_own_only_their_own_files() {
+    // Sibling-root isolation in the RESOLVER path: `IdeProjectConfig::matches_file`
+    // applies `normalized_starts_with(file, root)` FIRST, so two configs with
+    // incomparable roots can NEVER both claim the same file — genuine
+    // incomparable ambiguity is unreachable through `owner_for_file` (it IS
+    // reachable in the SNAPSHOT path, exercised by
+    // `workspace_snapshot_tests::incomparable_configured_roots_overlap_is_ambiguous`).
+    // The real reachable property here: each config owns ONLY files under its own
+    // root, and a file under neither root resolves to None.
+    let resolver = ProjectResolver::new(vec![
+        project(
+            "/workspace/packages/a",
+            "/workspace",
+            Some("/workspace/packages/a/tsconfig.json"),
+            ProjectMembership::MatchAll,
+        ),
+        project(
+            "/workspace/packages/b",
+            "/workspace",
+            Some("/workspace/packages/b/tsconfig.json"),
+            ProjectMembership::MatchAll,
+        ),
+    ]);
+
+    // A file under packages/a is owned by the `a` config alone.
+    assert_eq!(
+        resolver
+            .owner_for_file("/workspace/packages/a/src/Note.vue")
+            .and_then(|o| o.tsconfig_path.as_deref()),
+        Some("/workspace/packages/a/tsconfig.json"),
+        "a file under packages/a is owned by the a config alone"
+    );
+    // Negative: the `b` config must NOT cross-claim packages/a's file.
+    assert_ne!(
+        resolver
+            .owner_for_file("/workspace/packages/a/src/Note.vue")
+            .and_then(|o| o.tsconfig_path.as_deref()),
+        Some("/workspace/packages/b/tsconfig.json"),
+        "the b config must not cross-claim a file under packages/a"
+    );
+    // Symmetric: a file under packages/b is owned by the `b` config alone.
+    assert_eq!(
+        resolver
+            .owner_for_file("/workspace/packages/b/src/Panel.vue")
+            .and_then(|o| o.tsconfig_path.as_deref()),
+        Some("/workspace/packages/b/tsconfig.json"),
+        "a file under packages/b is owned by the b config alone"
+    );
+    // A file under NEITHER root resolves to None (no config claims it).
+    assert!(
+        resolver
+            .owner_for_file("/workspace/packages/c/src/Other.vue")
+            .is_none(),
+        "a file under neither sibling root must resolve to None"
+    );
+}
+
+#[test]
 fn resolve_for_project_uses_owner_tsconfig_paths_without_importer_file() {
     let mut configured = project(
         "/workspace",

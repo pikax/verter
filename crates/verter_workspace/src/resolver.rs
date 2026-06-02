@@ -142,28 +142,63 @@ impl ProjectResolver {
     }
 
     pub fn owner_for_file(&self, file_id: &str) -> Option<&IdeProjectConfig> {
-        let mut configured: Option<&IdeProjectConfig> = None;
+        // Collect every configured project whose membership claims the file.
+        let configured: Vec<&IdeProjectConfig> = self
+            .projects
+            .iter()
+            .filter(|project| project.tsconfig_path.is_some() && project.matches_file(file_id))
+            .collect();
+
+        // Nearest-root effective ownership (same rule as
+        // `WorkspaceSnapshot::configured_owner_resolution_for_file`): a
+        // configured candidate whose root is a STRICT ANCESTOR of another
+        // matching candidate's root loses. `extends`/breadth at an ancestor
+        // root must not make a descendant package file ambiguous when a
+        // descendant configured project also claims it.
+        let effective: Vec<&IdeProjectConfig> = configured
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                let candidate_root = normalize_canonical_id(&candidate.root);
+                !configured.iter().any(|other| {
+                    if std::ptr::eq(*other, *candidate) {
+                        return false;
+                    }
+                    let other_root = normalize_canonical_id(&other.root);
+                    // `other` strictly under `candidate` ⇒ candidate is an
+                    // ancestor ⇒ drop the ancestor candidate. The length check
+                    // makes containment STRICT (equal roots are not ancestors).
+                    other_root.len() > candidate_root.len()
+                        && normalized_starts_with(&other_root, &candidate_root)
+                })
+            })
+            .collect();
+
+        match effective.as_slice() {
+            // Unique effective configured owner.
+            [only] => return Some(only),
+            // Same-root / incomparable-root overlap → genuine ambiguity.
+            [_, ..] => return None,
+            // No configured owner → fall through to fallback selection.
+            [] => {}
+        }
+
+        // No configured owner: a single fallback may own the file, but two
+        // overlapping fallbacks stay ambiguous.
         let mut fallback: Option<&IdeProjectConfig> = None;
         let mut fallback_ambiguous = false;
-
         for project in &self.projects {
-            if !project.matches_file(file_id) {
+            if project.tsconfig_path.is_some() || !project.matches_file(file_id) {
                 continue;
             }
-
-            if project.tsconfig_path.is_some() {
-                if configured.is_some() {
-                    return None;
-                }
-                configured = Some(project);
-            } else if fallback.is_some() {
+            if fallback.is_some() {
                 fallback_ambiguous = true;
             } else {
                 fallback = Some(project);
             }
         }
 
-        configured.or_else(|| (!fallback_ambiguous).then_some(fallback).flatten())
+        (!fallback_ambiguous).then_some(fallback).flatten()
     }
 
     fn project_for_ownership(

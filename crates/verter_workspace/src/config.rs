@@ -398,6 +398,64 @@ pub fn load_project_references(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> V
         .collect()
 }
 
+/// Whether a tsconfig DECLARES file-ownership intent in its own JSON body.
+///
+/// Reads the raw tsconfig (not the `extends`-resolved membership) and checks
+/// for any of `files`, `include`, `exclude`, or `references`. This is the
+/// structural signal that a config is meant to own a concrete file set —
+/// `compilerOptions`-only configs (the classic `tsconfig.base.json` shared
+/// base) declare no such intent and are parse-only fragments for extenders.
+///
+/// `extends` is deliberately NOT a signal here: being reached through
+/// `extends` contributes compilerOptions/membership inheritance but never
+/// makes the base config a file owner (see [`is_project_config`]).
+fn tsconfig_declares_ownership_intent(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> bool {
+    let Some(content) = ws.read_file(tsconfig_path) else {
+        return false;
+    };
+    let cleaned = strip_json_comments(&content);
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&cleaned) else {
+        return false;
+    };
+    json.get("files").is_some()
+        || json.get("include").is_some()
+        || json.get("exclude").is_some()
+        || json.get("references").is_some()
+}
+
+/// Structural classification: is this discovered config eligible to OWN files?
+///
+/// A discovered tsconfig is a PROJECT config (eligible to own files) only if
+/// ANY of:
+///   * its basename is the TypeScript default project config name
+///     `tsconfig.json`; OR
+///   * it declares `files`, `include`, `exclude`, or `references`
+///     ([`tsconfig_declares_ownership_intent`]); OR
+///   * it is the resolved target of a TypeScript `references[].path` from some
+///     other config (`reference_targets`).
+///
+/// Otherwise it is a parse-only config fragment: an alternate
+/// `tsconfig.*.json` with only `compilerOptions` (and possibly `extends`),
+/// reachable through `extends` for inheritance but never an owning project.
+///
+/// This is a binary structural predicate — it never inspects the basename
+/// for marketing-style suffixes (`.base.`, `.app.`, etc.). The single name
+/// check is the exact TypeScript default project name.
+pub fn is_project_config(
+    ws: &dyn WorkspaceRead,
+    tsconfig_path: &str,
+    reference_targets: &rustc_hash::FxHashSet<String>,
+) -> bool {
+    let basename = tsconfig_path.rsplit('/').next().unwrap_or(tsconfig_path);
+    if basename == "tsconfig.json" {
+        return true;
+    }
+    if reference_targets.contains(&normalize_canonical_id(tsconfig_path)) {
+        return true;
+    }
+    tsconfig_declares_ownership_intent(ws, tsconfig_path)
+}
+
 /// Check if a workspace has any solution-style tsconfig.json.
 pub fn has_solution_style_tsconfig(ws: &dyn WorkspaceRead, workspace_root: &str) -> bool {
     let tsconfig = join_paths(workspace_root, "tsconfig.json");

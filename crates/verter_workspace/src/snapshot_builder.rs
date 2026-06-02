@@ -38,7 +38,8 @@ pub fn build_workspace_snapshot(
     vite_opts: &crate::vite_config::ViteConfigOptions,
 ) -> SnapshotBuildResult {
     use crate::config::{
-        discover_tsconfigs, load_compiler_options, load_project_membership, load_project_references,
+        discover_tsconfigs, is_project_config, load_compiler_options, load_project_membership,
+        load_project_references,
     };
     use crate::vite_config::{analyze_vite_config, ViteConfigAnalysis, ViteConfigTrustInfo};
     use std::path::PathBuf;
@@ -54,7 +55,28 @@ pub fn build_workspace_snapshot(
         // ── Discover tsconfigs ──
         let tsconfig_entries = discover_tsconfigs(&root_path);
 
+        // Pre-pass: collect every config that is the resolved target of a
+        // TypeScript `references[].path` from any discovered config. Such
+        // targets are project configs even if their own JSON declares no
+        // files/include/exclude. `load_project_references` returns already
+        // resolved+normalized paths; key the set by `normalize_canonical_id`
+        // so `is_project_config`'s lookup matches.
+        let reference_targets: FxHashSet<String> = tsconfig_entries
+            .iter()
+            .flat_map(|entry| load_project_references(ws, &entry.path))
+            .map(|target| crate::resolver::normalize_canonical_id(&target))
+            .collect();
+
         for entry in &tsconfig_entries {
+            // Only configs with structural file-ownership intent (or default
+            // name / reference targeting) become owning projects. Parse-only
+            // `extends` fragments (e.g. a compilerOptions-only
+            // `tsconfig.base.json`) are still parsed for inheritance through
+            // `extends`, but never registered as file owners.
+            if !is_project_config(ws, &entry.path, &reference_targets) {
+                continue;
+            }
+
             let tsconfig_path = CanonicalPath::new(&entry.path);
             let project_root = CanonicalPath::new(&entry.root);
             let raw_membership = load_project_membership(ws, &entry.path);

@@ -141,10 +141,37 @@ impl WorkspaceSnapshot {
             })
             .collect();
 
-        match configured.len() {
+        // Nearest-root effective ownership: a configured candidate whose root
+        // is a STRICT ANCESTOR of another matching candidate's root loses —
+        // `extends`/breadth at an ancestor root must not make a descendant
+        // package file ambiguous when a descendant configured project also
+        // claims it. After pruning ancestors, what remains is either exactly
+        // one config (UNIQUE), or multiple configs at the same root / at
+        // incomparable roots (genuine overlap → AMBIGUOUS).
+        let effective: SmallVec<[ProjectId; 2]> = configured
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                let candidate_root = &self.projects[candidate.0 as usize].root;
+                // Keep the candidate only if no OTHER matching candidate has a
+                // strictly-deeper root that contains this candidate's root.
+                !configured.iter().any(|other| {
+                    if other == candidate {
+                        return false;
+                    }
+                    let other_root = &self.projects[other.0 as usize].root;
+                    // `other` strictly under `candidate` ⇒ candidate is an
+                    // ancestor ⇒ drop the ancestor candidate.
+                    other_root.starts_with_dir(candidate_root)
+                        && other_root.as_str().len() > candidate_root.as_str().len()
+                })
+            })
+            .collect();
+
+        match effective.len() {
             0 => ConfiguredOwnerResolution::None,
-            1 => ConfiguredOwnerResolution::Unique(configured[0]),
-            _ => ConfiguredOwnerResolution::Ambiguous(configured),
+            1 => ConfiguredOwnerResolution::Unique(effective[0]),
+            _ => ConfiguredOwnerResolution::Ambiguous(effective),
         }
     }
 
