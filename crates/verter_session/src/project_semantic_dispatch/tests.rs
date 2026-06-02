@@ -389,22 +389,21 @@ fn project_member_rejects_non_public_members_from_external_surface() {
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let bool_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
-    let mk_member = |name: &str,
-                     value: SemanticNodeId,
-                     visibility: verter_type_expr::MemberVisibility| {
-        SurfaceMember {
-            visibility,
-            name: Arc::from(name),
-            value,
-            optional: false,
-            readonly: false,
-            is_method: false,
-            declared_in_macro_type_arg: false,
-            merge_role: crate::semantic_query::MemberMergeRole::Authored,
-            spans: Default::default(),
-            declaration_origin: None,
-        }
-    };
+    let mk_member =
+        |name: &str, value: SemanticNodeId, visibility: verter_type_expr::MemberVisibility| {
+            SurfaceMember {
+                visibility,
+                name: Arc::from(name),
+                value,
+                optional: false,
+                readonly: false,
+                is_method: false,
+                declared_in_macro_type_arg: false,
+                merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                spans: Default::default(),
+                declaration_origin: None,
+            }
+        };
     let surface = SurfaceView {
         members: Arc::from(
             vec![

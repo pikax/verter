@@ -1026,22 +1026,20 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // visibility filter the typed-IR derivation applies). A bare
             // name-only filter over the projected surface would bypass that
             // gate and leak protected/private members.
-            RouteDemand::Pick(members) if !members.is_empty() => {
-                self.dispatch_routed_pick_omit_via_shared_engine(
+            RouteDemand::Pick(members) if !members.is_empty() => self
+                .dispatch_routed_pick_omit_via_shared_engine(
                     scope_canonical_id,
                     root_symbol,
                     crate::semantic_query::DeclKey::builtin("Pick"),
                     members,
-                )
-            }
-            RouteDemand::Omit(members) if !members.is_empty() => {
-                self.dispatch_routed_pick_omit_via_shared_engine(
+                ),
+            RouteDemand::Omit(members) if !members.is_empty() => self
+                .dispatch_routed_pick_omit_via_shared_engine(
                     scope_canonical_id,
                     root_symbol,
                     crate::semantic_query::DeclKey::builtin("Omit"),
                     members,
-                )
-            }
+                ),
             _ => None,
         }
     }
