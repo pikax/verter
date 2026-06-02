@@ -3307,7 +3307,7 @@ impl VerterHost {
         // `(mode, view_fingerprint)` so an overlay-bearing reader
         // (view_fingerprint != 0) hits its own per-overlay slot, and
         // a base reader (view_fingerprint == 0) cannot observe an
-        // overlay-derived entry (Codex P1.3, fix-agent P0.1).
+        // overlay-derived entry.
         // cached_resolved_meta lives on DerivedRawState (D48 split).
         use crate::resolver_core::StoreView;
         let entry = self.derived_raw_cache().get(canonical)?;
@@ -3426,7 +3426,7 @@ impl VerterHost {
         // bearing publishers (`view_fingerprint != 0`) cannot
         // overwrite the base slot. A later base `resolve_component_meta`
         // (view_fingerprint == 0) does NOT fall through to an overlay-
-        // derived entry (Codex P1.3, fix-agent P0.1).
+        // derived entry.
         self.mirror_cached_resolved_meta_arc(canonical, mode, view_fingerprint, state);
     }
 
@@ -3491,8 +3491,7 @@ impl VerterHost {
         // View-aware key: `(mode, view_fingerprint)` prevents an
         // overlay-bearing publisher (view_fingerprint != 0) from
         // overwriting the base slot (view_fingerprint == 0) and
-        // contaminating a later base read (Codex P1.3,
-        // fix-agent P0.1).
+        // contaminating a later base read.
         {
             let mut derived_ref = self
                 .derived_raw_cache()
