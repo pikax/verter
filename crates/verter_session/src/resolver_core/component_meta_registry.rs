@@ -460,15 +460,29 @@ fn merge_component_meta_registry_candidates_bounded(
                             existing_property.optional && right_property.optional;
                         existing_property.readonly =
                             existing_property.readonly && right_property.readonly;
+                        // Duplicate member (same name in both sides): aggregate
+                        // to the MOST-RESTRICTIVE visibility (the shared merge
+                        // rule). A merged member is Public only when Public in
+                        // BOTH contributors, so a member non-public in either
+                        // side stays non-public — never synthesized Public.
+                        existing_property.visibility = existing_property
+                            .visibility
+                            .most_restrictive(right_property.visibility);
                     } else {
-                        // Carry the right-hand property's OXC spans verbatim.
-                        merged_members.push(ObjectMember::Property(ObjectProperty::with_spans(
-                            right_property.name.clone(),
-                            right_property.ty.clone(),
-                            right_property.optional,
-                            right_property.readonly,
-                            right_property.spans,
-                        )));
+                        // RHS-only property: carry the right-hand property's OXC
+                        // spans AND its declared accessibility verbatim (rebuild
+                        // of an existing member — `with_spans` would default it
+                        // to Public).
+                        merged_members.push(ObjectMember::Property(
+                            ObjectProperty::with_visibility(
+                                right_property.name.clone(),
+                                right_property.ty.clone(),
+                                right_property.optional,
+                                right_property.readonly,
+                                right_property.visibility,
+                                right_property.spans,
+                            ),
+                        ));
                     }
                 }
                 _ => {
@@ -2774,6 +2788,125 @@ mod tests {
         assert!(variants_shape.properties.iter().any(|member| {
             matches!(member, ObjectMember::Property(property) if property.name == "color")
         }));
+    }
+
+    fn property_with_visibility(
+        name: &str,
+        vis: verter_type_expr::MemberVisibility,
+    ) -> ObjectMember {
+        ObjectMember::Property(ObjectProperty::with_visibility(
+            name.to_string(),
+            TypeExpr::Primitive(PrimitiveName::Number),
+            false,
+            false,
+            vis,
+            verter_type_expr::MemberSpans::default(),
+        ))
+    }
+
+    fn merged_property_visibility(
+        merged: &TypeExpr,
+        name: &str,
+    ) -> verter_type_expr::MemberVisibility {
+        let TypeExpr::Object(obj) = merged else {
+            panic!("merged candidate should be object-shaped, got {merged:?}");
+        };
+        obj.properties
+            .iter()
+            .find_map(|m| match m {
+                ObjectMember::Property(p) if p.name == name => Some(p.visibility),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("merged object must contain `{name}`"))
+    }
+
+    /// F3 (RHS-only member): registry object merge must carry an RHS-only
+    /// property's declared accessibility verbatim — a private member
+    /// contributed only by the right side stays Private on the merged surface.
+    ///
+    /// Discriminating: against the tree where the RHS-only push uses
+    /// `with_spans`, the merged `right_only` member is Public and this FAILS.
+    #[test]
+    fn merge_registry_preserves_rhs_only_member_visibility() {
+        use verter_type_expr::MemberVisibility;
+        let left = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![property_with_visibility(
+                "left_only",
+                MemberVisibility::Public,
+            )],
+        }));
+        let right = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![property_with_visibility(
+                "right_only",
+                MemberVisibility::Private,
+            )],
+        }));
+
+        let merged = merge_component_meta_registry_candidates(Some(left), Some(right))
+            .expect("object candidates merge");
+        assert_eq!(
+            merged_property_visibility(&merged, "right_only"),
+            MemberVisibility::Private,
+            "an RHS-only private member must stay Private through the registry merge",
+        );
+        assert_eq!(
+            merged_property_visibility(&merged, "left_only"),
+            MemberVisibility::Public,
+            "the LHS public member is unchanged",
+        );
+    }
+
+    /// F3 (duplicate member): when both sides declare a member of the same
+    /// name, the merged member takes the MOST-RESTRICTIVE visibility (the shared
+    /// rule) — Public only when Public in BOTH sides. This is arm-order
+    /// independent.
+    ///
+    /// Discriminating: against the tree where the duplicate-member branch leaves
+    /// `existing_property.visibility` untouched (keeping the LEFT side's
+    /// visibility), `(Public-left, Private-right)` merges to Public and the
+    /// arm-order-independence assertion FAILS.
+    #[test]
+    fn merge_registry_duplicate_member_takes_most_restrictive_visibility() {
+        use verter_type_expr::MemberVisibility;
+
+        let merge_dup = |left_vis, right_vis| {
+            let left = TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![property_with_visibility("dup", left_vis)],
+            }));
+            let right = TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![property_with_visibility("dup", right_vis)],
+            }));
+            let merged = merge_component_meta_registry_candidates(Some(left), Some(right))
+                .expect("object candidates merge");
+            merged_property_visibility(&merged, "dup")
+        };
+
+        // Public in both -> Public.
+        assert_eq!(
+            merge_dup(MemberVisibility::Public, MemberVisibility::Public),
+            MemberVisibility::Public,
+        );
+        // Any non-public side -> non-public (most restrictive), arm-order
+        // independent.
+        assert_eq!(
+            merge_dup(MemberVisibility::Public, MemberVisibility::Private),
+            MemberVisibility::Private,
+            "public-left + private-right must merge to Private",
+        );
+        assert_eq!(
+            merge_dup(MemberVisibility::Private, MemberVisibility::Public),
+            MemberVisibility::Private,
+            "private-left + public-right must merge to Private (arm-order independent)",
+        );
+        assert_eq!(
+            merge_dup(MemberVisibility::Protected, MemberVisibility::Private),
+            MemberVisibility::Private,
+            "protected + private -> Private",
+        );
+        assert_eq!(
+            merge_dup(MemberVisibility::Public, MemberVisibility::Protected),
+            MemberVisibility::Protected,
+        );
     }
 
     #[test]

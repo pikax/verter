@@ -565,11 +565,16 @@ fn rewrite_object_member(
     match member {
         ObjectMember::Property(prop) => {
             let new_ty = rewrite_expr(&prop.ty, ctx)?;
-            Some(ObjectMember::Property(ObjectProperty::with_spans(
+            // PRESERVE the member's declared accessibility: this rebuilds an
+            // EXISTING property (only its child type changed), so it must carry
+            // `prop.visibility` via `with_visibility`. `with_spans` would default
+            // it to Public, upgrading a non-public member.
+            Some(ObjectMember::Property(ObjectProperty::with_visibility(
                 prop.name.clone(),
                 new_ty,
                 prop.optional,
                 prop.readonly,
+                prop.visibility,
                 prop.spans,
             )))
         }
@@ -595,10 +600,13 @@ fn rewrite_object_member(
         }
         ObjectMember::Method(method) => {
             let new_func = rewrite_function(&method.function, ctx)?;
-            Some(ObjectMember::Method(MethodSignature::with_spans(
+            // PRESERVE the method's declared accessibility (rebuild of an
+            // existing method — see the property arm).
+            Some(ObjectMember::Method(MethodSignature::with_visibility(
                 method.name.clone(),
                 new_func,
                 method.optional,
+                method.visibility,
                 method.spans,
             )))
         }

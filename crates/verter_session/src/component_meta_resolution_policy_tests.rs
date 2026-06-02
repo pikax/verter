@@ -745,3 +745,74 @@ fn w2_4_slot_binding_preserve_typed_indexed_access_via_imported_root() {
         binding.type_expr,
     );
 }
+
+/// F2: the policy's object-member rewrite (`rewrite_object_member`, fired when a
+/// child member's type changes — e.g. a registry alias substitution) must
+/// PRESERVE the member's declared accessibility. It rebuilds an existing member
+/// via `with_visibility`, NOT `with_spans` (which would silently upgrade a
+/// non-public member to Public).
+///
+/// Scenario: a non-participating prop is an OBJECT carrying a PRIVATE member
+/// whose value is `Ref { "Inner" }`. Rule 3 expands `Inner` to its registry
+/// body, which forces `rewrite_object_member` to rebuild the private member.
+/// The rebuilt member must stay Private.
+///
+/// Discriminating: against the tree where `rewrite_object_member` uses
+/// `with_spans`, the rebuilt `secret` member is Public and the assertion FAILS.
+#[test]
+fn policy_object_member_rewrite_preserves_visibility() {
+    use verter_type_expr::{MemberSpans, MemberVisibility};
+
+    let mut meta = empty_meta();
+    // `XyzWrap` is NOT macro-participating, so Rule 3 expands it; its body is an
+    // object with a PRIVATE member `secret: Inner`.
+    meta.props.push(prop("xyz", ref_zero("XyzWrap")));
+
+    let private_member_object = TypeExpr::Object(Arc::new(ObjectExpr {
+        properties: vec![ObjectMember::Property(ObjectProperty::with_visibility(
+            "secret".to_string(),
+            ref_zero("Inner"),
+            false,
+            false,
+            MemberVisibility::Private,
+            MemberSpans::default(),
+        ))],
+    }));
+    let inner_body = object_with_property("v", TypeExpr::Primitive(PrimitiveName::Number));
+    let registry = vec![
+        registry_entry("XyzWrap", private_member_object),
+        registry_entry("Inner", inner_body.clone()),
+    ];
+    let registry_meta = vec![
+        meta_entry("XyzWrap", "/workspace/xyz.ts"),
+        meta_entry("Inner", "/workspace/inner.ts"),
+    ];
+
+    // Empty participation set — both names expand.
+    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &[]);
+
+    // The published prop is the expanded `XyzWrap` object; its `secret` member's
+    // value should be the expanded `Inner` body (the rewrite fired), AND the
+    // member must still be Private.
+    let TypeExpr::Object(obj) = &meta.props[0].type_expr else {
+        panic!(
+            "expected expanded object prop, got {:?}",
+            meta.props[0].type_expr
+        );
+    };
+    let ObjectMember::Property(secret) = &obj.properties[0] else {
+        panic!("expected `secret` property, got {:?}", obj.properties[0]);
+    };
+    assert_eq!(
+        secret.visibility,
+        MemberVisibility::Private,
+        "the policy object-member rewrite must preserve the member's Private visibility",
+    );
+    // Confirm the rewrite actually fired (the inner Ref expanded), so the test
+    // exercises the rebuild branch rather than the no-op branch.
+    assert_eq!(
+        secret.ty, inner_body,
+        "the inner `Inner` ref must have been expanded by the policy rewrite \
+         (otherwise the rebuild branch never ran)",
+    );
+}
