@@ -20950,3 +20950,71 @@ defineProps<Props>()
         count.declared_in_macro_type_arg,
     );
 }
+
+/// End-to-end (`get_component_meta`) member-visibility leak guard for slot
+/// bindings whose first parameter is a CLASS carrying non-public members. This
+/// drives the FULL component-meta pipeline, so it covers BOTH the typeinfo
+/// adapter binding path (`binding_fields_from_param_ty`) AND the graph-native
+/// binding path (`slot_binding_graph::compute_bindings_via_graph` ->
+/// `publish_merged_bindings`); both must apply the Public-only publication
+/// filter so a navigated class param's `private` / `protected` member never
+/// reaches the published slot binding surface.
+///
+/// Discriminating: against the tree without the graph-native + adapter
+/// slot-binding filters, `protectedBinding` / `privateBinding` appear in the
+/// published bindings and the `does-not-contain` assertions FAIL.
+#[test]
+fn slot_binding_navigated_class_param_excludes_non_public_members_end_to_end() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/slot-props.ts",
+            r#"export class SlotProps {
+  publicBinding: string
+  protected protectedBinding: number
+  private privateBinding: boolean
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { SlotProps } from './slot-props'
+defineSlots<{ default(props: SlotProps): any }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("component meta with class-param slot resolves");
+
+    let default_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot must be published");
+    let binding_names: Vec<&str> = default_slot
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+
+    assert!(
+        binding_names.contains(&"publicBinding"),
+        "the public class-param member must publish as a slot binding; got {binding_names:?}",
+    );
+    assert!(
+        !binding_names.contains(&"protectedBinding"),
+        "a protected class-param member must NOT leak into published slot bindings \
+         (adapter OR graph-native path); got {binding_names:?}",
+    );
+    assert!(
+        !binding_names.contains(&"privateBinding"),
+        "a private class-param member must NOT leak into published slot bindings \
+         (adapter OR graph-native path); got {binding_names:?}",
+    );
+}

@@ -976,6 +976,11 @@ pub(crate) fn compute_bindings_via_graph(
     let slot_members = read_surface_members(ctx, slot_surface);
 
     for slot_member in slot_members.iter() {
+        // Public-only publication: a `private` / `protected` class member
+        // recorded on the shared surface must NOT be published as a slot.
+        if !slot_member.visibility.is_public() {
+            continue;
+        }
         // Realize the slot member value through the callable-
         // realization substrate before the `Function`-arm match.
         // Under transit-shallow macro publication the slot value may
@@ -1083,6 +1088,11 @@ pub(crate) fn compute_bindings_via_graph(
         let binding_members = read_surface_members(ctx, param_surface);
 
         for binding in binding_members.iter() {
+            // Public-only publication: a navigated class param's `private` /
+            // `protected` member must NOT leak as a published slot binding.
+            if !binding.visibility.is_public() {
+                continue;
+            }
             out.push(ResolvedSlotBinding {
                 owner_macro: owner_macro.clone(),
                 slot_name: slot_member.name.clone(),

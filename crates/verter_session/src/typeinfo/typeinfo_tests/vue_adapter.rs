@@ -1140,3 +1140,182 @@ fn generic_inherited_member_type_expr_scope_is_deriving_file() {
         "Local resolves to its real surface in the scope val's type_expr is bound to"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Member-visibility publication leak guards (A: L1 / L2 / L3).
+//
+// `extract_class` RECORDS non-public class members on the shared surface (so B5
+// can read the full set for native_props), so every PUBLISHED-member consumer
+// must re-apply a Public-only filter at the publication boundary. These tests
+// drive the typeinfo Vue adapter normalizers (`emits_from_typeinfo_surface`,
+// `slots_from_typeinfo_surface`, `binding_fields_from_param_ty`) over a class
+// type argument carrying `private` / `protected` members and assert the
+// non-public members do NOT leak into the published emit / slot / slot-binding
+// surface.
+//
+// Discriminating: against the tree without the Public-only filters on those
+// consumers, the `pub_field` / private / protected members appear in the
+// published output and the `does-not-contain` assertions FAIL.
+// ---------------------------------------------------------------------------
+
+const VUE_EMITS_CLASS_LOCAL: &str = r#"<script setup lang="ts">
+class EmitSurface {
+  publicEvt: (n: number) => void;
+  protected protectedEvt: (s: string) => void;
+  private privateEvt: (b: boolean) => void;
+}
+defineEmits<EmitSurface>();
+</script>
+"#;
+
+#[test]
+fn define_emits_over_local_class_does_not_publish_non_public_members() {
+    const FILE: &str = "/w/EmitsClassLocal.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_EMITS_CLASS_LOCAL);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineEmits<Class> resolves a surface");
+    let emits = emits_from_typeinfo_surface(&*host, &surface);
+    let names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"publicEvt"),
+        "the public class member must be published as an emit; got {names:?}",
+    );
+    assert!(
+        !names.contains(&"protectedEvt"),
+        "a protected class member must NOT leak as a published emit; got {names:?}",
+    );
+    assert!(
+        !names.contains(&"privateEvt"),
+        "a private class member must NOT leak as a published emit; got {names:?}",
+    );
+}
+
+const VUE_EMITS_CLASS_IMPORTED_DECL: &str = r#"export class EmitSurface {
+  publicEvt: (n: number) => void;
+  protected protectedEvt: (s: string) => void;
+  private privateEvt: (b: boolean) => void;
+}
+"#;
+
+const VUE_EMITS_CLASS_IMPORTED_SFC: &str = r#"<script setup lang="ts">
+import type { EmitSurface } from "./emit-surface";
+defineEmits<EmitSurface>();
+</script>
+"#;
+
+#[test]
+fn define_emits_over_imported_class_does_not_publish_non_public_members() {
+    const DECL: &str = "/w/emit-surface.ts";
+    const FILE: &str = "/w/EmitsClassImported.vue";
+    let host = make_host();
+    upsert(&host, DECL, VUE_EMITS_CLASS_IMPORTED_DECL);
+    upsert(&host, FILE, VUE_EMITS_CLASS_IMPORTED_SFC);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineEmits<ImportedClass> resolves a surface");
+    let emits = emits_from_typeinfo_surface(&*host, &surface);
+    let names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"publicEvt"),
+        "the public imported-class member must be published as an emit; got {names:?}",
+    );
+    assert!(
+        !names.contains(&"protectedEvt"),
+        "a protected imported-class member must NOT leak as a published emit; got {names:?}",
+    );
+    assert!(
+        !names.contains(&"privateEvt"),
+        "a private imported-class member must NOT leak as a published emit; got {names:?}",
+    );
+}
+
+const VUE_SLOTS_CLASS: &str = r#"<script setup lang="ts">
+class SlotSurface {
+  default: (props: { item: string }) => any;
+  protected protectedSlot: (props: { x: number }) => any;
+  private privateSlot: (props: { y: number }) => any;
+}
+defineSlots<SlotSurface>();
+</script>
+"#;
+
+#[test]
+fn define_slots_over_class_does_not_publish_non_public_members() {
+    const FILE: &str = "/w/SlotsClass.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_SLOTS_CLASS);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineSlots<Class> resolves a surface");
+    let slots = slots_from_typeinfo_surface(&*host, &surface);
+    let names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"default"),
+        "the public class slot member must be published; got {names:?}",
+    );
+    assert!(
+        !names.contains(&"protectedSlot"),
+        "a protected class member must NOT leak as a published slot; got {names:?}",
+    );
+    assert!(
+        !names.contains(&"privateSlot"),
+        "a private class member must NOT leak as a published slot; got {names:?}",
+    );
+}
+
+const VUE_SLOTS_CLASS_PARAM: &str = r#"<script setup lang="ts">
+class SlotProps {
+  publicBinding: string;
+  protected protectedBinding: number;
+  private privateBinding: boolean;
+}
+defineSlots<{ default(props: SlotProps): any }>();
+</script>
+"#;
+
+#[test]
+fn define_slots_navigated_class_param_does_not_publish_non_public_bindings() {
+    const FILE: &str = "/w/SlotsClassParam.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_SLOTS_CLASS_PARAM);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineSlots resolves a surface");
+    let slots = slots_from_typeinfo_surface(&*host, &surface);
+
+    let default_slot = slots
+        .iter()
+        .find(|s| s.name == "default")
+        .expect("the `default` slot must be published");
+    let binding_names: Vec<&str> = default_slot
+        .bindings
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect();
+
+    assert!(
+        binding_names.contains(&"publicBinding"),
+        "the public class-param member must be published as a slot binding; got {binding_names:?}",
+    );
+    assert!(
+        !binding_names.contains(&"protectedBinding"),
+        "a protected class-param member must NOT leak as a slot binding; got {binding_names:?}",
+    );
+    assert!(
+        !binding_names.contains(&"privateBinding"),
+        "a private class-param member must NOT leak as a slot binding; got {binding_names:?}",
+    );
+}

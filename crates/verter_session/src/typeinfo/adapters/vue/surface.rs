@@ -1002,7 +1002,14 @@ pub(crate) fn emits_from_typeinfo_surface(
 
     // (2) Property-style emits — fallback only when no call-signature emit fired.
     if emits.is_empty() {
-        for member in macro_surface.surface.members.iter() {
+        for member in macro_surface
+            .surface
+            .members
+            .iter()
+            // Public-only publication: a `private` / `protected` class member
+            // recorded on the shared surface must NOT leak as a published emit.
+            .filter(|member| member.visibility.is_public())
+        {
             let payload_expr = raise_member_value(ctx, member);
             let payload_expr_scope = payload_expr
                 .as_ref()
@@ -1195,6 +1202,9 @@ pub(crate) fn slots_from_typeinfo_surface(
         .surface
         .members
         .iter()
+        // Public-only publication: a `private` / `protected` class member
+        // recorded on the shared surface must NOT leak as a published slot.
+        .filter(|member| member.visibility.is_public())
         .filter_map(|member| {
             // A slot member's value may be a non-`Function` carrier shell under
             // the transit-shallow macro surface — most notably a generic slot
@@ -1290,13 +1300,19 @@ fn binding_fields_from_param_ty(
             .properties
             .iter()
             .filter_map(|member| match member {
-                verter_type_expr::ObjectMember::Property(prop) => Some(AnalyzedSlotFieldBinding {
-                    name: prop.name.clone(),
-                    type_annotation: render_type_expr_display(&prop.ty),
-                    binding_expr: Some(prop.ty.clone()),
-                    binding_expr_scope: Some(scope.clone()),
-                    span: verter_span::Span::default(),
-                }),
+                // Public-only publication: a non-public member must NOT leak as
+                // a published slot binding. A literal-object member is Public
+                // today, so this is defensive + consistent with the navigated
+                // arm below.
+                verter_type_expr::ObjectMember::Property(prop) if prop.visibility.is_public() => {
+                    Some(AnalyzedSlotFieldBinding {
+                        name: prop.name.clone(),
+                        type_annotation: render_type_expr_display(&prop.ty),
+                        binding_expr: Some(prop.ty.clone()),
+                        binding_expr_scope: Some(scope.clone()),
+                        span: verter_span::Span::default(),
+                    })
+                }
                 _ => None,
             })
             .collect();
@@ -1324,6 +1340,9 @@ fn binding_fields_from_param_ty(
     surface
         .members
         .iter()
+        // Public-only publication: a navigated class param's `private` /
+        // `protected` member must NOT leak as a published slot binding.
+        .filter(|member| member.visibility.is_public())
         .map(|member| {
             if let Some(root) = pick_symbolic_root {
                 let symbolic = TypeExpr::IndexedAccess {
