@@ -889,13 +889,13 @@ mod tests {
     fn prepared_type_decl_member_index_from_object_body() {
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::synthetic(
+                ObjectMember::Property(ObjectProperty::synthetic_public(
                     "label".into(),
                     TypeExpr::Primitive(PrimitiveName::String),
                     false,
                     false,
                 )),
-                ObjectMember::Property(ObjectProperty::synthetic(
+                ObjectMember::Property(ObjectProperty::synthetic_public(
                     "count".into(),
                     TypeExpr::Primitive(PrimitiveName::Number),
                     true,
@@ -939,13 +939,13 @@ mod tests {
         // `is_method` assertions below FAIL.
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::synthetic(
+                ObjectMember::Property(ObjectProperty::synthetic_public(
                     "label".into(),
                     TypeExpr::Primitive(PrimitiveName::String),
                     false,
                     false,
                 )),
-                ObjectMember::Method(verter_type_expr::MethodSignature::synthetic(
+                ObjectMember::Method(verter_type_expr::MethodSignature::synthetic_public(
                     "greet".into(),
                     verter_type_expr::FunctionExpr::synthetic(
                         vec![],
@@ -1021,14 +1021,14 @@ mod tests {
         };
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::with_spans(
+                ObjectMember::Property(ObjectProperty::with_spans_public(
                     "label".into(),
                     TypeExpr::Primitive(PrimitiveName::String),
                     false,
                     false,
                     prop_spans,
                 )),
-                ObjectMember::Method(verter_type_expr::MethodSignature::with_spans(
+                ObjectMember::Method(verter_type_expr::MethodSignature::with_spans_public(
                     "greet".into(),
                     verter_type_expr::FunctionExpr::synthetic(
                         vec![],
@@ -1156,7 +1156,7 @@ mod tests {
             properties: props
                 .iter()
                 .map(|(name, ty, optional)| {
-                    ObjectMember::Property(ObjectProperty::synthetic(
+                    ObjectMember::Property(ObjectProperty::synthetic_public(
                         (*name).into(),
                         ty.clone(),
                         *optional,

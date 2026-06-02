@@ -1019,7 +1019,7 @@ fn extract_object_literal(obj: &ObjectExpression<'_>, source: &str) -> ObjectExp
                     };
                     push_object_property_with_override(
                         &mut members,
-                        verter_type_expr::ObjectProperty::with_spans(name, ty, false, false, spans),
+                        verter_type_expr::ObjectProperty::with_spans_public(name, ty, false, false, spans),
                     );
                 }
             }
@@ -1053,7 +1053,7 @@ fn extract_object_literal_as_type(obj: &ObjectExpression<'_>, source: &str) -> T
                     };
                     push_object_property_with_override(
                         &mut members,
-                        verter_type_expr::ObjectProperty::with_spans(name, ty, false, false, spans),
+                        verter_type_expr::ObjectProperty::with_spans_public(name, ty, false, false, spans),
                     );
                 }
             }
@@ -1521,7 +1521,7 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                     .map(|ta| ta.type_annotation.span().into()),
             };
             Some(ObjectMember::Property(
-                verter_type_expr::ObjectProperty::with_spans(
+                verter_type_expr::ObjectProperty::with_spans_public(
                     name,
                     ty,
                     prop.optional,
@@ -1554,7 +1554,7 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 name: Some(method.key.span().into()),
                 type_annotation: None,
             };
-            Some(ObjectMember::Method(MethodSignature::with_spans(
+            Some(ObjectMember::Method(MethodSignature::with_spans_public(
                 name,
                 FunctionExpr::with_spans(
                     params,

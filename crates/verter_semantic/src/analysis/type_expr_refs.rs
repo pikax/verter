@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn ref_inside_object_property_is_a_reference() {
         let expr = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                 "x".to_string(),
                 t_ref("T"),
                 false,

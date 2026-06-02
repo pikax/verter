@@ -844,7 +844,7 @@ fn define_slots_eval_extracts_bindings_from_optional_function_types() {
                                         TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                                             properties: vec![
                                                 verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                    verter_type_expr::ObjectProperty::synthetic_public(
                                                         "item".to_string(),
                                                         TypeExpr::Primitive(PrimitiveName::String),
                                                         false,
@@ -852,7 +852,7 @@ fn define_slots_eval_extracts_bindings_from_optional_function_types() {
                                                     ),
                                                 ),
                                                 verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                    verter_type_expr::ObjectProperty::synthetic_public(
                                                         "open".to_string(),
                                                         TypeExpr::Primitive(PrimitiveName::Boolean),
                                                         false,
@@ -937,7 +937,7 @@ fn define_slots_eval_extracts_bindings_from_constructor_type_member() {
                                     TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                                         properties: vec![
                                             verter_type_expr::ObjectMember::Property(
-                                                verter_type_expr::ObjectProperty::synthetic(
+                                                verter_type_expr::ObjectProperty::synthetic_public(
                                                     "item".to_string(),
                                                     TypeExpr::Primitive(PrimitiveName::String),
                                                     false,
@@ -945,7 +945,7 @@ fn define_slots_eval_extracts_bindings_from_constructor_type_member() {
                                                 ),
                                             ),
                                             verter_type_expr::ObjectMember::Property(
-                                                verter_type_expr::ObjectProperty::synthetic(
+                                                verter_type_expr::ObjectProperty::synthetic_public(
                                                     "open".to_string(),
                                                     TypeExpr::Primitive(PrimitiveName::Boolean),
                                                     false,
@@ -1034,12 +1034,12 @@ fn huge_partial_slot_binding_expansions_fall_back_to_symbolic_source_type() {
                         ty: TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(vec![verter_type_expr::FunctionParam::synthetic(Some("props".to_string()), TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                                     properties: vec![
                                         verter_type_expr::ObjectMember::Property(
-                                            verter_type_expr::ObjectProperty::synthetic("day".to_string(), TypeExpr::Object(Arc::new(
+                                            verter_type_expr::ObjectProperty::synthetic_public("day".to_string(), TypeExpr::Object(Arc::new(
                                                     verter_type_expr::ObjectExpr {
                                                         properties: (0..512)
                                                             .map(|index| {
                                                                 verter_type_expr::ObjectMember::Property(
-                                                                    verter_type_expr::ObjectProperty::synthetic(format!("field{index}"), TypeExpr::Primitive(
+                                                                    verter_type_expr::ObjectProperty::synthetic_public(format!("field{index}"), TypeExpr::Primitive(
                                                                             PrimitiveName::String,
                                                                         ), true, false),
                                                                 )
@@ -1225,7 +1225,7 @@ fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bin
                                     Some("props".to_string()),
                                     TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                                         properties: vec![verter_type_expr::ObjectMember::Property(
-                                            verter_type_expr::ObjectProperty::synthetic(
+                                            verter_type_expr::ObjectProperty::synthetic_public(
                                                 "ui".to_string(),
                                                 TypeExpr::Ref {
                                                     name: Arc::from("ComponentUI"),
@@ -1262,7 +1262,7 @@ fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bin
             name: "default.ui".to_string(),
             r#type: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                 properties: vec![verter_type_expr::ObjectMember::Property(
-                    verter_type_expr::ObjectProperty::synthetic(
+                    verter_type_expr::ObjectProperty::synthetic_public(
                         "base".to_string(),
                         TypeExpr::Primitive(PrimitiveName::String),
                         false,
@@ -1443,7 +1443,7 @@ fn define_slots_extract_bindings_from_call_signature_object_types() {
                                         TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                                             properties: vec![
                                                 verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                    verter_type_expr::ObjectProperty::synthetic_public(
                                                         "item".to_string(),
                                                         TypeExpr::named("T"),
                                                         false,
@@ -1451,7 +1451,7 @@ fn define_slots_extract_bindings_from_call_signature_object_types() {
                                                     ),
                                                 ),
                                                 verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                    verter_type_expr::ObjectProperty::synthetic_public(
                                                         "index".to_string(),
                                                         TypeExpr::Primitive(PrimitiveName::Number),
                                                         false,
@@ -1459,7 +1459,7 @@ fn define_slots_extract_bindings_from_call_signature_object_types() {
                                                     ),
                                                 ),
                                                 verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                    verter_type_expr::ObjectProperty::synthetic_public(
                                                         "ui".to_string(),
                                                         TypeExpr::IndexedAccess {
                                                             object: Arc::new(TypeExpr::named(
@@ -1924,13 +1924,13 @@ fn small_partial_undefined_object_props_fall_back_to_symbolic_source_type() {
     )])];
     let degraded = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
         properties: vec![
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic_public(
                 "base".to_string(),
                 TypeExpr::Primitive(PrimitiveName::Undefined),
                 false,
                 false,
             )),
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic_public(
                 "label".to_string(),
                 TypeExpr::Primitive(PrimitiveName::Undefined),
                 false,
@@ -2013,12 +2013,12 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
     )])];
     let huge_members = (0..512)
         .map(|index| {
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic(
+            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic_public(
                 format!("field{index}"),
                 TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                     properties: vec![
                         verter_type_expr::ObjectMember::Property(
-                            verter_type_expr::ObjectProperty::synthetic(
+                            verter_type_expr::ObjectProperty::synthetic_public(
                                 "enabled".to_string(),
                                 TypeExpr::Primitive(PrimitiveName::Boolean),
                                 false,
@@ -2026,7 +2026,7 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
                             ),
                         ),
                         verter_type_expr::ObjectMember::Property(
-                            verter_type_expr::ObjectProperty::synthetic(
+                            verter_type_expr::ObjectProperty::synthetic_public(
                                 "label".to_string(),
                                 TypeExpr::Primitive(PrimitiveName::String),
                                 true,
@@ -2083,7 +2083,7 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
                                 properties: (0..512)
                                     .map(|index| {
                                         verter_type_expr::ObjectMember::Property(
-                                            verter_type_expr::ObjectProperty::synthetic(
+                                            verter_type_expr::ObjectProperty::synthetic_public(
                                                 format!("field{index}"),
                                                 TypeExpr::Primitive(PrimitiveName::String),
                                                 true,
@@ -2454,7 +2454,7 @@ fn expanded_slot_bindings_preserve_source_binding_order() {
                                         TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                                             properties: vec![
                                                 verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                    verter_type_expr::ObjectProperty::synthetic_public(
                                                         "index".to_string(),
                                                         TypeExpr::Primitive(PrimitiveName::Number),
                                                         false,
@@ -2462,7 +2462,7 @@ fn expanded_slot_bindings_preserve_source_binding_order() {
                                                     ),
                                                 ),
                                                 verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                    verter_type_expr::ObjectProperty::synthetic_public(
                                                         "item".to_string(),
                                                         TypeExpr::named("T"),
                                                         false,
@@ -2470,7 +2470,7 @@ fn expanded_slot_bindings_preserve_source_binding_order() {
                                                     ),
                                                 ),
                                                 verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic(
+                                                    verter_type_expr::ObjectProperty::synthetic_public(
                                                         "open".to_string(),
                                                         TypeExpr::Primitive(PrimitiveName::Boolean),
                                                         false,

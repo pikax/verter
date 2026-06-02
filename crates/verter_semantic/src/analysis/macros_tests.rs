@@ -2540,7 +2540,7 @@ fn build_expanded_type_expr_consumes_type_expr_field_directly_without_reparse() 
     let result = super::build_expanded_type_expr(&fields);
 
     let expected = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
             "prop".to_string(),
             typed_indexed_access.clone(),
             false,
@@ -2583,7 +2583,7 @@ fn build_expanded_type_expr_consumes_type_expr_field_directly_without_reparse() 
     }];
     let result_no_typed = super::build_expanded_type_expr(&fields_no_typed);
     let expected_no_typed = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
             "prop".to_string(),
             TypeExpr::Unknown {
                 raw: "AnythingHere".to_string(),
@@ -2613,7 +2613,7 @@ fn build_expanded_type_expr_consumes_type_expr_field_directly_without_reparse() 
     }];
     let result_none = super::build_expanded_type_expr(&fields_none);
     let expected_none = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
             "p".to_string(),
             TypeExpr::Unknown {
                 raw: "unknown".to_string(),

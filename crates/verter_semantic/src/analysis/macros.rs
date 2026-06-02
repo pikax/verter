@@ -1420,7 +1420,7 @@ fn build_expanded_type_expr(fields: &[AnalyzedPropField]) -> verter_type_expr::T
             // field. `name_only` maps an empty (default-placeholder) span to
             // `None` so a field with no real span does not fabricate a byte-0
             // span.
-            ObjectMember::Property(ObjectProperty::with_spans(
+            ObjectMember::Property(ObjectProperty::with_spans_public(
                 field.name.clone(),
                 ty,
                 field.is_optional,

@@ -995,7 +995,7 @@ mod tests {
         let properties: Vec<ObjectMember> = members
             .into_iter()
             .map(|(name, ty)| {
-                ObjectMember::Property(ObjectProperty::synthetic(
+                ObjectMember::Property(ObjectProperty::synthetic_public(
                     name.to_string(),
                     ty,
                     false,
