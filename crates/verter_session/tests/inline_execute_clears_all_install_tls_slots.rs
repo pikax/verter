@@ -165,7 +165,7 @@ fn inline_execute_none_winner_ctx_clears_session_and_audit_slots_too() {
     let executor: Arc<dyn StageExecutor> = Arc::new(InlineReentryExecutor {
         analysis_hook: hook,
     });
-    let sched = Scheduler::with_executor(
+    let sched = Scheduler::test_with_executor(
         SchedulerConfig {
             // Single CPU worker — forces inline-execute (no other
             // worker can pick up the inner Analysis).

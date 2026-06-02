@@ -76,7 +76,7 @@ fn scheduler_audit_records_non_empty_worker_thread_id_and_known_pool_under_load(
         loader.insert(format!("/file{i}.vue"), Arc::from("<template>x</template>"));
     }
     let executor: Arc<dyn StageExecutor> = Arc::new(PassthroughExecutor);
-    let sched = Scheduler::with_executor(
+    let sched = Scheduler::test_with_executor(
         SchedulerConfig::default(),
         loader as Arc<dyn SourceLoader>,
         executor,
@@ -182,7 +182,7 @@ fn submission_without_request_context_does_not_pollute_unrelated_contexts() {
     let loader = Arc::new(MemorySourceLoader::new());
     loader.insert("/free.vue".to_string(), Arc::from("<template>y</template>"));
     let executor: Arc<dyn StageExecutor> = Arc::new(PassthroughExecutor);
-    let sched = Scheduler::with_executor(
+    let sched = Scheduler::test_with_executor(
         SchedulerConfig::default(),
         loader as Arc<dyn SourceLoader>,
         executor,

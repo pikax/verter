@@ -221,7 +221,7 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
         io_threads: POOL_THREADS,
         ..SchedulerConfig::default()
     };
-    let sched = Scheduler::with_executor(config, loader as Arc<dyn SourceLoader>, executor);
+    let sched = Scheduler::test_with_executor(config, loader as Arc<dyn SourceLoader>, executor);
 
     let contexts: Arc<Vec<Arc<RequestContext>>> = Arc::new(
         (0..REQUESTS)

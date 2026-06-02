@@ -85,10 +85,28 @@ impl VerterHost {
             // (wait_or_drive on the host drives stages inline).
             #[cfg(not(target_arch = "wasm32"))]
             {
+                // The host constructs and injects the scheduler's worker
+                // pools — the scheduler owns no pool construction
+                // (mirrors the `HostCpuPool::new` injection pattern
+                // below). The two scheduler pools (CpuWorker/IoWorker)
+                // coexist with the host coordinator pool (`HostCpuPool`,
+                // tagged External) under the §6a dual-pool isolation
+                // invariant. The IO transport capacity is sized from the
+                // SAME resolved DAG budget the scheduler admits against
+                // (`resolved_dag_budget().io`) so the IO channel never
+                // becomes a second admission authority.
+                let scheduler_cpu_pool =
+                    verter_scheduler::SchedulerCpuPool::new(scheduler_config.cpu_threads);
+                let scheduler_io_pool = verter_scheduler::SchedulerIoPool::new(
+                    scheduler_config.io_threads,
+                    scheduler_config.resolved_dag_budget().io as usize,
+                );
                 verter_scheduler::scheduler::Scheduler::with_executor(
                     scheduler_config,
                     loader,
                     executor,
+                    scheduler_cpu_pool,
+                    scheduler_io_pool,
                 )
             }
             #[cfg(target_arch = "wasm32")]
