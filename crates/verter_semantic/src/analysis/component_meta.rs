@@ -2887,7 +2887,12 @@ fn collect_slot_binding_param_types<'a>(ty: &'a TypeExpr, out: &mut Vec<&'a Type
                 collect_slot_binding_param_types(inner, out);
             }
         }
-        TypeExpr::Function(func) => {
+        // A function type and a bare constructor type (`new (props) => R`)
+        // carry the same `FunctionExpr` payload; a slot whose value is either
+        // contributes its first parameter as the binding object. This runs on
+        // analyzer IR (lowered slot type), where a constructor type is still
+        // present un-collapsed.
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
             if let Some(first) = func.parameters.first() {
                 out.push(&first.ty);
             }

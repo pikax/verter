@@ -901,6 +901,102 @@ fn define_slots_eval_extracts_bindings_from_optional_function_types() {
     assert_eq!(binding_names, vec!["item", "open"]);
 }
 
+/// A `defineSlots` member whose value is a bare CONSTRUCTOR type
+/// (`new (props: { item: string }) => any`) must extract its first
+/// parameter's object members as slot bindings — exactly as the
+/// function-typed equivalent does. A constructor type carries the same
+/// `FunctionExpr` payload as a function type.
+///
+/// Discriminator: `collect_slot_binding_param_types` ran on analyzer IR
+/// (the lowered slot type, BEFORE any dispatch collapse). Pre-fix it
+/// matched only `TypeExpr::Function` and fell through `_ => {}` for a
+/// `ConstructorType`, so the first parameter was never collected and the
+/// slot published ZERO bindings.
+#[test]
+fn define_slots_eval_extracts_bindings_from_constructor_type_member() {
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineSlots,
+        ..make_define_props(vec![])
+    }];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        props: Vec::new(),
+        define_props: Vec::new(),
+        define_emits: Vec::new(),
+        emits: Vec::new(),
+        define_slots: vec![crate::analysis::type_expand::ExpandedMacroObjectShape {
+            macro_index: 0,
+            result: crate::analysis::type_expand::ExpansionResult::exact(
+                crate::analysis::type_expand::ExpandedObjectShape {
+                    properties: vec![crate::analysis::type_expand::ExpandedProperty {
+                        name: "leading".to_string(),
+                        // `new (props: { item: string; open: boolean }) => any`
+                        ty: TypeExpr::ConstructorType(Arc::new(
+                            verter_type_expr::FunctionExpr::synthetic(
+                                vec![verter_type_expr::FunctionParam::synthetic(
+                                    Some("props".to_string()),
+                                    TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                                        properties: vec![
+                                            verter_type_expr::ObjectMember::Property(
+                                                verter_type_expr::ObjectProperty::synthetic(
+                                                    "item".to_string(),
+                                                    TypeExpr::Primitive(PrimitiveName::String),
+                                                    false,
+                                                    false,
+                                                ),
+                                            ),
+                                            verter_type_expr::ObjectMember::Property(
+                                                verter_type_expr::ObjectProperty::synthetic(
+                                                    "open".to_string(),
+                                                    TypeExpr::Primitive(PrimitiveName::Boolean),
+                                                    false,
+                                                    false,
+                                                ),
+                                            ),
+                                        ],
+                                    })),
+                                    false,
+                                    false,
+                                )],
+                                Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                                Vec::new(),
+                            ),
+                        )),
+                        optional: false,
+                        readonly: false,
+                        declared_in_macro_type_arg: false,
+                    }],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+            ),
+        }],
+        slot_bindings: Vec::new(),
+        bindings: Vec::new(),
+    };
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+
+    let result = extract_component_meta(input);
+    let slot = result
+        .slots
+        .iter()
+        .find(|slot| slot.name == "leading")
+        .expect("leading slot should be extracted from a constructor-typed defineSlots member");
+    let binding_names: Vec<_> = slot
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+
+    assert_eq!(
+        binding_names,
+        vec!["item", "open"],
+        "a constructor-typed slot member must surface its first parameter's object members as \
+         bindings, identically to the function-typed equivalent"
+    );
+}
+
 #[test]
 fn huge_partial_slot_binding_expansions_fall_back_to_symbolic_source_type() {
     let macros = vec![AnalyzedMacro {

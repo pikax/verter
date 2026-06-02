@@ -204,7 +204,13 @@ impl VerterHost {
         }
 
         match expr {
-            TypeExpr::Function(function) => {
+            // A function type and a bare constructor type (`new (...) => R`)
+            // carry the same `FunctionExpr` payload; both materialise their
+            // parameter and return surfaces identically. Reconstruct as the
+            // SAME variant so the constructor-ness is preserved (never
+            // flattened to a plain function).
+            TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
+                let is_constructor = matches!(expr, TypeExpr::ConstructorType(_));
                 let mut function = function.as_ref().clone();
                 for param in &mut function.parameters {
                     param.ty = Self::materialize_project_intrinsic_member_surface_expr(
@@ -223,7 +229,12 @@ impl VerterHost {
                     );
                     *return_type = Arc::new(materialized);
                 }
-                TypeExpr::Function(Arc::new(function))
+                let function = Arc::new(function);
+                if is_constructor {
+                    TypeExpr::ConstructorType(function)
+                } else {
+                    TypeExpr::Function(function)
+                }
             }
             TypeExpr::Object(object) => {
                 let mut object = object.as_ref().clone();
@@ -233,7 +244,9 @@ impl VerterHost {
                             if nested_surface
                                 || matches!(
                                     &property.ty,
-                                    TypeExpr::Function(_) | TypeExpr::Object(_),
+                                    TypeExpr::Function(_)
+                                        | TypeExpr::ConstructorType(_)
+                                        | TypeExpr::Object(_),
                                 )
                             {
                                 property.ty =
