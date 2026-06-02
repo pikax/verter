@@ -849,11 +849,17 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
 
 fn normalize_object_member_type_params(member: &ObjectMember, scope: &[TypeParam]) -> ObjectMember {
     match member {
-        ObjectMember::Property(prop) => ObjectMember::Property(ObjectProperty::with_spans(
+        // Reconstruction of an EXISTING member (only the type-parameter refs in
+        // its value are rewritten): preserve the member's declared accessibility
+        // via `with_visibility`. `with_spans` would default it to Public,
+        // dropping a non-public class member's visibility when its generic
+        // instance shape is normalized.
+        ObjectMember::Property(prop) => ObjectMember::Property(ObjectProperty::with_visibility(
             prop.name.clone(),
             normalize_type_parameter_refs(&prop.ty, scope),
             prop.optional,
             prop.readonly,
+            prop.visibility,
             prop.spans,
         )),
         ObjectMember::IndexSignature(sig) => {
@@ -871,10 +877,11 @@ fn normalize_object_member_type_params(member: &ObjectMember, scope: &[TypeParam
         ObjectMember::ConstructSignature(func) => {
             ObjectMember::ConstructSignature(normalize_nested_function_type_params(func, scope))
         }
-        ObjectMember::Method(method) => ObjectMember::Method(MethodSignature::with_spans(
+        ObjectMember::Method(method) => ObjectMember::Method(MethodSignature::with_visibility(
             method.name.clone(),
             normalize_nested_function_type_params(&method.function, scope),
             method.optional,
+            method.visibility,
             method.spans,
         )),
     }
@@ -1002,5 +1009,104 @@ mod synthetic_carrier_tests {
                 carrier, normalised
             );
         }
+    }
+
+    /// `normalize_object_member_type_params` (reached via
+    /// `normalize_type_parameter_refs` over a `TypeExpr::Object`) rebuilds each
+    /// member to rewrite its type-parameter refs. That rebuild MUST preserve the
+    /// member's declared accessibility — it is a reconstruction of an existing
+    /// member, not a fresh mint.
+    ///
+    /// Discriminating: against the tree where the rebuild uses `with_spans`, the
+    /// normalized `protected`/`private` members come back `Public` and the
+    /// assertions FAIL.
+    #[test]
+    fn normalize_object_member_preserves_member_visibility() {
+        use verter_type_expr::{
+            FunctionExpr, MemberSpans, MemberVisibility, MethodSignature, ObjectExpr, ObjectMember,
+            ObjectProperty, PrimitiveName,
+        };
+
+        // A member value referencing a type parameter `T` forces the normalize
+        // walk to actually rebuild the member (rewrites the ref).
+        let t_ref = TypeExpr::Ref {
+            name: Arc::from("T"),
+            type_arguments: Arc::from(Vec::new()),
+        };
+        let object = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty::with_visibility(
+                    "prot".to_string(),
+                    t_ref.clone(),
+                    false,
+                    false,
+                    MemberVisibility::Protected,
+                    MemberSpans::default(),
+                )),
+                ObjectMember::Method(MethodSignature::with_visibility(
+                    "priv".to_string(),
+                    FunctionExpr::synthetic(Vec::new(), Some(Arc::new(t_ref.clone())), Vec::new()),
+                    false,
+                    MemberVisibility::Private,
+                    MemberSpans::default(),
+                )),
+                ObjectMember::Property(ObjectProperty::with_visibility(
+                    "pub_field".to_string(),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    false,
+                    false,
+                    MemberVisibility::Public,
+                    MemberSpans::default(),
+                )),
+            ],
+        }));
+
+        let scope = vec![TypeParam {
+            name: "T".to_string(),
+            constraint: None,
+            default: None,
+        }];
+        let normalized = normalize_type_parameter_refs(&object, &scope);
+        let TypeExpr::Object(obj) = &normalized else {
+            panic!("expected object, got {normalized:?}");
+        };
+
+        let prot = obj
+            .properties
+            .iter()
+            .find_map(|m| match m {
+                ObjectMember::Property(p) if p.name == "prot" => Some(p.visibility),
+                _ => None,
+            })
+            .expect("`prot` property must survive normalization");
+        assert_eq!(
+            prot,
+            MemberVisibility::Protected,
+            "a protected property must keep its visibility through normalize",
+        );
+
+        let priv_method = obj
+            .properties
+            .iter()
+            .find_map(|m| match m {
+                ObjectMember::Method(m) if m.name == "priv" => Some(m.visibility),
+                _ => None,
+            })
+            .expect("`priv` method must survive normalization");
+        assert_eq!(
+            priv_method,
+            MemberVisibility::Private,
+            "a private method must keep its visibility through normalize",
+        );
+
+        let pub_field = obj
+            .properties
+            .iter()
+            .find_map(|m| match m {
+                ObjectMember::Property(p) if p.name == "pub_field" => Some(p.visibility),
+                _ => None,
+            })
+            .expect("`pub_field` property must survive normalization");
+        assert_eq!(pub_field, MemberVisibility::Public);
     }
 }

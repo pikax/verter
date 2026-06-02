@@ -1499,7 +1499,7 @@ impl VerterHost {
                                     }
                                     _ => stabilized.clone(),
                                 };
-                                ObjectMember::Property(ObjectProperty::with_spans(
+                                ObjectMember::Property(ObjectProperty::with_visibility(
                                     property.name.clone(),
                                     if compare_type_expr_improvement(&solved, &property.ty) {
                                         solved
@@ -1518,7 +1518,10 @@ impl VerterHost {
                                     },
                                     property.optional,
                                     property.readonly,
-                                    // Type improvement preserves the member's spans.
+                                    // Type improvement rebuilds an EXISTING member
+                                    // (only its value type may change): preserve
+                                    // its declared accessibility AND its spans.
+                                    property.visibility,
                                     property.spans,
                                 ))
                             }
