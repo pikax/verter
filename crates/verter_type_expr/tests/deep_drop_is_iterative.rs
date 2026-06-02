@@ -127,7 +127,7 @@ fn deeply_nested_mixed_variant_chain_drops_without_stack_overflow() {
                 readonly: false,
             }),
             6 => Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
-                properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
                     "p".to_string(),
                     own(current),
                     false,

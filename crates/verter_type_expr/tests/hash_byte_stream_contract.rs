@@ -518,7 +518,7 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
         "object-all-members",
         TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::with_spans(
+                ObjectMember::Property(ObjectProperty::with_spans_public(
                     "p".into(),
                     TypeExpr::Primitive(PrimitiveName::String),
                     true,
@@ -529,7 +529,7 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
                         type_annotation: Some(span(4, 9)),
                     },
                 )),
-                ObjectMember::Property(ObjectProperty::synthetic(
+                ObjectMember::Property(ObjectProperty::synthetic_public(
                     "q".into(),
                     TypeExpr::named("Q"),
                     false,
@@ -548,7 +548,7 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
                 )),
                 ObjectMember::CallSignature(sample_function(false)),
                 ObjectMember::ConstructSignature(sample_function(true)),
-                ObjectMember::Method(MethodSignature::with_spans(
+                ObjectMember::Method(MethodSignature::with_spans_public(
                     "m".into(),
                     sample_function(false),
                     true,
@@ -1044,7 +1044,7 @@ fn pre_visibility_ref_object_member<H: Hasher>(member: &ObjectMember, h: &mut H)
 fn all_public_object_hash_stream_is_unchanged_from_pre_visibility() {
     let public_object = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
-            ObjectMember::Property(ObjectProperty::with_spans(
+            ObjectMember::Property(ObjectProperty::with_spans_public(
                 "p".into(),
                 TypeExpr::Primitive(PrimitiveName::String),
                 true,
@@ -1055,13 +1055,13 @@ fn all_public_object_hash_stream_is_unchanged_from_pre_visibility() {
                     type_annotation: Some(span(4, 9)),
                 },
             )),
-            ObjectMember::Property(ObjectProperty::synthetic(
+            ObjectMember::Property(ObjectProperty::synthetic_public(
                 "q".into(),
                 TypeExpr::named("Q"),
                 false,
                 false,
             )),
-            ObjectMember::Method(MethodSignature::with_spans(
+            ObjectMember::Method(MethodSignature::with_spans_public(
                 "m".into(),
                 sample_function(false),
                 true,

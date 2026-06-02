@@ -433,7 +433,7 @@ mod tests {
         ty_span: Span,
     ) -> TypeExpr {
         TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::with_spans(
+            properties: vec![ObjectMember::Property(ObjectProperty::with_spans_public(
                 name.to_string(),
                 TypeExpr::Primitive(PrimitiveName::Number),
                 false,

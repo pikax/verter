@@ -424,7 +424,7 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
                     .as_ref()
                     .map(|ta| ta.type_annotation.span().into()),
             };
-            Some(ObjectMember::Property(ObjectProperty::with_spans(
+            Some(ObjectMember::Property(ObjectProperty::with_spans_public(
                 name,
                 ty,
                 prop.optional,
@@ -458,7 +458,7 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
                 name: Some(method.key.span().into()),
                 type_annotation: None,
             };
-            Some(ObjectMember::Method(MethodSignature::with_spans(
+            Some(ObjectMember::Method(MethodSignature::with_spans_public(
                 name,
                 func,
                 method.optional,

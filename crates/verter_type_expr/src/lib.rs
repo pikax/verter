@@ -597,11 +597,17 @@ pub struct ObjectProperty {
 }
 
 impl ObjectProperty {
-    /// Construct a property with NO source spans (a synthesized property with
-    /// no single declaration site — e.g. a test fixture or a derived member).
-    /// Visibility defaults to `Public`.
+    /// Construct a genuinely SOURCE-LESS, semantically-public property: no
+    /// single declaration site and no accessibility origin (a synthesized
+    /// framework member, an interface / type-literal / object-literal / enum
+    /// member, a `$props`/`$slots` member, a test fixture). Visibility is
+    /// `Public` by construction because the origin has no accessibility — NOT
+    /// because visibility was unknown. Source-DERIVED reconstructions (where a
+    /// member already carries a visibility) MUST use
+    /// [`Self::synthetic_with_visibility`] or [`Self::with_visibility`] so a
+    /// non-public member can never be silently minted as `Public`.
     #[must_use]
-    pub fn synthetic(name: String, ty: TypeExpr, optional: bool, readonly: bool) -> Self {
+    pub fn synthetic_public(name: String, ty: TypeExpr, optional: bool, readonly: bool) -> Self {
         Self {
             name,
             ty,
@@ -612,10 +618,36 @@ impl ObjectProperty {
         }
     }
 
-    /// Construct a property carrying its OXC declaration-site spans. Visibility
-    /// defaults to `Public`.
+    /// Construct a SOURCE-DERIVED property with NO source spans, threading the
+    /// source member's declared `visibility`. Used by member-path / Pick /
+    /// indexed-access reconstruction where the navigated member already carries
+    /// a visibility that must be preserved (so a non-public member is never
+    /// re-minted as `Public`), but the reconstruction has no single span.
     #[must_use]
-    pub fn with_spans(
+    pub fn synthetic_with_visibility(
+        name: String,
+        ty: TypeExpr,
+        optional: bool,
+        readonly: bool,
+        visibility: MemberVisibility,
+    ) -> Self {
+        Self {
+            name,
+            ty,
+            optional,
+            readonly,
+            visibility,
+            spans: MemberSpans::default(),
+        }
+    }
+
+    /// Construct a genuinely SOURCE-LESS, semantically-public property carrying
+    /// its OXC declaration-site spans. The AST form (interface / type-literal /
+    /// object-literal member) has no accessibility origin, so `Public` is
+    /// correct by construction. Source-DERIVED reconstructions MUST use
+    /// [`Self::with_visibility`].
+    #[must_use]
+    pub fn with_spans_public(
         name: String,
         ty: TypeExpr,
         optional: bool,
@@ -731,10 +763,14 @@ pub struct MethodSignature {
 }
 
 impl MethodSignature {
-    /// Construct a method signature with NO source spans. Visibility defaults
-    /// to `Public`.
+    /// Construct a genuinely SOURCE-LESS, semantically-public method signature:
+    /// no single declaration site and no accessibility origin (a synthesized
+    /// framework member, an interface / type-literal method, a test fixture).
+    /// Visibility is `Public` by construction because the origin has no
+    /// accessibility. Source-DERIVED reconstructions MUST use
+    /// [`Self::synthetic_with_visibility`] or [`Self::with_visibility`].
     #[must_use]
-    pub fn synthetic(name: String, function: FunctionExpr, optional: bool) -> Self {
+    pub fn synthetic_public(name: String, function: FunctionExpr, optional: bool) -> Self {
         Self {
             name,
             function,
@@ -744,10 +780,33 @@ impl MethodSignature {
         }
     }
 
-    /// Construct a method signature carrying its OXC declaration-site spans.
-    /// Visibility defaults to `Public`.
+    /// Construct a SOURCE-DERIVED method signature with NO source spans,
+    /// threading the source member's declared `visibility`. Used by member-path
+    /// / Pick reconstruction where the navigated method already carries a
+    /// visibility that must be preserved.
     #[must_use]
-    pub fn with_spans(
+    pub fn synthetic_with_visibility(
+        name: String,
+        function: FunctionExpr,
+        optional: bool,
+        visibility: MemberVisibility,
+    ) -> Self {
+        Self {
+            name,
+            function,
+            optional,
+            visibility,
+            spans: MemberSpans::default(),
+        }
+    }
+
+    /// Construct a genuinely SOURCE-LESS, semantically-public method signature
+    /// carrying its OXC declaration-site spans. The AST form (interface /
+    /// type-literal method) has no accessibility origin, so `Public` is correct
+    /// by construction. Source-DERIVED reconstructions MUST use
+    /// [`Self::with_visibility`].
+    #[must_use]
+    pub fn with_spans_public(
         name: String,
         function: FunctionExpr,
         optional: bool,
