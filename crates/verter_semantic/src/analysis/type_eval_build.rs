@@ -1019,7 +1019,9 @@ fn extract_object_literal(obj: &ObjectExpression<'_>, source: &str) -> ObjectExp
                     };
                     push_object_property_with_override(
                         &mut members,
-                        verter_type_expr::ObjectProperty::with_spans_public(name, ty, false, false, spans),
+                        verter_type_expr::ObjectProperty::with_spans_public(
+                            name, ty, false, false, spans,
+                        ),
                     );
                 }
             }
@@ -1053,7 +1055,9 @@ fn extract_object_literal_as_type(obj: &ObjectExpression<'_>, source: &str) -> T
                     };
                     push_object_property_with_override(
                         &mut members,
-                        verter_type_expr::ObjectProperty::with_spans_public(name, ty, false, false, spans),
+                        verter_type_expr::ObjectProperty::with_spans_public(
+                            name, ty, false, false, spans,
+                        ),
                     );
                 }
             }

@@ -266,6 +266,12 @@ fn merge_member_visibility_folds_to_most_restrictive() {
     );
     // Single contributor returns exactly that visibility (preserves the
     // single-source case).
-    assert_eq!(MemberVisibility::merge_member_visibility([Protected]), Protected);
-    assert_eq!(MemberVisibility::merge_member_visibility([Private]), Private);
+    assert_eq!(
+        MemberVisibility::merge_member_visibility([Protected]),
+        Protected
+    );
+    assert_eq!(
+        MemberVisibility::merge_member_visibility([Private]),
+        Private
+    );
 }

@@ -3031,7 +3031,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // the keyspace gate is bypassed; otherwise `Public` (mirrors
                     // the Expanded path in `build.rs`).
                     visibility: source_member
-                        .map_or(verter_type_expr::MemberVisibility::Public, |sm| sm.visibility),
+                        .map_or(verter_type_expr::MemberVisibility::Public, |sm| {
+                            sm.visibility
+                        }),
                     // Mapped-type synthesis produces a member from a key
                     // domain via `[K in keyof T]: ...`. The produced
                     // member is not literally written in the consuming

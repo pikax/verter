@@ -1924,18 +1924,22 @@ fn small_partial_undefined_object_props_fall_back_to_symbolic_source_type() {
     )])];
     let degraded = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
         properties: vec![
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic_public(
-                "base".to_string(),
-                TypeExpr::Primitive(PrimitiveName::Undefined),
-                false,
-                false,
-            )),
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic_public(
-                "label".to_string(),
-                TypeExpr::Primitive(PrimitiveName::Undefined),
-                false,
-                false,
-            )),
+            verter_type_expr::ObjectMember::Property(
+                verter_type_expr::ObjectProperty::synthetic_public(
+                    "base".to_string(),
+                    TypeExpr::Primitive(PrimitiveName::Undefined),
+                    false,
+                    false,
+                ),
+            ),
+            verter_type_expr::ObjectMember::Property(
+                verter_type_expr::ObjectProperty::synthetic_public(
+                    "label".to_string(),
+                    TypeExpr::Primitive(PrimitiveName::Undefined),
+                    false,
+                    false,
+                ),
+            ),
         ],
     }));
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
@@ -2013,31 +2017,33 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
     )])];
     let huge_members = (0..512)
         .map(|index| {
-            verter_type_expr::ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic_public(
-                format!("field{index}"),
-                TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                    properties: vec![
-                        verter_type_expr::ObjectMember::Property(
-                            verter_type_expr::ObjectProperty::synthetic_public(
-                                "enabled".to_string(),
-                                TypeExpr::Primitive(PrimitiveName::Boolean),
-                                false,
-                                false,
+            verter_type_expr::ObjectMember::Property(
+                verter_type_expr::ObjectProperty::synthetic_public(
+                    format!("field{index}"),
+                    TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                        properties: vec![
+                            verter_type_expr::ObjectMember::Property(
+                                verter_type_expr::ObjectProperty::synthetic_public(
+                                    "enabled".to_string(),
+                                    TypeExpr::Primitive(PrimitiveName::Boolean),
+                                    false,
+                                    false,
+                                ),
                             ),
-                        ),
-                        verter_type_expr::ObjectMember::Property(
-                            verter_type_expr::ObjectProperty::synthetic_public(
-                                "label".to_string(),
-                                TypeExpr::Primitive(PrimitiveName::String),
-                                true,
-                                false,
+                            verter_type_expr::ObjectMember::Property(
+                                verter_type_expr::ObjectProperty::synthetic_public(
+                                    "label".to_string(),
+                                    TypeExpr::Primitive(PrimitiveName::String),
+                                    true,
+                                    false,
+                                ),
                             ),
-                        ),
-                    ],
-                })),
-                true,
-                false,
-            ))
+                        ],
+                    })),
+                    true,
+                    false,
+                ),
+            )
         })
         .collect();
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {

@@ -1241,28 +1241,26 @@ pub(crate) fn component_meta_registry_raw_member_path_surface(
         leaf = &property.ty;
     }
 
-    Some(
-        path.iter().zip(hop_visibilities).rev().fold(
-            leaf.clone(),
-            |child, (member_name, visibility)| {
-                // Nested-object wrapper for one navigation hop. The member name
-                // comes from the path; its visibility is the source member's
-                // declared accessibility (threaded above) so a non-public hop is
-                // never re-minted as `Public`.
-                TypeExpr::Object(Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(
-                        ObjectProperty::synthetic_with_visibility(
-                            member_name.clone(),
-                            child,
-                            true,
-                            false,
-                            visibility,
-                        ),
-                    )],
-                }))
-            },
-        ),
-    )
+    Some(path.iter().zip(hop_visibilities).rev().fold(
+        leaf.clone(),
+        |child, (member_name, visibility)| {
+            // Nested-object wrapper for one navigation hop. The member name
+            // comes from the path; its visibility is the source member's
+            // declared accessibility (threaded above) so a non-public hop is
+            // never re-minted as `Public`.
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(
+                    ObjectProperty::synthetic_with_visibility(
+                        member_name.clone(),
+                        child,
+                        true,
+                        false,
+                        visibility,
+                    ),
+                )],
+            }))
+        },
+    ))
 }
 
 pub(crate) fn component_meta_registry_expr_references_name(

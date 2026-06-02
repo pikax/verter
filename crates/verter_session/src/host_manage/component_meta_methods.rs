@@ -1688,7 +1688,10 @@ impl VerterHost {
         fn raw_pick_member_leaf(
             raw_body: &verter_type_expr::TypeExpr,
             member: &str,
-        ) -> Option<(verter_type_expr::TypeExpr, verter_type_expr::MemberVisibility)> {
+        ) -> Option<(
+            verter_type_expr::TypeExpr,
+            verter_type_expr::MemberVisibility,
+        )> {
             use verter_type_expr::{ObjectMember, TypeExpr};
             match raw_body {
                 TypeExpr::Parenthesized(inner) => raw_pick_member_leaf(inner, member),

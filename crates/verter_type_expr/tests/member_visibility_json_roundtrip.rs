@@ -106,12 +106,14 @@ fn manual_json_roundtrip_preserves_method_visibility() {
 /// contain it. This pins the marker-only-for-non-public wire scheme.
 #[test]
 fn public_member_json_omits_visibility_key_non_public_includes_it() {
-    let public = object(vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-        "x".into(),
-        TypeExpr::Primitive(PrimitiveName::Number),
-        false,
-        false,
-    ))]);
+    let public = object(vec![ObjectMember::Property(
+        ObjectProperty::synthetic_public(
+            "x".into(),
+            TypeExpr::Primitive(PrimitiveName::Number),
+            false,
+            false,
+        ),
+    )]);
     let public_json = public.to_json_value();
     let public_member = &public_json["properties"][0];
     assert!(
