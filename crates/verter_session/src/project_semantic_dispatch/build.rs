@@ -2493,11 +2493,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .with_observed_self_roots(observed_self_roots);
         }
         let node = match data.as_deref() {
+            // `keyof ClassType` yields only public keys (TS semantics): a
+            // private/protected member is not part of the keyspace. Filter
+            // non-public members out here, the direct-Object keyof chokepoint.
             Some(SemanticNodeData::Object(surface)) => self.intern_keyspace_names(
                 base,
                 surface
                     .members
                     .iter()
+                    .filter(|member| member.visibility.is_public())
                     .map(|member| Arc::clone(&member.name)),
                 &fence,
             ),
@@ -2593,12 +2597,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// and do not unwrap `DeclRef` / `InstantiationRef` carriers, so
     /// publication code uses this local surface helper when a source is
     /// not already an `Object`.
+    ///
+    /// Non-public members are EXCLUDED from the result. This is the keyof /
+    /// mapped / Pick keyspace chokepoint: TypeScript's `keyof ClassType`
+    /// yields only public keys, so `Partial<ClassWithPrivate>` /
+    /// `Pick<ClassWithPrivate, K>` / `{ [K in keyof ClassWithPrivate]: V }`
+    /// must not carry the non-public members at all. The keep-all native
+    /// surface (`native_props`) reads the member surface DIRECTLY (it does
+    /// not route through this published-projection helper), so it is
+    /// unaffected by this filter.
     pub(super) fn source_members_for_published_projection(
         &self,
         source: SemanticNodeId,
     ) -> Option<Vec<SurfaceMember>> {
+        fn public_members(members: &[SurfaceMember]) -> Vec<SurfaceMember> {
+            members
+                .iter()
+                .filter(|member| member.visibility.is_public())
+                .cloned()
+                .collect()
+        }
+
         if let Some(SemanticNodeData::Object(view)) = self.graph().node_data(source).as_deref() {
-            return Some(view.members.to_vec());
+            return Some(public_members(&view.members));
         }
 
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
@@ -2614,7 +2635,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };
         match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Object(view)) => Some(view.members.to_vec()),
+            Some(SemanticNodeData::Object(view)) => Some(public_members(&view.members)),
             _ => None,
         }
     }
@@ -2930,11 +2951,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 optional,
                 readonly,
                 is_method: false,
-                // Mapped-type produced member: synthesized from a key domain
-                // by the mapped construction (a structural, heritage-equivalent
-                // transform), with no single source declaration — `Public`, per
-                // the no-single-origin merge rule.
-                visibility: verter_type_expr::MemberVisibility::Public,
+                // Mapped-type produced member. The key domain is already
+                // public-only (non-public class members are filtered out of the
+                // keyspace at `source_members_for_published_projection` /
+                // `key_names_step`), so every produced member is public. For the
+                // homomorphic case (`{ [K in keyof T]: T[K] }` / Partial /
+                // Required / Readonly) thread the matched source member's
+                // (public) visibility verbatim so the invariant is preserved even
+                // if the keyspace gate is ever bypassed; otherwise the synthesized
+                // member is `Public`.
+                visibility: source_member
+                    .map_or(verter_type_expr::MemberVisibility::Public, |m| m.visibility),
                 declared_in_macro_type_arg: false,
                 // Mapped-type produced members are synthesized by the mapped
                 // construction, never an interface/class heritage overlay —

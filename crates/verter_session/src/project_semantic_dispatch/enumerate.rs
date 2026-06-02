@@ -134,9 +134,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         match data.as_ref() {
             SemanticNodeData::Object(surface) => {
+                // `keyof ClassType` yields only public keys (TS semantics):
+                // private/protected members are not part of the keyspace, so
+                // mapped types (`{ [K in keyof T]: V }`, `Partial<T>`) and
+                // `Pick`/`Omit` over a class never carry them. This is the
+                // key-name-enumeration chokepoint; native_props reads the
+                // surface directly and is unaffected.
                 let names = surface
                     .members
                     .iter()
+                    .filter(|member| member.visibility.is_public())
                     .map(|member| Arc::clone(&member.name))
                     .collect();
                 results.push(Some(names));

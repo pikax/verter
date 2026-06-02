@@ -3022,11 +3022,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     optional,
                     readonly,
                     is_method: false,
-                    // Mapped-produced member: synthesized from a key domain by
-                    // the mapper (a structural transform), with no single source
-                    // declaration — `Public`, per the no-single-origin merge
-                    // rule (mirrors the Expanded path in `build.rs`).
-                    visibility: verter_type_expr::MemberVisibility::Public,
+                    // Mapped-produced member. The key domain is already
+                    // public-only (non-public class members are filtered out of
+                    // the keyspace at `source_members_for_published_projection` /
+                    // `key_names_step`), so every produced member is public. For
+                    // the homomorphic case thread the matched source member's
+                    // (public) visibility verbatim so the invariant holds even if
+                    // the keyspace gate is bypassed; otherwise `Public` (mirrors
+                    // the Expanded path in `build.rs`).
+                    visibility: source_member
+                        .map_or(verter_type_expr::MemberVisibility::Public, |sm| sm.visibility),
                     // Mapped-type synthesis produces a member from a key
                     // domain via `[K in keyof T]: ...`. The produced
                     // member is not literally written in the consuming
