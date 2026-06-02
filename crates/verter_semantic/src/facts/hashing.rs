@@ -624,6 +624,7 @@ impl<'a> Walker<'a> {
         self.buf.push(0xFF);
         self.buf.push(u8::from(prop.optional));
         self.buf.push(u8::from(prop.readonly));
+        self.write_member_visibility(prop.visibility);
         self.walk_node(&prop.ty);
         self.buf.push(0xFD);
     }
@@ -633,8 +634,32 @@ impl<'a> Walker<'a> {
         self.buf.extend_from_slice(method.name.as_bytes());
         self.buf.push(0xFF);
         self.buf.push(u8::from(method.optional));
+        self.write_member_visibility(method.visibility);
         self.walk_function(&method.function);
         self.buf.push(0xFD);
+    }
+
+    /// Fold a member-visibility marker into the fact byte stream, emitting bytes
+    /// ONLY for a non-public member (`Protected` / `Private`). A `Public` member
+    /// emits NOTHING, so an all-public surface's fact identity is byte-identical
+    /// to the pre-visibility stream (zero churn) — the SAME marker-only-for-non-
+    /// public scheme the `TypeExpr` `Hash` byte stream uses. Without this,
+    /// public/protected/private members of the same name+type would COLLIDE in
+    /// fact/cache identity even though `TypeExpr` node identity distinguishes
+    /// them (a cache-correctness gap).
+    fn write_member_visibility(&mut self, visibility: verter_type_expr::MemberVisibility) {
+        use verter_type_expr::MemberVisibility;
+        match visibility {
+            MemberVisibility::Public => {}
+            MemberVisibility::Protected => {
+                self.buf.push(0x65);
+                self.buf.push(1);
+            }
+            MemberVisibility::Private => {
+                self.buf.push(0x65);
+                self.buf.push(2);
+            }
+        }
     }
 
     fn write_index_signature(&mut self, sig: &IndexSignature) {
@@ -1278,6 +1303,111 @@ mod tests {
         assert_ne!(
             a_hash, b_hash,
             "synthetic carriers differing only in value_node MUST hash distinctly"
+        );
+    }
+
+    fn object_with_property_visibility(vis: verter_type_expr::MemberVisibility) -> TypeExpr {
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty::with_visibility(
+                "x".to_string(),
+                prim(PrimitiveName::Number),
+                false,
+                false,
+                vis,
+                verter_type_expr::MemberSpans::default(),
+            ))],
+        }))
+    }
+
+    fn object_with_method_visibility(vis: verter_type_expr::MemberVisibility) -> TypeExpr {
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Method(MethodSignature::with_visibility(
+                "m".to_string(),
+                FunctionExpr::synthetic(vec![], None, vec![]),
+                false,
+                vis,
+                verter_type_expr::MemberSpans::default(),
+            ))],
+        }))
+    }
+
+    /// Two object types identical except a PROPERTY member's visibility must
+    /// produce DISTINCT fact hashes — `TypeExpr` node identity already
+    /// distinguishes them, so omitting visibility from the fact hasher would be
+    /// a cache-correctness gap (public/protected/private collide).
+    ///
+    /// Discrimination: against the tree where `write_property` omits visibility,
+    /// all three hashes are EQUAL and every `assert_ne!` FAILS.
+    #[test]
+    fn property_visibility_discriminates_fact_hash() {
+        use verter_type_expr::MemberVisibility::{Private, Protected, Public};
+        let pub_h = compute_semantic_hash(
+            &object_with_property_visibility(Public),
+            SymbolSpace::Type,
+            &UnresolvedLens,
+        )
+        .hash;
+        let prot_h = compute_semantic_hash(
+            &object_with_property_visibility(Protected),
+            SymbolSpace::Type,
+            &UnresolvedLens,
+        )
+        .hash;
+        let priv_h = compute_semantic_hash(
+            &object_with_property_visibility(Private),
+            SymbolSpace::Type,
+            &UnresolvedLens,
+        )
+        .hash;
+        assert_ne!(pub_h, prot_h, "public vs protected property must differ");
+        assert_ne!(pub_h, priv_h, "public vs private property must differ");
+        assert_ne!(prot_h, priv_h, "protected vs private property must differ");
+    }
+
+    /// Two object types identical except a METHOD member's visibility must
+    /// produce DISTINCT fact hashes (same rationale as the property case).
+    #[test]
+    fn method_visibility_discriminates_fact_hash() {
+        use verter_type_expr::MemberVisibility::{Private, Protected, Public};
+        let pub_h = compute_semantic_hash(
+            &object_with_method_visibility(Public),
+            SymbolSpace::Type,
+            &UnresolvedLens,
+        )
+        .hash;
+        let prot_h = compute_semantic_hash(
+            &object_with_method_visibility(Protected),
+            SymbolSpace::Type,
+            &UnresolvedLens,
+        )
+        .hash;
+        let priv_h = compute_semantic_hash(
+            &object_with_method_visibility(Private),
+            SymbolSpace::Type,
+            &UnresolvedLens,
+        )
+        .hash;
+        assert_ne!(pub_h, prot_h, "public vs protected method must differ");
+        assert_ne!(pub_h, priv_h, "public vs private method must differ");
+        assert_ne!(prot_h, priv_h, "protected vs private method must differ");
+    }
+
+    /// Two all-public objects built via DIFFERENT public constructors
+    /// (`synthetic` vs explicit `Public`) hash identically — the marker is
+    /// only-for-non-public, so public fact identity is unchanged.
+    #[test]
+    fn all_public_object_fact_hash_is_marker_free() {
+        use verter_type_expr::MemberVisibility::Public;
+        let via_synthetic = make_object(vec![("x", prim(PrimitiveName::Number))]);
+        let via_explicit_public = object_with_property_visibility(Public);
+        // The two only differ in how visibility was constructed (both Public)
+        // and the property name/type match, so their fact hashes are equal.
+        let a = compute_semantic_hash(&via_synthetic, SymbolSpace::Type, &UnresolvedLens).hash;
+        let b =
+            compute_semantic_hash(&via_explicit_public, SymbolSpace::Type, &UnresolvedLens).hash;
+        assert_eq!(
+            a, b,
+            "an all-public object's fact hash must not depend on how Public was constructed",
         );
     }
 }
