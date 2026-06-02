@@ -135,6 +135,248 @@ impl MacroVisibility {
     }
 }
 
+/// A half-open SFC-absolute byte-offset span, `[start, end)`.
+///
+/// Both offsets are measured against the **whole SFC source**, not a
+/// block-relative coordinate: the producer normalises every span it emits onto
+/// SFC-absolute coordinates before constructing this DTO, so the consumer can
+/// slice the original SFC source directly (e.g. to recover the exact default
+/// expression text or to drive a source map back onto the SFC) without
+/// re-resolving block offsets. `start < end` for any real span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MacroSourceSpanDto {
+    /// SFC-absolute start byte offset (inclusive).
+    pub start: u32,
+    /// SFC-absolute end byte offset (exclusive).
+    pub end: u32,
+}
+
+/// How a `withDefaults` default value was written for a single prop.
+///
+/// Method shorthand (`{ items() { return [] } }`) and an arrow/expression
+/// default (`{ items: () => [] }`) are *not* interchangeable at the byte level:
+/// a method-shorthand entry must be reconstructed as a function when the
+/// runtime default object is generated, whereas an expression entry is spliced
+/// verbatim. The consumer renders the default from [`MacroDefaultDto::expr`] +
+/// this kind; it must NOT re-scan the expression text to re-derive whether the
+/// source used method shorthand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MacroDefaultKindDto {
+    /// A value expression: `{ count: 0 }`, `{ items: () => [] }`. Rendered
+    /// verbatim as the `default:` value.
+    Expression,
+    /// ES method shorthand: `{ items() { return [] } }`. Rendered as a function
+    /// default — the consumer reconstructs `default() { ... }` / `default: () => ...`
+    /// rather than splicing the shorthand text into a value position.
+    MethodShorthand,
+}
+
+/// A single `withDefaults` default value, resolved for one prop.
+///
+/// - `expr` — the exact default-value source text, already normalised by the
+///   producer (no surrounding key/punctuation). Display/codegen text — the
+///   consumer splices it into the generated runtime default object and must NOT
+///   re-parse it for semantics.
+/// - `kind` — [`MacroDefaultKindDto`]: whether the source wrote an expression
+///   or method shorthand. Drives how `expr` is reconstructed in the output.
+/// - `span` — the SFC-absolute span of the default value in the original
+///   source, so a source map can point the generated default back onto the SFC.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroDefaultDto {
+    /// Default-value source text (key/punctuation stripped). Display/codegen
+    /// text — consumers must not re-parse it for semantics.
+    pub expr: String,
+    /// Whether the default was written as an expression or method shorthand.
+    pub kind: MacroDefaultKindDto,
+    /// SFC-absolute span of the default value in the original source.
+    pub span: MacroSourceSpanDto,
+}
+
+/// One `(prop name → default)` entry inside a `withDefaults` defaults object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroDefaultEntryDto {
+    /// Prop name the default applies to.
+    pub name: String,
+    /// The resolved default value for this prop.
+    pub default: MacroDefaultDto,
+}
+
+/// The raw `withDefaults` second argument (the defaults object), as written.
+///
+/// - `expr` — the exact source text of the defaults-object argument, already
+///   normalised by the producer. Display/codegen text — the consumer may emit
+///   it verbatim (e.g. as the `mergeDefaults` argument) but must NOT re-parse it
+///   to recover individual entries; [`MacroWithDefaultsDto::entries`] carries
+///   the per-prop breakdown.
+/// - `span` — the SFC-absolute span of that argument in the original source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroDefaultsArgDto {
+    /// Source text of the defaults-object argument. Display/codegen text —
+    /// consumers must not re-parse it for semantics.
+    pub expr: String,
+    /// SFC-absolute span of the defaults-object argument.
+    pub span: MacroSourceSpanDto,
+}
+
+/// Why the `withDefaults` defaults could not be fully resolved into per-prop
+/// entries, and what the consumer should fall back to.
+///
+/// The producer resolves the defaults object into [`MacroDefaultEntryDto`]
+/// entries when it can. When it cannot enumerate the entries statically, it
+/// records this fallback so the consumer knows whether the original argument was
+/// an object literal (it may still be spliced) or a runtime expression (it must
+/// be passed through to `mergeDefaults` at runtime), without the consumer
+/// re-classifying the argument text itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacroDefaultsFallbackKindDto {
+    /// The defaults argument was an object literal whose entries could not all
+    /// be enumerated (e.g. a spread). The object text is still available.
+    ObjectLiteral,
+    /// The defaults argument was a non-object runtime expression — the consumer
+    /// must defer to a runtime `mergeDefaults` call rather than splice entries.
+    RuntimeExpression,
+}
+
+/// The fallback signal for a `withDefaults` call whose defaults the producer
+/// could not fully resolve into per-prop entries.
+///
+/// - `kind` — [`MacroDefaultsFallbackKindDto`]: object literal vs runtime
+///   expression.
+/// - `suppress_unresolved_import_diagnostic` — when `true`, an unresolved
+///   imported props type on this `withDefaults` call must NOT raise the
+///   `XInvalidMacroType` "could not be resolved" diagnostic, because the runtime
+///   defaults fallback makes the unresolved import non-fatal (mirrors the
+///   `skip_unresolved_import_error` decision in the diagnostics path). The
+///   consumer reads this flag directly; it must NOT re-derive the suppression by
+///   re-scanning the defaults text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MacroDefaultsFallbackDto {
+    /// Object-literal vs runtime-expression fallback classification.
+    pub kind: MacroDefaultsFallbackKindDto,
+    /// Whether an unresolved imported props type is non-fatal here (suppresses
+    /// the `XInvalidMacroType` unresolved-import diagnostic).
+    pub suppress_unresolved_import_diagnostic: bool,
+}
+
+/// The resolved `withDefaults(defineProps<T>(), { ... })` defaults surface.
+///
+/// Carries the owned breakdown of a `withDefaults` call so the runtime path can
+/// generate the merged props object and the diagnostics path can decide
+/// unresolved-import suppression, without re-parsing any source text:
+///
+/// - `arg` — the raw defaults-object argument ([`MacroDefaultsArgDto`]).
+/// - `entries` — the per-prop `(name → default)` breakdown
+///   ([`MacroDefaultEntryDto`]); empty when the producer could only record a
+///   fallback.
+/// - `fallback` — [`MacroDefaultsFallbackDto`], present only when the defaults
+///   could not be fully enumerated into `entries`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroWithDefaultsDto {
+    /// The raw defaults-object argument as written.
+    pub arg: MacroDefaultsArgDto,
+    /// Per-prop default entries, in declaration order. Empty when only a
+    /// `fallback` could be recorded.
+    pub entries: Vec<MacroDefaultEntryDto>,
+    /// Fallback signal, present when the defaults could not be fully enumerated.
+    pub fallback: Option<MacroDefaultsFallbackDto>,
+}
+
+/// One binding brought into scope by a single type import in a macro type
+/// argument's dependency graph.
+///
+/// A macro type argument (`defineProps<T>()`) may reference type names declared
+/// in other modules. The consumer that re-renders the macro's type surface in a
+/// standalone TS context (e.g. the IDE/TSX path) must re-emit the imports those
+/// names came from. This enum mirrors the three TS import-binding forms so the
+/// consumer can reconstruct an exact `import` statement per source. The consumer
+/// renders the import from these structured fields and must NOT re-scan a
+/// rendered import string to recover the bindings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MacroTypeImportBindingDto {
+    /// A named import: `import { A }` (no alias) or `import { A as B }` (alias
+    /// in `local`). `imported` is the exported name; `local` is the in-scope
+    /// alias when it differs from `imported`.
+    Named {
+        /// The name as exported by the source module.
+        imported: String,
+        /// The local alias, present only when it differs from `imported`.
+        local: Option<String>,
+    },
+    /// A default import: `import D from "..."`. `local` is the in-scope name.
+    Default {
+        /// The local name bound to the module's default export.
+        local: String,
+    },
+    /// A namespace import: `import * as NS from "..."`. `local` is the in-scope
+    /// namespace name.
+    Namespace {
+        /// The local namespace name.
+        local: String,
+    },
+}
+
+/// A single type import reachable from a macro type argument's dependency graph.
+///
+/// - `source` — the import specifier (module path) as written.
+/// - `bindings` — the bindings this import statement brings into scope
+///   ([`MacroTypeImportBindingDto`]).
+///
+/// The consumer reconstructs the `import` statement from these structured
+/// fields; it must NOT re-scan a rendered import string to recover the source or
+/// bindings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroTypeImportDto {
+    /// Import specifier (module path) as written.
+    pub source: String,
+    /// Bindings this import brings into scope, in declaration order.
+    pub bindings: Vec<MacroTypeImportBindingDto>,
+}
+
+/// A single local type declaration reachable from a macro type argument's
+/// dependency graph.
+///
+/// When a macro type argument references a type declared in the same module
+/// (`type Foo = ...`, `interface Bar { ... }`), the consumer that re-renders the
+/// macro's type surface in a standalone TS context must re-emit that declaration
+/// too.
+///
+/// - `name` — the declared type name.
+/// - `decl_ts` — the full rendered TS source of the declaration. Display/codegen
+///   text — the consumer emits it verbatim and must NOT re-parse it for
+///   semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroLocalTypeDeclDto {
+    /// Declared type name.
+    pub name: String,
+    /// Full rendered TS source of the declaration. Display/codegen text —
+    /// consumers must not re-parse it for semantics.
+    pub decl_ts: String,
+}
+
+/// The transitive type-dependency closure of a single macro type argument.
+///
+/// A macro type argument (`defineProps<T>()` / `defineEmits<T>()`) may reference
+/// type names declared in other modules or locally. To re-render that surface in
+/// a standalone TS context the consumer needs those names in scope. This carries
+/// the imports + local declarations the producer collected for the surface so
+/// the consumer can re-emit them structurally:
+///
+/// - `imports` — the type imports the surface depends on
+///   ([`MacroTypeImportDto`]).
+/// - `local_declarations` — the local type declarations the surface depends on
+///   ([`MacroLocalTypeDeclDto`]).
+///
+/// The consumer renders imports + declarations from these structured fields and
+/// must NOT re-scan the rendered text strings to recover dependency structure.
+/// An absent dependency closure is `Default` (both lists empty).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MacroTypeDepsDto {
+    /// Type imports the surface depends on, in discovery order.
+    pub imports: Vec<MacroTypeImportDto>,
+    /// Local type declarations the surface depends on, in discovery order.
+    pub local_declarations: Vec<MacroLocalTypeDeclDto>,
+}
+
 /// A single resolved prop on the `defineProps` / `withDefaults` surface.
 ///
 /// Carries the owned equivalent of every field the compiler reads from the
@@ -146,8 +388,21 @@ impl MacroVisibility {
 ///   `required: true` for non-optional props, the TSX path emits the `?` marker.
 ///   `required` is the explicit positive form (`!optional`) so consumers do not
 ///   re-derive it; the producer keeps the two consistent.
-/// - `default_value` — the `withDefaults` defaults-object value text for this
-///   prop, when present (drives `default: <expr>` in the runtime props object).
+/// - `default` — the resolved `withDefaults` default for this prop, when present
+///   ([`MacroDefaultDto`]): the default expression text, whether it was written
+///   as an expression or method shorthand, and the SFC-absolute span of the
+///   default value. Drives `default: <expr>` / `default() { ... }` in the
+///   runtime props object. The producer normalises the span SFC-absolute; the
+///   consumer renders from the structured default and must NOT re-scan the
+///   expression text to re-classify it.
+/// - `map_span` — the SFC-absolute span of this prop's declaration in the
+///   original source ([`MacroSourceSpanDto`]), when the prop originates from a
+///   real source location. The TSX path uses it to drive a source map from the
+///   generated prop entry back onto the SFC; `None` for synthesised props that
+///   have no source span.
+/// - `ts_type_deps` — the transitive type-dependency closure of this prop's
+///   type ([`MacroTypeDepsDto`]): the imports + local declarations a consumer
+///   must re-emit to re-render the prop's type in a standalone TS context.
 /// - `constructors` — `ResolvedProp.types` lowered to [`RuntimeCtorKind`];
 ///   rendered as the runtime `{ type: ... }` value via `format_runtime_types`.
 /// - `ts_type` — the rendered TypeScript type text the TSX path emits for this
@@ -172,9 +427,22 @@ pub struct MacroPropDto {
     /// explicit so runtime codegen does not re-derive it; the producer keeps
     /// `required == !optional`.
     pub required: bool,
-    /// `withDefaults` default-value expression text for this prop, if any.
-    /// Drives the `default: <expr>` entry in the runtime props object.
-    pub default_value: Option<String>,
+    /// Resolved `withDefaults` default for this prop, if any. Carries the
+    /// default expression text, whether it was written as an expression or
+    /// method shorthand, and the SFC-absolute span of the default value. Drives
+    /// the `default: <expr>` / `default() { ... }` entry in the runtime props
+    /// object.
+    pub default: Option<MacroDefaultDto>,
+    /// SFC-absolute span of this prop's declaration in the original source, if
+    /// the prop has a real source location. The TSX path drives a source map
+    /// from the generated prop entry back onto the SFC with it; `None` for
+    /// synthesised props.
+    pub map_span: Option<MacroSourceSpanDto>,
+    /// Transitive type-dependency closure of this prop's type: imports + local
+    /// declarations a consumer must re-emit to re-render the type in a
+    /// standalone TS context. The consumer renders from the structured deps and
+    /// must NOT re-scan the rendered text strings.
+    pub ts_type_deps: MacroTypeDepsDto,
     /// Runtime constructor kinds inferred for this prop's type, in order.
     /// Lowered from `ResolvedProp.types`. Rendered as the runtime `{ type: ... }`
     /// value.
@@ -225,6 +493,14 @@ pub enum MacroEmitPayload {
 ///   directly (the inner text of `payload`, or empty for [`MacroEmitPayload::None`]).
 ///   Kept as a convenience field so consumers that only need the text do not
 ///   match on `payload`.
+/// - `map_span` — the SFC-absolute span of this emit's declaration in the
+///   original source ([`MacroSourceSpanDto`]), when the emit has a real source
+///   location. The TSX path drives a source map from the generated emit overload
+///   back onto the SFC with it; `None` for synthesised emits.
+/// - `payload_deps` — the transitive type-dependency closure of this emit's
+///   payload type ([`MacroTypeDepsDto`]): the imports + local declarations a
+///   consumer must re-emit to re-render the payload type in a standalone TS
+///   context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MacroEmitDto {
     /// Event name. Mirrors `ResolvedEmit.name`.
@@ -234,6 +510,16 @@ pub struct MacroEmitDto {
     /// Flat rendered payload type text (inner text of `payload`; empty for
     /// `None`). Display/codegen text — consumers must not re-parse it.
     pub payload_ts: String,
+    /// SFC-absolute span of this emit's declaration in the original source, if
+    /// the emit has a real source location. The TSX path drives a source map
+    /// from the generated emit overload back onto the SFC with it; `None` for
+    /// synthesised emits.
+    pub map_span: Option<MacroSourceSpanDto>,
+    /// Transitive type-dependency closure of this emit's payload type: imports +
+    /// local declarations a consumer must re-emit to re-render the payload type
+    /// in a standalone TS context. The consumer renders from the structured deps
+    /// and must NOT re-scan the rendered text strings.
+    pub payload_deps: MacroTypeDepsDto,
 }
 
 /// A single resolved slot on the `defineSlots` surface.
@@ -312,7 +598,10 @@ pub struct MacroNativePropDto {
 /// (`props_type_is_object_like`) to accept an empty-but-object-like props type.
 /// `native_props` carries the native-only class-member visibility + span surface
 /// that the `native_props` FFI carrier re-sources for `@verter/component-meta`'s
-/// `nativeProps`.
+/// `nativeProps`. `with_defaults` carries the resolved `withDefaults(...)` surface
+/// when the props were declared through a `withDefaults` call, so the runtime
+/// path can generate the merged props object and the diagnostics path can decide
+/// unresolved-import suppression without re-parsing the defaults source.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MacroPropsSurface {
     /// Resolved props, in declaration order.
@@ -325,6 +614,12 @@ pub struct MacroPropsSurface {
     /// span surface re-sourced by the `native_props` FFI carrier for
     /// `@verter/component-meta`'s `nativeProps`.
     pub native_props: Vec<MacroNativePropDto>,
+    /// The resolved `withDefaults(...)` surface, present only when the props were
+    /// declared through a `withDefaults` call ([`MacroWithDefaultsDto`]): the raw
+    /// defaults argument, the per-prop `(name → default)` breakdown, and the
+    /// unresolved-import fallback signal. `None` for a plain `defineProps` surface
+    /// with no `withDefaults` wrapper.
+    pub with_defaults: Option<MacroWithDefaultsDto>,
     /// Whether the props type argument resolved to nothing (drives
     /// `XInvalidMacroType`). Mirrors `MacroTypeParams.unresolved_type_ref`.
     pub unresolved: bool,
