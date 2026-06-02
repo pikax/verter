@@ -103,6 +103,13 @@ fn runtime_constructors_at_depth(ty: &TypeExpr, depth: usize) -> Vec<RuntimeCtor
         // -- Function => Function (infer.rs:61) --
         TypeExpr::Function(_) => vec![RuntimeCtorKind::Function],
 
+        // -- Constructor type `new (...) => R` => Function. Legacy's OXC walker
+        //    maps `TSConstructorType` to Function (infer.rs:61), the same arm as
+        //    a plain function type. The dedicated `TypeExpr::ConstructorType`
+        //    variant exists precisely so this stays Function while a type-literal
+        //    `{ new (): R }` (lowered to `TypeExpr::Object`) stays Object. --
+        TypeExpr::ConstructorType(_) => vec![RuntimeCtorKind::Function],
+
         // -- Parenthesized: transparent (infer.rs:64) --
         TypeExpr::Parenthesized(inner) => runtime_constructors_at_depth(inner, depth),
 

@@ -1190,7 +1190,10 @@ impl ShallowFileState {
                 }
                 true
             }
-            TypeExpr::Function(func) => {
+            // A constructor type carries the same `FunctionExpr` payload as a
+            // function type; its whole-route signature refs are collected
+            // identically.
+            TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
                 if matches!(context, WholeRouteContext::LeafProperty) {
                     return true;
                 }
@@ -1985,7 +1988,9 @@ fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
             collect_type_refs(true_type, out);
             collect_type_refs(false_type, out);
         }
-        TypeExpr::Function(func) => {
+        // A constructor type's signature refs are collected identically to a
+        // function type's (same `FunctionExpr` payload).
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
             for param in &func.parameters {
                 collect_type_refs(&param.ty, out);
             }
@@ -2141,7 +2146,11 @@ fn collect_typeof_roots(expr: &TypeExpr, out: &mut FxHashSet<String>) {
                 }
             }
         }
-        TypeExpr::Function(func) => collect_typeof_roots_in_function(func, out),
+        // A constructor type's typeof roots are collected identically to a
+        // function type's (same `FunctionExpr` payload).
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
+            collect_typeof_roots_in_function(func, out)
+        }
         TypeExpr::IndexedAccess { object, index } => {
             collect_typeof_roots(object, out);
             collect_typeof_roots(index, out);

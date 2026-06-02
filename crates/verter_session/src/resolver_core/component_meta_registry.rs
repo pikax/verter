@@ -608,7 +608,10 @@ fn contains_nested_resolution_targets(expr: &TypeExpr) -> bool {
             types.iter().any(contains_nested_resolution_targets)
         }
         TypeExpr::Object(_) => false,
-        TypeExpr::Function(_) => false,
+        // A constructor type, like a function type, is treated as a terminal
+        // here (its signature is not walked for nested resolution targets) —
+        // identical to the `Function` arm.
+        TypeExpr::Function(_) | TypeExpr::ConstructorType(_) => false,
         TypeExpr::TemplateLiteral { expressions, .. } => {
             expressions.iter().any(contains_nested_resolution_targets)
         }
@@ -666,7 +669,10 @@ fn method_surface_specificity_score(expr: &TypeExpr) -> usize {
                 }
             })
             .sum(),
-        TypeExpr::Function(func) => {
+        // A constructor type carries the same `FunctionExpr` payload as a
+        // function type and is an equally-specific callable surface, so it is
+        // scored identically.
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
             func.parameters
                 .iter()
                 .map(|param| method_surface_specificity_score(&param.ty))
@@ -840,7 +846,9 @@ fn bound_generic_ref_penalty(expr: &TypeExpr) -> usize {
                 }
             })
             .sum(),
-        TypeExpr::Function(func) => {
+        // A constructor type's signature is penalised identically to a function
+        // type's (same `FunctionExpr` payload).
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
             func.parameters
                 .iter()
                 .map(|param| bound_generic_ref_penalty(&param.ty))
@@ -1014,7 +1022,9 @@ fn imported_type_body_specificity_score(expr: &TypeExpr) -> usize {
                     })
                     .sum::<usize>()
         }
-        TypeExpr::Function(func) => {
+        // A constructor type scores as a function surface (same `FunctionExpr`
+        // payload, same callable-specificity contribution).
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
             SPECIFICITY_FUNCTION_BASE + imported_function_specificity_score(func)
         }
         TypeExpr::IndexedAccess { object, index } => {
@@ -1247,7 +1257,9 @@ pub(crate) fn component_meta_registry_expr_references_name(
                     })
             }
         }),
-        TypeExpr::Function(function) => {
+        // A constructor type may reference the target name in its parameters /
+        // return exactly like a function type (same `FunctionExpr` payload).
+        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
             function
                 .parameters
                 .iter()
@@ -1357,7 +1369,9 @@ pub(crate) fn component_meta_registry_indexed_ref_penalty(
                 }
             })
             .sum(),
-        TypeExpr::Function(func) => {
+        // A constructor type is penalised identically to a function type (same
+        // `FunctionExpr` payload walked for indexed refs).
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
             func.parameters
                 .iter()
                 .map(|param| component_meta_registry_indexed_ref_penalty(&param.ty))
@@ -1643,7 +1657,9 @@ pub(crate) fn collect_component_meta_registry_refs(
                 }
             }
         }
-        TypeExpr::Function(func) => {
+        // A constructor type's signature surface is collected identically to a
+        // function type's (same `FunctionExpr` payload).
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
             collect_component_meta_registry_function_surface_refs(
                 func,
                 published_names,
@@ -2215,6 +2231,9 @@ pub(crate) fn collect_component_meta_registry_public_surface_refs(
         | TypeExpr::TemplateLiteral { .. } => {}
         TypeExpr::Object(_)
         | TypeExpr::Function(_)
+        // A constructor type, like a function/object type, enqueues no top-level
+        // public-surface ref here (its inner signature is walked elsewhere).
+        | TypeExpr::ConstructorType(_)
         | TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::Unknown { .. }
@@ -2427,7 +2446,9 @@ pub(crate) fn collect_component_meta_registry_member_surface_refs(
                 );
             }
         }
-        TypeExpr::Function(func) => {
+        // A constructor type's signature surface is collected identically to a
+        // function type's (same `FunctionExpr` payload).
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
             collect_component_meta_registry_function_surface_refs(
                 func,
                 published_names,

@@ -262,6 +262,15 @@ fn hash_type_expr_structurally<H: Hasher>(root: &TypeExpr, hasher: &mut H) {
                 7u8.hash(hasher);
                 hash_function_expr(func, hasher, &mut worklist);
             }
+            // A constructor type carries the same `FunctionExpr` payload as a
+            // function type but is a DISTINCT type, so it hashes with a distinct
+            // discriminant (`22`, the next free tag — matching the frozen
+            // `TypeExpr` discriminant scheme) before the shared function body, so
+            // `new () => X` never collides with `() => X` in this hash.
+            TypeExpr::ConstructorType(func) => {
+                22u8.hash(hasher);
+                hash_function_expr(func, hasher, &mut worklist);
+            }
             TypeExpr::Ref {
                 name,
                 type_arguments,

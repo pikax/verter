@@ -207,7 +207,9 @@ pub fn count_operator_nodes(expr: &verter_type_expr::TypeExpr) -> u64 {
                     }
                 }
             }
-            TypeExpr::Function(f) => {
+            // A constructor type's signature is walked identically to a function
+            // type's (same `FunctionExpr` payload).
+            TypeExpr::Function(f) | TypeExpr::ConstructorType(f) => {
                 for p in f.parameters.iter() {
                     walk(&p.ty, acc);
                 }

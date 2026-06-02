@@ -1963,7 +1963,9 @@ fn type_expr_exceeds_node_limit(type_expr: &TypeExpr, limit: usize) -> bool {
                     type_expr_function_exceeds_node_limit(&method.function, seen, limit)
                 }
             }),
-            TypeExpr::Function(function) => {
+            // A constructor type carries the same `FunctionExpr` payload as a
+            // function type, so its node count is computed identically.
+            TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
                 type_expr_function_exceeds_node_limit(function, seen, limit)
             }
             TypeExpr::Ref { type_arguments, .. } => {

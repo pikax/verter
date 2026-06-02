@@ -246,7 +246,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         }
                     })
                 }
-                TypeExpr::Function(function) => {
+                // A constructor type's signature is checked identically to a
+                // function type's (same `FunctionExpr` payload).
+                TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
                     function.parameters.iter().any(|parameter| {
                         self.should_preserve_shallow_field_expr_inner(
                             scope_canonical_id,
@@ -788,15 +790,25 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         )
                     }
                 }),
-                TypeExpr::Function(function) => function.parameters.iter().any(|parameter| {
-                    contains_direct_imported_utility_route(
-                        engine,
-                        scope_canonical_id,
-                        &parameter.ty,
-                    )
-                }) || function.return_type.as_deref().is_some_and(|return_type| {
-                    contains_direct_imported_utility_route(engine, scope_canonical_id, return_type)
-                }),
+                // A constructor type's signature is searched identically to a
+                // function type's (same `FunctionExpr` payload).
+                TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => function
+                    .parameters
+                    .iter()
+                    .any(|parameter| {
+                        contains_direct_imported_utility_route(
+                            engine,
+                            scope_canonical_id,
+                            &parameter.ty,
+                        )
+                    })
+                    || function.return_type.as_deref().is_some_and(|return_type| {
+                        contains_direct_imported_utility_route(
+                            engine,
+                            scope_canonical_id,
+                            return_type,
+                        )
+                    }),
                 TypeExpr::Ref {
                     name,
                     type_arguments,
@@ -1047,7 +1059,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         .collect::<Option<Vec<_>>>()?,
                 ),
             }),
-            TypeExpr::Function(function) => {
+            // Both a function type and a constructor type carry the same
+            // `FunctionExpr` payload and rewrite their signature identically;
+            // the constructor-ness is preserved by reconstructing the matching
+            // variant at the end (a `ConstructorType` is never flattened to a
+            // plain `Function`).
+            TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
+                let is_constructor = matches!(expr, TypeExpr::ConstructorType(_));
                 // Structure-preserving alias rewrite: keep the function's OXC
                 // signature spans and each parameter's span verbatim.
                 let parameters = function
@@ -1108,14 +1126,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         })
                     })
                     .collect::<Option<Vec<_>>>()?;
-                Some(TypeExpr::Function(std::sync::Arc::new(
-                    verter_type_expr::FunctionExpr::with_spans(
-                        parameters,
-                        return_type,
-                        type_parameters,
-                        function.spans,
-                    ),
-                )))
+                let rewritten = std::sync::Arc::new(verter_type_expr::FunctionExpr::with_spans(
+                    parameters,
+                    return_type,
+                    type_parameters,
+                    function.spans,
+                ));
+                Some(if is_constructor {
+                    TypeExpr::ConstructorType(rewritten)
+                } else {
+                    TypeExpr::Function(rewritten)
+                })
             }
             TypeExpr::Ref {
                 name,

@@ -985,7 +985,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     })
                 }
             }),
-            TypeExpr::Function(function) => {
+            // A constructor type's signature is searched identically to a
+            // function type's (same `FunctionExpr` payload).
+            TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
                 function.parameters.iter().any(|param| {
                     self.expr_references_prepared_scope_symbol(scope_canonical_id, &param.ty)
                 }) || function.return_type.as_deref().is_some_and(|return_type| {

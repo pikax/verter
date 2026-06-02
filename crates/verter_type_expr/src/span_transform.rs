@@ -263,7 +263,7 @@ impl TypeExpr {
             Self::Object(object) => {
                 Arc::make_mut(object).shift_spans(delta);
             }
-            Self::Function(function) => {
+            Self::Function(function) | Self::ConstructorType(function) => {
                 Arc::make_mut(function).shift_spans(delta);
             }
             Self::Ref { type_arguments, .. } => {
@@ -353,7 +353,7 @@ impl TypeExpr {
             Self::Object(object) => {
                 Arc::make_mut(object).clear_spans();
             }
-            Self::Function(function) => {
+            Self::Function(function) | Self::ConstructorType(function) => {
                 Arc::make_mut(function).clear_spans();
             }
             Self::Ref { type_arguments, .. } => {

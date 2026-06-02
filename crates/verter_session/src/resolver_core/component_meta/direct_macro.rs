@@ -127,7 +127,9 @@ fn type_expr_has_direct_macro_reference(expr: &TypeExpr, needle: &str) -> bool {
                     .as_deref()
                     .is_some_and(|expr| type_expr_has_direct_macro_reference(expr, needle))
         }
-        TypeExpr::Function(function) => {
+        // A constructor type's signature is searched identically to a function
+        // type's (same `FunctionExpr` payload).
+        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
             function
                 .parameters
                 .iter()

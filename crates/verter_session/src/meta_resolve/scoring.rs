@@ -55,7 +55,9 @@ pub(crate) fn count_symbolic_carriers_in_expr(expr: &verter_type_expr::TypeExpr)
                     }
                 }
             }
-            TypeExpr::Function(function) => {
+            // A constructor type carries the same `FunctionExpr` payload as a
+            // function type; its signature is walked identically.
+            TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
                 if let Some(return_type) = function.return_type.as_deref() {
                     stack.push(return_type);
                 }
@@ -203,7 +205,9 @@ fn count_generic_detail_in_expr(expr: &verter_type_expr::TypeExpr) -> usize {
                     }
                 }
             }
-            TypeExpr::Function(function) => {
+            // A constructor type's signature (type-parameters, return,
+            // parameters) is walked identically to a function type's.
+            TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
                 for type_parameter in function.type_parameters.iter().rev() {
                     score += 1;
                     if let Some(default) = type_parameter.default.as_deref() {
@@ -291,6 +295,8 @@ fn type_expr_has_structural_top_level(expr: &verter_type_expr::TypeExpr) -> bool
         | TypeExpr::Literal(_)
         | TypeExpr::Object(_)
         | TypeExpr::Function(_)
+        // A constructor type is a concrete structural shape, like a function.
+        | TypeExpr::ConstructorType(_)
         | TypeExpr::Array { .. }
         | TypeExpr::Tuple { .. }
         | TypeExpr::Union(_)
@@ -343,6 +349,8 @@ pub(crate) fn component_meta_registry_prefers_structural_materialization(
         | TypeExpr::Mapped { .. }
         | TypeExpr::TemplateLiteral { .. }
         | TypeExpr::Function(_)
+        // A constructor type prefers structural materialization like a function.
+        | TypeExpr::ConstructorType(_)
         | TypeExpr::KeyOf(_)
         | TypeExpr::Rest(_) => true,
         TypeExpr::Ref { .. }

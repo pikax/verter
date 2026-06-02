@@ -158,7 +158,7 @@ fn drain_children(node: &mut TypeExpr, worklist: &mut Vec<TypeExpr>) {
             }
         }
 
-        TypeExpr::Function(func) => {
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
             if let Some(func) = Arc::into_inner(std::mem::replace(func, drop_leaf_function())) {
                 drain_function_expr(func, worklist);
             }
@@ -361,8 +361,19 @@ impl Hash for TypeExpr {
     }
 }
 
-/// Discriminant index in declaration order (matches the derive's
-/// `discriminant_value`, hashed as `isize`).
+/// Stable per-variant discriminant, hashed as `isize` (the leading field of
+/// every node's hash stream).
+///
+/// The integers 0..=21 are the original declaration-order indices of the former
+/// `#[derive(Hash)]`. They are FROZEN: each existing variant keeps its integer
+/// so its hash byte stream — and every content-addressed key derived from it —
+/// is unchanged. A NEW variant therefore takes the next free integer rather
+/// than its positional index in the enum (which would renumber, and thus
+/// re-key, every variant declared after it). `ConstructorType` is declared after
+/// `Function` for readability but takes the next free discriminant `22`.
+///
+/// (This is an in-memory hash, not a persisted cross-version artifact; the
+/// freeze keeps in-process cache keys stable across this change.)
 fn type_expr_discriminant(node: &TypeExpr) -> isize {
     match node {
         TypeExpr::Primitive(_) => 0,
@@ -387,6 +398,7 @@ fn type_expr_discriminant(node: &TypeExpr) -> isize {
         TypeExpr::RecursiveRef { .. } => 19,
         TypeExpr::SyntheticSlotBinding(_) => 20,
         TypeExpr::Unknown { .. } => 21,
+        TypeExpr::ConstructorType(_) => 22,
     }
 }
 
@@ -434,8 +446,12 @@ fn hash_node<'a, H: Hasher>(node: &'a TypeExpr, state: &mut H, stack: &mut Vec<H
             }
         }
 
-        // -- Function payload --
-        TypeExpr::Function(func) => stack.push(HashStep::Func(func)),
+        // -- Function / constructor-type payload. Both carry a `FunctionExpr`;
+        //    the leading discriminant (7 vs 22) already distinguishes them, so
+        //    the trailing field stream is the same `Func` step. --
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
+            stack.push(HashStep::Func(func))
+        }
 
         // -- Ref: name (leaf) then type_arguments slice --
         TypeExpr::Ref {

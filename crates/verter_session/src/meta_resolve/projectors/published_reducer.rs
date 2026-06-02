@@ -196,7 +196,9 @@ pub(crate) fn type_expr_contains_reducible_operator(expr: &TypeExpr) -> bool {
                         .is_some_and(type_expr_contains_reducible_operator)
             }
         }),
-        TypeExpr::Function(f) => {
+        // A constructor type's signature is searched identically to a function
+        // type's (same `FunctionExpr` payload).
+        TypeExpr::Function(f) | TypeExpr::ConstructorType(f) => {
             f.parameters
                 .iter()
                 .any(|p| type_expr_contains_reducible_operator(&p.ty))

@@ -384,7 +384,13 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                             .collect::<Vec<_>>(),
                     ),
                 },
-                TypeExpr::Function(function) => {
+                // Both a function type and a constructor type carry the same
+                // `FunctionExpr` payload and rewrite their signature identically;
+                // only the reconstructed variant differs, so the constructor-ness
+                // is preserved (a `ConstructorType` is never flattened to a plain
+                // `Function`). `is_constructor` selects the wrap at the end.
+                TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
+                    let is_constructor = matches!(expr, TypeExpr::ConstructorType(_));
                     let mut function = function.as_ref().clone();
                     for parameter in &mut function.parameters {
                         parameter.ty = inner(
@@ -424,7 +430,12 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
                             ));
                         }
                     }
-                    TypeExpr::Function(Arc::new(function))
+                    let function = Arc::new(function);
+                    if is_constructor {
+                        TypeExpr::ConstructorType(function)
+                    } else {
+                        TypeExpr::Function(function)
+                    }
                 }
                 TypeExpr::KeyOf(inner_expr) => {
                     if publish_operators {
@@ -913,7 +924,9 @@ pub(crate) fn type_expr_contains_public_member_route(expr: &verter_type_expr::Ty
                         .is_some_and(type_expr_contains_public_member_route)
             }
         }),
-        TypeExpr::Function(function) => {
+        // A constructor type's signature is searched for public member routes
+        // identically to a function type's (same `FunctionExpr` payload).
+        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
             function
                 .parameters
                 .iter()
@@ -1009,7 +1022,9 @@ pub(crate) fn type_expr_needs_nested_symbolic_route_preservation(
                     .any(|param| type_expr_contains_public_member_route(&param.ty))
             }
         }),
-        TypeExpr::Function(function) => function
+        // A constructor type's signature is searched identically to a function
+        // type's (same `FunctionExpr` payload).
+        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => function
             .parameters
             .iter()
             .any(|param| type_expr_contains_public_member_route(&param.ty)),
@@ -1264,7 +1279,9 @@ pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
                 engine,
             )
         }),
-        TypeExpr::Function(func) => {
+        // A constructor type's signature is evaluated identically to a function
+        // type's (same `FunctionExpr` payload).
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
             func.parameters.iter().all(|param| {
                 component_meta_registry_should_keep_raw_symbolic_non_object_alias(
                     &param.ty,

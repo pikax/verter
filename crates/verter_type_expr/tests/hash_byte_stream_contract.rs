@@ -172,6 +172,9 @@ fn variant_index(expr: &TypeExpr) -> isize {
         TypeExpr::RecursiveRef { .. } => 19,
         TypeExpr::SyntheticSlotBinding(_) => 20,
         TypeExpr::Unknown { .. } => 21,
+        // Added after the original derive: a new variant takes the next free
+        // discriminant (NOT its declaration-order index) so 0..=21 stay frozen.
+        TypeExpr::ConstructorType(_) => 22,
     }
 }
 
@@ -199,7 +202,7 @@ fn ref_hash<H: Hasher>(expr: &TypeExpr, h: &mut H) {
                 ref_hash_object_member(member, h);
             }
         }
-        TypeExpr::Function(func) => ref_hash_function(func, h),
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => ref_hash_function(func, h),
         TypeExpr::Ref {
             name,
             type_arguments,
@@ -561,6 +564,14 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
             None,
             Vec::new(),
         ))),
+    ));
+    // ConstructorType variant directly — same FunctionExpr payload as the
+    // Function corpus item, so the only stream difference is the leading
+    // discriminant (22 vs 7). Exercises the new variant through the live
+    // iterative `hash_node` and the frozen `ref_hash` mirror.
+    v.push((
+        "constructor-type",
+        TypeExpr::ConstructorType(Arc::new(sample_function(true))),
     ));
     // FunctionParam: same identity fields but DIFFERENT has_ts_annotation
     // must hash identically (the field is excluded). Both pushed; the

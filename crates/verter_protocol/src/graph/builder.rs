@@ -188,6 +188,13 @@ enum ExprMemoKey {
     Function {
         ptr: usize,
     },
+    /// Constructor type `new (...) => R`. A distinct memo variant from
+    /// [`Function`](Self::Function): a constructor type and a function type are
+    /// different types and must not share a memo entry even if they ever held
+    /// the same `Arc<FunctionExpr>` pointer.
+    ConstructorType {
+        ptr: usize,
+    },
     Ref {
         name: Arc<str>,
         type_arguments_ptr: usize,
@@ -275,6 +282,9 @@ impl ExprMemoKey {
                 ptr: arc_ptr_id(object),
             },
             TypeExpr::Function(function) => Self::Function {
+                ptr: arc_ptr_id(function),
+            },
+            TypeExpr::ConstructorType(function) => Self::ConstructorType {
                 ptr: arc_ptr_id(function),
             },
             TypeExpr::Ref {
@@ -445,6 +455,17 @@ impl ExprPtrKey {
             },
             TypeExpr::Function(function) => Self {
                 tag: 6,
+                p0: Arc::as_ptr(function) as usize,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                extra: 0,
+            },
+            // Constructor type — pointer-based like `Function`, but a DISTINCT
+            // `tag` (15) so the fast-path ptr cache never aliases a constructor
+            // type with a function type.
+            TypeExpr::ConstructorType(function) => Self {
+                tag: 15,
                 p0: Arc::as_ptr(function) as usize,
                 p1: 0,
                 p2: 0,
@@ -690,6 +711,16 @@ impl GraphBuilder {
                     .collect(),
             },
             TypeExpr::Function(function) => self.function_node(function),
+            // A constructor type's STRUCTURAL wire shape is exactly a function's
+            // (parameters / return / type-parameters). The typeinfo wire graph
+            // (`GraphTypeNode.kind`) is a closed structural taxonomy with no
+            // dedicated constructor-type kind, and the constructor-vs-function
+            // distinction that matters for Vue runtime inference is carried by
+            // the `TypeExpr::ConstructorType` variant itself (consumed by the
+            // session-side `runtime_ctor` reducer BEFORE wire serialisation), so
+            // emitting the function node here is the contract-correct shape — no
+            // schema-version bump or new wire kind is required.
+            TypeExpr::ConstructorType(function) => self.function_node(function),
             TypeExpr::Ref {
                 name,
                 type_arguments,

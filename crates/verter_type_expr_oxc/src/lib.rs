@@ -22,7 +22,7 @@ use oxc_ast::ast::{
     BindingPattern, FormalParameters, PropertyKey, TSFunctionType, TSMappedType,
     TSMappedTypeModifierOperator, TSQualifiedName, TSSignature, TSTupleElement, TSType, TSTypeName,
     TSTypeOperatorOperator, TSTypeParameterDeclaration, TSTypeQuery, TSTypeQueryExprName,
-    TSTypeReference,
+    TSTypeReference, UnaryOperator,
 };
 use oxc_span::GetSpan;
 
@@ -111,7 +111,18 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
             TypeExpr::Function(Arc::new(lower_function_type(func, source)))
         }
 
-        // -- Constructor type --
+        // -- Constructor type: `new (x: T) => R`.
+        //
+        // Lowered to the dedicated `TypeExpr::ConstructorType` variant rather
+        // than `Object { ConstructSignature }`. A bare constructor *type* and a
+        // type-literal `{ new (): R }` are otherwise structurally identical after
+        // lowering, but Vue's runtime-constructor inference maps the former to
+        // `Function` and the latter to `Object` (legacy `infer_runtime_type`:
+        // `TSConstructorType` -> Function at infer.rs:61; `TSTypeLiteral` ->
+        // Object at infer.rs:55). Keeping them apart at the producer lets the
+        // shared reducer reproduce that distinction. The carried `FunctionExpr`
+        // is identical to the construct-signature form, so any consumer wanting
+        // construct semantics walks the inner function exactly as before.
         TSType::TSConstructorType(ctor) => {
             let func = normalize_function_type_params(FunctionExpr::with_spans(
                 lower_formal_parameters(&ctor.params, source),
@@ -128,9 +139,7 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
                     return_type: Some(ctor.return_type.type_annotation.span().into()),
                 },
             ));
-            TypeExpr::Object(Arc::new(ObjectExpr {
-                properties: vec![ObjectMember::ConstructSignature(func)],
-            }))
+            TypeExpr::ConstructorType(Arc::new(func))
         }
 
         // -- Type reference --
@@ -236,15 +245,47 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
         TSLiteral::BigIntLiteral(b) => {
             TypeExpr::Literal(verter_type_expr::LiteralValue::BigInt(b.value.to_string()))
         }
-        TSLiteral::UnaryExpression(unary) => {
-            if let Expression::NumericLiteral(n) = &unary.argument {
-                TypeExpr::number_literal(-n.value)
-            } else {
-                TypeExpr::Unknown {
+        TSLiteral::UnaryExpression(unary) => match &unary.argument {
+            // `-1` / `+1` — a signed numeric literal type. The sign is the
+            // wrapping `UnaryExpression`'s operator, NOT a property of the inner
+            // literal, so it must be applied operator-aware: a `UnaryNegation`
+            // negates the magnitude while a `UnaryPlus` preserves it. Blindly
+            // negating would turn `+1` into the wrong literal `-1`. Any other
+            // unary operator (`~`, `!`, …) is not a valid literal-type sign and
+            // falls through to the `Unknown` raw-text fallback below.
+            Expression::NumericLiteral(n) => match unary.operator {
+                UnaryOperator::UnaryNegation => TypeExpr::number_literal(-n.value),
+                UnaryOperator::UnaryPlus => TypeExpr::number_literal(n.value),
+                _ => TypeExpr::Unknown {
                     raw: span_text(source, unary.span()),
+                },
+            },
+            // `-1n` / `+1n` — a signed bigint literal type. `BigIntLiteral.value`
+            // is the base-10 magnitude with NO sign (the sign lives on this
+            // wrapping `UnaryExpression`), so the signed form is reconstructed
+            // here operator-aware, mirroring the positive `TSLiteral::BigIntLiteral`
+            // arm. A `UnaryNegation` prepends `-`; a `UnaryPlus` keeps the bare
+            // magnitude (prepending `-` unconditionally would turn `+1n` into the
+            // wrong literal `-1n`). Lowering it to a `BigInt` literal (rather than
+            // the `Unknown` fallback) keeps it a first-class bigint literal so the
+            // Vue runtime-constructor reducer maps it to `Number` exactly like a
+            // positive bigint literal — matching legacy `infer_runtime_type`'s
+            // unary-bigint -> Number rule (`resolve_type/infer.rs:166-170`).
+            Expression::BigIntLiteral(b) => match unary.operator {
+                UnaryOperator::UnaryNegation => TypeExpr::Literal(
+                    verter_type_expr::LiteralValue::BigInt(format!("-{}", b.value)),
+                ),
+                UnaryOperator::UnaryPlus => {
+                    TypeExpr::Literal(verter_type_expr::LiteralValue::BigInt(b.value.to_string()))
                 }
-            }
-        }
+                _ => TypeExpr::Unknown {
+                    raw: span_text(source, unary.span()),
+                },
+            },
+            _ => TypeExpr::Unknown {
+                raw: span_text(source, unary.span()),
+            },
+        },
         TSLiteral::TemplateLiteral(tpl) => {
             if tpl.expressions.is_empty() {
                 if let Some(quasi) = tpl.quasis.first() {
@@ -728,6 +769,13 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
                 .collect(),
         })),
         TypeExpr::Function(func) => TypeExpr::Function(Arc::new(
+            normalize_nested_function_type_params(func.as_ref(), scope),
+        )),
+        // A constructor type carries the same `FunctionExpr` payload as a
+        // function type — its parameters / return may reference the enclosing
+        // generic scope (e.g. `<T>(...) => new () => T[]`), so it normalises
+        // identically; only the variant tag differs.
+        TypeExpr::ConstructorType(func) => TypeExpr::ConstructorType(Arc::new(
             normalize_nested_function_type_params(func.as_ref(), scope),
         )),
         TypeExpr::KeyOf(inner) => TypeExpr::KeyOf(Arc::new(normalize_type_parameter_refs(

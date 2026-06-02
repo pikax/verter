@@ -1467,7 +1467,9 @@ pub(crate) fn collect_type_expr_symbol_refs(
                 }
             }
         }
-        TypeExpr::Function(func) => {
+        // A constructor type's signature refs are collected identically to a
+        // function type's (same `FunctionExpr` payload).
+        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
             for param in &func.parameters {
                 collect_type_expr_symbol_refs(&param.ty, refs);
             }

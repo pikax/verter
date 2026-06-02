@@ -239,7 +239,9 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
                     && dispatch_route_expr_is_materialized(&signature.value_type)
             }
         }),
-        TypeExpr::Function(function) => {
+        // A constructor type's signature is checked identically to a function
+        // type's (same `FunctionExpr` payload).
+        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
             function
                 .return_type
                 .as_deref()
@@ -604,7 +606,9 @@ pub(super) fn type_expr_references_names(
                             .is_some_and(|return_type| visit(return_type, contains_name))
                 }
             }),
-            TypeExpr::Function(function) => {
+            // A constructor type's signature is searched identically to a
+            // function type's (same `FunctionExpr` payload).
+            TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
                 function
                     .parameters
                     .iter()

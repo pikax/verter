@@ -363,6 +363,16 @@ impl<'a> Walker<'a> {
             }
             TypeExpr::Object(obj) => self.walk_object(obj),
             TypeExpr::Function(func) => self.walk_function(func),
+            // A constructor type `new (...) => R` is a DISTINCT type from the
+            // function type `(...) => R` — they must not collide in a
+            // content-addressed cache key. Emit a distinct discriminator
+            // (`0x73`) before reusing the identical `walk_function` body
+            // encoding, so the carried signature still hashes alpha-stably while
+            // the constructor-ness is part of the hash.
+            TypeExpr::ConstructorType(func) => {
+                self.buf.push(0x73);
+                self.walk_function(func);
+            }
             TypeExpr::Ref {
                 name,
                 type_arguments,
@@ -833,6 +843,14 @@ impl<'a> Walker<'a> {
             }
             TypeExpr::Function(func) => {
                 key.push(0xA7);
+                key.extend_from_slice(&(Arc::as_ptr(func) as usize).to_le_bytes());
+            }
+            TypeExpr::ConstructorType(func) => {
+                // Distinct identity tag from `Function` (`0xA7`) so a
+                // constructor type and a function type that happen to share an
+                // `Arc<FunctionExpr>` pointer (they never do, but the tag keeps
+                // the discrimination structural) cannot alias as a cycle.
+                key.push(0xB5);
                 key.extend_from_slice(&(Arc::as_ptr(func) as usize).to_le_bytes());
             }
             TypeExpr::Ref {

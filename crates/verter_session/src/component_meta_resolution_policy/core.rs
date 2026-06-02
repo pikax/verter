@@ -309,6 +309,13 @@ pub(super) fn rewrite_expr(expr: &TypeExpr, ctx: &mut PolicyCtx<'_, '_>) -> Opti
         TypeExpr::Function(func) => {
             rewrite_function(func, ctx).map(|next| TypeExpr::Function(Arc::new(next)))
         }
+        // A constructor type's signature is rewritten with the same
+        // `rewrite_function` helper as a function type, but is reconstructed as
+        // a `ConstructorType` so the constructor-ness is preserved (never
+        // flattened to a plain function).
+        TypeExpr::ConstructorType(func) => {
+            rewrite_function(func, ctx).map(|next| TypeExpr::ConstructorType(Arc::new(next)))
+        }
         TypeExpr::Conditional {
             check,
             extends,
@@ -676,6 +683,9 @@ pub(super) fn body_is_resolvable(body: &TypeExpr, ctx: &PolicyCtx<'_, '_>) -> bo
         | TypeExpr::Tuple { .. }
         | TypeExpr::Object(_)
         | TypeExpr::Function(_)
+        // A constructor type is a concrete structural shape, resolvable like a
+        // function/object type.
+        | TypeExpr::ConstructorType(_)
         | TypeExpr::KeyOf(_)
         | TypeExpr::TypeOf(_)
         | TypeExpr::Conditional { .. }

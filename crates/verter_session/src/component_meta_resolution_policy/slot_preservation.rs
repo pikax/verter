@@ -133,7 +133,9 @@ fn type_expr_contains_imported_ref(expr: &TypeExpr, ctx: &mut PolicyCtx<'_, '_>)
                         .is_some_and(|rt| type_expr_contains_imported_ref(rt, ctx))
             }
         }),
-        TypeExpr::Function(function) => {
+        // A constructor type's signature is searched identically to a function
+        // type's (same `FunctionExpr` payload).
+        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
             function
                 .parameters
                 .iter()

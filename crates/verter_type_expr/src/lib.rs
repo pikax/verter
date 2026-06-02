@@ -152,6 +152,20 @@ pub enum TypeExpr {
     /// `(x: T, y: U) => R`
     Function(Arc<FunctionExpr>),
 
+    /// `new (x: T) => R` — a constructor type (TS `TSConstructorType`).
+    ///
+    /// Distinct from both [`Function`](Self::Function) and from a type-literal
+    /// `{ new (): R }` (which lowers to [`Object`](Self::Object) carrying an
+    /// [`ObjectMember::ConstructSignature`]). The two are structurally identical
+    /// after lowering otherwise, yet Vue's runtime-constructor inference treats a
+    /// bare constructor *type* as `Function` while a type-literal-with-construct-
+    /// signature is `Object` — so the producer must keep them apart. Carries the
+    /// same [`FunctionExpr`] payload (parameters / return / type parameters /
+    /// spans) as a construct signature, so a consumer that wants the construct
+    /// semantics walks the inner function exactly as it does for a
+    /// `ConstructSignature` member.
+    ConstructorType(Arc<FunctionExpr>),
+
     // -- References --
     /// A named type reference, optionally with type arguments.
     /// `MyType`, `Partial<T>`, `Record<K, V>`.
@@ -331,6 +345,23 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                 ret.map(Arc::new),
                 json_to_type_params(v.get("typeParameters"))?,
             ))))
+        }
+        "constructorType" => {
+            let params = json_to_func_params(v.get("parameters")?)?;
+            let ret = v.get("returnType").and_then(|r| {
+                if r.is_null() {
+                    None
+                } else {
+                    type_expr_from_json(r)
+                }
+            });
+            Some(TypeExpr::ConstructorType(Arc::new(
+                FunctionExpr::synthetic(
+                    params,
+                    ret.map(Arc::new),
+                    json_to_type_params(v.get("typeParameters"))?,
+                ),
+            )))
         }
         "ref" => {
             let name = v.get("name")?.as_str()?.to_string();
@@ -1339,6 +1370,11 @@ impl TypeExpr {
             Self::Function(func) => {
                 let mut value = Self::function_to_json(func);
                 value["kind"] = json!("function");
+                value
+            }
+            Self::ConstructorType(func) => {
+                let mut value = Self::function_to_json(func);
+                value["kind"] = json!("constructorType");
                 value
             }
             Self::Ref {

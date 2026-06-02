@@ -181,7 +181,12 @@ fn visit_expr(
             }
             ObjectMember::Method(method) => visit_function(&method.function, is_active, shadow),
         }),
-        TypeExpr::Function(function) => visit_function(function, is_active, shadow),
+        // A constructor type carries the same `FunctionExpr` payload as a
+        // function type — its parameters / return may reference an enclosing
+        // type parameter, so it is walked identically.
+        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
+            visit_function(function, is_active, shadow)
+        }
         TypeExpr::IndexedAccess { object, index } => {
             visit_expr(object, is_active, shadow) || visit_expr(index, is_active, shadow)
         }
