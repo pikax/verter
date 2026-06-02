@@ -153,6 +153,21 @@ pub struct GraphObjectMember {
     pub function: u32,
 }
 
+/// Whether an object member is publicly visible for the graph wire. Property
+/// and Method members carry a `MemberVisibility`; an index / call / construct
+/// signature has no accessibility concept and is always kept. The graph wire
+/// is a public surface with no member-visibility field, so non-public
+/// Property / Method members are filtered out before object-node encoding.
+fn object_member_is_public(member: &ObjectMember) -> bool {
+    match member {
+        ObjectMember::Property(property) => property.visibility.is_public(),
+        ObjectMember::Method(method) => method.visibility.is_public(),
+        ObjectMember::IndexSignature(_)
+        | ObjectMember::CallSignature(_)
+        | ObjectMember::ConstructSignature(_) => true,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GraphFunctionParam {
     pub name: u32,
@@ -704,9 +719,22 @@ impl GraphBuilder {
                     .collect(),
             },
             TypeExpr::Object(object) => GraphNode::Object {
+                // Public-surface sanitizer: the graph wire (component-meta graph
+                // / type_registry AND the typeinfo graph) is a public surface and
+                // carries NO member-visibility field, so a non-public
+                // (private/protected) class member must never be encoded onto it
+                // — a consumer decoding the wire could not distinguish or filter
+                // it. Drop non-public Property / Method members here, the single
+                // recursive chokepoint before object-node encoding (each member's
+                // value type is serialized through this same `node_id` path, so
+                // nested object surfaces are sanitized too). The keep-all native
+                // surface (`native_props`) is serialized separately as
+                // `ResolvedNativeProp` with its own visibility marker and does not
+                // route through this object-node path, so it is unaffected.
                 members: object
                     .properties
                     .iter()
+                    .filter(|member| object_member_is_public(member))
                     .map(|member| self.object_member(member))
                     .collect(),
             },
