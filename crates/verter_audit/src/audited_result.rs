@@ -89,7 +89,6 @@ impl<T, E> AuditedResult<T, E> {
 
     /// Borrow the outcome as a [`Result`], dropping the audit record.
     /// Use [`AuditedResult::audit`] to read the envelope alongside.
-    #[must_use]
     pub fn as_result(&self) -> Result<&T, &E> {
         match self {
             Self::Ok { value, .. } => Ok(value),
@@ -100,7 +99,6 @@ impl<T, E> AuditedResult<T, E> {
     /// Consume the carrier, returning the outcome and the audit record
     /// as a pair. The two halves can then be routed independently —
     /// the `Result` to the caller, the record to the records store.
-    #[must_use]
     pub fn into_parts(self) -> (Result<T, E>, RequestAuditRecord) {
         match self {
             Self::Ok { value, audit } => (Ok(value), audit),
@@ -110,7 +108,6 @@ impl<T, E> AuditedResult<T, E> {
 
     /// Consume the carrier, returning only the outcome and discarding
     /// the audit record.
-    #[must_use]
     pub fn into_result(self) -> Result<T, E> {
         match self {
             Self::Ok { value, .. } => Ok(value),
