@@ -581,6 +581,44 @@ fn cycle_id_propagates_canonicalization_conflicts() {
 
 // ─────────────────────────── closure-policy surface ──────────────────────
 
+// ─────────────────────── R21 split environment hashes ────────────────────
+
+#[test]
+fn r21_typeinfo_query_identity_carries_split_environment_hashes() {
+    // R21 scoping rule: cache / query identity keys carry the FIVE
+    // orthogonal environment-hash dimensions as SEPARATE fields
+    // (parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash,
+    // project_identity). A single bundled `project_config_hash` is
+    // forbidden — it would over-invalidate (any env change busts every
+    // cache that keys on the bundle). The typeinfo `GraphQueryIdentity`
+    // is the wire-side query-identity carrier and must expose all five.
+    // Discriminating: collapse the five to one `project_config_hash` and
+    // this fails.
+    let proto = read_proto();
+    let body = proto_block_body(&proto, "message", "GraphQueryIdentity");
+    for required in [
+        "bytes parse_env_hash =",
+        "bytes resolve_env_hash =",
+        "bytes type_env_hash =",
+        "bytes lib_env_hash =",
+        "bytes project_identity =",
+    ] {
+        assert!(
+            body.contains(required),
+            "GraphQueryIdentity must carry the split environment hash `{required} …` — \
+             the five env-hash dimensions stay separate (R21); a bundled hash is forbidden",
+        );
+    }
+    // The forbidden bundled forms must NOT appear.
+    for forbidden in ["project_config_hash", "config_hash", "env_hash_bundle"] {
+        assert!(
+            !body.contains(forbidden),
+            "GraphQueryIdentity must NOT carry a bundled `{forbidden}` — R21 forbids a \
+             single bundled environment hash; the five dimensions stay split",
+        );
+    }
+}
+
 #[test]
 fn closure_policy_surface_is_the_closed_five_variant_set() {
     // The closure policy is the closed `GraphClosurePolicy.kind` oneof —
