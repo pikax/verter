@@ -16236,17 +16236,23 @@ mod tests {
             // Wait until exactly ONE Source stage has been entered (the
             // worker is now parked on that gate, NOT released). Do not
             // release it — we want the worker stuck while we observe the
-            // driver dispatch the rest.
+            // driver dispatch the rest. Poll every gate non-blockingly
+            // against the SAME generous deadline the rest of the test uses
+            // (rather than a fixed per-receiver budget), so a scheduler
+            // slow to enter the first stage under load can't spuriously
+            // time this initial wait out.
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
-            let mut parked_idx = None;
-            for (i, erx) in entered_rxs.iter().enumerate() {
-                if erx.recv_timeout(Duration::from_millis(50)).is_ok() {
-                    parked_idx = Some(i);
-                    break;
+            let parked_idx = loop {
+                let entered = entered_rxs.iter().position(|erx| erx.try_recv().is_ok());
+                if let Some(i) = entered {
+                    break i;
                 }
-            }
-            let parked_idx = parked_idx
-                .expect("the single IO worker must enter SOME Source stage and park there");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the single IO worker must enter SOME Source stage and park there"
+                );
+                std::thread::yield_now();
+            };
 
             // THE DISCRIMINATOR: with the worker still parked on
             // `parked_idx`, the driver must have dispatched ALL N submit
