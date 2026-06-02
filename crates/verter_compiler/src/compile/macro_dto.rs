@@ -26,14 +26,14 @@
 //! Every field is owned (`String` / `Vec` / `Option` / plain enums) — there are
 //! no borrows, no lifetimes, no `&str`, and no `verter_session` / parser AST
 //! types. This is the property that lets the session/host produce the surface
-//! from the shared typed-IR dispatch (B5) and the compiler consume it (B6–B8)
-//! without either side leaking the other's internals. The DTO-boundary invariant
-//! (`verter_compiler` must never depend on `verter_session`) is pinned by
+//! from the shared typed-IR dispatch and the `verter_compiler` codegen paths
+//! consume it without either side leaking the other's internals. The
+//! DTO-boundary invariant (`verter_compiler` must never depend on
+//! `verter_session`) is pinned by
 //! `crates/verter_compiler/tests/no_session_dependency.rs`.
 //!
-//! These types are intentionally **unwired** in this change: no codegen path
-//! constructs or reads them yet. They are the target hand-off shape that later
-//! cutover steps route through, replacing the parser's `ResolvedElements`.
+//! These types are the owned hand-off shape the `verter_compiler` codegen paths
+//! route through in place of the parser's `ResolvedElements`.
 
 /// Runtime constructor kind inferred for a macro prop's type, mirroring the
 /// parser's `RuntimeType` (`verter_parser::utils::oxc::vue::RuntimeType`) on the
@@ -102,12 +102,14 @@ impl RuntimeCtorKind {
 /// Interface / type-literal members are always [`MacroVisibility::Public`]. This
 /// is the field the `native_props` FFI carrier
 /// (`ResolvedMacroMeta.native_props` → `FfiResolvedNativeProp.visibility`)
-/// requires: B5 populates it from the resolved class member and B11 re-sources
-/// `native_props` (name / optional / type / visibility / span) from this DTO,
-/// so the visibility fact must survive on the prop surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// requires: the session/host populates it from the resolved class member and
+/// the `native_props` FFI carrier re-sources its visibility (alongside name /
+/// optional / type / span) from this surface, so the visibility fact must
+/// survive on the prop surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MacroVisibility {
     /// `public` member (or any non-class / interface member — the default).
+    #[default]
     Public,
     /// `protected` class member.
     Protected,
@@ -130,12 +132,6 @@ impl MacroVisibility {
             Self::Protected => "protected",
             Self::Private => "private",
         }
-    }
-}
-
-impl Default for MacroVisibility {
-    fn default() -> Self {
-        Self::Public
     }
 }
 
@@ -264,6 +260,48 @@ pub struct MacroSlotDto {
     pub slot_ts: String,
 }
 
+/// A single native-only prop on the `defineProps` surface, carrying the
+/// class-member visibility surface and source span that the `native_props` FFI
+/// carrier requires.
+///
+/// This is the owned equivalent of the session-side native prop carrier
+/// (`ResolvedNativeProp`): the session/host projects it from the eager OXC
+/// resolved elements, and the `native_props` FFI carrier
+/// (`FfiResolvedNativeProp`) re-sources every field here — `name`, `is_optional`,
+/// `type_annotation`, `visibility`, and the span (`span_start` / `span_end`) —
+/// onto the `@verter/component-meta` `nativeProps` surface.
+///
+/// Unlike [`MacroPropDto`] (the published props/emits/slots surface), this
+/// carrier exists solely for the native `nativeProps` consumer, which the
+/// published surface does not cover: it preserves private/protected member
+/// visibility and the member's source span.
+///
+/// - `name` — the member name.
+/// - `is_optional` — whether the member is optional (`?`).
+/// - `type_annotation` — the rendered TS type annotation text, if any.
+///   Display/codegen text — consumers must not re-parse it for semantics.
+/// - `visibility` — [`MacroVisibility`]; preserves `public` / `protected` /
+///   `private` class-member visibility.
+/// - `span_start` / `span_end` — the member's SFC-absolute byte-offset span
+///   (`[start, end)`, half-open), re-sourced onto the FFI `span_start` /
+///   `span_end` fields.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MacroNativePropDto {
+    /// Member name.
+    pub name: String,
+    /// Whether the member is optional (`?`).
+    pub is_optional: bool,
+    /// Rendered TS type annotation text, if any. Display/codegen text —
+    /// consumers must not re-parse it for semantics.
+    pub type_annotation: Option<String>,
+    /// Class-member visibility (`public` / `protected` / `private`).
+    pub visibility: MacroVisibility,
+    /// SFC-absolute start byte offset of the member span (inclusive).
+    pub span_start: u32,
+    /// SFC-absolute end byte offset of the member span (exclusive).
+    pub span_end: u32,
+}
+
 /// The resolved `defineProps` / `withDefaults` surface.
 ///
 /// `unresolved` is the per-macro UNRESOLVED signal: `true` when the type
@@ -272,6 +310,9 @@ pub struct MacroSlotDto {
 /// diagnostic in [`crate::compile`]. `root_constructors` mirrors
 /// `ResolvedElements.root_runtime_types`, used by the object-like check
 /// (`props_type_is_object_like`) to accept an empty-but-object-like props type.
+/// `native_props` carries the native-only class-member visibility + span surface
+/// that the `native_props` FFI carrier re-sources for `@verter/component-meta`'s
+/// `nativeProps`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MacroPropsSurface {
     /// Resolved props, in declaration order.
@@ -280,6 +321,10 @@ pub struct MacroPropsSurface {
     /// Mirrors `ResolvedElements.root_runtime_types`; an `Object` entry marks
     /// an empty-but-object-like props type as valid.
     pub root_constructors: Vec<RuntimeCtorKind>,
+    /// Native-only props, in declaration order: the class-member visibility +
+    /// span surface re-sourced by the `native_props` FFI carrier for
+    /// `@verter/component-meta`'s `nativeProps`.
+    pub native_props: Vec<MacroNativePropDto>,
     /// Whether the props type argument resolved to nothing (drives
     /// `XInvalidMacroType`). Mirrors `MacroTypeParams.unresolved_type_ref`.
     pub unresolved: bool,
@@ -334,11 +379,11 @@ pub struct MacroOptionsSurface {
 /// The full per-SFC resolved macro-surface bundle.
 ///
 /// This is the owned hand-off shape the session/host produces from the shared
-/// typed-IR dispatch (B5) and the `verter_compiler` runtime / IDE-TSX /
-/// diagnostics paths consume (B6–B8), replacing the parser's `ResolvedElements`.
-/// Each surface is named per macro kind so it maps 1:1 onto the existing
-/// per-kind consumer sites, and each surface carries its own `unresolved` flag
-/// (the `XInvalidMacroType` driver).
+/// typed-IR dispatch and the `verter_compiler` runtime / IDE-TSX / diagnostics
+/// paths consume, in place of the parser's `ResolvedElements`. Each surface is
+/// named per macro kind so it maps 1:1 onto the existing per-kind consumer
+/// sites, and each surface carries its own `unresolved` flag (the
+/// `XInvalidMacroType` driver).
 ///
 /// A macro that is simply absent from the SFC is represented by its surface's
 /// `Default` (empty collections, `unresolved == false`).

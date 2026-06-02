@@ -3,16 +3,17 @@
 //! Pins the full field set of [`ResolvedMacroSurfaces`] and its members. The
 //! test constructs a fully-populated bundle — props covering **every**
 //! [`RuntimeCtorKind`] variant plus a non-public visibility, a default, an
-//! optional prop, and JSDoc; non-empty emits (call + tuple + none payload);
-//! non-empty slots; and an emits surface flagged `unresolved = true` — and
-//! asserts the constructed value `PartialEq`-equals an independently spelled-out
-//! expected literal. Any field dropped, renamed, or re-typed breaks the
-//! `PartialEq` and fails this test.
+//! optional prop, and JSDoc; native props carrying the visibility + span
+//! surface the `native_props` FFI carrier re-sources; non-empty emits (call +
+//! tuple + none payload); non-empty slots; and an emits surface flagged
+//! `unresolved = true` — and asserts the constructed value `PartialEq`-equals an
+//! independently spelled-out expected literal. Any field dropped, renamed, or
+//! re-typed breaks the `PartialEq` and fails this test.
 
 use verter_compiler::compile::{
-    MacroEmitDto, MacroEmitPayload, MacroEmitsSurface, MacroExposeSurface, MacroOptionsSurface,
-    MacroPropDto, MacroPropsSurface, MacroSlotDto, MacroSlotsSurface, MacroVisibility,
-    ResolvedMacroSurfaces, RuntimeCtorKind,
+    MacroEmitDto, MacroEmitPayload, MacroEmitsSurface, MacroExposeSurface, MacroNativePropDto,
+    MacroOptionsSurface, MacroPropDto, MacroPropsSurface, MacroSlotDto, MacroSlotsSurface,
+    MacroVisibility, ResolvedMacroSurfaces, RuntimeCtorKind,
 };
 
 /// Build a props list that exercises every `RuntimeCtorKind` variant exactly
@@ -130,12 +131,37 @@ fn sample_slots() -> Vec<MacroSlotDto> {
     ]
 }
 
+/// Build a native-props list exercising the visibility surface + span the
+/// `native_props` FFI carrier re-sources: a protected member with a real span
+/// and a type annotation, plus a private optional member.
+fn sample_native_props() -> Vec<MacroNativePropDto> {
+    vec![
+        MacroNativePropDto {
+            name: "internalId".to_string(),
+            is_optional: false,
+            type_annotation: Some("number".to_string()),
+            visibility: MacroVisibility::Protected,
+            span_start: 42,
+            span_end: 57,
+        },
+        MacroNativePropDto {
+            name: "secret".to_string(),
+            is_optional: true,
+            type_annotation: Some("string | undefined".to_string()),
+            visibility: MacroVisibility::Private,
+            span_start: 60,
+            span_end: 80,
+        },
+    ]
+}
+
 #[test]
 fn resolved_macro_surfaces_full_contract() {
     let surfaces = ResolvedMacroSurfaces {
         props: MacroPropsSurface {
             props: sample_props(),
             root_constructors: vec![RuntimeCtorKind::Object],
+            native_props: sample_native_props(),
             unresolved: false,
         },
         emits: MacroEmitsSurface {
@@ -223,6 +249,24 @@ fn resolved_macro_surfaces_full_contract() {
                 },
             ],
             root_constructors: vec![RuntimeCtorKind::Object],
+            native_props: vec![
+                MacroNativePropDto {
+                    name: "internalId".to_string(),
+                    is_optional: false,
+                    type_annotation: Some("number".to_string()),
+                    visibility: MacroVisibility::Protected,
+                    span_start: 42,
+                    span_end: 57,
+                },
+                MacroNativePropDto {
+                    name: "secret".to_string(),
+                    is_optional: true,
+                    type_annotation: Some("string | undefined".to_string()),
+                    visibility: MacroVisibility::Private,
+                    span_start: 60,
+                    span_end: 80,
+                },
+            ],
             unresolved: false,
         },
         emits: MacroEmitsSurface {
@@ -364,6 +408,35 @@ fn resolved_macro_surfaces_full_contract() {
         surfaces.props.root_constructors,
         vec![RuntimeCtorKind::Object]
     );
+
+    // Native props carry the visibility + span surface the FFI carrier
+    // re-sources. Assert each field directly so a dropped/renamed/retyped field
+    // fails here, not only via the whole-bundle equality above.
+    assert_eq!(surfaces.props.native_props.len(), 2);
+    let internal_id = &surfaces.props.native_props[0];
+    assert_eq!(internal_id.name, "internalId");
+    assert!(!internal_id.is_optional);
+    assert_eq!(internal_id.type_annotation.as_deref(), Some("number"));
+    assert_eq!(internal_id.visibility, MacroVisibility::Protected);
+    assert_eq!(internal_id.visibility.as_wire_str(), "protected");
+    // Span is preserved and well-formed (start < end), matching the FFI
+    // `span_start` / `span_end` fields.
+    assert_eq!(internal_id.span_start, 42);
+    assert_eq!(internal_id.span_end, 57);
+    assert!(internal_id.span_start < internal_id.span_end);
+
+    let secret = &surfaces.props.native_props[1];
+    assert_eq!(secret.name, "secret");
+    assert!(secret.is_optional);
+    assert_eq!(
+        secret.type_annotation.as_deref(),
+        Some("string | undefined")
+    );
+    assert_eq!(secret.visibility, MacroVisibility::Private);
+    assert!(!secret.visibility.is_public());
+    assert_eq!(secret.span_start, 60);
+    assert_eq!(secret.span_end, 80);
+    assert!(secret.span_start < secret.span_end);
 }
 
 /// An absent macro is the surface's `Default`: empty + not unresolved.
@@ -372,6 +445,7 @@ fn default_surfaces_are_empty_and_resolved() {
     let surfaces = ResolvedMacroSurfaces::default();
     assert!(surfaces.props.props.is_empty());
     assert!(surfaces.props.root_constructors.is_empty());
+    assert!(surfaces.props.native_props.is_empty());
     assert!(!surfaces.props.unresolved);
     assert!(surfaces.emits.emits.is_empty());
     assert!(!surfaces.emits.unresolved);
