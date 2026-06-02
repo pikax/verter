@@ -539,6 +539,88 @@ fn var_widens_string_literal_initializer() {
     );
 }
 
+/// A `let` whose initializer is a constructor-type assertion
+/// (`value as new () => { kind: "x" }`) must widen the literal members
+/// of the constructor's return type EXACTLY as the function-type
+/// equivalent does — and must PRESERVE the `ConstructorType` variant
+/// (not flatten it to `Function`).
+///
+/// `widen_literal_type` runs on analyzer-side lowered IR (the `as`
+/// expression lowers via `lower_ts_type`), BEFORE the dispatch lower
+/// collapses `Function`/`ConstructorType` to `SemanticNodeData::Function`.
+/// Pre-fix the catch-all `_ => expr` arm forwarded the whole
+/// `ConstructorType` untouched, so the inner `kind: "x"` literal was
+/// silently NOT widened. Discriminator: the inner `kind` member must be
+/// `string`, never the `"x"` literal — and the outer node must remain a
+/// `ConstructorType`.
+#[test]
+fn let_widens_constructor_type_return_literal_members() {
+    let env = parse_and_build_env(r#"let C = value as new () => { kind: "x" }"#);
+    let decl = &env.value_symbols["C"];
+
+    let Some(TypeExpr::ConstructorType(function)) = decl.type_annotation.as_ref() else {
+        panic!(
+            "constructor-type assertion must preserve the ConstructorType variant (never flatten to Function), got {:?}",
+            decl.type_annotation
+        );
+    };
+    let Some(return_type) = function.return_type.as_ref() else {
+        panic!("constructor type must carry a return type");
+    };
+    let TypeExpr::Object(obj) = return_type.as_ref() else {
+        panic!(
+            "constructor return type must remain an object, got {:?}",
+            return_type
+        );
+    };
+    let kind_ty = obj.properties.iter().find_map(|member| match member {
+        ObjectMember::Property(prop) if prop.name == "kind" => Some(&prop.ty),
+        _ => None,
+    });
+    assert_eq!(
+        kind_ty,
+        Some(&TypeExpr::Primitive(PrimitiveName::String)),
+        "let-bound constructor-return literal member must widen to `string`"
+    );
+    assert_ne!(
+        kind_ty,
+        Some(&TypeExpr::string_literal("x")),
+        "let-bound constructor-return literal member must NOT stay the `\"x\"` literal"
+    );
+}
+
+/// Parity guard: the FUNCTION-type equivalent of
+/// `let_widens_constructor_type_return_literal_members` must widen the
+/// same return literal identically. The two carry the same `FunctionExpr`
+/// payload; only the variant tag differs, so widening behaviour must be
+/// identical. This pins that the ConstructorType arm mirrors the Function
+/// arm rather than diverging.
+#[test]
+fn let_widens_function_type_return_literal_members_parity() {
+    let env = parse_and_build_env(r#"let F = value as () => { kind: "x" }"#);
+    let decl = &env.value_symbols["F"];
+
+    let Some(TypeExpr::Function(function)) = decl.type_annotation.as_ref() else {
+        panic!(
+            "function-type assertion must remain a Function, got {:?}",
+            decl.type_annotation
+        );
+    };
+    let return_type = function.return_type.as_ref().expect("function return type");
+    let TypeExpr::Object(obj) = return_type.as_ref() else {
+        panic!("function return type must remain an object, got {return_type:?}");
+    };
+    let kind_ty = obj.properties.iter().find_map(|member| match member {
+        ObjectMember::Property(prop) if prop.name == "kind" => Some(&prop.ty),
+        _ => None,
+    });
+    assert_eq!(
+        kind_ty,
+        Some(&TypeExpr::Primitive(PrimitiveName::String)),
+        "let-bound function-return literal member must widen to `string`"
+    );
+}
+
 #[test]
 fn let_widens_nested_object_literal_properties() {
     let env = parse_and_build_env(r#"let settings = { mode: "dark", nested: { count: 1 } }"#);

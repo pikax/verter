@@ -1389,6 +1389,23 @@ fn widen_literal_type(expr: TypeExpr) -> TypeExpr {
             function.type_parameters.clone(),
             function.spans,
         ))),
+        // A bare constructor type (`new (...) => R`) carries the same
+        // `FunctionExpr` payload as a function type, so its literal members
+        // widen identically. Reconstruct as a `ConstructorType` so the
+        // constructor-ness survives — never flatten it to a plain `Function`.
+        // This runs on analyzer-side lowered IR (e.g. `value as new () => T`),
+        // BEFORE the dispatch lower collapses `Function`/`ConstructorType`.
+        TypeExpr::ConstructorType(function) => {
+            TypeExpr::ConstructorType(Arc::new(FunctionExpr::with_spans(
+                function.parameters.clone(),
+                function
+                    .return_type
+                    .as_ref()
+                    .map(|return_type| Arc::new(widen_literal_type(return_type.as_ref().clone()))),
+                function.type_parameters.clone(),
+                function.spans,
+            )))
+        }
         _ => expr,
     }
 }
