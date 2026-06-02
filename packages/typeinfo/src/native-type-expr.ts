@@ -28,6 +28,17 @@ export type NativeTypeExpr =
       returnType?: NativeTypeExpr | null;
       typeParameters?: NativeTypeParameter[];
     }
+  // A bare TS constructor type `new (...) => R`. Rust serialises it with the
+  // SAME payload shape as `function` (parameters / returnType / typeParameters
+  // via `function_to_json`); only `kind` differs. Treated function-like by the
+  // descriptor mapper — the constructor-vs-function distinction is consumed in
+  // Rust (Vue runtime-ctor reducer + wire-graph builder) before this bridge.
+  | {
+      kind: "constructorType";
+      parameters: NativeFunctionParam[];
+      returnType?: NativeTypeExpr | null;
+      typeParameters?: NativeTypeParameter[];
+    }
   | { kind: "ref"; name: string; typeArguments: NativeTypeExpr[] }
   | {
       kind: "recursiveRef";

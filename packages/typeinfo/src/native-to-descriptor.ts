@@ -106,7 +106,15 @@ export function nativeToDescriptor(expr: NativeTypeExpr): TypeDescriptor {
       return tuple(expr.elements.map((e) => nativeToDescriptor(e.ty)));
     case "object":
       return lowerObject(expr.properties);
+    // `function` and `constructorType` share the identical native payload
+    // (parameters / returnType / typeParameters via Rust `function_to_json`)
+    // and both lower to a function-like `FunctionType` descriptor. The bare-
+    // constructor-vs-function distinction is consumed in Rust (Vue runtime-ctor
+    // reducer + wire-graph builder) before this bridge, so a `constructorType`
+    // node is treated function-like here rather than left as an unhandled raw
+    // descriptor.
     case "function":
+    case "constructorType":
       return lowerFunction({
         parameters: expr.parameters,
         returnType: expr.returnType ?? undefined,
@@ -232,6 +240,11 @@ function describeBrief(expr: NativeTypeExpr): string {
       return JSON.stringify(expr.value);
     case "ref":
       return expr.name;
+    case "constructorType":
+      // Function-like; brief it distinctly from a plain function so an operator
+      // shell that embeds a constructor type (e.g. inside a conditional) reads
+      // intelligibly rather than as the raw `constructorType` kind tag.
+      return "new (...) => ...";
     default:
       return expr.kind;
   }
