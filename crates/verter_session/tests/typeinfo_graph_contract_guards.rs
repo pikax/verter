@@ -130,7 +130,11 @@ fn proto_oneof_arms(source: &str, message: &str, discriminator: &str) -> BTreeSe
         }
         if let Some((lhs, _)) = stmt.split_once('=') {
             if let Some(selector) = lhs.split_whitespace().nth(1) {
-                if selector.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+                if selector
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_lowercase())
+                {
                     arms.insert(selector.to_string());
                 }
             }
@@ -205,7 +209,10 @@ fn node_taxonomy_complete() {
     // the set comparison fails.
     let proto = read_proto();
     let arms = proto_oneof_arms(&proto, "GraphTypeNode", "kind");
-    let expected: BTreeSet<String> = NODE_TAXONOMY_ARMS.iter().map(|s| (*s).to_string()).collect();
+    let expected: BTreeSet<String> = NODE_TAXONOMY_ARMS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
     assert_eq!(
         arms.len(),
         32,
@@ -358,8 +365,11 @@ fn origin_edge_taxonomy_locked() {
     // is exactly the session set.
     let session_set: BTreeSet<&str> = session_names.iter().copied().collect();
     let audit_set: BTreeSet<&str> = audit_names.iter().copied().collect();
-    let audit_minus_extra: BTreeSet<&str> =
-        audit_set.iter().copied().filter(|n| *n != "SharedLoadReuse").collect();
+    let audit_minus_extra: BTreeSet<&str> = audit_set
+        .iter()
+        .copied()
+        .filter(|n| *n != "SharedLoadReuse")
+        .collect();
     assert_eq!(
         audit_minus_extra, session_set,
         "audit OriginEdgeKind minus `SharedLoadReuse` must equal the session OriginEdgeKind set",
@@ -380,10 +390,15 @@ fn origin_edge_taxonomy_locked() {
         .map(|s| (*s).to_string())
         .collect();
     assert_eq!(
-        proto_variants, expected_proto,
+        proto_variants,
+        expected_proto,
         "proto GraphOriginEdgeKind drifted.\nproto-only: {:?}\nexpected-only: {:?}",
-        proto_variants.difference(&expected_proto).collect::<Vec<_>>(),
-        expected_proto.difference(&proto_variants).collect::<Vec<_>>(),
+        proto_variants
+            .difference(&expected_proto)
+            .collect::<Vec<_>>(),
+        expected_proto
+            .difference(&proto_variants)
+            .collect::<Vec<_>>(),
     );
     assert_eq!(
         proto_variants.len(),
@@ -424,7 +439,8 @@ fn symbol_node_preserves_type_value_namespace_spaces() {
     .map(|s| (*s).to_string())
     .collect();
     assert_eq!(
-        variants, expected,
+        variants,
+        expected,
         "GraphSymbolNamespace must be exactly {{ TYPE, VALUE, NAMESPACE }}.\n\
          proto-only: {:?}\nexpected-only: {:?}",
         variants.difference(&expected).collect::<Vec<_>>(),
@@ -511,12 +527,18 @@ fn literal_value_key_is_independent_of_wire_string_table() {
 
     // GraphLiteralValue is a distinct oneof with the four value kinds.
     let lit_arms = proto_oneof_arms(&proto, "GraphLiteralValue", "kind");
-    let expected: BTreeSet<String> = ["string_name_id", "number_bits", "boolean_value", "bigint_name_id"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
+    let expected: BTreeSet<String> = [
+        "string_name_id",
+        "number_bits",
+        "boolean_value",
+        "bigint_name_id",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
     assert_eq!(
-        lit_arms, expected,
+        lit_arms,
+        expected,
         "GraphLiteralValue.kind must be exactly the 4 value kinds \
          (string_name_id / number_bits / boolean_value / bigint_name_id).\n\
          proto-only: {:?}\nexpected-only: {:?}",
@@ -638,7 +660,8 @@ fn closure_policy_surface_is_the_closed_five_variant_set() {
     .map(|s| (*s).to_string())
     .collect();
     assert_eq!(
-        arms, expected,
+        arms,
+        expected,
         "GraphClosurePolicy.kind must be exactly the 5 closure strategies \
          (root_only / path / one_level / expanded / projection_required).\n\
          proto-only: {:?}\nexpected-only: {:?}",

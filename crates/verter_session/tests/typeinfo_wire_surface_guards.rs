@@ -306,11 +306,23 @@ fn ts_rs_not_applied_to_wire_dtos() {
 /// guarantee, so the field type is part of the contract.
 const CLOSED_ENUM_DISCRIMINANT_FIELDS: &[(&str, &str, &str)] = &[
     ("GraphSymbolNode", "namespace", "GraphSymbolNamespace"),
-    ("GraphResolvedDeclSlotIdentity", "namespace", "GraphSymbolNamespace"),
+    (
+        "GraphResolvedDeclSlotIdentity",
+        "namespace",
+        "GraphSymbolNamespace",
+    ),
     ("GraphOriginEdge", "kind", "GraphOriginEdgeKind"),
     ("GraphNodeStatus", "exactness", "GraphExactness"),
-    ("GraphProjectionReductionContext", "mode", "GraphProjectionMode"),
-    ("GraphProjectionReductionContext", "demand", "GraphReductionDemand"),
+    (
+        "GraphProjectionReductionContext",
+        "mode",
+        "GraphProjectionMode",
+    ),
+    (
+        "GraphProjectionReductionContext",
+        "demand",
+        "GraphReductionDemand",
+    ),
     ("GraphDiagnostic", "severity", "GraphDiagnosticSeverity"),
 ];
 
@@ -391,9 +403,7 @@ fn proto_enum_declaration_counts(proto: &str) -> std::collections::BTreeMap<Stri
 }
 
 /// Names declared more than once.
-fn proto_duplicate_enum_names(
-    counts: &std::collections::BTreeMap<String, usize>,
-) -> Vec<String> {
+fn proto_duplicate_enum_names(counts: &std::collections::BTreeMap<String, usize>) -> Vec<String> {
     counts
         .iter()
         .filter(|(_, &count)| count > 1)

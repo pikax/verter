@@ -20,15 +20,14 @@
 use std::path::PathBuf;
 
 use verter_protocol::typeinfo::graph as wire;
-use verter_protocol::typeinfo::graph::{
-    TYPEINFO_GRAPH_SCHEMA_VERSION,
-};
+use verter_protocol::typeinfo::graph::TYPEINFO_GRAPH_SCHEMA_VERSION;
 use verter_protocol::verter::v1::{
     graph_closure_policy, type_info_graph_request as wire_request, type_info_request_error,
 };
 use verter_session::typeinfo::request_validation::{
     validate_resolve_symbol_graph_request, validate_type_info_graph_request,
-    MAX_EXPANSION_DEPTH_BUDGET, MAX_EXPANSION_NODE_BUDGET, SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
+    MAX_EXPANSION_DEPTH_BUDGET, MAX_EXPANSION_NODE_BUDGET,
+    SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
 };
 
 fn workspace_root() -> PathBuf {
@@ -57,16 +56,20 @@ fn default_context() -> wire::ProjectionReductionContext {
 
 fn one_level_closure() -> wire::ClosurePolicy {
     wire::ClosurePolicy {
-        kind: Some(graph_closure_policy::Kind::OneLevel(wire::ClosureOneLevel {})),
+        kind: Some(graph_closure_policy::Kind::OneLevel(
+            wire::ClosureOneLevel {},
+        )),
     }
 }
 
 fn expanded_closure(node_budget: u32, depth_budget: u32) -> wire::ClosurePolicy {
     wire::ClosurePolicy {
-        kind: Some(graph_closure_policy::Kind::Expanded(wire::ClosureExpanded {
-            node_budget,
-            depth_budget,
-        })),
+        kind: Some(graph_closure_policy::Kind::Expanded(
+            wire::ClosureExpanded {
+                node_budget,
+                depth_budget,
+            },
+        )),
     }
 }
 
@@ -288,7 +291,10 @@ fn every_closure_variant_has_concrete_resource_bound() {
     // (4) A within-bounds Expanded budget validates.
     validate_resolve_symbol_graph_request(&resolve_symbol_request_with(
         Some(default_context()),
-        Some(expanded_closure(MAX_EXPANSION_NODE_BUDGET, MAX_EXPANSION_DEPTH_BUDGET)),
+        Some(expanded_closure(
+            MAX_EXPANSION_NODE_BUDGET,
+            MAX_EXPANSION_DEPTH_BUDGET,
+        )),
     ))
     .expect("a within-bounds Expanded budget must validate");
 
@@ -314,7 +320,8 @@ fn every_closure_variant_has_concrete_resource_bound() {
         .expect("GraphClosureExpanded must exist");
     let expanded_body = &proto[expanded_idx..expanded_idx + 160];
     assert!(
-        expanded_body.contains("uint32 node_budget =") && expanded_body.contains("uint32 depth_budget ="),
+        expanded_body.contains("uint32 node_budget =")
+            && expanded_body.contains("uint32 depth_budget ="),
         "GraphClosureExpanded must carry the `node_budget` and `depth_budget` the validator bounds",
     );
 }
@@ -374,7 +381,10 @@ fn typeinfo_request_error_union_is_consistent_across_sections() {
         }
     }
     proto_arms.sort();
-    let mut expected: Vec<String> = REQUEST_ERROR_VARIANTS.iter().map(|s| (*s).to_string()).collect();
+    let mut expected: Vec<String> = REQUEST_ERROR_VARIANTS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
     expected.sort();
     assert_eq!(
         proto_arms, expected,
@@ -548,7 +558,9 @@ fn relate_has_no_closure_field() {
     let relate_through_graph = wire::TypeInfoGraphRequest {
         schema_version: TYPEINFO_GRAPH_SCHEMA_VERSION,
         operation: wire::Operation::Relate as i32,
-        payload: Some(wire_request::Payload::ResolveSymbol(valid_resolve_symbol_request())),
+        payload: Some(wire_request::Payload::ResolveSymbol(
+            valid_resolve_symbol_request(),
+        )),
     };
     let err = validate_type_info_graph_request(&relate_through_graph)
         .expect_err("RELATE through the graph envelope must be rejected");
