@@ -18,6 +18,27 @@
 use verter_compiler::compile::RuntimeCtorKind;
 use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
+/// Maximum [`TypeExpr`] nesting the reducer recurses through before returning
+/// the safe `[Unknown]` fallback.
+///
+/// The reduction walks the `TypeExpr` children (parenthesised / rest wrappers,
+/// union / intersection arms, conditional branches, utility-type arguments).
+/// `RecursiveRef` is a terminal node so true cycles already stop, but a
+/// DEEPLY-NESTED ACYCLIC `TypeExpr` (the same depth class that forced the
+/// `TypeExpr` `Drop` / `Hash` impls to be iterative — see
+/// `verter_type_expr::recursive_traversal`) would otherwise overflow the thread
+/// stack via this call-stack recursion. Reducing past this depth returns
+/// `[RuntimeCtorKind::Unknown]` exactly like an un-inferable type — the runtime
+/// constructor of a pathologically-deep annotation is not knowable from its
+/// syntactic shape anyway.
+///
+/// The ceiling sits in the same family as the project's other syntactic-depth
+/// limits (`verter_session::types::MAX_RESOLVE_DEPTH = 128`,
+/// `verter_parser::…::PARSER_SYNTACTIC_DEPTH_LIMIT = 256`): comfortably above
+/// any realistic hand-written or generated prop type, far below the depth that
+/// exhausts a default thread stack.
+const RUNTIME_CTOR_REDUCE_DEPTH_LIMIT: usize = 256;
+
 /// Reduce a semantic [`TypeExpr`] to the Vue runtime prop constructor kinds it
 /// implies, mirroring the parser's `infer_runtime_type` exactly (which TS type
 /// maps to which constructor(s), union dedup + order, and the `Unknown`
@@ -28,7 +49,23 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 /// `string | string` yields `[String]`). The returned vector is never empty:
 /// an un-reducible type yields `[RuntimeCtorKind::Unknown]`, which downstream
 /// renders as `null` (matching `format_runtime_types`).
+///
+/// Recursion is depth-bounded by [`RUNTIME_CTOR_REDUCE_DEPTH_LIMIT`]: a
+/// pathologically-deep acyclic `TypeExpr` reduces to `[Unknown]` rather than
+/// overflowing the stack. Realistic depths are unaffected.
 pub fn runtime_constructors_from_type_expr(ty: &TypeExpr) -> Vec<RuntimeCtorKind> {
+    runtime_constructors_at_depth(ty, 0)
+}
+
+/// Depth-tracked core of [`runtime_constructors_from_type_expr`]. Every
+/// recursive descent into a `TypeExpr` child increments `depth`; once it
+/// reaches [`RUNTIME_CTOR_REDUCE_DEPTH_LIMIT`] the reduction yields the safe
+/// `[Unknown]` fallback without descending further.
+fn runtime_constructors_at_depth(ty: &TypeExpr, depth: usize) -> Vec<RuntimeCtorKind> {
+    if depth >= RUNTIME_CTOR_REDUCE_DEPTH_LIMIT {
+        return vec![RuntimeCtorKind::Unknown];
+    }
+    let depth = depth + 1;
     match ty {
         // -- Primitives (mirrors infer.rs:38-49) --
         TypeExpr::Primitive(name) => match name {
@@ -67,17 +104,17 @@ pub fn runtime_constructors_from_type_expr(ty: &TypeExpr) -> Vec<RuntimeCtorKind
         TypeExpr::Function(_) => vec![RuntimeCtorKind::Function],
 
         // -- Parenthesized: transparent (infer.rs:64) --
-        TypeExpr::Parenthesized(inner) => runtime_constructors_from_type_expr(inner),
+        TypeExpr::Parenthesized(inner) => runtime_constructors_at_depth(inner, depth),
 
         // -- `readonly T` / standalone rest: the non-`keyof` type operator
         //    recurses into the inner type (infer.rs:140). --
-        TypeExpr::Rest(inner) => runtime_constructors_from_type_expr(inner),
+        TypeExpr::Rest(inner) => runtime_constructors_at_depth(inner, depth),
 
         // -- Union: flatten arms + dedup, first-seen order (infer.rs:67-77) --
         TypeExpr::Union(arms) => {
             let mut out: Vec<RuntimeCtorKind> = Vec::new();
             for arm in arms.iter() {
-                for ctor in runtime_constructors_from_type_expr(arm) {
+                for ctor in runtime_constructors_at_depth(arm, depth) {
                     if !out.contains(&ctor) {
                         out.push(ctor);
                     }
@@ -91,7 +128,7 @@ pub fn runtime_constructors_from_type_expr(ty: &TypeExpr) -> Vec<RuntimeCtorKind
         TypeExpr::Intersection(arms) => {
             let mut out: Vec<RuntimeCtorKind> = Vec::new();
             for arm in arms.iter() {
-                for ctor in runtime_constructors_from_type_expr(arm) {
+                for ctor in runtime_constructors_at_depth(arm, depth) {
                     if ctor != RuntimeCtorKind::Unknown && !out.contains(&ctor) {
                         out.push(ctor);
                     }
@@ -108,7 +145,7 @@ pub fn runtime_constructors_from_type_expr(ty: &TypeExpr) -> Vec<RuntimeCtorKind
         TypeExpr::Ref {
             name,
             type_arguments,
-        } => runtime_constructors_from_ref(name, type_arguments),
+        } => runtime_constructors_from_ref(name, type_arguments, depth),
 
         // -- Conditional: union both branches; empty => Unknown
         //    (infer.rs:101-113) --
@@ -117,8 +154,8 @@ pub fn runtime_constructors_from_type_expr(ty: &TypeExpr) -> Vec<RuntimeCtorKind
             false_type,
             ..
         } => {
-            let mut out = runtime_constructors_from_type_expr(true_type);
-            for ctor in runtime_constructors_from_type_expr(false_type) {
+            let mut out = runtime_constructors_at_depth(true_type, depth);
+            for ctor in runtime_constructors_at_depth(false_type, depth) {
                 if !out.contains(&ctor) {
                     out.push(ctor);
                 }
@@ -179,7 +216,15 @@ pub fn runtime_constructors_from_type_expr(ty: &TypeExpr) -> Vec<RuntimeCtorKind
 /// built-in JS constructors, the recognised built-in classes (`Date`, `Map`,
 /// …), and the TypeScript utility types that imply a concrete runtime shape.
 /// Any other name is an unresolved reference and yields `[Unknown]`.
-fn runtime_constructors_from_ref(name: &str, type_arguments: &[TypeExpr]) -> Vec<RuntimeCtorKind> {
+///
+/// `depth` is the current reduction depth (see
+/// [`runtime_constructors_at_depth`]): the utility-type arms that infer from a
+/// type argument recurse through it so a deep argument is depth-bounded too.
+fn runtime_constructors_from_ref(
+    name: &str,
+    type_arguments: &[TypeExpr],
+    depth: usize,
+) -> Vec<RuntimeCtorKind> {
     match name {
         // Built-in JavaScript constructors (infer.rs:184-190).
         "Array" | "ReadonlyArray" => vec![RuntimeCtorKind::Array],
@@ -194,6 +239,13 @@ fn runtime_constructors_from_ref(name: &str, type_arguments: &[TypeExpr]) -> Vec
         "Date" | "RegExp" | "Error" | "Map" | "Set" | "WeakMap" | "WeakSet" | "Promise" => {
             vec![RuntimeCtorKind::BuiltIn(name.to_string())]
         }
+
+        // `this` type => Object. The shared lowerer represents a `TSThisType`
+        // as `Ref { name: "this" }` (it has no dedicated `TypeExpr` variant);
+        // legacy's OXC walker maps `TSThisType` directly to Object
+        // (infer.rs:147-148). Routing the ref name here keeps the two paths
+        // identical instead of falling through to the unresolved-ref `[Unknown]`.
+        "this" => vec![RuntimeCtorKind::Object],
 
         // Object-shaped utility types (infer.rs:198-200).
         "Partial" | "Required" | "Readonly" | "Record" | "Pick" | "Omit" | "InstanceType" => {
@@ -210,7 +262,7 @@ fn runtime_constructors_from_ref(name: &str, type_arguments: &[TypeExpr]) -> Vec
 
         // NonNullable<T> infers from T, filtering Null (infer.rs:204-215).
         "NonNullable" => match type_arguments.first() {
-            Some(first) => runtime_constructors_from_type_expr(first)
+            Some(first) => runtime_constructors_at_depth(first, depth)
                 .into_iter()
                 .filter(|ctor| *ctor != RuntimeCtorKind::Null)
                 .collect(),
@@ -219,14 +271,14 @@ fn runtime_constructors_from_ref(name: &str, type_arguments: &[TypeExpr]) -> Vec
 
         // Extract<T, U> returns U — infer from the 2nd arg (infer.rs:216-224).
         "Extract" => match type_arguments.get(1) {
-            Some(second) => runtime_constructors_from_type_expr(second),
+            Some(second) => runtime_constructors_at_depth(second, depth),
             None => vec![RuntimeCtorKind::Unknown],
         },
 
         // Exclude<T, U> / OmitThisParameter<T> infer from the 1st arg
         // (infer.rs:225-233).
         "Exclude" | "OmitThisParameter" => match type_arguments.first() {
-            Some(first) => runtime_constructors_from_type_expr(first),
+            Some(first) => runtime_constructors_at_depth(first, depth),
             None => vec![RuntimeCtorKind::Unknown],
         },
 
@@ -886,6 +938,126 @@ mod tests {
         assert_eq!(
             runtime_constructors_from_type_expr(&ty),
             vec![RuntimeCtorKind::Unknown]
+        );
+    }
+
+    // -- FIX 1: `this` type --
+
+    #[test]
+    fn ref_this_maps_to_object() {
+        // The shared lowerer lowers `TSThisType` to `Ref { name: "this" }`
+        // (verter_type_expr_oxc `lower_ts_type`), where legacy's OXC walker maps
+        // `TSThisType` directly to Object (infer.rs:147-148). Before the fix the
+        // ref-name handler fell through to the unresolved-ref `[Unknown]`; the
+        // dedicated `"this"` arm restores parity.
+        assert_eq!(
+            runtime_constructors_from_type_expr(&TypeExpr::named("this")),
+            vec![RuntimeCtorKind::Object]
+        );
+    }
+
+    #[test]
+    fn ref_this_with_type_arguments_still_maps_to_object() {
+        // `this` never carries type arguments in practice, but the arm keys on
+        // the name alone — a `this<...>` ref still reduces to Object, never the
+        // unresolved-ref fallback.
+        assert_eq!(
+            runtime_constructors_from_type_expr(&TypeExpr::named_with_args(
+                "this",
+                vec![prim(PrimitiveName::String)],
+            )),
+            vec![RuntimeCtorKind::Object]
+        );
+    }
+
+    // -- FIX 2: termination / stack-overflow safety on deep acyclic types --
+
+    /// Build a `TypeExpr` nested `n` levels deep through `Parenthesized`
+    /// wrappers around a terminal `string`. The deep tree itself is built (and
+    /// later dropped) safely thanks to `TypeExpr`'s iterative `Drop`.
+    fn deep_parenthesized(n: usize) -> TypeExpr {
+        let mut ty = prim(PrimitiveName::String);
+        for _ in 0..n {
+            ty = TypeExpr::Parenthesized(Arc::new(ty));
+        }
+        ty
+    }
+
+    /// Build a single `Union` whose sole arm is nested `n` levels deep through
+    /// `Parenthesized` wrappers — exercises the union-arm recursion in addition
+    /// to the wrapper recursion.
+    fn deep_union(n: usize) -> TypeExpr {
+        TypeExpr::Union(Arc::from(vec![deep_parenthesized(n)]))
+    }
+
+    #[test]
+    fn deeply_nested_parenthesized_reduces_without_stack_overflow() {
+        // N is far beyond the reduction depth limit AND far beyond what a naive
+        // call-stack recursion survives on a DEFAULT thread stack. The test runs
+        // on the default stack (no RUST_MIN_STACK) to prove the depth guard —
+        // not an enlarged stack — is what keeps it safe. Pre-fix this overflows;
+        // post-fix the guard returns the `[Unknown]` fallback once the limit is
+        // hit. The terminal `string` lives below the limit, so the reducer never
+        // reaches it: the result is the safe fallback, NOT `[String]`.
+        const N: usize = 50_000;
+        let ty = deep_parenthesized(N);
+        assert_eq!(
+            runtime_constructors_from_type_expr(&ty),
+            vec![RuntimeCtorKind::Unknown],
+            "a {N}-deep acyclic TypeExpr must reduce to the safe fallback, not overflow",
+        );
+    }
+
+    #[test]
+    fn deeply_nested_union_arm_reduces_without_stack_overflow() {
+        // Same depth class reached through the union-arm recursion path. Must
+        // also terminate via the guard on a default stack.
+        const N: usize = 50_000;
+        let ty = deep_union(N);
+        assert_eq!(
+            runtime_constructors_from_type_expr(&ty),
+            vec![RuntimeCtorKind::Unknown],
+            "a union whose arm is {N}-deep must reduce to the safe fallback, not overflow",
+        );
+    }
+
+    #[test]
+    fn shallow_depth_behavior_is_preserved_below_the_limit() {
+        // Nesting that stays well under the limit must reduce EXACTLY as before
+        // the guard — the terminal type is reached and reduced normally. This
+        // pins that the depth guard did not perturb realistic (shallow) inputs.
+        let ty = deep_parenthesized(RUNTIME_CTOR_REDUCE_DEPTH_LIMIT / 2);
+        assert_eq!(
+            runtime_constructors_from_type_expr(&ty),
+            vec![RuntimeCtorKind::String],
+            "a sub-limit nesting must still see through the wrappers to the terminal type",
+        );
+    }
+
+    #[test]
+    fn depth_limit_boundary_is_exact() {
+        // Discriminating boundary test: a nesting that places the terminal
+        // `string` at exactly the deepest reachable level still reduces to
+        // `[String]`, while one level deeper crosses the limit and yields the
+        // `[Unknown]` fallback. This pins the guard's threshold precisely so a
+        // future off-by-one (descending one level too few/many) is caught.
+        //
+        // The public entry calls the core at depth 0; the guard trips when the
+        // ENTRY `depth >= LIMIT`, then `depth` is incremented before recursing.
+        // A chain of `k` `Parenthesized` wrappers around a terminal enters the
+        // i-th wrapper at depth `i` (i = 0..k-1) and enters the terminal at
+        // depth `k`. The terminal is therefore reduced iff `k < LIMIT`, i.e. the
+        // deepest reachable terminal sits at `k = LIMIT - 1`.
+        let reachable = RUNTIME_CTOR_REDUCE_DEPTH_LIMIT - 1;
+        assert_eq!(
+            runtime_constructors_from_type_expr(&deep_parenthesized(reachable)),
+            vec![RuntimeCtorKind::String],
+            "the terminal at the deepest reachable level (k = LIMIT-1) must still be reduced",
+        );
+        assert_eq!(
+            runtime_constructors_from_type_expr(&deep_parenthesized(reachable + 1)),
+            vec![RuntimeCtorKind::Unknown],
+            "one wrapper deeper (k = LIMIT) must cross the limit and yield the safe fallback",
         );
     }
 }
