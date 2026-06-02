@@ -23,58 +23,97 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use verter_scheduler::cpu_concurrency::{CpuConcurrencyPermit, CpuConcurrencySemaphore};
 
-/// Capacity cap: with capacity 2, two `acquire()` calls succeed
-/// immediately and a third blocks until one of the first two permits is
-/// dropped. We observe the block by asserting the third acquire does not
-/// complete while both permits are held, then completes promptly after a
-/// release.
+/// Capacity cap: with capacity N, the (N+1)th `acquire()` BLOCKS until a
+/// permit is released. This test is deterministic and discriminating — it
+/// proves blocking via channel handshakes, NOT via sleep-timing
+/// inference:
+///
+/// - The spawned acquirer sends on `intent_tx` IMMEDIATELY before calling
+///   `acquire()`, then sends on `acquired_tx` ONLY AFTER `acquire()`
+///   returns.
+/// - The main thread waits for the intent signal (the spawned thread is
+///   about to enter `acquire`), then asserts `acquired_rx.recv_timeout`
+///   times out: a correctly-BLOCKING `acquire` cannot have returned yet,
+///   so no `acquired` message can exist within the window. A broken
+///   NON-blocking semaphore would have already sent on `acquired_tx`,
+///   tripping this assertion.
+/// - The main thread then releases one held permit and asserts the
+///   spawned `acquire` completes (the `acquired` message now arrives).
+///
+/// Because the discriminator is "did the `acquired` message arrive BEFORE
+/// any permit was freed", a non-blocking impl fails it regardless of
+/// thread-scheduling timing — the window only ever shrinks the chance of
+/// a false PASS for the real impl, never produces a false FAIL for a
+/// broken one.
 #[test]
 fn capacity_cap_blocks_until_permit_released() {
-    let sem = Arc::new(CpuConcurrencySemaphore::new(2));
+    const N: usize = 2;
+    /// Generous relative to scheduling jitter, short relative to the test
+    /// (the real impl never sends `acquired` in this window because no
+    /// permit is freed yet; only a broken non-blocking impl would).
+    const BLOCK_OBSERVATION_WINDOW: Duration = Duration::from_millis(300);
 
-    let p1 = sem.acquire();
-    let p2 = sem.acquire();
+    let sem = Arc::new(CpuConcurrencySemaphore::new(N));
 
-    // A third acquire on another thread must block while both permits live.
-    let acquired_third = Arc::new(AtomicUsize::new(0));
+    // Fill capacity on the main thread: N live permits, zero free.
+    let held: Vec<CpuConcurrencyPermit<'_>> = (0..N).map(|_| sem.acquire()).collect();
+    assert_eq!(held.len(), N, "main thread holds all {N} permits");
+
+    let (intent_tx, intent_rx) = mpsc::channel::<()>();
+    let (acquired_tx, acquired_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+
     let sem2 = Arc::clone(&sem);
-    let flag = Arc::clone(&acquired_third);
-    let handle = thread::spawn(move || {
-        let _p3 = sem2.acquire();
-        flag.store(1, Ordering::SeqCst);
-        // Hold briefly so the main thread can observe the store.
-        thread::sleep(Duration::from_millis(20));
+    let extra = thread::spawn(move || {
+        // Signal intent IMMEDIATELY before the (expected-blocking) acquire.
+        intent_tx.send(()).expect("intent send");
+        let _permit = sem2.acquire();
+        // Reached ONLY after acquire() returns — i.e. after a permit is
+        // free. A non-blocking impl reaches this immediately; the real
+        // impl reaches it only after the main thread drops a permit.
+        acquired_tx.send(()).expect("acquired send");
+        // Keep the permit live until the test tells us to finish, so the
+        // `acquired` send above is observed before this thread (and its
+        // sender) tears down. `_permit` drops at end of scope.
+        let _ = release_rx.recv();
     });
 
-    // Give the spawned thread time to attempt the (blocked) acquire.
-    thread::sleep(Duration::from_millis(80));
-    assert_eq!(
-        acquired_third.load(Ordering::SeqCst),
-        0,
-        "third acquire must block while capacity (2) is exhausted",
-    );
+    // The spawned thread is about to call `acquire()`.
+    intent_rx
+        .recv()
+        .expect("spawned thread signalled acquire intent");
 
-    // Release one permit; the blocked acquire must now proceed.
-    drop(p1);
-
-    let start = Instant::now();
-    while acquired_third.load(Ordering::SeqCst) == 0 {
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "third acquire did not proceed after a permit was released — \
-             RAII release or condvar notify is broken",
-        );
-        thread::sleep(Duration::from_millis(5));
+    // DISCRIMINATOR: capacity is exhausted, so `acquire()` MUST still be
+    // blocked — no `acquired` message can arrive within the window. A
+    // broken non-blocking semaphore would already have sent.
+    match acquired_rx.recv_timeout(BLOCK_OBSERVATION_WINDOW) {
+        Err(RecvTimeoutError::Timeout) => { /* correct: still blocked */ }
+        Ok(()) => panic!(
+            "(N+1)th acquire returned while capacity ({N}) was fully held — \
+             the semaphore did NOT block; a non-blocking/broken impl",
+        ),
+        Err(RecvTimeoutError::Disconnected) => {
+            panic!("acquirer thread dropped its sender before acquiring — test wiring bug")
+        }
     }
 
-    drop(p2);
-    handle.join().expect("third-acquire thread joined");
+    // Free exactly one slot; the blocked acquire must now proceed.
+    drop(held.into_iter().next().expect("at least one held permit"));
+
+    acquired_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("(N+1)th acquire proceeded after a permit was released");
+
+    // Let the acquirer release its permit and exit.
+    release_tx.send(()).expect("release send");
+    extra.join().expect("extra-acquirer thread joined");
 }
 
 /// RAII normal-drop release: a single-permit semaphore is fully
