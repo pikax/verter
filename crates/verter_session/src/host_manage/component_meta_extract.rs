@@ -326,7 +326,10 @@ fn merge_evaluated_prop_types_into_meta(
                         }
                     }
                 }
-                TypeExpr::Function(func) => {
+                // A function type and a bare constructor type (`new (...) => R`)
+                // carry the same `FunctionExpr` payload; both expose their
+                // parameter and return types to the reachability walk.
+                TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
                     for param in func.parameters.iter() {
                         worklist.push(&param.ty);
                     }
@@ -632,7 +635,10 @@ fn harvest_ref_names_iterative<F: FnMut(&str)>(root: &verter_type_expr::TypeExpr
                     }
                 }
             }
-            TypeExpr::Function(func) => {
+            // A function type and a bare constructor type (`new (...) => R`)
+            // carry the same `FunctionExpr` payload; both expose their
+            // parameter and return types to the reachability walk.
+            TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
                 for param in func.parameters.iter() {
                     worklist.push(&param.ty);
                 }
@@ -781,7 +787,10 @@ fn collect_imported_macro_participating_refs(
                     }
                 }
             }
-            TypeExpr::Function(func) => {
+            // A function type and a bare constructor type (`new (...) => R`)
+            // carry the same `FunctionExpr` payload; both expose their
+            // parameter and return types to the reachability walk.
+            TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
                 for param in func.parameters.iter() {
                     worklist.push(&param.ty);
                 }

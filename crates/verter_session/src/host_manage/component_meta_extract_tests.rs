@@ -642,6 +642,80 @@ mod walker_coverage_tests {
         );
     }
 
+    /// Embed the participating Ref inside a CONSTRUCTOR-type return wrapping an
+    /// Object (`new () => { wrapped: Target }`). A bare constructor type carries
+    /// the same `FunctionExpr` payload as a function type, so the walker must
+    /// traverse its return exactly like `walker_traverses_function_return_wrapping_object`.
+    /// Pre-fix the constructor type fell to the wildcard `_ => {}` and Target
+    /// was silently dropped.
+    #[test]
+    fn walker_traverses_constructor_type_return_wrapping_object() {
+        let project = fixture_project_with_target();
+        let participating = participating_set();
+
+        // `new () => { wrapped: Target }`
+        let object = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                "wrapped".to_string(),
+                participating_ref(),
+                false,
+                false,
+            ))],
+        }));
+        let ctor = TypeExpr::ConstructorType(Arc::new(FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(object)),
+            Vec::new(),
+        )));
+
+        let collected = super::super::collect_imported_macro_participating_refs_for_test(
+            project.host(),
+            "/src/App.vue",
+            &ctor,
+            &participating,
+        );
+
+        assert!(
+            collected.contains(&(ResolvedRootIdentity::new("/src/target.ts", "Target"), 0)),
+            "ConstructorType return_type wrapping Object must not terminate the walker. Got: {collected:?}"
+        );
+    }
+
+    /// Embed the participating Ref inside CONSTRUCTOR-type parameters
+    /// (`new (arg: Target) => void`). Must traverse exactly like
+    /// `walker_traverses_function_parameters`. Pre-fix the constructor type was
+    /// silently dropped at the wildcard arm.
+    #[test]
+    fn walker_traverses_constructor_type_parameters() {
+        let project = fixture_project_with_target();
+        let participating = participating_set();
+
+        let ctor = TypeExpr::ConstructorType(Arc::new(FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some("arg".to_string()),
+                participating_ref(),
+                false,
+                false,
+            )],
+            Some(Arc::new(TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::Void,
+            ))),
+            Vec::new(),
+        )));
+
+        let collected = super::super::collect_imported_macro_participating_refs_for_test(
+            project.host(),
+            "/src/App.vue",
+            &ctor,
+            &participating,
+        );
+
+        assert!(
+            collected.contains(&(ResolvedRootIdentity::new("/src/target.ts", "Target"), 0)),
+            "ConstructorType parameter type must not terminate the walker. Got: {collected:?}"
+        );
+    }
+
     /// Embed the participating Ref inside KeyOf. Pre-fix walker did not
     /// traverse KeyOf.
     #[test]

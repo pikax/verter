@@ -657,8 +657,12 @@ fn method_surface_specificity_score(expr: &TypeExpr) -> usize {
                     )))
                 }
                 ObjectMember::Property(prop) => {
-                    usize::from(matches!(prop.ty, TypeExpr::Function(_)))
-                        + method_surface_specificity_score(&prop.ty)
+                    // A bare constructor type is an equally-specific callable
+                    // surface as a function type — both earn the bonus.
+                    usize::from(matches!(
+                        prop.ty,
+                        TypeExpr::Function(_) | TypeExpr::ConstructorType(_)
+                    )) + method_surface_specificity_score(&prop.ty)
                 }
                 ObjectMember::IndexSignature(sig) => {
                     method_surface_specificity_score(&sig.key_type)
@@ -2540,7 +2544,7 @@ mod tests {
         component_meta_registry_public_indexed_access_route,
         component_meta_registry_raw_member_path_surface, enqueue_component_meta_registry_ref,
         imported_type_body_specificity_score, merge_component_meta_registry_candidates,
-        owner_component_meta_registry_import_root, RouteDemand,
+        method_surface_specificity_score, owner_component_meta_registry_import_root, RouteDemand,
     };
     use crate::types::{AnalysisLevel, DependencyResolution, HostConfig};
     use crate::VerterHost;
@@ -2569,6 +2573,47 @@ mod tests {
         TypeExpr::Object(Arc::new(ObjectExpr {
             properties: Vec::new(),
         }))
+    }
+
+    /// `{ cb: <callable> }` where the property value is a callable surface
+    /// (`() => void`). Built for either a `Function` or a `ConstructorType`
+    /// property value carrying the same `FunctionExpr` payload.
+    fn object_with_callable_prop(constructor: bool) -> TypeExpr {
+        let func = Arc::new(FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Void))),
+            Vec::new(),
+        ));
+        let cb = if constructor {
+            TypeExpr::ConstructorType(func)
+        } else {
+            TypeExpr::Function(func)
+        };
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+                "cb".to_string(),
+                cb,
+                false,
+                false,
+            ))],
+        }))
+    }
+
+    /// A constructor-type property is an equally-specific callable surface as a
+    /// function-type property, so the specificity score must be IDENTICAL.
+    /// Discriminating: the `Object`-property branch counted
+    /// `matches!(prop.ty, TypeExpr::Function(_))` only; a constructor-type
+    /// property missed that callable-surface bonus and scored one lower.
+    #[test]
+    fn constructor_type_prop_scores_like_function_prop() {
+        let function_obj = object_with_callable_prop(false);
+        let constructor_obj = object_with_callable_prop(true);
+        assert_eq!(
+            method_surface_specificity_score(&constructor_obj),
+            method_surface_specificity_score(&function_obj),
+            "a constructor-type property is an equally-specific callable surface \
+             as a function-type property",
+        );
     }
 
     #[test]
