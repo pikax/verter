@@ -261,10 +261,11 @@ pub struct ShallowSurfaceMember {
     pub is_method: bool,
     /// Declared accessibility, carried verbatim from the source
     /// [`SurfaceMember`] through the walker's intermediate state so the
-    /// empty-path Shallow projection round-trip is lossless. For a member
-    /// selected from a SINGLE source contributor during an intersection /
-    /// inherited merge, that contributor's accessibility is carried; a
-    /// synthetic / no-single-origin merged member is `Public`.
+    /// empty-path Shallow projection round-trip is lossless. A member produced
+    /// by an intersection / union / inherited merge carries the MOST-RESTRICTIVE
+    /// accessibility across its contributing arms (the shared merge rule): it is
+    /// `Public` only when Public in EVERY contributor; a member non-public in
+    /// any contributor stays non-public.
     pub visibility: verter_type_expr::MemberVisibility,
     pub declared_in_macro_type_arg: bool,
     pub merge_role: crate::semantic_query::MemberMergeRole,
@@ -3291,15 +3292,15 @@ struct MergedMemberAccum {
     /// Declaration file of the first contributor of ANY role — paired with
     /// `first_spans`.
     first_origin: Option<Arc<str>>,
-    /// Declared accessibility of the first `OwnBody` contributor — selected in
-    /// LOCKSTEP with `own_body_spans` when the surviving member is a single
-    /// own-body contributor.
-    own_body_visibility: Option<verter_type_expr::MemberVisibility>,
-    /// Declared accessibility of the first contributor of ANY role — selected
-    /// in LOCKSTEP with `first_spans` when the surviving member is a single
-    /// contributor. A genuine multi-contributor merge collapses to `Public`
-    /// (no single source accessibility), per the codex merge rule.
-    first_visibility: Option<verter_type_expr::MemberVisibility>,
+    /// MOST-RESTRICTIVE visibility across ALL `OwnBody` contributors (the shared
+    /// merge rule: `Private` > `Protected` > `Public`), folded over the RAW
+    /// contributor stream (NOT deduped value nodes) — two contributors sharing
+    /// one value type still both fold in. `None` until the first own-body
+    /// contributor is absorbed.
+    own_body_visibility_agg: Option<verter_type_expr::MemberVisibility>,
+    /// MOST-RESTRICTIVE visibility across ALL `Heritage` / `Authored`
+    /// contributors. `None` until the first such contributor is absorbed.
+    other_visibility_agg: Option<verter_type_expr::MemberVisibility>,
 }
 
 impl MergedMemberAccum {
@@ -3320,8 +3321,8 @@ impl MergedMemberAccum {
             first_spans: None,
             own_body_origin: None,
             first_origin: None,
-            own_body_visibility: None,
-            first_visibility: None,
+            own_body_visibility_agg: None,
+            other_visibility_agg: None,
         }
     }
 
@@ -3340,27 +3341,41 @@ impl MergedMemberAccum {
         if self.first_spans.is_none() {
             self.first_spans = Some(member.spans);
             self.first_origin = member.declaration_origin.clone();
-            self.first_visibility = Some(member.visibility);
         }
         if matches!(member.merge_role, MemberMergeRole::OwnBody) && self.own_body_spans.is_none() {
             self.own_body_spans = Some(member.spans);
             self.own_body_origin = member.declaration_origin.clone();
-            self.own_body_visibility = Some(member.visibility);
         }
+        // Aggregate visibility to the MOST-RESTRICTIVE contributor per role (the
+        // shared merge rule), folded over EVERY contributor (NOT deduped value
+        // nodes) — so two contributors sharing one value type still both fold
+        // in, and single-vs-multi never depends on value-node identity. The
+        // own-body and heritage/authored aggregates are tracked separately so
+        // the own-body-shadows-heritage rule can select the matching aggregate
+        // in `finish` (in LOCKSTEP with the value selection).
+        let fold = |slot: &mut Option<verter_type_expr::MemberVisibility>| {
+            *slot = Some(match *slot {
+                Some(existing) => existing.most_restrictive(member.visibility),
+                None => member.visibility,
+            });
+        };
         match member.merge_role {
             MemberMergeRole::OwnBody => {
                 self.saw_own_body = true;
+                fold(&mut self.own_body_visibility_agg);
                 if !self.own_body_values.contains(&member.value) {
                     self.own_body_values.push(member.value);
                 }
             }
             MemberMergeRole::Heritage => {
                 self.saw_heritage = true;
+                fold(&mut self.other_visibility_agg);
                 if !self.other_values.contains(&member.value) {
                     self.other_values.push(member.value);
                 }
             }
             MemberMergeRole::Authored => {
+                fold(&mut self.other_visibility_agg);
                 if !self.other_values.contains(&member.value) {
                     self.other_values.push(member.value);
                 }
@@ -3398,26 +3413,39 @@ impl MergedMemberAccum {
                 };
                 (values, role)
             };
-        let single_contributor = values.len() == 1;
         let value = match values.as_slice() {
             [single] => *single,
             _ => merge_value_nodes_recursive(graph, &values),
         };
-        // Visibility follows the value-selection rule, in LOCKSTEP with spans:
-        // a single surviving contributor carries its source accessibility (the
-        // own-body site when the result is own-body, else the first
-        // contributor); a genuine multi-contributor merge has no single source
-        // accessibility and collapses to `Public` (codex merge rule).
-        let visibility = if single_contributor {
-            if matches!(role, MemberMergeRole::OwnBody) {
-                self.own_body_visibility
-                    .or(self.first_visibility)
-                    .unwrap_or_default()
-            } else {
-                self.first_visibility.unwrap_or_default()
-            }
+        // Visibility aggregates to the MOST-RESTRICTIVE accessibility across the
+        // contributors that ACTUALLY contribute to the surviving member (the
+        // shared merge rule: `Private` > `Protected` > `Public`), selected in
+        // LOCKSTEP with the value/role selection:
+        //
+        // - own-body-shadows-heritage (`saw_own_body && saw_heritage`): the
+        //   heritage values are dropped, so only own-body contributors
+        //   participate — use the own-body aggregate.
+        // - otherwise: every contributor participates — fold the own-body and
+        //   heritage/authored aggregates together.
+        //
+        // A merged member is `Public` ONLY when it is Public in EVERY
+        // contributing arm; a member non-public in any contributor stays
+        // non-public (never synthesized Public). For a SINGLE contributor the
+        // aggregate is exactly that contributor's accessibility, so the
+        // single-source case is preserved. The RAW contributor counts (not
+        // deduped value-node counts) are folded into the aggregate during
+        // `absorb`, so two contributors sharing one value type are still
+        // aggregated correctly (the deduped-value-node count would have
+        // mis-treated them as a single source).
+        let visibility = if self.saw_own_body && self.saw_heritage {
+            self.own_body_visibility_agg.unwrap_or_default()
         } else {
-            verter_type_expr::MemberVisibility::Public
+            match (self.own_body_visibility_agg, self.other_visibility_agg) {
+                (Some(own), Some(other)) => own.most_restrictive(other),
+                (Some(own), None) => own,
+                (None, Some(other)) => other,
+                (None, None) => verter_type_expr::MemberVisibility::default(),
+            }
         };
         // The surviving member's spans follow the value-selection rule: an
         // own-body result references the own-body declaration site; otherwise
@@ -3647,19 +3675,20 @@ fn merge_union_surfaces_for_macro(
         let mut optional_in_any = false;
         let mut readonly_in_all = true;
         let mut declaring_arms = 0usize;
-        // Track the lone declaring arm's accessibility so a member contributed
-        // by exactly ONE arm carries that single source's visibility (codex
-        // single-source rule); a member declared by multiple arms is a genuine
-        // union merge with no single source accessibility.
-        let mut single_arm_visibility: Option<verter_type_expr::MemberVisibility> = None;
+        // Aggregate the MOST-RESTRICTIVE accessibility across EVERY arm that
+        // declares this member (the shared merge rule): the merged member is
+        // `Public` only when it is Public in EVERY declaring arm; a member
+        // non-public in any arm stays non-public (never synthesized Public). For
+        // a member declared by exactly one arm the aggregate is that arm's
+        // accessibility, so the single-source case is preserved.
+        let mut merged_visibility: Option<verter_type_expr::MemberVisibility> = None;
         for arm in &live {
             if let Some(arm_member) = arm.members.iter().find(|m| &m.name == name) {
                 declaring_arms += 1;
-                single_arm_visibility = if declaring_arms == 1 {
-                    Some(arm_member.visibility)
-                } else {
-                    None
-                };
+                merged_visibility = Some(match merged_visibility {
+                    Some(existing) => existing.most_restrictive(arm_member.visibility),
+                    None => arm_member.visibility,
+                });
                 per_arm_values.push(arm_member.value);
                 optional_in_any |= arm_member.optional;
                 readonly_in_all &= arm_member.readonly;
@@ -3683,10 +3712,10 @@ fn merge_union_surfaces_for_macro(
             optional: optional_in_any,
             readonly: readonly_in_all,
             is_method: false,
-            // A member contributed by a single arm carries that arm's declared
-            // accessibility; a member merged across multiple arms has no single
-            // source accessibility and is `Public` (codex merge rule).
-            visibility: single_arm_visibility.unwrap_or_default(),
+            // Most-restrictive accessibility across all declaring arms (the
+            // shared merge rule): Public only when Public in every declaring
+            // arm.
+            visibility: merged_visibility.unwrap_or_default(),
             declared_in_macro_type_arg: false,
             merge_role: MemberMergeRole::Authored,
             // Union arm-member: reached THROUGH the union, no single source
@@ -3813,4 +3842,295 @@ enum ExpandFrame {
 enum ExpansionCombineKind {
     Intersection,
     Union,
+}
+
+#[cfg(test)]
+mod m1_merge_visibility_tests {
+    //! M1: contributor-aggregation visibility rules for the intersection
+    //! (`merge_intersection_surfaces_with_graph`) and union
+    //! (`merge_union_surfaces_for_macro`) surface merges.
+    //!
+    //! A merged member is `Public` ONLY when it is Public in EVERY contributing
+    //! arm; a member non-public in any contributor stays non-public (never
+    //! synthesized Public — BUG 2). The aggregation folds the MOST-RESTRICTIVE
+    //! contributor visibility over the RAW contributor stream, so two
+    //! contributors sharing one value type are still aggregated correctly
+    //! (BUG 1 — the deduped value-node count would have mis-treated them as a
+    //! single source). The result is arm-order INDEPENDENT.
+
+    use std::sync::Arc;
+
+    use verter_type_expr::{MemberSpans, MemberVisibility};
+
+    use super::{
+        merge_intersection_surfaces_with_graph, merge_union_surfaces_for_macro, ShallowSurface,
+        ShallowSurfaceMember,
+    };
+    use crate::semantic_query::{MemberMergeRole, PrimitiveKind, SemanticNodeData};
+    use crate::semantic_query_memo::SemanticGraphStore;
+
+    fn member(
+        graph: &SemanticGraphStore,
+        name: &str,
+        vis: MemberVisibility,
+        role: MemberMergeRole,
+        value_prim: PrimitiveKind,
+    ) -> ShallowSurfaceMember {
+        ShallowSurfaceMember {
+            name: Arc::from(name),
+            value: graph.intern_node(SemanticNodeData::Primitive(value_prim)),
+            optional: false,
+            readonly: false,
+            is_method: false,
+            visibility: vis,
+            declared_in_macro_type_arg: false,
+            merge_role: role,
+            spans: MemberSpans::default(),
+            declaration_origin: None,
+        }
+    }
+
+    fn one_member_surface(m: ShallowSurfaceMember) -> ShallowSurface {
+        ShallowSurface {
+            members: vec![m],
+            call_signatures: Vec::new(),
+            construct_signatures: Vec::new(),
+            index_signatures: Vec::new(),
+            keyspace: None,
+        }
+    }
+
+    fn merged_member_visibility(surface: &ShallowSurface, name: &str) -> MemberVisibility {
+        surface
+            .members
+            .iter()
+            .find(|m| m.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("merged surface must contain `{name}`"))
+            .visibility
+    }
+
+    /// Intersection `A & B`: a member present in both arms, non-public in BOTH,
+    /// must stay non-public — aggregated to the most-restrictive — and the
+    /// result must be arm-order INDEPENDENT.
+    ///
+    /// This is the BUG 1 + BUG 2 case: both arms carry the SAME value type
+    /// (`number`), so the deduped value-node count is 1; the pre-fix code
+    /// therefore treated it as a single contributor and used the FIRST arm's
+    /// visibility (arm-order dependent), and a genuine multi-contributor would
+    /// have collapsed to Public. The fix aggregates most-restrictive over RAW
+    /// contributors.
+    #[test]
+    fn intersection_same_value_two_contributors_aggregates_most_restrictive() {
+        let graph = SemanticGraphStore::new();
+
+        // Arm order [Protected, Private] and [Private, Protected] must both
+        // yield Private (most-restrictive), independent of order.
+        let prot_then_priv = merge_intersection_surfaces_with_graph(
+            &graph,
+            &[
+                Some(one_member_surface(member(
+                    &graph,
+                    "x",
+                    MemberVisibility::Protected,
+                    MemberMergeRole::Authored,
+                    PrimitiveKind::Number,
+                ))),
+                Some(one_member_surface(member(
+                    &graph,
+                    "x",
+                    MemberVisibility::Private,
+                    MemberMergeRole::Authored,
+                    PrimitiveKind::Number,
+                ))),
+            ],
+        )
+        .expect("intersection of two object arms merges");
+        assert_eq!(
+            merged_member_visibility(&prot_then_priv, "x"),
+            MemberVisibility::Private,
+            "protected & private (same value) must aggregate to Private",
+        );
+
+        let priv_then_prot = merge_intersection_surfaces_with_graph(
+            &graph,
+            &[
+                Some(one_member_surface(member(
+                    &graph,
+                    "x",
+                    MemberVisibility::Private,
+                    MemberMergeRole::Authored,
+                    PrimitiveKind::Number,
+                ))),
+                Some(one_member_surface(member(
+                    &graph,
+                    "x",
+                    MemberVisibility::Protected,
+                    MemberMergeRole::Authored,
+                    PrimitiveKind::Number,
+                ))),
+            ],
+        )
+        .expect("intersection merges");
+        assert_eq!(
+            merged_member_visibility(&priv_then_prot, "x"),
+            MemberVisibility::Private,
+            "arm order must NOT change the merged visibility (private & protected = Private)",
+        );
+    }
+
+    /// Intersection: a member public in BOTH arms stays Public; a member public
+    /// in one arm and private in the other becomes Private (never Public).
+    #[test]
+    fn intersection_public_only_when_public_in_all_arms() {
+        let graph = SemanticGraphStore::new();
+
+        let both_public = merge_intersection_surfaces_with_graph(
+            &graph,
+            &[
+                Some(one_member_surface(member(
+                    &graph,
+                    "x",
+                    MemberVisibility::Public,
+                    MemberMergeRole::Authored,
+                    PrimitiveKind::Number,
+                ))),
+                Some(one_member_surface(member(
+                    &graph,
+                    "x",
+                    MemberVisibility::Public,
+                    MemberMergeRole::Authored,
+                    PrimitiveKind::String,
+                ))),
+            ],
+        )
+        .expect("intersection merges");
+        assert_eq!(
+            merged_member_visibility(&both_public, "x"),
+            MemberVisibility::Public,
+            "public in both arms stays Public",
+        );
+
+        let one_private = merge_intersection_surfaces_with_graph(
+            &graph,
+            &[
+                Some(one_member_surface(member(
+                    &graph,
+                    "x",
+                    MemberVisibility::Public,
+                    MemberMergeRole::Authored,
+                    PrimitiveKind::Number,
+                ))),
+                Some(one_member_surface(member(
+                    &graph,
+                    "x",
+                    MemberVisibility::Private,
+                    MemberMergeRole::Authored,
+                    PrimitiveKind::String,
+                ))),
+            ],
+        )
+        .expect("intersection merges");
+        assert_eq!(
+            merged_member_visibility(&one_private, "x"),
+            MemberVisibility::Private,
+            "public-in-one + private-in-other must be Private (never Public)",
+        );
+    }
+
+    /// Union `A | B`: a member declared in both arms aggregates to the
+    /// most-restrictive, arm-order independent. Public only when Public in every
+    /// declaring arm.
+    #[test]
+    fn union_member_in_all_arms_aggregates_most_restrictive() {
+        let graph = SemanticGraphStore::new();
+
+        let prot_then_priv = merge_union_surfaces_for_macro(
+            &graph,
+            &[
+                Some(one_member_surface(member(
+                    &graph,
+                    "x",
+                    MemberVisibility::Protected,
+                    MemberMergeRole::Authored,
+                    PrimitiveKind::Number,
+                ))),
+                Some(one_member_surface(member(
+                    &graph,
+                    "x",
+                    MemberVisibility::Private,
+                    MemberMergeRole::Authored,
+                    PrimitiveKind::Number,
+                ))),
+            ],
+        )
+        .expect("union merges");
+        assert_eq!(
+            merged_member_visibility(&prot_then_priv, "x"),
+            MemberVisibility::Private,
+            "union protected|private must aggregate to Private",
+        );
+
+        // Arm-order independent.
+        let priv_then_prot = merge_union_surfaces_for_macro(
+            &graph,
+            &[
+                Some(one_member_surface(member(
+                    &graph,
+                    "x",
+                    MemberVisibility::Private,
+                    MemberMergeRole::Authored,
+                    PrimitiveKind::Number,
+                ))),
+                Some(one_member_surface(member(
+                    &graph,
+                    "x",
+                    MemberVisibility::Protected,
+                    MemberMergeRole::Authored,
+                    PrimitiveKind::Number,
+                ))),
+            ],
+        )
+        .expect("union merges");
+        assert_eq!(
+            merged_member_visibility(&priv_then_prot, "x"),
+            MemberVisibility::Private,
+            "union arm order must NOT change merged visibility",
+        );
+    }
+
+    /// Union: a member declared in only ONE arm carries that arm's visibility
+    /// (the single-source case is preserved by the aggregate).
+    #[test]
+    fn union_single_arm_member_keeps_its_visibility() {
+        let graph = SemanticGraphStore::new();
+        let merged = merge_union_surfaces_for_macro(
+            &graph,
+            &[
+                Some(one_member_surface(member(
+                    &graph,
+                    "only_a",
+                    MemberVisibility::Protected,
+                    MemberMergeRole::Authored,
+                    PrimitiveKind::Number,
+                ))),
+                Some(one_member_surface(member(
+                    &graph,
+                    "only_b",
+                    MemberVisibility::Public,
+                    MemberMergeRole::Authored,
+                    PrimitiveKind::String,
+                ))),
+            ],
+        )
+        .expect("union merges");
+        assert_eq!(
+            merged_member_visibility(&merged, "only_a"),
+            MemberVisibility::Protected,
+            "a member in a single arm keeps that arm's accessibility",
+        );
+        assert_eq!(
+            merged_member_visibility(&merged, "only_b"),
+            MemberVisibility::Public,
+        );
+    }
 }
