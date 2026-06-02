@@ -294,8 +294,9 @@ impl NapiMetaSession {
 
     /// Batch surface for `getComponentMeta`: compute metadata for
     /// `canonicalsOrAliases` under one shared overlay view. The host batch
-    /// coordinator fans the N queries out on the host-owned coordinator
-    /// pool and accounts the batch submission exactly once. Returns one
+    /// coordinator fans the N queries out on the host-owned `HostCpuPool`
+    /// and accounts the submission once per non-empty batch (skipped for
+    /// an empty batch). Returns one
     /// slot per input in input order; a missing slot is encoded as a
     /// sentinel zero-length `Buffer`
     /// (a real payload always contains the FFI envelope, so JS readers

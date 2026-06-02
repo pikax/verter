@@ -1,13 +1,15 @@
 //! Regression: the component-meta BATCH path must not deadlock when its
-//! per-item closures trigger COLD cross-file `Load`/`Parse` work.
+//! per-item closures trigger COLD cross-file `TaskKind::Source`
+//! (load+parse) work.
 //!
 //! Failure class this characterises (rayon pool starvation):
 //! the batch outer coordinator fans out N component-meta jobs and
 //! synchronously waits for all of them. If that outer wait runs on the
 //! SAME finite executor that the scheduler's driver uses to dispatch
-//! the cold `Parse` each job depends on, then enough simultaneously-
-//! parked batch jobs saturate every worker on that pool, the driver's
-//! spawned `Parse` has no free worker, and the whole batch hangs at 0%
+//! the cold `TaskKind::Source` work each job depends on, then enough
+//! simultaneously-parked batch jobs saturate every worker on that pool,
+//! the driver's spawned `Source` task has no free worker, and the whole
+//! batch hangs at 0%
 //! CPU forever. The invariant being protected: an outer API fan-out may
 //! block only on scheduler-owned work; it must never occupy the same
 //! worker set that scheduler stage execution needs to make progress.
@@ -19,8 +21,8 @@
 //! cold dependency. This fixture does the opposite — every file is
 //! injected COLD into the workspace VFS (discoverable but unparsed) and
 //! the thread count is sized to saturate the stage pool — so each owner
-//! MUST drive a deep cross-file `Load → Parse` chain DURING the batch
-//! dispatch, parking a worker while it waits.
+//! MUST drive a deep cross-file `TaskKind::Source` (load+parse) chain
+//! DURING the batch dispatch, parking a worker while it waits.
 //!
 //! Watchdog discipline: the batch runs on a spawned worker thread and
 //! the test thread blocks on a bounded `recv_timeout`. A regression
@@ -57,7 +59,8 @@ const WATCHDOG: Duration = Duration::from_secs(60);
 ///   `types-{i}.ts` and consumes it via `defineProps`.
 /// - a CHAIN of `.ts` modules `types-0 → types-1 → … → types-{N-1} →
 ///   base.ts`, each interface extending the next, so resolving any one
-///   owner's prop type forces a deep cross-file `Load`/`Parse` walk.
+///   owner's prop type forces a deep cross-file `TaskKind::Source`
+///   (load+parse) walk.
 ///   There is NO true cycle (`base.ts` terminates the chain) — true
 ///   recursive types are unsupported per the project rules.
 ///
@@ -118,7 +121,7 @@ defineProps<Props{i}>();
     // `cpu_threads: N_OWNERS` makes the scheduler's stage pool exactly
     // as wide as the batch fan-out. Pre-fix, the outer wait runs on
     // this same pool, so N parked coordinator jobs occupy all N workers
-    // and the driver-spawned cold `Parse` starves.
+    // and the driver-spawned cold `TaskKind::Source` task starves.
     let scheduler_config = verter_scheduler::scheduler::SchedulerConfig {
         cpu_threads: N_OWNERS,
         ..verter_scheduler::scheduler::SchedulerConfig::default()
@@ -140,15 +143,17 @@ defineProps<Props{i}>();
 ///
 /// Discriminator (both directions):
 /// - Pre-fix (outer fan-out installed on the scheduler's own
-///   `cpu_pool`): the batch jobs park waiting for cold `Parse`, the
-///   driver cannot dispatch `Parse` onto the saturated pool, the result
+///   `cpu_pool`): the batch jobs park waiting for cold `TaskKind::Source`
+///   work, the driver cannot dispatch that `Source` task onto the
+///   saturated pool, the result
 ///   channel never receives, and the `recv_timeout` watchdog FAILS the
 ///   test. (Confirmed by running this test against the unfixed tree
 ///   before the coordinator primitive landed.)
 /// - Post-fix (outer fan-out installed on the host's dedicated
 ///   coordinator pool): the scheduler's `cpu_pool` workers stay free for
-///   `Parse`, the batch completes promptly, and every one of the
-///   `N_OWNERS` slots carries a `Some(analysis)` with non-empty props.
+///   `TaskKind::Source` work, the batch completes promptly, and every one
+///   of the `N_OWNERS` slots carries a `Some(analysis)` with non-empty
+///   props.
 #[test]
 fn batch_meta_cold_cross_file_deps_does_not_starve_scheduler_pool() {
     let project = build_cold_chain_project();
@@ -185,7 +190,7 @@ fn batch_meta_cold_cross_file_deps_does_not_starve_scheduler_pool() {
             "DEADLOCK: batch component-meta over {N_OWNERS} cold owners did not complete within \
              {WATCHDOG:?}. The outer batch fan-out is starving the scheduler's stage pool — its \
              coordinator wait must run on the host's dedicated coordinator pool, not on the same \
-             `cpu_pool` the driver uses to dispatch cold `Parse`."
+             `cpu_pool` the driver uses to dispatch cold `TaskKind::Source` work."
         ),
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             panic!("batch worker thread dropped the result channel without sending (panicked?)")

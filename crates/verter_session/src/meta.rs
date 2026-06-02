@@ -291,10 +291,11 @@ impl MetaProject {
     /// Open a new session in batch execution mode.
     ///
     /// Batch mode is for callers that issue N independent component-meta
-    /// requests together. The batch fans out on the host coordinator
-    /// pool via the host batch coordinator (NOT the scheduler's stage
-    /// pool); the scheduler only accounts the batch submission. Test
-    /// harness and MCP server callers use this path.
+    /// requests together. The batch routes through the host batch
+    /// coordinator — on native it fans out on the host-owned `HostCpuPool`
+    /// (NOT the scheduler's stage pool), on wasm it runs inline/
+    /// sequentially; the scheduler only accounts the submission, once per
+    /// non-empty batch. Test harness and MCP server callers use this path.
     #[allow(dead_code)]
     pub fn open_session_batch(self: &Arc<Self>) -> Result<MetaSession, MetaError> {
         self.open_session_with_mode(ExecutionMode::Batch)
@@ -405,10 +406,11 @@ impl MetaProject {
 /// Separates interactive-latency callers (LSP) from batch-throughput
 /// callers (test harness, MCP server). Interactive mode follows the
 /// single-request-then-wait path; Batch mode issues N independent
-/// component-meta requests that fan out on the host coordinator pool
-/// via the host batch coordinator (the scheduler only accounts the
-/// batch submission; its stage pool stays free for the items' cross-file
-/// `Load`/`Parse`).
+/// component-meta requests through the host batch coordinator — on native
+/// they fan out on the host-owned `HostCpuPool`, on wasm they run
+/// inline/sequentially (the scheduler only accounts the submission once
+/// per non-empty batch; its stage pool stays free for the items'
+/// cross-file `TaskKind::Source` load+parse work).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExecutionMode {
@@ -429,10 +431,11 @@ pub struct MetaSession {
     id: u64,
     project: Arc<MetaProject>,
     closed: AtomicBool,
-    /// Per-session execution mode. Batch sessions fan their N
-    /// component-meta jobs out through the host batch coordinator on
-    /// the host-owned coordinator pool; the scheduler is not the
-    /// fan-out owner — it only accounts the batch submission once via
+    /// Per-session execution mode. Batch sessions route their N
+    /// component-meta jobs through the host batch coordinator — on native
+    /// they fan out on the host-owned `HostCpuPool`, on wasm they run
+    /// inline/sequentially; the scheduler is not the fan-out owner — it
+    /// only accounts the submission once per non-empty batch via
     /// `account_batch_submission`. Interactive sessions resolve one
     /// request at a time without a batch coordinator.
     #[allow(dead_code)]
@@ -630,10 +633,12 @@ impl MetaSession {
     /// - the session's overlay map is snapshotted **once** into a
     ///   borrow-based [`crate::session_view::OverlaidViewRef`] that
     ///   lives for the duration of the batch (no per-id view rebuild);
-    /// - the host batch coordinator fans the N jobs out on the
-    ///   host-owned coordinator pool and accounts the batch submission
-    ///   exactly once, so `scheduler.counters().submit_count` increases
-    ///   by exactly one (independent of N);
+    /// - the host batch coordinator routes the N jobs — on native it fans
+    ///   them out on the host-owned `HostCpuPool`, on wasm it runs them
+    ///   inline/sequentially — and accounts the submission once per
+    ///   non-empty batch, so for a non-empty batch
+    ///   `scheduler.counters().submit_count` increases by exactly one
+    ///   (independent of N);
     /// - all N jobs route through
     ///   [`VerterHost::get_component_meta_via_view`] against the same
     ///   `&dyn SessionView`, so they share the host-owned admission
@@ -684,13 +689,14 @@ impl MetaSession {
         // stays alive across the whole batch.
         //
         // The batch coordinator owns the shared coordination concerns:
-        // it runs the outer fan-out on the host coordinator pool (NOT the
-        // scheduler's stage pool), performs the per-batch scheduler
-        // submission accounting exactly once (the policy carries the
-        // scheduler handle; the N jobs share one submission context), and
-        // isolates a per-job panic via `on_item_panic`. This call site
-        // supplies only the per-job resolution and the domain panic
-        // conversion below.
+        // it runs the outer fan-out through the host batch coordinator —
+        // on native on the host-owned `HostCpuPool` (NOT the scheduler's
+        // stage pool), on wasm inline/sequentially — performs the
+        // per-batch scheduler submission accounting once per non-empty
+        // batch (the policy carries the scheduler handle; the N jobs share
+        // one submission context), and isolates a per-job panic via
+        // `on_item_panic`. This call site supplies only the per-job
+        // resolution and the domain panic conversion below.
         let on_item_panic = |panic: crate::host_batch_coordinator::BatchItemPanic<
             '_,
             verter_scheduler::stage::SchedulerJobKind,
@@ -722,11 +728,13 @@ impl MetaSession {
     /// than the in-process `ComponentMetaAnalysis` struct.
     ///
     /// Shares the same single-submission contract as
-    /// [`Self::get_component_meta_batch`]: one overlay view, one
-    /// scheduler submission accounting, shared host-owned admission
-    /// caches. The fan-out runs on the host coordinator pool via the
-    /// host batch coordinator; the supplied `encode_fn` is invoked once
-    /// per non-cached id on a coordinator-pool worker.
+    /// [`Self::get_component_meta_batch`]: one overlay view, one scheduler
+    /// submission accounting per non-empty batch, shared host-owned
+    /// admission caches. The batch routes through the host batch
+    /// coordinator — on native it fans out on the host-owned `HostCpuPool`,
+    /// on wasm it runs inline/sequentially; the supplied `encode_fn` is
+    /// invoked once per non-cached id (on a `HostCpuPool` worker on native,
+    /// inline on wasm).
     ///
     /// Returns one slot per input in input order: `Some(bytes)` for a
     /// successful payload, `None` for a missing canonical or per-id
