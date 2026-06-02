@@ -644,8 +644,10 @@ mod tests {
 
         let pool = pool();
         let coord = HostBatchCoordinator::new(&pool);
-        let scheduler =
-            Scheduler::test_new(SchedulerConfig::default(), Arc::new(MemorySourceLoader::new()));
+        let scheduler = Scheduler::test_new(
+            SchedulerConfig::default(),
+            Arc::new(MemorySourceLoader::new()),
+        );
 
         // Shared panic converter for every accounting-test policy (no
         // item panics here, so a panic is a hard test failure).

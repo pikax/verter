@@ -310,7 +310,9 @@ impl SchedulerIoPool {
     /// Test-only — gated behind `cfg(any(test, feature = "test-support"))`.
     #[cfg(any(test, feature = "test-support"))]
     pub fn transport_capacity(&self) -> usize {
-        self.sender.capacity().expect("scheduler IO transport is bounded")
+        self.sender
+            .capacity()
+            .expect("scheduler IO transport is bounded")
     }
 
     /// Process-unique identity of this pool.

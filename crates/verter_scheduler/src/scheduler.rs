@@ -4,9 +4,9 @@
 //! requests via [`submit_request`](Scheduler::submit_request), which returns
 //! a [`CompletionHandle`] that resolves when the target stage is reached.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -646,14 +646,14 @@ pub struct Scheduler {
     /// the DAG node, release the parked reservation, surface `Failed`)
     /// without saturating the real transport. `cfg`-gated to `test` /
     /// `debug_assertions`; absent from release builds.
-    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) pool_submit_fault: AtomicU8,
     /// Test-only marker set when the last pool-submit fault was injected
     /// via [`Self::pool_submit_fault`] rather than observed from a real
     /// transport. Read (and cleared) by
     /// [`Self::terminalize_pool_submit_violation`] to suppress its
     /// `debug_assert!` for the deliberately-injected case.
-    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) pool_submit_fault_was_injected: AtomicBool,
 }
 
@@ -806,9 +806,9 @@ impl Scheduler {
             dag_admit_epoch: AtomicU64::new(0),
             #[cfg(any(test, debug_assertions))]
             batch_admit_epoch_trace: Mutex::new(None),
-            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+            #[cfg(all(test, not(target_arch = "wasm32")))]
             pool_submit_fault: AtomicU8::new(0),
-            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+            #[cfg(all(test, not(target_arch = "wasm32")))]
             pool_submit_fault_was_injected: AtomicBool::new(false),
         });
 
@@ -893,9 +893,9 @@ impl Scheduler {
             dag_admit_epoch: AtomicU64::new(0),
             #[cfg(any(test, debug_assertions))]
             batch_admit_epoch_trace: Mutex::new(None),
-            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+            #[cfg(all(test, not(target_arch = "wasm32")))]
             pool_submit_fault: AtomicU8::new(0),
-            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+            #[cfg(all(test, not(target_arch = "wasm32")))]
             pool_submit_fault_was_injected: AtomicBool::new(false),
         })
     }
@@ -3803,7 +3803,7 @@ impl Scheduler {
         &self,
         task: crate::pool::SchedulerPoolTask,
     ) -> Result<crate::pool::SchedulerPoolSubmitResult, crate::pool::SchedulerPoolSubmitError> {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         if let Some(err) = self.injected_pool_submit_fault() {
             // Drop `task` without running it (mirrors a genuine
             // Full/Closed where the transport consumed nothing).
@@ -3820,7 +3820,7 @@ impl Scheduler {
         &self,
         task: crate::pool::SchedulerPoolTask,
     ) -> Result<crate::pool::SchedulerPoolSubmitResult, crate::pool::SchedulerPoolSubmitError> {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         if let Some(err) = self.injected_pool_submit_fault() {
             drop(task);
             return Err(err);
@@ -3835,7 +3835,7 @@ impl Scheduler {
     /// the fault was test-injected so the downstream
     /// `terminalize_pool_submit_violation` suppresses its `debug_assert!`
     /// (the test is characterizing the release-build RELEASE path).
-    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     fn injected_pool_submit_fault(&self) -> Option<crate::pool::SchedulerPoolSubmitError> {
         let err = match self.pool_submit_fault.swap(0, Ordering::AcqRel) {
             1 => Some(crate::pool::SchedulerPoolSubmitError::Full),
@@ -3853,7 +3853,7 @@ impl Scheduler {
     /// dispatch observes a forced `Full` from `try_submit`, exercising
     /// the invariant-violation terminalize/release path without ever
     /// saturating the real transport. Consumed once (auto-clears).
-    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn arm_pool_submit_fault_full(&self) {
         self.pool_submit_fault.store(1, Ordering::Release);
     }
@@ -3902,12 +3902,12 @@ impl Scheduler {
         // the test rather than catch a bug. Production / debug builds
         // with a real transport failure still fault loudly.
         let test_injected = {
-            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+            #[cfg(all(test, not(target_arch = "wasm32")))]
             {
                 self.pool_submit_fault_was_injected
                     .swap(false, Ordering::AcqRel)
             }
-            #[cfg(not(all(not(target_arch = "wasm32"), any(test, feature = "test-support"))))]
+            #[cfg(not(all(test, not(target_arch = "wasm32"))))]
             {
                 false
             }
@@ -6003,7 +6003,8 @@ mod tests {
         blockers.insert("/a.vue".to_string(), vec!["/dep.ts".to_string()]);
 
         let executor = Arc::new(BlockingExecutor { blockers });
-        let sched = Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader, executor);
+        let sched =
+            Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader, executor);
 
         // Request Artifact for A
         let handle = sched.submit_request(Request {
@@ -6053,7 +6054,8 @@ mod tests {
         let executor = Arc::new(BlockingExecutor {
             blockers: std::collections::HashMap::new(),
         });
-        let sched = Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader, executor);
+        let sched =
+            Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader, executor);
 
         let handle = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
@@ -6422,7 +6424,8 @@ mod tests {
             io_threads: 1,
             dag_budget: Some(DagCapacityBudget { cpu: 1, io: 1 }),
         };
-        let sched = Scheduler::test_with_executor(config, loader, Arc::new(PanickingSourceExecutor));
+        let sched =
+            Scheduler::test_with_executor(config, loader, Arc::new(PanickingSourceExecutor));
 
         let h_panic = sched.submit_request(Request {
             file_id: "/panic.vue".to_string(),
@@ -6664,7 +6667,8 @@ mod tests {
         let executor = Arc::new(BlockingExecutor {
             blockers: blockers_map,
         });
-        let sched = Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader, executor);
+        let sched =
+            Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader, executor);
 
         // Tombstone the dep (simulating a prior deletion)
         sched.remove("/deleted-dep.ts");
@@ -6704,8 +6708,11 @@ mod tests {
         let executor = Arc::new(BlockingExecutor {
             blockers: blockers_map,
         });
-        let sched =
-            Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader.clone(), executor);
+        let sched = Scheduler::test_new_sync_with_executor(
+            SchedulerConfig::default(),
+            loader.clone(),
+            executor,
+        );
 
         // Submit /a.vue which depends on /dep.ts
         let h = sched.submit_request(Request {
@@ -7082,7 +7089,8 @@ mod tests {
         let executor = Arc::new(BlockingExecutor {
             blockers: blockers_map,
         });
-        let sched = Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader, executor);
+        let sched =
+            Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader, executor);
 
         // Step 1: Initial upsert → drive to gen G
         sched.submit_request(Request {
@@ -15970,11 +15978,15 @@ mod tests {
                     content: Arc<str>,
                     generation: u64,
                 ) -> Result<SourceSnapshot, crate::executor::StageError> {
-                    self.source_kind
-                        .store(kind_code(crate::caller_kind::CallerKind::current()), AtomOrd::SeqCst);
+                    self.source_kind.store(
+                        kind_code(crate::caller_kind::CallerKind::current()),
+                        AtomOrd::SeqCst,
+                    );
                     // `usize::MAX` is the "no scheduler-IO token" sentinel.
-                    self.source_io_token
-                        .store(scheduler_io_pool_token().unwrap_or(usize::MAX), AtomOrd::SeqCst);
+                    self.source_io_token.store(
+                        scheduler_io_pool_token().unwrap_or(usize::MAX),
+                        AtomOrd::SeqCst,
+                    );
                     Ok(SourceSnapshot::new_empty(content, generation))
                 }
                 fn execute_analysis(
@@ -15983,10 +15995,14 @@ mod tests {
                     _s: &SourceSnapshot,
                     generation: u64,
                 ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
-                    self.analysis_kind
-                        .store(kind_code(crate::caller_kind::CallerKind::current()), AtomOrd::SeqCst);
-                    self.analysis_cpu_token
-                        .store(scheduler_cpu_pool_token().unwrap_or(usize::MAX), AtomOrd::SeqCst);
+                    self.analysis_kind.store(
+                        kind_code(crate::caller_kind::CallerKind::current()),
+                        AtomOrd::SeqCst,
+                    );
+                    self.analysis_cpu_token.store(
+                        scheduler_cpu_pool_token().unwrap_or(usize::MAX),
+                        AtomOrd::SeqCst,
+                    );
                     Ok(AnalysisSnapshot::new_empty(generation))
                 }
                 fn execute_artifact(
@@ -16144,7 +16160,10 @@ mod tests {
             let config = SchedulerConfig {
                 cpu_threads: 2,
                 io_threads: 1,
-                dag_budget: Some(DagCapacityBudget { cpu: 8, io: N as u32 }),
+                dag_budget: Some(DagCapacityBudget {
+                    cpu: 8,
+                    io: N as u32,
+                }),
             };
             let sched = Scheduler::test_with_executor(
                 config,

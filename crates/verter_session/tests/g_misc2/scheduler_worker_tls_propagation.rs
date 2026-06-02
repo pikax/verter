@@ -73,7 +73,9 @@ fn run_on_io_worker_with_context(
         let _ = done_tx.send(());
     }))
     .expect("single-worker IO pool accepts one task under capacity");
-    done_rx.recv().expect("IO worker ran the task to completion");
+    done_rx
+        .recv()
+        .expect("IO worker ran the task to completion");
 }
 
 /// Plan §6.12 sub-task 2 test 1 — strict discriminator.
