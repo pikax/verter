@@ -171,6 +171,46 @@ fn object_property_serde_roundtrip_preserves_non_public_visibility() {
     assert_eq!(decoded_default.visibility, MemberVisibility::Public);
 }
 
+/// `MemberVisibility::most_restrictive` is the shared aggregation rule for
+/// merge synthesis (intersection / union / registry merge): `Private` wins over
+/// `Protected` wins over `Public`. It is commutative and associative, and the
+/// result is `Public` ONLY when BOTH inputs are `Public`. This is the single
+/// rule every merge contributor-aggregation path uses, so a non-public member
+/// in any contributor can never be synthesized as `Public`.
+///
+/// Discrimination: the method does not exist on the pre-change tree (compile
+/// failure); post-change, the restrictiveness ordering and the
+/// Public-only-when-both-Public invariant must hold.
+#[test]
+fn member_visibility_most_restrictive_picks_least_visible() {
+    use MemberVisibility::{Private, Protected, Public};
+
+    // Public only when BOTH are public.
+    assert_eq!(Public.most_restrictive(Public), Public);
+    // Any non-public input wins over Public.
+    assert_eq!(Public.most_restrictive(Protected), Protected);
+    assert_eq!(Protected.most_restrictive(Public), Protected);
+    assert_eq!(Public.most_restrictive(Private), Private);
+    assert_eq!(Private.most_restrictive(Public), Private);
+    // Private beats Protected.
+    assert_eq!(Protected.most_restrictive(Private), Private);
+    assert_eq!(Private.most_restrictive(Protected), Private);
+    // Idempotent on equal inputs.
+    assert_eq!(Protected.most_restrictive(Protected), Protected);
+    assert_eq!(Private.most_restrictive(Private), Private);
+
+    // Commutative across every pair.
+    for a in [Public, Protected, Private] {
+        for b in [Public, Protected, Private] {
+            assert_eq!(
+                a.most_restrictive(b),
+                b.most_restrictive(a),
+                "most_restrictive must be commutative for {a:?} / {b:?}",
+            );
+        }
+    }
+}
+
 #[test]
 fn method_signature_serde_roundtrip_preserves_non_public_visibility() {
     let protected = MethodSignature::with_visibility(

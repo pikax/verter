@@ -542,6 +542,33 @@ impl MemberVisibility {
             Self::Private => "private",
         }
     }
+
+    /// Restrictiveness rank: `Public` (0) is least restrictive, `Private` (2) is
+    /// most restrictive. Used by [`most_restrictive`](Self::most_restrictive) to
+    /// aggregate contributor visibilities.
+    const fn restrictiveness(self) -> u8 {
+        match self {
+            Self::Public => 0,
+            Self::Protected => 1,
+            Self::Private => 2,
+        }
+    }
+
+    /// Aggregate two member visibilities to the MORE restrictive of the two
+    /// (`Private` > `Protected` > `Public`). This is the single shared rule for
+    /// every merge-synthesis contributor aggregation (intersection / union
+    /// surface merge, registry object merge): a merged member is `Public` only
+    /// when it is `Public` in BOTH inputs, so a member that is non-public in any
+    /// contributor can never be synthesized as `Public`. Commutative and
+    /// associative.
+    #[must_use]
+    pub const fn most_restrictive(self, other: Self) -> Self {
+        if other.restrictiveness() > self.restrictiveness() {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 /// A named property in an object type.

@@ -282,14 +282,29 @@ fn json_array_to_type_exprs(v: &serde_json::Value) -> Option<Vec<TypeExpr>> {
         .collect::<Option<Vec<_>>>()
 }
 
+/// Parse the optional `"visibility"` wire string (`"protected"` / `"private"`)
+/// produced by the manual serializer. A MISSING field — every pre-existing
+/// all-public surface, and any external producer that never emitted it —
+/// deserializes as [`MemberVisibility::Public`]. An unrecognized value also
+/// falls back to `Public` (forward-compat with an additive wire string).
+fn member_visibility_from_json(v: &serde_json::Value) -> MemberVisibility {
+    match v.get("visibility").and_then(|x| x.as_str()) {
+        Some("protected") => MemberVisibility::Protected,
+        Some("private") => MemberVisibility::Private,
+        _ => MemberVisibility::Public,
+    }
+}
+
 fn json_to_object_member(v: &serde_json::Value) -> Option<ObjectMember> {
     let mk = v.get("memberKind")?.as_str()?;
     match mk {
-        "property" => Some(ObjectMember::Property(ObjectProperty::synthetic(
+        "property" => Some(ObjectMember::Property(ObjectProperty::with_visibility(
             v.get("name")?.as_str()?.to_string(),
             type_expr_from_json(v.get("ty")?)?,
             v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
             v.get("readonly").and_then(|o| o.as_bool()).unwrap_or(false),
+            member_visibility_from_json(v),
+            MemberSpans::default(),
         ))),
         "indexSignature" => Some(ObjectMember::IndexSignature(IndexSignature::synthetic(
             v.get("keyName")?.as_str()?.to_string(),
@@ -303,10 +318,12 @@ fn json_to_object_member(v: &serde_json::Value) -> Option<ObjectMember> {
         "constructSignature" => Some(ObjectMember::ConstructSignature(json_to_function_expr(
             v.get("function")?,
         )?)),
-        "method" => Some(ObjectMember::Method(MethodSignature::synthetic(
+        "method" => Some(ObjectMember::Method(MethodSignature::with_visibility(
             v.get("name")?.as_str()?.to_string(),
             json_to_function_expr(v.get("function")?)?,
             v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
+            member_visibility_from_json(v),
+            MemberSpans::default(),
         ))),
         _ => None,
     }
@@ -445,13 +462,23 @@ impl TypeExpr {
             Self::Object(obj) => json!({
                 "kind": "object",
                 "properties": obj.properties.iter().map(|m| match m {
-                    ObjectMember::Property(p) => json!({
-                        "memberKind": "property",
-                        "name": p.name,
-                        "ty": p.ty.to_json_value(),
-                        "optional": p.optional,
-                        "readonly": p.readonly
-                    }),
+                    ObjectMember::Property(p) => {
+                        let mut member = json!({
+                            "memberKind": "property",
+                            "name": p.name,
+                            "ty": p.ty.to_json_value(),
+                            "optional": p.optional,
+                            "readonly": p.readonly
+                        });
+                        // Serialize `visibility` ONLY when non-public so an
+                        // all-public surface's JSON is byte-unchanged and a
+                        // missing field parses back as `Public`. Mirrors the
+                        // marker-only-for-non-public hash scheme.
+                        if !p.visibility.is_public() {
+                            member["visibility"] = json!(p.visibility.as_wire_str());
+                        }
+                        member
+                    }
                     ObjectMember::IndexSignature(idx) => json!({
                         "memberKind": "indexSignature",
                         "keyName": idx.key_name,
@@ -467,12 +494,18 @@ impl TypeExpr {
                         "memberKind": "constructSignature",
                         "function": Self::function_to_json(f)
                     }),
-                    ObjectMember::Method(m) => json!({
-                        "memberKind": "method",
-                        "name": m.name,
-                        "function": Self::function_to_json(&m.function),
-                        "optional": m.optional
-                    }),
+                    ObjectMember::Method(m) => {
+                        let mut member = json!({
+                            "memberKind": "method",
+                            "name": m.name,
+                            "function": Self::function_to_json(&m.function),
+                            "optional": m.optional
+                        });
+                        if !m.visibility.is_public() {
+                            member["visibility"] = json!(m.visibility.as_wire_str());
+                        }
+                        member
+                    }
                 }).collect::<Vec<_>>()
             }),
             Self::Function(func) => {

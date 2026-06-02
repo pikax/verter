@@ -304,7 +304,13 @@ fn ref_hash_object_member<H: Hasher>(member: &ObjectMember, h: &mut H) {
             ref_hash(&p.ty, h);
             p.optional.hash(h);
             p.readonly.hash(h);
-            p.visibility.hash(h);
+            // Marker-only-for-non-public: a `Public` property emits NO
+            // visibility bytes (so an all-public surface's stream is identical
+            // to the pre-visibility stream); a non-public property folds its
+            // visibility discriminant.
+            if !p.visibility.is_public() {
+                p.visibility.hash(h);
+            }
             p.spans.hash(h);
         }
         ObjectMember::IndexSignature(s) => {
@@ -334,7 +340,10 @@ fn ref_hash_method<H: Hasher>(m: &MethodSignature, h: &mut H) {
     m.name.hash(h);
     ref_hash_function(&m.function, h);
     m.optional.hash(h);
-    m.visibility.hash(h);
+    // Marker-only-for-non-public (see `ref_hash_object_member`).
+    if !m.visibility.is_public() {
+        m.visibility.hash(h);
+    }
     m.spans.hash(h);
 }
 
@@ -962,4 +971,162 @@ fn deeply_nested_type_hashes_without_stack_overflow() {
 
     // The deep `current` also drops here without overflow (iterative
     // `Drop`), so the whole build/hash/drop cycle is depth-safe.
+}
+
+// ---------------------------------------------------------------------------
+// Pre-visibility byte-stream stability (H1)
+// ---------------------------------------------------------------------------
+//
+// `pre_visibility_ref_hash` is the FROZEN pre-B4.5 mirror: identical to
+// `ref_hash` EXCEPT it never folds member visibility at all (as if the
+// `visibility` field did not exist). It pins the exact byte stream that every
+// pre-existing all-public surface produced before member visibility was added,
+// so the marker-only-for-non-public scheme can be proven to leave that stream
+// untouched (zero cache-identity churn).
+
+fn pre_visibility_ref_hash<H: Hasher>(expr: &TypeExpr, h: &mut H) {
+    match expr {
+        TypeExpr::Object(obj) => {
+            // Mirror `ref_hash`'s Object arm exactly (discriminant + len +
+            // members), but route members through the visibility-free member
+            // hasher. The inner member TYPES recurse back through THIS function
+            // so a nested object member is also visibility-free.
+            variant_index(expr).hash(h);
+            obj.properties.len().hash(h);
+            for member in &obj.properties {
+                pre_visibility_ref_object_member(member, h);
+            }
+        }
+        // Delegate every non-object node to the live mirror (which hashes its
+        // own discriminant): only object members carry visibility, so no other
+        // node differs between the pre- and post-visibility streams. NOTE: any
+        // nested object reached THROUGH a non-object node here uses `ref_hash`
+        // (post-visibility) — acceptable because the corpus for these tests is
+        // an object at the root, exercising the member path directly.
+        _ => ref_hash(expr, h),
+    }
+}
+
+fn pre_visibility_ref_object_member<H: Hasher>(member: &ObjectMember, h: &mut H) {
+    match member {
+        ObjectMember::Property(p) => {
+            0isize.hash(h);
+            p.name.hash(h);
+            pre_visibility_ref_hash(&p.ty, h);
+            p.optional.hash(h);
+            p.readonly.hash(h);
+            // NO visibility fold — the pre-B4.5 stream.
+            p.spans.hash(h);
+        }
+        ObjectMember::Method(m) => {
+            4isize.hash(h);
+            m.name.hash(h);
+            ref_hash_function(&m.function, h);
+            m.optional.hash(h);
+            // NO visibility fold — the pre-B4.5 stream.
+            m.spans.hash(h);
+        }
+        // Index / call / construct members never carried visibility; reuse the
+        // live mirror (it is identical to the pre-visibility behaviour for them).
+        other => ref_hash_object_member(other, h),
+    }
+}
+
+/// An object whose members are ALL `Public` must hash to the EXACT pre-B4.5
+/// byte stream — the marker-only-for-non-public scheme emits NO visibility
+/// bytes for a public member, so every pre-existing all-public cache key is
+/// byte-identical (zero churn).
+///
+/// Discrimination: against the tree that folds `Public` UNCONDITIONALLY
+/// (B4.5-as-landed), the live stream contains an extra `Isize(0)` per member
+/// and this `assert_eq!` FAILS. With the fix it PASSES.
+#[test]
+fn all_public_object_hash_stream_is_unchanged_from_pre_visibility() {
+    let public_object = TypeExpr::Object(Arc::new(ObjectExpr {
+        properties: vec![
+            ObjectMember::Property(ObjectProperty::with_spans(
+                "p".into(),
+                TypeExpr::Primitive(PrimitiveName::String),
+                true,
+                true,
+                MemberSpans {
+                    declaration: Some(span(1, 9)),
+                    name: Some(span(1, 2)),
+                    type_annotation: Some(span(4, 9)),
+                },
+            )),
+            ObjectMember::Property(ObjectProperty::synthetic(
+                "q".into(),
+                TypeExpr::named("Q"),
+                false,
+                false,
+            )),
+            ObjectMember::Method(MethodSignature::with_spans(
+                "m".into(),
+                sample_function(false),
+                true,
+                MemberSpans::name_only(span(40, 41)),
+            )),
+        ],
+    }));
+
+    let live = RecordingHasher::record(|h| public_object.hash(h));
+    let pre_visibility = RecordingHasher::record(|h| pre_visibility_ref_hash(&public_object, h));
+    assert_eq!(
+        live, pre_visibility,
+        "an all-public object's live hash byte stream must equal the pre-B4.5 \
+         (visibility-free) stream — a public member must emit NO visibility bytes",
+    );
+    // Guard against a degenerate (empty) stream.
+    assert!(!live.is_empty(), "stream must be non-empty");
+}
+
+/// A non-public member MUST change the byte stream relative to the
+/// pre-visibility (visibility-free) reference — the marker is real, not a
+/// no-op. Distinct visibilities (`Protected` vs `Private`) produce distinct
+/// streams.
+///
+/// Discrimination: if the producer pushed NO marker for non-public members
+/// either (a broken "always skip" fix), the `assert_ne!`s would FAIL.
+#[test]
+fn non_public_member_changes_hash_stream_from_pre_visibility() {
+    let make = |vis: MemberVisibility| {
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty::with_visibility(
+                "x".into(),
+                TypeExpr::Primitive(PrimitiveName::Number),
+                false,
+                false,
+                vis,
+                MemberSpans::default(),
+            ))],
+        }))
+    };
+
+    let public = make(MemberVisibility::Public);
+    let protected = make(MemberVisibility::Protected);
+    let private = make(MemberVisibility::Private);
+
+    let public_stream = RecordingHasher::record(|h| public.hash(h));
+    let pre_vis_public = RecordingHasher::record(|h| pre_visibility_ref_hash(&public, h));
+    // Public is unchanged from the pre-visibility stream.
+    assert_eq!(public_stream, pre_vis_public);
+
+    let protected_stream = RecordingHasher::record(|h| protected.hash(h));
+    let private_stream = RecordingHasher::record(|h| private.hash(h));
+
+    // Both non-public streams DIFFER from the public (pre-visibility) stream.
+    assert_ne!(
+        protected_stream, public_stream,
+        "a protected member must fold a visibility marker",
+    );
+    assert_ne!(
+        private_stream, public_stream,
+        "a private member must fold a visibility marker",
+    );
+    // Protected and Private are mutually distinct.
+    assert_ne!(
+        protected_stream, private_stream,
+        "protected and private must produce distinct streams",
+    );
 }

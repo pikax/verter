@@ -304,9 +304,13 @@ enum HashStep<'a> {
     Usize(usize),
     /// Emit a trailing `bool` field.
     Bool(bool),
-    /// Emit a trailing `MemberVisibility` field (a class member's declared
-    /// accessibility, emitted in declaration order between `readonly` and
-    /// `spans` for a property / between `optional` and `spans` for a method).
+    /// Emit a trailing non-public `MemberVisibility` marker (a class member's
+    /// declared `protected` / `private` accessibility, emitted in declaration
+    /// order between `readonly` and `spans` for a property / between `optional`
+    /// and `spans` for a method). This step is pushed ONLY for non-public
+    /// members: a `Public` member emits no visibility bytes at all, so an
+    /// all-public surface's byte stream is identical to the pre-visibility
+    /// stream. `Protected` / `Private` each fold a distinct marker.
     Visibility(MemberVisibility),
     /// Emit a trailing `MappedModifier` field.
     Modifier(MappedModifier),
@@ -563,9 +567,15 @@ fn hash_object_member_step<'a, H: Hasher>(
         ObjectMember::Property(p) => {
             0isize.hash(state);
             p.name.hash(state);
-            // ty, optional, readonly, visibility, spans. Push reverse.
+            // ty, optional, readonly, [visibility marker ONLY if non-public],
+            // spans. Push reverse. A `Public` member emits NO visibility bytes,
+            // so an all-public surface hashes byte-identically to the pre-
+            // visibility stream (zero cache-identity churn); a non-public member
+            // folds a distinguishing marker (`Protected` / `Private`).
             stack.push(HashStep::MemberSpans(p.spans));
-            stack.push(HashStep::Visibility(p.visibility));
+            if !p.visibility.is_public() {
+                stack.push(HashStep::Visibility(p.visibility));
+            }
             stack.push(HashStep::Bool(p.readonly));
             stack.push(HashStep::Bool(p.optional));
             stack.push(HashStep::Node(&p.ty));
@@ -590,9 +600,13 @@ fn hash_object_member_step<'a, H: Hasher>(
         ObjectMember::Method(m) => {
             4isize.hash(state);
             m.name.hash(state);
-            // function, optional, visibility, spans. Push reverse.
+            // function, optional, [visibility marker ONLY if non-public], spans.
+            // Push reverse. `Public` emits no visibility bytes (pre-visibility
+            // byte stream preserved); a non-public method folds a marker.
             stack.push(HashStep::MemberSpans(m.spans));
-            stack.push(HashStep::Visibility(m.visibility));
+            if !m.visibility.is_public() {
+                stack.push(HashStep::Visibility(m.visibility));
+            }
             stack.push(HashStep::Bool(m.optional));
             stack.push(HashStep::Func(&m.function));
         }
