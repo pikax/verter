@@ -15,10 +15,12 @@
 //! - [`CompileTarget::ANALYSIS`] — script + template data (MCP static analysis)
 
 mod helpers;
+pub mod macro_dto;
 pub mod template_data;
 pub mod types;
 
 pub use helpers::*;
+pub use macro_dto::*;
 pub use template_data::*;
 pub use types::*;
 
