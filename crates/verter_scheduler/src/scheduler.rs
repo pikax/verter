@@ -211,7 +211,7 @@ fn dispatch_ready_job_to_executor(
             // panic-guarded so the reservation release below always runs — the
             // capacity class never leaks the permit parked at dispatch, even if
             // a host override panics.
-            let _outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 executor.execute_cache_node(
                     *cache_id,
                     *key_hash,
@@ -220,12 +220,53 @@ fn dispatch_ready_job_to_executor(
                     cancellation,
                 )
             }));
-            let stranded = dag.lock().complete(&job.identity);
-            debug_assert!(
-                stranded.is_empty(),
-                "CacheNode completion must not strand DAG waiters: CacheNode \
-                 identities are not used as DepKey prerequisites",
-            );
+            // The outcome decides the terminal. ONLY a clean `Ok(Ok(()))`
+            // completes the node as SUCCESS; a typed `Ok(Err(..))` (the
+            // not-overridden default and any real materialisation failure) and
+            // a panic (`Err(..)`) route through the failure path so the work is
+            // never recorded as if it succeeded. Both terminals release the
+            // parked capacity reservation exactly once (the by-value
+            // `release(self)` consume in `complete`/`cancel`), so the capacity
+            // class never leaks the permit on any arm. Cache-node identities
+            // are never observed as `DepKey` prerequisites, so neither terminal
+            // can strand a file-stage/artifact waiter — `complete` returns no
+            // newly-ready tokens and `cancel` returns no stranded tokens.
+            match outcome {
+                Ok(Ok(())) => {
+                    let newly_ready = dag.lock().complete(&job.identity);
+                    debug_assert!(
+                        newly_ready.is_empty(),
+                        "CacheNode completion must not strand DAG waiters: \
+                         CacheNode identities are not used as DepKey prerequisites",
+                    );
+                }
+                Ok(Err(_stage_error)) => {
+                    // Typed cache-node failure. Cancel the identity to release
+                    // the parked reservation and terminalize the node as
+                    // FAILED — never complete-as-success. This is the same
+                    // mechanism the cache-node submit-failure path uses.
+                    let stranded = dag.lock().cancel(&job.identity);
+                    debug_assert!(
+                        stranded.is_empty(),
+                        "CacheNode failure-cancel must not strand DAG waiters: \
+                         CacheNode identities are not used as DepKey prerequisites",
+                    );
+                }
+                Err(_panic) => {
+                    // The host override panicked. Cancel the identity to
+                    // release the parked reservation and terminalize the node
+                    // as FAILED — the panic must not be silently completed as
+                    // success. The unwind payload is dropped (the panic was
+                    // already reported by the default hook); the scheduler does
+                    // not re-raise on its worker thread.
+                    let stranded = dag.lock().cancel(&job.identity);
+                    debug_assert!(
+                        stranded.is_empty(),
+                        "CacheNode panic-cancel must not strand DAG waiters: \
+                         CacheNode identities are not used as DepKey prerequisites",
+                    );
+                }
+            }
         }
         // File-stage / artifact work. The owned execution descriptor is built
         // from the same `(kind, identity)` match and handed to the file-stage
@@ -5894,6 +5935,201 @@ mod tests {
         assert!(
             h.try_get().unwrap().is_ready(),
             "follow-on Analysis must dispatch after CacheNode dispatch released the permit",
+        );
+    }
+
+    /// A cache-node executor that fails with a typed `Ok(Err(StageError))`.
+    /// Records its call count so the test can confirm the hook actually ran
+    /// (the failure is real, not a non-routing skip).
+    #[derive(Debug, Default)]
+    struct FailingCacheExecutor {
+        calls: AtomicU64,
+    }
+
+    impl StageExecutor for FailingCacheExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn execute_cache_node(
+            &self,
+            _cache_id: crate::cache_id::SchedulerCacheId,
+            _key_hash: crate::dag::Hash16,
+            _view_epoch: u64,
+            _snapshot_pin_id: crate::dag::PinId,
+            _cancellation: &CancellationToken,
+        ) -> Result<(), crate::executor::StageError> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Err(crate::executor::StageError {
+                message: "synthetic cache-node materialisation failure".to_string(),
+            })
+        }
+    }
+
+    /// A cache-node executor that PANICS inside `execute_cache_node`.
+    #[derive(Debug, Default)]
+    struct PanickingCacheExecutor {
+        calls: AtomicU64,
+    }
+
+    impl StageExecutor for PanickingCacheExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn execute_cache_node(
+            &self,
+            _cache_id: crate::cache_id::SchedulerCacheId,
+            _key_hash: crate::dag::Hash16,
+            _view_epoch: u64,
+            _snapshot_pin_id: crate::dag::PinId,
+            _cancellation: &CancellationToken,
+        ) -> Result<(), crate::executor::StageError> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            panic!("synthetic cache-node materialisation panic");
+        }
+    }
+
+    /// Drive one injected CacheNode through the dispatch path under `executor`
+    /// and return the scheduler so the caller can read the terminal counts.
+    fn drive_one_injected_cache_node(executor: Arc<dyn StageExecutor>) -> Arc<Scheduler> {
+        use crate::cache_id::SchedulerCacheId;
+        use crate::dag::{PinId, WorkKind};
+        let loader = Arc::new(MemorySourceLoader::new());
+        let sched = Scheduler::test_new_sync_with_executor(
+            SchedulerConfig::default(),
+            loader as Arc<dyn crate::source_loader::SourceLoader>,
+            executor,
+        );
+        let cache_identity = WorkNodeIdentity::CacheNode {
+            cache_id: SchedulerCacheId(7),
+            key_hash: [0xABu8; 16],
+            view_epoch: 42,
+            snapshot_pin_id: PinId(99),
+        };
+        sched.dag.lock().submit(
+            cache_identity.clone(),
+            WorkKind::CacheNode,
+            Priority::Interactive,
+            Vec::new(),
+            None,
+        );
+        sched.drive_all();
+        // The dispatched identity is terminalized out of the DAG regardless of
+        // outcome (complete XOR cancel both remove it).
+        assert!(
+            sched.dag.lock().token_for(&cache_identity).is_none(),
+            "a dispatched CacheNode identity must be terminalized out of the DAG",
+        );
+        sched
+    }
+
+    /// The single router must NOT swallow an `execute_cache_node`
+    /// `Ok(Err(StageError))` and complete the node as success: a typed
+    /// cache-node failure terminalizes the node as FAILED (via `cancel`), not
+    /// as a successful `complete`.
+    ///
+    /// DISCRIMINATOR (`cache_node_terminal_counts`): with the pre-fix
+    /// swallow-and-`complete()` router the failing node is recorded
+    /// `completed == 1, cancelled == 0` and this test FAILS; with the fix the
+    /// failure routes to `cancel`, recording `completed == 0, cancelled == 1`.
+    /// `in_flight_cpu_permits() == 0` proves the parked reservation still
+    /// releases on the failure arm (both terminals release exactly once).
+    #[test]
+    fn cache_node_failure_is_not_completed_as_success() {
+        let executor = Arc::new(FailingCacheExecutor::default());
+        let sched = drive_one_injected_cache_node(Arc::clone(&executor) as Arc<dyn StageExecutor>);
+
+        // The hook genuinely ran (the failure is real routing, not a skip).
+        assert_eq!(
+            executor.calls.load(Ordering::Acquire),
+            1,
+            "execute_cache_node must be called once before the failure is surfaced",
+        );
+        let counts = sched.dag.lock().cache_node_terminal_counts();
+        assert_eq!(
+            counts.completed, 0,
+            "a typed cache-node failure must NOT be completed-as-success — the \
+             pre-fix router swallowed the Err and recorded completed == 1",
+        );
+        assert_eq!(
+            counts.cancelled, 1,
+            "a typed cache-node failure must terminalize the node as FAILED via \
+             cancel (recorded cancelled == 1)",
+        );
+        assert_eq!(
+            sched.dag.lock().in_flight_cpu_permits(),
+            0,
+            "the cache-node failure arm must still release the parked CPU permit \
+             exactly once (cancel's by-value reservation consume)",
+        );
+    }
+
+    /// The single router must NOT swallow an `execute_cache_node` PANIC and
+    /// complete the node as success: a panicking cache node terminalizes as
+    /// FAILED (via `cancel`), not as a successful `complete`. The panic is
+    /// caught by the dispatch path's `catch_unwind` (so the worker does not
+    /// abort), but the caught panic must route to the failure path.
+    ///
+    /// DISCRIMINATOR (`cache_node_terminal_counts`): with the pre-fix router
+    /// the caught panic fell through to `complete()` (`completed == 1`) and
+    /// this test FAILS; with the fix the panic arm calls `cancel`
+    /// (`completed == 0, cancelled == 1`). The synthetic panic message printed
+    /// by the default hook is expected — the panic is caught, not propagated.
+    #[test]
+    fn cache_node_panic_is_not_completed_as_success() {
+        let executor = Arc::new(PanickingCacheExecutor::default());
+        let sched = drive_one_injected_cache_node(Arc::clone(&executor) as Arc<dyn StageExecutor>);
+
+        // The hook ran and panicked (proves the panic arm was exercised).
+        assert_eq!(
+            executor.calls.load(Ordering::Acquire),
+            1,
+            "execute_cache_node must be entered once before it panics",
+        );
+        let counts = sched.dag.lock().cache_node_terminal_counts();
+        assert_eq!(
+            counts.completed, 0,
+            "a panicking cache node must NOT be completed-as-success — the pre-fix \
+             router caught the panic then completed the node, recording completed == 1",
+        );
+        assert_eq!(
+            counts.cancelled, 1,
+            "a panicking cache node must terminalize the node as FAILED via cancel \
+             (recorded cancelled == 1)",
+        );
+        assert_eq!(
+            sched.dag.lock().in_flight_cpu_permits(),
+            0,
+            "the cache-node panic arm must still release the parked CPU permit \
+             exactly once (cancel's by-value reservation consume)",
+        );
+    }
+
+    /// Companion positive case: a SUCCESSFUL `execute_cache_node`
+    /// (`Ok(Ok(()))`) IS completed-as-success. This anchors the other end of
+    /// the discriminator — the success path records `completed == 1,
+    /// cancelled == 0`, the exact inverse of the failure/panic tests above, so
+    /// the split genuinely distinguishes the two terminals (it is not a
+    /// constant that always reads "cancelled").
+    #[test]
+    fn cache_node_success_is_completed_not_cancelled() {
+        let executor = Arc::new(RecordingCacheExecutor::default());
+        let sched = drive_one_injected_cache_node(Arc::clone(&executor) as Arc<dyn StageExecutor>);
+
+        assert_eq!(
+            executor.calls.load(Ordering::Acquire),
+            1,
+            "execute_cache_node must be called once on the success path",
+        );
+        let counts = sched.dag.lock().cache_node_terminal_counts();
+        assert_eq!(
+            counts.completed, 1,
+            "a successful cache node must be completed-as-success (completed == 1)",
+        );
+        assert_eq!(
+            counts.cancelled, 0,
+            "a successful cache node must NOT be cancelled (cancelled == 0)",
         );
     }
 

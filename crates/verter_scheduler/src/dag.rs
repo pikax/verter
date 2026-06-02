@@ -571,6 +571,19 @@ fn class_for_index(index: usize) -> ResourceClass {
 /// weighted selection-count credit ([`Self::credit`]) across the four
 /// priority lanes — credit chooses the lane, the typed CPU/IO ledger
 /// governs admission, and a capacity-skip never debits credit.
+/// Cumulative cache-node terminal-outcome split returned by
+/// [`SchedulerDag::cache_node_terminal_counts`]. `completed + cancelled`
+/// equals the number of [`WorkNodeIdentity::CacheNode`] identities that have
+/// terminalized (each terminalizes exactly once, complete XOR cancel).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheNodeTerminalCounts {
+    /// Cache nodes terminalized as success via [`SchedulerDag::complete`].
+    pub completed: u64,
+    /// Cache nodes terminalized as failure/cancellation via
+    /// [`SchedulerDag::cancel`].
+    pub cancelled: u64,
+}
+
 pub struct SchedulerDag {
     /// Per-token node bookkeeping. Visibility is narrowed to
     /// `pub(in crate::dag)` because the `terminal_failures` child
@@ -683,6 +696,21 @@ pub struct SchedulerDag {
     io_counter: Arc<AtomicU64>,
     /// Per-class admission budget.
     budget: DagCapacityBudget,
+    /// Cumulative count of [`WorkNodeIdentity::CacheNode`] identities that
+    /// reached terminal SUCCESS via [`Self::complete`]. A cache node is
+    /// terminalized exactly once (complete XOR cancel), so this and
+    /// [`Self::cache_node_cancelled`] partition every dispatched cache node by
+    /// its actual terminal outcome. Surfaced via
+    /// [`Self::cache_node_terminal_counts`]; the router's cache-node arm relies
+    /// on routing success to `complete` and failure/panic to `cancel`, so the
+    /// split records whether a cache-node dispatch genuinely succeeded or was
+    /// failed/cancelled.
+    cache_node_completed: u64,
+    /// Cumulative count of [`WorkNodeIdentity::CacheNode`] identities that
+    /// reached terminal FAILURE/cancellation via [`Self::cancel`] (the
+    /// router's failure/panic path, and the submit-failure release path). See
+    /// [`Self::cache_node_completed`].
+    cache_node_cancelled: u64,
 }
 
 /// `(canonical, generation)` lookup key for [`SchedulerDag::file_waiters`].
@@ -720,6 +748,8 @@ impl SchedulerDag {
             cpu_counter: Arc::new(AtomicU64::new(0)),
             io_counter: Arc::new(AtomicU64::new(0)),
             budget,
+            cache_node_completed: 0,
+            cache_node_cancelled: 0,
         }
     }
 
@@ -736,6 +766,22 @@ impl SchedulerDag {
     /// Current in-flight I/O permits (diagnostic).
     pub fn in_flight_io_permits(&self) -> u64 {
         self.io_counter.load(Ordering::Acquire)
+    }
+
+    /// Cumulative cache-node terminal-outcome split (diagnostic).
+    ///
+    /// Every dispatched [`WorkNodeIdentity::CacheNode`] reaches terminal state
+    /// through exactly one of [`Self::complete`] (success) or [`Self::cancel`]
+    /// (failure/cancellation), so `completed + cancelled` equals the number of
+    /// cache nodes that have terminalized. The router routes a successful
+    /// `execute_cache_node` to `complete` and a failed/panicking one to
+    /// `cancel`; this split therefore distinguishes a cache-node dispatch that
+    /// genuinely succeeded from one that was failed.
+    pub fn cache_node_terminal_counts(&self) -> CacheNodeTerminalCounts {
+        CacheNodeTerminalCounts {
+            completed: self.cache_node_completed,
+            cancelled: self.cache_node_cancelled,
+        }
     }
 
     /// Per-class budget configured at construction.
@@ -1419,6 +1465,13 @@ impl SchedulerDag {
             Some(t) => t,
             None => return Vec::new(),
         };
+        // Record the cache-node SUCCESS terminal. Only a genuinely-present
+        // identity reaches here (the early-return above skips a no-op
+        // complete), so this counts each cache node's success exactly once,
+        // partitioning against the `cancel` failure tally.
+        if matches!(identity, WorkNodeIdentity::CacheNode { .. }) {
+            self.cache_node_completed += 1;
+        }
         // Scrub this node's token from every `waiters` list its
         // outstanding deps still point at, BEFORE removing the node,
         // so the reverse-index never carries a stale entry for a
@@ -1474,6 +1527,13 @@ impl SchedulerDag {
             Some(t) => t,
             None => return Vec::new(),
         };
+        // Record the cache-node FAILURE/cancellation terminal. Only a
+        // genuinely-present identity reaches here (the early-return above skips
+        // a no-op cancel), so this counts each cache node's failure exactly
+        // once, partitioning against the `complete` success tally.
+        if matches!(identity, WorkNodeIdentity::CacheNode { .. }) {
+            self.cache_node_cancelled += 1;
+        }
         if let Some(node) = self.nodes.get_mut(&tok) {
             node.cancelled = true;
         }
