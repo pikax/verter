@@ -182,6 +182,16 @@ fn regenerate_audit_bindings_into_tempdir() -> String {
         .expect("regenerate AnalyzedSurface graph");
     verter_audit::PolicyNamesResult::export_all(&ts_rs::Config::new().with_out_dir(tempdir.path()))
         .expect("regenerate PolicyNamesResult graph");
+    // `AuditedResult<T, E>` is a generic audit-bearing carrier. ts-rs
+    // exports the generic definition from any concrete instantiation;
+    // `ts_rs::Dummy` placeholders yield the parametrised
+    // `AuditedResult<T, E>` declaration. It is not reachable from
+    // `RequestAuditRecord` (it is a return carrier, not a record
+    // field), so it must be listed as its own export root.
+    verter_audit::AuditedResult::<ts_rs::Dummy, ts_rs::Dummy>::export_all(
+        &ts_rs::Config::new().with_out_dir(tempdir.path()),
+    )
+    .expect("regenerate AuditedResult graph");
     let path = tempdir.path().join("audit.generated.ts");
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read regenerated `{path:?}`: {e}"))
 }

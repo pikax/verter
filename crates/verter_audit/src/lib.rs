@@ -17,6 +17,9 @@
 //! - [`record`] — top-level [`record::RequestAuditRecord`] envelope plus
 //!   [`record::RequestKind`] / [`record::RequestKindPayload`]
 //!   discriminants and the [`record::IncidentalFields`] trait.
+//! - [`audited_result`] — [`audited_result::AuditedResult`], the
+//!   audit-bearing execution envelope pairing a request outcome with
+//!   its [`record::RequestAuditRecord`].
 //! - [`files`] — [`files::FileAudit`] / [`files::FileRole`]
 //!   per-file attribution attached to the envelope's `files` field.
 //! - [`timing`] — [`timing::RequestTimingAudit`].
@@ -45,6 +48,7 @@
 //!   [`batch::AuditRecordSource`] into a
 //!   [`payloads::BundlerBatchPayload`].
 
+pub mod audited_result;
 pub mod batch;
 pub mod config;
 pub mod files;
@@ -68,6 +72,7 @@ pub mod waits;
 // Common re-exports — keep narrow; consumers `use` the module path
 // for everything else.
 
+pub use audited_result::AuditedResult;
 pub use batch::{AuditRecordSource, BatchAuditAggregator, SLOWEST_RECORD_LIMIT};
 pub use config::{AuditCaps, AuditConfig, AuditConsumerFilter};
 pub use files::{FileAudit, FileRole};

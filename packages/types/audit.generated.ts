@@ -124,6 +124,34 @@ macro_index?: number | null, };
 export type AuditDiagnosticKind = "CyclicReference" | "BudgetExceeded" | "OpenConditional" | "ResolverError" | "IdempotentArm" | "EmptyUnionArm" | "Other";
 
 /**
+ * The outcome of an audited request together with the
+ * [`RequestAuditRecord`] captured while producing it.
+ *
+ * `T` is the success payload, `E` the typed error. Both arms carry
+ * the audit record so the observability envelope survives regardless
+ * of whether the request succeeded — a caller that only wants the
+ * audit can read [`AuditedResult::audit`] without inspecting the
+ * outcome.
+ */
+export type AuditedResult<T, E> = { "kind": "Ok", 
+/**
+ * The success payload.
+ */
+value: T, 
+/**
+ * The audit envelope captured for the request.
+ */
+audit: RequestAuditRecord, } | { "kind": "Err", 
+/**
+ * The typed error describing the failure.
+ */
+error: E, 
+/**
+ * The audit envelope captured for the request.
+ */
+audit: RequestAuditRecord, };
+
+/**
  * Augmentation target kind — mirror of
  * `verter_session::file_artifact_store::AugmentationTargetKind`.
  *
