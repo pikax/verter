@@ -284,18 +284,23 @@ fn dispatch_ready_job_to_executor(
                 dag,
             );
         }
+        // `Parse` is NEVER admitted as a runnable DAG node: it is a label for
+        // the future CPU split, not a request-target file stage, so `admit_work`
+        // (the file-stage admission path) `unreachable!()`s on `TaskKind::Parse`
+        // and there is no other site that produces a `(WorkKind::Parse,
+        // FileStage)` ready job. Routing it into `run_file_stage` would only
+        // hand it to `execute_stage_on_worker`, whose `TaskKind::Parse` arm
+        // panics anyway — so the invariant is single-sourced here at the router
+        // (no live Parse pipeline exists), and the executor's own
+        // `TaskKind::Parse => unreachable!()` stays as defense-in-depth.
         (WorkKind::Parse, WorkNodeIdentity::FileStage { .. }) => {
-            run_file_stage(
-                TaskKind::Parse,
-                job,
-                file_node,
-                generation,
-                failed_blocker_deps,
-                executor,
-                source_loader,
-                inbox_sender,
-                dag,
-            );
+            unreachable!(
+                "Parse is never admitted as a runnable DAG node — it is a label \
+                 for the future CPU split, not a request-target file stage. \
+                 `admit_work` rejects `TaskKind::Parse` (unreachable!) and no site \
+                 produces a `(WorkKind::Parse, FileStage)` ready job, so the router \
+                 can never observe one.",
+            )
         }
         (WorkKind::Analysis, WorkNodeIdentity::FileStage { .. }) => {
             run_file_stage(
@@ -3790,7 +3795,17 @@ impl Scheduler {
         // above, so this match never sees it.
         let task_kind = match (&job.kind, &job.identity) {
             (WorkKind::Load, WorkNodeIdentity::FileStage { .. }) => TaskKind::Load,
-            (WorkKind::Parse, WorkNodeIdentity::FileStage { .. }) => TaskKind::Parse,
+            // `Parse` is never admitted as a runnable DAG node (see the router
+            // `dispatch_ready_job_to_executor` and `admit_work`), so this
+            // descriptor builder never observes a `(WorkKind::Parse, FileStage)`
+            // ready job either. Fabricating a live `TaskKind::Parse` here would
+            // contradict the router, which `unreachable!()`s on the same pairing.
+            (WorkKind::Parse, WorkNodeIdentity::FileStage { .. }) => unreachable!(
+                "Parse is never admitted as a runnable DAG node — no site produces \
+                 a `(WorkKind::Parse, FileStage)` ready job (admit_work rejects \
+                 `TaskKind::Parse`), so the pool-routing descriptor builder cannot \
+                 observe one.",
+            ),
             (WorkKind::Analysis, WorkNodeIdentity::FileStage { .. }) => TaskKind::Analysis,
             (WorkKind::Artifact, WorkNodeIdentity::Artifact { profile_hash, .. }) => {
                 TaskKind::Artifact {
