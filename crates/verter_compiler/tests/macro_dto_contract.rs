@@ -349,10 +349,7 @@ fn resolved_macro_surfaces_full_contract() {
                     }],
                     local_declarations: vec![],
                 },
-                span: Some(MacroSourceSpanDto {
-                    start: 90,
-                    end: 95,
-                }),
+                span: Some(MacroSourceSpanDto { start: 90, end: 95 }),
             }),
             root_constructors: vec![RuntimeCtorKind::Object],
             native_props: sample_native_props(),
@@ -395,10 +392,7 @@ fn resolved_macro_surfaces_full_contract() {
                     }],
                     local_declarations: vec![],
                 },
-                span: Some(MacroSourceSpanDto {
-                    start: 90,
-                    end: 95,
-                }),
+                span: Some(MacroSourceSpanDto { start: 90, end: 95 }),
             }),
             props: vec![
                 MacroPropDto {
@@ -931,10 +925,7 @@ fn resolved_macro_surfaces_full_contract() {
                 decl_ts: "type T = string | number;".to_string(),
             }],
         },
-        span: Some(MacroSourceSpanDto {
-            start: 70,
-            end: 87,
-        }),
+        span: Some(MacroSourceSpanDto { start: 70, end: 87 }),
     };
     match &raw_root {
         MacroPropsTypeDto::TypeText { ts, deps, span } => {

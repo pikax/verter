@@ -189,15 +189,15 @@ pub enum MacroDefaultKindDto {
 /// A single `withDefaults` default value, resolved for one prop.
 ///
 /// - `expr` — the default-value source text, already normalised by the producer
-///   (no surrounding key/punctuation). Its exact content depends on `kind`:
+///   (no surrounding key/punctuation). Display/codegen text — the consumer
+///   renders it per `kind` (see [`MacroDefaultKindDto`]) and must NOT re-parse it
+///   for semantics. Its exact content depends on `kind`:
 ///     - for [`MacroDefaultKindDto::Expression`] it is the value expression
 ///       verbatim (`false`, `() => []`, `new Date()`);
 ///     - for [`MacroDefaultKindDto::MethodShorthand`] it is the method VALUE TAIL
 ///       — the parameter list + body that follow the method name, e.g.
 ///       `() { return [] }` for the source `items() { return [] }`, NOT the full
 ///       `items() { return [] }` property text.
-///   Display/codegen text — the consumer renders it per `kind` (see
-///   [`MacroDefaultKindDto`]) and must NOT re-parse it for semantics.
 /// - `kind` — [`MacroDefaultKindDto`]: whether the source wrote an expression
 ///   or method shorthand. Drives how `expr` is reconstructed in the output.
 /// - `span` — the SFC-absolute span of the default value in the original
