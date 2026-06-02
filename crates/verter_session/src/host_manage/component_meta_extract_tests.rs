@@ -737,4 +737,106 @@ mod walker_coverage_tests {
             "KeyOf wrapper must not terminate the walker. Got: {collected:?}"
         );
     }
+
+    /// `harvest_ref_names_iterative` (via `harvest_ref_names_for_test`)
+    /// must collect Ref names from BOTH the parameters and the return type
+    /// of a bare constructor type (`new (arg: Target) => Other`). A
+    /// constructor type carries the same `FunctionExpr` payload as a
+    /// function type.
+    ///
+    /// Discriminator: pre-fix the harvester matched only `TypeExpr::Function`
+    /// and fell through its `_ => {}` wildcard for a `ConstructorType`,
+    /// dropping both the parameter ref (`Target`) and the return ref
+    /// (`Other`).
+    #[test]
+    fn harvest_collects_constructor_type_param_and_return_refs() {
+        // `new (arg: Target) => Other`
+        let ctor = TypeExpr::ConstructorType(Arc::new(FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some("arg".to_string()),
+                participating_ref(), // Ref "Target"
+                false,
+                false,
+            )],
+            Some(Arc::new(TypeExpr::Ref {
+                name: Arc::from("Other"),
+                type_arguments: Arc::from(Vec::new().as_slice()),
+            })),
+            Vec::new(),
+        )));
+
+        let mut names: FxHashSet<String> = FxHashSet::default();
+        super::super::harvest_ref_names_for_test(&ctor, |name| {
+            names.insert(name.to_string());
+        });
+
+        assert!(
+            names.contains("Target"),
+            "harvester must collect the constructor PARAMETER ref `Target`. Got: {names:?}"
+        );
+        assert!(
+            names.contains("Other"),
+            "harvester must collect the constructor RETURN ref `Other`. Got: {names:?}"
+        );
+    }
+
+    /// `expr_contains_root_identity` (via `expr_contains_root_identity_for_test`)
+    /// must reach a participating identity embedded in a bare constructor
+    /// type's parameter or return type. This is the merge-gate reachability
+    /// walker — if it fails to descend into a constructor surface, an
+    /// imported macro-participating type nested inside `new (...) => ...`
+    /// is wrongly treated as unreachable and the evaluated merge decision
+    /// diverges.
+    ///
+    /// Discriminator: pre-fix the walker matched only `TypeExpr::Function`
+    /// and absorbed a `ConstructorType` through its `_ => {}` wildcard,
+    /// returning `false` for both the parameter-embedded and the
+    /// return-embedded `Target`.
+    #[test]
+    fn expr_contains_root_identity_descends_constructor_param_and_return() {
+        let project = fixture_project_with_target();
+        let host = project.host();
+        let target = ResolvedRootIdentity::new("/src/target.ts", "Target");
+
+        // `new (arg: Target) => void` — Target embedded in the PARAMETER.
+        let ctor_param = TypeExpr::ConstructorType(Arc::new(FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some("arg".to_string()),
+                participating_ref(),
+                false,
+                false,
+            )],
+            Some(Arc::new(TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::Void,
+            ))),
+            Vec::new(),
+        )));
+        assert!(
+            super::super::expr_contains_root_identity_for_test(
+                &ctor_param,
+                host,
+                "/src/App.vue",
+                &target,
+                0,
+            ),
+            "expr_contains_root_identity must reach Target embedded in a constructor parameter"
+        );
+
+        // `new () => Target` — Target embedded in the RETURN type.
+        let ctor_return = TypeExpr::ConstructorType(Arc::new(FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(participating_ref())),
+            Vec::new(),
+        )));
+        assert!(
+            super::super::expr_contains_root_identity_for_test(
+                &ctor_return,
+                host,
+                "/src/App.vue",
+                &target,
+                0,
+            ),
+            "expr_contains_root_identity must reach Target embedded in a constructor return type"
+        );
+    }
 }
