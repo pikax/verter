@@ -5922,6 +5922,139 @@ mod foundations_guards {
         }
     }
 
+    // ── Member-visibility constructor guard ──
+    //
+    // B4.5 makes silent-Public member construction IMPOSSIBLE in production:
+    // the implicit-Public `ObjectProperty`/`MethodSignature` constructors were
+    // split into intent-explicit names (`synthetic_public` / `with_spans_public`
+    // for genuinely source-less public origins; `synthetic_with_visibility` /
+    // `with_visibility` for source-derived reconstruction that threads the
+    // member's declared accessibility). This guard pins that split: a bare
+    // `ObjectProperty::synthetic(` / `MethodSignature::synthetic(` /
+    // `ObjectProperty::with_spans(` / `MethodSignature::with_spans(` in any
+    // production source file is banned, so a future reconstruction site cannot
+    // silently mint a non-public member as `Public` (the recurring leak class
+    // three review rounds chased site-by-site). `IndexSignature::synthetic(` /
+    // `::with_spans(` are NOT banned — index signatures carry no accessibility.
+
+    /// Predicate: returns `true` when `line` references one of the four banned
+    /// implicit-Public member constructors. The explicit `_public` /
+    /// `_with_visibility` suffixed forms are allowed (the needle `synthetic(`
+    /// does not substring-match `synthetic_public(`, because the byte after
+    /// `synthetic` is `_`, not `(`; likewise `with_spans(` vs
+    /// `with_spans_public(`). `with_visibility(` shares no banned needle.
+    pub fn line_has_banned_visibility_constructor(line: &str) -> bool {
+        const BANNED: &[&str] = &[
+            "ObjectProperty::synthetic(",
+            "MethodSignature::synthetic(",
+            "ObjectProperty::with_spans(",
+            "MethodSignature::with_spans(",
+        ];
+        BANNED.iter().any(|needle| line.contains(needle))
+    }
+
+    /// Walk the production tree and return `(rel_path, line_no, line)` triples
+    /// for every banned-constructor reference.
+    pub fn member_visibility_constructor_violations() -> Vec<(String, usize, String)> {
+        let crates_root = workspace_root().join("crates");
+        let mut violations = Vec::new();
+        let entries = match fs::read_dir(&crates_root) {
+            Ok(it) => it,
+            Err(_) => return violations,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let src_dir = path.join("src");
+            if !src_dir.exists() {
+                continue;
+            }
+            for file in walk_production_rs(&src_dir) {
+                let src = match fs::read_to_string(&file) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let rel = relative_to_root(&file);
+                for (idx, line) in src.lines().enumerate() {
+                    if line_has_banned_visibility_constructor(line) {
+                        violations.push((rel.clone(), idx + 1, line.to_string()));
+                    }
+                }
+            }
+        }
+        violations.sort();
+        violations
+    }
+
+    #[test]
+    fn no_implicit_public_member_constructors_in_production() {
+        let violations = member_visibility_constructor_violations();
+        assert!(
+            violations.is_empty(),
+            "Member-visibility guard violations: production source uses an\n\
+             implicit-Public member constructor. `ObjectProperty::synthetic` /\n\
+             `MethodSignature::synthetic` / `ObjectProperty::with_spans` /\n\
+             `MethodSignature::with_spans` silently mint members as `Public`,\n\
+             which is the recurring non-public-member leak class. Use the\n\
+             intent-explicit constructors instead:\n\
+             - source-LESS public origin (interface / type-literal /\n\
+               object-literal / enum / framework member): `synthetic_public` /\n\
+               `with_spans_public`.\n\
+             - source-DERIVED reconstruction (member already carries a\n\
+               visibility — member-path / Pick / indexed-access):\n\
+               `synthetic_with_visibility` / `with_visibility`.\n\n\
+             Violations:\n  {}",
+            violations
+                .iter()
+                .map(|(rel, lineno, line)| format!("{rel}:{lineno}: {}", line.trim()))
+                .collect::<Vec<_>>()
+                .join("\n  "),
+        );
+    }
+
+    #[test]
+    fn member_visibility_constructor_predicate_discriminates() {
+        // BANNED — every implicit-Public construction form, including the
+        // fully-qualified path and embedded call shapes.
+        let banned = [
+            "let p = ObjectProperty::synthetic(\"a\".into(), ty, false, false);",
+            "ObjectMember::Method(MethodSignature::synthetic(\"m\".into(), f, false))",
+            "Some(ObjectProperty::with_spans(name, ty, false, false, spans))",
+            "ObjectMember::Method(MethodSignature::with_spans(n, f, false, spans))",
+            "verter_type_expr::ObjectProperty::synthetic(name, ty, false, false)",
+        ];
+        for line in banned {
+            assert!(
+                line_has_banned_visibility_constructor(line),
+                "guard must FLAG banned constructor line: {line:?}",
+            );
+        }
+
+        // ALLOWED — the explicit replacements, `IndexSignature` (no
+        // accessibility concept), and prose that merely names the methods.
+        let allowed = [
+            "ObjectProperty::synthetic_public(\"a\".into(), ty, false, false)",
+            "MethodSignature::synthetic_public(\"m\".into(), f, false)",
+            "ObjectProperty::with_spans_public(name, ty, false, false, spans)",
+            "MethodSignature::with_spans_public(n, f, false, spans)",
+            "ObjectProperty::synthetic_with_visibility(name, ty, false, false, vis)",
+            "MethodSignature::synthetic_with_visibility(n, f, false, vis)",
+            "ObjectProperty::with_visibility(name, ty, false, false, vis, spans)",
+            "MethodSignature::with_visibility(n, f, false, vis, spans)",
+            "IndexSignature::synthetic(key, kty, vty, false)",
+            "IndexSignature::with_spans(key, kty, vty, false, spans)",
+            "/// Source-DERIVED reconstructions MUST use `Self::with_visibility`.",
+        ];
+        for line in allowed {
+            assert!(
+                !line_has_banned_visibility_constructor(line),
+                "guard must NOT flag allowed line: {line:?}",
+            );
+        }
+    }
+
     /// Cache-runtime overhaul plan-vocabulary ban (H19).
     ///
     /// The three new patterns added under the H19 rule must:
