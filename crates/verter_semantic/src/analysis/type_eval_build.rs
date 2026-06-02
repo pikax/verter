@@ -23,8 +23,8 @@ use oxc_ast::ast::{
 use oxc_span::GetSpan;
 use verter_type_expr::{
     FunctionExpr, FunctionParam, FunctionSpans, IndexSignature, IndexSignatureSpans, MemberSpans,
-    MethodSignature, ObjectExpr, ObjectMember, PrimitiveName, TypeExpr, TypeExprScope, TypeParam,
-    ValueRef,
+    MemberVisibility, MethodSignature, ObjectExpr, ObjectMember, PrimitiveName, TypeExpr,
+    TypeExprScope, TypeParam, ValueRef,
 };
 use verter_type_expr_oxc::{lower_ts_type, property_key_name};
 
@@ -460,6 +460,19 @@ fn alias_default_export_type_symbol(env: &mut EvalEnv, declared_name: &str) {
     env.add_type(aliased);
 }
 
+/// Lower an OXC `TSAccessibility` token to the shared-IR [`MemberVisibility`].
+/// `None` (no modifier) and `Some(Public)` map to [`MemberVisibility::Public`];
+/// `Some(Protected)` / `Some(Private)` carry the declared accessibility. This
+/// lowers the OXC token directly — it does NOT text-scan the source
+/// (Typed-IR-Only).
+fn visibility_from_ts_accessibility(acc: Option<TSAccessibility>) -> MemberVisibility {
+    match acc {
+        None | Some(TSAccessibility::Public) => MemberVisibility::Public,
+        Some(TSAccessibility::Protected) => MemberVisibility::Protected,
+        Some(TSAccessibility::Private) => MemberVisibility::Private,
+    }
+}
+
 fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
     let name = match &decl.id {
         Some(id) => id.name.to_string(),
@@ -474,9 +487,12 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
     for element in &decl.body.body {
         match element {
             ClassElement::PropertyDefinition(prop) => {
-                if matches!(prop.accessibility, None | Some(TSAccessibility::Public))
-                    && !prop.r#static
-                {
+                // Record every NON-static instance field. Accessibility is no
+                // longer an exclusion — a `private` / `protected` field is
+                // RECORDED on the shared surface with its declared visibility;
+                // the published-prop projection re-applies a Public-only filter
+                // at the publication boundary.
+                if !prop.r#static {
                     if let Some(prop_name) = property_key_name(&prop.key) {
                         let ty = prop
                             .type_annotation
@@ -492,11 +508,12 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
                                 .map(|ta| ta.type_annotation.span().into()),
                         };
                         members.push(ObjectMember::Property(
-                            verter_type_expr::ObjectProperty::with_spans(
+                            verter_type_expr::ObjectProperty::with_visibility(
                                 prop_name,
                                 ty,
                                 prop.optional,
                                 prop.readonly,
+                                visibility_from_ts_accessibility(prop.accessibility),
                                 spans,
                             ),
                         ));
@@ -504,20 +521,28 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
                 }
             }
             ClassElement::MethodDefinition(method) => {
-                if matches!(method.accessibility, None | Some(TSAccessibility::Public))
-                    && !method.r#static
-                {
+                if !method.r#static {
                     if method.kind == MethodDefinitionKind::Constructor {
-                        ctor_sig = Some(extract_function_signature(&method.value, source));
-                        ctor_fn_spans = FunctionSpans {
-                            signature: Some(method.span.into()),
-                            return_type: method
-                                .value
-                                .return_type
-                                .as_ref()
-                                .map(|rt| rt.type_annotation.span().into()),
-                        };
+                        // The constructor is NOT an instance surface member; it
+                        // feeds the VALUE-side `ConstructSignature` (for
+                        // `typeof ClassName` / `InstanceType`). Its value-side
+                        // extraction is unchanged by the visibility flip — a
+                        // non-public constructor still does not contribute a
+                        // call signature to the consuming surface.
+                        if matches!(method.accessibility, None | Some(TSAccessibility::Public)) {
+                            ctor_sig = Some(extract_function_signature(&method.value, source));
+                            ctor_fn_spans = FunctionSpans {
+                                signature: Some(method.span.into()),
+                                return_type: method
+                                    .value
+                                    .return_type
+                                    .as_ref()
+                                    .map(|rt| rt.type_annotation.span().into()),
+                            };
+                        }
                     } else if let Some(method_name) = property_key_name(&method.key) {
+                        // Record every NON-static instance method with its
+                        // declared accessibility (no longer an exclusion).
                         let func = extract_function_signature(&method.value, source);
                         let fn_spans = FunctionSpans {
                             signature: Some(method.value.span.into()),
@@ -532,7 +557,7 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
                             name: Some(method.key.span().into()),
                             type_annotation: None,
                         };
-                        members.push(ObjectMember::Method(MethodSignature::with_spans(
+                        members.push(ObjectMember::Method(MethodSignature::with_visibility(
                             method_name,
                             FunctionExpr::with_spans(
                                 func.parameters,
@@ -541,6 +566,7 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
                                 fn_spans,
                             ),
                             method.optional,
+                            visibility_from_ts_accessibility(method.accessibility),
                             member_spans,
                         )));
                     }

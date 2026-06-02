@@ -177,6 +177,177 @@ fn extracts_interface_with_methods() {
     }
 }
 
+// =============================================================================
+// Class member visibility (B4.5) — `extract_class` RECORDS non-public class
+// members with their declared accessibility on the shared IR surface, instead
+// of dropping them. Static members and the constructor are NOT surface
+// members. Interface members are always Public.
+// =============================================================================
+
+/// Find a property member by name in a `TypeExpr::Object` body.
+fn class_property<'a>(body: &'a TypeExpr, name: &str) -> Option<&'a ObjectProperty> {
+    let TypeExpr::Object(obj) = body else {
+        return None;
+    };
+    obj.properties.iter().find_map(|m| match m {
+        ObjectMember::Property(p) if p.name == name => Some(p),
+        _ => None,
+    })
+}
+
+/// Find a method member by name in a `TypeExpr::Object` body.
+fn class_method<'a>(body: &'a TypeExpr, name: &str) -> Option<&'a MethodSignature> {
+    let TypeExpr::Object(obj) = body else {
+        return None;
+    };
+    obj.properties.iter().find_map(|m| match m {
+        ObjectMember::Method(mm) if mm.name == name => Some(mm),
+        _ => None,
+    })
+}
+
+#[test]
+fn extract_class_records_non_public_members_with_visibility() {
+    // The producer-level discriminator: pre-change `extract_class` DROPS
+    // `b`/`c` (only `a` survives, all Public); post-change it RECORDS all three
+    // instance members with their declared accessibility. Static members and
+    // the constructor are excluded from the surface entirely.
+    let env = parse_and_build_env(
+        r#"
+        class C {
+            public a: string = "";
+            protected b: number = 0;
+            private c: boolean = false;
+            static s: string = "";
+            constructor() {}
+        }
+        "#,
+    );
+    let decl = &env.type_symbols["C"];
+    let body = &decl.body;
+
+    let a = class_property(body, "a").expect("public field `a` must be recorded");
+    assert_eq!(a.visibility, MemberVisibility::Public);
+
+    let b = class_property(body, "b").expect("protected field `b` must be RECORDED (not dropped)");
+    assert_eq!(b.visibility, MemberVisibility::Protected);
+
+    let c = class_property(body, "c").expect("private field `c` must be RECORDED (not dropped)");
+    assert_eq!(c.visibility, MemberVisibility::Private);
+
+    // Static member is NOT a surface member.
+    assert!(
+        class_property(body, "s").is_none(),
+        "static field `s` must be excluded from the instance surface"
+    );
+    // The constructor is NOT a surface member (no `constructor` property/method).
+    assert!(
+        class_property(body, "constructor").is_none()
+            && class_method(body, "constructor").is_none(),
+        "the constructor must not appear as a surface member"
+    );
+}
+
+#[test]
+fn extract_class_default_accessibility_is_public() {
+    // A field with no accessibility modifier is Public (mirrors
+    // `None | Some(Public) => Public`).
+    let env = parse_and_build_env(r#"class C { a: string = ""; }"#);
+    let body = &env.type_symbols["C"].body;
+    let a = class_property(body, "a").expect("field `a` must be recorded");
+    assert_eq!(a.visibility, MemberVisibility::Public);
+}
+
+#[test]
+fn extract_class_records_non_public_methods_with_visibility() {
+    let env = parse_and_build_env(
+        r#"
+        class C {
+            public pub(): void {}
+            protected prot(): void {}
+            private priv(): void {}
+            static stat(): void {}
+        }
+        "#,
+    );
+    let body = &env.type_symbols["C"].body;
+
+    assert_eq!(
+        class_method(body, "pub")
+            .expect("public method recorded")
+            .visibility,
+        MemberVisibility::Public
+    );
+    assert_eq!(
+        class_method(body, "prot")
+            .expect("protected method must be RECORDED (not dropped)")
+            .visibility,
+        MemberVisibility::Protected
+    );
+    assert_eq!(
+        class_method(body, "priv")
+            .expect("private method must be RECORDED (not dropped)")
+            .visibility,
+        MemberVisibility::Private
+    );
+    assert!(
+        class_method(body, "stat").is_none(),
+        "static method must be excluded from the instance surface"
+    );
+}
+
+#[test]
+fn extract_class_interface_members_stay_public() {
+    // Interface members have no accessibility — always Public.
+    let env = parse_and_build_env("interface I { a: string; m(): void }");
+    let body = &env.type_symbols["I"].body;
+    assert_eq!(
+        class_property(body, "a")
+            .expect("interface field")
+            .visibility,
+        MemberVisibility::Public
+    );
+    assert_eq!(
+        class_method(body, "m")
+            .expect("interface method")
+            .visibility,
+        MemberVisibility::Public
+    );
+}
+
+#[test]
+fn extract_class_with_heritage_records_non_public_own_members() {
+    // `class C extends Base { protected own }` folds to `Base & { own }`; the
+    // own-body Object arm records `own` with its accessibility.
+    let env = parse_and_build_env(
+        r#"
+        class Base { x: number = 0; }
+        class C extends Base {
+            public a: string = "";
+            private secret: number = 0;
+        }
+        "#,
+    );
+    let body = &env.type_symbols["C"].body;
+    let TypeExpr::Intersection(parts) = body else {
+        panic!("expected intersection (heritage fold), got {body:?}");
+    };
+    assert_eq!(parts[0], TypeExpr::named("Base"));
+    let own = &parts[1];
+    assert_eq!(
+        class_property(own, "a")
+            .expect("public own field")
+            .visibility,
+        MemberVisibility::Public
+    );
+    assert_eq!(
+        class_property(own, "secret")
+            .expect("private own field must be RECORDED")
+            .visibility,
+        MemberVisibility::Private
+    );
+}
+
 #[test]
 fn extracts_namespace_qualified_interfaces() {
     let env = parse_and_build_env(

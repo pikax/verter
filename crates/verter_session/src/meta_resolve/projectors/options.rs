@@ -86,6 +86,11 @@ pub(crate) fn project_options(
     };
     members
         .into_iter()
+        // Publication-boundary visibility filter (mirrors props): a non-public
+        // class member is not a published option. Every non-class origin is
+        // `Public`, so this is a no-op for the common object / interface
+        // options surfaces.
+        .filter(|member| member.visibility.is_public())
         .filter_map(|member| {
             let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
             Some(surface_member_to_expanded_field(

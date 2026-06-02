@@ -905,6 +905,66 @@ fn member_jsdoc_tag_text_span_recovers_multi_line_continuation() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// (N) B4.5 — the shared TypeInfoSurface RECORDS class-member visibility.
+//     `extract_class` records non-public INSTANCE members with their declared
+//     accessibility (Public / Protected / Private); static members and the
+//     constructor are NOT surface members. The published-prop filter is a
+//     SEPARATE, downstream concern (covered in `meta_resolve_tests`) — the raw
+//     surface keeps the full set so B5 can read it for `native_props`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn class_surface_records_member_visibility() {
+    let host = make_host_with_footprint();
+    const FILE: &str = "/fixtures/visibility_class.ts";
+    upsert_ts(
+        &host,
+        FILE,
+        r#"
+export class C {
+  public a: string = "";
+  protected b: number = 0;
+  private c: boolean = false;
+  static s: string = "";
+  constructor() {}
+}
+"#,
+    );
+
+    let surface = host
+        .resolve_shallow_surface(FILE, "C")
+        .expect("class `C` must resolve to a one-level surface");
+
+    use verter_type_expr::MemberVisibility;
+    assert_eq!(
+        member(&surface, "a").visibility,
+        MemberVisibility::Public,
+        "public field `a` must carry Public visibility"
+    );
+    assert_eq!(
+        member(&surface, "b").visibility,
+        MemberVisibility::Protected,
+        "protected field `b` must be RECORDED with Protected visibility"
+    );
+    assert_eq!(
+        member(&surface, "c").visibility,
+        MemberVisibility::Private,
+        "private field `c` must be RECORDED with Private visibility"
+    );
+
+    // Static member + constructor are NOT instance surface members.
+    let names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+    assert!(
+        !names.contains(&"s"),
+        "static field `s` must not be a surface member: {names:?}"
+    );
+    assert!(
+        !names.contains(&"constructor"),
+        "the constructor must not be a surface member: {names:?}"
+    );
+}
+
 // NOTE on the prepared-member append path (`build.rs`
 // `backfill_member_index_surface`, the codex#2 P1 / Claude P2-b front): the
 // overlay's APPEND branch (which copies each `PreparedMember`'s `spans` +

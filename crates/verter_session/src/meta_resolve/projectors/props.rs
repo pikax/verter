@@ -83,6 +83,14 @@ pub(crate) fn project_props(
         let members = read_surface_members(ctx, surface_node);
         members
             .into_iter()
+            // Publication-boundary visibility filter: the shared surface RECORDS
+            // non-public class members (B5 reads the full set for
+            // `native_props`), but Vue does NOT publish `private` / `protected`
+            // class fields as props. Filter to Public-only here, where surface
+            // members become published `ExpandedField`s. Every non-class origin
+            // is `Public`, so this is a no-op for interface / type-literal /
+            // mapped surfaces.
+            .filter(|member| member.visibility.is_public())
             .filter_map(|member| {
                 let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
                 // Emit `PublishedField` origin edges for every

@@ -84,6 +84,11 @@ pub(crate) fn project_slots(
         let members = read_surface_members(ctx, surface_node);
         members
             .into_iter()
+            // Publication-boundary visibility filter (mirrors props): a
+            // non-public class member is not a published slot. Every non-class
+            // origin is `Public`, so this is a no-op for the common
+            // type-literal / interface slot surfaces.
+            .filter(|member| member.visibility.is_public())
             .filter_map(|member| {
                 let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
                 dispatch.record_published_field_edge(

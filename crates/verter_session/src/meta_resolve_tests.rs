@@ -1212,6 +1212,72 @@ defineProps<Props>()
     );
 }
 
+/// A LOCAL `defineProps<C>()` over a class with mixed accessibility publishes
+/// ONLY the public instance field. The shared surface RECORDS the protected /
+/// private members, but the publication-boundary `Public`-only filter keeps
+/// them off the published props. Static members and the constructor are never
+/// surface members.
+///
+/// Discrimination: this FAILS on a tree where the analyzer records non-public
+/// members but the publication-boundary visibility filter is absent — `b` /
+/// `c` would leak into the published props.
+#[test]
+fn local_define_props_over_class_publishes_only_public_instance_field() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export class C {
+  public a: string = ""
+  protected b: number = 0
+  private c: boolean = false
+  static s: string = ""
+  constructor() {}
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { C } from './types'
+defineProps<C>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let state = project
+        .host()
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
+
+    let prop_names = prop_names_from_resolved(project.host(), "/App.vue", &state);
+
+    assert!(
+        prop_names.contains(&"a".to_string()),
+        "public field `a` must be published: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"b".to_string()),
+        "protected field `b` must NOT be published: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"c".to_string()),
+        "private field `c` must NOT be published: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"s".to_string()),
+        "static field `s` must NOT be published: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"constructor".to_string()),
+        "the constructor must NOT be published as a prop: {prop_names:?}"
+    );
+}
+
 #[test]
 fn imported_interface_extending_class_uses_shared_resolver_path() {
     let project = make_project();

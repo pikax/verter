@@ -770,6 +770,14 @@ pub(crate) fn props_from_typeinfo_surface(
         .surface
         .members
         .iter()
+        // Publication-boundary visibility filter: the shared surface RECORDS
+        // non-public class members (they participate in node identity and B5
+        // reads the full set for `native_props`), but Vue does NOT expose
+        // `private` / `protected` class fields as props. Filter to Public-only
+        // here, where surface members become published `AnalyzedPropField`s.
+        // Every non-class origin is `Public`, so this is a no-op for
+        // interface / type-literal / object-literal / mapped surfaces.
+        .filter(|member| member.visibility.is_public())
         .map(|member| {
             let type_expr = raise_member_value(ctx, member);
             let type_expr_scope = type_expr

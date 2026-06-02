@@ -950,6 +950,55 @@ fn optional_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> 
     }
 }
 
+/// B4.5 NODE-IDENTITY: `SurfaceMember::visibility` participates in graph node
+/// identity (Eq + Hash). Two members identical in every other field but
+/// differing in visibility intern / compare as DISTINCT, mirroring how `spans`
+/// already extends member identity. Discrimination: this FAILS on a tree where
+/// `visibility` is absent from `SurfaceMember` or excluded from its derives.
+#[test]
+fn surface_member_visibility_participates_in_node_identity() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use verter_type_expr::MemberVisibility;
+
+    fn hash_one<H: Hash>(value: &H) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    let node = crate::semantic_query::SemanticNodeId(7);
+    let with_visibility = |vis: MemberVisibility| SurfaceMember {
+        visibility: vis,
+        name: Arc::from("a"),
+        value: node,
+        optional: false,
+        readonly: false,
+        is_method: false,
+        declared_in_macro_type_arg: false,
+        merge_role: crate::semantic_query::MemberMergeRole::Authored,
+        spans: Default::default(),
+        declaration_origin: None,
+    };
+
+    let public = with_visibility(MemberVisibility::Public);
+    let protected = with_visibility(MemberVisibility::Protected);
+    let private = with_visibility(MemberVisibility::Private);
+
+    // Differing only in visibility => UNEQUAL and DISTINCT hashes.
+    assert_ne!(public, protected);
+    assert_ne!(public, private);
+    assert_ne!(protected, private);
+    assert_ne!(hash_one(&public), hash_one(&protected));
+    assert_ne!(hash_one(&public), hash_one(&private));
+    assert_ne!(hash_one(&protected), hash_one(&private));
+
+    // Same visibility => equal + equal hash.
+    let public2 = with_visibility(MemberVisibility::Public);
+    assert_eq!(public, public2);
+    assert_eq!(hash_one(&public), hash_one(&public2));
+}
+
 /// Object source with all required target members (via a shared inner
 /// type) is assignable to the target. This is the record-shape
 /// positive case the calls out — the mapped target
