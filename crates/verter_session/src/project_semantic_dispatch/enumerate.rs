@@ -708,14 +708,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Type }`. The lookup is constant-time and never dispatches an
     /// `Instantiate` / `Mapped` / `KeyOf` query.
     ///
-    /// - `Some(true)`  — the parse fact records the member's presence
-    ///   on the type's declaration body at the observed content
-    ///   version. Admit structurally.
-    /// - `Some(false)` — the artifact exists for the observed content
-    ///   version, but the fact registry has no
+    /// Admission follows the inconclusive-and-resolve ruling:
+    /// `MemberPresence` records presence/key only and carries NO
+    /// visibility, so a bare presence fact can never *admit* a member
+    /// into the public-only keyspace this predicate feeds. The mapping
+    /// is therefore present→inconclusive, absent→refute (this path
+    /// NEVER returns `Some(true)`):
+    ///
+    /// - `None` (PRESENT) — the parse fact records the member's
+    ///   presence on the type's declaration body at the observed
+    ///   content version, but cannot prove it is PUBLIC. Return `None`
+    ///   (INCONCLUSIVE) so the caller falls through to full resolution,
+    ///   which carries visibility and applies the public gate at the
+    ///   resolved-surface chokepoints. A non-public member can never be
+    ///   admitted on the strength of a presence fact.
+    /// - `Some(false)` (ABSENT) — the artifact exists for the observed
+    ///   content version, but the fact registry has no
     ///   `MemberPresence(type_name, needle, Type)` entry. The member
-    ///   is provably absent. Refute structurally.
-    /// - `None`        — the file artifact for `(canonical,
+    ///   is provably absent regardless of visibility. Refute
+    ///   structurally.
+    /// - `None` (UNRECOVERABLE) — the file artifact for `(canonical,
     ///   observed_hash)` is not recoverable (evicted, schema
     ///   mismatch, content-hash drift). Fall through to the caller's
     ///   existing tiers so the unrecoverable case falls back to the

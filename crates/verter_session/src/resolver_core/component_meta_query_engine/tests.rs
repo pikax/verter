@@ -4225,14 +4225,17 @@ export class C {
         object: Arc::new(TypeExpr::named("C")),
         index: Arc::new(TypeExpr::string_literal("publicObj")),
     }));
-    if let Some(keys) =
-        query_engine.enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &public_source)
-    {
-        assert!(
-            keys.iter().any(|k| k == "openKey"),
-            "keyof C['publicObj'] (public member) must enumerate `openKey`: {keys:?}"
+    let public_keys = query_engine
+        .enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &public_source)
+        .expect(
+            "positive control: `keyof C['publicObj']` (public member) MUST enumerate its surface \
+             keys (Some) — a None here means the route-key enumeration regressed, which would let \
+             the negative assertion below pass vacuously",
         );
-    }
+    assert!(
+        public_keys.iter().any(|k| k == "openKey"),
+        "keyof C['publicObj'] (public member) must enumerate `openKey`: {public_keys:?}"
+    );
 
     // DISCRIMINATING: `keyof C['privateObj']` (PRIVATE member) must NOT derive
     // route keys from the non-public member's surface.
