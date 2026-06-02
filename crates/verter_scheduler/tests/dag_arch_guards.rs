@@ -406,3 +406,126 @@ fn b7b_no_second_admission_budget_or_ready_queue() {
         "B7b: `DagCapacityBudget` (the sole admission ledger) must exist",
     );
 }
+
+/// Isolate the body of the first `fn <name>(` (signature → matching closing
+/// brace of the fn block). Returns the body slice including the outer braces.
+fn fn_body<'a>(src: &'a str, signature_marker: &str) -> &'a str {
+    let start = src.find(signature_marker).unwrap_or_else(|| {
+        panic!("expected `{signature_marker}` to exist in scheduler src");
+    });
+    let body_open = src[start..]
+        .find('{')
+        .map(|i| start + i)
+        .expect("fn body open brace");
+    let mut depth = 0usize;
+    let mut body_end = None;
+    for (i, ch) in src[body_open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    body_end = Some(body_open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body_end = body_end.expect("matched fn closing brace");
+    &src[body_open..=body_end]
+}
+
+/// U1 / B7d — there is EXACTLY ONE routing point from a dequeued `ReadyJob` to
+/// the `StageExecutor`, and the `CacheNode` case actually ROUTES (it calls
+/// `StageExecutor::execute_cache_node`) rather than being skipped or
+/// `unreachable!()`'d.
+///
+/// This guard pins the dispatch cutover:
+///
+/// 1. The lossy `WorkNodeIdentity → TaskKind` adapter `task_kind_for_ready_job`
+///    (whose CacheNode arm was an `unreachable!()`) stays deleted — no
+///    `fn task_kind_for_ready_job` may reappear.
+/// 2. The single dispatch entry `fn dispatch_ready_job_to_executor` exists and
+///    is declared exactly once.
+/// 3. Inside that function, the `CacheNode` dispatch arm calls
+///    `execute_cache_node` and contains NO `unreachable!()` — the routing is
+///    real, not a placeholder.
+///
+/// Discriminators:
+/// - Re-introducing `fn task_kind_for_ready_job` (a second adapter) fires (1).
+/// - Renaming / deleting `dispatch_ready_job_to_executor`, or adding a second
+///   such routing entry, fires (2).
+/// - Replacing the `execute_cache_node` call in the `CacheNode` arm with an
+///   `unreachable!()` / skip fires (3) — the same regression the
+///   `cache_node_dispatch_routes_to_execute_cache_node` unit test catches
+///   dynamically, pinned here statically.
+#[test]
+fn u1_single_dispatch_path_routes_cache_node_to_executor() {
+    let src = read_scheduler_source();
+
+    // (1) The lossy adapter stays deleted. `fn task_kind_for_ready_job` is the
+    //     function-definition fingerprint; backtick doc mentions of the name
+    //     in comments do not match (they lack `fn ` immediately before).
+    assert!(
+        !src.contains("fn task_kind_for_ready_job"),
+        "U1: the lossy `task_kind_for_ready_job` adapter (its CacheNode arm was \
+         an `unreachable!()`) must stay deleted — `dispatch_ready_job_to_executor` \
+         is the sole ReadyJob→executor routing point. Re-introducing the adapter \
+         resurrects the second dispatch path the cutover removed.",
+    );
+
+    // (2) The single dispatch entry exists and is declared exactly once.
+    let entry_decls = src.matches("fn dispatch_ready_job_to_executor(").count();
+    assert_eq!(
+        entry_decls, 1,
+        "U1: `dispatch_ready_job_to_executor` must be the ONE ReadyJob→executor \
+         dispatch entry — found {entry_decls} declarations. A second routing entry \
+         is a forbidden parallel dispatch path.",
+    );
+
+    // (3) Inside the single dispatch entry, the CacheNode arm routes to
+    //     `execute_cache_node` and is not an `unreachable!()` / skip.
+    let body = fn_body(&src, "fn dispatch_ready_job_to_executor(");
+    assert!(
+        body.contains("execute_cache_node"),
+        "U1: `dispatch_ready_job_to_executor` must route CacheNode work to \
+         `StageExecutor::execute_cache_node` — the call is missing, so cache-node \
+         work is not dispatched to the executor.",
+    );
+    // Isolate the `WorkKind::CacheNode` match arm: from the arm header to the
+    // first file-stage arm header (`WorkKind::Load`). The CacheNode arm must
+    // contain the `execute_cache_node` call and must NOT contain `unreachable!`.
+    let cache_arm_start = body
+        .find("WorkKind::CacheNode,")
+        .expect("U1: the dispatch entry must have a `WorkKind::CacheNode` match arm");
+    let after = &body[cache_arm_start..];
+    let cache_arm_end = after.find("(WorkKind::Load,").expect(
+        "U1: the dispatch entry must have a file-stage `WorkKind::Load` arm after CacheNode",
+    );
+    let cache_arm = &after[..cache_arm_end];
+    assert!(
+        cache_arm.contains("execute_cache_node"),
+        "U1: the CacheNode dispatch arm must call `execute_cache_node` (real routing)",
+    );
+    assert!(
+        !cache_arm.contains("unreachable!"),
+        "U1: the CacheNode dispatch arm must NOT be `unreachable!()` — it must ROUTE \
+         the cache node to `execute_cache_node`. An `unreachable!()` here is the \
+         placeholder the cutover removed.",
+    );
+
+    // The file-stage executor chokepoint is invoked only through the single
+    // dispatch entry's helper — `execute_stage_on_worker` is called exactly
+    // once in the whole scheduler src (inside `run_file_stage`), so file-stage
+    // dispatch cannot fork a second path either.
+    let on_worker_calls = src.matches("execute_stage_on_worker(").count();
+    // One definition + one call site = two textual matches.
+    assert_eq!(
+        on_worker_calls, 2,
+        "U1: `execute_stage_on_worker` must be the single file-stage executor \
+         chokepoint reached from ONE call site (its definition + one invocation = \
+         two matches) — found {on_worker_calls}. A second call site forks the \
+         dispatch path.",
+    );
+}

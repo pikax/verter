@@ -16,6 +16,7 @@ use web_time::Instant;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
+use crate::cancellation::CancellationToken;
 use crate::dag::{
     profile_hash_from_bytes, profile_hash_to_bytes, DagCapacityBudget, DedupJoinerEvent, DepKey,
     FileStageKey, ReadyJob, SchedulerDag, WorkKind, WorkNodeIdentity,
@@ -110,7 +111,10 @@ fn admit_work(
     request_context: Option<crate::request_context::OpaqueRequestContext>,
 ) -> crate::dag::SubmissionToken {
     let (identity, kind) = match task {
-        TaskKind::Source => (
+        // The live `FileStage{Source}` DAG node maps to `Load`; the
+        // load+parse work runs in one source-stage execution path, so
+        // there is no separate `Parse` DAG node admitted here.
+        TaskKind::Load => (
             WorkNodeIdentity::FileStage {
                 canonical: Arc::clone(canonical),
                 generation,
@@ -135,37 +139,197 @@ fn admit_work(
             },
             WorkKind::Artifact,
         ),
+        // `Parse` and `CacheNode` have no `TaskKind`-driven file-stage
+        // admission path in the single-`FileStage{Source}`-node model:
+        // `Parse` is intrinsic to the source stage, and cache nodes are
+        // submitted into the DAG directly by the cache layer, never through
+        // `admit_work`.
+        TaskKind::Parse | TaskKind::CacheNode { .. } => {
+            unreachable!(
+                "admit_work is the file-stage admission path (Load/Analysis/Artifact); \
+                 Parse is intrinsic to the source stage and CacheNode is admitted \
+                 directly into the DAG by the cache layer"
+            )
+        }
     };
     dag.submit(identity, kind, priority, Vec::new(), request_context)
 }
 
-/// Map a [`ReadyJob`] back to the legacy [`TaskKind`] surface so the
-/// dispatch loop can reuse the existing per-stage executors. The
-/// adapter is the single bridge between the DAG's typed identities and
-/// the per-stage execution path.
-fn task_kind_for_ready_job(job: &ReadyJob) -> TaskKind {
-    match &job.identity {
-        WorkNodeIdentity::FileStage { stage, .. } => match stage {
-            FileStageKey::Source => TaskKind::Source,
-            FileStageKey::Analysis => TaskKind::Analysis,
-        },
-        WorkNodeIdentity::Artifact { profile_hash, .. } => TaskKind::Artifact {
-            profile_hash: profile_hash_from_bytes(*profile_hash),
-        },
-        WorkNodeIdentity::CacheNode { .. } => {
-            // CacheNode dispatch is reserved for the cache layer above
-            // the scheduler. Falling through to Analysis here would
-            // mis-route the work to the analysis stage; panic loudly
-            // so any premature wiring through the file-stage adapter
-            // is caught immediately. The cache layer must own its own
-            // dispatch arm and never route cache-node work through
-            // this helper.
-            unreachable!(
-                "CacheNode work must not be routed through the file-stage adapter; \
-                 the cache layer owns its own dispatch arm"
+/// THE single routing point from a dequeued [`ReadyJob`] to the
+/// [`StageExecutor`]. Both the native pump path
+/// ([`Scheduler::dispatch_ready_job`]) and the inline path
+/// ([`Scheduler::execute_stage_inline`]) call this — there is no second
+/// adapter, and the `ReadyJob`'s own `(kind, identity)` is matched ONCE here.
+///
+/// Routing:
+///
+/// - [`WorkNodeIdentity::CacheNode`] → the cache-materialisation hook
+///   [`StageExecutor::execute_cache_node`], handed the full cache identity
+///   (`cache_id` + `key_hash` + `view_epoch` + `snapshot_pin_id`) directly from
+///   the identity plus a cancellation token. The dispatched node's parked
+///   capacity reservation is then released by marking the identity complete —
+///   cache-node identities are never observed as [`DepKey`] prerequisites by
+///   file-stage or artifact nodes, so completing here cannot strand a waiter.
+/// - file-stage / artifact work → the owned [`TaskKind`] execution descriptor
+///   is constructed inline from the same match and the work runs through the
+///   file-stage executor chokepoint [`Scheduler::execute_stage_on_worker`].
+///
+/// `file_node` is the resolved [`FileNode`] for file-stage work (the caller
+/// looks it up and applies the removed-node / generation-mismatch guards
+/// first); it is `None` for cache-node work, which has no file node.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_ready_job_to_executor(
+    job: &ReadyJob,
+    file_node: Option<&FileNode>,
+    generation: u64,
+    failed_blocker_deps: std::collections::BTreeMap<DepKey, crate::dag::FailedDepRecord>,
+    executor: &dyn StageExecutor,
+    source_loader: &dyn SourceLoader,
+    inbox_sender: &crossbeam_channel::Sender<Submission>,
+    dag: Arc<Mutex<SchedulerDag>>,
+    cancellation: &CancellationToken,
+) {
+    match (&job.kind, &job.identity) {
+        // Cache-node work routes straight to the cache-materialisation hook,
+        // taking the full identity directly: `cache_id` + `key_hash` ride the
+        // owned `TaskKind::CacheNode` descriptor, while `view_epoch` /
+        // `snapshot_pin_id` ride the identity and are handed to the executor
+        // separately (mirroring how `profile_hash` is passed alongside an
+        // `Artifact` task).
+        (
+            WorkKind::CacheNode,
+            WorkNodeIdentity::CacheNode {
+                cache_id,
+                key_hash,
+                view_epoch,
+                snapshot_pin_id,
+            },
+        ) => {
+            // Run the cache node. The executor's default returns a typed
+            // "unsupported" error (a host that has not opted in fails loudly);
+            // the host override performs the real materialisation. The call is
+            // panic-guarded so the reservation release below always runs — the
+            // capacity class never leaks the permit parked at dispatch, even if
+            // a host override panics.
+            let _outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                executor.execute_cache_node(
+                    *cache_id,
+                    *key_hash,
+                    *view_epoch,
+                    *snapshot_pin_id,
+                    cancellation,
+                )
+            }));
+            let stranded = dag.lock().complete(&job.identity);
+            debug_assert!(
+                stranded.is_empty(),
+                "CacheNode completion must not strand DAG waiters: CacheNode \
+                 identities are not used as DepKey prerequisites",
             );
         }
+        // File-stage / artifact work. The owned execution descriptor is built
+        // from the same `(kind, identity)` match and handed to the file-stage
+        // executor chokepoint.
+        (WorkKind::Load, WorkNodeIdentity::FileStage { .. }) => {
+            run_file_stage(
+                TaskKind::Load,
+                job,
+                file_node,
+                generation,
+                failed_blocker_deps,
+                executor,
+                source_loader,
+                inbox_sender,
+                dag,
+            );
+        }
+        (WorkKind::Parse, WorkNodeIdentity::FileStage { .. }) => {
+            run_file_stage(
+                TaskKind::Parse,
+                job,
+                file_node,
+                generation,
+                failed_blocker_deps,
+                executor,
+                source_loader,
+                inbox_sender,
+                dag,
+            );
+        }
+        (WorkKind::Analysis, WorkNodeIdentity::FileStage { .. }) => {
+            run_file_stage(
+                TaskKind::Analysis,
+                job,
+                file_node,
+                generation,
+                failed_blocker_deps,
+                executor,
+                source_loader,
+                inbox_sender,
+                dag,
+            );
+        }
+        (WorkKind::Artifact, WorkNodeIdentity::Artifact { profile_hash, .. }) => {
+            run_file_stage(
+                TaskKind::Artifact {
+                    profile_hash: profile_hash_from_bytes(*profile_hash),
+                },
+                job,
+                file_node,
+                generation,
+                failed_blocker_deps,
+                executor,
+                source_loader,
+                inbox_sender,
+                dag,
+            );
+        }
+        // The DAG's admission paths only produce the `(kind, identity)`
+        // pairings handled above; any other combination is a corrupt ready
+        // job (e.g. a `Load` kind on an `Artifact` identity), which the
+        // admission layer makes unrepresentable.
+        (kind, identity) => unreachable!(
+            "ready job carries an inconsistent (kind, identity) pairing: \
+             {kind:?} / {identity:?}",
+        ),
     }
+}
+
+/// Run a file-stage [`ReadyJob`] through the file-stage executor chokepoint.
+///
+/// Factored out of [`dispatch_ready_job_to_executor`] so each file-stage arm
+/// shares the node-presence assertion and the single call into
+/// [`Scheduler::execute_stage_on_worker`]. Cache-node work never reaches here.
+#[allow(clippy::too_many_arguments)]
+fn run_file_stage(
+    task_kind: TaskKind,
+    job: &ReadyJob,
+    file_node: Option<&FileNode>,
+    generation: u64,
+    failed_blocker_deps: std::collections::BTreeMap<DepKey, crate::dag::FailedDepRecord>,
+    executor: &dyn StageExecutor,
+    source_loader: &dyn SourceLoader,
+    inbox_sender: &crossbeam_channel::Sender<Submission>,
+    dag: Arc<Mutex<SchedulerDag>>,
+) {
+    let node = file_node.unwrap_or_else(|| {
+        unreachable!(
+            "file-stage dispatch ({:?}) requires a resolved FileNode; the caller \
+             looks the node up and applies the removed-node / generation guards \
+             before routing",
+            job.kind,
+        )
+    });
+    Scheduler::execute_stage_on_worker(
+        node,
+        generation,
+        &task_kind,
+        failed_blocker_deps,
+        executor,
+        source_loader,
+        inbox_sender,
+        dag,
+    );
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1174,8 +1338,8 @@ impl Scheduler {
     /// dedicated coordinator pool, never on the scheduler's
     /// stage-execution `cpu_pool`. Installing an outer wait on the stage
     /// pool would let parked coordinator jobs starve the very
-    /// `Source` stage work (the load+parse step folded into
-    /// `TaskKind::Source`) the driver dispatches onto that pool — the
+    /// `Source` stage work (the load+parse step the source stage runs
+    /// under `TaskKind::Load`) the driver dispatches onto that pool — the
     /// pool-starvation deadlock class. This method therefore performs
     /// accounting ONLY; it never touches a pool.
     pub fn account_batch_submission(&self) {
@@ -1634,7 +1798,7 @@ impl Scheduler {
     ///    [`Self::register_resolved_deps`] (Source already complete
     ///    when blockers arrive).
     /// 2. The Source-completion replay path inside
-    ///    [`Self::handle_stage_complete`] (TaskKind::Source arm).
+    ///    [`Self::handle_stage_complete`] (TaskKind::Load arm).
     ///
     /// Catches three cycle classes uniformly via the DAG's bounded
     /// reachability walk ([`SchedulerDag::dep_reaches_owner`]):
@@ -2543,14 +2707,17 @@ impl Scheduler {
         // Request-shape fallback that covers the race window before
         // this stamp lands.)
         let first_missing = if node.current_source().is_none() {
-            TaskKind::Source
+            TaskKind::Load
         } else if node.current_analysis().is_none() {
             TaskKind::Analysis
         } else {
             target.required_task_kind()
         };
-        let first_missing_identity: WorkNodeIdentity = match first_missing {
-            TaskKind::Source => WorkNodeIdentity::FileStage {
+        let first_missing_identity: WorkNodeIdentity = match &first_missing {
+            // The first missing stage is one of the request-target stages
+            // (`Load` for Source, `Analysis`, or `Artifact`); `Parse` and
+            // `CacheNode` are never produced by `required_task_kind`.
+            TaskKind::Load => WorkNodeIdentity::FileStage {
                 canonical: Arc::clone(&canonical),
                 generation,
                 stage: FileStageKey::Source,
@@ -2563,9 +2730,13 @@ impl Scheduler {
             TaskKind::Artifact { profile_hash } => WorkNodeIdentity::Artifact {
                 canonical: Arc::clone(&canonical),
                 generation,
-                profile_hash: profile_hash_to_bytes(profile_hash),
+                profile_hash: profile_hash_to_bytes(*profile_hash),
                 content_hash: [0u8; 16],
             },
+            TaskKind::Parse | TaskKind::CacheNode { .. } => unreachable!(
+                "first-missing-stage planning only yields Load/Analysis/Artifact; \
+                 Parse and CacheNode are not request-target stages"
+            ),
         };
         sender.set_target(crate::job::CompletionTarget::Work(
             first_missing_identity.clone(),
@@ -2607,18 +2778,23 @@ impl Scheduler {
         // per-canonical Artifact blocker registry at this
         // `(file_id, generation)` (owner Analysis is admitted ungated
         // for macro_type_deps).
-        if let TaskKind::Artifact { profile_hash } = first_missing {
+        if let TaskKind::Artifact { profile_hash } = &first_missing {
             self.admit_artifact_with_blockers(
                 dag,
                 &canonical,
                 generation,
-                profile_hash,
+                *profile_hash,
                 effective_priority,
                 None,
             );
             return;
         }
 
+        // A Source admission (the `Load` first-missing stage) transitions the
+        // dep from "queued in inbox" to "Source DAG identity admitted"; the
+        // matrix must stop treating it as a pending auto-ingest. Capture the
+        // discriminant before `admit_work` consumes `first_missing` by value.
+        let is_source_admission = matches!(first_missing, TaskKind::Load);
         admit_work(
             dag,
             &canonical,
@@ -2627,13 +2803,10 @@ impl Scheduler {
             effective_priority,
             None,
         );
-        // A Source admission transitions the dep from "queued in inbox"
-        // to "Source DAG identity admitted"; the matrix must stop
-        // treating it as a pending auto-ingest. The clear touches a
-        // DashMap, so it is deferred until the DAG lock releases (it
-        // would otherwise deadlock against anyone holding the DAG lock
-        // and waiting on that shard).
-        if matches!(first_missing, TaskKind::Source) {
+        // The clear touches a DashMap, so it is deferred until the DAG lock
+        // releases (it would otherwise deadlock against anyone holding the
+        // DAG lock and waiting on that shard).
+        if is_source_admission {
             post.auto_ingest_clears
                 .push((Arc::clone(&canonical), generation));
         }
@@ -3088,8 +3261,10 @@ impl Scheduler {
             .highest_priority_for_file(&canonical_arc, generation)
             .unwrap_or(Priority::Background);
 
-        match task_kind {
-            TaskKind::Source => {
+        match &task_kind {
+            // The source stage completes under the `Load` label (the live
+            // `FileStage{Source}` node maps to `Load`).
+            TaskKind::Load => {
                 // Extract dependencies from the committed source snapshot.
                 if let Some(source) = node.current_source() {
                     let deps = self.executor.extract_deps(file_id, &source);
@@ -3148,7 +3323,7 @@ impl Scheduler {
                                     &mut dag,
                                     &dep_canonical,
                                     dep_gen,
-                                    TaskKind::Source,
+                                    TaskKind::Load,
                                     std::cmp::min(inherited_priority, Priority::Interactive),
                                     parent_ctx,
                                 );
@@ -3339,7 +3514,7 @@ impl Scheduler {
                 let artifact_id = WorkNodeIdentity::Artifact {
                     canonical: Arc::clone(&canonical_arc),
                     generation,
-                    profile_hash: profile_hash_to_bytes(profile_hash),
+                    profile_hash: profile_hash_to_bytes(*profile_hash),
                     content_hash: [0u8; 16],
                 };
                 let mut dag = self.dag.lock();
@@ -3351,6 +3526,16 @@ impl Scheduler {
                     dag.clear_artifact_blockers(&canonical_arc, generation);
                 }
             }
+            // The pipeline advances on the request-target stage completions
+            // (`Load` → Analysis, `Analysis` → Artifact, `Artifact` terminal).
+            // `Parse` is intrinsic to the source stage and never completes as a
+            // standalone stage, and `CacheNode` completion is owned by the
+            // cache dispatch path, not the file-stage pipeline.
+            TaskKind::Parse | TaskKind::CacheNode { .. } => unreachable!(
+                "handle_stage_complete advances the file-stage pipeline on \
+                 Load/Analysis/Artifact completions; Parse and CacheNode do not \
+                 drive file-stage transitions"
+            ),
         }
     }
 
@@ -3510,24 +3695,72 @@ impl Scheduler {
         let executor = Arc::clone(&self.executor);
         let source_loader = Arc::clone(&self.source_loader);
 
-        // Defensive skip: CacheNode dispatch is owned by the cache
-        // layer above the scheduler. Cancel the DAG node so the
-        // parked capacity reservation releases — the dequeue has
-        // already taken a CPU permit against this candidate's
-        // resource class. Stranded-waiter contract: CacheNode
-        // identities are not observed as `DepKey` prerequisites by
-        // FileStage or Artifact nodes, so the cancel here cannot
-        // strand any waiter.
+        // Cache-node work has no file node and routes straight to the
+        // executor's cache-materialisation hook. It is CPU-class work
+        // (`WorkKind::CacheNode`), so it is spawned onto the CPU pool where
+        // the single dispatch entry `dispatch_ready_job_to_executor` runs it
+        // and releases the dispatched node's parked reservation. There is no
+        // file-stage routing for it (no node lookup, no generation guard).
         if matches!(job.identity, WorkNodeIdentity::CacheNode { .. }) {
-            let stranded = self.dag.lock().cancel(&job.identity);
-            debug_assert!(
-                stranded.is_empty(),
-                "CacheNode defensive skip must not strand DAG waiters: \
-                 CacheNode identities are not used as DepKey prerequisites"
-            );
-            return DispatchOutcome::Skipped;
+            let executor_for_cache = Arc::clone(&self.executor);
+            let source_loader_for_cache = Arc::clone(&self.source_loader);
+            let inbox_for_cache = inbox_sender.clone();
+            let dag_for_cache = Arc::clone(&self.dag);
+            // Snapshot the identity for the submit-failure release path before
+            // `job` moves into the pool closure below.
+            let cache_identity = job.identity.clone();
+            let task: crate::pool::SchedulerPoolTask = Box::new(move || {
+                let cancellation = CancellationToken::new();
+                dispatch_ready_job_to_executor(
+                    &job,
+                    None,
+                    0,
+                    std::collections::BTreeMap::new(),
+                    executor_for_cache.as_ref(),
+                    source_loader_for_cache.as_ref(),
+                    &inbox_for_cache,
+                    dag_for_cache,
+                    &cancellation,
+                );
+            });
+            return match self.try_submit_cpu(task) {
+                Ok(crate::pool::SchedulerPoolSubmitResult::Submitted) => {
+                    DispatchOutcome::SubmittedToPool
+                }
+                // A failed cache-node submit releases the parked reservation by
+                // cancelling the identity — cache-node identities are never
+                // DepKey prerequisites, so this cannot strand a waiter.
+                Err(_err) => {
+                    let stranded = self.dag.lock().cancel(&cache_identity);
+                    debug_assert!(
+                        stranded.is_empty(),
+                        "CacheNode submit-failure release must not strand DAG waiters: \
+                         CacheNode identities are not used as DepKey prerequisites",
+                    );
+                    DispatchOutcome::Skipped
+                }
+            };
         }
-        let task_kind = task_kind_for_ready_job(&job);
+
+        // File-stage / artifact work. Build the owned execution descriptor
+        // once for pool routing and the cold panic/submit-violation paths; the
+        // actual execution routes through the single dispatch entry
+        // `dispatch_ready_job_to_executor` below. `CacheNode` was branched away
+        // above, so this match never sees it.
+        let task_kind = match (&job.kind, &job.identity) {
+            (WorkKind::Load, WorkNodeIdentity::FileStage { .. }) => TaskKind::Load,
+            (WorkKind::Parse, WorkNodeIdentity::FileStage { .. }) => TaskKind::Parse,
+            (WorkKind::Analysis, WorkNodeIdentity::FileStage { .. }) => TaskKind::Analysis,
+            (WorkKind::Artifact, WorkNodeIdentity::Artifact { profile_hash, .. }) => {
+                TaskKind::Artifact {
+                    profile_hash: profile_hash_from_bytes(*profile_hash),
+                }
+            }
+            (kind, identity) => unreachable!(
+                "ready job carries an inconsistent file-stage (kind, identity) pairing: \
+                 {kind:?} / {identity:?}",
+            ),
+        };
         let (file_id, generation) = match &job.identity {
             WorkNodeIdentity::FileStage {
                 canonical,
@@ -3540,7 +3773,10 @@ impl Scheduler {
                 ..
             } => (canonical.to_string(), *generation),
             WorkNodeIdentity::CacheNode { .. } => {
-                unreachable!("CacheNode identities skipped by the defensive guard above")
+                unreachable!(
+                    "CacheNode identities are routed above and never reach file-stage \
+                              dispatch"
+                )
             }
         };
 
@@ -3609,10 +3845,13 @@ impl Scheduler {
         // `execute_stage_inline` directly without ever entering
         // `dispatch_ready_job` — the Inline caller is unreachable
         // on this path.
+        // `Load` is the I/O-class source label; every other file-stage label
+        // is CPU-class. A CPU worker inline-runs CPU-class work; an I/O worker
+        // inline-runs the I/O-class `Load` (source) work.
         let inline_eligible = (matches!(caller_kind, crate::caller_kind::CallerKind::CpuWorker)
-            && !matches!(task_kind, TaskKind::Source))
+            && !matches!(task_kind, TaskKind::Load))
             || (matches!(caller_kind, crate::caller_kind::CallerKind::IoWorker)
-                && matches!(task_kind, TaskKind::Source));
+                && matches!(task_kind, TaskKind::Load));
         if inline_eligible {
             // Install the winner's request-context TLS for the
             // duration of the inline stage execution. Both
@@ -3647,13 +3886,14 @@ impl Scheduler {
             // `CpuWorker × non-Source` runs inline on the CPU
             // worker → `Cpu`. The inline_eligible gate above
             // already restricts to these two combinations.
-            let inline_pool_tag = match (caller_kind, task_kind) {
-                (crate::caller_kind::CallerKind::IoWorker, TaskKind::Source) => {
+            let inline_pool_tag = match (caller_kind, &task_kind) {
+                (crate::caller_kind::CallerKind::IoWorker, TaskKind::Load) => {
                     crate::audit_publish::WorkerPoolTag::Io
                 }
                 _ => crate::audit_publish::WorkerPoolTag::Cpu,
             };
-            crate::caller_kind::with_active_path(identity, || {
+            let identity_for_path = identity.clone();
+            crate::caller_kind::with_active_path(identity_for_path, || {
                 Self::publish_scheduler_dispatch(
                     inline_pool_tag,
                     crate::audit_publish::SchedulerDepthsSnapshot {
@@ -3663,15 +3903,17 @@ impl Scheduler {
                     queue_dwell_ms,
                 );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    Self::execute_stage_on_worker(
-                        &node,
+                    let cancellation = CancellationToken::new();
+                    dispatch_ready_job_to_executor(
+                        &job,
+                        Some(&node),
                         generation,
-                        task_kind,
                         failed_blocker_deps,
                         executor.as_ref(),
                         source_loader.as_ref(),
                         &inbox_sender,
                         Arc::clone(&dag_handle),
+                        &cancellation,
                     );
                 }));
                 if result.is_err() {
@@ -3697,11 +3939,12 @@ impl Scheduler {
         let dag_for_violation = Arc::clone(&dag_handle);
         let inbox_for_violation = inbox_sender.clone();
 
-        if matches!(task_kind, TaskKind::Source) {
-            // Source jobs: I/O pool loads content, then hands off
-            // to CPU pool for parse.
+        if matches!(task_kind, TaskKind::Load) {
+            // Source (`Load`) jobs: I/O pool loads content; the parse step is
+            // intrinsic to the source-stage execution path (no separate node).
             let node_for_panic = Arc::clone(&node);
             let dag_for_panic = Arc::clone(&dag_handle);
+            let task_kind_for_panic = task_kind.clone();
             let task: crate::pool::SchedulerPoolTask = Box::new(move || {
                 let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
                     winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
@@ -3715,15 +3958,17 @@ impl Scheduler {
                 );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     crate::caller_kind::with_active_path(identity, || {
-                        Self::execute_stage_on_worker(
-                            &node,
+                        let cancellation = CancellationToken::new();
+                        dispatch_ready_job_to_executor(
+                            &job,
+                            Some(&node),
                             generation,
-                            task_kind,
                             failed_blocker_deps,
                             executor.as_ref(),
                             source_loader.as_ref(),
                             &inbox_sender,
                             Arc::clone(&dag_handle),
+                            &cancellation,
                         );
                     });
                 }));
@@ -3731,7 +3976,7 @@ impl Scheduler {
                     Self::surface_stage_panic_as_failed(
                         &node_for_panic,
                         generation,
-                        &task_kind,
+                        &task_kind_for_panic,
                         &inbox_sender,
                         dag_for_panic,
                     );
@@ -3754,6 +3999,7 @@ impl Scheduler {
             // Analysis/Artifact jobs: pure CPU work.
             let node_for_panic = Arc::clone(&node);
             let dag_for_panic = Arc::clone(&dag_handle);
+            let task_kind_for_panic = task_kind.clone();
             let task: crate::pool::SchedulerPoolTask = Box::new(move || {
                 let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
                     winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
@@ -3767,15 +4013,17 @@ impl Scheduler {
                 );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     crate::caller_kind::with_active_path(identity, || {
-                        Self::execute_stage_on_worker(
-                            &node,
+                        let cancellation = CancellationToken::new();
+                        dispatch_ready_job_to_executor(
+                            &job,
+                            Some(&node),
                             generation,
-                            task_kind,
                             failed_blocker_deps,
                             executor.as_ref(),
                             source_loader.as_ref(),
                             &inbox_sender,
                             Arc::clone(&dag_handle),
+                            &cancellation,
                         );
                     });
                 }));
@@ -3783,7 +4031,7 @@ impl Scheduler {
                     Self::surface_stage_panic_as_failed(
                         &node_for_panic,
                         generation,
-                        &task_kind,
+                        &task_kind_for_panic,
                         &inbox_sender,
                         dag_for_panic,
                     );
@@ -4100,27 +4348,28 @@ impl Scheduler {
 
     /// Dispatch work inline (used by `drive_one`/`drive_all` in sync mode and WASM).
     fn execute_stage_inline(&self, job: ReadyJob) {
-        // Defensive skip: CacheNode dispatch is owned by the cache
-        // layer above the scheduler. Skip before
-        // task_kind_for_ready_job so its unreachable!() never fires
-        // on a misrouted enqueue. Cancel the DAG node so the parked
-        // capacity reservation releases — `next_ready` has already
-        // taken a CPU permit against this candidate's class, and a
-        // `return` without releasing would pin the CPU budget.
-        // Stranded-waiter contract: CacheNode identities are not
-        // observed as `DepKey` prerequisites by FileStage or
-        // Artifact nodes, so the cancel here cannot strand any
-        // waiter.
+        // Cache-node work has no file node: run it inline through the single
+        // dispatch entry, which routes to the executor's cache hook and
+        // releases the dispatched node's parked reservation. No file-stage
+        // node lookup or generation guard applies.
         if matches!(job.identity, WorkNodeIdentity::CacheNode { .. }) {
-            let stranded = self.dag.lock().cancel(&job.identity);
-            debug_assert!(
-                stranded.is_empty(),
-                "inline CacheNode defensive skip must not strand DAG waiters: \
-                 CacheNode identities are not used as DepKey prerequisites"
-            );
+            let identity = job.identity.clone();
+            crate::caller_kind::with_active_path(identity, || {
+                let cancellation = CancellationToken::new();
+                dispatch_ready_job_to_executor(
+                    &job,
+                    None,
+                    0,
+                    std::collections::BTreeMap::new(),
+                    self.executor.as_ref(),
+                    self.source_loader.as_ref(),
+                    &self.inbox.sender,
+                    self.dag.clone(),
+                    &cancellation,
+                );
+            });
             return;
         }
-        let task_kind = task_kind_for_ready_job(&job);
         let (file_id, generation) = match &job.identity {
             WorkNodeIdentity::FileStage {
                 canonical,
@@ -4133,7 +4382,10 @@ impl Scheduler {
                 ..
             } => (canonical.to_string(), *generation),
             WorkNodeIdentity::CacheNode { .. } => {
-                unreachable!("CacheNode identities skipped by the defensive guard above")
+                unreachable!(
+                    "CacheNode identities are routed above and never reach file-stage \
+                              inline dispatch"
+                )
             }
         };
 
@@ -4168,18 +4420,23 @@ impl Scheduler {
         // Push the identity onto the active-path stack so a
         // re-entrant `wait_or_drive` from inside the executor
         // detects same-path self-await rather than blocking on
-        // its own pending completion.
+        // its own pending completion. The owned execution descriptor is
+        // constructed by the single dispatch entry from `job`'s own
+        // `(kind, identity)`.
         let identity = job.identity.clone();
+        let failed_blocker_deps = job.failed_blocker_deps.clone();
         crate::caller_kind::with_active_path(identity, || {
-            Self::execute_stage_on_worker(
-                &node,
+            let cancellation = CancellationToken::new();
+            dispatch_ready_job_to_executor(
+                &job,
+                Some(&node),
                 generation,
-                task_kind,
-                job.failed_blocker_deps,
+                failed_blocker_deps,
                 self.executor.as_ref(),
                 self.source_loader.as_ref(),
                 &self.inbox.sender,
                 self.dag.clone(),
+                &cancellation,
             );
         });
     }
@@ -4193,7 +4450,8 @@ impl Scheduler {
         task_kind: &TaskKind,
     ) -> WorkNodeIdentity {
         match task_kind {
-            TaskKind::Source => WorkNodeIdentity::FileStage {
+            // The live `FileStage{Source}` node maps to the `Load` label.
+            TaskKind::Load => WorkNodeIdentity::FileStage {
                 canonical: Arc::clone(canonical),
                 generation,
                 stage: FileStageKey::Source,
@@ -4209,6 +4467,14 @@ impl Scheduler {
                 profile_hash: profile_hash_to_bytes(*profile_hash),
                 content_hash: [0u8; 16],
             },
+            // Failure/terminalization addressing covers the file-stage tasks
+            // only. `Parse` shares the source stage's identity (it never
+            // terminalizes on its own), and `CacheNode` completion/release is
+            // owned by the cache dispatch path, not this inverse map.
+            TaskKind::Parse | TaskKind::CacheNode { .. } => unreachable!(
+                "dag_identity_for_task addresses file-stage nodes (Load/Analysis/Artifact) \
+                 for terminalization; Parse and CacheNode are not addressed here"
+            ),
         }
     }
 
@@ -4308,7 +4574,7 @@ impl Scheduler {
         //     verbatim — the downstream short-circuit then surfaces
         //     a typed `DependencyFailed` instead of synthesising a
         //     stage-only envelope.
-        if matches!(task_kind, TaskKind::Source) {
+        if matches!(task_kind, TaskKind::Load | TaskKind::Parse) {
             let analysis_stranded =
                 guard.fanout_source_failure_to_analysis_waiters(canonical, generation, &error);
             stranded.extend(analysis_stranded);
@@ -4327,7 +4593,10 @@ impl Scheduler {
         //     blockers always key on the producer's Analysis stage
         //     (`register_resolved_deps` records `DepKey::FileStage
         //     { stage: Analysis }`).
-        if matches!(task_kind, TaskKind::Source | TaskKind::Analysis) {
+        if matches!(
+            task_kind,
+            TaskKind::Load | TaskKind::Parse | TaskKind::Analysis
+        ) {
             let analysis_dep_key = crate::dag::DepKey::FileStage {
                 canonical: Arc::clone(canonical),
                 generation,
@@ -4342,12 +4611,18 @@ impl Scheduler {
         //    must NOT terminate other-profile waiters at the same
         //    (canonical, generation) — use the per-stage variant.
         match task_kind {
-            TaskKind::Source | TaskKind::Analysis => {
+            TaskKind::Load | TaskKind::Parse | TaskKind::Analysis => {
                 guard.signal_file_failed(canonical, generation, error);
             }
             TaskKind::Artifact { .. } => {
                 guard.signal_file_failed_for_stage(canonical, generation, task_kind, error);
             }
+            // CacheNode completion/release is owned by the cache dispatch path;
+            // it never terminalizes through the file-stage failure chokepoint.
+            TaskKind::CacheNode { .. } => unreachable!(
+                "terminalize_failure addresses file-stage tasks (Load/Parse/Analysis/Artifact); \
+                 CacheNode release is owned by the cache dispatch path"
+            ),
         }
         stranded
     }
@@ -4437,7 +4712,7 @@ impl Scheduler {
     fn execute_stage_on_worker(
         node: &FileNode,
         generation: u64,
-        task_kind: TaskKind,
+        task_kind: &TaskKind,
         failed_blocker_deps: std::collections::BTreeMap<
             crate::dag::DepKey,
             crate::dag::FailedDepRecord,
@@ -4473,7 +4748,7 @@ impl Scheduler {
                 &dag,
                 &canonical,
                 generation,
-                &task_kind,
+                task_kind,
                 SchedulerError::DependencyFailed {
                     dep_key: first_record.dep_key.clone(),
                     cause: Box::new(first_record.cause.clone()),
@@ -4483,7 +4758,10 @@ impl Scheduler {
             return;
         }
         match task_kind {
-            TaskKind::Source => {
+            // The source stage runs under the `Load` label (the live
+            // `FileStage{Source}` node maps to `Load`); the load+parse work
+            // runs in this one source-stage execution path.
+            TaskKind::Load => {
                 debug_assert!(
                     failed_blocker_deps.is_empty(),
                     "Source stage received failed_blocker_deps — pre-dispatch \
@@ -4518,12 +4796,24 @@ impl Scheduler {
                 Self::execute_artifact_stage(
                     node,
                     generation,
-                    profile_hash,
+                    *profile_hash,
                     executor,
                     inbox_sender,
                     dag,
                 );
             }
+            // `execute_stage_on_worker` is the file-stage executor chokepoint.
+            // `Parse` is intrinsic to the source stage (never dispatched as a
+            // standalone file stage in the single-`FileStage{Source}`-node
+            // model), and `CacheNode` is routed directly to
+            // `StageExecutor::execute_cache_node` by
+            // [`Self::dispatch_ready_job_to_executor`] — it never reaches this
+            // file-node-centric executor (it carries no `FileNode`).
+            TaskKind::Parse | TaskKind::CacheNode { .. } => unreachable!(
+                "execute_stage_on_worker runs file-stage work (Load/Analysis/Artifact); \
+                 Parse is intrinsic to the source stage and CacheNode routes through \
+                 dispatch_ready_job_to_executor to execute_cache_node"
+            ),
         }
     }
 
@@ -4561,7 +4851,7 @@ impl Scheduler {
                     &dag,
                     &canonical,
                     generation,
-                    &TaskKind::Source,
+                    &TaskKind::Load,
                     SchedulerError::FileNotFound {
                         file_id: node.canonical_id.clone(),
                     },
@@ -4583,7 +4873,7 @@ impl Scheduler {
                     &dag,
                     &canonical,
                     generation,
-                    &TaskKind::Source,
+                    &TaskKind::Load,
                     SchedulerError::StageFailed {
                         file_id: node.canonical_id.clone(),
                         stage: "Source".to_string(),
@@ -4607,12 +4897,12 @@ impl Scheduler {
 
             let result = RequestResult::Source(snapshot);
             dag.lock()
-                .signal_stage_complete(&canonical, generation, &TaskKind::Source, &result);
+                .signal_stage_complete(&canonical, generation, &TaskKind::Load, &result);
 
             let _ = inbox_sender.send(Submission::StageComplete {
                 file_id: node.canonical_id.clone(),
                 generation,
-                task_kind: TaskKind::Source,
+                task_kind: TaskKind::Load,
             });
         }
     }
@@ -5423,114 +5713,175 @@ mod tests {
         );
     }
 
-    /// A CacheNode identity submitted via SchedulerDag::submit must
-    /// NOT panic when the dispatch path tries to route it through
-    /// task_kind_for_ready_job — the dispatch path skips it
-    /// defensively and cancels the DAG entry so the parked admission
-    /// permit releases.
+    /// Executor that records every `execute_cache_node` invocation and the
+    /// full cache identity it was handed. Used by the CacheNode positive-
+    /// dispatch test to prove the dispatch path actually ROUTES cache-node
+    /// work to the executor (rather than a non-routing skip that never reaches
+    /// any executor method). All other stage methods use the default stub
+    /// bodies.
+    /// The four `WorkNodeIdentity::CacheNode` fields a recorded
+    /// `execute_cache_node` call was handed: `(cache_id, key_hash, view_epoch,
+    /// snapshot_pin_id)`.
+    type RecordedCacheCall = (u64, [u8; 16], u64, u64);
+
+    #[derive(Debug, Default)]
+    struct RecordingCacheExecutor {
+        /// Number of `execute_cache_node` calls observed.
+        calls: AtomicU64,
+        /// The four identity fields of the last call, recorded so the test
+        /// asserts the executor received the exact `WorkNodeIdentity::CacheNode`
+        /// values (not a fabricated or zeroed identity).
+        last: Mutex<Option<RecordedCacheCall>>,
+    }
+
+    impl StageExecutor for RecordingCacheExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn execute_cache_node(
+            &self,
+            cache_id: crate::cache_id::SchedulerCacheId,
+            key_hash: crate::dag::Hash16,
+            view_epoch: u64,
+            snapshot_pin_id: crate::dag::PinId,
+            _cancellation: &CancellationToken,
+        ) -> Result<(), crate::executor::StageError> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            *self.last.lock() = Some((cache_id.0, key_hash, view_epoch, snapshot_pin_id.0));
+            Ok(())
+        }
+    }
+
+    /// A CacheNode ready job dispatches THROUGH the executor's
+    /// `execute_cache_node` hook — the single dispatch entry
+    /// (`dispatch_ready_job_to_executor`) routes the identity directly to the
+    /// cache-materialisation method, handing it the exact four identity fields.
     ///
-    /// Pre-guard: task_kind_for_ready_job's CacheNode arm contains an
-    /// unreachable!() that panics whenever a CacheNode reaches it.
-    /// drive_one would therefore propagate the panic.
-    /// Post-guard: the dispatch path's defensive guard skips the
-    /// identity before task_kind_for_ready_job is called AND calls
-    /// `dag.cancel(&job.identity)` so the parked CPU permit
-    /// releases and the cache layer's own dispatch arm is free to
-    /// re-admit when it wires up.
+    /// DISCRIMINATOR: a non-routing dispatch that cancels/skips the CacheNode
+    /// BEFORE any executor call makes the recorder observe ZERO calls and this
+    /// test fails at the first assertion. (A `CacheNode` dispatch arm that
+    /// `unreachable!()`s instead of calling the hook fails the same way.)
     #[test]
-    fn cache_node_identity_silently_skipped_by_dispatch() {
+    fn cache_node_dispatch_routes_to_execute_cache_node() {
         use crate::cache_id::SchedulerCacheId;
         use crate::dag::{PinId, WorkKind};
         let loader = Arc::new(MemorySourceLoader::new());
-        let sched = test_scheduler_with_loader(loader);
+        let executor = Arc::new(RecordingCacheExecutor::default());
+        let sched = Scheduler::test_new_sync_with_executor(
+            SchedulerConfig::default(),
+            loader as Arc<dyn crate::source_loader::SourceLoader>,
+            Arc::clone(&executor) as Arc<dyn StageExecutor>,
+        );
 
-        // Inject a CacheNode identity directly into the DAG.
-        let cache_id = WorkNodeIdentity::CacheNode {
+        // Inject a CacheNode identity directly into the DAG (the cache layer's
+        // production producer is U7; here we submit the identity by hand).
+        let cache_identity = WorkNodeIdentity::CacheNode {
             cache_id: SchedulerCacheId(7),
-            key_hash: [0u8; 16],
-            view_epoch: 1,
-            snapshot_pin_id: PinId(1),
+            key_hash: [0xABu8; 16],
+            view_epoch: 42,
+            snapshot_pin_id: PinId(99),
         };
         sched.dag.lock().submit(
-            cache_id.clone(),
+            cache_identity.clone(),
             WorkKind::CacheNode,
             Priority::Interactive,
             Vec::new(),
             None,
         );
 
-        // The defensive guard dequeues, then cancels the identity
-        // so the permit releases. The CacheNode entry is removed
-        // from `by_identity`; `drive_one` returns true (work was
-        // dequeued); no panic propagates.
-        let _ = sched.drive_one();
-        // The key invariant: no panic propagated. The identity is
-        // no longer in `by_identity` (cancel removed it), which
-        // mirrors the sibling permit-release test.
+        // Drive the cache node to completion through the dispatch path.
+        sched.drive_all();
+
+        // POSITIVE ROUTING: the executor's cache hook was called exactly once.
+        assert_eq!(
+            executor.calls.load(Ordering::Acquire),
+            1,
+            "CacheNode dispatch must route to StageExecutor::execute_cache_node \
+             — the retired defensive skip / unreachable!() adapter never called it",
+        );
+        // IDENTITY FIDELITY: the hook received the exact four identity fields
+        // from `WorkNodeIdentity::CacheNode` (cache_id, key_hash, view_epoch,
+        // snapshot_pin_id), proving the router forwards the full identity and
+        // does not fabricate or zero it.
+        assert_eq!(
+            *executor.last.lock(),
+            Some((7, [0xABu8; 16], 42, 99)),
+            "execute_cache_node must receive the exact CacheNode identity fields",
+        );
+        // The CacheNode identity is consumed (completed) out of the DAG.
+        assert!(
+            sched.dag.lock().token_for(&cache_identity).is_none(),
+            "the dispatched CacheNode identity must be completed out of the DAG",
+        );
     }
 
-    /// CacheNode defensive skip in `execute_stage_inline` (and the
-    /// native dispatch loop) must release the parked CPU permit
-    /// before returning. Without the release, a {cpu:1} budget is
-    /// permanently drained on the first CacheNode submission and a
-    /// follow-on real CPU job never dispatches.
+    /// CacheNode dispatch releases the parked CPU permit. `next_ready` reserves
+    /// a CPU permit for the cache-node candidate at dispatch; after
+    /// `execute_cache_node` runs, the single dispatch entry marks the identity
+    /// complete, releasing the reservation through its by-value consume.
     ///
-    /// Without the cancel, `continue` / `return` skips the rest of
-    /// the dispatch arm but the reservation parked on the DAG node
-    /// by `next_ready` stays alive; the CPU class budget is held.
-    /// With the cancel, the skip path calls
-    /// `dag.cancel(&job.identity)` so the parked reservation
-    /// releases through its by-value consume.
+    /// DISCRIMINATOR: without the release the {cpu:1} class stays drained and
+    /// the follow-on Analysis below never dispatches —
+    /// `in_flight_cpu_permits()` would read 1 and `h.try_get()` would not be
+    /// ready.
     #[test]
-    fn cachenode_defensive_skip_releases_cpu_permit() {
+    fn cache_node_dispatch_releases_cpu_permit() {
         use crate::cache_id::SchedulerCacheId;
         use crate::dag::{PinId, WorkKind};
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/follow.vue".to_string(), Arc::from("content"));
-        // Tight {cpu:1, io:1} budget: a leaked CPU permit pins the
-        // class and the follow-on Analysis below cannot dispatch.
+        // Tight {cpu:1, io:1} budget: a leaked CPU permit pins the class and
+        // the follow-on Analysis below cannot dispatch.
         let config = SchedulerConfig {
             cpu_threads: 1,
             io_threads: 1,
             dag_budget: Some(DagCapacityBudget { cpu: 1, io: 1 }),
         };
-        let sched = Scheduler::test_new_sync(config, loader);
+        let executor = Arc::new(RecordingCacheExecutor::default());
+        let sched = Scheduler::test_new_sync_with_executor(
+            config,
+            loader as Arc<dyn crate::source_loader::SourceLoader>,
+            Arc::clone(&executor) as Arc<dyn StageExecutor>,
+        );
 
-        // Inject a CacheNode identity directly into the DAG so the
-        // dispatch path encounters the defensive skip.
-        let cache_id = WorkNodeIdentity::CacheNode {
+        // Inject a CacheNode identity directly into the DAG.
+        let cache_identity = WorkNodeIdentity::CacheNode {
             cache_id: SchedulerCacheId(7),
             key_hash: [0u8; 16],
             view_epoch: 1,
             snapshot_pin_id: PinId(1),
         };
         sched.dag.lock().submit(
-            cache_id.clone(),
+            cache_identity.clone(),
             WorkKind::CacheNode,
             Priority::Interactive,
             Vec::new(),
             None,
         );
 
-        // drive_one consumes the CacheNode via next_ready (which
-        // reserves a CPU permit) and the defensive skip MUST release.
-        let _ = sched.drive_one();
+        // drive_all consumes the CacheNode via next_ready (which reserves a
+        // CPU permit), routes it to execute_cache_node, then releases.
+        sched.drive_all();
 
-        // DISCRIMINATOR: the defensive skip must release the permit.
-        // Without the cancel, the counter would be 1 (parked
-        // reservation lives on the dispatched CacheNode entry);
-        // with the cancel it is 0 because the skip routes through
-        // `dag.cancel(&job.identity)`.
+        // The cache hook ran (the work was genuinely dispatched, not skipped).
+        assert_eq!(
+            executor.calls.load(Ordering::Acquire),
+            1,
+            "CacheNode must dispatch through execute_cache_node before releasing",
+        );
+        // DISCRIMINATOR: the reservation released. Without the release the
+        // counter would be 1 (parked reservation on the dispatched CacheNode
+        // entry); with it the count is 0.
         assert_eq!(
             sched.dag.lock().in_flight_cpu_permits(),
             0,
-            "CacheNode defensive skip must release the parked CPU permit \
+            "CacheNode dispatch must release the parked CPU permit \
              — without it the {{cpu:1}} class would stay drained",
         );
 
-        // Submit a real CPU job and verify it dispatches — the
-        // follow-on side of the discriminator. A leaked permit
-        // would have stalled this in the CPU class.
+        // Submit a real CPU job and verify it dispatches — the follow-on side
+        // of the discriminator. A leaked permit would have stalled this.
         let h = sched.submit_request(Request {
             file_id: "/follow.vue".to_string(),
             target: TargetStage::Analysis,
@@ -5542,7 +5893,7 @@ mod tests {
         sched.drive_all();
         assert!(
             h.try_get().unwrap().is_ready(),
-            "follow-on Analysis must dispatch after CacheNode skip released the permit",
+            "follow-on Analysis must dispatch after CacheNode dispatch released the permit",
         );
     }
 
@@ -6007,6 +6358,9 @@ mod tests {
     }
 
     impl StageExecutor for BlockingExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         fn extract_deps(
             &self,
             canonical_id: &str,
@@ -6148,6 +6502,9 @@ mod tests {
     /// Source executor that returns Err on the first call.
     struct ErrSourceExecutor;
     impl StageExecutor for ErrSourceExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         fn execute_source(
             &self,
             _canonical_id: &str,
@@ -6164,6 +6521,9 @@ mod tests {
     /// Analysis executor that succeeds on Source and Errs on Analysis.
     struct ErrAnalysisExecutor;
     impl StageExecutor for ErrAnalysisExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         fn execute_analysis(
             &self,
             _canonical_id: &str,
@@ -6180,6 +6540,9 @@ mod tests {
     /// Artifact only.
     struct ErrArtifactExecutor;
     impl StageExecutor for ErrArtifactExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         fn execute_artifact(
             &self,
             _canonical_id: &str,
@@ -6197,6 +6560,9 @@ mod tests {
     /// Source executor that panics on the first call.
     struct PanickingSourceExecutor;
     impl StageExecutor for PanickingSourceExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         fn execute_source(
             &self,
             _canonical_id: &str,
@@ -7448,6 +7814,9 @@ mod tests {
     }
 
     impl crate::executor::StageExecutor for GatedAnalysisExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         fn execute_analysis(
             &self,
             canonical_id: &str,
@@ -7625,6 +7994,9 @@ mod tests {
     }
 
     impl crate::executor::StageExecutor for DepAnalysisFailExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         fn extract_deps(
             &self,
             canonical_id: &str,
@@ -7737,6 +8109,9 @@ mod tests {
     }
 
     impl crate::executor::StageExecutor for GatedPanickingSourceExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         fn execute_source(
             &self,
             canonical_id: &str,
@@ -7874,6 +8249,9 @@ mod tests {
     }
 
     impl crate::executor::StageExecutor for GatedArtifactExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         fn execute_artifact(
             &self,
             canonical_id: &str,
@@ -8106,6 +8484,9 @@ mod tests {
     }
 
     impl StageExecutor for ProbeExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         fn execute_source(
             &self,
             _canonical_id: &str,
@@ -8507,6 +8888,9 @@ mod tests {
             dep_source_observed: Arc<AtomicU64>,
         }
         impl StageExecutor for ParentAndDepProbe {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
             fn extract_deps(&self, canonical_id: &str, _source: &SourceSnapshot) -> ExtractedDeps {
                 if canonical_id == PARENT {
                     ExtractedDeps {
@@ -8609,6 +8993,9 @@ mod tests {
             slots: Arc<Vec<Arc<AtomicU64>>>,
         }
         impl StageExecutor for PerFileProbe {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
             fn execute_analysis(
                 &self,
                 canonical_id: &str,
@@ -9725,7 +10112,7 @@ mod tests {
     /// the queued `NewRequest` and admits the Source identity, the
     /// live `by_identity` entry takes over as the source of truth for
     /// the matrix; a stale tracking entry would only confuse later
-    /// consults. The cleanup arm runs after `admit_work(TaskKind::Source)`
+    /// consults. The cleanup arm runs after `admit_work(TaskKind::Load)`
     /// in `handle_new_request`.
     ///
     /// Discriminator: plant a tracking entry (via the normal
@@ -10202,6 +10589,9 @@ mod tests {
     }
 
     impl crate::executor::StageExecutor for GatedFailingSourceExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         fn execute_source(
             &self,
             canonical_id: &str,
@@ -11210,6 +11600,9 @@ mod tests {
             analysis_hits: AtomicU64,
         }
         impl crate::executor::StageExecutor for CountingAnalysisExecutor {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
             fn execute_analysis(
                 &self,
                 _canonical_id: &str,
@@ -11392,6 +11785,9 @@ mod tests {
         /// `/dep.ts` itself extracts nothing.
         struct OwnerWithDepExtractor;
         impl crate::executor::StageExecutor for OwnerWithDepExtractor {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
             fn extract_deps(
                 &self,
                 canonical_id: &str,
@@ -11874,6 +12270,9 @@ mod tests {
         }
 
         impl crate::executor::StageExecutor for GatedFailingAnalysisExecutor {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
             fn execute_analysis(
                 &self,
                 canonical_id: &str,
@@ -12129,13 +12528,13 @@ mod tests {
             dag.signal_stage_complete(
                 &dep_arc,
                 dep_gen_v1,
-                &TaskKind::Source,
+                &TaskKind::Load,
                 &RequestResult::Source(Arc::clone(&source_snap)),
             );
             assert!(
                 dag.lookup_terminal_dep_failure(&key_v1).is_none(),
                 "terminal_dep_failures must be cleared by \
-                 signal_stage_complete(Source) at the same gen. \
+                 signal_stage_complete(Load) at the same gen. \
                  Without the clear, the record survives and the matrix \
                  returns Failed for a successfully-recovered dep.",
             );
@@ -13056,6 +13455,9 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     impl crate::executor::StageExecutor for HookExecutor {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         fn execute_source(
             &self,
             _canonical_id: &str,
@@ -13961,6 +14363,9 @@ mod tests {
             source_hook: Box<dyn Fn(&str) + Send + Sync>,
         }
         impl crate::executor::StageExecutor for SourceHookExecutor {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
             fn execute_source(
                 &self,
                 canonical_id: &str,
@@ -14302,6 +14707,9 @@ mod tests {
             source_hook: Box<dyn Fn(&str) + Send + Sync>,
         }
         impl crate::executor::StageExecutor for SourceHookExecutorIo {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
             fn execute_source(
                 &self,
                 canonical_id: &str,
@@ -16000,6 +16408,9 @@ mod tests {
                 }
             }
             impl crate::executor::StageExecutor for CallerKindProbe {
+                fn as_any(&self) -> &dyn std::any::Any {
+                    self
+                }
                 fn execute_source(
                     &self,
                     _c: &str,
@@ -16129,6 +16540,9 @@ mod tests {
             gates: dashmap::DashMap<String, SourceGate>,
         }
         impl crate::executor::StageExecutor for GatedSourceExecutor {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
             fn execute_source(
                 &self,
                 canonical_id: &str,
