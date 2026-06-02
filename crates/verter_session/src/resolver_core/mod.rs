@@ -1176,6 +1176,25 @@ where
         out
     }
 
+    /// Test-only: return the admitted `fact_dep_signature` of every
+    /// candidate stored under `key`, regardless of validation. Used by
+    /// the owner-Route fact-strip regression test to assert what the
+    /// publish boundary actually admitted into the cache (a warm-read
+    /// helper would hide a candidate that fails validation under the
+    /// live view, but the strip contract is about the ADMITTED set).
+    #[cfg(test)]
+    pub fn candidate_signatures_for_key(&self, key: &K) -> Vec<Arc<[FactVersionRef]>> {
+        match self.entries.get(key) {
+            Some(entry) => entry
+                .candidates
+                .load()
+                .iter()
+                .map(|c| Arc::clone(&c.fact_dep_signature))
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
     pub fn clear(&self) {
         self.entries.clear();
     }

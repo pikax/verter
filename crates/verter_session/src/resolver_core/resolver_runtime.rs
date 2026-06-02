@@ -109,6 +109,25 @@ where
         self.cache.values()
     }
 
+    /// Test-only pass-through to
+    /// [`ValidatedFactCache::candidate_signatures_for_key`].
+    #[cfg(test)]
+    pub fn candidate_signatures_for_key(&self, key: &K) -> Vec<Arc<[FactVersionRef]>> {
+        self.cache.candidate_signatures_for_key(key)
+    }
+
+    /// Test-only pass-through to [`ValidatedFactCache::warm_hit_count`].
+    #[cfg(test)]
+    pub fn warm_hit_count(&self) -> u64 {
+        self.cache.warm_hit_count()
+    }
+
+    /// Test-only pass-through to [`ValidatedFactCache::stale_miss_count`].
+    #[cfg(test)]
+    pub fn stale_miss_count(&self) -> u64 {
+        self.cache.stale_miss_count()
+    }
+
     pub fn remove(&self, key: &K) {
         self.cache.remove(key);
     }

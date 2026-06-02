@@ -106,6 +106,8 @@ mod component_meta_read_once_tests;
 #[cfg(test)]
 mod component_meta_repo_first_pass_diagnosis_tests;
 pub mod component_meta_resolution_policy;
+#[cfg(test)]
+mod component_meta_resolve_owner_route_strip_tests;
 pub mod component_meta_result_db;
 #[cfg(test)]
 mod component_meta_slot_binding_skip_tests;
