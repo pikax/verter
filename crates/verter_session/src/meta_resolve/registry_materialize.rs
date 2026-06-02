@@ -702,6 +702,44 @@ pub(crate) fn preserve_package_backed_symbolic_refs_node(
     }
 }
 
+/// Borrow the inner [`FunctionExpr`](verter_type_expr::FunctionExpr) of a
+/// function-like `TypeExpr` — a [`TypeExpr::Function`] OR a
+/// [`TypeExpr::ConstructorType`] — together with the constructor-ness flag.
+///
+/// Both variants carry the identical `FunctionExpr` payload and walk their
+/// signature identically; only the reconstructed variant differs. The
+/// structure-preserving route preservers use this so a function-like pair is
+/// walked regardless of whether either side is a plain function or a bare
+/// constructor type — and so a `ConstructorType` is reconstructed as a
+/// `ConstructorType` (never flattened to a `Function`).
+fn function_like_inner(
+    expr: &verter_type_expr::TypeExpr,
+) -> Option<(&std::sync::Arc<verter_type_expr::FunctionExpr>, bool)> {
+    use verter_type_expr::TypeExpr;
+    match expr {
+        TypeExpr::Function(function) => Some((function, false)),
+        TypeExpr::ConstructorType(function) => Some((function, true)),
+        _ => None,
+    }
+}
+
+/// Re-wrap a rewritten [`FunctionExpr`](verter_type_expr::FunctionExpr) as
+/// either [`TypeExpr::ConstructorType`] (when `is_constructor`) or
+/// [`TypeExpr::Function`]. Mirrors the wrap decision in
+/// `materialize_component_meta_registry_structural_expr`.
+fn wrap_function_like(
+    function: verter_type_expr::FunctionExpr,
+    is_constructor: bool,
+) -> verter_type_expr::TypeExpr {
+    use verter_type_expr::TypeExpr;
+    let function = std::sync::Arc::new(function);
+    if is_constructor {
+        TypeExpr::ConstructorType(function)
+    } else {
+        TypeExpr::Function(function)
+    }
+}
+
 pub(crate) fn preserve_registry_callable_param_member_routes(
     materialized: &verter_type_expr::TypeExpr,
     raw: &verter_type_expr::TypeExpr,
@@ -806,7 +844,20 @@ pub(crate) fn preserve_registry_callable_param_member_routes(
                 }
                 TypeExpr::Object(std::sync::Arc::new(object))
             }
-            (TypeExpr::Function(materialized_function), TypeExpr::Function(raw_function)) => {
+            // Function-like preservation covers a plain function OR a bare
+            // constructor type on EITHER side (both carry the same
+            // `FunctionExpr` payload). The constructor-ness of the RAW side is
+            // authoritative — the materialised side is the post-dispatch form,
+            // where a constructor type was raised function-like — so the
+            // rewritten signature is reconstructed as a `ConstructorType`
+            // whenever raw was one, never flattened to a plain `Function`.
+            _ if function_like_inner(materialized).is_some()
+                && function_like_inner(raw).is_some() =>
+            {
+                let (materialized_function, _) =
+                    function_like_inner(materialized).expect("guarded above");
+                let (raw_function, raw_is_constructor) =
+                    function_like_inner(raw).expect("guarded above");
                 let mut function = materialized_function.as_ref().clone();
                 for (parameter, raw_parameter) in function
                     .parameters
@@ -821,7 +872,7 @@ pub(crate) fn preserve_registry_callable_param_member_routes(
                 ) {
                     *return_type = std::sync::Arc::new(inner(return_type, raw_return_type, false));
                 }
-                TypeExpr::Function(std::sync::Arc::new(function))
+                wrap_function_like(function, raw_is_constructor)
             }
             _ => materialized.clone(),
         }
@@ -1158,7 +1209,21 @@ pub(crate) fn preserve_nested_symbolic_member_routes(
             }
             TypeExpr::Object(Arc::new(object))
         }
-        (TypeExpr::Function(materialized_function), TypeExpr::Function(raw_function)) => {
+        // Function-like preservation covers a plain function OR a bare
+        // constructor type on EITHER side. The constructor-ness of the RAW side
+        // is authoritative (the materialised side is the post-dispatch
+        // function-like form), so the rewritten signature is reconstructed as a
+        // `ConstructorType` whenever raw was one — never flattened to a plain
+        // `Function`. Without this the scanner at
+        // `type_expr_needs_nested_symbolic_route_preservation` flags a
+        // constructor type as needing preservation, but a `(Function,
+        // ConstructorType)` pair fell to the `_ => materialized.clone()` arm and
+        // SILENTLY DROPPED the nested member routes.
+        _ if function_like_inner(materialized).is_some() && function_like_inner(raw).is_some() => {
+            let (materialized_function, _) =
+                function_like_inner(materialized).expect("guarded above");
+            let (raw_function, raw_is_constructor) =
+                function_like_inner(raw).expect("guarded above");
             let mut function = materialized_function.as_ref().clone();
             for (param, raw_param) in function
                 .parameters
@@ -1185,7 +1250,7 @@ pub(crate) fn preserve_nested_symbolic_member_routes(
                     true,
                 ));
             }
-            TypeExpr::Function(Arc::new(function))
+            wrap_function_like(function, raw_is_constructor)
         }
         (TypeExpr::Parenthesized(materialized_inner), TypeExpr::Parenthesized(raw_inner)) => {
             TypeExpr::Parenthesized(Arc::new(preserve_nested_symbolic_member_routes(

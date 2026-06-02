@@ -47,6 +47,9 @@ mod projectors_peek_tests;
 #[path = "meta_resolve/projectors_silent_miss_tests.rs"]
 mod projectors_silent_miss_tests;
 mod registry_materialize;
+#[cfg(test)]
+#[path = "meta_resolve/registry_materialize_tests.rs"]
+mod registry_materialize_tests;
 mod resolved_state;
 mod scoring;
 pub(crate) mod slot_binding_graph;
