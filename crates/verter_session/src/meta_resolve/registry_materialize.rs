@@ -774,14 +774,27 @@ pub(crate) fn preserve_registry_callable_param_member_routes(
                     match candidate {
                         ObjectMember::Property(property) => {
                             raw_properties.insert(property.name.as_str(), property);
-                            if let TypeExpr::Function(function) = &property.ty {
-                                raw_callables
-                                    .insert(property.name.as_str(), function.as_ref().clone());
+                            // A property whose value is a function-like type
+                            // (plain `Function` OR a bare `ConstructorType`)
+                            // seeds the callable map. Capture the
+                            // constructor-ness so a Property→Method remap
+                            // reconstructs the correct variant rather than
+                            // flattening a constructor type to a function.
+                            if let Some((function, is_constructor)) =
+                                function_like_inner(&property.ty)
+                            {
+                                raw_callables.insert(
+                                    property.name.as_str(),
+                                    (function.as_ref().clone(), is_constructor),
+                                );
                             }
                         }
                         ObjectMember::Method(method) => {
                             raw_methods.insert(method.name.as_str(), method);
-                            raw_callables.insert(method.name.as_str(), method.function.clone());
+                            // A method signature is function-like (never a
+                            // constructor type).
+                            raw_callables
+                                .insert(method.name.as_str(), (method.function.clone(), false));
                         }
                         _ => {}
                     }
@@ -792,15 +805,18 @@ pub(crate) fn preserve_registry_callable_param_member_routes(
                             if let Some(raw_property) = raw_properties.get(property.name.as_str()) {
                                 property.ty =
                                     inner(&property.ty, &raw_property.ty, preserve_routes);
-                            } else if let TypeExpr::Function(function) = &property.ty {
-                                if let Some(raw_callable) =
+                            } else if let Some((materialized_function, materialized_is_ctor)) =
+                                function_like_inner(&property.ty)
+                            {
+                                if let Some((raw_callable, raw_is_ctor)) =
                                     raw_callables.get(property.name.as_str())
                                 {
                                     property.ty = inner(
-                                        &TypeExpr::Function(function.clone()),
-                                        &TypeExpr::Function(std::sync::Arc::new(
-                                            raw_callable.clone(),
-                                        )),
+                                        &wrap_function_like(
+                                            materialized_function.as_ref().clone(),
+                                            materialized_is_ctor,
+                                        ),
+                                        &wrap_function_like(raw_callable.clone(), *raw_is_ctor),
                                         preserve_routes,
                                     );
                                 }
@@ -820,17 +836,26 @@ pub(crate) fn preserve_registry_callable_param_member_routes(
                                     TypeExpr::Function(function) => function.as_ref().clone(),
                                     _ => method.function.clone(),
                                 };
-                            } else if let Some(raw_callable) =
+                            } else if let Some((raw_callable, raw_is_ctor)) =
                                 raw_callables.get(method.name.as_str())
                             {
+                                // A method's value is always function-like; the
+                                // raw callable may be a constructor-valued
+                                // property. Walk both function-like and take the
+                                // rewritten `FunctionExpr` payload back (the
+                                // method stays a method — its container, not the
+                                // signature, carries the constructor-ness).
                                 method.function = match &inner(
                                     &TypeExpr::Function(std::sync::Arc::new(
                                         method.function.clone(),
                                     )),
-                                    &TypeExpr::Function(std::sync::Arc::new(raw_callable.clone())),
+                                    &wrap_function_like(raw_callable.clone(), *raw_is_ctor),
                                     preserve_routes,
                                 ) {
-                                    TypeExpr::Function(function) => function.as_ref().clone(),
+                                    TypeExpr::Function(function)
+                                    | TypeExpr::ConstructorType(function) => {
+                                        function.as_ref().clone()
+                                    }
                                     _ => method.function.clone(),
                                 };
                             }

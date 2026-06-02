@@ -20,7 +20,8 @@
 use std::sync::Arc;
 
 use verter_type_expr::{
-    empty_type_args, FunctionExpr, FunctionParam, LiteralValue, PrimitiveName, TypeExpr,
+    empty_type_args, FunctionExpr, FunctionParam, LiteralValue, MethodSignature, ObjectExpr,
+    ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
 };
 
 use crate::meta_resolve::preserve_registry_callable_param_member_routes;
@@ -141,4 +142,71 @@ fn preserve_routes_plain_function_pair_unaffected() {
         }
         other => panic!("expected TypeExpr::Function (plain function unaffected), got {other:?}"),
     }
+}
+
+/// Object-member path: a RAW object **property** whose value is a bare
+/// `ConstructorType` (`make: new (x: Foo['bar']) => void`) must seed the
+/// per-member `raw_callables` map so that the same-named MATERIALISED
+/// **method** (`make(x: string): void`) has its parameter's public route
+/// preserved — exactly as a raw function-typed property would.
+///
+/// This exercises the `raw_callables` Property→Method fallback inside the
+/// `(Object, Object)` arm (the live use of a Property-sourced callable).
+///
+/// Discriminator: pre-fix `raw_callables` recorded ONLY
+/// `if let TypeExpr::Function(..)` properties, so a constructor-valued raw
+/// property was never inserted; the materialised method then matched
+/// neither `raw_methods` nor `raw_callables` and kept its inlined `string`
+/// parameter (route lost). Post-fix the constructor-valued property seeds
+/// `raw_callables`, the method's parameter route `Foo['bar']` survives.
+#[test]
+fn preserve_routes_object_raw_constructor_property_seeds_method_param_route() {
+    // RAW: `{ make: new (x: Foo['bar']) => void }` — `make` is a PROPERTY
+    // whose value is a bare constructor type carrying the public route.
+    let raw = TypeExpr::Object(Arc::new(ObjectExpr {
+        properties: vec![ObjectMember::Property(ObjectProperty::synthetic(
+            "make".to_string(),
+            TypeExpr::ConstructorType(Arc::new(function_expr_with_param(indexed_access_route()))),
+            false,
+            false,
+        ))],
+    }));
+
+    // MATERIALISED: `{ make(x: string): void }` — `make` is a METHOD whose
+    // parameter was inlined to a primitive at query time.
+    let materialized = TypeExpr::Object(Arc::new(ObjectExpr {
+        properties: vec![ObjectMember::Method(MethodSignature::synthetic(
+            "make".to_string(),
+            function_expr_with_param(TypeExpr::Primitive(PrimitiveName::String)),
+            false,
+        ))],
+    }));
+
+    let preserved = preserve_registry_callable_param_member_routes(&materialized, &raw);
+
+    let TypeExpr::Object(object) = &preserved else {
+        panic!("expected an Object result, got {preserved:?}");
+    };
+    let method = object
+        .properties
+        .iter()
+        .find_map(|m| match m {
+            ObjectMember::Method(method) if method.name == "make" => Some(&method.function),
+            _ => None,
+        })
+        .expect("`make` method must be present on the preserved object");
+
+    assert_eq!(method.parameters.len(), 1, "single-parameter method");
+    assert_eq!(
+        method.parameters[0].ty,
+        indexed_access_route(),
+        "the materialised method's parameter route Foo['bar'] must be preserved \
+         from the raw constructor-valued property, not left as the inlined `string`",
+    );
+    assert_ne!(
+        method.parameters[0].ty,
+        TypeExpr::Primitive(PrimitiveName::String),
+        "guards against the pre-fix `raw_callables` map missing the constructor-valued \
+         property (method param route lost)",
+    );
 }
