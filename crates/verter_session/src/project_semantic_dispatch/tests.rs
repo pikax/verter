@@ -7967,6 +7967,7 @@ fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
             optional: false,
             readonly: false,
             is_method: false,
+            visibility: verter_type_expr::MemberVisibility::Public,
             spans: expected_spans,
             declaration_origin: expected_origin.to_string(),
         },

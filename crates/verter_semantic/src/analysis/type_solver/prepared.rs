@@ -234,6 +234,13 @@ pub struct PreparedMember {
     pub optional: bool,
     pub readonly: bool,
     pub is_method: bool,
+    /// Declared accessibility of the member, carried verbatim from the IR
+    /// [`verter_type_expr::ObjectProperty::visibility`] /
+    /// [`verter_type_expr::MethodSignature::visibility`]. `Public` for every
+    /// non-class origin; class members carry their `TSAccessibility`. The
+    /// published-prop surface re-applies a `Public`-only filter at the
+    /// publication boundary, so non-public class members stay recorded here.
+    pub visibility: verter_type_expr::MemberVisibility,
     /// OXC declaration-site spans of this member, carried verbatim from the
     /// IR [`verter_type_expr::ObjectProperty::spans`] /
     /// [`verter_type_expr::ObjectMethod::spans`] so the macro-surface
@@ -473,6 +480,8 @@ impl PreparedTypeDecl {
                             optional: prop.optional,
                             readonly: prop.readonly,
                             is_method: false,
+                            // Carry the IR property's declared accessibility.
+                            visibility: prop.visibility,
                             // Carry the IR property's OXC declaration-site
                             // spans + this declaration's defining file so the
                             // overlay append is span-rich.
@@ -498,6 +507,8 @@ impl PreparedTypeDecl {
                             optional: method.optional,
                             readonly: false,
                             is_method: true,
+                            // Carry the IR method's declared accessibility.
+                            visibility: method.visibility,
                             // Carry the IR method's OXC member spans + defining
                             // file.
                             spans: method.spans,
