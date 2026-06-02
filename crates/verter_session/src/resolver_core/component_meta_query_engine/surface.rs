@@ -169,14 +169,6 @@ pub(crate) fn surface_view_to_projected_surface(
     }
 }
 
-pub(super) fn filtered_projected_surface(
-    mut surface: ProjectedSurface,
-    keep: impl Fn(&str) -> bool,
-) -> ProjectedSurface {
-    surface.members.retain(|member| keep(member.name.as_str()));
-    surface
-}
-
 pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
     match expr {
         TypeExpr::Unknown { raw } => {

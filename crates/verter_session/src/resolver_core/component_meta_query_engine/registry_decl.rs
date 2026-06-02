@@ -38,9 +38,8 @@ use verter_type_expr::TypeExpr;
 
 use super::helpers::{is_builtin_name, resolve_imported_registry_symbol_with_budget};
 use super::surface::{
-    dispatch_route_expr_is_materialized, filtered_projected_surface,
-    projected_compound_root_surface_via_dispatch, projected_surface_from_semantic_node,
-    projected_surface_to_type_expr,
+    dispatch_route_expr_is_materialized, projected_compound_root_surface_via_dispatch,
+    projected_surface_from_semantic_node, projected_surface_to_type_expr,
 };
 use super::{
     empty_semantic_args, engine_fact_signature_for_exported_type,
@@ -1019,21 +1018,68 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     _ => None,
                 }
             }
-            RouteDemand::Pick(members) if !members.is_empty() => self
-                .dispatch_projected_surface(scope_canonical_id, root_symbol)
-                .and_then(|surface| {
-                    projected_surface_to_type_expr(&filtered_projected_surface(surface, |name| {
-                        members.iter().any(|member| member == name)
-                    }))
-                })
-                .filter(dispatch_route_expr_is_materialized),
-            RouteDemand::Omit(members) if !members.is_empty() => self
-                .dispatch_projected_surface(scope_canonical_id, root_symbol)
-                .and_then(|surface| {
-                    projected_surface_to_type_expr(&filtered_projected_surface(surface, |name| {
-                        !members.iter().any(|member| member == name)
-                    }))
-                })
+            // Pick/Omit route through the SHARED semantic builtin engine
+            // (`build_builtin_utility`'s Pick/Omit arms), NOT a name-only hand
+            // filter over the projected surface. Routing through the shared
+            // engine inherits its public-keyspace gate: `Pick<C,K>` / `Omit<C,K>`
+            // over a class never re-mint a non-public member (the same
+            // visibility filter the typed-IR derivation applies). A bare
+            // name-only filter over the projected surface would bypass that
+            // gate and leak protected/private members.
+            RouteDemand::Pick(members) if !members.is_empty() => {
+                self.dispatch_routed_pick_omit_via_shared_engine(
+                    scope_canonical_id,
+                    root_symbol,
+                    crate::semantic_query::DeclKey::builtin("Pick"),
+                    members,
+                )
+            }
+            RouteDemand::Omit(members) if !members.is_empty() => {
+                self.dispatch_routed_pick_omit_via_shared_engine(
+                    scope_canonical_id,
+                    root_symbol,
+                    crate::semantic_query::DeclKey::builtin("Omit"),
+                    members,
+                )
+            }
+            _ => None,
+        }
+    }
+
+    /// Route a `RouteDemand::Pick` / `RouteDemand::Omit` through the SHARED
+    /// semantic builtin engine, exactly like the materialiser's Pick/Omit arm
+    /// (`component_meta_materialize.rs`): a two-step dispatch that (A)
+    /// instantiates the route ROOT to a projectable body, then (B) instantiates
+    /// the `Pick` / `Omit` builtin carrier on `[body, keys]` in the caller's
+    /// publication mode. The builtin engine's public-keyspace gate
+    /// (`build_builtin_utility`) is therefore the single owner of the Pick/Omit
+    /// projection — no second name-only hand filter, so non-public class members
+    /// can never be re-minted onto the routed surface.
+    fn dispatch_routed_pick_omit_via_shared_engine(
+        &mut self,
+        scope_canonical_id: &str,
+        root_symbol: &str,
+        builtin_identity: crate::semantic_query::DeclKey,
+        keys: &[String],
+    ) -> Option<TypeExpr> {
+        // Step A: instantiate the route root to a projectable body. Navigate
+        // keeps generic carriers intact (the builtin engine re-projects in the
+        // caller's mode), mirroring the materialiser's Step A.
+        let body_id = self.dispatch_root_instantiated(scope_canonical_id, root_symbol)?;
+        let dispatch = self.semantic_dispatch();
+        let keys_node = crate::meta_resolve::build_keys_union_node(dispatch.graph(), keys);
+        // Step B: instantiate the shared builtin Pick/Omit carrier on
+        // `[body, keys]` in the publication Expanded mode — the same path as a
+        // userland `Pick<…>` / `Omit<…>`, so fix-#1's public gate applies.
+        match dispatch.execute(SemanticQueryKey::Instantiate {
+            base: builtin_identity,
+            args: std::sync::Arc::from(vec![body_id, keys_node].into_boxed_slice()),
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Expanded,
+            ),
+        }) {
+            QueryResult::Value(node) => dispatch
+                .raise_node_to_type_expr(node)
                 .filter(dispatch_route_expr_is_materialized),
             _ => None,
         }

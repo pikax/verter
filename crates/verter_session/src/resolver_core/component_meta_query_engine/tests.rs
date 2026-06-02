@@ -710,6 +710,114 @@ export interface LinkProps extends NuxtLinkProps {
 }
 
 #[test]
+fn project_route_surface_expr_pick_over_class_excludes_non_public_keys() {
+    // DISCRIMINATING (fix #5, routed component-meta Pick/Omit helper): the
+    // routed Pick/Omit path (`dispatch_routed_expr_surface_expr`) must NOT
+    // hand-filter the projected surface by NAME only — it routes through the
+    // SHARED builtin Pick/Omit engine, inheriting its public-keyspace gate.
+    // `Pick<C, "secret">` over a class whose `secret` is PRIVATE yields an
+    // EMPTY surface; `Pick<C, "open">` (public) materialises `open`; an Omit of
+    // the public key leaves no non-public member.
+    //
+    // Discrimination: FAILS on the pre-fix tree where the Pick/Omit arms call
+    // `filtered_projected_surface(.., name-only)` over the FULL projected
+    // surface (which carries non-public members) — `secret` / `guarded` match
+    // the name filter and leak. PASSES once the arms delegate to the shared
+    // builtin engine (`DeclKey::builtin("Pick"/"Omit")` on `[body, keys]`),
+    // which public-filters source members before the name predicate.
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/Mixed.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+export class MixedClass {
+  public open: string = ""
+  protected guarded: number = 0
+  private secret: boolean = false
+}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/Mixed.vue"));
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let member_names = |projected: &TypeExpr| -> std::collections::BTreeSet<String> {
+        match projected {
+            TypeExpr::Object(object) => object
+                .properties
+                .iter()
+                .filter_map(|member| match member {
+                    ObjectMember::Property(p) => Some(p.name.clone()),
+                    ObjectMember::Method(m) => Some(m.name.clone()),
+                    _ => None,
+                })
+                .collect(),
+            // A non-object (empty/degenerate) surface carries no members.
+            _ => std::collections::BTreeSet::new(),
+        }
+    };
+
+    // Positive control: Pick of the PUBLIC key materialises it.
+    let pub_route = crate::resolver_core::RouteDemand::Pick(vec!["open".to_string()]);
+    if let Some(projected) = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/src/Mixed.vue",
+        "MixedClass",
+        &pub_route,
+    ) {
+        assert!(
+            member_names(&projected).contains("open"),
+            "Pick<MixedClass, \"open\"> (public) must materialise `open`: {projected:?}"
+        );
+    }
+
+    // DISCRIMINATING: Pick of a PRIVATE / PROTECTED key must NOT materialise it.
+    for key in ["secret", "guarded"] {
+        let route = crate::resolver_core::RouteDemand::Pick(vec![key.to_string()]);
+        let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
+            &mut query_engine,
+            "/src/Mixed.vue",
+            "MixedClass",
+            &route,
+        );
+        if let Some(projected) = projected {
+            assert!(
+                !member_names(&projected).contains(key),
+                "routed Pick<MixedClass, \"{key}\"> (non-public) must NOT materialise `{key}`: {projected:?}"
+            );
+        }
+    }
+
+    // DISCRIMINATING: Omit of the PUBLIC key must NOT leave the non-public
+    // members on the routed surface.
+    let omit_route = crate::resolver_core::RouteDemand::Omit(vec!["open".to_string()]);
+    if let Some(projected) = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
+        &mut query_engine,
+        "/src/Mixed.vue",
+        "MixedClass",
+        &omit_route,
+    ) {
+        let names = member_names(&projected);
+        assert!(
+            !names.contains("secret") && !names.contains("guarded"),
+            "routed Omit<MixedClass, \"open\"> must NOT leave non-public members: {projected:?}"
+        );
+    }
+}
+
+#[test]
 fn project_route_surface_expr_pick_keeps_package_backed_inherited_members_shallow() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
