@@ -711,15 +711,21 @@ impl GraphBuilder {
                     .collect(),
             },
             TypeExpr::Function(function) => self.function_node(function),
-            // A constructor type's STRUCTURAL wire shape is exactly a function's
-            // (parameters / return / type-parameters). The typeinfo wire graph
+            // INTENTIONAL erasure: a constructor type serialises to the SAME
+            // wire node as a function (`GraphNode::Function` — parameters /
+            // return / type-parameters). A constructor type's structural wire
+            // shape is exactly a function's, the typeinfo wire graph
             // (`GraphTypeNode.kind`) is a closed structural taxonomy with no
             // dedicated constructor-type kind, and the constructor-vs-function
             // distinction that matters for Vue runtime inference is carried by
-            // the `TypeExpr::ConstructorType` variant itself (consumed by the
-            // session-side `runtime_ctor` reducer BEFORE wire serialisation), so
-            // emitting the function node here is the contract-correct shape — no
-            // schema-version bump or new wire kind is required.
+            // the `TypeExpr::ConstructorType` variant itself and consumed by the
+            // session-side `runtime_ctor` reducer + the semantic dispatch BEFORE
+            // wire serialisation. Emitting the function node here is therefore
+            // the contract-correct final-state shape — no schema-version bump or
+            // new wire kind is required. The erasure is pinned (not accidental)
+            // by `constructor_type_serialises_to_function_wire_node` below, which
+            // also asserts the memo identity stays DISTINCT from a plain
+            // function (`ExprMemoKey::ConstructorType`).
             TypeExpr::ConstructorType(function) => self.function_node(function),
             TypeExpr::Ref {
                 name,
@@ -1034,6 +1040,103 @@ mod tests {
             assert_eq!(conditional_context[0].branch, 1, "branch=true should be 1");
             assert!(conditional_context[0].decided);
         }
+    }
+
+    /// Pins the INTENTIONAL constructor-type wire erasure: a
+    /// `TypeExpr::ConstructorType` serialises to a `GraphNode::Function` (the
+    /// closed `GraphTypeNode.kind` taxonomy has no dedicated constructor kind).
+    /// The constructor-vs-function distinction is consumed in the session
+    /// `runtime_ctor` reducer + semantic dispatch before serialisation, so
+    /// function-like is the contract-correct wire shape.
+    ///
+    /// Discriminating in two directions:
+    ///
+    /// * A builder that left the constructor type unhandled (or emitted some
+    ///   non-function node) fails the `GraphNode::Function` assertion, and the
+    ///   byte-equal check fails if the constructor type ever diverged from the
+    ///   same-payload function wire shape.
+    /// * The memo layer stays distinct: `ExprMemoKey::from_expr` of a
+    ///   constructor type must NOT equal that of a function carrying the same
+    ///   `Arc<FunctionExpr>` — if the `ConstructorType` memo arm were ever
+    ///   collapsed into `Self::Function`, this assertion fails. (The final wire
+    ///   *node id* legitimately dedups, because byte-identical `GraphNode`s
+    ///   share a node-id slot — the erasure is wire-shape-identical by design;
+    ///   the test pins that fact rather than asserting the opposite.)
+    #[test]
+    fn constructor_type_serialises_to_function_wire_node() {
+        use verter_type_expr::{FunctionExpr, FunctionParam};
+
+        // `new (x: string) => Foo` — one named param + a ref return.
+        let function = Arc::new(FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some("x".to_string()),
+                TypeExpr::Primitive(PrimitiveName::String),
+                false,
+                false,
+            )],
+            Some(Arc::new(TypeExpr::named("Foo"))),
+            Vec::new(),
+        ));
+        let ctor = TypeExpr::ConstructorType(Arc::clone(&function));
+
+        let mut builder = GraphBuilder::new();
+        let ctor_id = builder.node_id(&ctor);
+        let nodes = builder.nodes();
+        let node = &nodes[(ctor_id - 1) as usize];
+
+        // (1) The wire node is a Function (erasure) carrying the parameter.
+        match node {
+            GraphNode::Function { parameters, .. } => {
+                assert_eq!(
+                    parameters.len(),
+                    1,
+                    "constructor-type parameter must survive the function-node erasure",
+                );
+            }
+            other => panic!(
+                "constructor type must serialise to GraphNode::Function (intentional \
+                 erasure), got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+
+        // (2) The wire node is BYTE-IDENTICAL to a plain function with the SAME
+        // payload — the erasure is structural, not just same-discriminant.
+        let plain = TypeExpr::Function(Arc::clone(&function));
+        let mut fn_builder = GraphBuilder::new();
+        let fn_id = fn_builder.node_id(&plain);
+        let fn_node = fn_builder.nodes()[(fn_id - 1) as usize].clone();
+        assert_eq!(
+            node, &fn_node,
+            "constructor type and same-payload function must produce the same wire \
+             node (GraphNode::Function) — the erasure is wire-shape-identical",
+        );
+
+        // (3) The MEMO key stays distinct so a constructor type and a function
+        // carrying the same `Arc<FunctionExpr>` never share an `expr_ids` entry.
+        // This is the invariant the dedicated `ExprMemoKey::ConstructorType`
+        // variant exists to enforce: collapsing it into `Self::Function` would
+        // make these equal and is a cache-collision bug.
+        assert_ne!(
+            ExprMemoKey::from_expr(&ctor),
+            ExprMemoKey::from_expr(&plain),
+            "ExprMemoKey::ConstructorType must stay distinct from \
+             ExprMemoKey::Function for the same Arc<FunctionExpr>",
+        );
+
+        // (4) The final wire NODE id legitimately dedups: because the two wire
+        // nodes are byte-identical (claim 2), `node_ids` collapses them onto one
+        // slot. The erasure is wire-shape-identical by design — pin that fact so
+        // a future change that diverged the shapes (re-introducing a distinct
+        // node id) is caught and re-justified here.
+        let mut shared_builder = GraphBuilder::new();
+        let ctor_node_id = shared_builder.node_id(&ctor);
+        let fn_node_id = shared_builder.node_id(&plain);
+        assert_eq!(
+            ctor_node_id, fn_node_id,
+            "byte-identical constructor/function wire nodes must share one node id \
+             (wire erasure is shape-identical)",
+        );
     }
 
     #[test]
