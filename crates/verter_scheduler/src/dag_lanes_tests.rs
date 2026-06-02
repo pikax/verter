@@ -396,9 +396,18 @@ fn long_run_service_distribution_is_weight_monotone() {
     let mt = *counts.get(&Priority::Maintenance).unwrap_or(&0);
     // Weights 8:4:2:1 — service must be monotone by weight and every
     // lane must get nonzero service (no starvation).
-    assert!(c >= it && it >= bg && bg >= mt, "service must be weight-monotone: {c} {it} {bg} {mt}");
-    assert!(mt > 0, "Maintenance must receive nonzero long-run service: {mt}");
-    assert!(c > mt, "Critical must outrank Maintenance in service: {c} vs {mt}");
+    assert!(
+        c >= it && it >= bg && bg >= mt,
+        "service must be weight-monotone: {c} {it} {bg} {mt}"
+    );
+    assert!(
+        mt > 0,
+        "Maintenance must receive nonzero long-run service: {mt}"
+    );
+    assert!(
+        c > mt,
+        "Critical must outrank Maintenance in service: {c} vs {mt}"
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -435,8 +444,13 @@ fn capacity_skip_does_not_debit_credit_and_other_class_dispatches() {
     // saturated, Driver caller → no loan). The selector must fall
     // through to the IO class and dispatch the Background IO job
     // rather than busy-returning None.
-    let j2 = dag.next_ready().expect("io must dispatch when cpu saturated");
-    assert_eq!(j2.token, io, "the eligible IO job must dispatch despite CPU saturation");
+    let j2 = dag
+        .next_ready()
+        .expect("io must dispatch when cpu saturated");
+    assert_eq!(
+        j2.token, io,
+        "the eligible IO job must dispatch despite CPU saturation"
+    );
     assert_eq!(dag.in_flight_io_permits(), 1);
 
     // Third selection: nothing admittable (cpu still saturated, no IO
@@ -475,14 +489,29 @@ fn capacity_returns_to_zero_after_mixed_drain_and_cancel() {
     assert_eq!(dag.in_flight_io_permits(), 2);
 
     // Complete two, cancel two — permits must all return.
-    let by_tok = |t: SubmissionToken| dispatched.iter().find(|j| j.token == t).unwrap().identity.clone();
+    let by_tok = |t: SubmissionToken| {
+        dispatched
+            .iter()
+            .find(|j| j.token == t)
+            .unwrap()
+            .identity
+            .clone()
+    };
     let _ = dag.complete(&by_tok(a));
     let _ = dag.cancel(&by_tok(b));
     let _ = dag.complete(&by_tok(c));
     let _ = dag.cancel(&by_tok(d));
 
-    assert_eq!(dag.in_flight_cpu_permits(), 0, "cpu permits must return to zero");
-    assert_eq!(dag.in_flight_io_permits(), 0, "io permits must return to zero");
+    assert_eq!(
+        dag.in_flight_cpu_permits(),
+        0,
+        "cpu permits must return to zero"
+    );
+    assert_eq!(
+        dag.in_flight_io_permits(),
+        0,
+        "io permits must return to zero"
+    );
     assert_eq!(dag.in_flight_permits(), 0, "aggregate must return to zero");
 }
 
@@ -576,10 +605,15 @@ fn loan_does_not_fire_for_cross_class_parked_worker() {
     // An IoWorker parked on some IO identity must NOT loan a CPU permit.
     let io_path = [file_stage("/io.vue", 1, FileStageKey::Source)];
     assert!(
-        dag.next_ready_for_pump(CallerKind::IoWorker, &io_path).is_none(),
+        dag.next_ready_for_pump(CallerKind::IoWorker, &io_path)
+            .is_none(),
         "IoWorker must not loan a CPU permit for a CPU lane (cross-class)",
     );
-    assert_eq!(dag.in_flight_cpu_permits(), 1, "no cross-class loan was taken");
+    assert_eq!(
+        dag.in_flight_cpu_permits(),
+        1,
+        "no cross-class loan was taken"
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -604,7 +638,7 @@ fn active_path_skip_dispatches_next_eligible_token() {
     // With the active identity in the path, the higher-priority active
     // token is skipped and the lower-priority other token dispatches.
     let job = dag
-        .next_ready_for_pump(CallerKind::CpuWorker, &[active.clone()])
+        .next_ready_for_pump(CallerKind::CpuWorker, std::slice::from_ref(&active))
         .expect("the non-active token must dispatch");
     assert_eq!(
         job.token, other,
@@ -625,7 +659,10 @@ fn caller_class_preference_overrides_within_lane() {
         let job = dag
             .next_ready_for_pump(CallerKind::CpuWorker, &[])
             .expect("ready");
-        assert_eq!(job.token, cpu, "CpuWorker must receive the CPU candidate first");
+        assert_eq!(
+            job.token, cpu,
+            "CpuWorker must receive the CPU candidate first"
+        );
     }
     // IoWorker prefers IO.
     {
@@ -635,7 +672,10 @@ fn caller_class_preference_overrides_within_lane() {
         let job = dag
             .next_ready_for_pump(CallerKind::IoWorker, &[])
             .expect("ready");
-        assert_eq!(job.token, io, "IoWorker must receive the IO candidate first");
+        assert_eq!(
+            job.token, io,
+            "IoWorker must receive the IO candidate first"
+        );
     }
 }
 
@@ -730,7 +770,14 @@ fn prio_of(i: u64) -> Priority {
 #[test]
 fn seeded_lifecycle_lane_membership_matches_model() {
     for seed in [1u64, 7, 42, 1337, 99991] {
-        run_lifecycle_model(seed, 400, DagCapacityBudget { cpu: 1024, io: 1024 });
+        run_lifecycle_model(
+            seed,
+            400,
+            DagCapacityBudget {
+                cpu: 1024,
+                io: 1024,
+            },
+        );
     }
 }
 

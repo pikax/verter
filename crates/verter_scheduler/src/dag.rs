@@ -58,13 +58,13 @@ mod blocker_registry;
 mod terminal_failures;
 pub use terminal_failures::FailedDepRecord;
 
-/// Capacity-budget types: aging configuration, split CPU/IO budget,
-/// per-`WorkKind` resource class, and the typed
-/// [`DagCapacityReservation`]. Re-exported at this module's level
-/// so existing `crate::dag::DagCapacityBudget` etc. paths keep
-/// working without the submodule split being visible to callers.
+/// Capacity-budget types: split CPU/IO budget, per-`WorkKind`
+/// resource class, and the typed [`DagCapacityReservation`].
+/// Re-exported at this module's level so existing
+/// `crate::dag::DagCapacityBudget` etc. paths keep working without
+/// the submodule split being visible to callers.
 mod capacity;
-pub use capacity::{DagAgingConfig, DagCapacityBudget, DagCapacityReservation, ResourceClass};
+pub use capacity::{DagCapacityBudget, DagCapacityReservation, ResourceClass};
 
 /// Combined late-blocker registry entry for an
 /// `(owner_canonical, owner_generation)` slot. The Artifact
@@ -311,7 +311,18 @@ pub(in crate::dag) struct DagNode {
     pub(in crate::dag) identity: WorkNodeIdentity,
     pub(in crate::dag) kind: WorkKind,
     pub(in crate::dag) base_priority: Priority,
+    /// Wall-clock admission time. Retained ONLY for queue-dwell
+    /// audit (copied into [`ReadyJob::enqueue_time`] at dispatch);
+    /// it no longer influences selection order (the weighted-credit
+    /// lane selector replaced time-based aging).
     pub(in crate::dag) enqueue_time: Instant,
+    /// The `(Priority, ResourceClass)` lane this token currently
+    /// occupies in [`SchedulerDag::ready_lanes`], or `None` if the
+    /// node is not currently dispatch-ready (gated, dispatched, or
+    /// cancelled). Kept in lock-step with the lane index by
+    /// [`SchedulerDag::refresh_ready_membership`] so removal and
+    /// priority migration are O(log N) with no scan.
+    pub(in crate::dag) ready_membership: Option<(Priority, ResourceClass)>,
     /// Optional session-side context propagated by the driver. Carried
     /// as opaque bytes; the dispatch loop reads it when installing TLS.
     pub(in crate::dag) request_context: Option<crate::request_context::OpaqueRequestContext>,
@@ -440,7 +451,14 @@ pub struct ReadyJob {
     pub token: SubmissionToken,
     pub identity: WorkNodeIdentity,
     pub kind: WorkKind,
-    pub effective_priority: Priority,
+    /// The node's scheduling priority at dispatch time. Equal to the
+    /// node's `base_priority` (possibly upgraded by a dedup/explicit
+    /// priority upgrade before dispatch). The weighted-credit lane
+    /// selector may transiently service a lower-priority lane ahead
+    /// of a higher one for fairness, but the reported priority is
+    /// always the node's own base priority — selection-count credit
+    /// never rewrites a node's priority.
+    pub priority: Priority,
     pub enqueue_time: Instant,
     pub request_context: Option<crate::request_context::OpaqueRequestContext>,
     /// [`FailedDepRecord`]s for blockers whose producer failed
@@ -482,12 +500,77 @@ impl std::fmt::Debug for FileWaiterState {
     }
 }
 
+/// Number of priority lanes — one per [`Priority`] tier.
+const PRIORITY_LANE_COUNT: usize = 4;
+/// Number of resource-class shards within each priority lane — one
+/// per [`ResourceClass`] (`Cpu`, `Io`).
+const CLASS_COUNT: usize = 2;
+
+/// Per-lane weights for smooth weighted credit, indexed by
+/// [`Priority`] ordinal (`Critical`=0 .. `Maintenance`=3).
+///
+/// `Critical:8, Interactive:4, Background:2, Maintenance:1`. With all
+/// four lanes continuously eligible the worst-case service delay for
+/// a lane is bounded by the eligible-weight sum: `Maintenance` is
+/// served within at most `8+4+2+1 = 15` successful selections,
+/// `Background` within `8`, `Interactive` within `4`. The weights are
+/// strictly positive so every continuously-eligible lane is served in
+/// bounded time — there is no starvation without any time-based
+/// promotion.
+const LANE_WEIGHTS: [i64; PRIORITY_LANE_COUNT] = [8, 4, 2, 1];
+
+/// Priority → lane index (`Critical`=0 .. `Maintenance`=3).
+#[inline]
+fn lane_index(priority: Priority) -> usize {
+    priority as usize
+}
+
+/// Lane index → [`Priority`]. Used only by the test-only lane
+/// inspection helpers (the selector indexes lanes directly).
+#[cfg(test)]
+#[inline]
+fn priority_for_lane(index: usize) -> Priority {
+    match index {
+        0 => Priority::Critical,
+        1 => Priority::Interactive,
+        2 => Priority::Background,
+        _ => Priority::Maintenance,
+    }
+}
+
+/// [`ResourceClass`] → class-shard index (`Cpu`=0, `Io`=1).
+#[inline]
+fn class_index(class: ResourceClass) -> usize {
+    match class {
+        ResourceClass::Cpu => 0,
+        ResourceClass::Io => 1,
+    }
+}
+
+/// Class-shard index → [`ResourceClass`].
+#[inline]
+fn class_for_index(index: usize) -> ResourceClass {
+    if index == 0 {
+        ResourceClass::Cpu
+    } else {
+        ResourceClass::Io
+    }
+}
+
 /// Driver-owned scheduling DAG: SOLE readiness authority.
 ///
 /// Owns admission, dedup, generation supersession, dependency gating,
-/// blocker resolution, priority aging, the capacity counter, and the
-/// per-file request-group bookkeeping. There is exactly ONE of these
-/// per scheduler.
+/// blocker resolution, the weighted-credit priority-lane selector,
+/// the capacity counter, and the per-file request-group bookkeeping.
+/// There is exactly ONE of these per scheduler.
+///
+/// Readiness representation: dispatch-ready tokens live in
+/// [`Self::ready_lanes`], a fixed `4 × 2` matrix of FIFO token sets
+/// indexed by `(Priority, ResourceClass)`. Selection is O(lanes),
+/// never a scan of [`Self::nodes`]. Anti-starvation is smooth
+/// weighted selection-count credit ([`Self::credit`]) across the four
+/// priority lanes — credit chooses the lane, the typed CPU/IO ledger
+/// governs admission, and a capacity-skip never debits credit.
 pub struct SchedulerDag {
     /// Per-token node bookkeeping. Visibility is narrowed to
     /// `pub(in crate::dag)` because the `terminal_failures` child
@@ -569,7 +652,25 @@ pub struct SchedulerDag {
     /// `pub(in crate::dag)` so the `terminal_failures` child module
     /// owns the typed API around this map.
     pub(in crate::dag) terminal_dep_failures: FxHashMap<DepKey, FailedDepRecord>,
-    aging: DagAgingConfig,
+    /// Dispatch-ready tokens, sharded by `(Priority, ResourceClass)`.
+    /// Outer index is the [`Priority`] ordinal (`Critical`=0 ..
+    /// `Maintenance`=3), inner index is the [`ResourceClass`] ordinal
+    /// (`Cpu`=0, `Io`=1). Each cell is an ordered set keyed by
+    /// [`SubmissionToken`] (monotonic), giving deterministic FIFO
+    /// dispatch within a lane with O(log N) insert / remove / migrate
+    /// and no tombstones. A token appears in AT MOST one cell; its
+    /// current cell is mirrored on [`DagNode::ready_membership`].
+    ready_lanes: [[BTreeSet<SubmissionToken>; CLASS_COUNT]; PRIORITY_LANE_COUNT],
+    /// Smooth weighted selection-count credit, one accumulator per
+    /// priority lane (indexed by [`Priority`] ordinal). On each
+    /// successful selection round every ELIGIBLE lane gains its
+    /// weight; the lane that is actually admitted pays the sum of the
+    /// eligible weights. A starved-but-eligible lane therefore
+    /// monotonically overtakes repeatedly-served higher lanes within
+    /// a bounded number of selections (see [`LANE_WEIGHTS`]). Credit
+    /// advances ONLY on a successful admission — capacity skips,
+    /// active-path skips, and empty lanes never debit it.
+    credit: [i64; PRIORITY_LANE_COUNT],
     next_token: u64,
     /// Aggregate in-flight permit counter — sum of cpu + io.
     /// Surfaced via [`Self::in_flight_permits`] for diagnostics; not
@@ -591,14 +692,20 @@ struct FileGenKey {
     generation: u64,
 }
 
+impl Default for SchedulerDag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SchedulerDag {
     /// Create a new empty DAG with the default capacity budget.
-    pub fn new(aging: DagAgingConfig) -> Self {
-        Self::with_budget(aging, DagCapacityBudget::default())
+    pub fn new() -> Self {
+        Self::with_budget(DagCapacityBudget::default())
     }
 
     /// Create a new empty DAG with an explicit capacity budget.
-    pub fn with_budget(aging: DagAgingConfig, budget: DagCapacityBudget) -> Self {
+    pub fn with_budget(budget: DagCapacityBudget) -> Self {
         Self {
             nodes: FxHashMap::default(),
             by_identity: FxHashMap::default(),
@@ -606,7 +713,8 @@ impl SchedulerDag {
             file_waiters: FxHashMap::default(),
             artifact_blocker_deps: FxHashMap::default(),
             terminal_dep_failures: FxHashMap::default(),
-            aging,
+            ready_lanes: Default::default(),
+            credit: [0; PRIORITY_LANE_COUNT],
             next_token: 1,
             capacity_counter: Arc::new(AtomicU64::new(0)),
             cpu_counter: Arc::new(AtomicU64::new(0)),
@@ -633,6 +741,156 @@ impl SchedulerDag {
     /// Per-class budget configured at construction.
     pub fn budget(&self) -> DagCapacityBudget {
         self.budget
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Ready-lane index management. The lane matrix is the ONLY
+    // ready-set representation; `nodes`/`waiters`/`deps_remaining`
+    // remain the canonical ownership/gating state. Every lifecycle
+    // mutation that can change a token's dispatch-readiness routes
+    // through `refresh_ready_membership` so the lane index stays in
+    // lock-step with the node's `(cancelled, dispatched,
+    // deps_remaining, base_priority, kind)` — path-independent, one
+    // authority, no second readiness recompute.
+    // ─────────────────────────────────────────────────────────────
+
+    /// The lane a node SHOULD occupy given its current state, or
+    /// `None` if it is not dispatch-ready. A node is ready iff it is
+    /// not cancelled, not dispatched, and has no remaining deps.
+    fn desired_membership(node: &DagNode) -> Option<(Priority, ResourceClass)> {
+        if node.cancelled || node.dispatched || !node.deps_remaining.is_empty() {
+            return None;
+        }
+        Some((node.base_priority, ResourceClass::for_work_kind(node.kind)))
+    }
+
+    /// Reconcile a token's lane membership with its node state.
+    ///
+    /// This is the single lane-insert / lane-remove / lane-migrate
+    /// hook. Call it after any mutation to a node's `deps_remaining`,
+    /// `base_priority`, `dispatched`, or `cancelled`, and after a
+    /// node is first inserted. Idempotent: re-running with unchanged
+    /// state is a no-op.
+    fn refresh_ready_membership(&mut self, token: SubmissionToken) {
+        let desired = match self.nodes.get(&token) {
+            Some(node) => Self::desired_membership(node),
+            // Node gone: ensure no stale lane entry survives. We do
+            // not know its prior cell, so this is a no-op here —
+            // removal is always driven from the live node before the
+            // entry is dropped (see `complete`/`cancel`).
+            None => return,
+        };
+        let current = self
+            .nodes
+            .get(&token)
+            .and_then(|node| node.ready_membership);
+        if current == desired {
+            return;
+        }
+        if let Some((prio, class)) = current {
+            self.ready_lanes[lane_index(prio)][class_index(class)].remove(&token);
+        }
+        if let Some((prio, class)) = desired {
+            self.ready_lanes[lane_index(prio)][class_index(class)].insert(token);
+        }
+        if let Some(node) = self.nodes.get_mut(&token) {
+            node.ready_membership = desired;
+        }
+    }
+
+    /// Remove a token from whatever lane it occupies (if any) and
+    /// clear its mirror. Used on the dispatch / removal paths where
+    /// the node is leaving the ready set regardless of its other
+    /// state. Safe to call when the node is already absent from every
+    /// lane.
+    fn remove_from_lane(&mut self, token: SubmissionToken) {
+        let current = self
+            .nodes
+            .get(&token)
+            .and_then(|node| node.ready_membership);
+        if let Some((prio, class)) = current {
+            self.ready_lanes[lane_index(prio)][class_index(class)].remove(&token);
+        }
+        if let Some(node) = self.nodes.get_mut(&token) {
+            node.ready_membership = None;
+        }
+    }
+
+    /// Test-only inspection: the lane a token currently occupies, or
+    /// `None`. The lane matrix is the authoritative ready-set, so
+    /// this exposes exactly the index the selector reads.
+    #[cfg(test)]
+    pub(crate) fn ready_lane_membership_for_test(
+        &self,
+        token: SubmissionToken,
+    ) -> Option<(Priority, ResourceClass)> {
+        // Read directly from the lane matrix (not the node mirror) so
+        // the test characterizes the authoritative structure and would
+        // catch a mirror/lane divergence.
+        for (pi, lane) in self.ready_lanes.iter().enumerate() {
+            for (ci, cell) in lane.iter().enumerate() {
+                if cell.contains(&token) {
+                    return Some((priority_for_lane(pi), class_for_index(ci)));
+                }
+            }
+        }
+        None
+    }
+
+    /// Test-only invariant check: the set of tokens present in the
+    /// lane matrix EXACTLY equals the set of nodes that are
+    /// dispatch-ready (`!cancelled && !dispatched && deps_remaining
+    /// empty`), and every lane cell agrees with the node's
+    /// `(base_priority, ResourceClass)` and its `ready_membership`
+    /// mirror. Panics on any divergence.
+    #[cfg(test)]
+    pub(crate) fn assert_lane_membership_matches_nodes(&self) {
+        use std::collections::BTreeSet as Set;
+        // Tokens the model considers ready.
+        let mut model_ready: Set<SubmissionToken> = Set::new();
+        for (tok, node) in &self.nodes {
+            if let Some((prio, class)) = Self::desired_membership(node) {
+                model_ready.insert(*tok);
+                // Mirror must agree.
+                assert_eq!(
+                    node.ready_membership,
+                    Some((prio, class)),
+                    "node {tok:?} ready but its ready_membership mirror disagrees",
+                );
+            } else {
+                assert_eq!(
+                    node.ready_membership, None,
+                    "node {tok:?} not ready but its ready_membership mirror is Some",
+                );
+            }
+        }
+        // Tokens the lane matrix holds.
+        let mut lane_tokens: Set<SubmissionToken> = Set::new();
+        for (pi, lane) in self.ready_lanes.iter().enumerate() {
+            for (ci, cell) in lane.iter().enumerate() {
+                for tok in cell {
+                    assert!(
+                        lane_tokens.insert(*tok),
+                        "token {tok:?} appears in more than one lane cell",
+                    );
+                    let node = self
+                        .nodes
+                        .get(tok)
+                        .unwrap_or_else(|| panic!("lane holds token {tok:?} with no live node"));
+                    let expect = Self::desired_membership(node)
+                        .unwrap_or_else(|| panic!("lane holds non-ready token {tok:?}"));
+                    assert_eq!(
+                        expect,
+                        (priority_for_lane(pi), class_for_index(ci)),
+                        "token {tok:?} is in the wrong lane cell",
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            model_ready, lane_tokens,
+            "lane membership must equal model readiness",
+        );
     }
 
     /// Test-only peek at a node's `deps_remaining` set by token. Used
@@ -827,6 +1085,10 @@ impl SchedulerDag {
                     }
                 }
                 let _ = deps;
+                // A dispatched node is not in any lane, so a priority
+                // upgrade on it cannot migrate a lane entry; the
+                // refresh is a no-op but keeps the invariant explicit.
+                self.refresh_ready_membership(existing_token);
                 return existing_token;
             }
             // Pre-dispatch merge.
@@ -846,6 +1108,10 @@ impl SchedulerDag {
                         self.waiters.entry(dep).or_default().push(existing_token);
                     }
                 }
+                // Reconcile the lane: a priority upgrade migrates the
+                // token to a higher lane, and a newly-added dep that
+                // makes the node non-ready removes it from its lane.
+                self.refresh_ready_membership(existing_token);
                 return existing_token;
             }
         }
@@ -870,10 +1136,15 @@ impl SchedulerDag {
             dispatched: false,
             cancelled: false,
             reservation: None,
+            ready_membership: None,
         };
 
         self.nodes.insert(token, node);
         self.by_identity.insert(identity, token);
+        // A fresh node with no deps is immediately dispatch-ready and
+        // must enter its lane; a gated node stays out until its last
+        // dep clears.
+        self.refresh_ready_membership(token);
         token
     }
 
@@ -1100,8 +1371,11 @@ impl SchedulerDag {
         }
         let old = node.base_priority;
         node.base_priority = std::cmp::min(node.base_priority, new_priority);
-        if node.base_priority < old {
-            Some(node.base_priority)
+        let upgraded = node.base_priority;
+        if upgraded < old {
+            // A ready node migrates to the higher-priority lane.
+            self.refresh_ready_membership(tok);
+            Some(upgraded)
         } else {
             None
         }
@@ -1128,6 +1402,9 @@ impl SchedulerDag {
             .map(|n| n.deps_remaining.clone())
             .unwrap_or_default();
         self.remove_incoming_edges(tok, &outgoing_deps);
+        // Drop any lane entry for this token before the node is
+        // removed (the lane mirror lives on the node).
+        self.remove_from_lane(tok);
         if let Some(mut node) = self.nodes.remove(&tok) {
             // Release the dispatched-node's capacity reservation.
             // The by-value `release(self)` consume in
@@ -1151,6 +1428,9 @@ impl SchedulerDag {
                         newly_ready.push(waiter_tok);
                     }
                 }
+                // Reconcile the waiter's lane: clearing its last dep
+                // makes it dispatch-ready and inserts it into its lane.
+                self.refresh_ready_membership(waiter_tok);
             }
         }
         newly_ready
@@ -1169,6 +1449,9 @@ impl SchedulerDag {
         if let Some(node) = self.nodes.get_mut(&tok) {
             node.cancelled = true;
         }
+        // A cancelled node is no longer dispatch-ready — drop its lane
+        // entry (if it had one).
+        self.remove_from_lane(tok);
 
         let dep_key = DepKey::from_identity(identity);
         let mut stranded = Vec::new();
@@ -1183,6 +1466,10 @@ impl SchedulerDag {
                         stranded.push(waiter_tok);
                     }
                 }
+                // Reconcile the waiter's lane: a cancelled dep clears
+                // the waiter's last gate, making it dispatch-ready (it
+                // will dispatch then fail/retry).
+                self.refresh_ready_membership(waiter_tok);
             }
         }
         // Scrub this node's token from every `waiters` list its own
@@ -1267,27 +1554,31 @@ impl SchedulerDag {
         self.nodes.values().filter(|n| !n.cancelled).count()
     }
 
-    /// Dequeue the highest-priority ready node (no remaining deps,
-    /// not dispatched, not cancelled, and whose resource class has
-    /// admission capacity). Applies aging at dequeue time.
+    /// Dequeue the next ready node via the weighted-credit lane
+    /// selector (no remaining deps, not dispatched, not cancelled, and
+    /// whose resource class has admission capacity).
     ///
-    /// Hybrid budget per resource class: a job is only yielded if the
+    /// Selection is O(lanes), not a scan of the node map: dispatch-
+    /// ready tokens already live in [`Self::ready_lanes`] keyed by
+    /// `(Priority, ResourceClass)`. Smooth weighted selection-count
+    /// credit ([`Self::credit`]) chooses the priority lane; the typed
+    /// per-class ledger gates admission. A job is only yielded if the
     /// DAG can reserve a capacity permit against its resource class.
     /// The reservation is stored on the dispatched node and released
     /// by the by-value consume in [`Self::complete`] or
-    /// [`Self::cancel`]. If no candidate has a free permit, returns
-    /// `None` — the driver retries on the next pass.
+    /// [`Self::cancel`]. If no candidate's class can be admitted,
+    /// returns `None` — the driver retries on the next pass.
     ///
     /// Thin sync wrapper around [`Self::next_ready_for_pump`] for
-    /// driver-led pumps that do not yet supply a caller-kind or an
+    /// driver-led pumps that do not supply a caller-kind or an
     /// active-path frame.
     pub fn next_ready(&mut self) -> Option<ReadyJob> {
         self.next_ready_for_pump(crate::caller_kind::CallerKind::Driver, &[])
     }
 
     /// Caller-aware ready-job selection used by the cooperative
-    /// pump. Same readiness gating as [`Self::next_ready`] with
-    /// three caller-aware behaviours layered on top:
+    /// pump. Same lane/credit readiness gating as [`Self::next_ready`]
+    /// with three caller-aware behaviours layered on top:
     ///
     /// 1. **Active-path filter** — nodes whose identity appears
     ///    in `active_path` are SKIPPED. A worker that is itself
@@ -1295,161 +1586,221 @@ impl SchedulerDag {
     ///    through the cooperative pump.
     /// 2. **Caller-kind class preference** — `CpuWorker` callers
     ///    prefer CPU candidates; `IoWorker` callers prefer I/O
-    ///    candidates. The preference biases an inline-execute
-    ///    path through `dispatch_ready_job` so the calling
-    ///    worker runs a dep on its own thread.
+    ///    candidates WITHIN the credit-chosen priority lane. The
+    ///    preference biases an inline-execute path through
+    ///    `dispatch_ready_job` so the calling worker runs a dep on
+    ///    its own thread; it never inverts priority across lanes.
     /// 3. **Capacity loan** — when the per-class budget is full
     ///    and the calling worker is parked (active_path is non-
     ///    empty), the pump loans a permit on top of the budget
     ///    via [`Self::loan_capacity_for_class`]. Cpu × CpuWorker|Inline
     ///    and Io × IoWorker are the loanable combinations;
-    ///    cross-class combinations skip the candidate.
+    ///    cross-class combinations skip the candidate. The loan is
+    ///    attempted BEFORE class saturation is treated as a skip so a
+    ///    parked matching worker can over-admit its own saturated
+    ///    class to run a transitive dep inline (deadlock avoidance).
     pub fn next_ready_for_pump(
         &mut self,
         caller_kind: crate::caller_kind::CallerKind,
         active_path: &[WorkNodeIdentity],
     ) -> Option<ReadyJob> {
-        /// Sort key used to rank candidates in `next_ready` —
-        /// (effective_priority, enqueue_time, kind_ord, token).
-        type RankKey = (Priority, Instant, u8, u64);
-        /// Per-candidate ranked entry: (sort key, token, class).
-        type RankedCandidate = (RankKey, SubmissionToken, ResourceClass);
+        // Weighted-credit lane selection. Selection is O(lanes), never
+        // a scan of `self.nodes`. The four priority lanes are the
+        // credit domain; within a chosen lane the two class shards are
+        // FIFO-by-token. Two orthogonal gates:
+        //
+        //   - CREDIT chooses the lane (anti-starvation, selection-count
+        //     based — no aging).
+        //   - the typed CPU/IO LEDGER governs admission. A class that
+        //     cannot reserve (and cannot loan for this caller) is
+        //     marked blocked for THIS call only; selection re-runs over
+        //     the remaining classes. A capacity skip NEVER debits
+        //     credit.
+        //
+        // The loan path (deadlock avoidance) runs AFTER a token is
+        // chosen but BEFORE class saturation is treated as a skip, so a
+        // parked matching worker can still over-admit its own saturated
+        // class to inline-run a transitive dep.
 
-        let now = Instant::now();
+        // The class this caller may over-admit when parked. Matches
+        // the legacy loan matrix exactly: Cpu for CpuWorker|Inline, Io
+        // for IoWorker, and only when the caller is actually parked
+        // (active_path non-empty).
+        let loan_class = if active_path.is_empty() {
+            None
+        } else {
+            match caller_kind {
+                crate::caller_kind::CallerKind::CpuWorker
+                | crate::caller_kind::CallerKind::Inline => Some(ResourceClass::Cpu),
+                crate::caller_kind::CallerKind::IoWorker => Some(ResourceClass::Io),
+                _ => None,
+            }
+        };
 
-        // First, iterate the candidates in priority order so we
-        // attempt the most urgent jobs first. We pick the best
-        // candidate whose resource class still has capacity.
-        let mut ranked: Vec<RankedCandidate> = self
-            .nodes
-            .iter()
-            .filter_map(|(tok, node)| {
-                if node.cancelled || node.dispatched {
-                    return None;
+        // Caller-class preference for the inline-execute path: a
+        // CpuWorker floats its CPU shard ahead of the IO shard WITHIN a
+        // chosen lane (and symmetrically for IoWorker). Priority still
+        // dominates across lanes — preference never inverts priority.
+        let preferred_class = match caller_kind {
+            crate::caller_kind::CallerKind::CpuWorker => Some(ResourceClass::Cpu),
+            crate::caller_kind::CallerKind::IoWorker => Some(ResourceClass::Io),
+            _ => None,
+        };
+
+        // Classes proven un-admittable on THIS call (capacity full and
+        // no loan). Local to the call — never persisted, so the pump
+        // simply stops on `None` rather than busy-spinning.
+        let mut blocked_class = [false; CLASS_COUNT];
+
+        // Bounded retry: at most one exclusion per class.
+        loop {
+            // Per-lane: does this lane have a dispatchable candidate in
+            // some non-blocked class shard (skipping active-path
+            // identities)? Record the first eligible token per
+            // (lane, class) so we don't re-walk.
+            let mut eligible_lane = [false; PRIORITY_LANE_COUNT];
+            // chosen[lane][class] = Some(first non-active-path token).
+            let mut head: [[Option<SubmissionToken>; CLASS_COUNT]; PRIORITY_LANE_COUNT] =
+                Default::default();
+            let mut any_eligible = false;
+
+            for pi in 0..PRIORITY_LANE_COUNT {
+                for ci in 0..CLASS_COUNT {
+                    if blocked_class[ci] {
+                        continue;
+                    }
+                    // First (lowest-token = FIFO) candidate in this
+                    // shard whose identity the caller is not itself
+                    // executing.
+                    let tok = self.ready_lanes[pi][ci].iter().copied().find(|tok| {
+                        match self.nodes.get(tok) {
+                            Some(node) => !active_path.contains(&node.identity),
+                            None => false,
+                        }
+                    });
+                    if let Some(tok) = tok {
+                        head[pi][ci] = Some(tok);
+                        eligible_lane[pi] = true;
+                        any_eligible = true;
+                    }
                 }
-                if !node.deps_remaining.is_empty() {
-                    return None;
+            }
+
+            if !any_eligible {
+                return None;
+            }
+
+            // Smooth weighted credit: every eligible lane accrues its
+            // weight (computed on a local copy of the persistent
+            // credit); the selected lane pays the eligible-weight sum.
+            // Both mutations are COMMITTED only on a successful
+            // admission below.
+            let mut effective = self.credit;
+            let mut total_weight = 0i64;
+            for pi in 0..PRIORITY_LANE_COUNT {
+                if eligible_lane[pi] {
+                    effective[pi] = self.credit[pi].saturating_add(LANE_WEIGHTS[pi]);
+                    total_weight = total_weight.saturating_add(LANE_WEIGHTS[pi]);
                 }
-                // Skip identities the caller is itself waiting on.
-                // Dispatching them through the cooperative pump
-                // would re-enter `execute_stage_on_worker` on a
-                // stage that the calling worker is already running,
-                // duplicating the dispatch and breaking the parked-
-                // reservation single-release invariant. The base
-                // [`Self::next_ready`] call site passes an empty
-                // slice, so this filter only fires under the
-                // cooperative pump.
-                if active_path.contains(&node.identity) {
-                    return None;
+            }
+
+            // Pick the eligible lane with the highest credit; tie-break
+            // by higher priority (lower lane index).
+            let mut sel = None;
+            for pi in 0..PRIORITY_LANE_COUNT {
+                if !eligible_lane[pi] {
+                    continue;
                 }
-                let effective = effective_priority(node, now, &self.aging);
-                let kind_ord = match node.kind {
-                    WorkKind::Load => 0,
-                    WorkKind::Parse => 1,
-                    WorkKind::Analysis => 2,
-                    WorkKind::Artifact => 3,
-                    WorkKind::CacheNode => 4,
-                };
-                Some((
-                    (effective, node.enqueue_time, kind_ord, tok.0),
-                    *tok,
-                    ResourceClass::for_work_kind(node.kind),
-                ))
-            })
-            .collect();
-        ranked.sort_by(|a, b| {
-            // CPU workers prefer CPU work so an inline-execute path
-            // through `dispatch_ready_job` can run the dependency on
-            // the SAME worker that is parked. I/O workers are
-            // symmetric. Non-pool callers (Driver, Inline, External)
-            // see the original priority-only ordering.
-            let cpu_preference = matches!(caller_kind, crate::caller_kind::CallerKind::CpuWorker);
-            let io_preference = matches!(caller_kind, crate::caller_kind::CallerKind::IoWorker);
-            if cpu_preference {
-                match (a.2, b.2) {
-                    (ResourceClass::Cpu, ResourceClass::Io) => return std::cmp::Ordering::Less,
-                    (ResourceClass::Io, ResourceClass::Cpu) => return std::cmp::Ordering::Greater,
-                    _ => {}
-                }
-            } else if io_preference {
-                match (a.2, b.2) {
-                    (ResourceClass::Io, ResourceClass::Cpu) => return std::cmp::Ordering::Less,
-                    (ResourceClass::Cpu, ResourceClass::Io) => return std::cmp::Ordering::Greater,
+                match sel {
+                    None => sel = Some(pi),
+                    Some(cur) if effective[pi] > effective[cur] => sel = Some(pi),
                     _ => {}
                 }
             }
-            a.0.cmp(&b.0)
-        });
+            let sel = sel.expect("any_eligible implies a selected lane");
 
-        for (_, tok, class) in ranked {
-            // Try to reserve a permit for this candidate's class.
-            // Parked workers (Cpu / Io / Inline) in the cooperative
-            // pump can take a typed capacity LOAN for their matching
-            // resource class when the configured budget is already
-            // full — the calling worker is holding its own permit
-            // but parked, so its thread is the inline-execute path
-            // that runs the dep. The loan releases through the
-            // same single-release Drop contract as a normal
-            // reservation.
-            //
-            // Class × caller_kind loan matrix:
-            // - Cpu × CpuWorker|Inline → loan a Cpu permit.
-            // - Io  × IoWorker         → loan an Io permit.
-            // - other combinations: no loan, skip the candidate.
-            let loan_eligible = matches!(
-                (caller_kind, class),
-                (
-                    crate::caller_kind::CallerKind::CpuWorker
-                        | crate::caller_kind::CallerKind::Inline,
-                    ResourceClass::Cpu,
-                ) | (crate::caller_kind::CallerKind::IoWorker, ResourceClass::Io,)
-            );
+            // Within the selected lane, choose the class shard. Honour
+            // the caller's class preference when that shard has a
+            // candidate; otherwise take whichever shard does.
+            let class_order: [usize; CLASS_COUNT] = match preferred_class {
+                Some(pref) => {
+                    let p = class_index(pref);
+                    [p, 1 - p]
+                }
+                None => [0, 1],
+            };
+            let mut picked: Option<(SubmissionToken, ResourceClass)> = None;
+            for &ci in &class_order {
+                if let Some(tok) = head[sel][ci] {
+                    picked = Some((tok, class_for_index(ci)));
+                    break;
+                }
+            }
+            let (tok, class) = picked.expect("selected lane is eligible in some class shard");
+
+            // Admission gate: reserve the class permit, or loan it when
+            // the caller is a parked matching worker. The loan runs
+            // BEFORE treating saturation as a skip (deadlock avoidance).
             let reservation = match self.try_reserve_for_class(class) {
                 Some(r) => Some(r),
-                None if loan_eligible && !active_path.is_empty() => {
-                    self.loan_capacity_for_class(class)
-                }
+                None if loan_class == Some(class) => self.loan_capacity_for_class(class),
                 None => None,
             };
-            let reservation = match reservation {
-                Some(r) => r,
-                None => continue, // class budget full — skip
+            let Some(reservation) = reservation else {
+                // Class saturated and not loanable for this caller.
+                // Exclude the class for this call and re-run selection.
+                // Credit is NOT debited for a capacity skip.
+                blocked_class[class_index(class)] = true;
+                continue;
             };
+
+            // Admission succeeded — COMMIT the credit step now.
+            for pi in 0..PRIORITY_LANE_COUNT {
+                if eligible_lane[pi] {
+                    self.credit[pi] = self.credit[pi].saturating_add(LANE_WEIGHTS[pi]);
+                }
+            }
+            self.credit[sel] = self.credit[sel].saturating_sub(total_weight);
+
+            // Remove the dispatched token from its lane and publish the
+            // ReadyJob. `refresh`/`remove_from_lane` reads the mirror,
+            // so update state via the helper before mutating dispatched.
+            self.remove_from_lane(tok);
             let node = match self.nodes.get_mut(&tok) {
                 Some(n) => n,
                 None => {
-                    // Node disappeared mid-scan — return the permit.
+                    // Token vanished between selection and dispatch
+                    // (should not happen under the DAG lock, but stay
+                    // safe). Return the permit; credit already
+                    // committed, which is harmless.
                     reservation.release();
                     continue;
                 }
             };
-            let effective_priority = effective_priority(node, now, &self.aging);
             node.dispatched = true;
-            // Park the reservation on the node so `complete` /
-            // `cancel` returns the permit exactly once.
+            // Park the reservation on the node so `complete` / `cancel`
+            // returns the permit exactly once.
             node.reservation = Some(reservation);
-            // Drain the failed-blocker-deps marker into the ReadyJob
-            // so the pre-dispatch short-circuit in
+            let priority = node.base_priority;
+            // Drain the failed-blocker-deps marker into the ReadyJob so
+            // the pre-dispatch short-circuit in
             // `Scheduler::execute_stage_on_worker` can surface a typed
             // DependencyFailed when a prerequisite died terminally
-            // before this node became dispatchable. `take` moves the
-            // map out — the DagNode no longer owns it once the node
-            // has been published to dispatch. The carried
+            // before this node became dispatchable. The carried
             // `FailedDepRecord` values preserve each producer's
-            // terminal cause so the surfaced `DependencyFailed`
-            // carries it through verbatim.
+            // terminal cause so the surfaced `DependencyFailed` carries
+            // it through verbatim.
             let failed_blocker_deps = std::mem::take(&mut node.failed_blocker_deps);
             return Some(ReadyJob {
                 token: tok,
                 identity: node.identity.clone(),
                 kind: node.kind,
-                effective_priority,
+                priority,
                 enqueue_time: node.enqueue_time,
                 request_context: node.request_context.clone(),
                 failed_blocker_deps,
             });
         }
-        None
     }
 
     /// Drop ALL state (nodes, edges, waiters, file waiters). Used by
@@ -1477,6 +1828,14 @@ impl SchedulerDag {
         }
         self.artifact_blocker_deps.clear();
         self.terminal_dep_failures.clear();
+        // Drop every ready-lane entry and reset the credit
+        // accumulators — there is no work left to be fair between.
+        for lane in &mut self.ready_lanes {
+            for cell in lane {
+                cell.clear();
+            }
+        }
+        self.credit = [0; PRIORITY_LANE_COUNT];
         self.capacity_counter.store(0, Ordering::Release);
         self.cpu_counter.store(0, Ordering::Release);
         self.io_counter.store(0, Ordering::Release);
@@ -1855,17 +2214,6 @@ fn node_matches_file_gen(node: &DagNode, canonical: &Arc<str>, generation: u64) 
             ..
         } => c.as_ref() == canonical.as_ref() && *g == generation,
         WorkNodeIdentity::CacheNode { .. } => false,
-    }
-}
-
-/// Compute the effective priority for `node` at `now` under `aging`.
-fn effective_priority(node: &DagNode, now: Instant, aging: &DagAgingConfig) -> Priority {
-    let base = node.base_priority;
-    let age = now.saturating_duration_since(node.enqueue_time);
-    match base {
-        Priority::Background if age >= aging.background_to_interactive => Priority::Interactive,
-        Priority::Maintenance if age >= aging.maintenance_to_background => Priority::Background,
-        other => other,
     }
 }
 

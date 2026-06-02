@@ -15,8 +15,8 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 
 use crate::dag::{
-    profile_hash_from_bytes, profile_hash_to_bytes, DagAgingConfig, DagCapacityBudget,
-    DedupJoinerEvent, DepKey, FileStageKey, ReadyJob, SchedulerDag, WorkKind, WorkNodeIdentity,
+    profile_hash_from_bytes, profile_hash_to_bytes, DagCapacityBudget, DedupJoinerEvent, DepKey,
+    FileStageKey, ReadyJob, SchedulerDag, WorkKind, WorkNodeIdentity,
 };
 use crate::driver::{QueuedRequest, Submission, SubmissionInbox};
 use crate::edges::EdgeManager;
@@ -51,8 +51,6 @@ pub struct SchedulerConfig {
     pub cpu_threads: usize,
     /// Number of I/O pool threads (default: 4).
     pub io_threads: usize,
-    /// Aging thresholds for priority promotion.
-    pub aging: DagAgingConfig,
     /// Per-class DAG admission budget. Defaults are derived from
     /// `cpu_threads` / `io_threads` when the explicit budget is
     /// `None`.
@@ -67,7 +65,6 @@ impl Default for SchedulerConfig {
             #[cfg(target_arch = "wasm32")]
             cpu_threads: 1,
             io_threads: 4,
-            aging: DagAgingConfig::default(),
             dag_budget: None,
         }
     }
@@ -526,8 +523,8 @@ pub struct Scheduler {
     /// Edge manager (reverse-dep index + forward-dep snapshots).
     pub(crate) edges: EdgeManager,
     /// Single driver-owned readiness authority — admission, dedup,
-    /// dependency gating, priority aging, capacity reservation,
-    /// per-file waiter groups.
+    /// dependency gating, the weighted-credit lane selector, capacity
+    /// reservation, per-file waiter groups.
     ///
     /// Wrapped in `Arc` so worker closures can clone a handle for
     /// completion signalling without holding `&self`.
@@ -748,7 +745,6 @@ impl Scheduler {
             nodes: DashMap::new(),
             edges: EdgeManager::new(),
             dag: Arc::new(Mutex::new(SchedulerDag::with_budget(
-                config.aging.clone(),
                 dag_budget_for_config(&config),
             ))),
             inbox: SubmissionInbox::new(),
@@ -823,7 +819,6 @@ impl Scheduler {
             nodes: DashMap::new(),
             edges: EdgeManager::new(),
             dag: Arc::new(Mutex::new(SchedulerDag::with_budget(
-                config.aging.clone(),
                 dag_budget_for_config(&config),
             ))),
             inbox: SubmissionInbox::new(),
@@ -1922,7 +1917,13 @@ impl Scheduler {
         // lifetime, and never delegates this slot to another role.
         let _ = crate::caller_kind::CallerKind::set(crate::caller_kind::CallerKind::Driver);
 
-        let aging_interval = std::time::Duration::from_secs(5);
+        // Periodic missed-wake safety net: even with no submission, the
+        // driver re-pumps every 5s so any stranded ready work (e.g. a
+        // waiter freed by a terminal-failure fan-out whose explicit
+        // wake was missed) still dispatches. This is NOT priority
+        // aging — selection-count weighted credit needs no timer; this
+        // interval purely backstops a dropped wake.
+        let idle_repump_interval = std::time::Duration::from_secs(5);
 
         loop {
             // Upgrade Weak to Arc — if this fails, the scheduler was dropped.
@@ -1960,8 +1961,8 @@ impl Scheduler {
             // Drop the strong ref before blocking so the caller's Drop can run.
             drop(scheduler);
 
-            // Wait for the next submission or aging timer.
-            match receiver.recv_timeout(aging_interval) {
+            // Wait for the next submission or the idle re-pump tick.
+            match receiver.recv_timeout(idle_repump_interval) {
                 Ok(submission) => {
                     if let Some(scheduler) = weak.upgrade() {
                         // Process the wake submission directly so
@@ -5154,7 +5155,6 @@ mod tests {
         let config = SchedulerConfig {
             cpu_threads: 1,
             io_threads: 1,
-            aging: DagAgingConfig::default(),
             dag_budget: Some(DagCapacityBudget { cpu: 1, io: 1 }),
         };
         let sched = Scheduler::new_sync(config, loader);
@@ -5878,7 +5878,6 @@ mod tests {
         let config = SchedulerConfig {
             cpu_threads: 1,
             io_threads: 1,
-            aging: DagAgingConfig::default(),
             dag_budget: Some(DagCapacityBudget { cpu: 1, io: 1 }),
         };
         Scheduler::new_sync_with_executor(config, loader, executor)
@@ -6113,7 +6112,6 @@ mod tests {
         let config = SchedulerConfig {
             cpu_threads: 1,
             io_threads: 1,
-            aging: DagAgingConfig::default(),
             dag_budget: Some(DagCapacityBudget { cpu: 1, io: 1 }),
         };
         let sched = Scheduler::with_executor(config, loader, Arc::new(PanickingSourceExecutor));
@@ -7317,7 +7315,7 @@ mod tests {
     /// has downstream DepKey waiters must re-enqueue the stranded
     /// waiters so the driver thread re-runs dispatch promptly.
     /// Without the wake the stranded waiter still dispatches —
-    /// eventually — but only after the next aging-interval tick
+    /// eventually — but only after the next idle re-pump tick
     /// (default 5s), which inflates failure-path latency.
     ///
     /// Test setup: owner `/a.vue` lists `/dep.ts` as a blocker.
@@ -7354,12 +7352,12 @@ mod tests {
         });
 
         // The owner's Artifact must resolve in well under the
-        // driver's aging interval (5s). Without the wake-on-stranded
-        // path the dep's Analysis failure strands the owner's
-        // Analysis gate and the driver sleeps in `recv_timeout`
-        // until the next aging tick; with the wake the path triggers
-        // a prompt dispatch and the owner's Analysis + Artifact run
-        // in sub-second time.
+        // driver's idle re-pump interval (5s). Without the
+        // wake-on-stranded path the dep's Analysis failure strands the
+        // owner's Analysis gate and the driver sleeps in `recv_timeout`
+        // until the next idle re-pump tick; with the wake the path
+        // triggers a prompt dispatch and the owner's Analysis +
+        // Artifact run in sub-second time.
         let start = Instant::now();
         let deadline = start + Duration::from_millis(1500);
         let mut state: Option<CompletionState<RequestResult>> = None;
@@ -7375,7 +7373,7 @@ mod tests {
             state.is_some(),
             "owner Artifact must resolve within 1500ms (without the \
              wake-on-stranded path, the stranded Analysis gate would \
-             wait for the 5s aging tick); got None after {elapsed:?}"
+             wait for the 5s idle re-pump tick); got None after {elapsed:?}"
         );
         // Don't assert ready vs failed — the owner's Artifact may
         // succeed (the dep was only a blocker gate) or fail
@@ -7441,7 +7439,6 @@ mod tests {
         let config = SchedulerConfig {
             cpu_threads: 1,
             io_threads: 1,
-            aging: DagAgingConfig::default(),
             dag_budget: Some(DagCapacityBudget { cpu: 1, io: 1 }),
         };
         let sched = Scheduler::with_executor(config, loader, executor);
@@ -8028,7 +8025,7 @@ mod tests {
     /// through the DAG-owned waiter group bookkeeping.
     #[test]
     fn scheduler_dedup_calls_on_dedup_joiner_with_winner_audited_true_when_winner_captures() {
-        let mut dag = SchedulerDag::new(DagAgingConfig::default());
+        let mut dag = SchedulerDag::new();
         let (_h1, s1) = completion_pair::<RequestResult>();
         let (_h2, s2) = completion_pair::<RequestResult>();
 
@@ -8083,7 +8080,7 @@ mod tests {
     #[test]
     fn scheduler_dedup_calls_on_dedup_joiner_with_winner_audited_false_when_winner_does_not_capture(
     ) {
-        let mut dag = SchedulerDag::new(DagAgingConfig::default());
+        let mut dag = SchedulerDag::new();
         let (_h1, s1) = completion_pair::<RequestResult>();
         let (_h2, s2) = completion_pair::<RequestResult>();
 
@@ -13203,7 +13200,7 @@ mod tests {
     /// the Source-completion replay paths.
     #[test]
     fn filter_drops_direct_self_cycle() {
-        let dag = crate::dag::SchedulerDag::new(crate::dag::DagAgingConfig::default());
+        let dag = crate::dag::SchedulerDag::new();
         let owner: Arc<str> = Arc::from("/a.vue");
         let self_dep = DepKey::FileStage {
             canonical: Arc::clone(&owner),
@@ -13231,7 +13228,7 @@ mod tests {
     /// B→A so B's Analysis admits with no blockers.
     #[test]
     fn filter_drops_direct_mutual_cycle_late_registration() {
-        let mut dag = crate::dag::SchedulerDag::new(crate::dag::DagAgingConfig::default());
+        let mut dag = crate::dag::SchedulerDag::new();
         let a: Arc<str> = Arc::from("/a.vue");
         let b: Arc<str> = Arc::from("/b.vue");
 
@@ -13280,7 +13277,7 @@ mod tests {
     /// and reports the cycle.
     #[test]
     fn filter_drops_three_node_cycle_a_b_c_a() {
-        let mut dag = crate::dag::SchedulerDag::new(crate::dag::DagAgingConfig::default());
+        let mut dag = crate::dag::SchedulerDag::new();
         let a: Arc<str> = Arc::from("/a.vue");
         let b: Arc<str> = Arc::from("/b.vue");
         let c: Arc<str> = Arc::from("/c.vue");
@@ -13351,7 +13348,7 @@ mod tests {
     /// safety guard required by §5 STOP condition (1).
     #[test]
     fn filter_preserves_non_cycle_dep() {
-        let mut dag = crate::dag::SchedulerDag::new(crate::dag::DagAgingConfig::default());
+        let mut dag = crate::dag::SchedulerDag::new();
         let a: Arc<str> = Arc::from("/a.vue");
         let b: Arc<str> = Arc::from("/b.vue");
 

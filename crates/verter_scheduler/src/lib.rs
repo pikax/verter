@@ -8,7 +8,7 @@
 //! - [`FileNode`](node::FileNode) — per-file state: ArcSwap snapshots, generation counter
 //! - [`SchedulerDag`](dag::SchedulerDag) — the sole readiness/admission/reservation authority (admission, dedup, dependency gating, capacity reservation)
 //! - [`CompletionHandle`](job::CompletionHandle) — request-scoped handle, resolves to exactly one terminal state
-//! - [`Priority`](stage::Priority) — 4-tier scheduling with FIFO within tier and aging across tiers
+//! - [`Priority`](stage::Priority) — 4-tier scheduling with FIFO within tier and smooth weighted selection-count credit across tiers
 //! - [`ReverseIndex`](edges::ReverseIndex) — concurrent reverse-dep index
 //! - [`OverlayMap`](overlay::OverlayMap) — concurrent editor buffer storage
 //! - [`SourceLoader`](source_loader::SourceLoader) — file loading trait (memory/disk)

@@ -146,37 +146,46 @@ impl SchedulerDag {
             return stranded;
         };
         for waiter_tok in waiters {
-            let Some(waiter) = self.nodes.get_mut(&waiter_tok) else {
-                continue;
-            };
-            if waiter.cancelled {
-                continue;
+            {
+                let Some(waiter) = self.nodes.get_mut(&waiter_tok) else {
+                    continue;
+                };
+                if waiter.cancelled {
+                    continue;
+                }
+                waiter.deps_remaining.remove(analysis_dep_key);
+                // Record the failed DepKey on the waiter so the
+                // executor short-circuits with a typed
+                // `DependencyFailed` instead of running the user-side
+                // stage executor over a dep whose Analysis can never
+                // commit. Without this marker the Artifact (or other
+                // downstream) executor reads the OWNER's
+                // `current_source()` / `current_analysis()` only — it
+                // never re-consults the failed dep — and silently
+                // returns `Ready` even though the declared blocker died.
+                //
+                // The recorded `FailedDepRecord` carries `cause` so the
+                // surfaced `DependencyFailed` preserves the producer's
+                // terminal error (FileNotFound, StageFailed, etc.)
+                // instead of synthesising a stage-only envelope.
+                waiter.failed_blocker_deps.insert(
+                    analysis_dep_key.clone(),
+                    FailedDepRecord {
+                        dep_key: analysis_dep_key.clone(),
+                        cause: cause.clone(),
+                    },
+                );
+                if waiter.deps_remaining.is_empty() && !waiter.dispatched {
+                    stranded.push(waiter_tok);
+                }
             }
-            waiter.deps_remaining.remove(analysis_dep_key);
-            // Record the failed DepKey on the waiter so the
-            // executor short-circuits with a typed
-            // `DependencyFailed` instead of running the user-side
-            // stage executor over a dep whose Analysis can never
-            // commit. Without this marker the Artifact (or other
-            // downstream) executor reads the OWNER's
-            // `current_source()` / `current_analysis()` only — it
-            // never re-consults the failed dep — and silently
-            // returns `Ready` even though the declared blocker died.
-            //
-            // The recorded `FailedDepRecord` carries `cause` so the
-            // surfaced `DependencyFailed` preserves the producer's
-            // terminal error (FileNotFound, StageFailed, etc.)
-            // instead of synthesising a stage-only envelope.
-            waiter.failed_blocker_deps.insert(
-                analysis_dep_key.clone(),
-                FailedDepRecord {
-                    dep_key: analysis_dep_key.clone(),
-                    cause: cause.clone(),
-                },
-            );
-            if waiter.deps_remaining.is_empty() && !waiter.dispatched {
-                stranded.push(waiter_tok);
-            }
+            // Reconcile the waiter's lane: clearing the failed dep can
+            // make the waiter dispatch-ready (it carries a
+            // FailedDepRecord and will short-circuit with
+            // DependencyFailed at execute time). Without this the
+            // stranded waiter would never enter a lane and never
+            // dispatch.
+            self.refresh_ready_membership(waiter_tok);
         }
         stranded
     }

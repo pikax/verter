@@ -37,13 +37,6 @@ fn cache_node(cache: u64, key: u64, epoch: u64, pin: u64) -> WorkNodeIdentity {
     }
 }
 
-fn fast_aging() -> DagAgingConfig {
-    DagAgingConfig {
-        background_to_interactive: Duration::from_millis(50),
-        maintenance_to_background: Duration::from_millis(50),
-    }
-}
-
 /// Discriminating fact: WorkNodeIdentity has exactly three
 /// variants. Adding a fourth would fail compilation here
 /// because the exhaustive match below must cover it.
@@ -86,7 +79,7 @@ fn work_kind_has_exactly_five_variants() {
 /// Highest-priority ready node dispatches first.
 #[test]
 fn next_ready_returns_highest_priority_first() {
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let t_low = dag.submit(
         file_stage("/low.vue", 1, FileStageKey::Source),
         WorkKind::Load,
@@ -122,7 +115,7 @@ fn next_ready_returns_highest_priority_first() {
 /// taking the min (higher priority).
 #[test]
 fn submit_dedup_merges_identity_and_upgrades_priority() {
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let t1 = dag.submit(
         file_stage("/a.vue", 1, FileStageKey::Source),
         WorkKind::Load,
@@ -140,7 +133,7 @@ fn submit_dedup_merges_identity_and_upgrades_priority() {
     assert_eq!(t1, t2, "dedup must return the same token");
     let r = dag.next_ready().expect("ready");
     assert_eq!(r.token, t1);
-    assert_eq!(r.effective_priority, Priority::Critical);
+    assert_eq!(r.priority, Priority::Critical);
     assert!(
         dag.next_ready().is_none(),
         "only one node should have been dispatched after dedup",
@@ -151,7 +144,7 @@ fn submit_dedup_merges_identity_and_upgrades_priority() {
 /// older node so it never dispatches.
 #[test]
 fn cancel_older_generation_drops_stale_node() {
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let _old = dag.submit(
         file_stage("/a.vue", 1, FileStageKey::Source),
         WorkKind::Load,
@@ -178,7 +171,7 @@ fn cancel_older_generation_drops_stale_node() {
 /// waiter becomes dispatchable.
 #[test]
 fn dependency_gating_holds_back_node_until_dep_completes() {
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let dep_id = file_stage("/dep.ts", 1, FileStageKey::Analysis);
     let _dep_tok = dag.submit(
         dep_id.clone(),
@@ -214,7 +207,7 @@ fn dependency_gating_holds_back_node_until_dep_completes() {
 /// across kinds, proving the variant disjointness in practice.
 #[test]
 fn dynamic_import_barrier_uses_cache_node_dep_to_gate_artifact() {
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let barrier = cache_node(1, 42, 7, 99);
     let _bt = dag.submit(
         barrier.clone(),
@@ -240,7 +233,7 @@ fn dynamic_import_barrier_uses_cache_node_dep_to_gate_artifact() {
 /// Cancellation releases capacity exactly once via Drop.
 #[test]
 fn cancellation_releases_capacity_permits_exactly_once_on_drop() {
-    let dag = SchedulerDag::new(DagAgingConfig::default());
+    let dag = SchedulerDag::new();
     assert_eq!(dag.in_flight_permits(), 0);
     {
         let _r = dag.reserve_capacity(3);
@@ -254,7 +247,7 @@ fn cancellation_releases_capacity_permits_exactly_once_on_drop() {
 /// `release(self)` consumes the reservation.
 #[test]
 fn capacity_release_returns_permits_and_makes_double_release_unrepresentable() {
-    let dag = SchedulerDag::new(DagAgingConfig::default());
+    let dag = SchedulerDag::new();
     let r = dag.reserve_capacity(2);
     assert_eq!(dag.in_flight_permits(), 2);
     r.release();
@@ -267,29 +260,11 @@ fn capacity_release_returns_permits_and_makes_double_release_unrepresentable() {
     assert_eq!(dag.in_flight_permits(), 0);
 }
 
-/// Aging promotes Background → Interactive after the configured
-/// threshold.
-#[test]
-fn aging_promotes_background_to_interactive_after_threshold() {
-    let mut dag = SchedulerDag::new(fast_aging());
-    let _t = dag.submit(
-        file_stage("/old.vue", 1, FileStageKey::Source),
-        WorkKind::Load,
-        Priority::Background,
-        Vec::new(),
-        None,
-    );
-    // Wait past the aging threshold.
-    std::thread::sleep(Duration::from_millis(80));
-    let r = dag.next_ready().expect("ready after aging");
-    assert_eq!(r.effective_priority, Priority::Interactive);
-}
-
 /// Cancel returns stranded waiters whose only remaining dep was
 /// the cancelled node, so the driver can fail them.
 #[test]
 fn cancel_returns_stranded_waiters_for_failure_propagation() {
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let dep_id = file_stage("/dep.ts", 1, FileStageKey::Analysis);
     let _dep = dag.submit(
         dep_id.clone(),
@@ -318,7 +293,7 @@ fn cancel_returns_stranded_waiters_for_failure_propagation() {
 /// same dispatch.
 #[test]
 fn submit_dedup_merges_incoming_deps_into_existing_node() {
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let dep_a = file_stage("/a.ts", 1, FileStageKey::Analysis);
     let dep_b = file_stage("/b.ts", 1, FileStageKey::Analysis);
     let dep_c = file_stage("/c.ts", 1, FileStageKey::Analysis);
@@ -379,7 +354,7 @@ fn submit_dedup_merges_incoming_deps_into_existing_node() {
 /// joiner shares the in-flight result.
 #[test]
 fn in_flight_dedup_no_panic_no_deps_change() {
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let id = file_stage("/target.vue", 1, FileStageKey::Source);
 
     // Admit and dispatch target first.
@@ -425,7 +400,7 @@ fn in_flight_dedup_no_panic_no_deps_change() {
 #[test]
 fn dispatched_dedup_with_deps_does_not_mutate_incoming_edges() {
     use crate::request_context::OpaqueRequestContext;
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let target_id = file_stage("/target.vue", 1, FileStageKey::Source);
 
     // Admit target with an initial dep A AND a real request_context
@@ -550,7 +525,7 @@ fn dispatched_dedup_with_deps_does_not_mutate_incoming_edges() {
 /// release the upgrade was silently dropped.
 #[test]
 fn priority_upgrade_survives_in_flight_dedup() {
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let id = file_stage("/target.vue", 1, FileStageKey::Source);
     let t1 = dag.submit(
         id.clone(),
@@ -588,7 +563,7 @@ fn priority_upgrade_survives_in_flight_dedup() {
 /// dispatch after the canonical bumped to a higher generation.
 #[test]
 fn supersede_old_file_generations_cancels_stale_dag_nodes() {
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let stale = file_stage("/a.vue", 1, FileStageKey::Source);
     let _stale_tok = dag.submit(
         stale.clone(),
@@ -630,7 +605,7 @@ fn supersede_old_file_generations_cancels_stale_dag_nodes() {
 #[test]
 fn next_ready_defers_when_cpu_class_saturated_and_resumes_on_complete() {
     let budget = DagCapacityBudget { cpu: 1, io: 1 };
-    let mut dag = SchedulerDag::with_budget(DagAgingConfig::default(), budget);
+    let mut dag = SchedulerDag::with_budget(budget);
 
     // Submit two CPU-bound jobs at the same priority.
     let id_a = file_stage("/a.ts", 1, FileStageKey::Analysis);
@@ -679,7 +654,7 @@ fn next_ready_defers_when_cpu_class_saturated_and_resumes_on_complete() {
 #[test]
 fn next_ready_admits_io_when_cpu_full_and_vice_versa() {
     let budget = DagCapacityBudget { cpu: 1, io: 1 };
-    let mut dag = SchedulerDag::with_budget(DagAgingConfig::default(), budget);
+    let mut dag = SchedulerDag::with_budget(budget);
 
     let cpu_id = file_stage("/cpu.ts", 1, FileStageKey::Analysis);
     let io_id = file_stage("/io.vue", 1, FileStageKey::Source);
@@ -710,7 +685,7 @@ fn next_ready_admits_io_when_cpu_full_and_vice_versa() {
 /// `submit` calls with the same identity.
 #[test]
 fn submit_count_stays_one_under_dedup() {
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     dag.submit(
         file_stage("/a.vue", 1, FileStageKey::Source),
         WorkKind::Load,
@@ -744,7 +719,7 @@ fn submit_count_stays_one_under_dedup() {
 /// adjacency case must still hold.
 #[test]
 fn has_dep_on_returns_true_when_dep_is_in_deps_remaining() {
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let dep_id = file_stage("/dep.ts", 1, FileStageKey::Analysis);
     let owner_id = artifact("/a.vue", 1, 7);
     let dep_key = DepKey::from_identity(&dep_id);
@@ -772,7 +747,7 @@ fn has_dep_on_returns_true_when_dep_is_in_deps_remaining() {
 /// `deps_remaining` no longer contains it.
 #[test]
 fn has_dep_on_returns_false_when_dep_completed() {
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let dep_id = file_stage("/dep.ts", 1, FileStageKey::Analysis);
     let owner_id = artifact("/a.vue", 1, 7);
     let dep_key = DepKey::from_identity(&dep_id);
@@ -804,7 +779,7 @@ fn has_dep_on_returns_false_when_dep_completed() {
 /// to C, follows C's edges to A, and reports true.
 #[test]
 fn dep_reaches_owner_returns_true_for_three_node_cycle() {
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let a = canonical("/a.vue");
     let b = canonical("/b.vue");
     let c = canonical("/c.vue");
@@ -864,7 +839,7 @@ fn dep_reaches_owner_returns_true_for_three_node_cycle() {
 #[test]
 fn dep_reaches_owner_detects_cycle_past_256_hops() {
     const CHAIN_LEN: usize = 300;
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let a = canonical("/a.vue");
     let chain: Vec<Arc<str>> = (0..CHAIN_LEN)
         .map(|i| canonical(&format!("/b{i}.vue")))
@@ -942,7 +917,7 @@ fn dep_reaches_owner_frontier_bounded_on_dense_graph() {
     // reachable through forward edges. So the reachable set is
     // the start (1) plus every node in layers 1..LAYERS.
     const REACHABLE: usize = 1 + (LAYERS - 1) * WIDTH;
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let owner = canonical("/owner.vue");
 
     // Build a layered DAG with no cycle. Each node in layer L
@@ -1030,7 +1005,7 @@ fn dep_reaches_owner_frontier_bounded_on_dense_graph() {
     // Fallback wall-clock bound: well above any O(V) walk but far
     // below the O(E) blow-up the pop-time variant produces.
     assert!(
-        elapsed < std::time::Duration::from_secs(2),
+        elapsed < Duration::from_secs(2),
         "dense-graph BFS must complete in bounded O(V) time; elapsed = {elapsed:?}",
     );
 }
@@ -1041,7 +1016,7 @@ fn dep_reaches_owner_frontier_bounded_on_dense_graph() {
 #[test]
 fn next_ready_for_pump_skips_active_path_identities() {
     use crate::caller_kind::CallerKind;
-    let mut dag = SchedulerDag::new(DagAgingConfig::default());
+    let mut dag = SchedulerDag::new();
     let id = file_stage("/a.vue", 1, FileStageKey::Analysis);
     dag.submit(
         id.clone(),
@@ -1069,13 +1044,7 @@ fn next_ready_for_pump_skips_active_path_identities() {
 #[test]
 fn next_ready_for_pump_prefers_cpu_class_for_cpu_worker_caller() {
     use crate::caller_kind::CallerKind;
-    let mut dag = SchedulerDag::with_budget(
-        DagAgingConfig {
-            background_to_interactive: Duration::from_secs(60),
-            maintenance_to_background: Duration::from_secs(60),
-        },
-        DagCapacityBudget { cpu: 1, io: 1 },
-    );
+    let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 1, io: 1 });
 
     // CPU candidate (Analysis).
     let cpu_id = file_stage("/a.vue", 1, FileStageKey::Analysis);
@@ -1114,13 +1083,7 @@ fn next_ready_for_pump_prefers_cpu_class_for_cpu_worker_caller() {
 #[test]
 fn next_ready_for_pump_prefers_io_class_for_io_worker_caller() {
     use crate::caller_kind::CallerKind;
-    let mut dag = SchedulerDag::with_budget(
-        DagAgingConfig {
-            background_to_interactive: Duration::from_secs(60),
-            maintenance_to_background: Duration::from_secs(60),
-        },
-        DagCapacityBudget { cpu: 1, io: 1 },
-    );
+    let mut dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 1, io: 1 });
 
     let cpu_id = file_stage("/a.vue", 1, FileStageKey::Analysis);
     dag.submit(
@@ -1155,10 +1118,7 @@ fn next_ready_for_pump_prefers_io_class_for_io_worker_caller() {
 /// is exhausted (symmetric with the CPU-loan path).
 #[test]
 fn loan_capacity_for_class_io_bumps_past_cap_and_releases_on_drop() {
-    let dag = SchedulerDag::with_budget(
-        DagAgingConfig::default(),
-        DagCapacityBudget { cpu: 4, io: 1 },
-    );
+    let dag = SchedulerDag::with_budget(DagCapacityBudget { cpu: 4, io: 1 });
     // First reservation consumes the only I/O slot.
     let _r1 = dag
         .try_reserve_for_class(ResourceClass::Io)

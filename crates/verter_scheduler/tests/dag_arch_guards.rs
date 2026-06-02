@@ -285,3 +285,124 @@ fn scheduler_has_only_atomic_batch_api() {
          atomic-admission primitive.",
     );
 }
+
+/// B7b — readiness selection is lane/credit based, NOT a linear scan.
+///
+/// `next_ready_for_pump` is the SOLE selection engine. The
+/// weighted-credit lane selector reads only the bounded
+/// `ready_lanes` matrix; it must NEVER revert to scanning the whole
+/// `self.nodes` map (the O(N)-per-call scan + full sort that the
+/// cutover removed). This guard isolates the body of
+/// `next_ready_for_pump` and asserts none of the scan-era
+/// fingerprints reappear inside it.
+///
+/// Discriminator: re-introducing `self.nodes.iter()` /
+/// `self.nodes.values()` / a ranked `.collect()` / `.sort_by(` inside
+/// the selector fires this guard. The pre-change scan impl contained
+/// all four; the lane impl contains none.
+#[test]
+fn b7b_next_ready_for_pump_has_no_linear_scan() {
+    let src = fs::read_to_string(scheduler_src_root().join("dag.rs")).expect("read dag.rs");
+    let marker = "pub fn next_ready_for_pump(";
+    let start = src
+        .find(marker)
+        .expect("B7b: `next_ready_for_pump` must exist as the sole readiness selector");
+    // Isolate the function body: from the marker to the matching
+    // closing brace of the fn block. Walk brace depth starting at the
+    // first `{` after the signature.
+    let body_open = src[start..]
+        .find('{')
+        .map(|i| start + i)
+        .expect("fn body open brace");
+    let mut depth = 0usize;
+    let mut body_end = None;
+    for (i, ch) in src[body_open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    body_end = Some(body_open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body_end = body_end.expect("matched fn closing brace");
+    let body = &src[body_open..=body_end];
+
+    for needle in [
+        "self.nodes.iter()",
+        "self.nodes.values()",
+        ".collect()",
+        ".sort_by(",
+    ] {
+        assert!(
+            !body.contains(needle),
+            "B7b: `next_ready_for_pump` must select via the bounded `ready_lanes` matrix, \
+             not a linear scan over the node map — found scan fingerprint `{needle}`. \
+             Readiness selection must stay O(lanes), never O(N).",
+        );
+    }
+    // Positive anchor: the selector must read the lane matrix.
+    assert!(
+        body.contains("ready_lanes"),
+        "B7b: `next_ready_for_pump` must read the `ready_lanes` matrix",
+    );
+}
+
+/// B7b — time-based priority aging is fully retired. The
+/// weighted-credit lane selector replaced it; no aging config, no
+/// aging field, and no `effective_priority` promotion fn may exist.
+///
+/// Discriminator: re-introducing `DagAgingConfig`,
+/// `SchedulerConfig.aging`, or `fn effective_priority` fires this
+/// guard. The pre-change source declared all three.
+#[test]
+fn b7b_priority_aging_is_retired() {
+    let src = read_scheduler_source();
+    for needle in [
+        "DagAgingConfig",
+        "fn effective_priority",
+        // The `SchedulerConfig.aging` field declaration.
+        "pub aging:",
+    ] {
+        assert!(
+            !src.contains(needle),
+            "B7b: time-based aging is retired — found `{needle}`. Anti-starvation is \
+             smooth weighted selection-count credit in the lane selector, not aging.",
+        );
+    }
+}
+
+/// B7b — the typed CPU/IO `DagCapacityBudget` ledger is the SOLE
+/// admission authority. No second admission-budget type may appear
+/// beside it (the cutover forbids a parallel budget such as
+/// `DagAdmissionBudget`), and no second ready-queue authority such as
+/// an `ArrayQueue` ready set.
+///
+/// Discriminator: introducing a `struct DagAdmissionBudget` (a second
+/// budget) or an `ArrayQueue` ready-queue fires this guard. The lane
+/// index is a `BTreeSet`-per-cell matrix, not a parallel queue type.
+#[test]
+fn b7b_no_second_admission_budget_or_ready_queue() {
+    let src = read_scheduler_source();
+    for needle in [
+        "struct DagAdmissionBudget",
+        "DagAdmissionBudget",
+        "ArrayQueue",
+    ] {
+        assert!(
+            !src.contains(needle),
+            "B7b: the typed CPU/IO `DagCapacityBudget` ledger is the sole admission \
+             authority and `ready_lanes` is the sole ready set — found a second \
+             budget/queue symbol `{needle}`.",
+        );
+    }
+    // The single ledger type must still exist.
+    assert!(
+        src.contains("pub struct DagCapacityBudget"),
+        "B7b: `DagCapacityBudget` (the sole admission ledger) must exist",
+    );
+}

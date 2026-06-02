@@ -1,13 +1,16 @@
-//! Capacity / aging types — child module of `dag`.
+//! Capacity types — child module of `dag`.
 //!
 //! Houses the admission-budget plumbing that the DAG consumes
-//! during dispatch: the priority-tier aging configuration, the
-//! split CPU / I/O resource budget, the per-`WorkKind` resource
-//! class, and the typed reservation that decrements counters
-//! exactly once on release. The types live here so the main
-//! `dag.rs` file stays focused on the readiness DAG (admission,
-//! dedup, gating, fan-out) rather than the capacity accounting
-//! it consumes.
+//! during dispatch: the split CPU / I/O resource budget, the
+//! per-`WorkKind` resource class, and the typed reservation that
+//! decrements counters exactly once on release. The types live
+//! here so the main `dag.rs` file stays focused on the readiness
+//! DAG (admission, dedup, gating, fan-out) rather than the
+//! capacity accounting it consumes.
+//!
+//! Anti-starvation is handled by the weighted-credit lane selector
+//! in `dag.rs`, not by a time-based promotion config — the ledger
+//! here governs ADMISSION only.
 //!
 //! Visibility note: every type is `pub` so the existing
 //! `crate::dag::*` re-exports continue to work without callers
@@ -15,27 +18,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::WorkKind;
-
-/// Configuration for priority-tier aging in the DAG.
-#[derive(Clone, Debug)]
-pub struct DagAgingConfig {
-    /// Background entries older than this promote to Interactive.
-    pub background_to_interactive: Duration,
-    /// Maintenance entries older than this promote to Background.
-    pub maintenance_to_background: Duration,
-}
-
-impl Default for DagAgingConfig {
-    fn default() -> Self {
-        Self {
-            background_to_interactive: Duration::from_secs(10),
-            maintenance_to_background: Duration::from_secs(30),
-        }
-    }
-}
 
 /// Admission-time capacity budget, split into two resource classes.
 ///
