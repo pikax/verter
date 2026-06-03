@@ -2,7 +2,7 @@
 
 This document is the per-field audit + per-cache-layer key composition
 table for the fact-based cache architecture. The full rule set
-(R1–R29) lives in the `/type-cache-architecture` skill.
+(R1–R31) lives in the `/type-cache-architecture` skill.
 
 For the next-generation cache runtime and performance migration plan, see
 [`cache-runtime-overhaul-plan.md`](cache-runtime-overhaul-plan.md).
@@ -38,10 +38,11 @@ For the next-generation cache runtime and performance migration plan, see
 > vs `Arc<str>`). `FactVersionRef` is the chosen shape because it
 > aligns with the per-domain dispatch surface (R26's
 > `validates_parse_domain` / `validates_resolve_imports_domain` /
-> `validates_route_surface_domain`).
+> `validates_route_surface_domain` /
+> `validates_program_analysis_domain`).
 
 > AMENDMENT 2026-05-12-D — The whole-hash retirement audit-test at
-> `crates/verter_session/tests/whole_hash_migration_audit.rs` is a
+> `crates/verter_session/tests/g_misc1/whole_hash_migration_audit.rs` is a
 > **count-bounded inventory** (each enumerated read site asserted
 > to have ≤ N occurrences), not a per-site absence assertion. The
 > R20 multi-candidate substrate + `VersionedDeclIdentity` +
@@ -78,7 +79,17 @@ corpus fingerprint).
 | `EnvHashInputs.lib_names` | per-call | `lib_env` | Selected TS `lib*.d.ts` set (e.g., `lib.dom.d.ts`, `lib.es2022.d.ts`). |
 | `EnvHashInputs.type_roots` | per-call | `lib_env` | `typeRoots` directory list for ambient `@types`. |
 | `EnvHashInputs.ambient_corpus_fingerprint` | per-call | `lib_env` | Identity of the resolved ambient library corpus (registered globals, module-augmentation declarations). |
-| `WorldSnapshot` (request identity) | `crates/verter_session/src/cache_runtime/world_snapshot.rs` | n/a — request-concurrency identity | Carries all five env hashes plus `compat_token`, `compiler_version`, `plugin_versions`, source-map / public-API policy hashes, `overlay_identity`, and `generation`. Exposes per-layer dim accessors (`parse_dims`, `resolve_dims`, `type_dims`, `compile_dims`); NEVER enters a cache key as a whole (R21 — the static guard `tests/world_snapshot_is_not_a_cache_key.rs` rejects any cache-layer struct field of type `WorldSnapshot`). |
+| `EnvHashInputs.ts_semantic_version` | per-call | `type_env` | The TypeScript semantic-engine version the resolver mirrors (the pinned `tsgo` semantic version). A semantic-version change can alter inference / relation / reduction outcomes for the same source, so cached semantic values depend on it. Distinct from `parser_version` (a `parse_env` dimension on `FileArtifactStore`) and `resolver_version` (a `resolve_env` dimension on `RouteDb`). |
+| `EnvHashInputs.jsx_mode` | per-call | `type_env` | `jsx` emit/semantic mode (`preserve` / `react` / `react-jsx` / `react-jsxdev` / `react-native`). Changes how JSX expressions type and which factory surface applies. |
+| `EnvHashInputs.jsx_import_source` | per-call | `resolve_env` | `jsxImportSource` — the module the `jsx` / `jsxs` runtime factory resolves from. A resolution input (it changes WHERE the factory comes from). |
+| `EnvHashInputs.jsx_factory` | per-call | `type_env` | `jsxFactory` / `jsxFragmentFactory` classic-runtime factory identifiers. Change which call surface a JSX element synthesises. |
+| `EnvHashInputs.module_resolution` | per-call | `resolve_env` | `moduleResolution` strategy (`node10` / `node16` / `nodenext` / `bundler` / `classic`). Changes HOW specifiers resolve. |
+| `EnvHashInputs.package_conditions` | per-call | `resolve_env` | Active package export/import `conditions` (the `exports` / `imports` condition set, e.g. `import` / `require` / `types` / `node` / `browser`). Order- and membership-sensitive; selects which conditional export target a specifier resolves to. |
+| `EnvHashInputs.custom_conditions` | per-call | `resolve_env` | `customConditions` — user-declared additional resolution conditions layered onto `package_conditions`. |
+| `EnvHashInputs.module_suffixes` | per-call | `resolve_env` | `moduleSuffixes` — the ordered specifier-suffix search list (e.g. `[".ios", ""]`). Changes which on-disk file a specifier resolves to. |
+| `EnvHashInputs.decorator_semantics` | per-call | `type_env` | Decorator + class-field semantics: `experimentalDecorators` (legacy TS decorators) vs TS7 standard decorators, plus `emitDecoratorMetadata`. Changes the typed decorator/class surface. |
+| `EnvHashInputs.use_define_for_class_fields` | per-call | `type_env` | `useDefineForClassFields` — `[[Define]]` vs `[[Set]]` class-field semantics. Changes whether a field shadows/overrides a base accessor and the declared class surface. |
+| `WorldSnapshot` (request identity) | `crates/verter_session/src/cache_runtime/world_snapshot.rs` | n/a — request-concurrency identity | Carries all five env hashes plus `compat_token`, `compiler_version`, `plugin_versions`, source-map / public-API policy hashes, `overlay_identity`, and `generation`. Exposes per-layer dim accessors (`parse_dims`, `resolve_dims`, `type_dims`, `compile_dims`); NEVER enters a cache key as a whole (R21 — the static guard `crates/verter_session/tests/g_misc3/world_snapshot_is_not_a_cache_key.rs` rejects any cache-layer struct field of type `WorldSnapshot`). |
 
 ### R21 scoping rule (the dimension that does NOT enter every key)
 
@@ -98,6 +109,66 @@ The `FileArtifactStore` key does **NOT** carry `lib_env_hash`
 `augmentation_index` skeleton on `FileArtifactStore` **DOES** carry
 `lib_env_hash` because module augmentations are looked up against
 the lib + ambient corpus.
+
+The same R21 discipline governs every dimension added above: each one
+enters a cache key **only** when the cached value depends on it, and it
+enters via the **split env hash of the dimension it belongs to** — there
+is no bundled `project_config_hash` mega-hash that smuggles them all in
+together. Concretely:
+
+- A `type_env` addition (`ts_semantic_version`, `jsx_mode`, `jsx_factory`,
+  `decorator_semantics`, `use_define_for_class_fields`) folds into
+  `type_env_hash`, so it enters every layer that already carries
+  `type_env_hash` (typed-IR resolve, `MaterializeStructureDb`,
+  `RefCycleResultDb`, `SemanticGraphStore`, `ComponentMetaResultDb`,
+  `TypeInfoGraphResultDb`) and stays absent from `ResolvedImportFacts`
+  (which carries no `type_env_hash`).
+- A `resolve_env` addition (`jsx_import_source`, `module_resolution`,
+  `package_conditions`, `custom_conditions`, `module_suffixes`) folds into
+  `resolve_env_hash`, so it enters every resolution-dependent layer
+  (`ResolvedImportFacts`, `RouteDb`, `RouteDb` effective export set,
+  `AugmentationTargetKey`) and stays absent from a pure type-value layer
+  that does not re-resolve specifiers.
+
+These are split-env-hash **additions**, not query-identity content: none of
+them is a field on any query-identity key struct. Query-identity keys stay
+content-free (R6) — they carry the content-free `DeclKey` plus the relevant
+split env hashes; they never carry a content/version hash or
+`fact_dep_signature`. A query-identity value is version-rooted on the cached
+value (`ReadSetSignature.facts` + self-roots), not on the key.
+
+### Session-only env identity + persistent-admission rule (R21 + R6)
+
+Two dimensions are **session-scoped identity**, never persistent-cache key
+material:
+
+- **Overlay / session identity** (`overlay_identity`, the active editor
+  overlay set) enters **session cache identity ONLY**. A persistent / base
+  cache layer (`FileArtifactStore`, the base population of `RouteDb` /
+  `ModuleAugmentationIndex` / `EffectiveExportSet`, and any pure artifact
+  cache) **NEVER** admits an overlay-only result and never keys on
+  `overlay_identity`: an overlay edit produces a session-scoped value that is
+  returned to the caller but is **not** written into the base / persistent
+  store. This is the existing base-only discipline already stated for
+  `ModuleAugmentationIndex` and `EffectiveExportSet` (the cold scan + refresh
+  filter to base `is_legacy` artifacts), generalised to a hard rule: a result
+  computed under any overlay/session-scoped input may populate the
+  session-scoped cache but never the base/persistent one. Pinned by
+  **`persistent_caches_never_admit_overlay_only_results`**.
+- **Instantiation-depth policy** (`InstantiationDepthPolicy` — the
+  recursive-conditional / recursive-mapped instantiation-depth limit beyond
+  the per-reducer budgets, parent §4.3 / §6) is part of the **cache
+  identity + the recorded facts** of the depth-sensitive query-identity
+  caches (`SemanticGraphStore` `Instantiate` / `Conditional` / `MappedType`
+  nodes, `MaterializeStructureDb`, `RefCycleResultDb`, `TypeInfoGraphResultDb`).
+  Two reductions of the same type under different depth policies reduce
+  differently (one truncates at a shallower depth), so the policy is a
+  meaning-affecting input. It folds into `type_env_hash` (the depth limit is a
+  type-checking option), so it does **not** add a new key field — it enters
+  the same layers `type_env_hash` enters, and the recorded `ReadSetSignature`
+  validates against the depth policy in effect. Pinned by
+  **`instantiation_depth_policy_in_identity_and_facts`** (owned at
+  `U3.CACHE_FACT_MODEL`).
 
 ## Cache layer key composition (final-state)
 
@@ -123,6 +194,71 @@ scope structure). Invariant under cosmetic edits (whitespace,
 comments, JSDoc, generic param rename). Computed once per
 `(canonical, content_hash, parse_env_hash)` and lives alongside
 `IndexedReady` in `FileArtifactStore.FileArtifacts`.
+
+## Multi-candidate `FamilySlots` — per-family adaptive caps + eviction
+
+Each query-identity cache slot in the multi-candidate `FamilySlots`
+substrate (`crates/verter_session/src/semantic_query_memo/mod.rs`;
+`SemanticGraphStore` family memo) holds a **candidate list**: concurrent
+version/env variants of the same query identity coexist as candidates, and
+validity is decided per-candidate by `ReadSetSignature.validate_with_self_roots`
+against the caller's live view (`validated_at_generation` is recency metadata
+only, never a validity oracle). The candidate-list **capacity and eviction
+policy is per-family, not a uniform cap of 4 with FIFO eviction**:
+
+- **`candidate_cap()` is per-family.** Each query family declares its own
+  candidate cap via a `candidate_cap()` function on the family descriptor
+  rather than a single global `FAMILY_SLOT_CANDIDATE_CAP = 4`. The
+  inference/substitution-heavy families — **`Relate`, `ResolveCall`,
+  `Instantiate`, `Conditional`, `MappedType`, `FlowReturn`** — get **higher**
+  adaptive caps (the same identity legitimately coexists across many live
+  substitution / inference-context / env variants, so a small cap would thrash
+  a hot inference loop). Content-light families (e.g. `ResolveEnum`,
+  `KeyOf`, `ResolveOverloadSet`) keep a **small** cap. The cap is *adaptive*:
+  it may grow toward the family's ceiling under sustained valid-hit pressure
+  and shrink back, never exceeding the family ceiling or the global memory
+  ceiling below.
+- **Eviction = invalid-first, then LRU-by-valid-hit.** When a slot is at its
+  cap and a new candidate must be admitted, eviction is **two-tier**: (1) evict
+  any candidate that is **invalid** under the current live view first (an
+  invalid candidate can never warm-hit, so it is pure overhead); (2) only if
+  every candidate is still valid, evict the **least-recently valid-hit**
+  candidate (LRU keyed on the last generation at which the candidate served a
+  validated warm hit), not the oldest-inserted (FIFO). FIFO evicts a
+  freshly-inserted-but-hot candidate; LRU-by-valid-hit retains the candidates
+  that are actually serving the workload. Same-discriminant re-publish
+  (matching `validated_at_generation` + `facts`) replaces in place and does
+  not consume a slot.
+- **Global memory ceiling.** Per-family caps are bounded by a process-wide
+  **global memory ceiling** over the whole multi-candidate substrate: the sum
+  of admitted candidates across all families and slots cannot exceed the
+  ceiling. When the global ceiling is reached, admission applies the same
+  invalid-first / LRU-by-valid-hit eviction **across** slots (globally, not
+  just within the target slot) before admitting, so one hot family cannot
+  starve memory from the rest. A candidate that cannot be admitted without
+  breaching the ceiling and whose eviction victims are all still valid +
+  more-recently-hit is **not admitted** — the value is returned to the caller
+  through the typed `ReturnOnly`/`ComputeAdmission` path, never published
+  (consistent with the substrate's existing non-admission discipline).
+- **Benched fallback-count bound per family.** Each family carries a
+  **benchmarked fallback-count bound** — the maximum tolerated cold-recompute
+  ("fallback") rate for that family's representative workload — regression-
+  gated through the existing `BenchResultRow`, which already reports cache
+  mode, hit count, and fallback count. The bench asserts the per-family
+  fallback count stays at or below its declared bound for the representative
+  batch; a cap regression (e.g. silently reverting a hot family to a small cap)
+  shows up as a fallback-count regression and fails the bench gate. This makes
+  the per-family caps an empirically-tuned, regression-protected contract
+  rather than a hand-picked constant.
+
+The validity rail is unchanged: the per-family cap + eviction policy governs
+only *which* candidates a slot retains; *whether* a retained candidate may
+warm-hit is still decided exclusively by `ReadSetSignature.validate_with_self_roots`
+against the caller's live view. Pinned by
+**`cache_candidate_cap_is_per_family_not_uniform`**,
+**`family_eviction_prefers_invalid_then_lru_valid_hit`**, and the benched
+per-family fallback-count bound (owned at `U3.CACHE_FACT_MODEL`; the result-DB
+candidate storage at `U10.RESULT_DB` rides the same substrate).
 
 ## Fact registry shape
 
@@ -165,9 +301,12 @@ enum FactKey {
     // Route-surface domain (R12; populated downstream by RouteDb)
     EffectiveExportSet,
     ModuleAugmentationIndexShape { target_kind_tag, external_specifier, resolved_relative_canonical, wildcard_pattern },
+
+    // Program-analysis domain (populated by the demand-sliced flow engine)
+    FlowSlice { function_slot, projection_path, slice_hash, selected_binding_ids, selected_effect_ids, selected_control_region_ids, closure_summary_ids },
 }
 
-enum FactDomain { ParseFile, ResolveImports, RouteSurface }
+enum FactDomain { ParseFile, ResolveImports, RouteSurface, ProgramAnalysis }
 
 impl FactKey {
     fn domain(&self) -> FactDomain;  // routes per-domain validator dispatch
@@ -186,12 +325,32 @@ trait StoreView {
     fn validates_parse_domain(&self, _fact: &ParseFactRef) -> bool { false }
     fn validates_resolve_imports_domain(&self, _fact: &ResolveImportsFactRef) -> bool { false }
     fn validates_route_surface_domain(&self, _fact: &RouteSurfaceFactRef) -> bool { false }
+    // ProgramAnalysis domain — owns the `FlowSlice` fact (the demand-sliced flow
+    // engine). Validates against the current region/function-body identity
+    // (`flow_body_stable_hash`) + the stored `FlowSlice` semantic hash. Fail-closed:
+    // a missing / overflowed / stale / unrooted `FlowSlice` fact returns `false`.
+    fn validates_program_analysis_domain(&self, _fact: &ProgramAnalysisFactRef) -> bool { false }
 }
 ```
 
-The dispatch table is bounded by `FactDomain` (3 variants), not by
+The dispatch table is bounded by `FactDomain` (4 variants), not by
 `FactKey`. Adding a new `FactKey` extends a per-domain `*FactRef`
 enum but does NOT widen the trait.
+
+The `ProgramAnalysis` domain is the fourth closed `FactDomain`. It owns
+the `FlowSlice` fact produced by the demand-sliced flow engine — `FlowSlice`
+is NOT a parse / resolve-imports / route-surface fact. Its
+`FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef { .. })` carries the
+flow-region identity (`function_slot`, `projection_path`, `flow_body_stable_hash`)
+plus the stored `FlowSlice` semantic hash. `StoreView::validates_program_analysis_domain`
+re-derives the live region's `flow_body_stable_hash` and the recorded slice's
+semantic hash and validates BOTH gates; it FAILS CLOSED on a missing, overflowed,
+stale (body changed → `flow_body_stable_hash` differs), or unrooted fact — a
+fail-closed miss recomputes rather than serving a torn slice. `flow_body_stable_hash`
+is content-derived flow node/fact identity, NOT a query-identity-key dimension:
+query-identity keys stay content-free (R6); the flow result is version-rooted via
+this `FlowSlice` fact, exactly as the other query-identity caches version-root
+through their recorded facts.
 
 ## Two-phase emission (R28)
 
@@ -234,7 +393,7 @@ byte-identical fingerprints regardless of declaration order.
 
 ## See also
 
-- `.claude/skills/type-cache-architecture/SKILL.md` — full R1–R29
+- `.claude/skills/type-cache-architecture/SKILL.md` — full R1–R31
   rule set with semantic content.
 - `crates/verter_workspace/src/env_hash.rs` — env-hash function
   implementations.

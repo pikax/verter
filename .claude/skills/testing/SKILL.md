@@ -123,6 +123,10 @@ After the TDD loop, run the full verification pass:
 
 Do not run bare `cargo test --workspace` by default in this repo. It also runs doctests and example builds, which are substantially slower than the normal verification loop. Run doctests only when rustdoc examples changed or the user explicitly asks for them.
 
+### Enum-variant ripple (silent catch-all absorption)
+
+When changing a variant of a widely-matched enum (`SemanticQueryKey`, `TypeExpr`, `WorkKind`, `EmitOp`, etc.), `cargo check` does NOT flag a `_ =>` catch-all that silently absorbs the changed variant — the build passes while the arm does the wrong thing. Grep every `match` on the enum for `_ =>` / `..` wildcards (and every TS `default:` switch) and confirm each intends the new behavior. Distinguish ANALYZER-IR consumers (which see the raw analyzer variants) from DISPATCH-RAISED consumers (which see the collapsed forms produced at `raise.rs`) — the same logical change may need edits in both.
+
 ### Test Validation Pattern
 
 All codegen tests must validate generated JS syntax:

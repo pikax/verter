@@ -1,4 +1,7 @@
-# Stage 5+6 Cutover — BLOCK PLAN (working; awaiting codex binding sign-off on Q1-Q4)
+# Stage 5+6 Cutover — BLOCK PLAN
+
+> **Sequencing authority: `docs/arch/semantic-db-overhaul-unified-remaining-plan.md`** — this file is detail/reference only; the `D:/` paths and old SHAs/branches in it are HISTORICAL. This plan **OWNS its block range `S5.B1`–`S5.B12`** under the unified cross-plan sequencing (§3.1 there): `S5.B5` is the SHARED macro-surface gate landing AFTER typeinfo U2 (and is RESCOPE-GATE-REQUIRED — its normalizer compatibility matrix is a gate deliverable), and `S5.B11`/`S5.B12` are a HARD GATE before any typeinfo U8+ work. The codex binding sign-off (Q1–Q4) is resolved in the "CODEX BINDING SIGN-OFF CORRECTIONS" section below, which overrides the earlier block sketch; the revised block list (B1 → B3 → … → B12, B2 dropped) is the live order.
+
 Branch base: integration `refactor/semantic-db-overhaul` (re-verify HEAD at each block land; was 63d682f69).
 Implements codex BINDING verdict (D:/tmp/stage5-codex-verdict.txt) + reachability (D:/tmp/stage5-reachability.md).
 Approach: port verter_compiler macro lowering off parser resolve_type/ OXC resolver → shared dispatch
@@ -82,9 +85,16 @@ setup.rs:782 + resolve_type/{mod,infer}.rs (parser flip + deletion), architectur
   for type-based props; runtime object/array props stay syntax-only.
 - Q4 BIND: native_props is a LIVE public FFI surface (ResolvedMacroMeta.native_props mod.rs:53/75; component_meta.proto:630;
   verter_ffi convert/component_meta.rs:383) built via collect_external_macro_types (external_macro_types.rs:16/46, route_owned_shallow.rs:613/626).
-  FOLD native_props into ResolvedMacroSurfaces (or sibling DTO) BEFORE B11; gate B11 deletion on it. **CRITICAL NEW SCOPE: class VISIBILITY
-  exists in legacy rail (resolve_type/mod.rs:218, decl.rs:1189) but NOT in typeinfo surfaces (semantic_query.rs:1054, typeinfo/surface.rs:116).
-  ADD visibility semantic data to the DTO/typeinfo surface, OR explicitly remove the public API — do NOT silently drop it.**
+  FOLD native_props into ResolvedMacroSurfaces (or sibling DTO) BEFORE B11; gate B11 deletion on it. **CRITICAL NEW SCOPE — CARRY class
+  VISIBILITY through the DTO (it is NOT a typeinfo gap): class member visibility ALREADY belongs to the typeinfo / query surface as
+  `verter_type_expr::MemberVisibility` — carried on `SurfaceMember.visibility` (typeinfo/surface.rs:141), the graph node `visibility` field
+  (semantic_query.rs:1074), and lowered by `visibility_from_ts_accessibility` (verter_semantic type_eval_build.rs:468); every published Vue
+  surface re-applies a `Public`-only filter at publication and the `native_props` carrier reads the full keep-all recorded member set
+  (surface_projector.rs `ResolvedMemberVisibility`). So Stage5's scope is NOT "add visibility to typeinfo" — it is to CARRY the existing
+  visibility through `ResolvedMacroSurfaces` / the `native_props` carrier and PROVE B11 preserves it (gate B11 deletion on that proof). The
+  old "visibility exists ONLY in resolve_type/ (resolve_type/mod.rs:218, decl.rs:1189), NOT in typeinfo" framing is stale — the parser
+  `resolve_type/` rail (now under crates/verter_parser/.../vue/script/resolve_type/) is the rail B10/B11 DELETE, not the home of visibility;
+  do NOT re-add visibility to typeinfo and do NOT silently drop the public `native_props` surface.**
 - B5 SPLIT (binding): (i) structured resolution OUTCOME first (make resolve_vue_macro_surface_with_ctx return structured outcome OR sibling
   probe in resolve_macro_surfaces_for), (ii) DTO normalization second. build_resolve_macro_payload does NOT preserve valid-empty-vs-unresolved
   (no-args Opaque(Miss) build.rs:3942; 1-arg passthrough :3944; vue_macro_dtos collapses failure to empty surface.rs:619/622; projection None on

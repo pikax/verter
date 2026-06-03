@@ -1,5 +1,7 @@
 # Verter go-to-definition — BINDING ARCHITECTURE (codex final decision, 2026-06-02)
 
+> **Sequencing authority: `docs/arch/semantic-db-overhaul-unified-remaining-plan.md`** — this file is detail/reference only; the `D:/` paths and old SHAs/branches in it are HISTORICAL.
+
 Source: final codex consult, informed by 4 code/empirical subagents + prior-art research + 2 architecture consults. This is the binding architecture the implementation plan must follow. Breaking changes allowed. Four NEVERS: no shims, no legacy/dual paths, no stubs, no shortcuts.
 
 ## DECISION
@@ -45,10 +47,21 @@ Delete the three-path design. One engine pipeline:
 LSP position → classify into DefinitionQuery → map into generated TSX if needed → ask tsgo backend when semantic TS resolution required → normalize generated/declaration/native result into DefinitionTarget → terminalize barrels and Vue default exports → render target into LSP Location using the target file's own snapshot → exact dedup.
 
 ```rust
+// Provenance model (matches goto-definition-overhaul-plan.md Phase 5/6-7 exactly):
+// a target's source span carries the validation token for HOW that span was
+// obtained — never a CompileSnapshotId on a real-source/external span. The rule:
+// `CompileSnapshotId` is ONLY the generated-compile-warm-hit (fact-validated)
+// identity for generated→Vue TSX mappings; real-source/external/host targets
+// validate with the source hash (`Hash16`), never a TSX/compile snapshot id.
+enum TargetProvenance {
+    GeneratedMapping(CompileSnapshotId), // span produced by mapping a generated TSX range → .vue source; validate CompileSnapshotId
+    HostSource(Hash16),                  // span is a real-source byte range (.ts/.js/.d.ts/named .vue); validate source_hash (= [u8;16])
+    LiveSameFile,                        // same-file binding resolved from live analysis; no remote validation
+}
 enum DefinitionTarget {
-    RealSource { uri: CanonicalUri, span: SourceByteRange, symbol: SymbolKind, snapshot: SnapshotId },
-    SfcComponent { uri: CanonicalUri, anchor: SfcComponentAnchor, snapshot: SnapshotId },
-    ExternalDeclaration { uri: CanonicalUri, span: SourceByteRange, symbol: SymbolKind, snapshot: SnapshotId },
+    RealSource { uri: CanonicalUri, span: SourceByteRange, symbol: SymbolKind, provenance: TargetProvenance },
+    SfcComponent { uri: CanonicalUri, anchor: SfcComponentAnchor, provenance: TargetProvenance },
+    ExternalDeclaration { uri: CanonicalUri, span: SourceByteRange, symbol: SymbolKind, source_hash: Hash16 },
 }
 struct SfcComponentAnchor {
     preferred_span: SourceByteRange,
@@ -63,7 +76,7 @@ SfcComponentAnchor is first-class compiler/analysis output on every `.vue` recor
 4. First template root tag start.
 5. FileStart only for truly empty SFCs, recorded explicitly, never a silent fallback.
 
-Target mappers/spans come from the HOST, not the open-doc registry. For every target `.vue`: ensure_compiled(canonical_uri, profile) then read host.get_ide(...).source_map, compiled TSX path, analysis, export graph, SnapshotId. A mapper is usable only when its snapshot matches the TSX snapshot tsgo used. Stale mapper → drop target.
+Target mappers/spans come from the HOST, not the open-doc registry. For every target `.vue`: ensure_compiled(canonical_uri, profile) then read host.get_ide(...).source_map, compiled TSX path, analysis, export graph, CompileSnapshotId. A mapper is usable only when its snapshot matches the TSX snapshot tsgo used. Stale mapper → drop target. (`CompileSnapshotId` is the compile warm-hit fact-validated identity reconciled in the unified plan §3.1.2 — `semantic_hash` + override hashes + profile + parser/compiler/version + canonicalized `ReadSetSignature` facts — and is named distinctly from U5's cache-entry-pin `SnapshotId(u64)`.)
 
 Per-target behavior:
 - Same-file binding → RealSource, SFC-absolute span, live LineIndex.
@@ -94,7 +107,7 @@ Dedup by canonical identity (uri, target kind, normalized source span, symbol id
 ## INVARIANTS + TESTS
 Mapping: common paths exact; v-html/v-text/`:[key]`/native v-model map identifiers exactly; v-model verifies every repeated generated occurrence maps back; generated prefix positions (_ctx./$setup.) → None; overwritten punctuation interiors → None unless querying the explicit anchor; UTF-16/CRLF/emoji/astral/tabs/multiline round-trip; strict half-open boundary at start/end/one-past-end; static guard: no IDE codegen call passes format!("{}{}", prefix, ident) into a mapped overwrite.
 Definition: `.vue` default import → component anchor not first binding; script-setup/explicit-export-default/template-only/defineOptions each land on expected anchor; barrel default terminal → terminal `.vue` anchor; named `.vue` export → named binding; `.ts/.js` export → real target line via target LineIndex; `.vue.d.ts` stays `.d.ts`; missing target compile → no definition not 0:0; stale mapper snapshot rejected; dedup keeps canonical `.vue`; virtual `.vue.tsx` editing uses the same DefinitionEngine.
-Architecture guards: ban Range::default() in navigation result construction (except explicit tests); ban current-file mapper fallback for cross-file targets; require SnapshotId equality before mapping generated target ranges; require every `.vue` analysis record to contain SfcComponentAnchor; require all definition surfaces (definition, type definition, references, rename, code actions) to call DefinitionEngine.
+Architecture guards: ban Range::default() in navigation result construction (except explicit tests); ban current-file mapper fallback for cross-file targets; require CompileSnapshotId equality before mapping generated target ranges; require every `.vue` analysis record to contain SfcComponentAnchor; require all definition surfaces (definition, type definition, references, rename, code actions) to call DefinitionEngine.
 
 ## MIGRATION SHAPE (ordered, each independently landable + verifiable)
 1. Harden PositionMapper: typed coordinates, strict interval lookup, None on unmapped, no extrapolation. Blast radius: mapping callers handle Option.

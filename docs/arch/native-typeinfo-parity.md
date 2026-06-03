@@ -13,6 +13,16 @@
 > **Owning blocks:** `U0`–`U15` (the unified plan reserves these block IDs and
 > links here). Where this document must express ordering it expresses it as a
 > dependency relationship, not a competing stage ladder.
+>
+> **Native checker (sibling follow-up).** Typeinfo parity (this architecture, the
+> `U0`–`U15` blocks) is the **foundation**; the native checker is a **later layer**
+> over the **same** resolver (`SemanticQueryKey → ProjectSemanticDispatch::execute →
+> SemanticGraphStore`), specified as a sibling plan in
+> `docs/arch/native-checker.md`. The typeinfo blocks **reserve** the checker seams —
+> the `SemanticQueryValue::DiagnosticAnalysis(CheckResult)` value arm + the `Check*`
+> query names (§3), the `ExecutableRegionId` / `ExecutableRegionKind::Function` region
+> abstraction, and the `ProgramAnalysisContributor` injection seam (§5) — but do **not**
+> build the checker. It is **not** part of the 363-row parity blocks.
 
 The end state is a full native checker-grade typeinfo engine — not a larger
 flow-return patch. It has **one resolver**:
@@ -20,6 +30,24 @@ flow-return patch. It has **one resolver**:
 is no OXC query-time resolver, no tsserver/tsgo execution path, no projection
 repair path, and no whole-body typecheck path. OXC is the syntax/lowering
 front-end only.
+
+**The target is FULL TypeScript-checker-grade type parity** — relation /
+assignability, inference, measured variance, control-flow narrowing, conditional /
+mapped / template reduction, overload resolution, and the cross-engine recursion —
+an **honest multi-person-year scope** (sequencing authority §"Scope"). The **363-row
+ledger (PART 2 §10) tracks COVERAGE / wiring, NOT semantic tsc-parity**: 363-green
+proves every row is owned + executably proven + wired ("detects un-wired"), it does
+**not** prove the engine agrees with `tsc`/`tsgo` on the families' SEMANTICS
+("detects wrong"). **Semantic tsc-parity is gated separately by the differential
+`tsgo`-parity oracle (§6.3)** — a per-family divergence budget over a TS-conformance
+slice + property-generated fixtures, baselined at each hard phase's **rescope gate**
+(sequencing authority §3.2). The hardest cores (`U2.RELATION_INFER`, U6 cross-engine
+recursion, the native checker, U7) are **RESCOPE-GATE-REQUIRED**: their
+algorithm-depth design is produced at a pre-implementation rescope session (planner +
+1-Claude+2-codex panel iterating to best-architecture, with a real termination proof
+where recursive), NOT specified up-front here. The "route through `Relate` / the one
+engine" phrasing throughout is the one-engine WIRING constraint, not a substitute for
+those phases' algorithms.
 
 ---
 
@@ -40,9 +68,9 @@ doc-update obligations") and is now **done**.
 
 | File | Owns |
 |---|---|
-| `docs/arch/native-typeinfo-parity.md` | **Parent architecture** (this file): engine architecture, capability map, query/fact authority, the per-block contract template, the two-table manifest ledger, the cutover/ledger transaction contract, the guards index |
+| `docs/arch/native-typeinfo-parity.md` | **Parent architecture** (this file): engine architecture, capability map, query/fact authority, the per-block contract template, the two-table manifest ledger, the git/CI landing protocol, the guards index |
 | `docs/arch/native-typeinfo-parity-u2-reducers.md` | **U2** child blocks: reducer / relation / utility / indexed / mapped / template / class / enum / module / JSX foundations |
-| `docs/arch/native-flow-return.md` | **U6** flow chapter: the demand-sliced `ReturnPathPeeker` (two-frontier model) and the flow IR |
+| `docs/arch/native-flow-return.md` | **U6** flow chapter: the per-function `FunctionFlowGraph` + the `ReturnPathPeeker` graph demand planner (two-frontier rule as typed edge classes) and the flow IR |
 | `docs/arch/native-typeinfo-parity-cache-export-session.md` | **U3 / U8 / U10 / U11 / U12 / U13**: facts, exporter, DB, session, projections, wire |
 | `docs/arch/native-typeinfo-parity-adapters-final-lift.md` | **U14 / U15**: framework adapters, integrations, final lift |
 
@@ -346,6 +374,46 @@ Four `ClassFeatures` decorator/accessor matrix rows, each with a named guard:
 - `decorators.rs::decorators_accessor_decorator_returning_same_target_publishes_public_property`
   — guard **`accessor_decorator_identity_target_return_keeps_public_property`**.
 
+### 1.8 Declaration-merge order is specified and recorded as facts
+
+When a name has multiple declarations that merge (interface + interface,
+namespace + interface, namespace + function, `enum` + namespace, a module + its
+augmentations), the merged surface's member ORDER and override resolution are not
+incidental — TS has a defined merge order, and the same source under a different
+contributor order can produce a different merged surface. The merged-declaration /
+augmentation reducers (`ResolveMergedDeclaration` / `ResolveDeclarationAugmentation`,
+U2.MODULE_AUGMENTATION) specify this order and record the contributor SEQUENCE as
+facts so the merged result is deterministic and the cache validates against it:
+
+- **TS binder order within a file.** Declarations that merge within one file are
+  ordered by the TS binder's declaration order (source order, with the binder's
+  same-name merge rules). The merged member surface is assembled in that order.
+- **Overload-group precedence.** A merged callable's overload group is ordered per TS's
+  overload-merge precedence (declared overloads in declaration order; an
+  implementation signature is internal-only and never the externally-visible last
+  overload — consistent with §7 / the "last visible overload" rule for
+  `ReturnType<typeof overloaded>`). The overload-group sequence is part of the recorded
+  merge order.
+- **Augmentation contributor order across files.** A module/global augmentation's
+  contributors (the augmenting files) are ordered deterministically (by the
+  declaration-analysis contributor sequence — the same contributor-provenance
+  discipline §3 names for merged declarations and global augmentations), so a merged
+  augmented surface does not depend on file-visitation nondeterminism.
+- **Contributor sequence recorded as FACTS.** The merge does not just compute an order
+  at query time — it records the contributor sequence as facts (on the
+  declaration-analysis fact surface the merged/augmentation reducers read), so the
+  `ReadSetSignature` validates against the exact contributor set + order in effect: a
+  new / removed / reordered contributor invalidates the cached merged surface through
+  the recorded facts (R6 version rooting on the value, not on a query-identity key).
+
+Guard: **`declaration_merge_records_binder_overload_augmentation_order_as_facts`** (the
+merged-declaration / augmentation reducers order contributors by TS binder order +
+overload-group precedence + augmentation-contributor sequence and record that sequence
+as facts validated by `ReadSetSignature`; a discriminating fixture pins a merged
+surface whose member/overload order is order-sensitive and asserts the order matches
+the oracle and that adding a contributor invalidates the cached merge through the
+recorded facts; owned at `U2.MODULE_AUGMENTATION`).
+
 ---
 
 ## 2. Query Keys
@@ -508,7 +576,18 @@ struct CallResolutionContext {
 ```
 
 (Equivalently these axes may live on `CallResolutionContext`; the requirement is
-that they are part of the cache identity.) Guards:
+that they are part of the cache identity.)
+
+Call resolution is also where the `InferenceSession` substrate (§4.2) is most
+visible: `ResolveCall` opens one **speculative** `InferenceSession` per overload
+candidate, runs applicability + argument-to-parameter inference + fixation + final
+substitution inside the session, and publishes ONLY the winning completed
+`ResolvedCall` under this key — losing candidates' sessions are discarded without
+publishing any entry, fact signature, or backfill. The published value is the final
+`ResolvedCall`, never a mutable session or a session-local partial (§4.2 admission
+rule).
+
+Guards:
 **`resolve_call_key_covers_args_this_contextual_type_overload_policy_and_context`**
 and **`resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit`**.
 
@@ -530,7 +609,11 @@ policy. `ReturnProjectionDemand` is its own key field `demand`, not duplicated i
 relation/call demand mode) is its own key field `input`. This canonical key is
 identical to the full normalized re-entry identity used by the flow cycle-id space
 (`FlowReturnContext + ReturnProjectionDemand + FlowInputContext` — §5): the cache
-key and the cycle-re-entry key are the same normalized identity. Guards:
+key and the cycle-re-entry key are the same normalized identity. That flow cycle-id
+space is the flow-typed view of the ONE shared `CheckerReentryGraph` (§4.2) that
+also spans `ResolveCall`, `ContextualTypeAt`, and `FlowNarrowingAt`, so the
+`ResolveCall → FlowReturn → narrowing → ResolveCall` cycle discharges through a
+shared re-entry assumption rather than self-awaiting or budget-spinning. Guards:
 **`flow_return_key_covers_env_dimensions`** and
 **`flow_return_key_covers_input_context_and_projection_demand`** (two `FlowReturn`
 queries differing only in projection demand, or only in contextual callback input
@@ -640,9 +723,16 @@ struct RelationContext {
 produces inference bindings (`infer` / `InferBind`, generic call inference,
 conditional-type `infer` extraction, contextual generic inference) resolves
 differently under a different inference setup even when everything else is
-identical. `Relate` therefore carries an `inference_context: Option<InferenceContextKey>`
-— `Some` (part of identity) for binding-producing relations, `None` for pure
-non-binding assignability checks:
+identical. Such a relation runs INSIDE the active `InferenceSession` of the
+enclosing `CheckerTransaction` (§4.2): it mutates the session (deposits candidates
+into the relevant `InferenceInfo`) and returns **session-local inference deltas**,
+which are never globally cacheable partial results. What caches is the completed
+result, fingerprinted by the session's projection. `Relate` therefore carries an
+`inference_context: Option<InferenceContextKey>` — `Some` (part of identity) for
+binding-producing relations, `None` for pure non-binding assignability checks.
+`InferenceContextKey` is the **cache-identity projection of the active session** —
+the completed-session fingerprint of the inference setup in scope — not a standalone
+bag of axes assembled independently of the session:
 
 ```rust
 struct InferenceContextKey {
@@ -657,8 +747,12 @@ struct InferenceContextKey {
 ```
 
 `NoInferMask` is the occurrence-local `NoInfer` suppression mask (consistent with
-§1.2). The relation/inference engine is the **sole** owner of this binding work; it
-does not implement a parallel matcher (§4).
+§1.2). These axes are exactly the fields the active `InferenceSession` carries
+(§4.2): `InferenceContextKey` is their content-free projection onto the cache key,
+so two relations under different inference sessions produce distinct identities. The
+relation/inference engine is the **sole** owner of this binding work — every
+binding-producing relation runs through the `InferenceSession` substrate (§4.2) and
+none implements a parallel matcher (§4).
 
 The `RelationBudget` pair memo (§6) is keyed by **this full** `Relate` identity
 (`source`, `target`, `relation`, `policy`, `source_freshness`, `inference_context`,
@@ -668,6 +762,10 @@ key, `Relate` produces a public `RelationPayload` (outcome / bindings / proof +
 typed `BudgetExceeded` non-admission), not a bare tri-state `RelationResult`; its
 value domain is `SemanticQueryValue::Relation(RelationPayload)`, and `RelationPayload`
 is exactly where public `relate` returns its proof off the type-values surface.
+Only the COMPLETED `RelationPayload` of a completed, deterministic session is
+admitted under this key (§4.2 admission rule); the session-local inference deltas a
+binding-producing relation deposits are never warm-admitted on their own, and a
+cancelled / budget-exceeded / mid-flight session is `ReturnOnly`.
 
 Guards: **`relate_key_covers_relation_kind_policy_freshness_and_context`**,
 **`relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit`**, and
@@ -714,7 +812,13 @@ struct ProgramAnalysisContext {
 `FlowNarrowingKey` and `ContextualTypingKey` are the same axis identities the
 `ResolveCall` context-sensitive-arg identity and `CallResolutionContext` carry —
 there is one flow/narrowing axis space and one contextual-typing axis space shared
-across the call, flow-return, and program-analysis keys.
+across the call, flow-return, and program-analysis keys. `ContextualTypeAt` and
+`FlowNarrowingAt` are nodes on the ONE shared `CheckerReentryGraph` (§4.2)
+alongside `ResolveCall` and `FlowReturn` — each keyed by its full normalized
+`ProgramAnalysisContext + ProgramPointId` identity — so a contextual / narrowing
+re-entry on the mutual-recursion cycle records the in-flight re-entry assumption
+rather than self-awaiting; and contextual-callback inference at such a point runs
+inside the active `InferenceSession` (§4.2), not a private callback-inference loop.
 
 Per-key no-cross-context-warm-hit guards (one per remaining key, same discipline as
 the call/relate guards):
@@ -804,6 +908,106 @@ The class is closed by one meta-guard asserting enum/table EQUALITY:
   behavior together at U6 — never a row ahead of its variant. The guard is green
   after EVERY block, never red in the gap between U2 and U6.
 
+### 2.10 Query modes are presets over the `ProjectionDemand` / `EvalPolicy` lattice
+
+The five mode names (`Identity` / `Navigate` / `Shallow` / `Expanded` / `Skeleton`)
+are **too coarse to be primary cache / semantic identity**: a single enum rung
+cannot say "expand the member set but not the bodies", "preserve the alias but
+reduce operators", or "open generics as shells but stop at carriers" without
+multiplying into a combinatorial enum. The PRIMARY semantic-demand and the PRIMARY
+cache-identity dimension is a two-part **demand lattice** — `ProjectionDemand`
+(WHAT surface is demanded) plus `EvalPolicy` (HOW it is evaluated):
+
+```rust
+struct ProjectionDemand {
+    path: ProjectionPath,            // the demanded projection path (interned, prefix-shared)
+    facets: SurfaceFacetSet,         // which surface facets are demanded (members / index sigs / heritage / …)
+    member_demand: MemberBodyDemand, // member-SET only vs member-set + per-member BODY
+    call_signatures: bool,           // call signatures demanded
+    construct_signatures: bool,      // construct signatures demanded
+    index_signatures: bool,          // string/number/symbol index signatures demanded
+    display_needs: DisplayNeeds,     // display/raw-string needs (display-only; never drives resolution)
+}
+
+struct EvalPolicy {
+    alias_preservation: AliasPreservation,   // keep alias identity vs inline the alias body
+    normalization_depth: NormalizationDepth, // how deep operators/unions/intersections normalize
+    generic_open: GenericOpenPolicy,         // Bound | TypeParamShells (unbound params become TypeParam shells)
+    operator_reduction: OperatorReduction,   // reduce vs leave operator carriers (Pick/Omit/keyof) unevaluated
+    surface_role: SurfaceRole,               // prop / emit / model / slot / option / plain — structural role
+    provenance: ProvenanceNeed,              // declaration-provenance retention
+    merge_role: MergeRole,                   // how this demand participates in a merge (withDefaults, intersection arms)
+    carrier_stop: CarrierStopPolicy,         // stop at semantic carriers (the Skeleton BFS stop) vs continue
+}
+```
+
+`ProjectionDemand` + `EvalPolicy` is the demand identity carried on every projection
+/ flow key field that today reads a coarse `ProjectionMode` (the `demand` field on
+`ResolveClassSurface` / `ApparentType` / `ResolveMergedDeclaration` /
+`ResolveAmbientNamespace` / `FlowReturn`, the `ProjectionReductionContext` projection
+axes, and the flow `ReturnProjectionDemand` / `terminal_mode`). It is a key **demand
+dimension** carried ALONGSIDE the split env hashes (§2.6–2.8), not a replacement: the
+five-way env split (R21) is unchanged, and the demand point — like every
+query-identity key field — carries no content/version hash and no `fact_dep_signature`
+(R6). The five mode names remain as **public aliases / presets** over the lattice — a
+stable public vocabulary, never a competing primary identity. Each preset is exactly one `(ProjectionDemand,
+EvalPolicy)` point:
+
+| Preset | `ProjectionDemand` | `EvalPolicy` |
+|---|---|---|
+| `Identity` | empty path; no member/body demand | `alias_preservation = Keep` — returns the alias declaration identity, never its body and never a miss |
+| `Navigate` | the intermediate-hop path; member-set only | `alias_preservation = Keep`, `operator_reduction = NavigateOnly` — chooses the next hop, non-owning normalization only |
+| `Shallow` | one shell level: member-name surface, no per-member body | `member_demand = SetOnly`, `operator_reduction = Leave` — one shell level; operator carriers (`Pick<…>`) stay `Ref` / unevaluated |
+| `Expanded` | the terminal projection: member set + the demanded per-member bodies | `member_demand = SetPlusBody` on the terminal hop, `normalization_depth = Terminal` — `keyof T` emits the member-name literal-union from T's SHALLOW surface without entering member bodies |
+| `Skeleton` | the BFS / generic-helper traversal surface | `generic_open = TypeParamShells` + `carrier_stop = StopAtCarrier` — unbound type parameters become `TypeParam` shells so Conditional branches do not collapse to `never` for unbound generics |
+
+`Skeleton` is therefore **not a special semantic mode** — it is exactly
+`generic_open = TypeParamShells` plus the carrier-stop policy on the same lattice;
+`Instantiate { args: [], body_mode: Skeleton }` is `Instantiate` with that preset.
+The presets are a closed convenience surface; a demand that does not fit a preset
+constructs a `(ProjectionDemand, EvalPolicy)` point directly rather than adding a
+sixth mode rung.
+
+**Cache satisfaction / backfill is by LATTICE RELATION, not enum ordering.** A cached
+entry's `satisfied_projection` is the `(ProjectionDemand, EvalPolicy)` point it
+actually materialised. A warm hit is served only when the cached point **dominates**
+(in the lattice partial order: a broader-or-equal demand under a compatible policy)
+the requested point — i.e. the cached work provably covers the request. A broader
+result may **backfill** a narrower entry only for the narrower points it actually
+materialised (the lattice meet it covered); a narrower result must not pretend broader
+work is cached, and two incomparable points (e.g. a `Skeleton` / `TypeParamShells`
+slice vs a `Bound` expansion) never satisfy each other. This replaces any "broader
+mode satisfies narrower mode by enum rank" reasoning — there is no total order on the
+five names to rank, and `Skeleton` is incomparable to the expansion presets rather
+than "below" them. Guards:
+**`query_modes_are_presets_over_projection_demand_eval_policy`** (each of the five
+names resolves to exactly its `(ProjectionDemand, EvalPolicy)` preset; no mode name is
+a primary key dimension on any cache),
+**`cache_satisfaction_is_demand_lattice_not_enum_order`** (a warm hit / backfill is
+decided by the lattice dominance relation, not by mode-enum ordering; two incomparable
+demand points never satisfy each other), and
+**`skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode`** (the `Skeleton`
+preset is exactly `generic_open = TypeParamShells` + `carrier_stop`, with no
+special-cased semantic branch keyed on a `Skeleton` mode tag).
+
+**Cache-axis MINIMALITY + normalization (perf hardening).** Every context /
+substitution / demand / env axis carried on a query-identity key — the
+`(ProjectionDemand, EvalPolicy)` point here, the `InferenceContextKey`, the
+substitution canonical hash, the split env hashes — must be **proven minimal and
+normalized under benchmark pressure**, because the axis set is the single biggest lever
+on warm-hit rate: over-keying (an axis that does not change the value, or an
+un-normalized axis whose two equivalent forms hash differently) fragments one logical
+result across many slots and collapses the hit rate; under-keying (a missing
+meaning-affecting axis) serves a stale result. Concretely: substitution and demand axes
+are CANONICALIZED before they enter a key (the substitution canonical hash and the
+prefix-interned projection path are normal forms, so `["a","b"]` and an equivalent
+interned path hash identically, and two equivalent substitution environments collapse
+to one key); a demand axis that a family never branches on is NOT carried on that
+family's key. This is benched, not asserted by inspection: removing or denormalizing an
+axis must either break a correctness fixture (the axis was load-bearing) or leave the
+benched hit rate unchanged (the axis was dead and should be dropped). Pinned by
+**`cache_key_axes_are_minimal_and_normalized`** (PART 1 §6.2).
+
 ---
 
 ## 3. Typed semantic-query value domain (`SemanticQueryValue`)
@@ -826,6 +1030,8 @@ enum SemanticQueryValue {
     FlowReturn(Arc<FlowReturnResult>),       // FlowReturn — demand-sliced return/body flow result
     ResolvedCall(Arc<ResolvedCallResult>),   // ResolveCall — reusable call-resolution result
     Relation(RelationPayload),               // Relate — public relation payload (outcome / bindings / proof + typed BudgetExceeded)
+    // RESERVED-SEAM (NON-LIVE — no live SemanticQueryKey maps here; no SemanticQueryKeySpec row carries it):
+    DiagnosticAnalysis(CheckResult),         // future native checker — see "Reserved native-checker query/value space" below
 }
 ```
 
@@ -862,6 +1068,41 @@ Guards: **`every_semantic_query_key_maps_to_exactly_one_value_domain`**,
 value and no relation-proof value is ever materialised as a `GraphTypeNode` arm —
 the type-values-only surface admits only `TypeNode` values).
 
+### Reserved native-checker query/value space (NON-LIVE — reserved names, not live spec rows)
+
+The value domain reserves — but does NOT build — the surface a future native checker
+block would land on, so that future block is a clean ADDITION rather than a re-shape:
+
+- The reserved value-domain arm **`SemanticQueryValue::DiagnosticAnalysis(CheckResult)`**
+  (above) is the would-be home for whole-region / whole-file / whole-program
+  diagnostics. It is **NON-LIVE**: no live `SemanticQueryKey` variant maps to it, and
+  the generated `SemanticQueryKeySpec` table carries **no** row for it — the standing
+  enum==table meta-guard (`semantic_query_key_spec_table_equals_enum`) counts only the
+  live query variants, and this arm has no live query, so it is a reserved value name,
+  not a live spec row.
+- The reserved query names **`CheckProgram` / `CheckFile` / `CheckRegion` /
+  `CheckExpression` / `CheckAssignable` / `CheckCall` / `CheckDeclaration`** are
+  RESERVED for that future checker block. They are NOT added to the live
+  `SemanticQueryKey` enum or the spec table now; they are documented here only so the
+  future block does not collide with an existing name and so its diagnostics route
+  through the ONE `ProjectSemanticDispatch::execute` dispatch (not a second checker
+  resolver). The future checker must produce diagnostics from the existing
+  `Relate` / `ResolveCall` / `FlowReturn` / `ContextualTypeAt` facts — no second
+  diagnostic engine beside those, no diagnostic projection-repair, and no TS
+  text-based diagnostic path.
+- **HARD RULE — typeinfo must NOT route through whole-body checking.** The reserved
+  arm / names exist only so a future checker is clean; typeinfo parity (the 363-row
+  scope) NEVER depends on them. No typeinfo query — `FlowReturn`, `ResolveCall`,
+  `ContextualTypeAt`, member projection, or any U2/U6 reducer — may dispatch a
+  `Check*` query or whole-body type-check a region to answer a typeinfo request.
+  Typeinfo stays demand-sliced (parent §5); whole-body checking is a separate future
+  layer over the same resolver, gated by `reserved_checker_queries_are_non_live_typeinfo_does_not_whole_body_check`.
+
+This is a MINIMAL reservation: a reserved value arm + a reserved-names list + the
+non-live note. The checker itself (its execution, its diagnostic taxonomy, its parity
+manifest) is explicitly out of scope here and is a sibling follow-up plan, not a
+typeinfo-parity block.
+
 ---
 
 ## 4. Inference / Relation / Operators
@@ -875,12 +1116,69 @@ differences. Its cache identity is the full upgraded key (§2.7), not the bare
 `(source, target)` pair. Under that key it produces a public `RelationPayload`, not
 a bare tri-state.
 
-`InferBind` is **relation-owned**. Add `InferTargetPattern::{ObjectProperty,
-TupleHead, TupleTail, TupleInit, TupleLast, ParamTuple, ReturnPosition,
-TemplatePart}`. Conditional reduction consumes relation bindings; it does not
-implement its own matcher. Binding-producing relation work carries the
-`InferenceContextKey` so the same pair under a different inference setup does not
-warm-hit.
+`InferBind` is **relation-owned**, and inference is **session-owned**: every
+binding-producing relation runs inside the active `InferenceSession` of the
+enclosing `CheckerTransaction` (§4.2), which is the SOLE inference substrate.
+Add `InferTargetPattern::{ObjectProperty, TupleHead, TupleTail, TupleInit,
+TupleLast, ParamTuple, ReturnPosition, TemplatePart}`. Conditional `infer`,
+reverse-mapped inference, contextual-callback inference, overload applicability,
+and final substitution all collect into the same session — there is no
+per-surface matcher (the one-resolver rule applied to inference: §4.2).
+Conditional reduction consumes relation bindings; it does not implement its own
+matcher. Binding-producing relation work is keyed by the session's
+`InferenceContextKey` — the cache-identity projection of the active session
+(§2.7, §4.2) — so the same pair under a different inference setup does not
+warm-hit, and the in-flight session deltas are never themselves cached.
+
+### 4.0 Variance is MEASURED (marker-type probe fixed-point), not assumed
+
+`InferenceContextKey.variance_phase` / `InferenceSession`'s `priority` measurement
+(§2.7, §4.2) name the variance pass in scope (covariant / contravariant / invariant);
+they do NOT settle WHAT a type parameter's variance IS. The `variance_phase` field is
+the pass marker the relation consults — it is **not** a bare stand-in for the
+parameter's measured variance. A generic type's per-parameter variance is computed by
+a real algorithm — a **marker-type probe fixed-point** — and that MEASURED variance
+feeds §4.1's relation (it decides whether relating `G<A>` to `G<B>` relates `A`/`B`
+covariantly, contravariantly, invariantly, or bivariantly per the method-parameter
+quirk):
+
+- **Marker-type probe.** Variance of a type parameter `T` of a generic `G` is measured
+  by instantiating `G` with two distinguished **marker** types (`super-marker` /
+  `sub-marker` sentinels) in `T`'s position and relating the two instantiations through
+  the SAME `Relate` engine (§4.1): if `G<super>` relates to `G<sub>` the parameter is
+  covariant, if `G<sub>` relates to `G<super>` it is contravariant, if both it is
+  bivariant, if neither it is invariant. There is no separate variance matcher — the
+  probe runs the one relation engine.
+- **SCC-aware fixed-point.** Mutually-recursive generics (`G` references `H` references
+  `G` in their parameter positions) form a variance strongly-connected component. The
+  measurement runs as a fixed-point over the SCC: parameters start at the unit
+  (bivariant) and the probe iterates the relation until the measured variances stop
+  changing (the standard variance fixed-point — a parameter only ever moves AWAY from
+  bivariant toward a more-constrained variance, so the iteration is monotone and
+  terminates). A parameter whose measurement cannot close (budget-abandoned) is treated
+  as invariant (the sound conservative direction), never silently assumed covariant.
+- **Cached by declaration / env / TS-version.** Measured variance is CACHED keyed by
+  the generic's declaration identity (content-free `DeclKey`, R6) + the split env
+  hashes it depends on (`type_env_hash` — which now folds in the TS semantic version,
+  §2 / `fact-based-cache.md`) + `lib_env_hash` where the parameter's constraint reaches
+  lib surfaces. The cached measured-variance value is version-rooted on
+  `ReadSetSignature.facts` like any other query-identity result; it is recomputed when
+  the declaration or the relevant env changes, never per relation.
+- **Bivariant-method quirks live in relation POLICY, not ad hoc.** TS's
+  method-parameter bivariance (a method-shaped member's parameters relate bivariantly
+  under the non-`strictFunctionTypes` method rule, whereas a property-shaped function's
+  parameters relate contravariantly) is represented in `RelationPolicy` (§2.7) — the
+  relation reads the policy flag to decide method-parameter bivariance, rather than a
+  scattered special-case at each call site. The measured variance and the policy
+  together decide each parameter relation.
+
+The MEASURED variance — not a bare `variance_phase` enum stand-in — is what §4.1's
+relation consumes when relating generic instantiations. Guard:
+**`variance_is_measured_by_marker_probe_fixed_point_not_assumed`** (variance is computed
+by the SCC-aware marker-probe fixed-point and cached by declaration/env/TS-version;
+a discriminating fixture pins a contravariant-parameter and a bivariant-method case
+against the oracle and asserts variance is measured, not assumed covariant; owned at
+`U2.RELATION_INFER`).
 
 ### 4.1 Relation cycle / assumption protocol (coinductive SCC)
 
@@ -954,15 +1252,340 @@ it from the sentinel — the relation-cycle analogue of
 the type-values surface, pinned by **`relation_proofs_not_graph_type_nodes`** and
 **`typeinfo_relate_payload_exposes_relation_proof_without_graph_type_node`**.
 
-### 4.2 Conditional / mapped / index / template reducers
+**Memo locality + FAST negative/unknown paths (perf hardening).** Relation and
+inference are the hottest reducers, and the common case is a CHEAP answer: a
+not-assignable, no-match, or unknown outcome that should be decided WITHOUT the deep
+structural / coinductive-SCC machinery above. Two design properties are required and
+benched. (1) **Fast-reject before deep work.** Before opening an SCC scope or relating
+members pairwise, `Relate` runs cheap structural discriminators — primitive / literal /
+shape-tag / brand-identity / arity mismatches that prove `NotAssignable` (or a definite
+no-match) in O(1)–O(tag) — and only the survivors enter the structural relation. A
+mismatch never pays for member recursion. The `RelationBudget` pair memo (§6) is keyed
+by the FULL `Relate` identity so a repeat negative is a memo hit, not a re-walk. (2)
+**Memo locality.** The relation pair memo and the `InferenceSession` candidate tables
+are laid out for locality — interned node IDs as keys, the per-relation-root assumption
+scope kept contiguous, hot pairs (the same `(source, target)` relation re-asked inside
+one root) resolving against a local table rather than the process-wide store. The
+negative / unknown answer must be as cheap to reach as the positive answer is to cache;
+a relation that fast-rejects must not allocate a proof, a fact payload, or a session
+transaction. Pinned by **`relation_negative_and_unknown_paths_are_fast`** (a
+discriminating bench asserts a mismatch / no-match / unknown is decided by the
+fast-reject path and a repeat is a memo hit, both without entering the structural-SCC
+or member-recursion machinery; PART 1 §6.2).
+
+### 4.2 The `CheckerTransaction` + `InferenceSession` substrate
+
+Cache identity (§2) makes results reusable; it does not by itself make inference
+**checker-grade**. Type-parameter inference in TypeScript is a stateful
+fixed-point: candidates accumulate per parameter across argument positions and the
+return position, priority and variance decide how competing candidates combine,
+fixation freezes a parameter, and overload resolution speculates per candidate and
+discards losers. A flat `(source, target)` relation memo cannot express that
+state. The end state is a first-class, transient inference substrate that lives
+**inside the one resolver** (it is the cold-compute state of
+`ProjectSemanticDispatch::execute`, not a second engine): a `CheckerTransaction`
+holding one or more `InferenceSession`s. The same substrate drives generic call
+inference, conditional `infer` extraction, reverse-mapped inference,
+contextual-callback inference, overload applicability, and final substitution —
+**one inference engine, not per-surface matchers** (the one-resolver rule applied
+to inference). Only a completed, deterministic session is admitted, and what is
+admitted is the FINAL typed result, never the mutable session.
+
+**`CheckerTransaction` — the per-root cold-compute frame.** Opened when a root
+`SemanticQueryKey` cold-computes a result that requires inference (a `ResolveCall`,
+a binding-producing `Relate`, a `Conditional` with `infer`, a `FlowReturn` that
+solves a generic call, a `ContextualTypeAt` that drives a callback). It carries:
+
+```rust
+struct CheckerTransaction {
+    root: SemanticQueryKey,                  // the cold-compute root that opened the transaction
+    env: SplitEnvHashes,                     // the five split env hashes (parse/resolve/type/lib/project), R21
+    contextual_target: Option<ContextualTarget>, // the expected-type / contextual target in scope
+    overload_policy: OverloadPolicy,         // first-applicable vs best-match overload selection
+    freshness_excess_policy: FreshnessExcessPolicy, // fresh-object-literal excess-check / freshness mode
+    relation_cycle_stack: RelationAssumptionStack,  // §4.1 coinductive-SCC scoped assumptions, shared
+    reentry_stack: CheckerReentryStack,      // §4.2 shared re-entry / cycle-id space (below)
+    budget: CheckerBudget,                   // shared with RelationBudget / CallResolutionBudget / FlowSliceBudget
+    read_set: ReadSetSignatureAccumulator,   // the deterministic read-set (ReadSetSignature.facts) for admission
+    sessions: SessionStack,                  // the active InferenceSession stack (speculative + committed)
+}
+```
+
+The `read_set` is the same `ReadSetSignature.facts` path-precise observation set
+the fact-cache validates on every warm hit (R-rules); admission records it on the
+final value. `env` is the split five-hash set (never a bundled
+`project_config_hash`, R21); the transaction carries no content / version hash and
+no `fact_dep_signature` on any cache-identity it produces (R6).
+
+**`InferenceSession` — one per active inference scope; holds one `InferenceInfo`
+per inferable type parameter.** A session is the mutable working state for a single
+attempt to infer a signature's type parameters from a set of argument / return
+positions. `ResolveCall` opens one **speculative** session per overload candidate;
+the candidate that wins keeps its session, the losers' sessions are discarded
+without publishing anything. Each session carries:
+
+```rust
+struct InferenceSession {
+    signature: SignatureRef,                 // the candidate signature whose params are being inferred
+    infos: BTreeMap<TypeParamId, InferenceInfo>, // one per inferable type parameter, deterministic order
+    no_infer_mask: NoInferMask,              // occurrence-local NoInfer suppression in effect (§1.2)
+    contextual_inference_mode: ContextualInferenceMode, // whether/how the contextual target drives inference
+    state: SessionState,                     // InProgress | CompletedDeterministic | Abandoned(reason)
+}
+
+struct InferenceInfo {
+    candidates: CandidateSet,                // covariant inference candidates collected so far
+    contra_candidates: CandidateSet,         // contravariant candidates collected so far
+    priority: InferencePriority,             // the CLOSED priority ladder (below)
+    top_level: bool,                         // candidate observed at a top-level (non-nested) position
+    is_fixed: bool,                          // fixation flag — a fixed param collects no further candidates
+    constraint: Option<SemanticNodeId>,      // the type-parameter constraint
+    default: Option<SemanticNodeId>,         // the type-parameter default
+    const_param_policy: ConstParamPolicy,    // `<const T>` const-ness propagation
+}
+```
+
+`InferencePriority` is a **CLOSED enum** — a fixed ladder, not an open integer —
+with an explicit `combinable` marker bit per rung:
+
+```rust
+enum InferencePriority {                     // lowest → highest; `combinable` marker per rung
+    ReturnTypePosition,                      // lowest: a candidate inferred from the return position
+    NakedTypeParameter,                      // a naked `T` argument position
+    NonNakedTypeParameter,                   // `T` nested under a constructor (Array<T>, { x: T }, …)
+    // …additional rungs (mapped-type source, contextual literal, etc.) added only by a reviewed
+    //   schema bump; each rung declares whether it is `combinable` with a same-priority sibling.
+}
+```
+
+**The EXPLICIT candidate-combination rule** (the meaning of "combine candidates",
+stated mechanically rather than left to an implementation):
+
+- **Same-priority covariant candidates UNION.** Two candidates collected for the
+  same parameter at the same priority on the covariant side combine by union.
+- **Contravariant candidates INTERSECT.** Candidates on the `contra_candidates`
+  side combine by intersection (the contravariant measurement pass).
+- **Higher priority REPLACES lower** — UNLESS the priority rung is marked
+  `combinable`, in which case a higher-priority candidate unions with the retained
+  lower-priority set instead of discarding it. (This is why the ladder is a closed
+  enum with a per-rung `combinable` bit, not a bare integer: replace-vs-combine is
+  a property of the rung, audited by the guard.)
+- **A FIXED parameter collects no further candidates.** Once `is_fixed` is set,
+  later positions contribute nothing to that parameter — fixation is monotone.
+- **The widening-vs-literal fork happens on FIRST inference.** The first candidate
+  for a parameter decides whether subsequent same-position literals widen to their
+  primitive or stay literal (the literal-vs-widened decision is taken once, at the
+  first candidate, consistent with §4.3's `widen_for_position`); `<const T>`
+  (`const_param_policy`) and the `as const` site suppress widening per the oracle,
+  not by a blanket rule.
+
+**The composition — every inference surface runs inside the session:**
+
+- **`ResolveCall`** opens one speculative `InferenceSession` per overload
+  candidate, runs applicability + argument-to-parameter inference + fixation +
+  final substitution inside the session, and publishes ONLY the winning completed
+  `ResolvedCall`. Losing candidates' sessions never publish (no entry, no fact
+  signature, no backfill).
+- **Binding-producing `Relate`** (the `inference_context = Some(..)` arm of §2.7)
+  MUTATES the active session — it deposits candidates into the relevant
+  `InferenceInfo` and returns **session-local inference deltas**, NOT a globally
+  cacheable partial result. A binding `Relate` delta is meaningful only within its
+  session; it is never warm-admitted on its own. Pure non-binding assignability
+  (`inference_context = None`) is a normal `Relate` that does not touch a session
+  and whose `RelationPayload` caches normally.
+- **Conditional `infer`** (§4.3) extracts its `infer` bindings through the session:
+  the `infer U` positions are inferable parameters in a session whose candidates
+  the conditional check-type relation deposits, and the true-branch substitution
+  reads the session's fixed values.
+- **Reverse-mapped inference, contextual-callback inference, and overload
+  applicability** all run as sessions / session passes — there is no separate
+  reverse-mapped matcher, no separate callback inference loop engine, and no
+  separate applicability checker. The contextual-callback iterative generic
+  inference loop (U6.CONTEXTUAL_CALLBACK) is exactly the session's **fixation
+  fixed-point**: it iterates candidate collection → fixation → re-measurement until
+  the session reaches `CompletedDeterministic` or the budget abandons it.
+- **Reverse-mapped inference is a GENUINE added mechanism — relation-owned, inside
+  the session.** Inferring a type parameter from a source assigned to a
+  **homomorphic mapped target** (`inferring T from a value assigned to
+  `{ [K in keyof T]: F<T[K]> }``) is not ordinary structural inference: TS reverses
+  the mapping — for each source property it relates the source member type against the
+  mapped template `F<T[K]>` to recover the corresponding `T[K]` candidate, then
+  reassembles the inferred `T` from the per-key recoveries. This is the one place the
+  inference engine genuinely needs reverse-mapped support, and it is added as a
+  relation-owned pass INSIDE the `InferenceSession`: the reverse-mapping relates each
+  source property through binding-producing `Relate` (§2.7) — depositing the recovered
+  `T[K]` candidate into the relevant `InferenceInfo` — and the session's final
+  substitution reassembles `T` from the fixed per-key values. There is NO separate
+  reverse-mapped matcher and NO standalone reverse-mapping engine: it is a pass of the
+  one session, owned by the mapped-type reducer (U2.MAPPED_TEMPLATE) + the session
+  (U2.RELATION_INFER). Guard:
+  **`reverse_mapped_inference_is_relation_owned_in_session`** (reverse-mapped inference
+  runs through binding-producing `Relate` inside the `InferenceSession`, depositing
+  per-key candidates; a discriminating fixture infers `T` from a value assigned to a
+  homomorphic mapped target and asserts the recovery routes through the session, not a
+  private reverse-mapping matcher; owned at `U2.MAPPED_TEMPLATE` + `U2.RELATION_INFER`).
+- **Fresh-object-literal excess checking is per-property + spread-taint-aware, in the
+  session.** `source_freshness: FreshnessKey` (§2.7) carries the fresh-vs-non-fresh
+  mode, but freshness is not a single whole-object bit: an object literal's freshness is
+  tracked **per property**, and a spread (`{ ...base, x: 1 }`) **taints** the freshness
+  of the spread-in properties (a property that came from a non-fresh spread source is
+  NOT subject to excess-property checking, while the literal's own written properties
+  ARE). The session models this with a per-property freshness/spread-taint algorithm:
+  each property of a fresh literal carries a freshness/taint bit (own-written = fresh
+  / excess-checked; spread-in from a non-fresh source = tainted / not excess-checked;
+  spread-in from a fresh source propagates that source's per-property bits), and the
+  excess-property relation consults the per-property bit rather than the whole-object
+  flag. This is the spread-aware extension of the `FreshnessKey` excess-check mode and
+  it lives in the session (the relation/excess-check substrate), not a second checker.
+  Guard: **`freshness_tracks_per_property_spread_taint`** (excess-property checking is
+  decided per property with spread-taint propagation; a discriminating fixture spreads
+  a non-fresh source into a fresh literal with an extra own property and asserts only
+  the own property is excess-checked while the spread-in properties are not; owned at
+  `U2.RELATION_INFER` + exercised on the return path at `U6.VALUE_INFERENCE`).
+- **Final substitution** instantiates the signature from the session's fixed
+  `InferenceInfo` values — the same session that collected the candidates produces
+  the substitution, so there is no second inference pass over the result.
+
+**ADMISSION (fact-cache R-rules).** Only a **COMPLETED, DETERMINISTIC** session may
+be admitted, and what is admitted is the FINAL typed result — a `ResolvedCall`, a
+`RelationPayload`, a `Conditional` reduction, or a concrete instantiation — **never
+the mutable session and never a session-local partial / delta**. A session that is
+cancelled, budget-exceeded, superseded by a generation change mid-flight, or left
+non-deterministic routes its result through `ReturnOnly`: the value is returned to
+the caller but nothing is published (no cache entry, no reverse-index metadata, no
+fact signature, no backfill) — the inference analogue of the relation cycle's
+`ReturnOnly` path (§4.1) and the flow slice's `BudgetExceeded` non-admission
+(§6, U6.FLOW_RETURN_SUBSTRATE). The admitted value's cache identity is the §2 key
+of the root query; for binding-producing relations it is the completed-session
+fingerprint `InferenceContextKey` (§2.7) — never the in-flight session object.
+
+**The `CheckerReentryGraph` — one shared re-entry / cycle-id space.** `ResolveCall`,
+`FlowReturn`, `ContextualTypeAt`, and `FlowNarrowingAt` (and the reducers they call)
+are mutually recursive: resolving a call contextually types a callback, which solves
+a callback body via `FlowReturn`, whose narrowing relates argument types via
+`Relate`, which can re-enter `ResolveCall`. The cycle
+`ResolveCall → FlowReturn → narrowing → ResolveCall` MUST NOT self-await on the
+in-flight dispatch slot or burn budget spinning. The end state is ONE
+`CheckerReentryGraph` shared across all four entry points (and the reducers
+beneath them), carried on the `CheckerTransaction.reentry_stack`:
+
+- **Keying — full normalized identity per node.** Each node on the re-entry stack is
+  keyed by the FULL normalized identity of its query: a `FlowReturn` node by
+  `FlowReturnContext + ReturnProjectionDemand + FlowInputContext` (§2.5, §5), a
+  `ResolveCall` node by the full `ResolveCall` identity (§2.4), a `ContextualTypeAt`
+  / `FlowNarrowingAt` node by its `ProgramAnalysisContext` + `ProgramPointId`
+  (§2.8). The re-entry stack is the single shared cycle-id space — the per-flow
+  cycle space (§5) and the relation assumption stack (§4.1) are the relation /
+  flow-typed views of this one shared stack, not separate spaces that could
+  diverge.
+- **Same-stack re-entry records a transient assumption — but discharge is
+  per-value-domain SCC / fixed-point, not "return the in-flight assumption."** When
+  dispatch reaches a node whose full normalized identity is already on the
+  `reentry_stack`, it does NOT recompute, does NOT self-await the in-flight slot, and
+  does NOT consult the warm memo; it records / consults a transient **re-entry
+  assumption** for that node (the typed analogue of the relation coinductive "assume
+  it holds" edge — §4.1) so the cross-engine cycle does not deadlock or budget-spin.
+  That assumption is only the coinductive STEP. Each value domain then DISCHARGES its
+  re-entry SCC to a domain-typed converged result before anything is warm-admitted,
+  exactly as `Relate` discharges its §4.1 coinductive SCC over outgoing non-assumptive
+  obligations (Relation keeps that §4.1 protocol unchanged; it simply participates in
+  this one shared stack rather than owning a private one):
+  - **`FlowReturn` — SCC fixed-point to a STABLE projected return type.** The
+    re-entry SCC over `FlowReturn` nodes iterates the return contributors (each return
+    site's selected-path value-provider result joined across control-region edges)
+    to a fixed point. Only a STABLE, exact projected return type is publishable; if
+    the iteration does not converge to an exact result (a contributor stays
+    `Unknown` / cancelled / budget-abandoned), the node is `ReturnOnly` carrying a
+    typed `DegradedReason` — never a warm entry built from the transient assumption.
+  - **`ResolveCall` — SCC fixed-point to the overload-winner + substitution
+    fingerprint.** The re-entry SCC over `ResolveCall` nodes iterates overload-winner
+    selection plus the session's substitution fingerprint (the
+    `InferenceContextKey`) to a fixed point. Only a COMPLETED, deterministic
+    `ResolvedCall` (a settled overload winner with a settled substitution
+    fingerprint) is publishable; a session that stays speculative / non-deterministic
+    / budget-abandoned is `ReturnOnly`.
+  - **`ContextualTypeAt` — SCC fixed-point to contextual-target equality.** The
+    re-entry SCC over `ContextualTypeAt` nodes iterates the contextual target /
+    substitution to EQUALITY (the contextual target stops changing between
+    iterations). Only a STABLE contextual fact is publishable as a
+    `ProgramAnalysisGraph` value; an unconverged contextual target is `ReturnOnly`.
+  - **`Relate`** keeps its §4.1 coinductive-SCC discharge over outgoing non-assumptive
+    obligations (positive ⇒ publish `CoinductiveCycle`; negative ⇒ publishable
+    `NotAssignable`; `Unknown` / cancelled / `BudgetExceeded` ⇒ `ReturnOnly`).
+  - **HARD RULE — no transient assumption or cycle sentinel may warm-admit.** The
+    re-entry assumption (and any cross-engine cycle sentinel) is a transient stack
+    value: it is NEVER warm-admitted, NEVER backfilled, NEVER published as a final
+    result, NEVER recorded as a fact signature. ONLY a converged, stable,
+    deterministic per-domain result is cacheable; everything else (unconverged,
+    cancelled, superseded mid-flight, budget-exceeded) routes through `ReturnOnly` —
+    the same `ReturnOnly`-vs-publish discipline as §4.1 and the flow slice's
+    `BudgetExceeded` non-admission (§6).
+
+Guards (R6 — registered in §11.8 and the owning blocks):
+**`inference_runs_in_checker_transaction_not_per_surface_matcher`** (generic call
+inference, conditional `infer`, reverse-mapped inference, contextual-callback
+inference, overload applicability, and final substitution all enter the
+`InferenceSession` substrate — there is no second inference matcher),
+**`only_completed_deterministic_sessions_are_admitted`** (a session-local delta /
+in-flight session is never warm-admitted; a cancelled / budget-exceeded / mid-flight
+session is `ReturnOnly`, and only the final `ResolvedCall` / `RelationPayload` /
+`Conditional` / instantiation publishes),
+**`inference_candidate_combination_matches_priority_and_variance`** (same-priority
+covariant candidates union, contravariant intersect, higher priority replaces lower
+unless the rung is `combinable`, and a fixed parameter collects no further
+candidates — an oracle-pinned discriminating fixture exercises return-position vs
+argument-position competition), and
+**`checker_reentry_graph_spans_flow_call_contextual_narrowing`** (the
+`ResolveCall → FlowReturn → narrowing → ResolveCall` cycle records a re-entry
+assumption on the shared stack and never self-awaits or budget-spins; keyed by full
+normalized identity per node), and
+**`cross_engine_cycle_discharge_admits_only_stable_deterministic_results`** (each
+value-domain re-entry SCC discharges to a converged deterministic result before warm
+admission — `FlowReturn` to a stable projected return type, `ResolveCall` to a
+completed overload-winner + substitution fingerprint, `ContextualTypeAt` to
+contextual-target equality; a discriminating fixture forces a non-converged /
+budget-abandoned cross-engine cycle and asserts the transient assumption / cycle
+sentinel is `ReturnOnly`, never warm-admitted, never recorded as a fact signature,
+and only a converged result is cached),
+**`reverse_mapped_inference_is_relation_owned_in_session`** (reverse-mapped inference
+is a relation-owned session pass — per-key recovery through binding-producing `Relate`,
+reassembled by the session's final substitution — not a private reverse-mapping
+matcher), and **`freshness_tracks_per_property_spread_taint`** (fresh-object-literal
+excess checking is decided per property with spread-taint propagation, in the session,
+not a whole-object freshness bit).
+
+### 4.3 Conditional / mapped / index / template reducers
 
 - **Conditional:** `any` evaluates both branches and unions; distributive `never`
   collapses to `never`; open conditionals distribute the remaining `ProjectPath` into
-  both branches; closed conditionals reduce immediately.
+  both branches; closed conditionals reduce immediately. `infer` extraction runs
+  inside the active `InferenceSession` (§4.2): each `infer U` is an inferable
+  parameter whose candidates the check-type relation deposits via binding-producing
+  `Relate`, and the true branch substitutes from the session's fixed values — the
+  conditional reducer never runs a private `infer` matcher.
 - **Mapped / index / template:** mapped `-?` strips ONLY the optional-property-origin
   `undefined`; key remap runs through `TemplateLiteralReduce`; `as never` drops keys;
   indexed access distributes union keys, honors string/number/symbol index precedence,
   and keeps intermediate hops in `Navigate`.
+- **Template-literal numeric / bigint lexing follows TS lexical rules.**
+  `TemplateLiteralReduce` (§2.6) models TS's **lexical numeric/bigint parser** when a
+  template-literal pattern infers a numeric/bigint segment (`infer N extends number` /
+  `extends bigint`, and the placeholder-vs-literal matching that produces a numeric
+  literal type). The reducer does NOT use Rust's `str::parse` or an ad-hoc numeric
+  splitter; it applies TS's own lexical grammar so the matched literal type is exactly
+  what `tsgo` produces: decimal / hex (`0x`) / octal (`0o`) / binary (`0b`) integer
+  forms, exponent (`1e3`) and fractional forms, numeric separators (`1_000`), leading-
+  `+`/`-` sign handling, the `n` `bigint` suffix (and the rule that a fractional /
+  exponent form is NOT a valid bigint), and the canonical normalization TS applies when
+  turning the lexed value back into a literal-type name (e.g. the normalized decimal
+  spelling). A segment that does not lex as a valid number/bigint under TS's grammar
+  does NOT match the numeric `infer` (it stays a string segment / fails the conditional
+  branch), matching TS. Guard:
+  **`template_literal_reduce_models_ts_numeric_bigint_lexing`** (template-literal
+  numeric/bigint `infer` matching uses TS lexical numeric/bigint semantics, oracle-
+  pinned against `tsgo`; a discriminating fixture pins a hex / separator / exponent /
+  `bigint`-suffix case and asserts the matched literal type equals the oracle, not a
+  Rust-`parse` result; owned at `U2.MAPPED_TEMPLATE`).
 - **Mapped `-?` clears the optionality/presence FLAG, not arbitrary `undefined` in
   the value.** TS7's `-?` removes ONLY the `undefined` that originates from a property
   being optional (the member-presence / optional-origin component); it does **not**
@@ -984,7 +1607,7 @@ the type-values surface, pinned by **`relation_proofs_not_graph_type_nodes`** an
 
 Widening is one helper: `widen_for_position(ty, WideningSite)`.
 
-### 4.3 `satisfies` — TS7 oracle-pinned
+### 4.4 `satisfies` — TS7 oracle-pinned
 
 `E satisfies T` checks assignability of `E` to `T`, contextually types `E` with `T`,
 then keeps the inferred source type of `E`, not `T`. The finer behavior is settled by
@@ -1014,75 +1637,211 @@ execution anywhere in runtime/default tests except the gated drift generator.
 source member set where TypeScript does; it is not a blanket replacement with the
 target and not a projection repair. Exact TS7 oracle pins are mandatory before lift.
 
-### 4.4 Apparent types
+### 4.5 Apparent types
 
 `ApparentType` resolves primitive and array members through lib-declared wrapper
 interfaces keyed by `lib_env_hash`. The query result is memory-only; reusable lib
 artifacts may persist through `FileArtifactStore`, but query nodes do not persist
 under U4.
 
+### 4.6 `ThisType<T>` contextual object-literal binding (in `ContextualTypeAt`)
+
+`ThisType<T>` is not an ordinary member surface — it is a **contextual marker** that
+binds the `this` type inside an object literal's method bodies. When an object literal
+is contextually typed by a target that includes `ThisType<T>` in an intersection (the
+classic `{ methods: M } & ThisType<D & M>` pattern, e.g. a Vue-options / mixin object),
+every method of the object literal is contextually typed with its `this` bound to `T`.
+This contextual `this` binding is computed in **`ContextualTypeAt`** (the
+program-analysis context that resolves the expected/contextual type at a point — §2.8,
+behavior at `U6.CONTEXTUAL_CALLBACK`), NOT as a published type-node member and NOT a
+structural rewrite of the object surface:
+
+- When `ContextualTypeAt` resolves the contextual target of an object-literal method,
+  it detects a `ThisType<T>` arm in the contextual target's intersection and supplies
+  `T` as the method's contextual `this` type (so `this.x` inside the method resolves
+  against `T`). The object literal's own surface is unchanged — `ThisType<T>` is a
+  contextual fact consumed at the method body, exposed through `ProgramAnalysisGraph`
+  like any other contextual-typing fact (§1.3), never a `GraphTypeNode` arm.
+- `ThisType<T>` itself contributes no members to the object's apparent surface (it is a
+  marker interface); only its contextual-`this` effect is observed. Absent an explicit
+  `ThisType<T>` arm, the contextual `this` falls back to TS's default (the object type
+  itself under the relevant `noImplicitThis` rule), via the same `ContextualTypeAt`
+  path — no separate engine.
+
+Guard: **`this_type_contextual_object_literal_binding_in_contextual_type_at`** (a
+`ThisType<T>` arm in an object literal's contextual target binds the method `this` to
+`T` through `ContextualTypeAt`, exposed as a `ProgramAnalysisGraph` contextual fact and
+never a `GraphTypeNode` member; a discriminating fixture pins `this.x` inside a method
+of a `… & ThisType<D>`-typed object literal resolving against `D`; owned at
+`U6.CONTEXTUAL_CALLBACK`).
+
 ---
 
-## 5. Flow Architecture (demand-sliced)
+## 5. Flow Architecture (demand-sliced over a per-function flow graph)
 
-The flow engine is demand-sliced; a full lowered body is not good enough. The
-detailed U6 chapter lives in `docs/arch/native-flow-return.md`; the cross-cutting
-contract is:
+The flow engine is demand-sliced; a full lowered body is not good enough. The flow
+model is **one sparse `FunctionFlowGraph` built once per function** from the
+function's `FunctionBodySkeleton`, with typed edges; a demand slice is **graph
+reachability** over that structure, planned (not procedurally re-walked) per query.
+The detailed U6 chapter lives in `docs/arch/native-flow-return.md`; the
+cross-cutting contract is:
 
 `FunctionBodySkeleton` (in/under `IndexedReady`): arena-free, shallow statement /
 control skeleton, return-site index, lexical binding index, assignment/kill
 summaries, no type lowering.
 
-`ReturnPathPeeker` is a path-contribution algorithm over a shallow
-`FunctionBodySkeleton`. Given `ReturnProjectionDemand { path, terminal_mode }`, it
-builds a `ReturnSlicePlan` using **two distinct frontiers** so demand-slicing stays
-sound under effects:
+`FunctionFlowGraph` is a **sparse, arena-free dependence structure built ONCE per
+function** from its `FunctionBodySkeleton` — the same density and the same
+build-time-no-type-lowering discipline as the rest of `IndexedReady`. It does **no
+type lowering at build time**: it stays a structural skeleton over interned slots /
+paths / regions, and every type along an edge resolves on demand only when a slice
+actually traverses it. Its nodes are the function's value definitions, return sites,
+expression sites, control regions, and closure/loop boundaries; its edges are
+**typed**, each edge class carrying exactly the dependence kind it represents:
 
-- **Value-provider frontier:** computes which sources provide the demanded value. For
-  each return site and demanded path `P`, compute value contributors by
-  reverse-walking only the returned expression, reaching definitions, path-affecting
-  assignments, branch predicates, and call effects. This frontier MAY stop at a
-  definite-present write for `P[0]`.
-- **Effect frontier:** stays open even past a definite-present write. It scans earlier
-  evaluated expressions for assignments, assertion calls, known local closure
-  effects, abrupt completion, and control-flow effects that can affect the selected
-  value expressions. A sibling property whose value type cannot be lowered must still
-  contribute its effect summary when that effect changes a binding read by the
-  selected path. The effect frontier MUST also sweep two effect classes the
-  value-provider frontier skips because their value is overwritten later — evaluation
-  effects survive a definite write even though value materialization does not:
+**Build cost stays SHALLOW (perf hardening).** The build is a perf-critical path
+because every queried function pays it once, so three properties are required and
+benched: (1) **compact interned IDs** — slots, paths, regions, and node/edge handles
+are interned integer IDs (prefix-shared projection paths), never owned strings or
+boxed AST pointers, so the graph is cache-dense and cheap to hash; (2) **NO type
+lowering at build** — the build reads only the arena-free `FunctionBodySkeleton`
+(statement/control skeleton, return-site / binding indexes, write/kill summaries) and
+emits structural edges; no `TypeExpr` is lowered, no `Relate`/`Instantiate`/import is
+touched at build time (those happen only when a slice traverses an edge); and (3)
+**LAZY region materialization for very large functions** — the graph is region-shaped
+(§ the `ExecutableRegionId` abstraction below), so an oversized body does NOT eagerly
+build or retain the full dense graph: the build materializes the region skeleton + a
+per-region summary and materializes a region's interior edges only when a demand slice
+reaches into that region. A huge function with a tiny demand slice pays only for the
+regions the slice touches, never for the whole body. This is what makes the
+shallow-by-default slice cheap at the build boundary, not just at the query boundary.
+
+- **value-def** — a slot/path is defined by an expression (reaching definition).
+- **path-write** — a write targets a specific projection path on a slot
+  (`slot.P[0]…`), including optional / unknown writes.
+- **eval-effect** — evaluating an expression mutates / narrows / calls into a binding
+  even when its *value* is non-contributing (computed property-name expressions,
+  spread / `Object.assign` source evaluation, assertion calls).
+- **narrowing-predicate** — a branch predicate that narrows a slot along a control
+  region (the fact the demand slice must carry to narrow the selected path).
+- **control-region** — a node belongs to a control region (branch arm, switch case,
+  try / catch / finally body) so the planner can compose branch joins and reachability.
+- **closure-escape** — a slot is captured by an escaping closure (passed, returned, or
+  stored beyond the frame), so its mutable value must widen at the escape boundary.
+- **loop-summary** — a loop region's per-iteration write/kill summary, so the loop
+  fixed-point joins on it without re-walking the body.
+- **try/finally-override** — a `finally` control-return overrides the try / catch
+  returns it dominates (a `finally` without return preserves them).
+
+**Reserved region abstraction (`ExecutableRegionId` / `ExecutableRegionKind::Function`
+— NON-LIVE beyond functions).** The 363 parity rows need function-body flow plus the
+existing top-level expression lowering only; the flow graph is NOT generalized to a
+whole `ExecutableRegionGraph` now. The architecture RESERVES a region abstraction so
+`FunctionFlowGraph` is documented as ONE region kind — `ExecutableRegionKind::Function`,
+addressable by an `ExecutableRegionId` — and the other region kinds (module top-level,
+class static blocks, field / parameter initializers, decorator expressions, top-level
+await, template regions) are NAMED as FUTURE region kinds, **not implemented**. The
+demand planner, the slice nodes, and `flow_body_stable_hash` are already
+region-shaped (they key on a function part / region identity), so a future block can
+add a region kind without re-shaping the planner. Until such a block lands, only
+`ExecutableRegionKind::Function` exists; no other region kind is built, and no
+typeinfo row depends on one.
+
+**Reserved injection seam (`ProgramAnalysisContributor` / `SemanticContribution` —
+FUTURE-AWARE, NOT built).** The architecture reserves a NAMED seam by which a future
+framework-semantic source (e.g. Vue template semantics) could feed typed facts into
+the `ProgramAnalysisGraph` — `ProgramAnalysisContributor` emitting
+`SemanticContribution`s (future typed facts `InjectedBinding` / `InjectedNarrowingFact`
+/ `InjectedContextualType` / `InjectedRelation`). The framework-adapter system is NOT
+designed here. The only requirement on the CURRENT architecture is that it stays
+seam-clean: it must avoid text / fake-AST / type-node mutation as an injection
+mechanism and must keep semantic SLOTS + provenance + env identity available, so the
+future seam can deposit typed facts (carrying their own provenance + env identity)
+rather than synthesising source. That is the whole obligation now; the contributor
+system is a sibling follow-up, not a typeinfo-parity block.
+
+`ReturnPathPeeker` is the **graph demand PLANNER** over the `FunctionFlowGraph` — not
+a procedural mini-CFG walker. Given a demand `(return_site | expression_site,
+projection_path, EvalPolicy)`, it computes the demand slice as **graph reachability**
+from that origin across the typed edges, producing a `ReturnSlicePlan` whose nodes
+are exactly those reachable under the edge-class rules below. It does not re-traverse
+statement lists, re-discover bindings, or re-run a control-flow walk: the structure is
+already in the graph; the planner only *selects* the reachable subgraph. Because the
+origin can be a return site OR an arbitrary expression site, the same graph + planner
+serves return-type queries **and** future expression-site queries (a typeinfo query at
+an arbitrary program point) with **no second flow engine** — loops, closures, try /
+finally, computed keys, and spreads are all already edge classes on the one graph.
+
+The **two-frontier rule** is required for soundness and is preserved — expressed now
+as **edge classes**, not as two separate procedural passes. Reachability follows two
+edge-class families with different stop conditions:
+
+- **Value-provider edges** (value-def + path-write) compute which sources provide the
+  demanded value. Reachability along them MAY **stop at a definite-present write** for
+  `P[0]` (the value is fully determined there). Optional / unknown writes are kept as
+  `ProjectPath(source, P)` and earlier candidates remain reachable.
+- **Effect edges** (eval-effect + narrowing-predicate + control-region + closure-escape
+  + loop-summary + try/finally-override) **stay live even past a definite-present
+  write**: an evaluation effect that already ran and mutated a binding the selected
+  path reads is reachable regardless of whether the property carrying it is
+  non-contributing for value. A sibling property whose value type cannot be lowered
+  still contributes its **effect** edge when that effect changes a binding read by the
+  selected path. Two effect classes the value-provider family skips because their value
+  is overwritten later are carried by effect edges precisely because **evaluation
+  effects survive a definite write even though value materialization does not**:
   - **Computed property-name expressions.** A computed key `[expr]: v` evaluates
     `expr` for its side effects regardless of whether that property's value is later
     overwritten or is not the demanded path. If `expr` assigns, narrows, or calls into
-    a binding the selected path reads, the effect frontier includes that computed-key
-    evaluation effect — even when the property is non-contributing for value. Only its
-    evaluation effect is taken; the selected value is not materialized from it.
+    a binding the selected path reads, its computed-key **eval-effect** edge is reachable
+    — even when the property is non-contributing for value. Only its evaluation effect
+    is taken; the selected value is not materialized from it.
   - **Spread / `Object.assign` evaluation effects.** A spread `...src` or an
     `Object.assign(target, src)` evaluates `src` (and reads its enumerable own keys)
     for side effects even when a later definite write to `P[0]` makes it
     non-contributing for the demanded value. If evaluating `src` affects a binding read
-    by the selected path, the effect frontier carries that evaluation effect past the
-    definite write; only the spread's value contribution is skipped.
+    by the selected path, its **eval-effect** edge is reachable past the definite write;
+    only the spread's value contribution is skipped.
 
 The two-frontier rule is required for soundness. Demanding `["b"]` in
 `return { a: (x = "s"), b: x.toUpperCase() }` must not lower sibling `a`'s value type
-but MUST include `a`'s effect summary, because `a`'s initializer assigns `x` and `x`
-is read by the selected `b`.
+but MUST stay reachable along `a`'s eval-effect edge, because `a`'s initializer assigns
+`x` and `x` is read by the selected `b` — value-provider reachability stops at `b`'s
+write, but the `x = "s"` eval-effect edge stays live and retypes `x` before
+`x.toUpperCase()`.
 
-Contribution-scan rules: object literals and `Object.assign` scan write sources
-right-to-left for `P[0]` (the value-provider frontier stops only at a definite-present
-write; optional/unknown writes are included as `ProjectPath(source, P)`); known
-unrelated properties are skipped for value purposes by syntactic key footprint, not
-value resolution, but the effect frontier still sweeps them; `return { ...spread, b }`
-with demand `["b"]` makes `spread` and sibling `a` non-contributing for value (no
-type resolution), while the effect frontier still inspects them (including the
-spread/`Object.assign` source's evaluation effect); `const r = { a, b }; return r`
-inlines the last reaching definition if `r` is unescaped/unmutated, else includes only
-writes that may affect `P` and returns a typed degraded path result on unknown
-mutation — never lowers siblings; conditional returns run this per return site then
-join selected path results with the branch predicates needed for narrowing.
+Reachability rules (the typed-edge form of the contribution scan): object literals and
+`Object.assign` scan path-write edges right-to-left for `P[0]` (value-provider
+reachability stops only at a definite-present write; optional/unknown writes stay
+reachable as `ProjectPath(source, P)`); known unrelated properties carry no
+value-provider edge into the demanded path (skipped by syntactic key footprint, not
+value resolution) but their eval-effect edges are still followed; `return { ...spread,
+b }` with demand `["b"]` leaves `spread` and sibling `a` value-non-contributing (no
+type resolution) while their eval-effect edges (including the spread / `Object.assign`
+source's evaluation effect) stay reachable; `const r = { a, b }; return r` follows the
+value-def edge to the last reaching definition if `r` is unescaped/unmutated, else
+follows only the path-write edges that may affect `P` and returns a typed degraded path
+result on unknown mutation — never lowers siblings; conditional returns reach per
+return site across control-region edges, then join selected path results with the
+narrowing-predicate edges needed for narrowing.
 
-Peeker guards: **`flow_return_path_peeker_spread_override_skips_overwritten_sibling`**,
+Flow-graph guards: **`function_flow_graph_built_once_per_function_skeleton`** (the
+`FunctionFlowGraph` is constructed once per function from its `FunctionBodySkeleton`,
+with no per-query rebuild and no type lowering at build time),
+**`flow_slice_is_graph_reachability_not_procedural_walk`** (the demand slice is graph
+reachability over the `FunctionFlowGraph` from the demand origin — the planner selects
+a reachable subgraph and never re-runs a procedural mini-CFG statement walk),
+**`flow_graph_effect_edges_stay_live_past_value_writes`** (the two-frontier soundness
+as a typed-edge invariant: effect-class edges remain reachable past a definite-present
+write for the demanded path, while value-provider edges may stop there), and the
+perf-hardening guard
+**`flow_graph_build_is_shallow_interned_no_lowering_lazy_regions`** (the build uses
+compact interned IDs, lowers NO type at build time — asserting no `TypeExpr` lowering /
+`Relate` / `Instantiate` / import fact is produced by graph construction — and
+materializes oversized-function regions lazily: a large body with a small demand slice
+materializes only the regions the slice touches, benched so build cost scales with the
+sliced regions, not the whole body; PART 1 §6.2).
+
+Planner guards: **`flow_return_path_peeker_spread_override_skips_overwritten_sibling`**,
 **`flow_return_path_peeker_alias_return_projects_requested_member_only`**,
 **`flow_return_path_peeker_unknown_alias_mutation_degrades_path_not_whole_body`**,
 **`flow_return_path_peeker_definite_write_keeps_prior_effects_for_selected_value`**,
@@ -1095,12 +1854,22 @@ Peeker guards: **`flow_return_path_peeker_spread_override_skips_overwritten_sibl
 **`flow_return_path_peeker_computed_key_effects_survive_definite_write`**, plus the
 explicit `Mytype` negative guard.
 
-`FlowSliceHashNode` hashes only the selected return/control/binding slice; a full-body
-hash is allowed only for a true whole-return request and is rejected for
-member-projection requests. `FlowSliceLoweredBodyNode` lowers only the slice plan into
-`FlowSliceIR`. `FlowSliceIR` carries `FlowStmt`, `FlowExpr`, `FlowSlotId`, `FlowPath`,
-`FlowFrame`, `NarrowingFact`, `AliasCorrelation`, `FlowEffect`, `ReturnAccumulator`,
-`LoopSummary`.
+`FlowReturn` / `FlowSlice` / `FlowSliceBudget` stay the cached query + slice + budget
+**over** the `FunctionFlowGraph`; the slice is now the graph-reachability result the
+planner produced. `FlowSliceHashNode` hashes only that reachable slice (the selected
+return/control/binding subgraph); a full-body hash is allowed only for a true
+whole-return request and is rejected for member-projection requests. Flow node / fact
+identity is rooted by a per-function **`flow_body_stable_hash`** (body-SENSITIVE,
+cosmetic-INSENSITIVE — computed from `FunctionBodySkeleton` + the `FunctionFlowGraph`
+semantic structure, INCLUDING literals, operators, control flow, writes, calls,
+property keys, and type-affecting syntax), NOT the body-insensitive decl-skeleton
+`parse_stable_hash`: `return { b: 1 }` and `return { b: 2 }` MUST hash differently
+(they share one `parse_stable_hash` — keying the flow node/fact on it would warm-hit
+unsoundly). `parse_stable_hash` keeps its decl-skeleton meaning for decl-level
+artifact caches; only the flow node / fact identity uses `flow_body_stable_hash`.
+`FlowSliceLoweredBodyNode` lowers only the slice plan into `FlowSliceIR`. `FlowSliceIR`
+carries `FlowStmt`, `FlowExpr`, `FlowSlotId`, `FlowPath`, `FlowFrame`, `NarrowingFact`,
+`AliasCorrelation`, `FlowEffect`, `ReturnAccumulator`, `LoopSummary`.
 
 **Acceptance example (non-materialization).**
 
@@ -1111,22 +1880,31 @@ type Foo = ReturnType<typeof myType>['b']
 
 Resolution must be: `IndexedAccess` threads demand `['b']` into `ReturnType`;
 `ReturnType` produces/uses a lazy flow-return root; `ProjectPath` calls `FlowReturn`
-with path `['b']`; `ReturnPathPeeker` selects only the `b` property and `const b = 1`;
-it does not lower `a`, does not resolve `new Mytype()`, does not load `Mytype`, and
-does not walk sibling members. The returned literal `1` widens to `number` at
-return-position. A guard asserts no `ResolveClassSurface`, `TypeOf`, constructor,
-import, or route fact for `Mytype` appears.
+with path `['b']`; the demand planner computes the slice as graph reachability from
+`(return_site, ['b'], EvalPolicy)` over `myType`'s `FunctionFlowGraph`, reaching only
+the `b` value-def edge and `const b = 1`; it does not lower `a`, does not resolve
+`new Mytype()`, does not load `Mytype`, and does not walk sibling members (no
+value-provider edge into `a` is reachable, and `a` carries no eval-effect edge into
+`b`). The returned literal `1` widens to `number` at return-position. A guard asserts
+no `ResolveClassSurface`, `TypeOf`, constructor, import, or route fact for `Mytype`
+appears.
 
 **Mutual recursion + flow cycle space.** Flow is mutually recursive with type
 reduction: `ReturnType` calls `FlowReturn`; flow narrowing calls `Relate`; call
 solving routes through `ResolveCall` / `ResolveOverloadSet` and `Relate`; return
 member projection calls `ProjectPath`/`ProjectMember`; those may re-enter `FlowReturn`.
-This needs a **separate flow cycle-id space**. Re-entry is keyed on the FULL
-normalized `FlowReturnContext + ReturnProjectionDemand + FlowInputContext`, not a
-narrow tuple — the narrow `(function_slot, substitution_env_hash, projection_path,
-terminal_mode, flow_policy)` form can terminate but can also mask a real result with a
-sentinel under a different demand. Same-context recursion returns a stable flow cycle
-sentinel; it never self-awaits. Guards:
+The `FunctionFlowGraph` and the cross-query cycle space are **distinct structures**:
+the `FunctionFlowGraph` is the per-function intra-function dependence structure the
+demand planner slices (it never spans functions or queries), while the
+`CheckerReentryGraph` (§4.2) is the cross-query obligation stack shared across
+`ResolveCall` / `FlowReturn` / `ContextualTypeAt` / `FlowNarrowingAt`. Flow's cycle-id
+space is the flow-typed VIEW of that one shared `CheckerReentryGraph`, not a private
+space. Re-entry is keyed on the FULL normalized
+`FlowReturnContext + ReturnProjectionDemand + FlowInputContext`, not a narrow tuple —
+the narrow `(function_slot, substitution_env_hash, projection_path, terminal_mode,
+flow_policy)` form can terminate but can also mask a real result with a sentinel under
+a different demand. Same-context recursion records the in-flight re-entry assumption on
+the shared stack (a stable flow cycle sentinel); it never self-awaits. Guards:
 **`flow_cycle_sentinel_is_never_admitted_as_cache_entry`** (the sentinel is
 `ReturnOnly`) and **`flow_cycle_sentinel_does_not_hide_real_base_return_contributor`**
 (a sentinel for one normalized context/demand/input is never served to a re-entry
@@ -1137,10 +1915,15 @@ substitution canonical hash, `ProjectionReductionContext`, and `FlowPolicy`. It 
 NOT carry `ReturnProjectionDemand` or `FlowInputContext` — those are the sibling
 `demand` / `input` key fields of the canonical struct, so the full cache identity is
 `FlowReturnContext + ReturnProjectionDemand + FlowInputContext` with no field
-duplicated. A cached flow result carries `satisfied_projection`: `FlowReturn(path=['b'],
-Expanded)` cannot satisfy a whole return or `['a']`; a broader result backfills a
-narrower entry only when the broader computation actually materialised that narrower
-path; `Skeleton` remains isolated. The flow fact signature includes
+duplicated. `ReturnProjectionDemand` is the flow-typed `(ProjectionDemand, EvalPolicy)`
+point for the return surface (§2.10); the cached flow result carries
+`satisfied_projection` as the point it actually materialised, and warm-hit / backfill
+is decided by the demand-lattice dominance relation (§2.10), NOT by mode-enum order:
+`FlowReturn(path=['b'], Expanded)` cannot satisfy a whole return or `['a']` (neither
+dominates it); a broader result backfills a narrower entry only for the narrower points
+it actually materialised; a `Skeleton` (`TypeParamShells` + carrier-stop) slice is
+**incomparable** to a bound-expansion slice and never satisfies it. The flow fact
+signature includes
 `FlowSlice { function_slot, projection_path, slice_hash, selected_binding_ids,
 selected_effect_ids, selected_control_region_ids, closure_summary_ids }`, plus
 `MemberPresence`, `Member`, `RouteGeneration`, `ExportSurface`, `ModuleAugmentation`,
@@ -1148,20 +1931,28 @@ selected_effect_ids, selected_control_region_ids, closure_summary_ids }`, plus
 read. The extra `FlowSlice` fields beyond `selected_binding_ids` are required because
 effect-only changes (an earlier sibling's assignment, an assertion call, a closure
 write summary, a control-flow region) must invalidate a cached slice even when no
-selected binding's identity changed. Budget, overflow, cycle, cancellation, or partial
-slice results are `ReturnOnly`.
+selected binding's identity changed. The `FlowSlice` fact lives in the new
+**`FactDomain::ProgramAnalysis`** domain (the fourth closed `FactDomain` —
+`docs/arch/fact-based-cache.md`), validated on every warm hit by
+`StoreView::validates_program_analysis_domain`, which re-derives the live region's
+`flow_body_stable_hash` + the recorded slice semantic hash and **FAILS CLOSED** on a
+missing / overflowed / stale / unrooted fact. Budget, overflow, cycle, cancellation,
+or partial slice results are `ReturnOnly`.
 
-**Shallow-by-default (post-peeker).** The shallow-by-default target is valid only after
-the `ReturnPathPeeker` correction. Path laziness must hold for cross-file return types
-(`ReturnType` creates a lazy flow-return root; projected paths call `FlowReturn(path)`),
-imported class methods (`ResolveClassSurface` accepts member demand and resolves only
-that method/signature), nested `ReturnType<typeof f>["x"]["y"]` (intermediates are
-`Navigate`, terminal is caller mode), spread/`Object.assign` (right-to-left scan;
-unknown spread contributes only `ProjectPath(spread, P)`), and generic returns
-(`FlowReturn` key includes the normalized substitution hash; open generics keep
-conditional/path shells instead of whole-body lowering).
+**Shallow-by-default (graph-reachability slice).** The shallow-by-default target is
+valid only because the slice is graph reachability over the `FunctionFlowGraph`, not a
+whole-body lowering. Path laziness must hold for cross-file return types (`ReturnType`
+creates a lazy flow-return root; projected paths call `FlowReturn(path)`), imported
+class methods (`ResolveClassSurface` accepts member demand and resolves only that
+method/signature), nested `ReturnType<typeof f>["x"]["y"]` (intermediate hops run the
+`Navigate` preset, the terminal hop runs the caller's `(ProjectionDemand, EvalPolicy)`
+point — §2.10), spread/`Object.assign` (right-to-left scan; unknown spread contributes
+only `ProjectPath(spread, P)`), and generic returns (`FlowReturn` key includes the
+normalized substitution hash; open generics keep conditional/path shells instead of
+whole-body lowering).
 
-`Skeleton` is the BFS / generic-helper traversal mode used by
+`Skeleton` is not a special semantic mode: it is the `generic_open = TypeParamShells`
++ carrier-stop preset over the demand lattice (§2.10), used by
 `Instantiate { args: [], body_mode: Skeleton }` — unbound type parameters become
 `TypeParam` shells so Conditional branches do not collapse to `never` for unbound
 generics.
@@ -1203,6 +1994,236 @@ applies identically to every hot reducer, each with its own named guard:
 **`call_resolution_budget_exceeded_admits_nothing`**, and
 **`apparent_type_budget_exceeded_admits_nothing`** (`FlowSliceBudget`'s equivalent is the
 existing FlowReturn three-layer rule plus the `ReturnOnly` flow-result rule).
+
+### 6.1 Multi-candidate cache substrate — per-family caps + env/fact dimensions
+
+The query results these budgets gate are stored in the multi-candidate `FamilySlots`
+substrate. Its candidate-retention policy and cache-key dimension set are owned by the
+fact-based cache architecture (`docs/arch/fact-based-cache.md` → "Multi-candidate
+`FamilySlots`" + the `IdeProjectConfig` 5-way env-hash audit; landed at
+`U3.CACHE_FACT_MODEL`, with `TypeInfoGraphResultDb` candidate storage at
+`U10.RESULT_DB`). The two contracts that matter for this engine:
+
+- **Per-family adaptive caps, NOT a uniform cap-4 FIFO.** Each query family declares
+  its own `candidate_cap()`; the inference/substitution-heavy families — `Relate`,
+  `ResolveCall`, `Instantiate`, `Conditional`, `MappedType`, `FlowReturn` — get higher
+  adaptive caps (their identities legitimately coexist across many live substitution /
+  inference-context / env variants), content-light families keep small caps. Slot-cap
+  eviction is **invalid-first, then least-recently valid-hit (LRU-by-valid-hit)**, not
+  FIFO; the whole substrate is bounded by a **global memory ceiling**; each family's
+  cold-recompute rate is held to a **benchmarked fallback-count bound** regression-gated
+  through `BenchResultRow`. Per-candidate validity stays the
+  `ReadSetSignature.validate_with_self_roots` rail. Pinned by
+  **`cache_candidate_cap_is_per_family_not_uniform`** +
+  **`family_eviction_prefers_invalid_then_lru_valid_hit`**.
+- **The cache keys cover every meaning-affecting env/fact dimension, split per R21.**
+  Beyond the five base env hashes, the split env hashes fold in the TS semantic
+  version, JSX mode / import-source / factory, `moduleResolution`, package export/import
+  conditions, `types`/`typeRoots`, the lib set, decorator + class-field semantics,
+  `useDefineForClassFields`, `customConditions` / `moduleSuffixes`, and the
+  `InstantiationDepthPolicy` (recursive-conditional/mapped depth beyond the budgets) —
+  each entering ONLY the layers whose value depends on it, never a bundled
+  `project_config_hash` (R21). These are split-env-hash / fact additions, never fields
+  on a query-identity key (R6). Overlay/session identity is **session-cache identity
+  only**: a persistent/base cache never admits an overlay-only result. Pinned by
+  **`cache_keys_cover_ts_jsx_moduleresolution_decorator_lib_dimensions`**,
+  **`instantiation_depth_policy_in_identity_and_facts`**, and
+  **`persistent_caches_never_admit_overlay_only_results`**.
+
+### 6.2 Performance contract
+
+The §6 budgets keep each cold compute bounded; this contract states the COST SHAPE the
+engine is held to — per query family, as a hit-rate target, as a memory budget, and as
+an invalidation blast radius — and makes that contract regression-gated, not aspirational.
+The architecture already has the right perf instincts (one resolver, parse/shallow once,
+demand slicing, fact-validated lazy invalidation, typed non-admission); this section turns
+those instincts into a benched, guarded contract. It REFERENCES the existing structures
+(the `FunctionFlowGraph` §5, the `(ProjectionDemand, EvalPolicy)` demand lattice §2.10,
+the per-family multi-candidate caps §6.1, the four `FactDomain`s incl. `ProgramAnalysis`)
+— it does not redesign them.
+
+**Governing rule — optimize so the fallback path is RARELY ENTERED, not for a fast
+fallback.** The engine's performance win comes from AVOIDING work, not from a cheap
+fallback. The whole architecture is built to make the slow path (cold recompute, full
+relation, whole-surface materialization, whole-body flow) the EXCEPTION: one resolver
+(no second engine to diverge or re-walk), parse + shallow-index once per content hash,
+demand-sliced flow + projection (never whole-body / whole-surface), fact-validated lazy
+invalidation (only what actually changed recomputes), and typed non-admission (a partial
+/ budget-exceeded / cancelled result is `ReturnOnly`, so a cold miss never poisons the
+warm path into re-missing). A "fallback" here means any cold recompute or
+budget-degraded path; the design target is to drive its ENTRY RATE down via warm-hit
+rate + minimal cache axes + cheap negative paths, NOT to make the fallback body fast.
+A change that speeds the fallback while leaving its entry rate unchanged does not
+satisfy this contract; a change that lowers the entry rate does. Pinned as a design
+rule by **`architecture_minimizes_fallback_entry_not_fallback_cost`** (a bench asserts
+the tracked metric is the family's fallback ENTRY count against its bound, and that the
+warm path is O(validate) — see below — so the optimized-for quantity is fallback rate,
+not fallback latency).
+
+**Cold vs warm cost per query family.** For every family the WARM path is the same
+shape — peek the multi-candidate slot, validate the candidate's `ReadSetSignature.facts`
+against the caller's live `StoreView` (and self-roots), return the `Arc`. A warm hit is
+therefore **O(validate)** — proportional to the recorded fact-set size, NOT to the cost
+of recomputing the result — and allocates no audit payload without an active accumulator.
+The COLD shape is per family:
+
+| Family | COLD compute shape | WARM path (always O(validate) + return `Arc`) |
+|---|---|---|
+| `FlowReturn` | build/reuse the `FunctionFlowGraph` (once per function, shallow §5), plan the demand slice as graph reachability from `(origin, projection_path, EvalPolicy)`, lower ONLY the slice into `FlowSliceIR`, evaluate it | validate `FlowSlice` (+ `Member`/`Route`/…) facts in `FactDomain::ProgramAnalysis`; return `Arc<FlowReturnResult>` |
+| `ResolveCall` | select the applicable overload, run the `InferenceSession` fixed-point (candidate accumulation + fixation), relate args via `Relate`, materialize the call result | validate the recorded facts; return `Arc<ResolvedCallResult>` |
+| `Relate` | fast-reject discriminators first (§4.1 perf hardening); survivors open the coinductive-SCC scope, relate members / instantiated bodies / constraints, discharge the SCC | validate the recorded facts; return the `RelationPayload` (incl. proof) |
+| `Instantiate` | substitute type args into the base body under the demand point; reduce per `EvalPolicy` (bound vs `TypeParamShells`) | validate; return the instantiated `TypeNode` `Arc` |
+| `Conditional` | relate the check type to the extends type (open conditionals distribute the path into both branches §2.10); reduce closed conditionals immediately | validate; return the reduced branch / distributed `TypeNode` |
+| `MappedType` | reverse-demand match the demanded keys BEFORE keyspace enumeration (§6 `KeyspaceBudget`); reduce only the demanded members with their optionality modifiers | validate; return the mapped surface `TypeNode` |
+| `ResolveClassSurface` | substitute heritage, resolve ONLY the demanded static/instance member or signature (member-demand on the hot path), carry nominal brands | validate; return the demanded class-surface projection `Arc` |
+| `ApparentType` | look the apparent member up in the `lib_env_hash`-keyed member index under member-demand (NO whole-lib materialization) | validate (`LibIntrinsic` + lib_env); return the apparent member `TypeNode` |
+| `TemplateLiteralReduce` | reverse-demand match the pattern against the demanded keys; reduce template segments under TS lexical numeric/bigint semantics (§4.3) | validate; return the reduced literal-union `TypeNode` |
+| projection / demand-lattice families (`ProjectPath` / `ProjectMember` / `KeyOf` / `IndexedAccess` / `NormalizeUnion` / `NormalizeIntersection`) | run the path-precise projection: intermediate hops in `Navigate`, the terminal hop in the caller's `(ProjectionDemand, EvalPolicy)` point; materialize ONLY the terminal demanded projection | validate; return the projected `TypeNode` `Arc` (broader results backfill narrower points by the lattice meet they covered §2.10) |
+
+The cold shapes share one discipline: **demand-scoped, never whole-object.** No family
+materializes a whole surface / whole body / whole keyspace when the demand is a member /
+path / branch — that is the §2.10 + §5 + §6 shallow-by-default rule restated as a cost
+contract. A cold path that would force whole-lib / whole-keyspace / whole-body
+materialization on the hot path is a budget non-admission (§6), not a slow success.
+
+**Cache hit-rate targets + benched fallback-count bound per family.** Each family
+declares a hit-rate target and, the regression-gated form, a **bounded fallback (cold
+recompute) count** on the benchmark corpus. The fallback count is the tracked metric (a
+warm-hit-rate target is reported, but the GATE is on fallback count because it is exactly
+the "fallback rarely entered" quantity the governing rule optimizes). This rides the
+existing `BenchResultRow`, which already reports hit count + fallback count per run: a
+bench regression FAILS when a family's fallback count exceeds its bound on the corpus.
+The inference/substitution-heavy families (`Relate`, `ResolveCall`, `Instantiate`,
+`Conditional`, `MappedType`, `FlowReturn`) carry the higher adaptive candidate caps that
+keep their legitimately-coexisting variants resident (§6.1), so their steady-state
+fallback count stays under bound even across many live substitution / inference-context
+/ env variants; content-light families hold a tight bound under small caps. The bound is
+per family, on the corpus, regression-gated — not a global average that can hide one
+family thrashing.
+
+**Memory budgets + compaction / sweep.** The demand-sliced shape keeps the working set
+small, but the retained structures still need explicit budgets + an aggressive
+compaction/sweep policy under the global memory ceiling (§6.1). Each structure carries
+a budget and a sweep trigger:
+
+| Retained structure | Budget | Compaction / sweep |
+|---|---|---|
+| `SemanticGraphStore` multi-candidate slots | per-family candidate cap (§6.1) + the process-wide global memory ceiling | invalid-first, then LRU-by-valid-hit eviction; at the ceiling, cross-slot invalid-first/LRU eviction; an un-admittable candidate routes through `ReturnOnly` (never published) |
+| per-function `FunctionFlowGraph` | bounded resident graph set, keyed by `flow_body_stable_hash` | drop the graph for a superseded `flow_body_stable_hash` (a body edit) and for cold functions under the ceiling; oversized functions retain only materialized regions (§5 lazy regions) |
+| flow slices (`FlowSliceIR`) | `FlowSliceBudget` (§6) | slices are demand-scoped and not retained beyond their cached `FlowReturn` result; a budget-exceeded slice is `ReturnOnly` |
+| relation proofs (`CoinductiveCycle` etc.) | bounded with the `RelationPayload` they annotate | dropped with their owning relation candidate on eviction; never retained independently |
+| query candidates | per-family cap (§6.1) | invalid-first / LRU-by-valid-hit, as above |
+| audit records | the `verter_audit` accumulator bound; opt-in (`audit_enabled` + `footprint_capture`) | swept per the audit runtime's retention; a warm hit allocates NO audit payload without an active accumulator |
+| `ProgramAnalysis` facts | the `FactDomain::ProgramAnalysis` fact-set per cached slice | superseded/stale facts fall out with their cached entry on validation failure; the domain FAILS CLOSED on a missing/overflowed/stale/unrooted fact |
+
+Eviction never produces a warm cache entry, never backfills, and never publishes a torn
+result — the typed non-admission rule (§6) governs every drop. Compaction prefers
+dropping INVALID and SUPERSEDED structures first (they cannot serve a warm hit anyway),
+then cold-but-valid by LRU-by-valid-hit.
+
+**Invalidation scenarios + expected re-compute blast radius.** Invalidation is lazy and
+fact-driven (the §6.1 / fact-cache rails), so the blast radius is exactly the recorded
+read-set, not a broad sweep:
+
+- **Same-file BODY edit** (`return { b: 1 }` → `return { b: 2 }`, an assertion call
+  added, a branch reordered): the edited function's `flow_body_stable_hash` changes, so
+  ONLY the `flow_body_stable_hash`-keyed `FunctionFlowGraph` + the `ProgramAnalysis`
+  `FlowSlice` facts that read it recompute, plus the dependent facts that recorded them.
+  The decl-skeleton artifacts (`IndexedReady`, `parse_stable_hash`-keyed decl-level
+  caches, the file's export surface when the signature is unchanged) **survive** — a body
+  edit is body-sensitive / cosmetic-insensitive and does NOT invalidate decl-level
+  artifacts. Blast radius: the edited function's flow + its direct fact-readers.
+- **Cross-file DECL edit** (a changed/removed exported type a dependent resolved): lazy
+  fact-driven invalidation — only the dependents whose recorded `ReadSetSignature.facts`
+  actually observed the changed declaration fail validation on their next warm hit and
+  recompute; dependents that never read it keep their warm entries. The reverse dep
+  graph is NOT the invalidation authority (it is not consulted as a truth source); the
+  per-candidate fact validation against the live `StoreView` is. Blast radius: the
+  transitive set that recorded a fact on the changed decl, discovered lazily at read
+  time — not the whole importer closure.
+- **Env-hash change** (a `tsconfig` / lib / JSX / decorator / `moduleResolution` option
+  changes): only the cache layers KEYED on the affected split env dimension invalidate
+  (R21 — each dimension enters only the layers whose value depends on it). A
+  `type_env_hash`-only change (e.g. `strict`) does not invalidate a `ResolvedImportFacts`
+  entry that excludes `lib_env_hash`; a `lib_env_hash` change invalidates the lib-reading
+  layers (`ApparentType`, typed-IR resolve, `SemanticGraphStore` query nodes) but not the
+  layers that never fold it in. Blast radius: exactly the layers whose key includes the
+  changed dimension.
+
+**Verter-vs-TS/tsgo benchmark fixtures.** Performance parity is demonstrated, not
+asserted: a benchmark suite runs Verter and TS/tsgo over the SAME semantic queries and
+reports both. The fixtures cover the consumer-real query shapes — component-meta
+resolution, projected typeinfo, IDE hover / completion queries, selected member
+expansion (`Pick` / `Omit` / a single demanded member off a large surface), and the
+demand-slice case `ReturnType<typeof f>["b"]` (the §5 non-materialization example: only
+the `b` slice is computed, `a` / `new Mytype()` are never resolved). Every run is
+reported with the existing benchmark-reporting contract — cache mode, source-map policy,
+batch shape, thread count, hit count, and fallback count (the `BenchResultRow` schema) —
+so a Verter-vs-tsgo comparison is apples-to-apples on cache mode + batch + threads, and a
+fallback-count regression is visible per family. These benches are part of TERMINAL
+ACCEPTANCE (perf-regression-gated), not merely the functional gate — see the U15 bench
+deliverable in `docs/arch/native-typeinfo-parity-adapters-final-lift.md`.
+
+**Perf-hardening guards (baked into the engine sections, indexed here).** The four
+perf-hardening properties are pinned by named guards introduced in their owning sections
+and collected in the guards index (§11.8 / Guards index → "Performance contract"):
+**`flow_graph_build_is_shallow_interned_no_lowering_lazy_regions`** (§5 — shallow
+interned build, no type lowering, lazy region materialization),
+**`cache_key_axes_are_minimal_and_normalized`** (§2.10 — every key axis benchmark-proven
+minimal + normalized), **`relation_negative_and_unknown_paths_are_fast`** (§4.1 — fast
+negative/unknown reject + memo locality), and
+**`architecture_minimizes_fallback_entry_not_fallback_cost`** (this section — the
+governing rule: the tracked/optimized metric is fallback ENTRY rate, with the warm path
+held O(validate)). Typed non-admission (§6) already prevents warm-cache poisoning — a
+budget-exceeded / cancelled / partial result is `ReturnOnly`, never warm-admitted — so
+the fallback path, when it IS entered, cannot corrupt the warm path that keeps it rare;
+that rule is cross-referenced here, unchanged.
+
+### 6.3 Differential `tsgo`-parity oracle (the SEMANTIC-correctness gate)
+
+The §6.2 benches gate the COST shape (fallback-count / cache-mode / warm-hit). They do
+**not** gate semantic agreement with TypeScript. **Semantic tsc-parity is gated by the
+differential `tsgo`-parity oracle** — distinct from, and additive to, the 363-row
+coverage ledger (PART 2 §10) and the §6.2 performance benches.
+
+**What it is.** A harness that runs a corpus through **Verter AND the pinned `tsgo`**,
+diffs the **STRUCTURED** results (not display strings), and gates on a **per-family
+divergence budget**:
+
+- **Corpus = a TS-conformance slice + property-generated type fixtures.** The
+  conformance slice exercises the published TS behaviors per family; the
+  property-generated fixtures stress the reducers with mechanically-generated types
+  (unions, intersections, conditionals, mapped/template constructs, generic
+  instantiations) so parity is tested beyond the hand-written cases.
+- **Structured diff.** Compare the projected `TypeInfoGraphPayload` / `RelationPayload`
+  / `TypeDescriptor` structurally against `tsgo`'s answer for the same query — NOT a
+  text compare of display output (display divergence is allowed; SEMANTIC divergence is
+  the gate).
+- **Per-family divergence budget.** Each reducer family declares a parity-coverage
+  target shape — **"N conformance cases per family; divergence budget M per family"** —
+  and the oracle FAILS that family when its structured divergence count exceeds M. The
+  budget is per family (so one family cannot hide behind another's agreement), against
+  the pinned `tsgo`.
+
+**Why it replaces the 363 proxy as the semantic gate.** A green 363 ledger proves
+**coverage** (every row owned + executably proven + wired — "detects un-wired"). The
+oracle proves **semantic completeness** (the engine computes what `tsc`/`tsgo`
+computes — "detects **wrong**"). Stating `363-green` as tsc-parity is the proxy error
+the oracle closes: the two are distinct claims. The behavioral guards stay (they detect
+un-wired); the oracle is the net-new semantic gate on top.
+
+**Produced at each hard phase's rescope gate.** The oracle baseline for a family is a
+**rescope-gate deliverable** (sequencing authority §3.2(b)): when a
+RESCOPE-GATE-REQUIRED phase (`U2.RELATION_INFER`, U6 cross-engine, the native checker,
+…) is designed at its rescope session, the session names that phase's families' N / M
+and the oracle gates the phase's acceptance. So the oracle grows phase-by-phase
+alongside the algorithm-depth design, rather than landing as one monolith.
+
+**Distinct from the §6.2 / U15 perf benches.** The §6.2 Verter-vs-`tsgo` fixtures run
+the same pinned `tsgo` but gate COST (fallback count / cache mode); the §6.3 oracle
+gates SEMANTIC agreement (per-family divergence). Both ride the pinned `tsgo`; they are
+separate gates. Terminal acceptance (PART 2 §12) requires both green, in addition to the
+363 lift.
 
 ---
 
@@ -1306,14 +2327,31 @@ total is unchanged). Where a submatrix fixture corresponds to an existing ignore
 # PART 2 — The Execution Framework
 
 This part owns the **cross-cutting** execution framework: the per-block contract
-template, the two-table manifest ledger, the crash-safe cutover/ledger transaction
-contract, the no-skip guarantee, the resume protocol, and the `.cutover-state`
-`[typeinfo_parity]` namespace. The per-U-block block instances live in the subplans;
-this is the shared machinery they all use.
+template, the two-table manifest ledger, the git/CI landing protocol, the no-skip
+guarantee, and the resume protocol. The per-U-block block instances live in the
+subplans; this is the shared machinery they all use.
+
+**Two DISTINCT gates (do not conflate).** (1) The **per-big-phase RESCOPE GATE**
+(sequencing authority §3.2) runs **before** a RESCOPE-GATE-REQUIRED phase
+(`U2.RELATION_INFER`, U6 cross-engine, the native checker, U7) implements: a planner +
+1-Claude+2-codex panel iterate to best-architecture and produce the phase's
+algorithm-depth design + termination proof + the §6.3 oracle baseline + the
+fail-today guards. (2) The **per-block three-reviewer LAND panel** (§11.12) authorizes
+the squash-merge of each FINISHED block. The rescope gate is pre-implementation
+design; the LAND panel is the merge gate. Both are **additive to** the git/CI landing
+model below, and both are distinct from §14.1's codex-architect fork gate (an
+UNFORESEEN fork resolved DURING a block).
 
 There is no new top-level phase ladder — subplans, not stages. A block cannot start
 until all prerequisite block IDs are done, and "done" is derived mechanically from the
-manifest and guard suite, not from prose.
+manifest, the merged git history, and the guard suite, not from prose. The landing
+boundary is git/CI itself: **git is the transaction log, branch protection is the
+accept gate, and `git revert` is rollback.** There is no tracked orchestration cursor,
+no write-ahead log, no lease, no revision CAS, and no persisted gate/review receipt —
+those distributed-database mechanics were redundant on top of what git and CI already
+provide, and a tracked cursor (a versioned file the landing protocol itself rewrites)
+created cryptographic-fixed-point, paired-hash, and crash-recovery problems that git
+does not have.
 
 ## 9. The per-block contract template
 
@@ -1362,16 +2400,16 @@ how it is verified:
 - **`Critical-rule guards:`** is mandatory per R6: if the block introduces any new
   `(CRITICAL)` rule, it registers the named guard(s) for that rule; a block introducing
   no new `(CRITICAL)` rule states that explicitly.
-- **`Commit cadence:`** is the git-history discipline (§11.11): a WIP series during the
-  block (high WIP count expected; **no per-commit gate** — the WIP exemption applies, so
-  intermediate `todo!()` / placeholder states are permitted), squashed to EXACTLY ONE
-  land commit at the `accept` done-edge. Mainline receives one commit per landed block.
+- **`Commit cadence:`** is the git-history discipline (§11.11): a WIP series on the
+  block's branch during the block (high WIP count expected; **no per-commit gate** — the
+  WIP exemption applies, so intermediate `todo!()` / placeholder states are permitted),
+  squash-merged to EXACTLY ONE land commit on the target branch when the branch merges.
+  The target branch receives one commit per landed block.
 - **`Review gate:`** is the LAND authorization (§11.12): the three-reviewer panel — 1
   Claude Code + 2 codex, all bad-mood, holding the best-architecture-no-compromises /
   breaking-changes-allowed mandate — must all return LAND (or residuals are NITs-only)
-  before `accept`, bound to the gated input-hash pair (so a stale review never
-  authorizes the land). This is a SECOND `accept` precondition alongside the workspace
-  gate, not a done-predicate part.
+  before the branch merges. This is a branch-protection required-approval rule, enforced
+  by the merge gate, not a done-predicate part.
 
 `Commit cadence:` and `Review gate:` are **PARENT-UNIFORM**: their value is IDENTICAL
 for every block — the §11.11 one-squashed-land-commit discipline and the §11.12
@@ -1459,10 +2497,16 @@ enum ProofRequirement {
 
 enum IgnoreStatus {
     Ignored,
-    Verifying { block_id: TypeInfoParityBlockId, lease_id: LeaseId },
     Lifted { block_id: TypeInfoParityBlockId },
 }
 ```
+
+`IgnoreStatus` is binary — `Ignored` or `Lifted`. There is no tracked `Verifying`
+transient and no `lease_id`: the "in-flight, not-yet-landed" state of a block is simply
+its UNMERGED branch (§11). A block's branch removes the block's source `#[ignore]`s, flips
+its rows `Ignored → Lifted`, and decrements `EXPECTED_TOTAL_IGNORED_COUNT` in the SAME
+branch — so every committed state (the branch tip and the post-squash-merge target tip) is
+count-consistent, and CI runs the full workspace gate against the branch's `Lifted` state.
 
 ### 10.2 `ProofRequirement` — every row resolves to an executable proof
 
@@ -1559,11 +2603,13 @@ row (file::function)
   the guard REJECTS as a placeholder (an unimplemented / `todo` / `unknown` mechanism — a
   genuine gap), or (b) a genuinely NEW fixture not among the 363, handled by the SEPARATE
   `AdditionalProofRow` table. There is no third "we think it's covered" state.
-- **Gate: a block cannot enter `Verifying` until its rows' coverage is complete +
-  non-placeholder.** The coverage table is a PRECONDITION on `prepare-verify`: a block may
-  transition its rows to `Verifying` only after every one of its rows has a non-placeholder
-  `mechanism_id`, an executable `ProofRequirement`, and a `semantic_queries`/facts mapping
-  consistent with its capability — BEFORE `prepare-verify` strips any `#[ignore]`.
+- **Gate: a block's rows cannot flip to `Lifted` until their coverage is complete +
+  non-placeholder.** The coverage table is a CI PRECONDITION on every block branch: the
+  branch may transition its rows `Ignored → Lifted` (and strip their source `#[ignore]`s)
+  only when every one of its rows has a non-placeholder `mechanism_id`, an executable
+  `ProofRequirement`, and a `semantic_queries`/facts mapping consistent with its capability.
+  The coverage guard runs in the full CI gate, so a branch that flips rows to `Lifted`
+  without complete coverage fails CI and cannot merge.
 
 Two guards make this mechanical:
 
@@ -1585,17 +2631,34 @@ Two guards make this mechanical:
   `ResolveDeclarationAugmentation` → `DeclarationAnalysis`. A row mapped to a mechanism
   inconsistent with its capability FAILS.
 
-The gate is enforced by **`block_cannot_enter_verifying_without_complete_coverage`** (in the
-two-phase guard set): `prepare-verify` is rejected for any block whose rows are not all
-complete + non-placeholder.
+The gate is enforced by **`block_rows_cannot_lift_without_complete_coverage`** (in the
+coverage guard set): the guard FAILS — and so fails CI on the block's branch, blocking the
+merge — for any block whose rows are flipped `Lifted` while their coverage is not complete +
+non-placeholder.
 
 This closes the completeness class: 363-row full parity is not probed by sampling — it is the
 mechanical property "the generated coverage table is complete and non-placeholder over every
 manifest row in both tables, each mapped to the expected capability mechanism, before any
-block verifies" — while the binding 363 total stays a separate, exact count/bijection over the
-`IgnoredTestRow` table alone.
+block's rows lift" — while the binding 363 total stays a separate, exact count/bijection over
+the `IgnoredTestRow` table alone.
 
 ### 10.4.1 The authoritative U0 row → `block_id` partition (all 363 rows)
+
+**Framing — the numbering is the coverage layering; the architecture is mechanism-first.**
+The `U0`–`U15` block numbering is the **execution / coverage bucket** layering — the
+units a branch lands and the rows each owns. It is NOT the architectural decomposition.
+The ARCHITECTURE is **mechanism-first**, in dependence order: Foundation / cache / wire
+(`U0` ledger, `U3` fact model, `U4` cache-runtime nodes, `U8` wire surface) → the
+`CheckerTransaction` + relation / inference engine (`U2.RELATION_INFER` and the U2
+reducers it drives) → the type constructors / reducers (indexed-access, mapped /
+template, class surfaces, enums, utilities) → the `FunctionFlowGraph` + call / contextual
+flow (the `U6` blocks — substrate, narrowing mechanisms, call resolution, contextual
+callbacks) → projection / session / adapters (`U13` projection, `U11` session, `U14` /
+`U15` adapters and final lift). The U-block buckets are read THROUGH that mechanism order:
+each block's owning mechanism (its dominant `mechanism_id`) is what fixes its place in the
+dependence DAG, not its number. This is framing only — it does not renumber `U0`–`U15` or
+re-layout the blocks; the one mechanism-driven refinement below is that the narrowing
+bucket is split into per-mechanism sub-blocks (`U6.NARROW_*`).
 
 This is the **authoritative, exhaustive** `row → block_id` map the U0 coverage-table
 generator emits and `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`
@@ -1615,7 +2678,7 @@ fixes the single owning block. The per-block counts (summing to 363) are:
 
 | Owning `block_id` | Rows | Owning `block_id` | Rows |
 |---|---:|---|---:|
-| `U2.RELATION_INFER` | 20 | `U6.NARROWING` | 104 |
+| `U2.RELATION_INFER` | 20 | `U6.NARROW_*` (8 sub-blocks, below) | 104 |
 | `U2.UTILITIES` | 42 | `U6.PREDICATE_ASSERTION` | 3 |
 | `U2.INDEXED_ACCESS` | 16 | `U6.CALL_RESOLVE` | 19 |
 | `U2.MAPPED_TEMPLATE` | 16 | `U6.CONTEXTUAL_CALLBACK` | 15 |
@@ -1627,7 +2690,28 @@ fixes the single owning block. The per-block counts (summing to 363) are:
 | `U10.RESULT_DB` | 13 | `U11.PUBLIC_RELATION_SESSION` | 9 |
 | `U14.MACRO_ADAPTER` | 1 | `U15.FINAL_LIFT` | 5 |
 
-Sum = 363. Blocks not in this table (`U0.MANIFEST_SUBSTRATE`, `U2.QUERY_VALUE_DOMAIN`,
+Sum = 363 (the `U6.NARROW_*` bucket contributes its 104 rows as the sum of the eight
+sub-blocks below). The narrowing bucket is split per-mechanism (mechanism-first
+framing, above) into eight `U6.NARROW_*` sub-blocks; each of the former
+`U6.NARROWING` block's 104 rows is assigned to exactly ONE sub-block by its dominant
+narrowing mechanism (the `file::function` mechanism), so the sub-blocks partition the
+104 with no row lost, added, duplicated, or re-tagged:
+
+| `U6.NARROW_*` sub-block | Rows | Mechanism |
+|---|---:|---|
+| `U6.NARROW_TYPEOF` | 15 | `typeof` operator narrowing (`narrow_typeof.rs`) |
+| `U6.NARROW_EQUALITY` | 15 | literal / `null` / `undefined` (strict-)equality narrowing (`narrow_equality.rs`) |
+| `U6.NARROW_TRUTHINESS` | 15 | truthiness / optional-chain narrowing (`narrow_truthiness.rs`) |
+| `U6.NARROW_IN` | 15 | `in`-operator narrowing (`narrow_in_operator.rs`) |
+| `U6.NARROW_INSTANCEOF` | 14 | `instanceof` narrowing (`narrow_instanceof.rs`) |
+| `U6.NARROW_DISCRIMINATED` | 14 | discriminated-union / switch / destructure correlation (`narrow_discriminated_union.rs`) |
+| `U6.NARROW_SUBSTITUTION` | 11 | flow narrowing of a generic substitution (`substitution_types.rs` `sb01`–`sb08`/`sb11`–`sb13`) |
+| `U6.NARROW_INVALIDATION` | 5 | narrowing preserved / invalidated across reassignment / opaque call / destructure (`flow_invalidations.rs` `fi01`/`fi02`/`fi04`/`fi05`/`fi09`) |
+
+Sub-block sum = 104. These eight sub-blocks REPLACE the former single `U6.NARROWING`
+block (which no longer exists as a `block_id`); `U6.PREDICATE_ASSERTION` (`fi08`,
+`sb09`/`sb10`) and `U6.LOOP_CLOSURE` (`fi03`/`fi06`/`fi07`) remain SEPARATE blocks and
+are unchanged by the split. Blocks not in this table (`U0.MANIFEST_SUBSTRATE`, `U2.QUERY_VALUE_DOMAIN`,
 `U8.WIRE_SURFACE_CLOSURE`, `U12.EXPORTER`, `U13.PROJECTION`) own **zero** `IgnoredTestRow`s —
 they build substrate (ledger / keys / wire / exporter / projection) the owning blocks lift
 their rows through; their `Exact test rows lifted` is explicitly `none`.
@@ -1843,86 +2927,8 @@ The complete partition (each entry `file::function — substrate`):
 - `value_inference.rs::value_inference_flow_variables_narrow_return_value_by_branch` — `ValueInference`
 - `value_inference.rs::value_inference_function_body_return_union_from_return_statements` — `ValueInference`
 
-**`U6.NARROWING`** (104 rows):
+**`U6.NARROW_TYPEOF`** (15 rows):
 
-- `flow_invalidations.rs::flow_invalidations_fi01_reassignment_invalidates_string_narrowing` — `FlowNarrowing`
-- `flow_invalidations.rs::flow_invalidations_fi02_narrowing_preserved_across_opaque_call` — `FlowNarrowing`
-- `flow_invalidations.rs::flow_invalidations_fi04_destructured_discriminant_preserves_correlation` — `FlowNarrowing`
-- `flow_invalidations.rs::flow_invalidations_fi05_destructured_discriminant_loses_on_reassignment` — `FlowNarrowing`
-- `flow_invalidations.rs::flow_invalidations_fi09_exhaustive_never_tail_does_not_widen_return` — `FlowNarrowing`
-- `narrow_discriminated_union.rs::narrow_discriminated_union_du01_if_equality_discriminant` — `FlowNarrowing`
-- `narrow_discriminated_union.rs::narrow_discriminated_union_du02_switch_discriminant` — `FlowNarrowing`
-- `narrow_discriminated_union.rs::narrow_discriminated_union_du03_switch_default_never` — `FlowNarrowing`
-- `narrow_discriminated_union.rs::narrow_discriminated_union_du04_negated_discriminant` — `FlowNarrowing`
-- `narrow_discriminated_union.rs::narrow_discriminated_union_du05_multi_property_discriminant` — `FlowNarrowing`
-- `narrow_discriminated_union.rs::narrow_discriminated_union_du06_nested_discriminant` — `FlowNarrowing`
-- `narrow_discriminated_union.rs::narrow_discriminated_union_du07_number_literal_discriminant` — `FlowNarrowing`
-- `narrow_discriminated_union.rs::narrow_discriminated_union_du08_boolean_literal_discriminant` — `FlowNarrowing`
-- `narrow_discriminated_union.rs::narrow_discriminated_union_du09_destructure_correlation` — `FlowNarrowing`
-- `narrow_discriminated_union.rs::narrow_discriminated_union_du10_in_guard_plus_discriminant` — `FlowNarrowing`
-- `narrow_discriminated_union.rs::narrow_discriminated_union_du11_switch_per_arm_join` — `FlowNarrowing`
-- `narrow_discriminated_union.rs::narrow_discriminated_union_du12_switch_fall_through` — `FlowNarrowing`
-- `narrow_discriminated_union.rs::narrow_discriminated_union_du14_reassignment_re_narrowing` — `FlowNarrowing`
-- `narrow_discriminated_union.rs::narrow_discriminated_union_du15_template_literal_discriminant` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq01_string_literal_on_literal_union` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq02_negated_string_literal_on_literal_union` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq03_number_literal_on_triple_union` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq04_boolean_true_on_boolean` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq05_null_on_nullable_string` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq06_undefined_on_optional_string` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq07_double_equals_null_on_nullish_string` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq08_string_literal_on_string_does_not_narrow` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq09_string_literal_on_primitive_union` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq10_two_unions_mutual_equality_does_not_narrow` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq11_impossible_compound_absorbs_never` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq12_property_equality_discriminant` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq13_as_const_literal_rhs` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq14_number_literal_on_number_does_not_narrow` — `FlowNarrowing`
-- `narrow_equality.rs::narrow_equality_eq15_nan_equality_does_not_narrow` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io01_binary_union` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io02_shared_key` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io03_else_branch` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io04_intersection` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io05_optional_property` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io06_on_unknown` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io07_on_object` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io08_compound_conjunction` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io09_negated` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io10_three_arm_union` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io11_generic_constrained` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io12_reassignment_renarrowing` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io13_class_vs_object` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io14_template_literal_key` — `FlowNarrowing`
-- `narrow_in_operator.rs::narrow_in_operator_io15_symbol_key` — `FlowNarrowing`
-- `narrow_instanceof.rs::narrow_instanceof_in01_binary_union` — `FlowNarrowing`
-- `narrow_instanceof.rs::narrow_instanceof_in02_class_plus_primitive` — `FlowNarrowing`
-- `narrow_instanceof.rs::narrow_instanceof_in03_on_unknown` — `FlowNarrowing`
-- `narrow_instanceof.rs::narrow_instanceof_in04_subclass_union` — `FlowNarrowing`
-- `narrow_instanceof.rs::narrow_instanceof_in05_already_narrowed` — `FlowNarrowing`
-- `narrow_instanceof.rs::narrow_instanceof_in06_abstract_class` — `FlowNarrowing`
-- `narrow_instanceof.rs::narrow_instanceof_in07_else_reachability` — `FlowNarrowing`
-- `narrow_instanceof.rs::narrow_instanceof_in08_interface_union` — `FlowNarrowing`
-- `narrow_instanceof.rs::narrow_instanceof_in09_negated_early_return` — `FlowNarrowing`
-- `narrow_instanceof.rs::narrow_instanceof_in10_intersection` — `FlowNarrowing`
-- `narrow_instanceof.rs::narrow_instanceof_in11_generic_ctor` — `FlowNarrowing`
-- `narrow_instanceof.rs::narrow_instanceof_in13_array_special_case` — `FlowNarrowing`
-- `narrow_instanceof.rs::narrow_instanceof_in14_promise_special_case` — `FlowNarrowing`
-- `narrow_instanceof.rs::narrow_instanceof_in15_nullable` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr01_string_or_undefined` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr02_string_or_null` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr03_string_or_nullish` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr04_string_no_nullable_does_not_narrow` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr05_number_literal_union` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr06_string_literal_union` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr07_boolean_union` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr08_negated_string_or_undefined` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr09_property_truthiness` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr10_early_return_guard` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr11_unknown_collapses_to_unknown` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr12_object_or_null` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr13_compound_and_chain` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr14_number_or_undefined_does_not_split_zero` — `FlowNarrowing`
-- `narrow_truthiness.rs::narrow_truthiness_tr15_optional_chain_truthiness` — `FlowNarrowing`
 - `narrow_typeof.rs::narrow_typeof_nt01_string_on_binary_union` — `FlowNarrowing`
 - `narrow_typeof.rs::narrow_typeof_nt02_number_on_triple_union` — `FlowNarrowing`
 - `narrow_typeof.rs::narrow_typeof_nt03_boolean_on_union` — `FlowNarrowing`
@@ -1938,6 +2944,97 @@ The complete partition (each entry `file::function — substrate`):
 - `narrow_typeof.rs::narrow_typeof_nt13_negated_guard_early_return` — `FlowNarrowing`
 - `narrow_typeof.rs::narrow_typeof_nt14_compare_literal_var_does_not_narrow` — `FlowNarrowing`
 - `narrow_typeof.rs::narrow_typeof_nt15_compound_and_property` — `FlowNarrowing`
+
+**`U6.NARROW_EQUALITY`** (15 rows):
+
+- `narrow_equality.rs::narrow_equality_eq01_string_literal_on_literal_union` — `FlowNarrowing`
+- `narrow_equality.rs::narrow_equality_eq02_negated_string_literal_on_literal_union` — `FlowNarrowing`
+- `narrow_equality.rs::narrow_equality_eq03_number_literal_on_triple_union` — `FlowNarrowing`
+- `narrow_equality.rs::narrow_equality_eq04_boolean_true_on_boolean` — `FlowNarrowing`
+- `narrow_equality.rs::narrow_equality_eq05_null_on_nullable_string` — `FlowNarrowing`
+- `narrow_equality.rs::narrow_equality_eq06_undefined_on_optional_string` — `FlowNarrowing`
+- `narrow_equality.rs::narrow_equality_eq07_double_equals_null_on_nullish_string` — `FlowNarrowing`
+- `narrow_equality.rs::narrow_equality_eq08_string_literal_on_string_does_not_narrow` — `FlowNarrowing`
+- `narrow_equality.rs::narrow_equality_eq09_string_literal_on_primitive_union` — `FlowNarrowing`
+- `narrow_equality.rs::narrow_equality_eq10_two_unions_mutual_equality_does_not_narrow` — `FlowNarrowing`
+- `narrow_equality.rs::narrow_equality_eq11_impossible_compound_absorbs_never` — `FlowNarrowing`
+- `narrow_equality.rs::narrow_equality_eq12_property_equality_discriminant` — `FlowNarrowing`
+- `narrow_equality.rs::narrow_equality_eq13_as_const_literal_rhs` — `FlowNarrowing`
+- `narrow_equality.rs::narrow_equality_eq14_number_literal_on_number_does_not_narrow` — `FlowNarrowing`
+- `narrow_equality.rs::narrow_equality_eq15_nan_equality_does_not_narrow` — `FlowNarrowing`
+
+**`U6.NARROW_TRUTHINESS`** (15 rows):
+
+- `narrow_truthiness.rs::narrow_truthiness_tr01_string_or_undefined` — `FlowNarrowing`
+- `narrow_truthiness.rs::narrow_truthiness_tr02_string_or_null` — `FlowNarrowing`
+- `narrow_truthiness.rs::narrow_truthiness_tr03_string_or_nullish` — `FlowNarrowing`
+- `narrow_truthiness.rs::narrow_truthiness_tr04_string_no_nullable_does_not_narrow` — `FlowNarrowing`
+- `narrow_truthiness.rs::narrow_truthiness_tr05_number_literal_union` — `FlowNarrowing`
+- `narrow_truthiness.rs::narrow_truthiness_tr06_string_literal_union` — `FlowNarrowing`
+- `narrow_truthiness.rs::narrow_truthiness_tr07_boolean_union` — `FlowNarrowing`
+- `narrow_truthiness.rs::narrow_truthiness_tr08_negated_string_or_undefined` — `FlowNarrowing`
+- `narrow_truthiness.rs::narrow_truthiness_tr09_property_truthiness` — `FlowNarrowing`
+- `narrow_truthiness.rs::narrow_truthiness_tr10_early_return_guard` — `FlowNarrowing`
+- `narrow_truthiness.rs::narrow_truthiness_tr11_unknown_collapses_to_unknown` — `FlowNarrowing`
+- `narrow_truthiness.rs::narrow_truthiness_tr12_object_or_null` — `FlowNarrowing`
+- `narrow_truthiness.rs::narrow_truthiness_tr13_compound_and_chain` — `FlowNarrowing`
+- `narrow_truthiness.rs::narrow_truthiness_tr14_number_or_undefined_does_not_split_zero` — `FlowNarrowing`
+- `narrow_truthiness.rs::narrow_truthiness_tr15_optional_chain_truthiness` — `FlowNarrowing`
+
+**`U6.NARROW_IN`** (15 rows):
+
+- `narrow_in_operator.rs::narrow_in_operator_io01_binary_union` — `FlowNarrowing`
+- `narrow_in_operator.rs::narrow_in_operator_io02_shared_key` — `FlowNarrowing`
+- `narrow_in_operator.rs::narrow_in_operator_io03_else_branch` — `FlowNarrowing`
+- `narrow_in_operator.rs::narrow_in_operator_io04_intersection` — `FlowNarrowing`
+- `narrow_in_operator.rs::narrow_in_operator_io05_optional_property` — `FlowNarrowing`
+- `narrow_in_operator.rs::narrow_in_operator_io06_on_unknown` — `FlowNarrowing`
+- `narrow_in_operator.rs::narrow_in_operator_io07_on_object` — `FlowNarrowing`
+- `narrow_in_operator.rs::narrow_in_operator_io08_compound_conjunction` — `FlowNarrowing`
+- `narrow_in_operator.rs::narrow_in_operator_io09_negated` — `FlowNarrowing`
+- `narrow_in_operator.rs::narrow_in_operator_io10_three_arm_union` — `FlowNarrowing`
+- `narrow_in_operator.rs::narrow_in_operator_io11_generic_constrained` — `FlowNarrowing`
+- `narrow_in_operator.rs::narrow_in_operator_io12_reassignment_renarrowing` — `FlowNarrowing`
+- `narrow_in_operator.rs::narrow_in_operator_io13_class_vs_object` — `FlowNarrowing`
+- `narrow_in_operator.rs::narrow_in_operator_io14_template_literal_key` — `FlowNarrowing`
+- `narrow_in_operator.rs::narrow_in_operator_io15_symbol_key` — `FlowNarrowing`
+
+**`U6.NARROW_INSTANCEOF`** (14 rows):
+
+- `narrow_instanceof.rs::narrow_instanceof_in01_binary_union` — `FlowNarrowing`
+- `narrow_instanceof.rs::narrow_instanceof_in02_class_plus_primitive` — `FlowNarrowing`
+- `narrow_instanceof.rs::narrow_instanceof_in03_on_unknown` — `FlowNarrowing`
+- `narrow_instanceof.rs::narrow_instanceof_in04_subclass_union` — `FlowNarrowing`
+- `narrow_instanceof.rs::narrow_instanceof_in05_already_narrowed` — `FlowNarrowing`
+- `narrow_instanceof.rs::narrow_instanceof_in06_abstract_class` — `FlowNarrowing`
+- `narrow_instanceof.rs::narrow_instanceof_in07_else_reachability` — `FlowNarrowing`
+- `narrow_instanceof.rs::narrow_instanceof_in08_interface_union` — `FlowNarrowing`
+- `narrow_instanceof.rs::narrow_instanceof_in09_negated_early_return` — `FlowNarrowing`
+- `narrow_instanceof.rs::narrow_instanceof_in10_intersection` — `FlowNarrowing`
+- `narrow_instanceof.rs::narrow_instanceof_in11_generic_ctor` — `FlowNarrowing`
+- `narrow_instanceof.rs::narrow_instanceof_in13_array_special_case` — `FlowNarrowing`
+- `narrow_instanceof.rs::narrow_instanceof_in14_promise_special_case` — `FlowNarrowing`
+- `narrow_instanceof.rs::narrow_instanceof_in15_nullable` — `FlowNarrowing`
+
+**`U6.NARROW_DISCRIMINATED`** (14 rows):
+
+- `narrow_discriminated_union.rs::narrow_discriminated_union_du01_if_equality_discriminant` — `FlowNarrowing`
+- `narrow_discriminated_union.rs::narrow_discriminated_union_du02_switch_discriminant` — `FlowNarrowing`
+- `narrow_discriminated_union.rs::narrow_discriminated_union_du03_switch_default_never` — `FlowNarrowing`
+- `narrow_discriminated_union.rs::narrow_discriminated_union_du04_negated_discriminant` — `FlowNarrowing`
+- `narrow_discriminated_union.rs::narrow_discriminated_union_du05_multi_property_discriminant` — `FlowNarrowing`
+- `narrow_discriminated_union.rs::narrow_discriminated_union_du06_nested_discriminant` — `FlowNarrowing`
+- `narrow_discriminated_union.rs::narrow_discriminated_union_du07_number_literal_discriminant` — `FlowNarrowing`
+- `narrow_discriminated_union.rs::narrow_discriminated_union_du08_boolean_literal_discriminant` — `FlowNarrowing`
+- `narrow_discriminated_union.rs::narrow_discriminated_union_du09_destructure_correlation` — `FlowNarrowing`
+- `narrow_discriminated_union.rs::narrow_discriminated_union_du10_in_guard_plus_discriminant` — `FlowNarrowing`
+- `narrow_discriminated_union.rs::narrow_discriminated_union_du11_switch_per_arm_join` — `FlowNarrowing`
+- `narrow_discriminated_union.rs::narrow_discriminated_union_du12_switch_fall_through` — `FlowNarrowing`
+- `narrow_discriminated_union.rs::narrow_discriminated_union_du14_reassignment_re_narrowing` — `FlowNarrowing`
+- `narrow_discriminated_union.rs::narrow_discriminated_union_du15_template_literal_discriminant` — `FlowNarrowing`
+
+**`U6.NARROW_SUBSTITUTION`** (11 rows):
+
 - `substitution_types.rs::substitution_types_sb01_bare_narrowing_of_generic` — `TypeParameterFeatures`
 - `substitution_types.rs::substitution_types_sb02_narrowing_in_constrained_generic` — `TypeParameterFeatures`
 - `substitution_types.rs::substitution_types_sb03_substitution_survives_method_calls` — `TypeParameterFeatures`
@@ -1949,6 +3046,14 @@ The complete partition (each entry `file::function — substrate`):
 - `substitution_types.rs::substitution_types_sb11_generic_narrowed_via_in_operator` — `TypeParameterFeatures`
 - `substitution_types.rs::substitution_types_sb12_truthiness_on_t_or_undefined` — `TypeParameterFeatures`
 - `substitution_types.rs::substitution_types_sb13_substitution_carried_across_destructure` — `TypeParameterFeatures`
+
+**`U6.NARROW_INVALIDATION`** (5 rows):
+
+- `flow_invalidations.rs::flow_invalidations_fi01_reassignment_invalidates_string_narrowing` — `FlowNarrowing`
+- `flow_invalidations.rs::flow_invalidations_fi02_narrowing_preserved_across_opaque_call` — `FlowNarrowing`
+- `flow_invalidations.rs::flow_invalidations_fi04_destructured_discriminant_preserves_correlation` — `FlowNarrowing`
+- `flow_invalidations.rs::flow_invalidations_fi05_destructured_discriminant_loses_on_reassignment` — `FlowNarrowing`
+- `flow_invalidations.rs::flow_invalidations_fi09_exhaustive_never_tail_does_not_widen_return` — `FlowNarrowing`
 
 **`U6.PREDICATE_ASSERTION`** (3 rows):
 
@@ -2070,27 +3175,26 @@ The complete partition (each entry `file::function — substrate`):
 
 `EXPECTED_TOTAL_IGNORED_COUNT` is ALWAYS exactly `count(IgnoredTestRow where status ==
 Ignored)`; it is 363 at U0. It is NOT a frozen constant that lags the row states — it is the
-live count of `Ignored` `IgnoredTestRow`s, and every phase that changes how many are `Ignored`
-updates it IN THE SAME LOCKED STATE TRANSACTION so the count guard never observes a
-disagreement. The count and bijection are over the `IgnoredTestRow` table ONLY —
-`AdditionalProofRow`s are excluded (they carry no `IgnoreStatus`). The bijection guards are:
-live ignored test sites (source `#[ignore]`s) must exactly equal `IgnoredTestRow`s with
-`status == Ignored`, and that set must also exactly equal `EXPECTED_TOTAL_IGNORED_COUNT`. The
-phase accounting:
+live count of `Ignored` `IgnoredTestRow`s, and the block branch that changes how many are
+`Ignored` updates it IN THE SAME BRANCH (and so in the same squash-merge) so the count guard
+never observes a disagreement in any committed state. The count and bijection are over the
+`IgnoredTestRow` table ONLY — `AdditionalProofRow`s are excluded (they carry no
+`IgnoreStatus`). The bijection guards are: live ignored test sites (source `#[ignore]`s) must
+exactly equal `IgnoredTestRow`s with `status == Ignored`, and that set must also exactly equal
+`EXPECTED_TOTAL_IGNORED_COUNT`. The accounting is a single coupled edit on the block's branch:
 
-- **`prepare_verify`** strips the block's source `#[ignore]`s AND flips its rows
-  `Ignored → Verifying` AND sets `EXPECTED_TOTAL_IGNORED_COUNT = count(status == Ignored)`
-  (decrements by exactly the block's row count) — ALL in one locked transaction, so at every
-  committed instant the live source-`#[ignore]` count, the `Ignored` row count, and the count
-  agree. This lets the FULL workspace gate run while the block is `Verifying` (its `#[ignore]`s
-  already removed) WITHOUT tripping the count guard: a `Verifying` row is neither a source
-  `#[ignore]` nor an `Ignored` row nor counted in the total.
-- **`accept`** changes the block's rows `Verifying → Lifted` with NO further count change (the
-  rows already left the `Ignored` set at `prepare_verify`); `Lifted` rows must correspond to a
-  live test function without `#[ignore]`.
-- **`abort`** restores the block's source `#[ignore]`s AND restores the rows `Verifying →
-  Ignored` AND restores `EXPECTED_TOTAL_IGNORED_COUNT` to `count(status == Ignored)` — again all
-  in one locked transaction.
+- **The block's branch** strips the block's source `#[ignore]`s AND flips its rows
+  `Ignored → Lifted` AND sets `EXPECTED_TOTAL_IGNORED_COUNT = count(status == Ignored)`
+  (decrements by exactly the block's row count) — ALL in the SAME branch, so at every committed
+  instant (the branch tip AND the post-squash-merge target tip) the live source-`#[ignore]`
+  count, the `Ignored` row count, and the count agree, and the count/bijection guards stay green.
+  CI runs the FULL workspace gate against the branch's `Lifted` state (the block's `#[ignore]`s
+  already removed, so the lifted tests execute under the gate); a `Lifted` row must correspond to
+  a live test function without `#[ignore]`.
+- **Rollback is `git revert`** of the block's squash commit — it restores the source
+  `#[ignore]`s, the rows `Lifted → Ignored`, and `EXPECTED_TOTAL_IGNORED_COUNT` in one revert,
+  exactly because the branch coupled all three edits. No separate compensating transaction is
+  needed: reverting the one squash commit is the rollback.
 
 The two-table split is pinned by a dedicated binding-total count guard:
 
@@ -2109,265 +3213,124 @@ The two-table split is pinned by a dedicated binding-total count guard:
   and no `AdditionalProofRow` is counted toward `EXPECTED_TOTAL_IGNORED_COUNT` or the bijection. An
   `AdditionalProofRow` count other than 7, or a row that leaks into the ignored count/bijection, FAILS.
 
-## 11. The cutover / ledger TRANSACTION CONTRACT (crash-safe journaled transaction)
+## 11. The git/CI landing protocol
 
-The orchestration substrate that lands blocks — the `.cutover-state` typeinfo-parity cursor, the
-manifest ledger, and the source-`#[ignore]` state — is governed by ONE transaction contract,
-specified in full at the plan level here. It is a CRASH-SAFE JOURNALED TRANSACTION. The seven
-parts:
+Blocks land through git and CI, not through a tracked orchestration cursor. **Git is the
+transaction log, branch protection is the accept gate, and `git revert` is rollback.** The
+substrate that lands a block is exactly three things, each already provided by git/CI:
 
-### 11.1 Snapshot isolation (reads included)
+- the **manifest ledger** (the two-table `IgnoredTestRow` + `AdditionalProofRow` state, §10);
+- the **source-`#[ignore]` state** (the test-site annotations);
+- the **block branch + its squash-merge commit** (the per-block unit of work and the atomic
+  landing edge).
 
-Every mutation AND every observation operates on a single locked, consistent under-lock snapshot
-of `.cutover-state` + manifest/count + source-`#[ignore]` state. The three artifacts are published
-as SEPARATE temp-renames within a transaction, so any read could otherwise catch a transaction
-mid-flight and see two artifacts at one transaction's value and the third at another's — exactly
-the torn cross-artifact view per-file atomic-rename does not prevent. The end-state rule is snapshot
-isolation over the WHOLE state, reads included: EVERY observation — the invariant/bijection/count
-checks, the parallel-safety / landed-agreement guards, prereq derivation, parent-completion, the
-resume protocol's lease-staleness + next-block selection reads, and dispatch-eligibility reads —
-takes `.cutover-state.lock` (the STABLE SIBLING lock, never `.cutover-state` itself) and reads the
-FULL snapshot under that single lock. A read of any one artifact WITHOUT the lock, or a read that
-observes one artifact under the lock and another outside it (a torn cross-artifact snapshot), is a
-violation. The lock serializes mutations against each other AND against every observation, so the
-only states any reader ever sees are committed, whole-snapshot boundaries.
+A block is landed iff its squash commit (carrying the `Typeinfo-Block:` trailer) is merged AND
+its rows are `Lifted` AND its required guards pass in CI. That is derivable from git + the
+manifest alone — there is NO tracked cursor, NO write-ahead log, NO lease, NO revision CAS, and
+NO persisted gate/review receipt. The eight parts of the protocol:
 
-### 11.2 Two-phase prepare-verify → gate → accept / abort (each a LOCKED STATE TRANSACTION)
+### 11.1 One branch per block
 
-A block is NOT accepted by landing-then-reverting. Under parallel execution a "land before the
-workspace gate, compensating-revert on failure" model is unsound — a dependent block can start on a
-landed-but-not-yet-gated block about to be reverted, and a single atomic rename cannot transactionally
-cover `.cutover-state` + the manifest rows + the expected counts + the source-`#[ignore]` removals.
-The end state is an explicit TWO-PHASE COMMIT with a distinct pending state, where each phase is a
-LOCKED STATE TRANSACTION (not a single multi-file atomic rename), and "done" is decided by both the
-manifest AND the guard suite.
+Each block is implemented on its OWN branch off the target branch
+(`refactor/semantic-db-overhaul`). The branch is the unit of in-flight work and the only place a
+block's incomplete state ever lives — there is no tracked cursor recording "block X is in
+flight." A block's branch does exactly three coupled things in the SAME branch (so every commit
+on it, and the eventual squash-merge, is internally consistent):
 
-Each phase (`prepare_verify` / `accept` / `abort`) touches THREE distinct on-disk artifacts —
-`.cutover-state` (the TOML cursor), the manifest rows + `EXPECTED_TOTAL_IGNORED_COUNT`, and the
-source-file `#[ignore]` lines. No filesystem rename can cover three separate files atomically. The
-phase is made correct by a LOCK plus a snapshot-revalidate plus a transition ORDER that keeps every
-intermediate observable state non-done, NOT by pretending one rename covers all three:
+1. makes the block's code changes;
+2. removes the block's exact source `#[ignore]`s; and
+3. flips the block's manifest rows `Ignored → Lifted` and sets
+   `EXPECTED_TOTAL_IGNORED_COUNT = count(status == Ignored)` (decrement by the block's row count).
 
-- **Lock + snapshot-revalidate under the lock (writes AND all reads).** All phase writes, the xtask's
-  precondition checks, AND every cutover-state observation take the STABLE SIBLING lock
-  `.cutover-state.lock`. UNDER the lock, the reader/writer RE-READS all three artifacts as one snapshot
-  and (for a write phase) re-checks the phase's preconditions against that fresh snapshot. A precondition
-  that fails on the under-lock snapshot ABORTS the phase without writing anything; a read-only observer
-  decides on the under-lock whole-snapshot, never a partial mid-transaction view.
-- **Write each file by temp-rename, with a `revision`-CAS on `.cutover-state`.** Each of the three
-  artifacts is published by its own write-temp-then-rename. The `.cutover-state` write additionally
-  applies the `revision`-CAS (commit only if `[typeinfo_parity].revision` is unchanged since the
-  under-lock read, bump on commit, retry on CAS miss). This keeps per-file temp-rename + CAS-on-revision
-  for `.cutover-state` while NOT claiming one rename spans all three files.
-- **Transition ORDER makes every intermediate on-disk state non-done.** The lease keep/release order and
-  the file-write order are chosen so EVERY intermediate on-disk state is observably NON-DONE. `accept`
-  does NOT append the `landed_blocks` token / release the lease until AFTER the manifest rows are written
-  `Lifted` and the source `#[ignore]`s are already removed, so the `.cutover-state` `accept` commit (the
-  LAST write) is the single observable done-edge; before it lands, the block's lease is still LIVE and
-  its `landed_blocks` token still absent. `prepare_verify` keeps the lease LIVE and never appends a token.
-  `abort` restores `#[ignore]`s and the rows to `Ignored` and clears the lease.
+Because (2) and (3) are coupled in one branch, the count/bijection guards (§10.5) hold at the
+branch tip and at the post-merge target tip — there is no window where the source-`#[ignore]`
+count, the `Ignored` row count, and `EXPECTED_TOTAL_IGNORED_COUNT` disagree in any committed,
+mergeable state. The WIP series on the branch MAY carry intermediate `todo!()` / placeholder /
+empty-test states (the `CLAUDE.md` Stub-Prevention WIP exemption) — those are scratch states that
+never reach the target branch; the squash-merged commit is the final, gated state.
 
-The pending state is `IgnoreStatus::Verifying { block_id, lease_id }` (alongside `Ignored` / `Lifted`):
-the block's source `#[ignore]`s are removed and its rows are `Verifying`, but it is NOT yet completed/
-landed; the `lease_id` ties the verifying rows to the live `active_blocks` lease that owns the in-flight
-verification. `prepare_verify` (phase 1) removes the source `#[ignore]`s, marks the rows `Verifying`,
-KEEPS the lease LIVE, and does NOT append to `landed_blocks`. The full workspace gate runs WHILE the
-block is `Verifying` (the `#[ignore]`s already removed, so the lifted tests execute under the gate);
-prerequisite checks and parent-completion MUST treat `Verifying` rows as NOT done. `accept` (phase 2)
-runs ONLY after the gate passes; `abort` (gate failed) restores the pre-verify state.
+### 11.2 CI is the gate
 
-The guard is **`typeinfo_state_snapshots_are_locked_and_precondition_checked`**: every phase is a locked
-state transaction, NOT a single multi-file atomic rename — eligibility reads + precondition checks take
-the stable sibling lock; under the lock the phase re-reads all three artifacts as one snapshot and
-revalidates preconditions before any write; each artifact is published by its own temp-rename (with the
-`revision`-CAS on `.cutover-state`); and the lease/file-write order makes every intermediate non-done.
+CI is the precondition for landing — the branch may merge only on GREEN CI. CI runs, on the
+block's branch:
 
-### 11.3 The durable workspace-gate RECEIPT bound to the input-hash PAIR
+- the COMPLETE Rust **AND** JavaScript workspace gate, green only when BOTH pass — **Rust:**
+  `cargo test --workspace --tests`; `cargo clippy --workspace -- -D warnings`;
+  `cargo fmt --all --check`. **JavaScript:** `pnpm test`; `pnpm install --frozen-lockfile`;
+- the coverage / proof gates (§10.4 — `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`,
+  `capability_rows_map_to_expected_query_fact_mechanisms`, `block_rows_cannot_lift_without_complete_coverage`,
+  the proof-registry / row-test-wrapper guards, the count + bijection guards §10.5);
+- the required guards for the block (its `TYPEINFO_PARITY_BLOCKS.required_guards` + the
+  Critical-rule guards (R6) for any new `(CRITICAL)` rule it introduces); and
+- the block-DAG / consumed-mechanism guard
+  (`typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_prereqs`, §11.5).
 
-"`accept` ran only after a green workspace gate" must be MECHANICALLY ENFORCEABLE over the EXACT content
-the gate ran against AND the exact deterministic post-accept content, not a named intent and not a single
-live hash. A single live `workspace_gate_input_hash` is insufficient: the gate runs while the block is
-`Verifying`, so it hashes the manifest rows in their `Verifying` form, but `accept` transitions those rows
-`Verifying → Lifted` and the manifest rows/count are part of the hashed input — so a single hash recomputed
-AFTER `accept` flips the rows would no longer match, and a receipt over the `Verifying` input alone does not
-PROVE the post-accept `Lifted` state was gated. The receipt therefore binds the PAIR
-`{ pre_accept_verifying_hash, post_accept_lifted_hash }`.
+Because CI runs the FULL workspace gate against the branch's `Lifted` state (the block's
+`#[ignore]`s already removed on the branch), the lifted tests execute under the gate. A branch
+that flips rows `Lifted` without complete coverage, or whose lifted tests fail, or whose required
+guards fail, has RED CI and cannot merge. Green CI is necessary; the three-reviewer LAND (§11.3)
+is the additional human/agent precondition.
 
-The gate is the COMPLETE Rust **AND** JavaScript gate — it is green only when BOTH gates pass:
+### 11.3 Three-reviewer LAND (branch-protection accept gate)
 
-- **Rust:** `cargo test --workspace --tests --verbose`; `cargo clippy --workspace -- -D warnings`;
-  `cargo fmt --all --check`.
-- **JavaScript:** `pnpm test`; `pnpm install --frozen-lockfile`.
+The branch merges only when the review panel says LAND — a branch-protection **required-approval**
+rule, enforced by the merge gate, NOT a persisted hash-bound receipt. The panel is EXACTLY THREE
+reviewers — **1 Claude Code reviewer + 2 codex reviewers** — each adversarial / bad-mood, every
+reviewer holding a **best-architecture-no-compromises mandate**: breaking changes are ALLOWED and
+DESIRED; the goal is the best architecture / solution possible, never the easiest or least-breaking
+path. The LAND bar is: **all three return LAND, OR all residual findings are NITs (cosmetic /
+non-material — P3-class) only.** Any open material finding (P0 / P1 / P2-class) from ANY of the
+three blocks the merge.
 
-The `pre_accept_verifying_hash` input below already covers the JS-relevant tracked inputs
-(`package.json` / the lockfile / the TS sources), so the receipt binds the JS gate exactly as it binds the
-Rust gate — a stale receipt fails the hash match whether the intervening change was Rust or JS.
+Staleness is handled by git, not by a hash receipt: branch protection re-requires approval on new
+commits / requires the branch to be up to date with the target before merge, so a review of an
+older branch state does not authorize a merge of a newer one. There is no
+`pre_accept_verifying_hash`, no persisted `review_receipts`, and no `gate_receipts` — the merge
+gate (green CI + required approvals + up-to-date branch) IS the accept gate. This is pinned as a
+PROCESS rule (the branch-protection configuration), recorded by
+`typeinfo_block_accept_requires_review_land_verdict` (§11.12 — reframed to the merge gate, no
+receipt).
 
-The gate-pass precondition is satisfied in exactly ONE of two ways: (a) `accept` itself RUNS the full
-workspace gate inline (the complete Rust + JS gate above) and proceeds only on green;
-OR (b) `accept` CONSUMES a durable GATE RECEIPT artifact bound to `{ block_id, lease_id,
-workspace_gate_input_hash: { pre_accept_verifying_hash, post_accept_lifted_hash }, command set, success }`,
-where:
+### 11.4 Squash-merge lands the block atomically
 
-- `pre_accept_verifying_hash` covers the FULL gated input the gate ran against, with the block's manifest
-  rows in their `Verifying` form: the workspace tracked source/tests/protos/config/lockfiles, PLUS the
-  manifest rows-as-`Verifying` + `EXPECTED_TOTAL_IGNORED_COUNT`, the source-`#[ignore]` state, the
-  `block_id`, the `lease_id`, the command set, and the toolchain/config fingerprint; and
-- `post_accept_lifted_hash` covers the DETERMINISTIC post-`accept` state: the SAME full input with ONLY the
-  block's rows transitioned `Verifying → Lifted` (no count change — the count left the `Ignored` set at
-  `prepare-verify`), and `success = true`.
+The branch's WIP series is squash-merged into EXACTLY ONE commit on the target branch — that
+squash-merge is the atomic landing edge. The target branch therefore receives EXACTLY ONE commit
+per landed block: a LOW landing-commit count, a HIGH WIP count during the work. The single squash
+commit carries a machine-readable trailer:
 
-Distinct from both is a third, CONTENT-ONLY operand persisted at the SAME `accept` point:
+```
+Typeinfo-Block: <block-id>
+```
 
-- `post_accept_lifted_tree_hash` is a deterministic CANONICAL PROJECTED CONTENT HASH over the post-`accept`
-  tracked tree with the `.cutover-state*` orchestration-cursor family EXCLUDED — a blake3 over the sorted
-  tracked-blob set (path + blob content) of every tracked file EXCEPT the `.cutover-state` file and any
-  tracked sibling cursor artifact (`.cutover-state.lock`, journal/WAL siblings — the `.cutover-state*`
-  family). It is NOT a whole-worktree tree id (such an id WOULD include `.cutover-state`).
-  It carries NONE of the gated-input metadata. It is computed and persisted at `accept` ALONGSIDE
-  `post_accept_lifted_hash`, and is DISTINCT from it: `post_accept_lifted_hash` is the whole-gated-input
-  hash (workspace content PLUS `block_id` / `lease_id` / command set / toolchain-config fingerprint /
-  `success` / the manifest rows-as-`Lifted`) and is the §11.3 accept-recheck operand UNCHANGED;
-  `post_accept_lifted_tree_hash` is the content-only operand the §11.11 land-commit comparison targets,
-  because the canonical projection (tracked content minus the `.cutover-state*` cursor) can NEVER equal the
-  whole-gated-input hash.
+Content integrity is provided by git + branch protection — the squash commit's tree IS the
+reviewed, CI-green branch content, and branch protection forbids force-pushing a different tree
+past the gate. There is NO `post_accept_lifted_tree_hash`, no `post_accept_lifted_hash`, and no
+content-hash binding to recompute: the merge gate guarantees the merged tree is the gated tree.
+Pinned by `typeinfo_block_lands_as_single_squashed_commit` (§11.11 — exactly one target-branch
+commit per block carrying the `Typeinfo-Block:` trailer; the tree-hash binding is dropped).
 
-  The `.cutover-state*` exclusion has TWO independent justifications. (a) **It avoids a cryptographic fixed
-  point.** `.cutover-state` is a TRACKED file, and `accept` writes the `post_accept_lifted_tree_hash` itself
-  (plus the `landed_blocks` token, the `land_records` entry, and the lease release) INTO `.cutover-state`. A
-  hash that included `.cutover-state` would have to equal a tree that contains its own value — unsatisfiable
-  — so excluding the cursor family lets those accept-time writes be persisted without self-reference. (b)
-  **It is the SEMANTICALLY correct content binding.** The workspace gate (§11.3) ran on the AUTHORED content
-  — the block's source / tests / docs plus the manifest rows — while `.cutover-state`'s `landed_blocks` /
-  `land_records` / lease-release fields are written by `accept` AFTER the gate and were NEVER part of the
-  gated input. They must therefore NOT enter the content-binding operand; binding only the authored content
-  is exactly what the land commit should be pinned to.
+### 11.5 Git is the transaction log; branch protection is the accept gate; `git revert` is rollback
 
-Under `.cutover-state.lock`, `accept`'s precondition recheck (1) RECOMPUTES the pre-accept input hash over
-the LIVE gated input (rows still `Verifying`) and verifies it EQUALS the receipt's `pre_accept_verifying_hash`;
-(2) verifies the receipt EXISTS and its binding MATCHES (same `block_id` + `lease_id` as the lease being
-accepted); (3) APPLIES ONLY the deterministic `Verifying → Lifted` transition; and (4) recomputes the
-resulting state's input hash and verifies it EQUALS `post_accept_lifted_hash`. A STALE receipt — produced
-before ANY gated-input content change, or from a different block, or a different lease — fails the
-`pre_accept_verifying_hash` match; a non-deterministic / tampered post-state fails the
-`post_accept_lifted_hash` match. WITHOUT a present, bound, success-true receipt whose recomputed
-`pre_accept_verifying_hash` matches the live `Verifying` input AND whose `post_accept_lifted_hash` equals the
-deterministic post-`accept` state (and absent the inline-gate option), `accept` REFUSES.
+"Done" for a block is derivable from git + the manifest, with NO tracked cursor, NO WAL, NO lease,
+NO revision CAS, and NO receipts. A block is **done** iff ALL of:
 
-**Status-sensitive-guard equivalence.** The two-hash receipt is SOUND — gating the `Verifying` state proves
-the `Lifted` state — ONLY if every proof/guard check the gate evaluates on a `Verifying` row is EQUIVALENT to
-what it would evaluate on that row's soon-to-be `Lifted` form. Any STATUS-SENSITIVE guard or proof check (one
-whose result depends on `IgnoreStatus`) MUST, while the block is `Verifying` under the gate, treat a
-`Verifying { block_id, lease_id }` row as its post-accept `Lifted { block_id }` form for that check — e.g.
-`lifted_row_executes_declared_proof` (the row's generated wrapper runs its declared proof while `Verifying`,
-exactly as once `Lifted`), `landed_typeinfo_blocks_have_required_guards_and_workspace_gate` (the block's
-required/Critical-rule guards present and passing during the gate), and the row-test wrapper itself. The
-deterministic `Verifying → Lifted` transition `accept` applies is then the ONLY difference between the gated
-state (`pre_accept_verifying_hash`) and the accepted state (`post_accept_lifted_hash`), and that difference
-does not change any proof/guard outcome. Status-INSENSITIVE checks are unaffected.
+1. its squash commit (carrying the `Typeinfo-Block: <block-id>` trailer) is MERGED into the target
+   branch, AND
+2. every row in its row-set is `Lifted` in the manifest, AND
+3. its `TYPEINFO_PARITY_BLOCKS.required_guards` / the Critical-rule guards (R6) for any new
+   `(CRITICAL)` rule the block introduces are PRESENT (registered and passing in the default suite).
 
-The guard is **`workspace_gate_passes_before_typeinfo_block_acceptance`**: `accept` either ran the full gate
-inline on green, or consumed a durable receipt EXISTING and BOUND to the pair, with the recomputed
-`pre_accept_verifying_hash` matching, applying ONLY the deterministic transition, then matching
-`post_accept_lifted_hash` — and the gate's status-sensitive checks treating a `Verifying` row as its post-accept
-`Lifted` form. A receipt produced before an intervening Rust/TS/proto/test/package/config/lockfile (or
-manifest/source-`#[ignore]`) change recomputes to a non-matching `pre_accept_verifying_hash` and does NOT
-authorize the accept. A lifecycle that flips rows to `Lifted` / appends the landed token without a present,
-bound, success-true receipt (and without an inline green gate), or that applies more than the deterministic
-transition before checking `post_accept_lifted_hash`, or that evaluates a status-sensitive check on a
-`Verifying` row as not-yet-`Lifted`, FAILS.
+The merged trailer (part 1) and the `Lifted` rows (part 2) move together because the branch
+couples them and the squash-merge lands them atomically — there is no rows-`Lifted`-but-not-landed
+intermediate on the target branch (that state only ever exists on the unmerged branch). **Rollback
+is `git revert`** of the block's squash commit: because the branch coupled the code, the
+`#[ignore]` removals, and the row/count edits, one revert restores all of them in a single commit.
+This is the same predicate the landed-agreement check and prereq derivation read (§14).
 
-### 11.4 Every intermediate on-disk state is non-done
-
-Because the artifacts are written as ordered per-file temp-renames, the lease keep/release order and write
-order make every mid-transaction state observably non-done (done is gated on the final `accept` `.cutover-state`
-write).
-
-### 11.5 The lease lifecycle
-
-Dispatch / heartbeat / adopt / clear, with the precise four-clause staleness predicate (LANDED OR
-MANIFEST-COMPLETE OR EXPIRED/ADOPTED OR CLEARED), never "any newer revision." A lease is STALE iff: (a) its
-block id is already in `[typeinfo_parity].landed_blocks` (LANDED — i.e. `accept`ed); (b) its block's manifest
-rows are all `Lifted` (MANIFEST-COMPLETE — a `Verifying` block is NOT manifest-complete); (c) it is EXPIRED
-(`now_unix > expiry_unix` with no fresher heartbeat) OR has been explicitly ADOPTED (its `lease_id` / `owner_id`
-no longer match the original holder after a CAS-adoption write); or (d) it has been explicitly CLEARED (an
-explicit release / `abort` removed the `active_blocks` entry). A lease is NOT stale merely because
-`acquired_revision < revision`: unrelated parallel writes bump `revision` without making a live, heartbeated,
-unaccepted lease old. A lease whose block is `Verifying` under that same live holder is a LIVE in-flight cursor,
-NOT stale. `acquired_revision` is recency/CAS metadata, never the staleness oracle.
-
-### 11.6 The crash-recoverable PENDING-TRANSACTION JOURNAL (WAL), reconcile-on-read
-
-Snapshot isolation only protects readers from mid-transaction temp-renames while the lock is HELD — it does NOT
-cover a writer DYING mid-transaction (e.g. `accept` leaving rows `Lifted` with no landed token / an unreleased
-lease). A crashed `accept` can leave rows `Lifted` but no `landed_blocks` token / an unreleased lease; a crashed
-`prepare-verify` can leave the `#[ignore]`s removed / rows `Verifying` but the count or lease half-written; a
-crashed `abort` can leave a half-restored state — all states the four-part done predicate correctly reads as NOT
-done, but for which the contract must give a recovery path.
-
-The end-state rule is a DURABLE PENDING-TRANSACTION JOURNAL (a write-ahead log) under `[typeinfo_parity]`: BEFORE
-any phase renames its artifacts, the xtask WRITES a journal entry recording (i) the PHASE (`prepare-verify` /
-`accept` / `abort`), (ii) the BLOCK ID, (iii) the LEASE ID, (iv) the BEFORE snapshot hash and the AFTER snapshot
-hash (the intended post-commit state's hash), and (v) the INTENDED ARTIFACT TRANSITIONS (the exact `.cutover-state`
-/ manifest-row+count / source-`#[ignore]` edits the phase will apply); the entry is CLEARED only after the phase's
-FINAL done-edge write commits, so a present entry means a transaction was interrupted mid-flight.
-
-Recovery is folded into snapshot isolation: EVERY under-lock observation MUST, as its FIRST under-lock act,
-RECONCILE the pending journal — for any present entry it either (a) COMPLETES a valid partially-applied `accept` by
-re-applying the intended remaining transitions to reach the recorded AFTER state, but ONLY when a matching gate
-receipt is present (its `pre_accept_verifying_hash` matching the recorded pre-accept state AND its
-`post_accept_lifted_hash` matching the completion target) AND the on-disk state matches the recorded BEFORE hash, OR
-(b) ROLLS BACK to the recorded previous (BEFORE) state when completion is not valid (no matching receipt, a
-BEFORE-hash mismatch, or a `prepare-verify`/`abort` interruption), restoring the artifacts and clearing the entry.
-Only AFTER reconciliation leaves a clean, whole, committed snapshot does the observation read its decision. This
-makes a crashed writer's stranded state RECOVERABLE-OR-REJECTED before any prereq/dispatch/eligibility decision ever
-reads it. Pinned by **`pending_typeinfo_transactions_reconciled_before_eligibility`** and the extended landed-agreement
-guard **`cutover_state_landed_blocks_match_typeinfo_manifest`** (which reconciles the journal before reading agreement).
-
-### 11.7 The 4-part done predicate
-
-Because `accept` writes the manifest rows `Lifted` BEFORE it appends the `landed_blocks` token / releases the lease
-(the rows-`Lifted`-but-token-absent in-transaction window), "rows all `Lifted`" ALONE is NOT a sufficient
-done/prereq-satisfied test. A block is "done" / its prerequisite is "satisfied", EVALUATED ON THE UNDER-LOCK WHOLE
-SNAPSHOT, iff ALL of:
-
-1. every row in its row-set is `Lifted`, AND
-2. the block's `landed_blocks` token is PRESENT in `.cutover-state.typeinfo_parity.landed_blocks`, AND
-3. there is NO live active lease for that block in `.cutover-state.typeinfo_parity.active_blocks` (no in-flight
-   `accept`/`abort`/verification still holds it — a `Verifying`-under-live-lease block is never done), AND
-4. the block's `TYPEINFO_PARITY_BLOCKS.required_guards` / the Critical-rule guards (R6) for any new `(CRITICAL)` rule
-   the block introduces are PRESENT (registered and passing in the default suite).
-
-A TOKEN-ABSENT state, a LIVE-LEASE state, or a GUARD-ABSENT state is NOT done. Row status ALONE is not sufficient;
-neither is the token alone. This is the SAME predicate the landed-agreement guard
-(`cutover_state_landed_blocks_match_typeinfo_manifest`) and prereq derivation
-(`typeinfo_block_prereqs_derive_from_manifest_status`) read, reconciled to one definition. It is well-defined precisely
-because the observer reads rows + token + lease as ONE under-lock snapshot (§11.1).
-
-### 11.8 The named guards
-
-The transaction contract is pinned by:
-`typeinfo_state_snapshots_are_locked_and_precondition_checked`,
-`typeinfo_block_prereqs_derive_from_manifest_status`,
-`typeinfo_block_prereqs_ignore_verifying_blocks`,
-`verifying_typeinfo_block_lease_blocks_dependents`,
-`workspace_gate_passes_before_typeinfo_block_acceptance`,
-`landed_typeinfo_blocks_have_required_guards_and_workspace_gate`,
-`cutover_state_landed_blocks_match_typeinfo_manifest` (extended to reconcile the pending journal before reading
-agreement),
-`pending_typeinfo_transactions_reconciled_before_eligibility`,
-`cutover_state_typeinfo_writes_are_locked_and_cas`,
-`parallel_typeinfo_block_landing_preserves_all_tokens`,
-`resume_rejects_stale_typeinfo_block_lease`,
-`no_vacuous_parent_u_block_landing`,
-`zero_row_blocks_land_exactly_once`,
-`typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_prereqs` (the block prerequisite DAG is acyclic and both key-prerequisite-consistent AND mechanism-prerequisite-consistent —
-see below),
-`typeinfo_block_lands_as_single_squashed_commit` (§11.11 — each landed block contributes exactly one mainline commit; the WIP
-series is squashed at `accept`), and
-`typeinfo_block_accept_requires_review_land_verdict` (§11.12 — `accept` requires a present, bound review receipt recording a
-LAND / NITs-only verdict from all three panel reviewers, 1 Claude Code + 2 codex, whose recomputed `pre_accept_verifying_hash`
-matches).
+The block prerequisite DAG is pinned by
+**`typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_prereqs`**, which is
+ALSO part of the CI gate (§11.2). It is the block prerequisite DAG acyclicity + key-prerequisite
++ mechanism-prerequisite consistency guard described next.
 
 `typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_prereqs`
 (lives in `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs`, which U0
@@ -2410,28 +3373,86 @@ is why `U2.CLASS_SURFACES` / `U2.JSX_FOUNDATIONS` (which precede U6 and must NOT
 depend on it) consume `ResolveCall` neither directly nor through any owned row, and
 why the genuine `ResolveCall`-consuming rows are owned by U6 blocks. Second, the
 fi08-class deadlock (checks 2–3): `flow_invalidations_fi08_asserts_narrows_dotted_member_path`
-is a `U6.NARROWING`-substrate row whose dominant mechanism is the
+is a `FlowNarrowing`-substrate row (its sibling `flow_invalidations` narrowing rows live
+in `U6.NARROW_INVALIDATION`) whose dominant mechanism is the
 `PredicateAssertion.assertion_effect_dotted_member_path` engine owned by
-`U6.PREDICATE_ASSERTION`; under a keys-only model the row could sit in `U6.NARROWING`
+`U6.PREDICATE_ASSERTION`; under a keys-only model the row could sit in a narrowing
+sub-block (`U6.NARROW_INVALIDATION` by its `flow_invalidations` substrate)
 while consuming `U6.PREDICATE_ASSERTION`'s assertion engine even though
-`U6.PREDICATE_ASSERTION` is not a prerequisite of `U6.NARROWING` (the actual edge is the reverse) —
+`U6.PREDICATE_ASSERTION` is not a prerequisite of any `U6.NARROW_*` sub-block (the actual edge is the reverse) —
 a latent mechanism deadlock. The mechanism model FAILS this (check 2: the row's
-dominant-mechanism owner `U6.PREDICATE_ASSERTION` ≠ a `U6.NARROWING` `block_id`),
+dominant-mechanism owner `U6.PREDICATE_ASSERTION` ≠ a `U6.NARROW_*` sub-block `block_id`),
 forcing the row's `block_id` to `U6.PREDICATE_ASSERTION`, where it correctly consumes
-the `FlowNarrowing.frame` mechanism that `U6.NARROWING` — its declared prerequisite —
-produces (check 3 holds, no cycle).
+the `FlowNarrowing.frame` mechanism that the `U6.NARROW_*` sub-blocks — its declared prerequisites —
+produce (check 3 holds, no cycle).
 
-The exact BYTE-LEVEL locking + atomic-rename + CAS IMPLEMENTATION (the file-lock primitive on the stable sibling
-`.cutover-state.lock`, the temp-write-then-rename per artifact, the `revision` compare-and-swap, the receipt
-persistence/binding to the input-hash PAIR, the pending-transaction journal write/reconcile/clear protocol, and the
-write-order proof) is REALIZED and VERIFIED in the owning implementation block (U0) UNDER these named guards. Snapshot
-isolation + the WAL pending-transaction journal (reconcile-on-every-observation) + the input-hash-bound gate receipt +
-the four-part done predicate together constitute a COMPLETE crash-safe transaction — even a mid-transaction crash is
-recoverable-or-rejected, and any deviation surfaces as a guard failure rather than an unspecified gap.
+### 11.6 Why git/CI replaces the transaction substrate
+
+There is no byte-level locking, atomic-rename, CAS, write-ahead log, or receipt-persistence
+protocol to realize: git's commit DAG, branch protection, the CI gate, and `git revert` ALREADY
+provide an atomic, crash-safe, rollback-capable landing boundary. A crashed agent leaves an
+unmerged branch (or an unmerged PR), never a torn tracked cursor — the target branch only ever
+moves by a gated, atomic squash-merge, so there is no half-applied state to reconcile and no
+mid-transaction window for a reader to observe. This is strictly SAFER than the retired tracked
+`.cutover-state.typeinfo_parity` cursor: that cursor was a versioned file the landing protocol
+itself rewrote, which forced a cryptographic-fixed-point exclusion (`.cutover-state*` excluded
+from its own content hash), a paired-hash gate receipt to survive the `Verifying → Lifted`
+re-hash, and a WAL to recover a writer that died mid-rewrite. Git has none of those problems
+because the log is not a tracked file the protocol mutates in place — it IS the history.
+
+### 11.7 The done predicate (git + manifest)
+
+A block is "done" / its prerequisite is "satisfied" iff the three-part predicate of §11.5 holds:
+its squash commit (with the `Typeinfo-Block:` trailer) is MERGED, every row in its row-set is
+`Lifted`, and its required / Critical-rule guards are present and passing. There is no token, no
+lease, and no under-lock snapshot to read: the merged trailer + the manifest row state + the
+guard suite are the whole predicate, and they are mutually consistent by construction because the
+branch couples them and the squash-merge lands them atomically. This is the SAME predicate the
+landed-agreement check (the manifest agrees with the merged `Typeinfo-Block:` trailers) and
+prereq derivation (§14) read.
+
+### 11.8 The named guards
+
+The landing protocol is pinned by:
+`block_rows_cannot_lift_without_complete_coverage` (§10.4 — a branch flipping rows `Lifted`
+without complete coverage fails CI),
+`landed_typeinfo_blocks_have_required_guards` (a landed block's required / Critical-rule guards
+are present and passing — the §11.5 done-predicate part 3),
+`no_vacuous_parent_u_block_landing` (§11.9),
+`zero_row_blocks_land_exactly_once` (§11.10),
+`typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_prereqs` (the block
+prerequisite DAG is acyclic and both key-prerequisite-consistent AND mechanism-prerequisite-consistent —
+above),
+`typeinfo_block_lands_as_single_squashed_commit` (§11.11 — each landed block contributes exactly
+one target-branch commit carrying the `Typeinfo-Block:` trailer), and
+`typeinfo_block_accept_requires_review_land_verdict` (§11.12 — the merge gate requires the
+three-reviewer LAND / NITs-only verdict from all three panel reviewers, 1 Claude Code + 2 codex).
+
+All of these guards run in the CI gate (§11.2). There are no `.cutover-state`/lease/CAS/WAL/receipt
+guards — the retired transaction substrate's guards
+(`typeinfo_state_snapshots_are_locked_and_precondition_checked`,
+`pending_typeinfo_transactions_reconciled_before_eligibility`,
+`cutover_state_typeinfo_writes_are_locked_and_cas`,
+`parallel_typeinfo_block_landing_preserves_all_tokens`,
+`resume_rejects_stale_typeinfo_block_lease`,
+`cutover_state_typeinfo_namespace_isolated_from_legacy_cutover_tokens`,
+`legacy_cutover_completion_preserves_typeinfo_namespace_when_active`,
+`cutover_state_landed_blocks_match_typeinfo_manifest`,
+`typeinfo_block_prereqs_derive_from_manifest_status`,
+`typeinfo_block_prereqs_ignore_verifying_blocks`,
+`verifying_typeinfo_block_lease_blocks_dependents`,
+`workspace_gate_passes_before_typeinfo_block_acceptance`) are DELETED with the substrate they
+pinned. The `workspace_gate_passes_before_typeinfo_block_acceptance` intent — "the full gate
+passed before the block landed" — is now the CI gate itself (§11.2): a branch cannot merge on red
+CI, so a merged block is gate-passed by construction.
+
+`typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_prereqs` is the keystone
+guard above; it is part of the CI gate and lives in
+`crates/verter_session/tests/typeinfo_ignored_test_manifest.rs` (U0-owned).
 
 ### 11.9 Parent / aggregate U-block tokens (no vacuous parent landing)
 
-A parent U-block token (e.g. `U2`) is an AGGREGATE over its child blocks (e.g. `U2.RELATION_INFER`, `U2.UTILITY`, …);
+A parent U-block token (e.g. `U2`) is an AGGREGATE over its child blocks (e.g. `U2.RELATION_INFER`, `U2.UTILITIES`, …);
 it does NOT own manifest rows directly. The naive "every landed block's rows are all `Lifted`" rule is UNSOUND for such
 a token: a parent that owns zero manifest rows directly satisfies "all its rows are `Lifted`" VACUOUSLY. The end state
 is ONE of (either is acceptable; the requirement is that a parent token is never vacuously satisfiable):
@@ -2452,421 +3473,228 @@ Some real child blocks own ZERO manifest rows: `U0.MANIFEST_SUBSTRATE`,
 substrate / wire / projection surfaces, not row lifts. A purely row-status
 eligibility predicate is ill-defined for them — "all its rows are `Lifted`" is
 VACUOUSLY true, so a cold agent could neither unambiguously SELECT them nor avoid
-RE-selecting an already-done one. Their lifecycle is therefore TOKEN/done-predicate
-driven, not row-status driven:
+RE-selecting an already-done one. Their lifecycle is therefore MERGED-TRAILER /
+done-predicate driven, not row-status driven:
 
-- **Eligible** iff the block is NOT done by the four-part done predicate (§11.7),
-  AND its `.cutover-state.typeinfo_parity.landed_blocks` token is ABSENT, AND its
-  block-ID prereqs are landed (by the same done predicate). A zero-row block's done
-  predicate collapses to predicate parts 2–4 (token present, no live lease, required
-  guards present), since part 1 (rows `Lifted`) is vacuously satisfied.
-- **`prepare-verify`** records the lease + phase with NO row-status transitions and
-  NO `EXPECTED_TOTAL_IGNORED_COUNT` change (it owns no rows).
-- **`accept`** appends the `landed_blocks` token ONLY AFTER the block's required
-  guards + the `{pre,post}` input-hash-PAIR gate receipt pass — the token append /
-  lease release is the LAST observable done-edge, exactly as for row-owning blocks.
+- **Eligible** iff the block is NOT done by the §11.5 done predicate — i.e. its
+  squash commit carrying the `Typeinfo-Block:` trailer is NOT yet merged into the
+  target branch — AND its block-ID prereqs are merged (by the same predicate). A
+  zero-row block's done predicate collapses to predicate parts 1 + 3 (its
+  `Typeinfo-Block:` trailer merged, its required guards present), since part 2 (rows
+  `Lifted`) is vacuously satisfied.
+- **Its branch** makes only the substrate/wire/projection code changes, with NO
+  row-status transition, NO `EXPECTED_TOTAL_IGNORED_COUNT` change, and NO source
+  `#[ignore]` edit (it owns no rows). It still carries a `Typeinfo-Block: <block-id>`
+  trailer on its squash commit, gated by the same CI + three-reviewer LAND.
+- **It lands** when its branch merges (one squash commit, trailer present) — the
+  merged trailer is the done-edge, exactly as for row-owning blocks.
 
 The "next actionable block" selector COMPOSES two predicates so a cold agent always
 has an unambiguous next block: the row-status predicate (for row-owning blocks) AND
-this token/done-predicate predicate (for zero-row blocks). A zero-row block lands
-EXACTLY ONCE, is never skipped, and is never re-selected once its token is present.
-Pinned by **`zero_row_blocks_land_exactly_once`** — asserts every zero-row block
-lands exactly once (token appended exactly once, after guards + receipt), is never
-skipped, and is never re-selected after its token is present.
+this merged-trailer/done-predicate predicate (for zero-row blocks). A zero-row block
+lands EXACTLY ONCE, is never skipped, and is never re-selected once its
+`Typeinfo-Block:` trailer is merged. Pinned by **`zero_row_blocks_land_exactly_once`**
+— asserts every zero-row block lands exactly once (its `Typeinfo-Block:` trailer
+appears on exactly one merged target-branch commit, after CI + LAND), is never
+skipped, and is never re-selected after its trailer is merged.
 
-### 11.11 Git commit history — WIP series → squash → one land commit at `accept`
+### 11.11 Git commit history — WIP series → squash-merge → one commit per block
 
-The two-phase transaction (§11.2) is the ledger/cutover-state axis of acceptance.
-This subsection is the GIT-HISTORY projection of that same acceptance — a SEPARATE
-axis from the xtask transaction, not a replacement for it. It governs how many
-commits mainline (`refactor/semantic-db-overhaul`) receives per landed block.
+This subsection governs how many commits the target branch
+(`refactor/semantic-db-overhaul`) receives per landed block.
 
-- **During block implementation the owning agent commits FREELY as a WIP series.**
-  A HIGH WIP commit count is expected and encouraged (per-fix commits aid crash
-  recovery — a fix-agent's partial work survives an API failure cleanly). **WIP
-  commits do NOT run the full workspace gate.** Per `CLAUDE.md`'s Stub-Prevention
-  WIP exemption, the in-flight WIP series MAY carry `todo!()` / placeholder /
-  empty-test intermediate states — they are scratch states on the way to the landed
-  commit, exactly the case the WIP exemption permits.
-- **When the block is implementation-complete, the full workspace gate runs ONCE**
-  (§11.3 / §14 resume step 8) — the complete Rust **AND** JavaScript gate — and any
-  failure is fixed (with more WIP commits, re-running the gate after the fixes).
-- **The WIP series is squashed into EXACTLY ONE land commit per landed block**,
-  created at the `accept` done-edge — the squash is the git-history projection of
-  the `accept` phase. Mainline therefore receives EXACTLY ONE commit per landed
-  block: a LOW landing-commit count, a HIGH WIP count during the work. The single
-  land commit may be created only AFTER both the green gate receipt (§11.3) and the
-  three-reviewer LAND verdict (§11.12) authorize the `accept` — the squash never
-  precedes the LAND authorization.
-- **The land commit is CONTENT- and IDENTITY-bound to the accept receipt** — the
-  git-history axis is hash-bound exactly as the cutover-state axis is (§11.3), so no
-  stray post-review / post-gate tracked change can ride in the land commit and the
-  guard can never degrade to manual history inspection:
-  - **Machine-readable land-commit trailer.** The single squashed mainline land
-    commit carries a trailer binding it to the accepted state:
-    `Typeinfo-Block: <block_id>`, `Typeinfo-Lease: <lease_id>`,
-    `Pre-Accept-Verifying-Hash: <pre_accept_verifying_hash>` — the SAME hash the gate
-    receipt (§11.3) and the review-LAND receipt (§11.12) bind to. The trailer is
-    NON-CIRCULAR: its three values are COPIED from the accept receipt recorded at
-    `accept`, not recomputed from the land commit itself.
-  - **Content binding.** The canonical projection of the land commit's tracked tree —
-    the same blake3 over the sorted tracked-blob set with the `.cutover-state*`
-    orchestration-cursor family EXCLUDED (§13.1) — EQUALS the accepted
-    `post_accept_lifted_tree_hash`, the content-only operand recorded at `accept` over
-    the exact authorized post-`accept` AUTHORED content (rows `Verifying → Lifted`, no
-    count change). This is the CONTENT-ONLY canonical projection, NOT the
-    whole-gated-input `post_accept_lifted_hash` (the projection can never equal that —
-    §11.3); the full-input `post_accept_lifted_hash` keeps its §11.3 role as the `accept`
-    precondition recheck of the whole gated state. The `.cutover-state*` cursor is
-    excluded on BOTH sides because it is accept-mutated bookkeeping written AFTER the gate
-    (the `landed_blocks` token / `land_records` / lease release / the stored hash itself)
-    and was never part of the gated AUTHORED input. A clean index is required at squash /
-    `accept`; any land commit whose canonical projection DIVERGES from
-    `post_accept_lifted_tree_hash` (stray authored files, post-gate edits, a dirty index
-    in the AUTHORED content) is REJECTED — while `.cutover-state`'s own accept-writes are
-    correctly outside the comparison.
-  - **Land-record persistence.** The trailer source (`block_id` / `lease_id` /
-    `pre_accept_verifying_hash`) plus the content-only `post_accept_lifted_tree_hash`
-    is persisted in the §13.1 `[typeinfo_parity]` state at `accept`, so the token ↔
-    commit mapping is machine-checkable, not a prose intent.
-- **Disambiguation from §13.2.** §13.2's "There is NO single `land` command" refers
-  to the **cutover-state xtask**: acceptance is the two-phase `prepare-verify` →
-  gate → `accept` transaction, NOT a one-shot xtask `land` subcommand. The **land
-  COMMIT** here is a DIFFERENT axis — the git-history artifact produced by squashing
-  the WIP series at the `accept` phase. The two never contradict: "one land commit
-  (git)" is produced by the `accept` phase; there is still no one-shot `land` xtask
-  subcommand. The xtask transaction decides WHEN acceptance is valid; the squash is
-  HOW that acceptance shows up in mainline git history.
+- **During block implementation the owning agent commits FREELY as a WIP series on
+  the block's branch.** A HIGH WIP commit count is expected and encouraged (per-fix
+  commits aid crash recovery — a fix-agent's partial work survives an API failure
+  cleanly). **WIP commits do NOT run the full workspace gate.** Per `CLAUDE.md`'s
+  Stub-Prevention WIP exemption, the in-flight WIP series MAY carry `todo!()` /
+  placeholder / empty-test intermediate states — they are scratch states on the way
+  to the merge, exactly the case the WIP exemption permits.
+- **CI runs the full workspace gate on the branch** (§11.2) — the complete Rust
+  **AND** JavaScript gate plus the coverage/proof gates, required guards, and the
+  block-DAG guard — and any failure is fixed (with more WIP commits, re-running CI
+  after the fixes). Green CI is necessary to merge.
+- **The WIP series is squash-merged into EXACTLY ONE commit per landed block** on the
+  target branch — that squash-merge is the atomic landing edge. The target branch
+  therefore receives EXACTLY ONE commit per landed block: a LOW landing-commit count,
+  a HIGH WIP count during the work. The squash-merge may happen only AFTER green CI
+  (§11.2) AND the three-reviewer LAND verdict (§11.12) — branch protection enforces
+  both as merge preconditions, so the merge never precedes the LAND authorization.
+- **The squash commit carries a machine-readable trailer** binding it to the block:
+  `Typeinfo-Block: <block_id>`. That single trailer is the whole binding — there is
+  NO `Typeinfo-Lease`, NO `Pre-Accept-Verifying-Hash`, and NO content-hash trailer.
+  Content integrity comes from git + branch protection: the squash commit's tree IS
+  the reviewed, CI-green branch content, and branch protection forbids force-pushing a
+  different tree past the gate. There is no `post_accept_lifted_tree_hash` / canonical
+  projected content hash to recompute and compare — the merge gate guarantees the
+  merged tree is the gated tree, so a stray post-review tracked change cannot ride in
+  the merge without re-triggering CI + re-required approval.
 
-Pinned by **`typeinfo_block_lands_as_single_squashed_commit`** — maps each
-`.cutover-state.typeinfo_parity.landed_blocks` token to EXACTLY ONE mainline
-(`refactor/semantic-db-overhaul`) commit carrying the matching land-commit trailer
-(`Typeinfo-Block` / `Typeinfo-Lease` / `Pre-Accept-Verifying-Hash` equal to the
-accept-receipt values) AND a canonical tracked-tree projection equal to the accepted
-content-only `post_accept_lifted_tree_hash`. The guard computes the SAME canonical
-projection over the land commit that `accept` recorded — the blake3 over the sorted
-tracked-blob set with the `.cutover-state*` orchestration-cursor family EXCLUDED (NOT
-a whole-worktree tree id, and NOT the whole-gated-input
-`post_accept_lifted_hash`, which the projection can never equal — §11.3) — and compares
-it to the stored value. The token ↔ commit relation is a BIJECTION: the guard REJECTS
-zero commits for a token, more than one commit for a token, a commit with a missing /
-mismatched trailer, a content-divergent commit (canonical projection ≠
-`post_accept_lifted_tree_hash`, i.e. stray authored files / post-gate edits / a dirty
-index in the AUTHORED content at squash), or a squash performed before the gate +
-review-LAND authorization. Because both sides exclude the `.cutover-state*` cursor, the
-accept-time writes into `.cutover-state` (`landed_blocks` / `land_records` / lease
-release / the stored hash itself) are correctly OUTSIDE the comparison — the projection
-binds only the gated AUTHORED content, so the guard is satisfiable rather than chasing a
-cryptographic fixed point. The comparison is NON-CIRCULAR: the trailer and hash values
-are COPIED from the receipt recorded at `accept`, not recomputed from the commit itself.
-Because the trailer source is persisted in the §13.1 `[typeinfo_parity]` state at
-`accept`, the mapping is machine-checkable, not a manual history inspection.
+Pinned by **`typeinfo_block_lands_as_single_squashed_commit`** — asserts each landed
+block's `Typeinfo-Block: <block_id>` trailer appears on EXACTLY ONE target-branch
+(`refactor/semantic-db-overhaul`) commit. The block ↔ commit relation is a BIJECTION:
+the guard REJECTS zero commits carrying a block's trailer, more than one commit
+carrying it, or a commit with a missing / malformed trailer. The TREE-HASH binding is
+DROPPED — the guard checks only the one-commit-per-block + `Typeinfo-Block:` trailer
+property; git + branch protection provide content integrity (the retired
+`Pre-Accept-Verifying-Hash` / `post_accept_lifted_tree_hash` / canonical-projection
+comparison is gone, along with the cryptographic-fixed-point exclusion it required).
+The mapping is machine-checkable from git history alone (the trailer set on the target
+branch), not a prose intent and not a manual inspection.
 
-### 11.12 Review-LAND verdict gate (three-reviewer panel before `accept`)
+### 11.12 Review-LAND verdict gate (three-reviewer panel before merge)
 
-`accept` must be authorized by reviewers who say to LAND, not by the workspace gate
-alone. This is a SECOND `accept` precondition alongside the workspace-gate receipt
-(§11.3), bound to the SAME gated input so a stale review can never authorize a land.
+A branch merges only when reviewers say to LAND, not by green CI alone. This is a
+branch-protection **required-approval** rule — a PROCESS rule enforced by the merge
+gate, NOT a persisted hash-bound receipt.
 
 The review panel is EXACTLY THREE reviewers — **1 Claude Code reviewer + 2 codex
 reviewers** — each adversarial / bad-mood, every reviewer holding a
 **best-architecture-no-compromises mandate**: breaking changes are ALLOWED and
 DESIRED; the goal is the best architecture / solution possible, never the easiest or
-least-breaking path. Each reviewer evaluates the block's implementation against the
-SAME `Verifying`-state gated input the workspace gate ran against.
+least-breaking path. Each reviewer evaluates the block's branch (its `Lifted`-state
+diff against the target branch).
 
-`accept` REFUSES unless, IN ADDITION to the green workspace-gate receipt (§11.3), a
-durable **review-LAND verdict receipt** is present and bound to
-`{ block_id, lease_id, pre_accept_verifying_hash }`, recording a verdict from ALL
-THREE panel reviewers. The LAND bar is: **all three return LAND, OR all residual
+The branch CANNOT merge unless, IN ADDITION to green CI (§11.2), all three panel
+reviewers return LAND. The LAND bar is: **all three return LAND, OR all residual
 findings are NITs (cosmetic / non-material — P3-class) only.** Any open material
-finding (P0 / P1 / P2-class) from ANY of the three blocks the land.
+finding (P0 / P1 / P2-class) from ANY of the three blocks the merge.
 
-- The review is evaluated against the same `Verifying`-state gated input the
-  workspace gate ran against; a review produced before any intervening
-  tracked-content change recomputes to a non-matching `pre_accept_verifying_hash`
-  and does NOT authorize the accept (exactly the staleness rule §11.3 uses for the
-  gate receipt — the JS-relevant tracked inputs are covered by that same hash, so a
-  JS-only change also invalidates a stale review).
-- A non-LAND verdict from any reviewer, a missing reviewer, an open material
-  finding, or a verdict bound to a different `block_id` / `lease_id` / hash →
-  `accept` REFUSES.
-- The verdict receipt is persisted by the `review-receipt <block-id>` xtask step
-  (§13.2), mirroring `gate-receipt`: it records the panel composition (1 Claude Code
-  + 2 codex), each reviewer's verdict, and that all residuals are NITs-only, bound to
-  the input-hash pair, only after all three return LAND / NITs-only. `accept`
-  consumes BOTH the gate receipt AND this three-reviewer review-LAND receipt.
+- Staleness is handled by git, not a hash receipt: branch protection re-requires
+  approval on new commits and requires the branch to be up to date with the target
+  before merge, so a review of an older branch state cannot authorize a merge of a
+  newer one (covering Rust AND JS changes equally — any new commit, of any kind,
+  re-triggers CI and re-required approval).
+- A non-LAND verdict from any reviewer, a missing reviewer, or an open material
+  finding → the merge is BLOCKED.
+- There is NO persisted `review_receipts` artifact, NO `pre_accept_verifying_hash`,
+  and NO `xtask review-receipt` step. The verdict lives in the PR / branch-protection
+  required-approval record; the merge gate (green CI + required approvals + up-to-date
+  branch) IS the accept gate.
 
-The §11.7 four-part done predicate is unchanged (done = rows `Lifted` + token + no
-live lease + guards present). The review-LAND verdict and the workspace gate are
-`accept` PRECONDITIONS, not done-predicate parts: the `accept` phase cannot fire — so
-the `landed_blocks` token never appears — until BOTH receipts are present and bound.
-The done predicate is NOT weakened; it simply can never observe a `Lifted` /
-token-present state that was not authorized by both receipts.
+The §11.5 done predicate is unchanged (done = merged `Typeinfo-Block:` trailer + rows
+`Lifted` + guards present). The review-LAND verdict and green CI are MERGE
+preconditions, not done-predicate parts: the squash-merge cannot fire — so the
+`Typeinfo-Block:` trailer never appears on the target branch — until both hold. The
+done predicate is NOT weakened; it simply can never observe a merged block that was
+not authorized by green CI + the three-reviewer LAND.
 
-Pinned by **`typeinfo_block_accept_requires_review_land_verdict`** — `accept`
-requires a present, bound review receipt recording a LAND / NITs-only verdict from
-all three panel reviewers (1 Claude Code + 2 codex), whose recomputed
-`pre_accept_verifying_hash` matches the live `Verifying` input; no land on any
-reviewer's non-LAND verdict, any open material (P0/P1/P2-class) finding, a missing
-reviewer, or a stale / mis-bound receipt.
+Pinned by **`typeinfo_block_accept_requires_review_land_verdict`** — a PROCESS rule
+recording that the merge gate requires the three-reviewer LAND / NITs-only verdict
+from all three panel reviewers (1 Claude Code + 2 codex), enforced as a
+branch-protection required-approval rule; no merge on any reviewer's non-LAND verdict,
+any open material (P0/P1/P2-class) finding, or a missing reviewer. The persisted-receipt
+binding is DROPPED — git branch protection (required approvals + up-to-date branch)
+provides staleness protection without a hash-bound receipt.
 
 ## 12. No-skip guarantee
 
 A skipped block is mechanically visible in three ways: its rows remain `Ignored`, its tests remain ignored or red, and
-dependent block prereq guards fail. If someone removes an ignore without changing the row, the bijection guard fails. If
-someone changes the row without removing the ignore, the count guard fails. `EXPECTED_TOTAL_IGNORED_COUNT` is ALWAYS
-exactly `count(status == Ignored)` (never frozen): `prepare-verify` sets it in the SAME locked transaction that strips
-the `#[ignore]`s and flips the rows to `Verifying`, `accept` makes no further count change, and `abort` restores it — so
-the count guard stays green while the gate runs on `Verifying` rows. If someone marks a block landed while rows remain
-`Ignored`, `no_landed_typeinfo_block_has_live_ignored_rows` fails. If someone lands a parent/aggregate U-block token while
-any child block's rows remain `Ignored` — including the vacuous zero-row case — `no_vacuous_parent_u_block_landing` fails.
+dependent-block prereq guards fail. If someone removes an ignore without flipping the row to `Lifted`, the bijection guard
+fails. If someone flips the row without removing the ignore, the count guard fails. `EXPECTED_TOTAL_IGNORED_COUNT` is ALWAYS
+exactly `count(status == Ignored)` (never frozen): the block's branch sets it in the SAME branch that strips the
+`#[ignore]`s and flips the rows `Ignored → Lifted` (§10.5), so the count/bijection guards stay green at the branch tip and
+the post-merge target tip, and CI runs the full gate against that `Lifted` state. If someone flips a row to `Lifted`
+without coverage, `block_rows_cannot_lift_without_complete_coverage` fails CI. If someone marks a block landed while rows
+remain `Ignored`, the landed-agreement check (the manifest must agree with the merged `Typeinfo-Block:` trailers) fails. If
+someone lands a parent/aggregate U-block while any child block's rows remain `Ignored` — including the vacuous zero-row case
+— `no_vacuous_parent_u_block_landing` fails.
 
-Block acceptance is a TWO-PHASE commit, NOT land-then-revert, and each phase is a LOCKED STATE TRANSACTION, NOT a single
-multi-file atomic rename (§11.2). Prerequisite checks and parent-completion treat `Verifying` rows as NOT done, so a
-dependent block can never start on — and thus never observes as accepted — a block that has only been prepared-for-
-verification (`typeinfo_block_prereqs_ignore_verifying_blocks`, `verifying_typeinfo_block_lease_blocks_dependents`);
-`accept` runs strictly after a green workspace gate (`workspace_gate_passes_before_typeinfo_block_acceptance`); and "done"
-requires both `Lifted` rows AND the block's required / Critical-rule guards present
-(`landed_typeinfo_blocks_have_required_guards_and_workspace_gate`) — never row status alone. Because blocks may land in
-PARALLEL under the multi-agent / handoff model, a concurrent `accept` can no longer silently lose a landed token or clobber
-another agent's in-flight cursor: every typeinfo `.cutover-state` write is locked (on the stable sibling lockfile, never the
-atomically-replaced state file) + atomic-rename + `revision`-CAS over an `active_blocks` lease map
-(`cutover_state_typeinfo_writes_are_locked_and_cas`, `parallel_typeinfo_block_landing_preserves_all_tokens`,
-`resume_rejects_stale_typeinfo_block_lease`).
+The landing boundary is git/CI itself (§11), not a land-then-revert dance: a block's incomplete state lives only on its
+unmerged branch, and the target branch moves only by a gated, atomic squash-merge. Prerequisite checks and parent-completion
+read merged `Typeinfo-Block:` trailers + `Lifted` rows (§11.5 / §14), so a dependent block can never start on — and thus
+never observes as landed — a block whose branch has not yet merged. The CI gate runs the full workspace gate on every
+branch (§11.2), so a merged block is gate-passed by construction; and "done" requires the merged trailer AND the block's
+required / Critical-rule guards present (`landed_typeinfo_blocks_have_required_guards`) — never row status alone. Because
+blocks land through independent branches + the merge queue (already serialized + atomic), two concurrent landings cannot
+clobber each other or lose a landing: each is its own squash-merge, and `git revert` of a block's squash commit is the
+rollback. No tracked cursor, lease, or CAS is involved — git's history is the transaction log.
 
-## 13. The `.cutover-state` `[typeinfo_parity]` namespace
+## 13. No tracked orchestration cursor
 
-`.cutover-state` remains the execution cursor, but the typeinfo-parity cutover tokens are NAMESPACED and isolated from the
-legacy top-level cutover tokens. The typeinfo block tokens live under `.cutover-state.typeinfo_parity.landed_blocks`, NOT
-in the top-level `landed_blocks` / `active_block` keys. Namespacing (not migrating or resetting the legacy tokens) is a
-required U0 deliverable: the legacy top-level tokens keep their existing meaning untouched, and every typeinfo guard / xtask
-/ resume read targets only the `typeinfo_parity` namespace. The manifest is semantic progress; `.cutover-state.typeinfo_parity`
-is in-flight orchestration state; they must agree before a block is accepted, enforced by named guards.
+There is NO `.cutover-state.typeinfo_parity` namespace, no tracked-cursor TOML schema, no
+namespaced xtask, and no crash-recovery machinery. The typeinfo-parity landing protocol does NOT
+write any tracked orchestration file: git history is the transaction log, branch protection is the
+accept gate, and `git revert` is rollback (§11). Concretely, none of the following exists in this
+architecture:
 
-The typeinfo-parity execution state is PARALLEL-SAFE (multiple agents may execute different blocks concurrently). A single
-`active_block` scalar plus read-modify-write landing is not safe: two agents landing different blocks (or one dispatching
-while another lands) can clobber the cursor or LOSE a landed token. The `[typeinfo_parity]` section therefore carries a
-`revision` counter (bumped on every write) and an `active_blocks` MAP keyed by block id (each entry a full LEASE, supporting
-MULTIPLE concurrently-active blocks), NOT a single scalar. Every typeinfo write goes through `xtask cutover-state typeinfo …`,
-which serializes concurrent writers with file locking, publishes atomically via atomic rename, and applies a CAS on `revision`.
+- a tracked `[typeinfo_parity]` block in `.cutover-state` (no `revision` CAS counter, no
+  `active_blocks` lease map, no `landed_blocks` token list, no `gate_receipts` / `review_receipts`
+  / `land_records` / `pending_transactions` subtables);
+- a namespaced `xtask cutover-state typeinfo {dispatch,heartbeat,adopt,prepare-verify,gate-receipt,review-receipt,accept,abort}`
+  surface;
+- a write-ahead log / pending-transaction journal, a stable-sibling lockfile, a paired input-hash
+  gate receipt, a persisted three-reviewer review receipt, or a `post_accept_lifted_tree_hash`
+  content-projection.
 
-### 13.1 TOML schema (both namespaces in one file)
+A landed block is identified by its merged `Typeinfo-Block: <block-id>` trailer plus its `Lifted`
+manifest rows (§11.5) — derivable from git + the manifest, with no separate tracked cursor to keep
+in sync, lock, CAS, or reconcile. The LEGACY top-level `.cutover-state` cutover cursor (the
+separate, broader-plan execution cursor with its own `active_block` / `landed_blocks` keys) is
+UNRELATED to this architecture and is untouched: the typeinfo-parity landing protocol neither reads
+nor writes it.
 
-The top-level legacy keys keep their single `active_block` / `landed_blocks`; the `[typeinfo_parity]` section is parallel-safe.
+## 14. Resume protocol (git + manifest)
 
-```toml
-active_block = ""
-landed_blocks = [...]   # legacy tokens, e.g. "0", "1.6", "6.i"
+The resume protocol is GIT- and MANIFEST-DRIVEN and PARALLEL-SAFE (multiple agents may run it
+concurrently via independent branches). A fresh agent determines what's next from git + the
+manifest alone — no tracked cursor, no lease adoption, no staleness predicate, no WAL reconcile.
 
-[typeinfo_parity]
-revision = 0            # monotonically increasing CAS token; bumped on every typeinfo write
-landed_blocks = []      # typeinfo parity block IDs, e.g. "U2.RELATION_INFER"
-
-# active_blocks is a MAP keyed by block id (NOT a single active_block scalar):
-# multiple blocks may be concurrently active. Each entry is a full LEASE.
-[typeinfo_parity.active_blocks."U2.RELATION_INFER"]
-lease_id = "01J…ULID"   # unique per lease acquisition (fresh ULID/UUID each dispatch)
-owner_id = "agent-7"    # the agent/process that holds the lease
-acquired_revision = 0   # the `revision` value at which this lease was acquired
-heartbeat_unix = 0      # last heartbeat (wall-clock unix seconds); refreshed while alive
-expiry_unix = 0         # EXPIRED if now_unix > expiry_unix with no fresher heartbeat (heartbeat_unix + lease_ttl)
-
-# Durable GATE RECEIPT: gate-receipt persists this on green; accept consumes it as its gate-pass
-# precondition (recomputing pre-accept Verifying hash, applying only the deterministic Verifying->Lifted
-# transition, verifying post-accept Lifted hash, all under the lock), or refuses. Bound to the PAIR.
-[typeinfo_parity.gate_receipts."U2.RELATION_INFER"]
-block_id = "U2.RELATION_INFER"
-lease_id = "01J…ULID"              # must match the lease being accepted
-[typeinfo_parity.gate_receipts."U2.RELATION_INFER".workspace_gate_input_hash]
-pre_accept_verifying_hash = "blake3:…"  # full gated input with rows in their VERIFYING form
-post_accept_lifted_hash = "blake3:…"    # deterministic post-accept state (rows Verifying->Lifted, no count change)
-command_set = ["cargo test --workspace --tests --verbose", "cargo clippy --workspace -- -D warnings", "cargo fmt --all --check", "pnpm test", "pnpm install --frozen-lockfile"]
-success = true                      # accept refuses unless success == true (BOTH the Rust AND the JS gate green) and BOTH paired hashes match
-
-# Durable REVIEW-LAND VERDICT RECEIPT: review-receipt persists this on an all-LAND / NITs-only verdict; accept
-# consumes it as its SECOND precondition (alongside the gate receipt), bound to the SAME pre_accept_verifying_hash
-# so a stale review cannot authorize a land. Panel is EXACTLY three: 1 Claude Code + 2 codex, all bad-mood,
-# best-architecture-no-compromises / breaking-changes-allowed mandate.
-[typeinfo_parity.review_receipts."U2.RELATION_INFER"]
-block_id = "U2.RELATION_INFER"
-lease_id = "01J…ULID"                       # must match the lease being accepted
-pre_accept_verifying_hash = "blake3:…"      # same gated input the workspace gate ran against (covers JS-relevant inputs)
-panel = ["claude-code", "codex", "codex"]   # EXACTLY 1 Claude Code + 2 codex
-verdicts = ["LAND", "LAND", "LAND"]         # all three LAND, OR all residual findings are NITs-only (P3-class)
-residuals_nits_only = true                  # any open material (P0/P1/P2-class) finding from ANY reviewer blocks the land
-# accept refuses unless all three reviewers returned LAND/NITs-only, residuals_nits_only == true, and the
-# recomputed pre_accept_verifying_hash matches the live Verifying input.
-
-# Durable LAND RECORD: accept persists this so the single squashed mainline land commit is content/identity
-# bound to the accepted state (§11.11). It is the trailer source the git-history guard reads — the values are
-# COPIED from the gate/review receipts at accept (non-circular), so the token <-> commit bijection is
-# machine-checkable, not a prose intent.
-[typeinfo_parity.land_records."U2.RELATION_INFER"]
-block_id = "U2.RELATION_INFER"
-lease_id = "01J…ULID"                       # Typeinfo-Lease trailer value
-pre_accept_verifying_hash = "blake3:…"      # Typeinfo-Block/Pre-Accept-Verifying-Hash trailer value (same hash the gate + review receipts bind to)
-post_accept_lifted_hash = "blake3:…"        # whole-gated-input hash; the §11.3 accept-recheck operand (copied from the gate receipt) — NOT the content-projection comparison target
-post_accept_lifted_tree_hash = "blake3:…"   # content-only CANONICAL PROJECTED CONTENT hash over the post-accept tracked tree MINUS the .cutover-state* cursor family (NOT a whole-worktree tree id); the land commit's same projection MUST equal THIS (§11.11)
-
-# Durable PENDING-TRANSACTION JOURNAL / WAL: each phase writes its entry BEFORE renaming any artifact
-# and clears it only after the phase's final done-edge write commits. Every under-lock observation
-# reconciles a present entry FIRST — completing a valid partial accept (matching receipt + matching
-# before_hash) or rolling back to before_hash.
-[typeinfo_parity.pending_transactions."U2.RELATION_INFER"]
-phase = "accept"                    # "prepare-verify" | "accept" | "abort"
-block_id = "U2.RELATION_INFER"
-lease_id = "01J…ULID"
-before_hash = "blake3:…"           # whole under-lock snapshot BEFORE the transaction (the roll-back target)
-after_hash = "blake3:…"            # intended whole under-lock snapshot AFTER commit (the completion target)
-intended_transitions = ["rows U2.RELATION_INFER Verifying->Lifted", "landed_blocks += U2.RELATION_INFER", "release lease U2.RELATION_INFER"]
-```
-
-### 13.2 Namespaced xtask command (two-phase acceptance)
-
-Typeinfo orchestration uses an explicit namespaced subcommand — `xtask cutover-state typeinfo dispatch <block-id>`,
-`heartbeat <block-id>`, `adopt <block-id>`, `prepare-verify <block-id>`, `gate-receipt <block-id>`,
-`review-receipt <block-id>`, `accept <block-id>`, and
-`abort <block-id>` — reading and writing ONLY the `[typeinfo_parity]` section's FULL subtable set —
-`revision` / `active_blocks` / `landed_blocks` / `gate_receipts` / `review_receipts` / `land_records` /
-`pending_transactions` (and the block's manifest row status / expected count). `dispatch` ACQUIRES a lease (minting a fresh `lease_id`, recording
-`owner_id` / `acquired_revision` / `heartbeat_unix` / `expiry_unix`); `heartbeat` REFRESHES the holder's heartbeat; `adopt`
-takes over an EXPIRED lease by replacing its `lease_id` + `owner_id` (only when expired, under the CAS). `gate-receipt` RUNS
-the full workspace gate (the complete Rust **AND** JavaScript gate — `cargo test --workspace --tests --verbose`,
-`cargo clippy --workspace -- -D warnings`, `cargo fmt --all --check`, `pnpm test`, `pnpm install --frozen-lockfile` — green only
-when BOTH pass) for the `Verifying` block and, on green, PERSISTS the durable receipt bound to the input-hash PAIR (whose
-`pre_accept_verifying_hash` covers the JS-relevant tracked inputs too, so the receipt binds the JS gate). `review-receipt` RUNS the
-three-reviewer LAND panel (§11.12) and, on an all-LAND / NITs-only verdict, PERSISTS the durable review-LAND receipt bound to the
-same input-hash pair. `accept` consumes BOTH receipts (or runs the gate inline plus consumes the review-LAND receipt) and PERSISTS the
-`land_records` entry — its trailer fields (`block_id` / `lease_id` / `pre_accept_verifying_hash`) COPIED from the gate + review receipts, plus the
-content-only `post_accept_lifted_tree_hash` (the canonical projection over the tracked tree MINUS the `.cutover-state*` cursor family — §11.11) — BEFORE the final observable done-edge (the `landed_blocks` append + lease release), so the single
-squashed land commit is content/identity bound to the accepted AUTHORED state (§11.11). The legacy `xtask cutover-state land <block-id>` / `dispatch <block-id>`
-commands (the top-level cutover) continue to touch ONLY the top-level keys and are unaffected.
-
-There is NO single `land` command and NO compensating-revert-after-land path: acceptance is `prepare-verify` → gate →
-`accept`/`abort`. Each phase is a LOCKED, CRASH-RECOVERABLE STATE TRANSACTION (under `.cutover-state.lock`; under-lock
-snapshot + precondition recheck that FIRST reconciles any pending journal entry; each phase WRITING its journal entry before
-renaming any artifact and CLEARING it after the final done-edge write; each artifact written by its own temp-rename; the
-`.cutover-state` write `revision`-CAS-guarded; the lease keep/release + file-write order chosen so every intermediate is
-non-done).
-
-### 13.3 Locking, whole-file round-trip, and legacy-deletion lifecycle
-
-- **Locked (STABLE SIBLING lockfile), atomic per-file, CAS-guarded writes.** Every typeinfo write MUST take a file lock on
-  `.cutover-state.lock` — NEVER on `.cutover-state` itself (the state file is atomically REPLACED on every write, so a lock on
-  its inode is silently dropped at the rename and serializes nothing). The `.cutover-state` write publishes atomically via
-  atomic rename and applies a CAS on `[typeinfo_parity].revision` (read, compute, commit only if unchanged, bump, retry on
-  miss). The accompanying manifest-row transitions and source-`#[ignore]` edits are written as their OWN sibling temp-renames
-  within the SAME locked transaction, ordered so the `.cutover-state` `landed_blocks`/lease write is the LAST, observable
-  done-edge. Pinned by `cutover_state_typeinfo_writes_are_locked_and_cas` and `parallel_typeinfo_block_landing_preserves_all_tokens`.
-- **Precise staleness predicate (NOT "any newer revision").** The four-clause predicate of §11.5. Pinned by
-  `resume_rejects_stale_typeinfo_block_lease`.
-- **Whole-file round-trip.** The xtask must round-trip the ENTIRE file (preserve BOTH namespaces on every write); a write
-  through either command must leave the other namespace byte-faithful.
-- **Legacy guards stay structural on top-level keys.** The existing legacy `.cutover-state` guards parse the top-level
-  `active_block` / `landed_blocks` STRUCTURALLY (not by whole-file text-scan) and IGNORE the `[typeinfo_parity]` section
-  entirely, so the new namespace is invisible to them.
-- **Legacy-deletion lifecycle.** Because the typeinfo-parity tokens share the SAME file under `[typeinfo_parity]`, legacy
-  completion must NOT delete the file while `[typeinfo_parity]` is active or non-empty. Legacy completion may CLEAR/RETIRE only
-  the TOP-LEVEL state; it MUST leave the `[typeinfo_parity]` section byte-faithful and MUST NOT delete the file while
-  `.typeinfo_parity.active_blocks` is non-empty or `.typeinfo_parity.landed_blocks` is non-empty. The file may be DELETED only
-  when BOTH namespaces are retired/empty. Symmetrically, retiring the typeinfo namespace never deletes the file while the legacy
-  top-level state is live. Pinned by `legacy_cutover_completion_preserves_typeinfo_namespace_when_active`.
-
-### 13.4 Namespace / parallel-safety / two-phase guards
-
-Beyond the transaction-contract guards (§11.8), the namespace and parallel-safety surface is enforced by:
-**`cutover_state_typeinfo_namespace_isolated_from_legacy_cutover_tokens`** (typeinfo tokens live only under
-`.cutover-state.typeinfo_parity`, never the legacy top-level keys; the two token spaces stay disjoint) and
-**`legacy_cutover_completion_preserves_typeinfo_namespace_when_active`**.
-
-## 14. Resume protocol (lease-based, parallel-safe)
-
-The resume protocol is LEASE-BASED and PARALLEL-SAFE (multiple agents may run it concurrently). A fresh agent:
-
-1. Read `semantic-db-overhaul-unified-remaining-plan.md`, `native-typeinfo-parity.md`, and the `.cutover-state.typeinfo_parity`
-   namespace (its `revision`, `active_blocks` map, and `landed_blocks`).
+1. Read `semantic-db-overhaul-unified-remaining-plan.md` and `native-typeinfo-parity.md`. Read the
+   manifest (`status` of each `IgnoredTestRow`), the merged `Typeinfo-Block:` trailers on the
+   target branch, and the block prereq DAG (`TYPEINFO_PARITY_BLOCKS.prereqs`).
 2. Run the manifest guard test first.
-3. Take `.cutover-state.lock` and inspect `active_blocks` (a MAP, not a single cursor) AS PART OF THE UNDER-LOCK WHOLE
-   SNAPSHOT (rows + token + lease + source-`#[ignore]` state read together — §11.1). For each lease, decide LIVE vs STALE by
-   the four-clause predicate (§11.5), NOT "any newer revision". Resume a LIVE lease this agent owns idempotently, or ADOPT an
-   EXPIRED one via `xtask cutover-state typeinfo adopt <block-id>`; do NOT blindly resume a stale lease and do NOT adopt a
-   still-live lease held by another agent.
-4. Otherwise — still under the lock, reading the same whole snapshot — choose the first eligible `TYPEINFO_PARITY_BLOCKS`
-   block by the COMPOSED selector §11.10 defines (so both kinds of block have an unambiguous next-actionable). A block is
-   eligible iff its prereqs are DONE by the four-part predicate (§11.7) AND it has no LIVE lease held by another agent
-   (including a lease whose block is mid-`Verifying`), AND:
-   - for a **row-owning block** — its own rows still have `status == Ignored`; OR
-   - for a **zero-row block (§11.10)** (`U0.MANIFEST_SUBSTRATE`, `U2.QUERY_VALUE_DOMAIN`, `U8.WIRE_SURFACE_CLOSURE`,
-     `U12.EXPORTER`, `U13.PROJECTION`) — it is NOT done by the four-part predicate (§11.7) AND its
-     `.cutover-state.typeinfo_parity.landed_blocks` token is ABSENT (a zero-row block owns no rows, so its eligibility is
-     token/done-predicate driven, never row-status driven).
+3. **Next-actionable selection (replaces lease adoption).** Compute the done set from git + the
+   manifest: a block is DONE iff its `Typeinfo-Block:` trailer is merged into the target branch AND
+   its rows are `Lifted` AND its required guards pass (§11.5 / §11.7). Then pick the FIRST block
+   whose prereqs are all DONE and whose own state is still un-landed, by the COMPOSED selector
+   §11.10 defines:
+   - for a **row-owning block** — its own rows still have `status == Ignored` (its
+     `Typeinfo-Block:` trailer not yet merged); OR
+   - for a **zero-row block (§11.10)** (`U0.MANIFEST_SUBSTRATE`, `U2.QUERY_VALUE_DOMAIN`,
+     `U8.WIRE_SURFACE_CLOSURE`, `U12.EXPORTER`, `U13.PROJECTION`) — its `Typeinfo-Block:` trailer is
+     NOT yet merged (a zero-row block owns no rows, so its eligibility is merged-trailer driven, not
+     row-status driven).
 
-   Then ACQUIRE its lease via `xtask cutover-state typeinfo dispatch <block-id>` (a locked, atomic-rename, `revision`-CAS
-   write). If the CAS loses to a concurrent agent, re-read and pick the next eligible block.
-5. Execute exactly that block contract (refreshing the lease via `xtask cutover-state typeinfo heartbeat <block-id>` while the
-   work is in flight).
-6. Dry-run the block's tests (the exact lifted-row proofs) to confirm they pass before committing anything — WITHOUT any source
-   `#[ignore]` edit: run them either via `cargo test … -- --ignored` (or the equivalent generated-wrapper invocation, which
-   executes the row's declared proof) so the still-`Ignored` rows execute WITHOUT removing their source `#[ignore]`s, OR defer
-   the proof run until AFTER `prepare-verify` strips them. There is NO "remove the `#[ignore]`s locally before `prepare-verify`"
-   step — source `#[ignore]` removal happens ONLY inside `prepare-verify`'s locked transaction. Do NOT yet `prepare-verify`,
-   `accept`, append a landed token, or change the count.
-7. PHASE 1 — `prepare-verify` as a LOCKED STATE TRANSACTION: takes `.cutover-state.lock`, re-reads `.cutover-state` + manifest +
-   source-`#[ignore]` state and revalidates preconditions (the lease live), then writes each artifact by temp-rename (the
-   `.cutover-state` write `revision`-CAS-guarded). The row work BRANCHES by block kind (§11.10):
-   - for a **row-owning block** — revalidate this block's rows `Ignored` with `#[ignore]`s present, then remove the exact source
-     `#[ignore]`s, flip this block's rows to `Verifying { block_id, lease_id }`, AND set `EXPECTED_TOTAL_IGNORED_COUNT =
-     count(status == Ignored)` (all in the SAME locked transaction), WITHOUT appending to `landed_blocks`;
-   - for a **zero-row block (§11.10)** — record ONLY the lease + phase, with NO row-status transition, NO
-     `EXPECTED_TOTAL_IGNORED_COUNT` change, and NO source-`#[ignore]` edit (it owns no rows), WITHOUT appending to `landed_blocks`.
+   Idempotency is "trailer already merged → skip": a block whose `Typeinfo-Block:` trailer is
+   already merged is DONE and is never re-selected. Parallelism is independent branches + the merge
+   queue (already serialized + atomic); two agents that pick the same block simply produce two
+   branches and the merge queue serializes the merge — no CAS, no lease.
+4. **Cut a branch for the chosen block** off the target branch (`refactor/semantic-db-overhaul`).
+   The branch is the unit of in-flight work; there is no "dispatch" / lease step.
+5. Execute exactly that block contract on the branch (committing a WIP series freely; §11.11).
+6. Dry-run the block's tests (the exact lifted-row proofs) to confirm they pass — either via
+   `cargo test … -- --ignored` (or the equivalent generated-wrapper invocation, which executes the
+   row's declared proof) BEFORE the branch strips the `#[ignore]`s, OR after the branch flips the
+   rows. The branch's `Lifted`-flip + `#[ignore]`-removal + count-decrement are one coupled edit on
+   the branch (§10.5 / §11.1).
+7. **Flip the block's rows on the branch.** The branch makes the code changes, removes the block's
+   exact source `#[ignore]`s, flips its rows `Ignored → Lifted`, and sets
+   `EXPECTED_TOTAL_IGNORED_COUNT = count(status == Ignored)` — all in the SAME branch (zero-row
+   blocks skip the row/`#[ignore]`/count edits and make only their substrate changes; §11.10). The
+   branch tip is count-consistent at every commit.
+8. **Push the branch; CI runs the full gate** (§11.2) — the complete Rust **AND** JavaScript gate
+   (`cargo test --workspace --tests`, `cargo clippy --workspace -- -D warnings`,
+   `cargo fmt --all --check`, `pnpm test`, `pnpm install --frozen-lockfile`) plus the coverage/proof
+   gates, the block's required guards, and the block-DAG guard — against the branch's `Lifted`
+   state. Green CI is the precondition. Fix any failure with more WIP commits and re-run CI. WIP
+   commits do not gate; CI on the branch does.
+9. **Three-reviewer LAND, then squash-merge** (§11.3 / §11.4 / §11.12): on green CI AND an all-LAND
+   / NITs-only verdict from all three panel reviewers (1 Claude Code + 2 codex) AND no unresolved
+   design fork (§14.1), squash-merge the branch into ONE target-branch commit carrying the
+   `Typeinfo-Block: <block-id>` trailer. Branch protection enforces green CI + required approvals +
+   up-to-date branch as merge preconditions, so the merge is the atomic landing edge. Rollback is
+   `git revert` of that squash commit (§10.5 / §11.5). Both row-owning and zero-row blocks land the
+   same way; "done" additionally requires the block's required / Critical-rule guards present and
+   passing (vacuously true for the row part of a zero-row block).
+10. **Parent U-block completion is derived, not landed (§11.9):** a parent is done when every row in
+    its UNION-of-child-rows row-set is `Lifted` (every child block's `Typeinfo-Block:` trailer
+    merged). A parent is NEVER landed while any child block's rows remain `Ignored`; if parent
+    tokens are derived-only, the parent becomes done automatically and is never independently landed.
 
-   Either branch KEEPS the lease LIVE. After it, the block is observable only as in-flight-verifying; prereqs/parent-completion
-   treat its `Verifying` rows (row-owning) — and, for a zero-row block, its still-absent `landed_blocks` token — as NOT done.
-   The gate (step 8) and `accept` (step 9) run for BOTH block kinds.
-8. Run the full workspace gate — the complete Rust **AND** JavaScript gate, green only when BOTH pass: Rust
-   (`cargo test --workspace --tests --verbose`, `cargo clippy --workspace -- -D warnings`, `cargo fmt --all --check`) and
-   JavaScript (`pnpm test`, `pnpm install --frozen-lockfile`) — WHILE the block is `Verifying` (the
-   `#[ignore]`s already removed; the gate's status-sensitive checks treat each `Verifying` row as its post-accept `Lifted` form —
-   §11.3) — via `xtask cutover-state typeinfo gate-receipt <block-id>`, which runs the gate and, on GREEN, PERSISTS the durable
-   receipt bound to the input-hash PAIR (whose `pre_accept_verifying_hash` covers the JS-relevant tracked inputs —
-   `package.json` / lockfile / TS sources — so the receipt binds the JS gate too). The gate runs strictly BETWEEN
-   `prepare-verify` and `accept` — never before `prepare-verify`, never skipped by `accept`. (Equivalently `accept` runs the gate
-   inline on green and skips the persisted receipt.) Then run the three-reviewer LAND panel (§11.12) via
-   `xtask cutover-state typeinfo review-receipt <block-id>`, persisting the durable review-LAND receipt bound to the same
-   input-hash pair; `accept` (step 9) consumes BOTH receipts. WIP commits made during the block do NOT run this gate — only the
-   block-done gate here does (§11.11).
-9. PHASE 2 — on a GREEN gate AND an all-LAND / NITs-only three-reviewer verdict (§11.12) AND no unresolved design fork (§14.1),
-   `accept` as a LOCKED, CRASH-RECOVERABLE STATE TRANSACTION: takes the lock, re-reads the artifacts — FIRST reconciling any
-   pending journal entry — and WRITES a `phase = "accept"` journal entry BEFORE renaming any artifact, then writes each artifact
-   by temp-rename (the `.cutover-state` write `revision`-CAS-guarded), with the `landed_blocks` append + lease release (the
-   observable done-edge) LAST. Both block kinds keep the gate receipt + the review-LAND receipt bound + the journal + the
-   done-edge-LAST ordering; the row work BRANCHES by block kind (§11.10):
-   - for a **row-owning block** — revalidate preconditions (rows `Verifying` under this lease AND the durable gate receipt
-     present + bound with the RECOMPUTED pre-accept `Verifying` hash MATCHING — or inline green gate — AND the durable review-LAND
-     receipt present + bound with its recomputed `pre_accept_verifying_hash` MATCHING, recording a LAND / NITs-only verdict from
-     all three panel reviewers), then write the rows `Verifying → Lifted` FIRST (the ONLY deterministic transition, no further
-     count change), VERIFY the resulting state's recomputed whole-input hash EQUALS `post_accept_lifted_hash`, then the
-     `landed_blocks` append + lease release LAST. On a RED gate, `abort` as a LOCKED STATE TRANSACTION instead: restores the
-     source `#[ignore]`s, restores the rows to `Ignored`, restores the count, and clears the lease — because the block was never
-     appended to `landed_blocks` and its rows were `Verifying` (never `Lifted`), no dependent could ever have observed it as
-     accepted.
-   - for a **zero-row block (§11.10)** (`U0.MANIFEST_SUBSTRATE`, `U2.QUERY_VALUE_DOMAIN`, `U8.WIRE_SURFACE_CLOSURE`,
-     `U12.EXPORTER`, `U13.PROJECTION`) — revalidate the live lease AND its `landed_blocks` token ABSENT AND its required /
-     Critical-rule guards present AND BOTH receipts (gate + review-LAND) present + bound with their recomputed
-     `pre_accept_verifying_hash` MATCHING — then perform NO row-status transition, NO `EXPECTED_TOTAL_IGNORED_COUNT` change, and
-     NO source-`#[ignore]` edit (it owns no rows) — then the `landed_blocks` append + lease release LAST. On a RED gate, `abort`
-     simply CLEARS the lease: there is no row / `#[ignore]` / count restore because none were touched.
-
-   "Done" additionally requires the block's required / Critical-rule guards present and passing, not row status alone (vacuously
-   true for the row part of a zero-row block).
-10. When all child blocks of a U-block are done — every row in the parent's UNION-of-child-rows row-set `Lifted` (no child row
-    left `Ignored` or `Verifying`) — land the parent U-block token (or, if parent tokens are derived-only, the parent becomes
-    done automatically and is never independently landed). A parent is NEVER landed while any child block's rows remain `Ignored`
-    OR `Verifying`.
-
-Re-running a partially done block is safe because the manifest tells which rows still need lifting and all cache/query changes
-are idempotent under the one-engine guards.
+Re-running a partially done block is safe because the manifest tells which rows still need lifting,
+the merged trailers tell which blocks are done, and all cache/query changes are idempotent under the
+one-engine guards.
 
 ### 14.1 Unforeseen-design-fork escalation (codex-architect decision gate)
 
@@ -2880,13 +3708,14 @@ invariant.
   No compromise / easy-path fallback is taken to move faster; the goal is the best architecture / solution possible.
 - **High confidence is required.** The decision is accepted ONLY when codex expresses **high confidence**. A low-confidence or
   hedged codex result is iterated — re-prompted with the specific doubt — until a confident best-architecture decision exists.
-- **Work does NOT continue until the fork is decided.** The block stays in its WIP / pre-`accept` state (no `prepare-verify`, no
-  gate, no `accept`, no land) until the fork is resolved. An unresolved design fork is an `accept`-blocking condition, DISTINCT
-  from the gate receipt (§11.3) and the three-reviewer review-LAND receipt (§11.12).
+- **Work does NOT continue until the fork is decided.** The block stays in its WIP / pre-merge state (the branch is not pushed
+  for CI/merge) until the fork is resolved. An unresolved design fork is a MERGE-blocking condition, DISTINCT from the CI gate
+  (§11.2) and the three-reviewer LAND (§11.12).
 - **The orchestrator drives this loop 100% autonomously.** Consistent with the §14 resume protocol, it never pauses for a human
   checkpoint on a fork it can route to codex; it routes, iterates to high confidence, then continues the block.
 - **Composition with §11.12.** codex deciding a fork ≠ the three-reviewer LAND panel. The fork decision happens DURING the block
-  (WIP state); the three-reviewer LAND panel happens at block-done, before `accept`. They are different stages of the same block.
+  (WIP state, on the branch); the three-reviewer LAND panel happens at block-done, before the squash-merge. They are different
+  stages of the same block.
 
 This rule introduces NO new `(CRITICAL)` code rule and NO new mechanical guard — it is an orchestration-process rule for the
 driving orchestrator, so it does not trip the R6 meta-guard (which requires a guard only for new `(CRITICAL)` code rules).
@@ -2950,10 +3779,11 @@ The real un-ignore sets must be **row-exact in the manifest**, not inferred from
 
 The guarantee over the 363 rows is the composition of: the two-table ledger (§10) with the exact-363 count + bijection (§10.5);
 the U0 row-exact capability→mechanism→proof coverage table (§10.4) that DEFINES completeness mechanically; the per-row executable
-`ProofRequirement` with the generated proof registry + row-test wrapper (§10.2, §10.3); the two-phase prepare-verify → gate →
-accept lifecycle with the input-hash-bound gate receipt (§11); the no-skip guarantee (§12); and the lease-based, parallel-safe
-resume protocol (§14). A block lifts only its exact manifest rows, can enter `Verifying` only after its coverage is complete +
-non-placeholder, and reaches `Lifted`/`landed_blocks` only after a green workspace gate over the exact accepted content — so the
+`ProofRequirement` with the generated proof registry + row-test wrapper (§10.2, §10.3); the git/CI landing protocol (§11) —
+branch per block → green CI (full Rust+JS gate + coverage/proof/required/DAG guards) → three-reviewer LAND → squash-merge with
+the `Typeinfo-Block:` trailer; the no-skip guarantee (§12); and the git/manifest-driven, parallel-safe resume protocol (§14). A
+block lifts only its exact manifest rows, its rows can flip `Lifted` only after its coverage is complete + non-placeholder, and
+it reaches `Lifted` + merged trailer only after a green CI gate over the exact branch content + the three-reviewer LAND — so the
 363-row parity is mechanically tracked from `Ignored` to `Lifted`, never skipped and never vacuously satisfied.
 
 ---
@@ -2998,6 +3828,7 @@ introduces lands with at least one named guard here.
 - `augmentation_keys_return_declaration_analysis_value`
 - `declaration_augmentation_facts_not_type_nodes`
 - `relate_query_value_carries_relation_proof_and_budget_state`
+- `reserved_checker_queries_are_non_live_typeinfo_does_not_whole_body_check` (the reserved `DiagnosticAnalysis(CheckResult)` arm + `Check*` query names are NON-LIVE — no live query maps to them, no `SemanticQueryKeySpec` row carries them — and no typeinfo query whole-body type-checks a region; owned at U2.QUERY_VALUE_DOMAIN, §3)
 
 ## Query keys — declaration augmentation (generalized)
 
@@ -3046,8 +3877,18 @@ introduces lands with at least one named guard here.
   `every_semantic_query_key_has_explicit_context_and_cross_context_warm_hit_guard`)
 - plus dispatch-completeness and schema-version guards for any public wire arm
 
-## Flow — peeker + cycle
+## Query keys — projection-demand / eval-policy lattice (query modes, §2.10)
 
+- `query_modes_are_presets_over_projection_demand_eval_policy`
+- `cache_satisfaction_is_demand_lattice_not_enum_order`
+- `skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode`
+
+## Flow — flow graph + demand planner + cycle
+
+- `flow_slice_is_graph_reachability_not_procedural_walk`
+- `function_flow_graph_built_once_per_function_skeleton`
+- `flow_graph_effect_edges_stay_live_past_value_writes`
+- `flow_slice_keys_on_body_sensitive_hash_not_parse_stable_hash` (the `FlowSliceHashNode` key + `FlowSlice` fact root on `flow_body_stable_hash`, body-sensitive / cosmetic-insensitive — `return { b: 1 }` vs `return { b: 2 }` hash differently; owned at U6.FLOW_RETURN_SUBSTRATE)
 - `flow_return_path_peeker_spread_override_skips_overwritten_sibling`
 - `flow_return_path_peeker_alias_return_projects_requested_member_only`
 - `flow_return_path_peeker_unknown_alias_mutation_degrades_path_not_whole_body`
@@ -3069,10 +3910,36 @@ introduces lands with at least one named guard here.
 - `relation_coinductive_scc_discharges_on_outgoing_obligations`
 - `relation_cycle_sentinel_is_never_warm_admitted`
 
-## Reducers — mapped optionality
+## Inference — checker transaction / session (PART 1 §4.2)
+
+- `inference_runs_in_checker_transaction_not_per_surface_matcher`
+- `only_completed_deterministic_sessions_are_admitted`
+- `inference_candidate_combination_matches_priority_and_variance`
+- `checker_reentry_graph_spans_flow_call_contextual_narrowing`
+- `cross_engine_cycle_discharge_admits_only_stable_deterministic_results` (per-domain SCC/fixed-point discharge — `FlowReturn`/`ResolveCall`/`ContextualTypeAt`; no transient assumption or cycle sentinel warm-admits; owned at U6.CALL_RESOLVE)
+- `variance_is_measured_by_marker_probe_fixed_point_not_assumed` (variance is computed by the SCC-aware marker-type-probe fixed-point and cached by declaration/env/TS-version; bivariant-method quirks in `RelationPolicy`; replaces any bare `variance_phase` stand-in; owned at U2.RELATION_INFER, PART 1 §4.0)
+- `reverse_mapped_inference_is_relation_owned_in_session` (reverse-mapped inference is a relation-owned `InferenceSession` pass — per-key recovery via binding-producing `Relate`, reassembled by final substitution — not a private reverse-mapping matcher; owned at U2.MAPPED_TEMPLATE + U2.RELATION_INFER, PART 1 §4.2)
+- `freshness_tracks_per_property_spread_taint` (fresh-object-literal excess checking is per-property with spread-taint propagation, in the session; not a whole-object freshness bit; owned at U2.RELATION_INFER, exercised at U6.VALUE_INFERENCE, PART 1 §4.2)
+
+## Fact cache — domains (fact-based-cache.md closed `FactDomain` set)
+
+- `program_analysis_fact_domain_validates_flow_slice` (the fourth closed `FactDomain::ProgramAnalysis` owns the `FlowSlice` fact; `StoreView::validates_program_analysis_domain` fails closed on missing/overflowed/stale/unrooted; owned at U3.CACHE_FACT_MODEL, produced at U6.FLOW_RETURN_SUBSTRATE)
+
+## Fact cache — multi-candidate substrate + env/fact dimensions (PART 1 §6.1; fact-based-cache.md)
+
+- `cache_candidate_cap_is_per_family_not_uniform` (the multi-candidate `FamilySlots` candidate cap is per-family via `candidate_cap()` — higher adaptive caps for `Relate`/`ResolveCall`/`Instantiate`/`Conditional`/`MappedType`/`FlowReturn`, small caps for content-light families; FAILS against a single uniform `FAMILY_SLOT_CANDIDATE_CAP`; owned at U3.CACHE_FACT_MODEL)
+- `family_eviction_prefers_invalid_then_lru_valid_hit` (slot-cap eviction evicts invalid candidates first, then least-recently valid-hit, NOT FIFO; the benched per-family fallback-count bound via `BenchResultRow` is asserted alongside; owned at U3.CACHE_FACT_MODEL)
+- `cache_keys_cover_ts_jsx_moduleresolution_decorator_lib_dimensions` (the split env hashes cover TS semantic version / JSX mode·import-source·factory / `moduleResolution` / package export-import conditions / `types`·`typeRoots` / lib set / decorator·class-field semantics / `useDefineForClassFields` / `customConditions`·`moduleSuffixes`, each in the env hash of the layer it affects under R21 — no bundled `project_config_hash`; owned at U3.CACHE_FACT_MODEL)
+- `instantiation_depth_policy_in_identity_and_facts` (the `InstantiationDepthPolicy` is part of the depth-sensitive query-identity caches' identity — folded into `type_env_hash` — AND validated against the recorded `ReadSetSignature.facts`; owned at U3.CACHE_FACT_MODEL)
+- `persistent_caches_never_admit_overlay_only_results` (overlay/session-scoped results populate the session cache only — never a base/persistent cache; overlay/session identity is session-cache identity only; owned at U3.CACHE_FACT_MODEL)
+
+## Reducers — mapped optionality / template / contextual / declaration-merge
 
 - `mapped_minus_optional_strips_only_optional_origin_undefined`
 - `mapped_minus_optional_preserves_explicit_undefined_on_required_property`
+- `template_literal_reduce_models_ts_numeric_bigint_lexing` (template-literal numeric/bigint `infer` matching uses TS lexical numeric/bigint semantics — hex/octal/binary/exponent/separator/`n`-suffix — oracle-pinned, not a Rust `parse`; owned at U2.MAPPED_TEMPLATE, PART 1 §4.3)
+- `this_type_contextual_object_literal_binding_in_contextual_type_at` (a `ThisType<T>` arm in an object literal's contextual target binds the method `this` to `T` through `ContextualTypeAt`, exposed as a `ProgramAnalysisGraph` contextual fact and never a `GraphTypeNode` member; owned at U6.CONTEXTUAL_CALLBACK, PART 1 §4.6)
+- `declaration_merge_records_binder_overload_augmentation_order_as_facts` (the merged-declaration / augmentation reducers order contributors by TS binder order + overload-group precedence + augmentation-contributor sequence and record that sequence as facts validated by `ReadSetSignature`; owned at U2.MODULE_AUGMENTATION, PART 1 §1.8)
 
 ## Performance budgets — non-admission
 
@@ -3080,6 +3947,13 @@ introduces lands with at least one named guard here.
 - `keyspace_budget_exceeded_admits_nothing`
 - `call_resolution_budget_exceeded_admits_nothing`
 - `apparent_type_budget_exceeded_admits_nothing`
+
+## Performance contract — perf hardening (PART 1 §6.2)
+
+- `flow_graph_build_is_shallow_interned_no_lowering_lazy_regions` (the `FunctionFlowGraph` build uses compact interned IDs, lowers NO type at build time — no `TypeExpr` lowering / `Relate` / `Instantiate` / import fact from graph construction — and materializes oversized-function regions lazily so build cost scales with the sliced regions, not the whole body; owned at U6.FLOW_RETURN_SUBSTRATE, PART 1 §5 + §6.2)
+- `cache_key_axes_are_minimal_and_normalized` (every context / substitution / demand / env axis on a query-identity key is benchmark-proven minimal + normalized — removing or denormalizing an axis either breaks a correctness fixture or leaves the benched hit rate unchanged; over-keying fragments slots, under-keying is stale; owned at U2.QUERY_VALUE_DOMAIN / U3.CACHE_FACT_MODEL, PART 1 §2.10 + §6.2)
+- `relation_negative_and_unknown_paths_are_fast` (the common not-assignable / no-match / unknown outcome is decided by the fast-reject discriminator path with a repeat served from the full-identity pair memo, both WITHOUT entering the coinductive-SCC / member-recursion machinery, and without allocating a proof / fact / session transaction; memo locality is benched; owned at U2.RELATION_INFER, PART 1 §4.1 + §6.2)
+- `architecture_minimizes_fallback_entry_not_fallback_cost` (the governing design rule: the tracked + perf-regression-gated metric is each family's fallback ENTRY count against its `BenchResultRow` bound, and the warm path is held O(validate); optimization targets fallback RATE — via warm-hit rate + minimal axes + cheap negative paths — not fallback latency; owned at U3.CACHE_FACT_MODEL + the U15 bench deliverable, PART 1 §6.2)
 
 ## JSX — existing-query resolution (no new keys)
 
@@ -3100,32 +3974,35 @@ introduces lands with at least one named guard here.
 - `lifted_row_executes_declared_proof`
 - `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`
 - `capability_rows_map_to_expected_query_fact_mechanisms`
+- `block_rows_cannot_lift_without_complete_coverage` (a branch flipping rows `Lifted` without complete coverage fails CI)
 - `ignored_test_row_table_holds_exactly_363_rows`
 - `additional_proof_row_table_holds_exactly_7_rows`
 - the source-`#[ignore]` ↔ `Ignored`-rows ↔ `EXPECTED_TOTAL_IGNORED_COUNT` bijection/count guards
 - `no_landed_typeinfo_block_has_live_ignored_rows`
 
-## Cutover / ledger — transaction contract + namespace / parallel-safety
+## Landing protocol — git/CI (§11)
 
-- `typeinfo_state_snapshots_are_locked_and_precondition_checked`
-- `pending_typeinfo_transactions_reconciled_before_eligibility`
-- `block_cannot_enter_verifying_without_complete_coverage`
-- `typeinfo_block_prereqs_derive_from_manifest_status`
-- `typeinfo_block_prereqs_ignore_verifying_blocks`
-- `verifying_typeinfo_block_lease_blocks_dependents`
-- `workspace_gate_passes_before_typeinfo_block_acceptance`
-- `landed_typeinfo_blocks_have_required_guards_and_workspace_gate`
-- `cutover_state_landed_blocks_match_typeinfo_manifest`
-- `no_vacuous_parent_u_block_landing`
-- `zero_row_blocks_land_exactly_once`
-- `typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_prereqs`
-- `typeinfo_block_lands_as_single_squashed_commit`
-- `typeinfo_block_accept_requires_review_land_verdict`
-- `cutover_state_typeinfo_writes_are_locked_and_cas`
-- `parallel_typeinfo_block_landing_preserves_all_tokens`
-- `resume_rejects_stale_typeinfo_block_lease`
-- `cutover_state_typeinfo_namespace_isolated_from_legacy_cutover_tokens`
-- `legacy_cutover_completion_preserves_typeinfo_namespace_when_active`
+All of these run in the CI gate (§11.2):
+
+- `landed_typeinfo_blocks_have_required_guards` (the §11.5 done-predicate guard part: a landed block's required / Critical-rule guards are present and passing)
+- `no_vacuous_parent_u_block_landing` (§11.9)
+- `zero_row_blocks_land_exactly_once` (§11.10 — exactly one merged target-branch commit carries each zero-row block's `Typeinfo-Block:` trailer)
+- `typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_prereqs` (§11.5)
+- `typeinfo_block_lands_as_single_squashed_commit` (§11.11 — exactly one target-branch commit per block carrying the `Typeinfo-Block:` trailer; the tree-hash binding is dropped)
+- `typeinfo_block_accept_requires_review_land_verdict` (§11.12 — PROCESS rule: the merge gate requires the three-reviewer LAND / NITs-only verdict, 1 Claude Code + 2 codex, enforced by branch-protection required approvals; the persisted-receipt binding is dropped)
+
+The retired tracked-cursor transaction guards — `typeinfo_state_snapshots_are_locked_and_precondition_checked`,
+`pending_typeinfo_transactions_reconciled_before_eligibility`, `block_cannot_enter_verifying_without_complete_coverage`
+(renamed to `block_rows_cannot_lift_without_complete_coverage`, above),
+`typeinfo_block_prereqs_derive_from_manifest_status`, `typeinfo_block_prereqs_ignore_verifying_blocks`,
+`verifying_typeinfo_block_lease_blocks_dependents`, `workspace_gate_passes_before_typeinfo_block_acceptance` (now the CI gate
+itself, §11.2), `landed_typeinfo_blocks_have_required_guards_and_workspace_gate` (the gate part folded into CI; renamed to
+`landed_typeinfo_blocks_have_required_guards`, above), `cutover_state_landed_blocks_match_typeinfo_manifest`,
+`cutover_state_typeinfo_writes_are_locked_and_cas`, `parallel_typeinfo_block_landing_preserves_all_tokens`,
+`resume_rejects_stale_typeinfo_block_lease`, `cutover_state_typeinfo_namespace_isolated_from_legacy_cutover_tokens`, and
+`legacy_cutover_completion_preserves_typeinfo_namespace_when_active` — are DELETED with the tracked
+`.cutover-state.typeinfo_parity` cursor they pinned (§13). Git history + branch protection + `git revert` provide the
+landing/accept/rollback boundary those guards used to police.
 
 ---
 
@@ -3137,9 +4014,11 @@ introduces lands with at least one named guard here.
   replace the floating `"latest"` range).
 - **The oracle row generator** (deterministic `OracleId`, checked-in normalized snapshots, feature/env-gated regeneration) is a
   required deliverable; the `tsgo`-execution-forbidden guard for runtime/default tests is a required deliverable.
-- **Namespacing the `.cutover-state` `[typeinfo_parity]` tokens** (not migrating or resetting the legacy tokens) is a required U0
-  deliverable, along with the two-namespace TOML schema, the namespaced two-phase xtask command, and the legacy-deletion
-  lifecycle (§13).
+- **The git/CI landing protocol** (§11) is the required execution-framework deliverable: the per-block branch discipline, the CI
+  gate (the full Rust+JS workspace gate + the coverage/proof/required/DAG guards), the branch-protection three-reviewer LAND
+  required approval, and the squash-merge `Typeinfo-Block:` trailer convention. There is NO tracked `.cutover-state.typeinfo_parity`
+  namespace, NO two-namespace TOML schema, NO namespaced xtask, and NO crash-recovery machinery to deliver (§13) — git history +
+  branch protection + `git revert` are the transaction log / accept gate / rollback.
 - **The generated artifacts** — the `SemanticQueryKeySpec` table (§2.9), the proof registry + typed row-test wrapper (§10.3), and
   the U0 row-exact coverage table (§10.4) — are each produced by a dedicated `cargo run` generator and checked in (generated, not
   hand-maintained).
@@ -3167,9 +4046,10 @@ unified-plan edits are applied directly in `semantic-db-overhaul-unified-remaini
     is deleted (the coverage table is §10.4 / §10.4.1 here + the in-repo manifest, never a scratch/temp artifact).
   - **(b) Replace the "no-op 4-field-schema confirm" U0 entry with the extended two-table ledger — DONE.** The unified plan's U0
     entry now describes the extended ledger this architecture requires: the two-table ledger (`IgnoredTestRow` extended schema +
-    the separate coverage-only `AdditionalProofRow` table — §10.1), `IgnoreStatus` (`Ignored` / `Verifying` / `Lifted`),
-    `ProofRequirement`, the proof registry + row-test wrapper, the §10.4 / §10.4.1 row-exact coverage table, and the
-    `.cutover-state.typeinfo_parity` namespace + two-phase prepare-verify → gate → accept transaction contract (§§11–14).
+    the separate coverage-only `AdditionalProofRow` table — §10.1), `IgnoreStatus` (binary `Ignored` / `Lifted`),
+    `ProofRequirement`, the proof registry + row-test wrapper, the §10.4 / §10.4.1 row-exact coverage table, and the git/CI
+    landing protocol (§§11–14) — branch per block → green CI → three-reviewer LAND → squash-merge with the `Typeinfo-Block:`
+    trailer (no tracked `.cutover-state.typeinfo_parity` cursor; git=log, branch-protection=accept, revert=rollback).
   - **(c) Require ALL 363 `IgnoredTestRow`s lifted in U15 + the §9 terminal checklist (not a majority/fraction) — DONE.** The
     unified plan's U15 + §9 terminal checklist now require EVERY one of the 363 `IgnoredTestRow`s `Lifted` (zero parity ignores),
     with the ONLY permitted residual `#[ignore]`s being the registered Svelte/React STOP-gate files (which are not among the 363) —
@@ -3180,8 +4060,8 @@ unified-plan edits are applied directly in `semantic-db-overhaul-unified-remaini
     DeclarationAnalysisContext }`, not the former `ResolveModuleAugmentation`); and reconciles wording implying a uniform type-node
     query result to the typed
     `SemanticQueryValue` value-domain layer.
-- **U6 doc** (`native-flow-return.md`) — update for the new query keys and the demand-sliced `ReturnPathPeeker` (two-frontier
-  model) that amend it.
+- **U6 doc** (`native-flow-return.md`) — update for the new query keys and the per-function `FunctionFlowGraph` + the
+  `ReturnPathPeeker` graph demand planner (the two-frontier rule expressed as typed edge classes) that amend it.
 - **Recovered foundation doc** (`semantic-type-graph-plan-recovered.md`) — amend the self-contradictory stale wording so the doc
   is not internally inconsistent: the stale `NoInfer` declaration-metadata wording → occurrence-local; the
   `decorators.rs — UnsupportedConstruct::Decorator + diagnostic projection` line → the class-surface ruling (§1.7); the §2.17 /

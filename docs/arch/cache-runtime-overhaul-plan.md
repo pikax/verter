@@ -1,3 +1,5 @@
+> **SUPERSEDED.** This document is historical. The live authority is [`docs/arch/semantic-db-overhaul-unified-remaining-plan.md`](./semantic-db-overhaul-unified-remaining-plan.md) (and the native-typeinfo-parity doc-set). Sections below are retained for provenance; where they contradict the unified plan, the unified plan wins.
+
 > **Status (2026-06-02):** Remaining work from this plan is now tracked in [`semantic-db-overhaul-unified-remaining-plan.md`](./semantic-db-overhaul-unified-remaining-plan.md), which merges + sequences the remaining items of this plan with the other track. Drive new work from the unified plan; this file remains as historical/detail reference.
 
 # Cache runtime overhaul plan
@@ -1152,6 +1154,8 @@ Per-row, one `ArtifactNode` or `QueryNode` impl is created.
 | `FlowLoweredBodyNode` (Block 11) | `FlowLoweredBodyKey { canonical, function_symbol, parse_stable_hash, body_semantic_hash, parser_version }` | `FlowLoweredBody` | parse_stable_hash + `body_semantic_hash` (the latter produced UPSTREAM by `FlowBodyHashNode`). `FlowLoweredBodyNode::compute` does NOT call `compute_body_semantic_hash`. |
 
 **Query-identity nodes (skill `R20` multi-candidate — key carries NO content/version/`fact_dep_signature`):**
+
+> SUPERSEDED: the split `MaterializeMemoDb` / `MemberShapeCacheDb` shape caches are retired; the per-member materialiser cache is a slot inside `ShapeCacheDb` indexed by `ShapeSubject::SemanticNode` (unified plan §2.2; the static guard `block_6i_static_guards.rs::shape_cache_db_replaces_split_caches` forbids re-introduction). The `MemberShapeCacheDb` row below maps onto that `ShapeCacheDb` slot.
 
 | Cache | Slot key (skill `R6`/H3) | Candidate discriminant | Notes |
 |---|---|---|---|
@@ -2651,6 +2655,8 @@ pub struct DagCapacityDemand {
 (DECISION 2, codex).** The driver is the ONLY readiness mutator. A
 submitter never holds `DagState.readiness.lock()` and never spins on a
 ready-queue `push`. Admission is gated by a typed node/edge/CPU/I/O budget:
+
+> SUPERSEDED: `DagAdmissionBudget` is not built; `DagCapacityBudget` / `DagCapacityReservation` is the single ledger (unified plan §2.2). `queue.rs` itself was deleted by §7 — the budget lives on the driver-owned `SchedulerDag`, not a `queue.rs` addition.
 
 ```rust
 // crates/verter_scheduler/src/queue.rs (additions)

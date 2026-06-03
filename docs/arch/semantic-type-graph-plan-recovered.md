@@ -1,4 +1,8 @@
+> **SUPERSEDED.** This document is historical. The live authority is [`docs/arch/semantic-db-overhaul-unified-remaining-plan.md`](./semantic-db-overhaul-unified-remaining-plan.md) (and the native-typeinfo-parity doc-set). Sections below are retained for provenance; where they contradict the unified plan, the unified plan wins.
+
 > **Status (2026-06-02):** Remaining work from this plan is now tracked in [`semantic-db-overhaul-unified-remaining-plan.md`](./semantic-db-overhaul-unified-remaining-plan.md), which merges + sequences the remaining items of this plan with the other track. Drive new work from the unified plan; this file remains as historical/detail reference.
+
+> **SUPERSEDED — typeinfo parity ledger (2026-06-03):** This document is historical / foundation reference for the typeinfo semantic-graph design. The authoritative typeinfo parity ledger is the **363-row `block_id` partition in [`native-typeinfo-parity.md`](./native-typeinfo-parity.md) §10.4.1** (the row-exact capability→mechanism→proof coverage table), backed by the two-table ledger at `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs` (363 `IgnoredTestRow`s + the separate `AdditionalProofRow` coverage table; `IgnoreStatus { Ignored, Lifted { block_id } }`; binding total exactly 363). The stale unignore-manifest wording in this file (the `typeinfo_tests_unignore_plan.md` doc-manifest with `(file, fn_name, target_phase, unblocked_by)` columns and the "384 tests" lift schedule) describes a SUPERSEDED schema — the live ledger is the in-repo `.rs` manifest, never a competing `.md` doc, and the binding count is the parser-derived 363, not 384 (384 was the raw `#[ignore]` line count). Read §3.0/§8 here for design intent only; take the ledger schema, the count, and the per-block partition from `native-typeinfo-parity.md` §10 / §10.4.1.
 
 # Verter TypeInfo Semantic Graph Plan — Revision 17
 
@@ -330,6 +334,8 @@ Intrinsic dispatch routes through `IntrinsicRegistry::lookup` — the SDK audit 
 ## 3. Semantic Graph Model
 
 ### 3.0 Proto Schema (Full Rewrite)
+
+> SUPERSEDED: the A0a-landed wire uses the `Graph*`-prefixed names (`GraphTypeNode` / `GraphMergedDeclaration` / …), a single `TypeInfoGraphRequest` envelope (7-arm oneof), an 11-variant `TypeInfoRequestError`, and `PredicateSubjectName` (the `PredicateSubjectIdentifier` rename is landed). The bare-`TypeNode` / per-request-message naming and the 8-variant error below are superseded (unified plan §2.2). The `GraphFlowNarrowing` / `GraphContextualType` arms move OUT of `GraphTypeNode` into a sibling `ProgramAnalysisGraph` at U8 (unified plan §2.2 / §3 cross-export-session U8).
 
 The current `crates/verter_protocol/proto/verter/v1/typeinfo.proto` (94 lines) is replaced in full as part of Phase 0a (no field renumbering — proto3 cannot renumber once shipped, so the wire-compat table below documents which field numbers carry over and which are introduced fresh). The plan rewrite normatively specifies:
 
@@ -797,18 +803,18 @@ Empty union normalises to `Never`; empty intersection to `Unknown`. Guard: `alge
 
 #### 3.2.3 Aggregates
 
-#### 3.2.1 Primitives And Literals
-
 ```rust
-pub enum TypeNode {
-    Primitive(PrimitiveKind),
-    UniqueSymbol { decl: SymbolId },
-    Literal(LiteralValue),
-    // ...
+TypeNode::Object {
+    members: Vec<ObjectMember>,
+    index_signatures: Vec<IndexSignature>,
+    call_signatures: Vec<SignatureRef>,
+    construct_signatures: Vec<SignatureRef>,
+    flags: ObjectFlags,
 }
 
-pub enum PrimitiveKind {
-    Any, Unknown, Never, Void, Null, Undefined,
+pub struct ObjectMember {
+    name: MemberName,
+    name_kind: MemberNameKind,
     value: TypeNodeId,
     optional: bool,
     readonly: bool,
@@ -1033,6 +1039,8 @@ pub struct EnumMember {
 ```
 
 #### 3.2.10 Flow / Narrowing / Contextual Typing
+
+> SUPERSEDED: flow narrowing and contextual typing are NOT `TypeNode` arms. A.11 (the authoritative revision) moves them into a sibling `ProgramAnalysisGraph`; U8 performs the wire move (re-home the two arms under `ProgramAnalysisGraph`, `reserved` the vacated `GraphTypeNode` tags 26/27) and produces the `TypeInfoGraphPayload { graph, program_analysis }` shape (unified plan §2.2 / cache-export-session U8). Read the shapes below as the program-analysis payload, not `TypeNode` variants.
 
 See §3.11 for the producer chain. The graph EXPOSES these as typed query payloads that callers consult on demand; the typeinfo graph payload always includes the variants in the DTO (even when unpopulated) so the wire shape is stable.
 
@@ -1349,6 +1357,8 @@ pub struct TypeInfoGraphSlotKey {
     pub project_identity: Hash16,
     pub resolver_version: u32,
 }
+
+> SUPERSEDED: `SubstitutionConcrete` is retired; `CanonicalSubstitutionValueKey` (A.10) is the single substitution-value carrier (unified plan §2.2). The `SubstitutionKey` below carries the A.10 carrier in place of the `concrete` field shown.
 
 #[derive(Hash, Eq, PartialEq, Clone)]
 pub struct SubstitutionKey {
@@ -2359,6 +2369,8 @@ pnpm install --frozen-lockfile
 
 ### 8.x Existing Ignored Test Lift Schedule (384 tests across `crates/verter_session/src/typeinfo/typeinfo_tests/`)
 
+> **SUPERSEDED (see the top-of-file banner):** this per-file phase schedule and the `typeinfo_tests_unignore_plan.md` doc-manifest are historical. The authoritative ledger is the 363-row `block_id` partition in [`native-typeinfo-parity.md`](./native-typeinfo-parity.md) §10.4.1, backed by the in-repo `.rs` two-table manifest (`crates/verter_session/tests/typeinfo_ignored_test_manifest.rs`); the binding count is the parser-derived **363** (not 384 — that was the raw `#[ignore]` line count), tracked by `block_id` rather than phase.
+
 The 384 `#[ignore]`'d tests describe future contracts that this plan satisfies. The schedule below assigns each FILE to a phase; per-test target details for the highest-coupling files live in the follow-up artifact `crates/verter_session/src/typeinfo/typeinfo_tests_unignore_plan.md` (created in Phase 0a as a planning doc; the schedule below summarises by phase).
 
 **Phase 0b/1 (foundational shapes — exporter + lowering + new SemanticQueryKey variants land):**
@@ -2497,6 +2509,8 @@ Every public typeinfo entry-point opens a `RequestAuditRecord` with `RequestKind
 | `crates/verter_session/src/component_meta_audit/footprint_miner.rs` | Add a new `TypeInfoGraphFootprintCell` struct (fields: `snapshot_node_count: u32`, `snapshot_edge_count: u32`, `exactness_summary: ExactnessSummary`, `merged_decl_count: u32`, `augmentation_count: u32`, `overload_signature_count: u32`) and a new `FootprintAccumulator.typeinfo_graph_cells: SmallVec<[TypeInfoGraphFootprintCell; 4]>` field. The contribution function is `fn contribute_typeinfo_graph(record: &TypeInfoGraphPayloadAudit) -> TypeInfoGraphFootprintCell`. The miner does not switch on `RequestKind` — it receives an already-typed `TypeInfoGraphPayloadAudit` from the record observer. |
 | `packages/types/audit.generated.ts` | Regenerated via `ts-rs`. |
 | `crates/verter_session/tests/architecture_guards.rs::wave_3_entry_points_propagate_tls` (function at line 7641 inside `architecture_guards.rs`) | Extend with typeinfo entry-point drivers verifying TLS observer propagation. There is NO sibling `wave_3_entry_points_propagate_tls.rs` file — the function lives inside `architecture_guards.rs`. |
+
+> SUPERSEDED: the nine `exactness_*: u32` scalar fields below are replaced by one `exactness_counts: BTreeMap<ExactnessTag, u32>` map field (reconcile-#5 / CF-2; unified plan §2.2). This applies to every `TypeInfoGraphPayloadAudit` listing in this doc.
 
 ```rust
 pub struct TypeInfoGraphPayloadAudit {
