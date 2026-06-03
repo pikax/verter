@@ -125,6 +125,52 @@ fn typeinfo_ts_bindings_record_the_proto_file_path() {
     );
 }
 
+/// Resolve a node-shipped CLI shim to a form the OS can actually execute.
+///
+/// `pnpm install` writes several shims for a `.bin` entry: an extensionless
+/// POSIX shell script, a Windows `.CMD` batch file, and a `.ps1` script. On
+/// Windows `std::process::Command` / `CreateProcess` CANNOT launch the
+/// extensionless shell script — it returns `%1 is not a valid Win32 application`
+/// (os error 193) because the file is not a PE image — so this resolver returns
+/// the `.CMD`/`.exe`/`.bat` form instead (launched via `cmd /c`, see
+/// [`command_for_tool`]). On non-Windows platforms the extensionless shim is
+/// directly executable and is returned as-is.
+///
+/// `base` is the extensionless path (e.g. `node_modules/.bin/buf`). Returns the
+/// first existing runnable form, or `None` when none exists.
+fn resolve_executable_shim(base: &Path) -> Option<PathBuf> {
+    if cfg!(windows) {
+        // npm/pnpm emit `buf.CMD`; allow `.exe`/`.bat`/lowercase `.cmd` too for
+        // tools that ship a native launcher or globally-installed variants.
+        for ext in ["CMD", "cmd", "exe", "bat"] {
+            let candidate = base.with_extension(ext);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    } else if base.is_file() {
+        Some(base.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// Build a [`Command`] that runs a located node-shipped CLI.
+///
+/// On Windows the resolved shim is a `.CMD` batch file (or `.exe`/`.bat`), which
+/// `CreateProcess` cannot exec as a bare process image, so the tool is launched
+/// through `cmd /c <shim>`. On other platforms the binary is invoked directly.
+fn command_for_tool(bin: &Path) -> Command {
+    if cfg!(windows) {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/c").arg(bin);
+        cmd
+    } else {
+        Command::new(bin)
+    }
+}
+
 /// Locate the `buf` binary the workspace ships:
 ///
 /// 1. Prefer `node_modules/.bin/buf` (the locked `@bufbuild/buf`
@@ -132,36 +178,40 @@ fn typeinfo_ts_bindings_record_the_proto_file_path() {
 /// 2. Fall back to `buf` on PATH.
 /// 3. Return `None` when neither resolves — the test then skips
 ///    gracefully (running on a node-free machine).
+///
+/// On Windows the returned path is the runnable `.CMD`/`.exe` shim (see
+/// [`resolve_executable_shim`]), never the extensionless POSIX shell script.
 fn locate_buf_binary(workspace_root: &Path) -> Option<PathBuf> {
     let workspace_buf = workspace_root.join("node_modules").join(".bin").join("buf");
-    if workspace_buf.is_file() {
-        return Some(workspace_buf);
+    if let Some(resolved) = resolve_executable_shim(&workspace_buf) {
+        return Some(resolved);
     }
     // PATH lookup — `which buf` style.
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
-        let candidate = dir.join("buf");
-        if candidate.is_file() {
-            return Some(candidate);
+        if let Some(resolved) = resolve_executable_shim(&dir.join("buf")) {
+            return Some(resolved);
         }
     }
     None
 }
 
 /// Locate the `oxfmt` binary the workspace ships at root devDeps.
+///
+/// On Windows the returned path is the runnable `.CMD`/`.exe` shim (see
+/// [`resolve_executable_shim`]), never the extensionless POSIX shell script.
 fn locate_oxfmt_binary(workspace_root: &Path) -> Option<PathBuf> {
     let workspace_oxfmt = workspace_root
         .join("node_modules")
         .join(".bin")
         .join("oxfmt");
-    if workspace_oxfmt.is_file() {
-        return Some(workspace_oxfmt);
+    if let Some(resolved) = resolve_executable_shim(&workspace_oxfmt) {
+        return Some(resolved);
     }
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
-        let candidate = dir.join("oxfmt");
-        if candidate.is_file() {
-            return Some(candidate);
+        if let Some(resolved) = resolve_executable_shim(&dir.join("oxfmt")) {
+            return Some(resolved);
         }
     }
     None
@@ -203,7 +253,7 @@ fn typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output() {
     );
     std::fs::write(&template_path, template_body).expect("write temp buf template");
 
-    let status = Command::new(&buf_bin)
+    let status = command_for_tool(&buf_bin)
         .arg("generate")
         .arg("--template")
         .arg(&template_path)
@@ -222,7 +272,7 @@ fn typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output() {
         out_dir.display(),
     );
     if let Some(oxfmt_bin) = locate_oxfmt_binary(&root) {
-        let status = Command::new(&oxfmt_bin)
+        let status = command_for_tool(&oxfmt_bin)
             .arg(&regen_typeinfo_path)
             .status()
             .unwrap_or_else(|err| panic!("invoke `oxfmt`: {err}"));
