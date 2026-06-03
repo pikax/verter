@@ -12,7 +12,10 @@ use oxc_ast::ast::{Expression, ObjectPropertyKind};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 
+use verter_span::{SourceByteOffset, SourceByteRange};
+
 use crate::ast::types::{ElementNode, TagType};
+use crate::ide::template::emit::{emit_op, EmitOp, EmitText};
 use crate::ide::{event_to_jsx_name, get_directive_name};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
@@ -162,7 +165,7 @@ pub fn process_element_props<'alloc>(
 
         // v-model expansion: convert to modelValue/onUpdate:modelValue prop pair
         if is_builtin_directive(prop, source, "model") {
-            process_v_model(prop, oxc_prop, el, source, out, resolver, is_jsx);
+            super::vmodel::process_v_model(prop, oxc_prop, el, source, out, resolver, is_jsx);
             continue;
         }
 
@@ -274,10 +277,16 @@ pub fn process_element_props<'alloc>(
                     // Build CollectedDirective
                     let camel_name = directive_name_to_camel(dir_name);
 
-                    // Value
+                    // Value — the custom-directive expression is relocated into a
+                    // synthetic `___VERTER___runCustomDirective(...)` call, so it is
+                    // resolved to a flat string via the shared `build_prefixed_expr`
+                    // helper (no in-place mapping is possible here).
                     let value = if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                         let raw = &source[vs as usize..ve as usize];
-                        resolve_prefixed_expr(raw, vs, oxc_prop, resolver)
+                        match oxc_prop.and_then(|p| p.exp.as_ref()) {
+                            Some(exp) => build_prefixed_expr(raw, vs, exp, resolver, &[]),
+                            None => resolver.resolve_simple_expr(raw),
+                        }
                     } else {
                         "true".to_string()
                     };
@@ -419,10 +428,18 @@ fn process_v_bind<'alloc>(
                 return;
             }
             if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-                let value_expr = &source[vs as usize..ve as usize];
-                let resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
-                let prop_end = get_prop_end(prop);
-                out.overwrite(prop.start, prop_end, &format!("{}={{{}}}", key, resolved));
+                // `bar` is preserved in place; `key={` / `}` are unmapped boundaries.
+                emit_in_place_jsx_value(
+                    prop,
+                    oxc_prop,
+                    source,
+                    out,
+                    resolver,
+                    vs,
+                    ve,
+                    &format!("{}={{", key),
+                    "}",
+                );
             } else {
                 let resolved = resolver.resolve_simple_expr(&kebab_to_camel_case(key));
                 let prop_end = get_prop_end(prop);
@@ -431,26 +448,10 @@ fn process_v_bind<'alloc>(
             return;
         }
 
-        // v-bind="obj" → spread: `{...obj}`
+        // v-bind="obj" → spread: `{...obj}`. `obj` is preserved in place (each
+        // identifier maps back via binding patches); `{...` / `}` are unmapped.
         if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-            let value_expr = &source[vs as usize..ve as usize];
-            let resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
-            let prop_end = get_prop_end(prop);
-
-            // When the resolved expression is the original with a prefix prepended
-            // (e.g., "___VERTER___instance." + "$attrs"), split the overwrite to
-            // preserve the original identifier's source map position for TSGO hover.
-            let trimmed = value_expr.trim();
-            if let Some(prefix) = resolved.strip_suffix(trimmed) {
-                let leading_ws = (value_expr.len() - value_expr.trim_start().len()) as u32;
-                let trailing_ws = (value_expr.len() - value_expr.trim_end().len()) as u32;
-                let tvs = vs + leading_ws;
-                let tve = ve - trailing_ws;
-                out.overwrite(prop.start, tvs, &format!("{{...{}", prefix));
-                out.overwrite(tve, prop_end, "}");
-            } else {
-                out.overwrite(prop.start, prop_end, &format!("{{...{}}}", resolved));
-            }
+            emit_in_place_jsx_value(prop, oxc_prop, source, out, resolver, vs, ve, "{...", "}");
         }
         return;
     }
@@ -460,10 +461,12 @@ fn process_v_bind<'alloc>(
     let arg_name = &source[arg_start as usize..arg_end as usize];
 
     // Dynamic key: :[key]="val" → {...{[key]: val}}
+    // Both the arg (`key`) and value (`val`) identifiers are preserved IN PLACE
+    // and map back to their source spans; the punctuation `{...{[`, `]: `, `}}}`
+    // is unmapped synthetic text.
     if prop.is_dynamic == Some(true) {
         if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
             let value_expr = &source[vs as usize..ve as usize];
-            let value_resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
             let arg_expr = arg_name
                 .trim()
                 .strip_prefix('[')
@@ -472,13 +475,63 @@ fn process_v_bind<'alloc>(
                 .trim();
             let arg_expr_start =
                 arg_start + (arg_expr.as_ptr() as usize - arg_name.as_ptr() as usize) as u32;
-            let arg_resolved =
-                resolve_prefixed_dynamic_arg(arg_expr, arg_expr_start, oxc_prop, resolver);
+            let arg_expr_end = arg_expr_start + arg_expr.len() as u32;
+
+            let value_leading_ws = (value_expr.len() - value_expr.trim_start().len()) as u32;
+            let value_trailing_ws = (value_expr.len() - value_expr.trim_end().len()) as u32;
+            let tvs = vs + value_leading_ws;
+            let tve = ve - value_trailing_ws;
             let prop_end = get_prop_end(prop);
-            out.overwrite(
-                prop.start,
-                prop_end,
-                &format!("{{...{{[{}]: {}}}}}", arg_resolved, value_resolved),
+
+            // `{...{[` before the arg identifier.
+            emit_op(
+                out,
+                &EmitOp::OverwriteSyntheticBoundary {
+                    source: SourceByteRange::new(
+                        SourceByteOffset(prop.start),
+                        SourceByteOffset(arg_expr_start),
+                    ),
+                    text: EmitText::Static("{...{["),
+                    anchor: None,
+                },
+            );
+            // `key` preserved in place; per-identifier prefixes via arg bindings.
+            if let Some(oxc_p) = oxc_prop {
+                if let Some(ref arg) = oxc_p.arg {
+                    if let Some(ref bindings) = arg.bindings {
+                        resolver.collect_binding_patches(bindings, out);
+                    }
+                }
+            }
+            // `]: ` between the arg and the value identifier.
+            emit_op(
+                out,
+                &EmitOp::OverwriteSyntheticBoundary {
+                    source: SourceByteRange::new(
+                        SourceByteOffset(arg_expr_end),
+                        SourceByteOffset(tvs),
+                    ),
+                    text: EmitText::Static("]: "),
+                    anchor: None,
+                },
+            );
+            // `val` preserved in place; per-identifier prefixes via value bindings.
+            if let Some(oxc_p) = oxc_prop {
+                if let Some(ref exp) = oxc_p.exp {
+                    if let Some(ref bindings) = exp.bindings {
+                        resolver.collect_binding_patches(bindings, out);
+                    }
+                }
+            }
+            // `}}` closing the computed-key object (`{[key]: val}`) + the spread
+            // (`{...}`).
+            emit_op(
+                out,
+                &EmitOp::OverwriteSyntheticBoundary {
+                    source: SourceByteRange::new(SourceByteOffset(tve), SourceByteOffset(prop_end)),
+                    text: EmitText::Static("}}"),
+                    anchor: None,
+                },
             );
         }
         return;
@@ -503,7 +556,12 @@ fn process_v_bind<'alloc>(
 
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
         let value_expr = &source[vs as usize..ve as usize];
-        let resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
+        // Flat resolution drives guard-injection detection + the in-place split
+        // branch decisions below; the identifier itself stays preserved in place.
+        let resolved = match oxc_prop.and_then(|p| p.exp.as_ref()) {
+            Some(exp) => build_prefixed_expr(value_expr, vs, exp, resolver, &[]),
+            None => resolver.resolve_simple_expr(value_expr),
+        };
 
         // Inject type narrowing guard into function-typed props (Part C Step 8).
         let guarded = if let Some(guard) = v_if_guard {
@@ -590,9 +648,14 @@ fn process_v_on<'alloc>(
 
     if !has_arg {
         // v-on="{ mousedown: doThis }" → spread: {...{ mousedown: doThis }}
+        // The object literal is structurally rewritten (event-key remapping), so it
+        // is resolved to a flat string via the shared `build_prefixed_expr` helper.
         if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
             let value_expr = &source[vs as usize..ve as usize];
-            let resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
+            let resolved = match oxc_prop.and_then(|p| p.exp.as_ref()) {
+                Some(exp) => build_prefixed_expr(value_expr, vs, exp, resolver, &[]),
+                None => resolver.resolve_simple_expr(value_expr),
+            };
             let rewritten = rewrite_v_on_object_literal_expr(&resolved);
             let prop_end = get_prop_end(prop);
             out.overwrite(prop.start, prop_end, &format!("{{...{}}}", rewritten));
@@ -614,12 +677,20 @@ fn process_v_on<'alloc>(
             .trim();
         let raw_arg_start =
             arg_start + (raw_arg.as_ptr() as usize - event_name.as_ptr() as usize) as u32;
-        let resolved_arg = resolve_prefixed_dynamic_arg(raw_arg, raw_arg_start, oxc_prop, resolver);
+        // Dynamic event-name spread: arg + value are embedded in a computed-key
+        // template literal, resolved to flat strings via the shared helper.
+        let resolved_arg = match oxc_prop.and_then(|p| p.arg.as_ref()) {
+            Some(arg) => build_prefixed_expr(raw_arg, raw_arg_start, arg, resolver, &[]),
+            None => resolver.resolve_simple_expr(raw_arg),
+        };
         let prop_end = get_prop_end(prop);
 
         if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
             let value_expr = &source[vs as usize..ve as usize];
-            let resolved_value = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
+            let resolved_value = match oxc_prop.and_then(|p| p.exp.as_ref()) {
+                Some(exp) => build_prefixed_expr(value_expr, vs, exp, resolver, &[]),
+                None => resolver.resolve_simple_expr(value_expr),
+            };
             out.overwrite(
                 prop.start,
                 prop_end,
@@ -645,7 +716,12 @@ fn process_v_on<'alloc>(
         let prop_end = get_prop_end(prop);
         if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
             let value_expr = &source[vs as usize..ve as usize];
-            let resolved_expr = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
+            // Flat resolution drives handler-shape classification only; the handler
+            // identifier is preserved in place by the split emission below.
+            let resolved_expr = match oxc_prop.and_then(|p| p.exp.as_ref()) {
+                Some(exp) => build_prefixed_expr(value_expr, vs, exp, resolver, &[]),
+                None => resolver.resolve_simple_expr(value_expr),
+            };
             let resolved_expr = resolved_expr.trim();
             let is_simple_ident =
                 crate::template::code_gen::binding::is_simple_ident(resolved_expr);
@@ -691,7 +767,12 @@ fn process_v_on<'alloc>(
 
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
         let value_expr = &source[vs as usize..ve as usize];
-        let resolved_expr = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
+        // Flat resolution drives handler-shape classification only; the handler
+        // identifier is preserved in place by the split emission below.
+        let resolved_expr = match oxc_prop.and_then(|p| p.exp.as_ref()) {
+            Some(exp) => build_prefixed_expr(value_expr, vs, exp, resolver, &[]),
+            None => resolver.resolve_simple_expr(value_expr),
+        };
         let resolved_expr = resolved_expr.trim();
 
         // Determine if the handler needs wrapping
@@ -818,206 +899,62 @@ fn process_v_on<'alloc>(
     }
 }
 
-/// Process `v-model` directive → expand to prop + update event pair.
+/// Emit a directive whose value is a single JSX-attribute expression kept
+/// IN PLACE — `lead`/`trail` are the synthetic JSX boundaries (`innerHTML={` …
+/// `}`) and the user expression bytes are preserved 1:1 so the identifier keeps
+/// its exact source-map mapping.
 ///
-/// - `v-model="count"` → `modelValue={count} onUpdate:modelValue={($event) => (count = $event)}`
-/// - `v-model:title="val"` → `title={val} onUpdate:title={($event) => (val = $event)}`
-/// - Modifiers are emitted as a modifiers prop (e.g., `modelModifiers={{ trim: true }}`)
-fn process_v_model<'alloc>(
+/// Lowering (typed [`EmitOp`] discipline):
+/// - `OverwriteSyntheticBoundary(prop.start..tvs, lead)` — delete + unmapped insert.
+/// - `PreserveOriginal(tvs..tve)` — pure no-op; bytes stay an `Original` chunk.
+/// - per-identifier prefix/suffix via `collect_binding_patches` (in-place prepends,
+///   maps each sub-identifier).
+/// - `OverwriteSyntheticBoundary(tve..prop_end, trail)` — delete + unmapped insert.
+#[allow(clippy::too_many_arguments)]
+fn emit_in_place_jsx_value<'alloc>(
     prop: &NodeProp,
     oxc_prop: Option<&OxcParsedProp<'alloc>>,
-    el: &ElementNode,
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
     resolver: &BindingResolver<'alloc>,
-    is_jsx: bool,
+    vs: u32,
+    ve: u32,
+    lead: &str,
+    trail: &str,
 ) {
-    let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) else {
-        // v-model with no value — remove
-        let prop_end = get_prop_end(prop);
-        out.overwrite(prop.start, prop_end, "");
-        return;
-    };
-
-    let raw_expr = &source[vs as usize..ve as usize];
-    let resolved = resolve_prefixed_expr(raw_expr, vs, oxc_prop, resolver);
+    let value_expr = &source[vs as usize..ve as usize];
+    let leading_ws = (value_expr.len() - value_expr.trim_start().len()) as u32;
+    let trailing_ws = (value_expr.len() - value_expr.trim_end().len()) as u32;
+    let tvs = vs + leading_ws;
+    let tve = ve - trailing_ws;
     let prop_end = get_prop_end(prop);
 
-    // Determine prop name: default "modelValue" or named v-model:xxx
-    let is_dynamic_arg = prop.is_dynamic == Some(true);
-    let (value_prop, update_event, modifier_prop) = if let (Some(arg_s), Some(arg_e)) =
-        (prop.arg_start, prop.arg_end)
-    {
-        let arg = &source[arg_s as usize..arg_e as usize];
-        if is_dynamic_arg {
-            // Dynamic arg: v-model:[expr]="val" → spread syntax
-            let raw_arg = arg
-                .trim()
-                .strip_prefix('[')
-                .and_then(|s| s.strip_suffix(']'))
-                .unwrap_or(arg)
-                .trim();
-            let raw_arg_start = arg_s + (raw_arg.as_ptr() as usize - arg.as_ptr() as usize) as u32;
-            let resolved_arg =
-                resolve_prefixed_dynamic_arg(raw_arg, raw_arg_start, oxc_prop, resolver);
-            (
-                format!("[{}]", resolved_arg),
-                format!("[`onUpdate:${{{}}}`]", resolved_arg),
-                format!("[`${{{}}}Modifiers`]", resolved_arg),
-            )
-        } else {
-            let camel_arg = kebab_to_camel_case(arg);
-            (
-                camel_arg.clone(),
-                format!("onUpdate:{}", camel_arg),
-                format!("{}Modifiers", camel_arg),
-            )
-        }
-    } else {
-        (
-            "modelValue".to_string(),
-            "onUpdate:modelValue".to_string(),
-            "modelModifiers".to_string(),
-        )
+    let lead_op = EmitOp::OverwriteSyntheticBoundary {
+        source: SourceByteRange::new(SourceByteOffset(prop.start), SourceByteOffset(tvs)),
+        text: EmitText::Borrowed(lead),
+        anchor: None,
+    };
+    let preserve = EmitOp::PreserveOriginal {
+        source: SourceByteRange::new(SourceByteOffset(tvs), SourceByteOffset(tve)),
+    };
+    let trail_op = EmitOp::OverwriteSyntheticBoundary {
+        source: SourceByteRange::new(SourceByteOffset(tve), SourceByteOffset(prop_end)),
+        text: EmitText::Borrowed(trail),
+        anchor: None,
     };
 
-    // Build the replacement.
-    // For native HTML elements, use the actual DOM property (value/checked)
-    // and a valid JSX event handler (onInput/onChange).
-    // For components, use modelValue prop + spread for the event handler
-    // (since "onUpdate:modelValue" is not a valid JSX attribute name).
-    let is_native = el.tag_type.is_element();
-
-    let event_param = if is_jsx { "$event" } else { "$event: any" };
-
-    let mut replacement = if is_dynamic_arg {
-        // Dynamic: always use spread syntax for computed prop names
-        format!(
-            "{{...{{{}:{}, \"{}\":({}) => (({}) = $event)}}}}",
-            value_prop, resolved, update_event, event_param, resolved
-        )
-    } else if is_native {
-        // Native element: use DOM property + native event handler
-        let tag = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
-        let (dom_prop, event_name) = native_vmodel_prop_and_event(el, source, tag);
-
-        // Check if the element already has an explicit handler for the same event
-        // (e.g., @change on a checkbox with v-model). If so, skip v-model's handler
-        // to avoid duplicate JSX attributes (TS17001).
-        let vue_event = event_name
-            .strip_prefix("on")
-            .map(|s| {
-                let mut c = s.chars();
-                match c.next() {
-                    Some(ch) => {
-                        let lower = ch.to_lowercase().to_string();
-                        format!("{}{}", lower, c.as_str())
-                    }
-                    None => String::new(),
-                }
-            })
-            .unwrap_or_default();
-        let has_explicit_handler = el.props.iter().any(|p| {
-            p.is_directive && {
-                let dn = get_directive_name(p, source);
-                (dn == "on" || dn == "@")
-                    && p.arg_start
-                        .zip(p.arg_end)
-                        .map(|(a, b)| source[a as usize..b as usize] == vue_event)
-                        .unwrap_or(false)
+    emit_op(out, &lead_op);
+    emit_op(out, &preserve);
+    // Per-identifier accessor prefixes/suffixes (e.g. `___VERTER___instance.`,
+    // `.value`) applied in place — each maps its identifier back to source.
+    if let Some(oxc_p) = oxc_prop {
+        if let Some(ref exp) = oxc_p.exp {
+            if let Some(ref bindings) = exp.bindings {
+                resolver.collect_binding_patches(bindings, out);
             }
-        });
-
-        // Check if the element already has an explicit binding for the DOM prop
-        // (e.g., :checked on a radio with v-model). If so, skip v-model's prop.
-        let has_explicit_prop = el.props.iter().any(|p| {
-            if p.is_directive {
-                let dn = get_directive_name(p, source);
-                (dn == "bind" || dn == ":")
-                    && p.arg_start
-                        .zip(p.arg_end)
-                        .map(|(a, b)| &source[a as usize..b as usize] == dom_prop)
-                        .unwrap_or(false)
-            } else {
-                let name = &source[p.start as usize..p.name_end as usize];
-                name == dom_prop
-            }
-        });
-
-        if has_explicit_prop && has_explicit_handler {
-            // Both prop and handler already exist — v-model is redundant
-            String::new()
-        } else if has_explicit_prop {
-            // Only emit the event handler
-            format!(
-                "{}={{({}) => (({}) = $event)}}",
-                event_name, event_param, resolved
-            )
-        } else if has_explicit_handler {
-            // Only emit the DOM property, skip the event handler
-            format!("{}={{{}}}", dom_prop, resolved)
-        } else {
-            format!(
-                "{}={{{}}} {}={{({}) => (({}) = $event)}}",
-                dom_prop, resolved, event_name, event_param, resolved
-            )
         }
-    } else {
-        // Component: modelValue + spread for event handler
-        format!(
-            "{}={{{}}} {{...{{\"{}\":({}) => (({}) = $event)}}}}",
-            value_prop, resolved, update_event, event_param, resolved
-        )
-    };
-
-    // Emit modifiers prop if present
-    if !prop.modifiers.is_empty() {
-        replacement.push_str(&format!(
-            " {}={{{{ {} }}}}",
-            modifier_prop,
-            prop.modifiers
-                .iter()
-                .map(|m| {
-                    let name = &source[m.start as usize..m.end as usize];
-                    format!("{}: true", name)
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
     }
-
-    out.overwrite(prop.start, prop_end, &replacement);
-}
-
-/// Determine the DOM property and event handler for v-model on native elements.
-/// Returns (prop_name, event_name) — both are valid JSX attribute identifiers.
-fn native_vmodel_prop_and_event(
-    el: &ElementNode,
-    source: &str,
-    tag: &str,
-) -> (&'static str, &'static str) {
-    match tag {
-        "input" => {
-            // Check for type="checkbox" or type="radio"
-            for prop in &el.props {
-                if !prop.is_directive {
-                    let name = &source[prop.start as usize..prop.name_end as usize];
-                    if name == "type" {
-                        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-                            let type_value = &source[vs as usize..ve as usize];
-                            if type_value == "checkbox" || type_value == "radio" {
-                                return ("checked", "onChange");
-                            }
-                        }
-                    }
-                }
-            }
-            ("value", "onInput")
-        }
-        "select" => ("value", "onChange"),
-        "textarea" => ("value", "onInput"),
-        _ => ("value", "onInput"),
-    }
+    emit_op(out, &trail_op);
 }
 
 /// Process `v-html="expr"` → `innerHTML={expr}`.
@@ -1029,10 +966,17 @@ fn process_v_html<'alloc>(
     resolver: &BindingResolver<'alloc>,
 ) {
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-        let expr = &source[vs as usize..ve as usize];
-        let resolved = resolve_prefixed_expr(expr, vs, oxc_prop, resolver);
-        let prop_end = get_prop_end(prop);
-        out.overwrite(prop.start, prop_end, &format!("innerHTML={{{}}}", resolved));
+        emit_in_place_jsx_value(
+            prop,
+            oxc_prop,
+            source,
+            out,
+            resolver,
+            vs,
+            ve,
+            "innerHTML={",
+            "}",
+        );
     }
 }
 
@@ -1045,13 +989,16 @@ fn process_v_text<'alloc>(
     resolver: &BindingResolver<'alloc>,
 ) {
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-        let expr = &source[vs as usize..ve as usize];
-        let resolved = resolve_prefixed_expr(expr, vs, oxc_prop, resolver);
-        let prop_end = get_prop_end(prop);
-        out.overwrite(
-            prop.start,
-            prop_end,
-            &format!("textContent={{{}}}", resolved),
+        emit_in_place_jsx_value(
+            prop,
+            oxc_prop,
+            source,
+            out,
+            resolver,
+            vs,
+            ve,
+            "textContent={",
+            "}",
         );
     }
 }
@@ -1276,35 +1223,7 @@ fn inject_function_guard(
     }
 }
 
-fn resolve_prefixed_expr(
-    raw_expr: &str,
-    expr_start: u32,
-    oxc_prop: Option<&OxcParsedProp<'_>>,
-    resolver: &BindingResolver<'_>,
-) -> String {
-    if let Some(oxc_p) = oxc_prop {
-        if let Some(ref exp) = oxc_p.exp {
-            return build_prefixed_expr(raw_expr, expr_start, exp, resolver, &[]);
-        }
-    }
-    resolver.resolve_simple_expr(raw_expr)
-}
-
-fn resolve_prefixed_dynamic_arg(
-    raw_arg: &str,
-    raw_arg_start: u32,
-    oxc_prop: Option<&OxcParsedProp<'_>>,
-    resolver: &BindingResolver<'_>,
-) -> String {
-    if let Some(oxc_p) = oxc_prop {
-        if let Some(ref arg) = oxc_p.arg {
-            return build_prefixed_expr(raw_arg, raw_arg_start, arg, resolver, &[]);
-        }
-    }
-    resolver.resolve_simple_expr(raw_arg)
-}
-
-fn kebab_to_camel_case(input: &str) -> String {
+pub(super) fn kebab_to_camel_case(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut upper_next = false;
     for ch in input.chars() {

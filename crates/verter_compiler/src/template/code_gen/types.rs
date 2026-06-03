@@ -115,6 +115,27 @@ impl<'alloc> CodeGenOutput<'alloc> {
         self.mapped_prepends.push((pos, source_pos, 0, allocated));
     }
 
+    /// Push an UNMAPPED prepend-left that interleaves with mapped prepends at the
+    /// same position in insertion order.
+    ///
+    /// Plain [`prepend_static`](Self::prepend_static) / [`prepend_alloc`](Self::prepend_alloc)
+    /// land in the `prepends` vec, which `apply_to` concatenates BEFORE all
+    /// `mapped_prepends` at the same position — so an unmapped→mapped→unmapped
+    /// sequence at one anchor (e.g. `value={` + mapped `count` + `}` for relocated
+    /// `v-model`) would reorder to `value={}` + `count`. Routing the unmapped text
+    /// through `mapped_prepends` with `content_offset == content.len()` keeps it in
+    /// the same vec (token sits one-past-the-end → emits no mapping) so the order
+    /// is preserved. This mirrors the v-for `.map((` bridge emission.
+    #[inline]
+    pub fn prepend_ordered_unmapped(&mut self, pos: u32, content: &str) {
+        if content.is_empty() {
+            return;
+        }
+        let allocated = self.alloc.alloc_str(content);
+        let len = allocated.len() as u32;
+        self.mapped_prepends.push((pos, 0, len, allocated));
+    }
+
     /// Push a source-mapped prepend-left with a content offset.
     /// Characters before `content_offset` are unmapped; the source map token is
     /// placed at `content_offset`, pointing to `source_pos`. Used when binding

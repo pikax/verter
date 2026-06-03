@@ -19,7 +19,9 @@
 //! | `v-on="obj"` | `{...obj}` |
 
 pub mod directives;
+pub mod emit;
 pub mod props;
+pub mod vmodel;
 
 use oxc_allocator::Allocator;
 use rustc_hash::{FxHashMap, FxHashSet};
