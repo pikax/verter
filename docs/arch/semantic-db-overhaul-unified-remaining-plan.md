@@ -227,7 +227,7 @@ is produced at its rescope session (§3.2) before it implements.
 | S5.B5 | RESCOPE-GATE-PENDING | macro-surface gate; `resolve_macro_surfaces_for` not wired; compat matrix is a gate deliverable; ← U2 |
 | S5.B6–B12 | NOT-STARTED | consumer switch + parser-spans-only + legacy `resolve_type/` deletion; ← S5.B5 |
 | U0 | PARTLY-LANDED | `AuditedResult` carrier landed; host-API wiring + two-table ledger extension remain |
-| U1 | PARTLY-LANDED | `TaskKind` split + `CacheNode` + executor surface landed; `dispatch_cpu_task` + cache-node dispatch wiring remain |
+| U1 | LANDED | `TaskKind` split + `CacheNode` + executor surface + `try_submit_cpu` CPU dispatch + wired `CacheNode` routing (`dispatch_ready_job_to_executor` → `execute_cache_node`) + discriminating tests all landed; the remaining host-side cache-node materializer / `execute_cache_node` override is U7/U9 session-bridge scope |
 | U2.QUERY_VALUE_DOMAIN | NOT-STARTED | the typed `SemanticQueryValue` value-domain layer (convergence gate) |
 | U2.RELATION_INFER | RESCOPE-GATE-PENDING | the relation/inference/variance core; ← U2.QUERY_VALUE_DOMAIN |
 | U2 (other reducers) | NOT-STARTED | indexed/mapped/utilities/class/enums/module-aug/JSX sub-blocks |
@@ -1039,11 +1039,16 @@ guards**. Sequence is faithful to §A; do not reorder.
   `WorkKind`. The `TaskKind` enum split (`Load` + `Parse` + `Analysis` +
   `Artifact` + `CacheNode { cache_id, key_hash }`), the dropped `Copy/Eq/Hash`
   (it derives `Clone, PartialEq, Debug`), `TargetStage`, and the
-  `StageExecutor::as_any` + `execute_cache_node` trait surface are ALREADY
-  PRESENT (`crates/verter_scheduler/src/stage.rs:60`, `executor.rs:122`/`:138`).
-  REMAINING: add `dispatch_cpu_task` and wire a real session-side cache-node
-  dispatch (the `execute_cache_node` default impl returns a "not implemented"
-  `StageError` requiring override). The `task_kind_for_ready_job` adapter is
+  `StageExecutor::as_any` + `execute_cache_node` trait surface are ALL LANDED
+  (`crates/verter_scheduler/src/stage.rs:60`, `executor.rs:122`/`:138`). CPU
+  dispatch lands as `try_submit_cpu` (`scheduler.rs:4143`), and `CacheNode`
+  routing is wired through the single router `dispatch_ready_job` →
+  `dispatch_ready_job_to_executor` (`scheduler.rs:181`) → `execute_cache_node`,
+  with discriminating tests covering route / permit-release / failure / panic /
+  success outcomes. The only REMAINING work is the host-side cache-node
+  materializer that overrides `execute_cache_node` (its default impl returns a
+  "not implemented" `StageError`) — that override is U7/U9 session-bridge scope,
+  not U1. The `task_kind_for_ready_job` adapter is
   ALREADY GONE; the surviving `unreachable!()` in `admit_work` (`scheduler.rs`)
   is the correct end-state (`Parse` is intrinsic to the source stage and
   `CacheNode` is admitted into the DAG directly by the cache layer, never
@@ -1055,7 +1060,7 @@ guards**. Sequence is faithful to §A; do not reorder.
 - **Required deletions:** none — the `task_kind_for_ready_job` adapter this block
   was scoped to delete is ALREADY GONE (0 src hits). `SchedulerJobKind`
   (component-meta batch fan-out) is **RETAINED** and must not alias `TaskKind`.
-- **Guards:** keep `dag_arch_guards` (12/12) green; a discriminating test that
+- **Guards:** keep `dag_arch_guards` (13/13) green; a discriminating test that
   the CacheNode dispatch arm actually routes (not `unreachable!()`); a guard that
   there is exactly one dispatch path (no second `task_kind_for_ready_job`-style
   adapter re-introduced).
@@ -1406,7 +1411,7 @@ guards**. Sequence is faithful to §A; do not reorder.
 - **Required deletions:** none net-new to delete (no submitter-side `ArrayQueue` /
   `yield_now` / readiness-lock exists post-§7). `submit_dag` is net-new, NOT a
   `submit_batch` replacement (`submit_batch` was already deleted in §6c).
-- **Guards:** keep `dag_arch_guards` (12/12) +
+- **Guards:** keep `dag_arch_guards` (13/13) +
   `b7b_no_second_admission_budget_or_ready_queue` green; a guard that there is no
   second readiness structure; typed-`Backpressure`-before-mutation test (H22);
   single-release reservation test (h23).
