@@ -74,9 +74,11 @@ fn type_resolution_audit_shared_graph_reused_across_entry_points() {
         },
         name: Arc::from("Outer"),
     });
-    let (resolved, record) = host.resolve_type_with_audit(key, "/Probe.vue");
-    let resolved = resolved.expect("Outer must resolve through type-resolution surface");
-    let record = record.expect("active TypeResolution request must produce a record");
+    let (resolved, record) = host.resolve_type_with_audit(key, "/Probe.vue").into_parts();
+    let resolved = resolved
+        .expect("Outer must resolve through type-resolution surface")
+        .expect("resolved node must be present");
+    // record is always present now (carrier `audit` mandatory).
     let payload = record
         .type_resolution_payload()
         .expect("kind must be TypeResolution");

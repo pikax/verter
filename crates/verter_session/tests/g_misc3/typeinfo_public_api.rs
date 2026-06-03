@@ -65,10 +65,11 @@ fn resolve_named_symbol_with_audit_returns_record() {
         aliases: Vec::new(),
     });
 
-    let (node, record) =
-        host.resolve_named_symbol_with_audit("/types.ts", "T", &[], Some(ProjectionMode::Expanded));
-    let _node = node.expect("non-generic decl resolves");
-    let record = record.expect("audit record must be returned");
+    let (node, record) = host
+        .resolve_named_symbol_with_audit("/types.ts", "T", &[], Some(ProjectionMode::Expanded))
+        .into_parts();
+    let _node = node.ok().flatten().expect("non-generic decl resolves");
+    // record is always present now (carrier `audit` field is mandatory).
     assert_eq!(record.kind, RequestKind::TypeResolution);
     assert!(matches!(
         record.kind_payload,
@@ -99,9 +100,9 @@ fn evaluate_type_expression_with_audit_resolves_primitive() {
         mode: ProjectionMode::Expanded,
         cacheable: false,
     };
-    let (node, record) = host.evaluate_type_expression_with_audit(req);
-    let _node = node.expect("primitive expression resolves");
-    let record = record.expect("audit record must be returned");
+    let (node, record) = host.evaluate_type_expression_with_audit(req).into_parts();
+    let _node = node.ok().flatten().expect("primitive expression resolves");
+    // record is always present now (carrier `audit` field is mandatory).
     assert!(matches!(
         record.kind_payload,
         RequestKindPayload::TypeResolution(_)
@@ -144,6 +145,13 @@ fn evaluate_with_extra_imports_round_trip() {
         mode: ProjectionMode::Expanded,
         cacheable: true,
     };
-    let (_node, record) = host.evaluate_type_expression_with_audit(req);
-    assert!(record.is_some());
+    let record = host
+        .evaluate_type_expression_with_audit(req)
+        .audit()
+        .clone();
+    assert_eq!(
+        record.capture_state,
+        verter_audit::AuditCaptureState::ActiveStored,
+        "audit-enabled evaluate must produce a stored record",
+    );
 }

@@ -123,8 +123,10 @@ fn path_a_c_full_bar_navigates_intermediates_and_expands_terminal() {
         },
         name: Arc::from("A"),
     });
-    let (a_node, _) = host.resolve_type_with_audit(resolve_a, "/types.ts");
-    let a_node = a_node.expect("A must resolve");
+    let (a_node, _) = host
+        .resolve_type_with_audit(resolve_a, "/types.ts")
+        .into_parts();
+    let a_node = a_node.ok().flatten().expect("A must resolve");
 
     // Step 2: drive the path projection A['c']['full']['bar'] with
     // the caller's mode set to Expanded.
@@ -142,10 +144,15 @@ fn path_a_c_full_bar_navigates_intermediates_and_expands_terminal() {
             ProjectionMode::Expanded,
         ),
     };
-    let (resolved, record) = host.resolve_type_with_audit(project, "/types.ts");
-    let resolved = resolved.expect("path projection must resolve");
+    let (resolved, record) = host
+        .resolve_type_with_audit(project, "/types.ts")
+        .into_parts();
+    let resolved = resolved
+        .ok()
+        .flatten()
+        .expect("path projection must resolve");
     let _ = resolved;
-    let record = record.expect("active TypeResolution request must produce a record");
+    // record is always present now (carrier `audit` field is mandatory).
     let payload = record
         .type_resolution_payload()
         .expect("kind must be TypeResolution");

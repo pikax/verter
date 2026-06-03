@@ -34,7 +34,8 @@ mod typeinfo;
 use audit::{
     audit_record_list_to_json_string, audit_record_to_json_string, kind_matches_wasm,
     parse_bundler_kind_wasm, parse_compile_target_wasm, parse_request_id_str_wasm,
-    AuditRecordFilterWasm, BundlerBatchSummaryArgsWasm, WorkspaceOpArgWasm,
+    stored_audit_record_to_json_string, AuditRecordFilterWasm, BundlerBatchSummaryArgsWasm,
+    WorkspaceOpArgWasm,
 };
 
 /// WASM audit bundle — mirror of the NAPI binding's bundle shape.
@@ -749,11 +750,11 @@ impl WasmVerterHost {
                 },
                 name: std::sync::Arc::<str>::from(decl_name_owned.as_str()),
             });
-            let (_resolved, record) = host.resolve_type_with_audit(key, &canonical_id_owned);
-            match record {
-                Some(rec) => audit_record_to_json_string(&rec),
-                None => Ok(JsValue::NULL),
-            }
+            let record = host
+                .resolve_type_with_audit(key, &canonical_id_owned)
+                .audit()
+                .clone();
+            stored_audit_record_to_json_string(&record)
         }))?
     }
 
@@ -767,11 +768,11 @@ impl WasmVerterHost {
         let host = std::sync::Arc::clone(&self.inner);
         let canonical_id_owned = canonical_id.to_string();
         catch_panic(AssertUnwindSafe(move || {
-            let (_result, record) = host.compile_with_audit(&canonical_id_owned, target_value);
-            match record {
-                Some(rec) => audit_record_to_json_string(&rec),
-                None => Ok(JsValue::NULL),
-            }
+            let record = host
+                .compile_with_audit(&canonical_id_owned, target_value)
+                .audit()
+                .clone();
+            stored_audit_record_to_json_string(&record)
         }))?
     }
 
@@ -976,12 +977,15 @@ impl WasmVerterHost {
         catch_panic(AssertUnwindSafe(move || {
             let arc_args: Vec<std::sync::Arc<verter_type_expr::TypeExpr>> =
                 exprs.into_iter().map(std::sync::Arc::new).collect();
-            let (resolved, record) = host.resolve_named_symbol_with_audit(
-                &canonical_id_owned,
-                &name_owned,
-                &arc_args,
-                resolve_mode,
-            );
+            let (outcome, record) = host
+                .resolve_named_symbol_with_audit(
+                    &canonical_id_owned,
+                    &name_owned,
+                    &arc_args,
+                    resolve_mode,
+                )
+                .into_parts();
+            let (resolved, error) = crate::typeinfo::split_resolve_outcome(outcome);
             let type_expr_json = match resolved {
                 Some(node_id) => host
                     .project_node_to_type_expr(node_id)
@@ -989,13 +993,11 @@ impl WasmVerterHost {
                     .transpose()?,
                 None => None,
             };
-            let audit_json = match record {
-                Some(rec) => Some(crate::typeinfo::encode_audit_record(&rec)?),
-                None => None,
-            };
+            let audit_json = crate::typeinfo::encode_stored_audit_record(&record)?;
             let result = crate::typeinfo::WasmTypeInfoResolveResult {
                 type_expr: type_expr_json,
                 audit_record: audit_json,
+                error,
             };
             to_wasm_value(&result)
         }))?
@@ -1014,7 +1016,8 @@ impl WasmVerterHost {
         let req = crate::typeinfo::decode_evaluate_request(request_json)?;
         let host = std::sync::Arc::clone(&self.inner);
         catch_panic(AssertUnwindSafe(move || {
-            let (resolved, record) = host.evaluate_type_expression_with_audit(req);
+            let (outcome, record) = host.evaluate_type_expression_with_audit(req).into_parts();
+            let (resolved, error) = crate::typeinfo::split_resolve_outcome(outcome);
             let type_expr_json = match resolved {
                 Some(node_id) => host
                     .project_node_to_type_expr(node_id)
@@ -1022,13 +1025,11 @@ impl WasmVerterHost {
                     .transpose()?,
                 None => None,
             };
-            let audit_json = match record {
-                Some(rec) => Some(crate::typeinfo::encode_audit_record(&rec)?),
-                None => None,
-            };
+            let audit_json = crate::typeinfo::encode_stored_audit_record(&record)?;
             let result = crate::typeinfo::WasmTypeInfoResolveResult {
                 type_expr: type_expr_json,
                 audit_record: audit_json,
+                error,
             };
             to_wasm_value(&result)
         }))?
@@ -1472,10 +1473,10 @@ impl WasmMetaSession {
     ) -> Result<JsValue, JsValue> {
         let session = self.session()?;
         catch_panic(AssertUnwindSafe(|| {
-            let Some((analysis, resolution, record)) = session
+            let (outcome, record) = session
                 .get_component_meta_with_audit(canonical_or_alias)
-                .map_err(ffi_err)?
-            else {
+                .into_parts();
+            let Some((analysis, resolution)) = outcome.map_err(ffi_err)? else {
                 return Ok(JsValue::NULL);
             };
             let ffi = verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(

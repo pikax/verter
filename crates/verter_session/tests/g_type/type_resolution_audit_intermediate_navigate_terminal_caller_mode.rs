@@ -58,8 +58,12 @@ fn type_resolution_audit_intermediate_hops_navigate_terminal_uses_caller_mode() 
         },
         name: Arc::from("A"),
     });
-    let (a_node, _) = host.resolve_type_with_audit(resolve_a, "/types.ts");
-    let a_node = a_node.expect("A must resolve");
+    let (a_node, _) = host
+        .resolve_type_with_audit(resolve_a, "/types.ts")
+        .into_parts();
+    let a_node = a_node
+        .expect("A must resolve")
+        .expect("resolved node must be present");
 
     // Now drive a path projection of length 3 — `A['c']['full']['bar']`.
     let project = SemanticQueryKey::ProjectPath {
@@ -76,10 +80,14 @@ fn type_resolution_audit_intermediate_hops_navigate_terminal_uses_caller_mode() 
             ProjectionMode::Expanded,
         ),
     };
-    let (resolved, record) = host.resolve_type_with_audit(project, "/types.ts");
-    let resolved = resolved.expect("path projection must resolve");
+    let (resolved, record) = host
+        .resolve_type_with_audit(project, "/types.ts")
+        .into_parts();
+    let resolved = resolved
+        .expect("path projection must resolve")
+        .expect("resolved node must be present");
     let _ = resolved;
-    let record = record.expect("active TypeResolution request must produce a record");
+    // record is always present now (carrier `audit` mandatory).
     let payload = record
         .type_resolution_payload()
         .expect("kind must be TypeResolution");

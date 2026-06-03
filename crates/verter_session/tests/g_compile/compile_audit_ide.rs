@@ -43,7 +43,13 @@ fn build_host() -> Arc<VerterHost> {
 #[test]
 fn compile_with_audit_ide_publishes_record_with_ide_tag_and_tsx_block() {
     let host = build_host();
-    let (result, record) = host.compile_with_audit("/i.vue", CompileTarget::IDE);
+    let (result, record) = host
+        .compile_with_audit("/i.vue", CompileTarget::IDE)
+        .into_parts();
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => match e {},
+    };
 
     // IDE target produces a TSX block, not a VDOM template block.
     assert!(
@@ -52,7 +58,7 @@ fn compile_with_audit_ide_publishes_record_with_ide_tag_and_tsx_block() {
         result.errors
     );
 
-    let record = record.expect("audit_enabled=true ⇒ record published");
+    // record is always present now (carrier `audit` field is mandatory).
     match &record.kind {
         verter_audit::RequestKind::Compile { target } => {
             assert_eq!(

@@ -165,6 +165,7 @@ mod tests {
             files: Vec::new(),
             waits: None,
             kind_payload: RequestKindPayload::None,
+            capture_state: crate::record::AuditCaptureState::ActiveStored,
             trace_id: String::new(),
         }
     }

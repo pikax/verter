@@ -50,7 +50,13 @@ fn host_with(canonical: &str, source: &'static str) -> Arc<VerterHost> {
 #[test]
 fn compile_with_audit_populates_css_analysis_ms_when_style_block_present() {
     let host = host_with("/withstyle.vue", SFC_WITH_STYLE);
-    let (result, record) = host.compile_with_audit("/withstyle.vue", CompileTarget::BUNDLER);
+    let (result, record) = host
+        .compile_with_audit("/withstyle.vue", CompileTarget::BUNDLER)
+        .into_parts();
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => match e {},
+    };
 
     assert!(
         !result.styles.is_empty(),
@@ -58,7 +64,6 @@ fn compile_with_audit_populates_css_analysis_ms_when_style_block_present() {
     );
 
     let payload = record
-        .expect("audit_enabled=true ⇒ record")
         .compile_payload()
         .cloned()
         .expect("Compile kind ⇒ CompilePayload");
@@ -86,13 +91,12 @@ fn compile_with_audit_populates_css_analysis_ms_when_style_block_present() {
 #[test]
 fn compile_with_audit_leaves_css_analysis_ms_none_when_no_style_block() {
     let host = host_with("/nostyle.vue", SFC_WITHOUT_STYLE);
-    let (_result, record) = host.compile_with_audit("/nostyle.vue", CompileTarget::BUNDLER);
+    let record = host
+        .compile_with_audit("/nostyle.vue", CompileTarget::BUNDLER)
+        .audit()
+        .clone();
 
-    let payload = record
-        .expect("audit record published")
-        .compile_payload()
-        .cloned()
-        .expect("CompilePayload");
+    let payload = record.compile_payload().cloned().expect("CompilePayload");
 
     // Negative discriminator: an SFC with no <style> blocks must
     // leave css_analysis_ms at None — protects against a producer

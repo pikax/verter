@@ -45,18 +45,37 @@ fn upsert_ts(host: &VerterHost, canonical_id: &str, source: &str) {
     });
 }
 
+/// Split a typeinfo `AuditedResult<Option<node>, E>` carrier into the
+/// `(node, record)` pair the happy-path tests inspect. Both a non-fault
+/// miss (`Ok(None)`) and a dispatch fault (`Err`) collapse to `None`
+/// here — these helper callers only exercise the success path, so the
+/// flatten is benign. The fault-routing tests below use `into_parts()`
+/// directly to discriminate `Err` from `Ok(None)`. The audit record is
+/// always present.
+fn parts<E>(
+    carrier: verter_audit::AuditedResult<Option<crate::semantic_query::SemanticNodeId>, E>,
+) -> (
+    Option<crate::semantic_query::SemanticNodeId>,
+    verter_audit::RequestAuditRecord,
+) {
+    let (outcome, record) = carrier.into_parts();
+    (outcome.ok().flatten(), record)
+}
+
 fn assert_one_typeresolution_record(
-    record: &Option<verter_audit::RequestAuditRecord>,
+    record: &verter_audit::RequestAuditRecord,
 ) -> &verter_audit::RequestAuditRecord {
-    let r = record
-        .as_ref()
-        .expect("active TypeResolution request must produce a record");
-    assert_eq!(r.kind, RequestKind::TypeResolution);
+    assert_eq!(record.kind, RequestKind::TypeResolution);
     assert!(
-        matches!(r.kind_payload, RequestKindPayload::TypeResolution(_)),
+        matches!(record.kind_payload, RequestKindPayload::TypeResolution(_)),
         "kind_payload must be TypeResolution"
     );
-    r
+    assert_eq!(
+        record.capture_state,
+        verter_audit::AuditCaptureState::ActiveStored,
+        "active TypeResolution request must produce a stored record"
+    );
+    record
 }
 
 fn type_arg_ref(name: &str) -> Arc<TypeExpr> {
@@ -243,12 +262,12 @@ export type Outer = Inner;
     // unwrap aliases — the contract is "do not unwrap + do not
     // expand". Compare against the Navigate / Expanded results to
     // discriminate.
-    let (id_node, record) = host.resolve_named_symbol_with_audit(
+    let (id_node, record) = parts(host.resolve_named_symbol_with_audit(
         "/aliases.ts",
         "Outer",
         &[],
         Some(ProjectionMode::Identity),
-    );
+    ));
     let id_node = id_node.expect("Identity must resolve");
     let _ = assert_one_typeresolution_record(&record);
 
@@ -275,12 +294,12 @@ export type Outer = Inner;
     // Discriminate against Navigate / Expanded — those return a
     // *different* node id (the Object body) for the same input,
     // proving Identity's no-unwrap contract holds.
-    let (navigate_node, _) = host.resolve_named_symbol_with_audit(
+    let (navigate_node, _) = parts(host.resolve_named_symbol_with_audit(
         "/aliases.ts",
         "Outer",
         &[],
         Some(ProjectionMode::Navigate),
-    );
+    ));
     let navigate_node = navigate_node.expect("Navigate must resolve");
     assert_ne!(
         id_node, navigate_node,
@@ -300,12 +319,12 @@ export type Outer = Inner;
 "#,
     );
 
-    let (nav_node, record) = host.resolve_named_symbol_with_audit(
+    let (nav_node, record) = parts(host.resolve_named_symbol_with_audit(
         "/aliases.ts",
         "Outer",
         &[],
         Some(ProjectionMode::Navigate),
-    );
+    ));
     let nav_node = nav_node.expect("Navigate must resolve");
     let _ = assert_one_typeresolution_record(&record);
 
@@ -331,12 +350,12 @@ export type Outer = Inner;
 "#,
     );
 
-    let (exp_node, record) = host.resolve_named_symbol_with_audit(
+    let (exp_node, record) = parts(host.resolve_named_symbol_with_audit(
         "/aliases.ts",
         "Outer",
         &[],
         Some(ProjectionMode::Expanded),
-    );
+    ));
     let exp_node = exp_node.expect("Expanded must resolve");
     let _ = assert_one_typeresolution_record(&record);
 
@@ -369,7 +388,8 @@ export type Outer = Inner;
     );
 
     // No mode override → host defaults to Expanded for non-generic.
-    let (def_node, record) = host.resolve_named_symbol_with_audit("/types.ts", "Outer", &[], None);
+    let (def_node, record) =
+        parts(host.resolve_named_symbol_with_audit("/types.ts", "Outer", &[], None));
     let def_node = def_node.expect("default must resolve");
     let r = assert_one_typeresolution_record(&record);
     let payload = match &r.kind_payload {
@@ -406,7 +426,8 @@ export type Wrap<T> = { wrapped: T };
 "#,
     );
 
-    let (def_node, record) = host.resolve_named_symbol_with_audit("/types.ts", "Wrap", &[], None);
+    let (def_node, record) =
+        parts(host.resolve_named_symbol_with_audit("/types.ts", "Wrap", &[], None));
     let def_node = def_node.expect("generic default must resolve");
     let r = assert_one_typeresolution_record(&record);
     let payload = match &r.kind_payload {
@@ -431,13 +452,14 @@ fn resolve_named_symbol_with_audit_emits_one_record() {
     upsert_ts(&host, "/single.ts", "export type T = number;\n");
 
     let baseline = host.audit_records.len();
-    let (_node, record) = host.resolve_named_symbol_with_audit(
+    let (_node, record) = parts(host.resolve_named_symbol_with_audit(
         "/single.ts",
         "T",
         &[],
         Some(ProjectionMode::Expanded),
-    );
-    let _ = record.expect("one record must be returned at the call boundary");
+    ));
+    // record is always present now (carrier `audit` field is mandatory).
+    let _ = &record;
     let after = host.audit_records.len();
     // EXACTLY one new record was inserted — discriminating
     // assertion against any "internal sub-query bumped the count"
@@ -456,13 +478,13 @@ fn resolve_named_symbol_with_audit_carries_trace_id() {
     let host = make_host_with_audit();
     upsert_ts(&host, "/single.ts", "export type T = number;\n");
 
-    let (_node, record) = host.resolve_named_symbol_with_audit(
+    let (_node, record) = parts(host.resolve_named_symbol_with_audit(
         "/single.ts",
         "T",
         &[],
         Some(ProjectionMode::Expanded),
-    );
-    let r = record.expect("active request must produce a record");
+    ));
+    let r = &record;
     assert!(
         !r.trace_id.is_empty(),
         "RequestAuditRecord.trace_id must propagate from RequestContext.trace_id"
@@ -492,7 +514,7 @@ fn evaluate_simple_primitive_returns_primitive() {
         mode: ProjectionMode::Expanded,
         cacheable: false,
     };
-    let (node, record) = host.evaluate_type_expression_with_audit(req);
+    let (node, record) = parts(host.evaluate_type_expression_with_audit(req));
     let node = node.expect("primitive expression must resolve");
     let _ = assert_one_typeresolution_record(&record);
 
@@ -517,7 +539,7 @@ fn evaluate_object_type() {
         mode: ProjectionMode::Expanded,
         cacheable: false,
     };
-    let (node, _record) = host.evaluate_type_expression_with_audit(req);
+    let (node, _record) = parts(host.evaluate_type_expression_with_audit(req));
     let node = node.expect("object expression must resolve");
 
     let store = host.project_type_store().semantic_graph();
@@ -561,7 +583,7 @@ export type Foo = { foo: number };
         mode: ProjectionMode::Expanded,
         cacheable: false,
     };
-    let (node, _record) = host.evaluate_type_expression_with_audit(req);
+    let (node, _record) = parts(host.evaluate_type_expression_with_audit(req));
     let node = node.expect("imported expression must resolve");
 
     let store = host.project_type_store().semantic_graph();
@@ -626,18 +648,18 @@ fn evaluate_caches_when_cacheable_true() {
         mode: ProjectionMode::Expanded,
         cacheable: true,
     };
-    let (node1, record1) = host.evaluate_type_expression_with_audit(req());
+    let (node1, record1) = parts(host.evaluate_type_expression_with_audit(req()));
     let node1 = node1.expect("first call must resolve");
-    let r1 = record1.expect("first record");
+    let r1 = &record1;
     assert!(
         !r1.from_cache,
         "first call must report cold (from_cache=false)"
     );
 
     // Second call with the same parameters → cache hit.
-    let (node2, record2) = host.evaluate_type_expression_with_audit(req());
+    let (node2, record2) = parts(host.evaluate_type_expression_with_audit(req()));
     let node2 = node2.expect("second call must resolve");
-    let r2 = record2.expect("second record");
+    let r2 = &record2;
     assert!(
         r2.from_cache,
         "second call with same request must report from_cache=true"
@@ -657,11 +679,11 @@ fn evaluate_skips_cache_when_cacheable_false() {
         mode: ProjectionMode::Expanded,
         cacheable: false,
     };
-    let (_node1, record1) = host.evaluate_type_expression_with_audit(req());
-    let r1 = record1.expect("first record");
+    let (_node1, record1) = parts(host.evaluate_type_expression_with_audit(req()));
+    let r1 = &record1;
     assert!(!r1.from_cache);
-    let (_node2, record2) = host.evaluate_type_expression_with_audit(req());
-    let r2 = record2.expect("second record");
+    let (_node2, record2) = parts(host.evaluate_type_expression_with_audit(req()));
+    let r2 = &record2;
     assert!(
         !r2.from_cache,
         "non-cacheable repeated call must always be cold"
@@ -722,8 +744,9 @@ fn evaluate_with_audit_emits_one_record() {
         mode: ProjectionMode::Expanded,
         cacheable: false,
     };
-    let (_node, record) = host.evaluate_type_expression_with_audit(req);
-    let _ = record.expect("one record must be returned at the call boundary");
+    let (_node, record) = parts(host.evaluate_type_expression_with_audit(req));
+    // record is always present now (carrier `audit` field is mandatory).
+    let _ = &record;
     let after = host.audit_records.len();
     assert_eq!(
         after - baseline,
@@ -746,8 +769,8 @@ fn evaluate_with_audit_carries_trace_id() {
         mode: ProjectionMode::Expanded,
         cacheable: false,
     };
-    let (_node, record) = host.evaluate_type_expression_with_audit(req);
-    let r = record.expect("active request must produce a record");
+    let (_node, record) = parts(host.evaluate_type_expression_with_audit(req));
+    let r = &record;
     assert!(
         !r.trace_id.is_empty(),
         "trace_id must propagate from RequestContext.trace_id"
@@ -770,12 +793,12 @@ export type Wrap<T> = { wrapped: T };
 "#,
     );
 
-    let (node, record) = host.resolve_named_symbol_with_audit(
+    let (node, record) = parts(host.resolve_named_symbol_with_audit(
         "/types.ts",
         "Wrap",
         &[type_arg_primitive(PrimitiveName::String)],
         Some(ProjectionMode::Expanded),
-    );
+    ));
     let node = node.expect("Wrap<string> must resolve");
     let _ = assert_one_typeresolution_record(&record);
     let store = host.project_type_store().semantic_graph();
@@ -902,12 +925,12 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     // (2) Public consumer: `resolve_named_symbol_with_audit` (defaults to
     //     Expanded for a non-generic decl) must return a type carrying the
     //     inherited members.
-    let (resolved, record) = host.resolve_named_symbol_with_audit(
+    let (resolved, record) = parts(host.resolve_named_symbol_with_audit(
         "/types.ts",
         "ColorModeSelectProps",
         &[],
         Some(ProjectionMode::Expanded),
-    );
+    ));
     let resolved = resolved.expect("ColorModeSelectProps must resolve");
     let _ = assert_one_typeresolution_record(&record);
     let mut public_names = Vec::new();
@@ -929,5 +952,214 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         !public_names.iter().any(|n| n == "<opaque-miss>"),
         "the public consumer's type MUST NOT carry an `Opaque(Miss)` heritage \
          arm. Got: {public_names:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch-fault routing (F1)
+//
+// The typeinfo resolution entry-points decode every `QueryResult::Error`
+// arm through `classify_dispatch_error`, which routes a genuine dispatch
+// FAULT to the carrier's `Err(TypeResolutionRequestError)` arm and a
+// non-fault MISS to `Ok(fallback)`. These tests pin that split.
+//
+// DISCRIMINATING: the pre-change entry-points collapsed every
+// `QueryResult::Error(_)` to `None` (→ `Ok(None)` in carrier terms), so
+// `classify_dispatch_error` did not exist and a fault could never reach
+// the `Err` arm. The fault assertions below therefore FAIL against the
+// old collapse and PASS against the routed split. The end-to-end miss
+// tests pin the complementary half — a well-formed request that resolves
+// no node rides `Ok`, never `Err`.
+// ---------------------------------------------------------------------------
+
+use crate::host_resolve_type_audit::TypeResolutionRequestError;
+use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
+use crate::semantic_query::QueryError;
+use crate::typeinfo::resolve_named_symbol::classify_dispatch_error;
+
+fn sample_budget_failure() -> BudgetExceededFailure {
+    BudgetExceededFailure {
+        domain: BudgetDomain::ProjectionOperation,
+        limit: 1,
+        actual: 2,
+        context: "typeinfo-fault-test".to_string(),
+    }
+}
+
+#[test]
+fn classify_dispatch_error_routes_budget_exceeded_to_err() {
+    let err = QueryError::BudgetExceeded(sample_budget_failure());
+    let out = classify_dispatch_error(&err, None);
+    assert_eq!(
+        out,
+        Err(TypeResolutionRequestError::BudgetExceeded(
+            sample_budget_failure()
+        )),
+        "a BudgetExceeded dispatch fault MUST ride the carrier's `Err` arm, \
+         NOT collapse to `Ok(None)`"
+    );
+}
+
+#[test]
+fn classify_dispatch_error_routes_alias_cycle_to_err() {
+    let chain: Arc<[Arc<str>]> = Arc::from(vec![Arc::from("A"), Arc::from("B")]);
+    let err = QueryError::AliasCycle {
+        chain: Arc::clone(&chain),
+    };
+    let out = classify_dispatch_error(&err, None);
+    assert!(
+        matches!(out, Err(TypeResolutionRequestError::AliasCycle { .. })),
+        "an AliasCycle dispatch fault MUST ride `Err`; got {out:?}"
+    );
+}
+
+#[test]
+fn classify_dispatch_error_routes_unstable_state_to_err() {
+    let err = QueryError::UnstableState { attempts: 3 };
+    let out = classify_dispatch_error(&err, None);
+    assert_eq!(
+        out,
+        Err(TypeResolutionRequestError::UnstableState { attempts: 3 }),
+    );
+}
+
+#[test]
+fn classify_dispatch_error_routes_unsupported_intrinsic_to_err() {
+    let err = QueryError::UnsupportedIntrinsic {
+        name: Arc::from("NoSuchIntrinsic"),
+    };
+    let out = classify_dispatch_error(&err, None);
+    assert!(
+        matches!(
+            out,
+            Err(TypeResolutionRequestError::UnsupportedIntrinsic { .. })
+        ),
+        "an UnsupportedIntrinsic dispatch fault MUST ride `Err`; got {out:?}"
+    );
+}
+
+#[test]
+fn classify_dispatch_error_routes_miss_to_ok_fallback() {
+    // A non-fault miss rides `Ok`, carrying whatever fallback node the
+    // caller already resolved (here `None`).
+    assert_eq!(classify_dispatch_error(&QueryError::Miss, None), Ok(None));
+    // RecursiveRef and DeclPlaceholder are also non-faults.
+    assert_eq!(
+        classify_dispatch_error(
+            &QueryError::RecursiveRef {
+                name: Arc::from("Tree")
+            },
+            None
+        ),
+        Ok(None)
+    );
+    assert_eq!(
+        classify_dispatch_error(
+            &QueryError::DeclPlaceholder {
+                canonical_id: Arc::from("/a.ts"),
+                name: Arc::from("Foo"),
+                whole_hash: Default::default(),
+            },
+            None
+        ),
+        Ok(None)
+    );
+}
+
+#[test]
+fn resolve_named_symbol_unknown_symbol_rides_ok_not_err() {
+    let host = make_host_with_audit();
+    upsert_ts(&host, "/miss.ts", "export type T = string;\n");
+    let (outcome, _record) = host
+        .resolve_named_symbol_with_audit(
+            "/miss.ts",
+            "DefinitelyNotDeclared",
+            &[],
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    assert!(
+        outcome.is_ok(),
+        "an unknown symbol is a non-fault miss and MUST ride the `Ok` arm, \
+         never `Err`; got {outcome:?}"
+    );
+}
+
+#[test]
+fn evaluate_type_expression_unresolvable_rides_ok_not_err() {
+    let host = make_host_with_audit();
+    upsert_ts(&host, "/eval_miss.ts", "export type T = string;\n");
+    let req = EvaluateTypeExpressionRequest {
+        scope: "/eval_miss.ts".to_string(),
+        expression: "NoSuchTypeName".to_string(),
+        extra_imports: Vec::new(),
+        mode: ProjectionMode::Expanded,
+        cacheable: false,
+    };
+    let (outcome, _record) = host.evaluate_type_expression_with_audit(req).into_parts();
+    assert!(
+        outcome.is_ok(),
+        "an unresolvable expression is a non-fault miss and MUST ride the \
+         `Ok` arm, never `Err`; got {outcome:?}"
+    );
+}
+
+#[test]
+fn nested_materialization_hard_fault_rides_err_not_degraded_ok() {
+    use crate::semantic_query::{QueryResult, SemanticNodeId};
+    use crate::typeinfo::resolve_named_symbol::{
+        classify_materialization_step, MaterializationStep,
+    };
+
+    // Discriminating guard for the nested-materialization fault hop.
+    //
+    // The placeholder-materialisation loop (in `materialize_through_aliases`
+    // and its evaluate-type-expression sibling) re-dispatches
+    // `Instantiate { args: [] }` against a `DeclPlaceholder`'s identity and
+    // routes the result through `classify_materialization_step`. When that
+    // nested dispatch HARD-FAULTS (a `BudgetExceeded` / `UnstableState` /
+    // `AliasCycle` / `UnsupportedIntrinsic` / `Other` `QueryResult::Error`
+    // arm), the fault MUST propagate as `Err` — not silently degrade to
+    // `Ok(Stop(placeholder))`.
+    //
+    // Pre-change the loop's `QueryResult::Error(_) => return current` arm
+    // returned the un-materialised placeholder node, so a hard fault would
+    // observe `Ok(Stop(_))`. This assertion FAILS against that behaviour
+    // and PASSES once the arm routes through `classify_dispatch_error`.
+    let current = SemanticNodeId(7);
+
+    // HARD FAULT → Err (the bug the change fixed).
+    let fault = QueryResult::Error(QueryError::BudgetExceeded(sample_budget_failure()));
+    let out = classify_materialization_step(fault, current);
+    assert!(
+        matches!(out, Err(TypeResolutionRequestError::BudgetExceeded(_))),
+        "a hard dispatch fault during NESTED materialization MUST propagate as \
+         `Err`, never degrade to `Ok(Stop(placeholder))`; got {out:?}"
+    );
+
+    // NON-FAULT MISS → degraded-but-successful `Ok(Stop(current))`
+    // (degraded-but-successful rides Ok, per native-flow-return.md).
+    let miss = classify_materialization_step(QueryResult::Error(QueryError::Miss), current);
+    assert_eq!(
+        miss,
+        Ok(MaterializationStep::Stop(current)),
+        "a non-fault miss keeps the degraded `current` node as a successful Ok"
+    );
+
+    // Progressing VALUE → Continue(next).
+    let next = SemanticNodeId(9);
+    let step = classify_materialization_step(QueryResult::Value(next), current);
+    assert_eq!(
+        step,
+        Ok(MaterializationStep::Continue(next)),
+        "a fresh value node advances the loop"
+    );
+
+    // VALUE that did not progress (next == current) → Stop(current).
+    let no_progress = classify_materialization_step(QueryResult::Value(current), current);
+    assert_eq!(
+        no_progress,
+        Ok(MaterializationStep::Stop(current)),
+        "a dispatch that returns the same placeholder stops the loop"
     );
 }

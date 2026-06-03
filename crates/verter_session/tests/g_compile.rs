@@ -4,6 +4,8 @@
 mod admission_overflow_routes_to_return_only;
 #[path = "g_compile/compile_audit_css_analysis.rs"]
 mod compile_audit_css_analysis;
+#[path = "g_compile/compile_audit_filtered_and_parent.rs"]
+mod compile_audit_filtered_and_parent;
 #[path = "g_compile/compile_audit_ide.rs"]
 mod compile_audit_ide;
 #[path = "g_compile/compile_audit_no_hot_loop_instrumentation.rs"]

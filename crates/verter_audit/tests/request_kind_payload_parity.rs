@@ -142,6 +142,7 @@ fn typeinfo_graph_payload_accessor_returns_some() {
         waits: None,
         kind_payload: RequestKindPayload::TypeInfoGraph(TypeInfoGraphPayload::default()),
         trace_id: String::new(),
+        capture_state: verter_audit::AuditCaptureState::ActiveStored,
     };
     assert!(record.typeinfo_graph_payload().is_some());
 

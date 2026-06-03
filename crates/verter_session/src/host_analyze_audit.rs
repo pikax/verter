@@ -33,19 +33,24 @@
 //!    metric describes the file's real semantic footprint.
 //! 5. Build the [`verter_audit::RequestAuditRecord`] with
 //!    [`verter_audit::RequestKindPayload::SemanticAnalysis`].
-//! 6. Finalise through the registration. `Noop` registrations return
-//!    `(Some(analysis), None)`; active registrations return
-//!    `(Some(analysis), Some(record))`. A missing canonical returns
-//!    `(None, None)` — there is no audit work to attribute when the
-//!    file does not exist in the workspace.
+//! 6. Finalise through the registration and return an
+//!    [`verter_audit::AuditedResult<Option<AnalysisReady>, Infallible>`]
+//!    carrier. A resolved canonical rides `Ok(Some(analysis))`; a
+//!    missing canonical rides `Ok(None)`. The carrier's `audit` field
+//!    is mandatory — filtered / disabled paths return the cheap
+//!    default-filled record marked
+//!    [`verter_audit::AuditCaptureState::FilteredNoop`] /
+//!    [`verter_audit::AuditCaptureState::AuditDisabled`].
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
+use std::convert::Infallible;
+
 use verter_audit::{
-    RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit, RequestStoreAudit,
-    RequestTimingAudit, SemanticAnalysisPayload, WaitAudit,
+    AuditedResult, RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit,
+    RequestStoreAudit, RequestTimingAudit, SemanticAnalysisPayload, WaitAudit,
 };
 
 use crate::host_audit_runtime::AuditRequestRegistration;
@@ -58,21 +63,29 @@ impl VerterHost {
     /// Run a semantic-analysis request through the host's shared
     /// `IndexedReady` materialisation path and return the resulting
     /// [`AnalysisReady`] alongside the per-request
-    /// [`RequestAuditRecord`].
+    /// [`RequestAuditRecord`], packaged in a single
+    /// [`crate::AuditedResult`] carrier.
     ///
-    /// Returns:
-    /// - `(Some(analysis), Some(record))` when the audit-config
-    ///   consumer filter accepts `RequestKind::SemanticAnalysis` AND
-    ///   the canonical resolved through the workspace.
-    /// - `(Some(analysis), None)` when the filter rejected the kind
-    ///   (`AuditRequestRegistration::Noop`); the analysis still ran.
-    /// - `(None, None)` when the canonical does not exist in the
-    ///   workspace — there is no audit work to attribute.
+    /// The error type is [`Infallible`]: semantic analysis has no
+    /// request-fault path — a missing canonical rides the success arm
+    /// as `Ok(None)`.
+    ///
+    /// Outcome mapping:
+    /// - `Ok(Some(analysis))` — the canonical resolved through the
+    ///   workspace and analysis materialised.
+    /// - `Ok(None)` — the canonical does not exist in the workspace.
+    ///
+    /// The carrier's `audit` field is always populated:
+    /// [`verter_audit::AuditCaptureState::ActiveStored`] on the
+    /// full-capture path, or the cheap default-filled record marked
+    /// [`verter_audit::AuditCaptureState::FilteredNoop`] /
+    /// [`verter_audit::AuditCaptureState::AuditDisabled`] on the
+    /// filtered / disabled paths.
     #[must_use]
     pub fn analyze_with_audit(
         self: &Arc<Self>,
         canonical_id: &str,
-    ) -> (Option<AnalysisReady>, Option<RequestAuditRecord>) {
+    ) -> AuditedResult<Option<AnalysisReady>, Infallible> {
         // Probe the IndexedReady cache BEFORE constructing the
         // registration so the cache state we observe is unaffected by
         // any work we are about to perform. The probe is
@@ -91,10 +104,22 @@ impl VerterHost {
         // Audit-disabled fast path: drive the analysis with NO
         // `RequestContextGuard` installed. Producer-side
         // `current_observer()` returns `None`, the instrumentation
-        // short-circuits at the TLS check, and we publish nothing.
+        // short-circuits at the TLS check, and nothing is published.
+        // The carrier still carries a cheap default-filled record
+        // marked `AuditDisabled`.
         if !self.config.audit_enabled {
+            let request_id = self.next_request_id();
             let analysis = self.materialize_analysis_ready(canonical_id);
-            return (analysis, None);
+            let parent_request_id =
+                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+            let record = noop_semantic_analysis_record(
+                request_id,
+                canonical_id,
+                parent_request_id,
+                pre_call_cache_hit,
+                verter_audit::AuditCaptureState::AuditDisabled,
+            );
+            return AuditedResult::ok(analysis, record);
         }
 
         // Stamp request id and increment the created-counter so the
@@ -149,22 +174,40 @@ impl VerterHost {
         };
         let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
 
-        // Missing canonical: nothing to attribute. Return `(None,
-        // None)` regardless of registration arm — `Active` doesn't
-        // get a record because there is no real analysis behind it,
-        // and the registration's defensive `Drop` will sweep its
-        // entry from `active_requests` when the local Arc goes out
-        // of scope.
-        let Some(analysis) = analysis else {
-            return (None, None);
-        };
-
-        // Filtered kinds: skip record construction entirely. The
-        // analysis still ran (consumers asked for it), but the audit
-        // surface stays inert.
+        // Filtered kinds: return the cheap default-filled record. The
+        // analysis still ran (consumers asked for it), but no payload
+        // is collected and nothing is published.
         if matches!(registration.as_ref(), AuditRequestRegistration::Noop) {
-            return (Some(analysis), None);
+            let record = noop_semantic_analysis_record(
+                request_id,
+                canonical_id,
+                ctx.parent_request_id.map(|id| id.to_string()),
+                pre_call_cache_hit,
+                verter_audit::AuditCaptureState::FilteredNoop,
+            );
+            return AuditedResult::ok(analysis, record);
         }
+
+        // Missing canonical on an active registration: there is no
+        // analysis behind the request, but the carrier still returns a
+        // populated record so the always-a-record contract holds. The
+        // payload is the zero-valued default; the registration is
+        // finalised so the active-request slot is released cleanly
+        // rather than swept by the defensive `Drop`.
+        let Some(analysis) = analysis else {
+            let record = RequestAuditRecord {
+                from_cache: pre_call_cache_hit,
+                ..noop_semantic_analysis_record(
+                    request_id,
+                    canonical_id,
+                    ctx.parent_request_id.map(|id| id.to_string()),
+                    pre_call_cache_hit,
+                    verter_audit::AuditCaptureState::ActiveStored,
+                )
+            };
+            registration.finalize(record.clone());
+            return AuditedResult::ok(None, record);
+        };
 
         // Build the audit payload from the materialised AnalysisReady.
         // The numeric counters describe the file's actual semantic
@@ -216,12 +259,13 @@ impl VerterHost {
             files: Vec::new(),
             waits,
             kind_payload: RequestKindPayload::SemanticAnalysis(payload),
+            capture_state: verter_audit::AuditCaptureState::ActiveStored,
             trace_id: String::new(),
         };
 
         let cloned = record.clone();
         registration.finalize(record);
-        (Some(analysis), Some(cloned))
+        AuditedResult::ok(Some(analysis), cloned)
     }
 
     /// Materialise an [`AnalysisReady`] for `canonical_id` by routing
@@ -258,6 +302,37 @@ impl VerterHost {
             export_signatures: indexed.export_signatures.clone(),
             snapshot: Arc::new(snapshot),
         })
+    }
+}
+
+/// Build the cheap default-filled [`RequestAuditRecord`] returned on
+/// the filtered / disabled / missing-canonical semantic-analysis path.
+/// No per-request counters are collected — the payload is the
+/// zero-valued default and `capture_state` records why the full path
+/// was skipped.
+fn noop_semantic_analysis_record(
+    request_id: u64,
+    canonical_id: &str,
+    parent_request_id: Option<String>,
+    from_cache: bool,
+    capture_state: verter_audit::AuditCaptureState,
+) -> RequestAuditRecord {
+    RequestAuditRecord {
+        request_id,
+        canonical_id: canonical_id.to_string(),
+        kind: RequestKind::SemanticAnalysis,
+        parent_request_id,
+        from_cache,
+        timings: RequestTimingAudit::default(),
+        memory: RequestMemoryAudit::default(),
+        store: RequestStoreAudit::default(),
+        footprint: None,
+        scheduler: None,
+        files: Vec::new(),
+        waits: None,
+        kind_payload: RequestKindPayload::SemanticAnalysis(SemanticAnalysisPayload::default()),
+        capture_state,
+        trace_id: String::new(),
     }
 }
 

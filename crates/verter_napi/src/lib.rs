@@ -2186,11 +2186,11 @@ impl NapiVerterHost {
                 },
                 name: std::sync::Arc::<str>::from(decl_name.as_str()),
             });
-            let (_resolved, record) = host.resolve_type_with_audit(key, &canonical_id);
-            match record {
-                Some(rec) => audit::encode_record(&rec).map(Some),
-                None => Ok(None),
-            }
+            let record = host
+                .resolve_type_with_audit(key, &canonical_id)
+                .audit()
+                .clone();
+            audit::encode_stored_record(&record)
         }))?
     }
 
@@ -2207,11 +2207,11 @@ impl NapiVerterHost {
         let target = audit::parse_compile_target(&target)?;
         let host = std::sync::Arc::clone(&self.inner);
         catch_panic(std::panic::AssertUnwindSafe(move || {
-            let (_result, record) = host.compile_with_audit(&canonical_id, target);
-            match record {
-                Some(rec) => audit::encode_record(&rec).map(Some),
-                None => Ok(None),
-            }
+            let record = host
+                .compile_with_audit(&canonical_id, target)
+                .audit()
+                .clone();
+            audit::encode_stored_record(&record)
         }))?
     }
 
@@ -2223,11 +2223,8 @@ impl NapiVerterHost {
     pub fn analyze_with_audit(&self, canonical_id: String) -> Result<Option<Buffer>> {
         let host = std::sync::Arc::clone(&self.inner);
         catch_panic(std::panic::AssertUnwindSafe(move || {
-            let (_analysis, record) = host.analyze_with_audit(&canonical_id);
-            match record {
-                Some(rec) => audit::encode_record(&rec).map(Some),
-                None => Ok(None),
-            }
+            let record = host.analyze_with_audit(&canonical_id).audit().clone();
+            audit::encode_stored_record(&record)
         }))?
     }
 
@@ -2439,8 +2436,10 @@ impl NapiVerterHost {
         catch_panic(std::panic::AssertUnwindSafe(move || {
             let arc_args: Vec<std::sync::Arc<TypeExpr>> =
                 exprs.into_iter().map(std::sync::Arc::new).collect();
-            let (resolved, record) =
-                host.resolve_named_symbol_with_audit(&canonical_id, &name, &arc_args, resolve_mode);
+            let (outcome, record) = host
+                .resolve_named_symbol_with_audit(&canonical_id, &name, &arc_args, resolve_mode)
+                .into_parts();
+            let (resolved, error) = typeinfo::split_resolve_outcome(outcome);
             let type_expr_buf = match resolved {
                 Some(node_id) => host
                     .project_node_to_type_expr(node_id)
@@ -2448,13 +2447,11 @@ impl NapiVerterHost {
                     .transpose()?,
                 None => None,
             };
-            let audit_buf = match record {
-                Some(rec) => Some(typeinfo::encode_audit_record(&rec)?),
-                None => None,
-            };
+            let audit_buf = typeinfo::encode_stored_audit_record(&record)?;
             Ok(typeinfo::NapiTypeInfoResolveResult {
                 typeExpr: type_expr_buf,
                 auditRecord: audit_buf,
+                error,
             })
         }))?
     }
@@ -2476,7 +2473,8 @@ impl NapiVerterHost {
         let req = typeinfo::decode_evaluate_request(request)?;
         let host = std::sync::Arc::clone(&self.inner);
         catch_panic(std::panic::AssertUnwindSafe(move || {
-            let (resolved, record) = host.evaluate_type_expression_with_audit(req);
+            let (outcome, record) = host.evaluate_type_expression_with_audit(req).into_parts();
+            let (resolved, error) = typeinfo::split_resolve_outcome(outcome);
             let type_expr_buf = match resolved {
                 Some(node_id) => host
                     .project_node_to_type_expr(node_id)
@@ -2484,13 +2482,11 @@ impl NapiVerterHost {
                     .transpose()?,
                 None => None,
             };
-            let audit_buf = match record {
-                Some(rec) => Some(typeinfo::encode_audit_record(&rec)?),
-                None => None,
-            };
+            let audit_buf = typeinfo::encode_stored_audit_record(&record)?;
             Ok(typeinfo::NapiTypeInfoResolveResult {
                 typeExpr: type_expr_buf,
                 auditRecord: audit_buf,
+                error,
             })
         }))?
     }

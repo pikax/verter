@@ -44,7 +44,13 @@ fn host_for() -> Arc<VerterHost> {
 fn compile_with_audit_populates_sourcemap_ms_and_bytes_when_source_map_enabled() {
     let host = host_for();
     // Default `compile_with_audit` enables source_map.
-    let (result, record) = host.compile_with_audit("/sm.vue", CompileTarget::BUNDLER);
+    let (result, record) = host
+        .compile_with_audit("/sm.vue", CompileTarget::BUNDLER)
+        .into_parts();
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => match e {},
+    };
 
     let script_block = result
         .script
@@ -57,11 +63,7 @@ fn compile_with_audit_populates_sourcemap_ms_and_bytes_when_source_map_enabled()
         script_block.source_map.len()
     );
 
-    let payload = record
-        .expect("audit_enabled=true ⇒ record")
-        .compile_payload()
-        .cloned()
-        .expect("CompilePayload");
+    let payload = record.compile_payload().cloned().expect("CompilePayload");
 
     assert!(
         payload.sourcemap_ms.is_some(),
@@ -89,7 +91,13 @@ fn compile_with_audit_options_leaves_sourcemap_ms_none_when_source_map_disabled(
         source_map: false,
         ..VerterCompileOptions::default()
     };
-    let (result, record) = host.compile_with_audit_options("/sm.vue", CompileTarget::BUNDLER, opts);
+    let (result, record) = host
+        .compile_with_audit_options("/sm.vue", CompileTarget::BUNDLER, opts)
+        .into_parts();
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => match e {},
+    };
 
     let script_block = result
         .script
@@ -100,11 +108,7 @@ fn compile_with_audit_options_leaves_sourcemap_ms_none_when_source_map_disabled(
         "source_map=false must produce an empty source_map string",
     );
 
-    let payload = record
-        .expect("audit_enabled=true ⇒ record")
-        .compile_payload()
-        .cloned()
-        .expect("CompilePayload");
+    let payload = record.compile_payload().cloned().expect("CompilePayload");
 
     // Negative discriminator: source_map=false ⇒ no emit ⇒ accumulator
     // stays 0 ⇒ payload reports None.

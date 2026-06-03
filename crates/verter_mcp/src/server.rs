@@ -1,4 +1,4 @@
-﻿//! MCP server definition with tool routing.
+//! MCP server definition with tool routing.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -259,26 +259,30 @@ fn populate_evidence(diags: &mut [verter_diagnostics::LintDiagnostic], source: O
     }
 }
 
-/// Approximate the audit-payload metrics from a tool's outgoing
-/// `Result<CallToolResult, ErrorData>`. Sums the byte size of every
-/// text content fragment for `result_size_bytes`; lifts the error's
-/// debug rendering into the optional error string when the tool
-/// returns `Err`. Used by every audit-instrumented MCP tool handler
-/// so the wrapper can populate `McpToolPayload` without the handler
-/// having to thread sizing logic by hand.
-fn audit_outcome_metrics(result: &Result<CallToolResult, ErrorData>) -> (u32, Option<String>) {
-    match result {
-        Ok(call) => {
-            let mut bytes: u32 = 0;
-            for content in call.content.iter() {
-                if let Some(text) = content.as_text() {
-                    bytes = bytes.saturating_add(text.text.len() as u32);
-                }
-            }
-            (bytes, None)
+/// Lift a tool's inner `Result<CallToolResult, ErrorData>` into the
+/// `audit_mcp_tool_call` closure contract:
+/// `Result<McpToolSuccess<CallToolResult>, ErrorData>`.
+///
+/// The success arm measures `result_size_bytes` (sum of every text
+/// content fragment's byte length); the error arm flows through
+/// unchanged — the audit wrapper folds it into the payload's error
+/// string via `Debug`. This keeps each tool handler from threading
+/// sizing logic by hand and guarantees no nested `Result` inside the
+/// carrier's `Ok` arm.
+fn mcp_tool_success(
+    result: Result<CallToolResult, ErrorData>,
+) -> Result<verter_session::host_mcp_audit::McpToolSuccess<CallToolResult>, ErrorData> {
+    let call = result?;
+    let mut bytes: u32 = 0;
+    for content in call.content.iter() {
+        if let Some(text) = content.as_text() {
+            bytes = bytes.saturating_add(text.text.len() as u32);
         }
-        Err(err) => (0, Some(format!("{err:?}"))),
     }
+    Ok(verter_session::host_mcp_audit::McpToolSuccess {
+        value: call,
+        result_size_bytes: bytes,
+    })
 }
 
 // ── Tool implementations ───────────────────────────────────────────
@@ -421,26 +425,20 @@ impl VerterMcpServer {
                 .as_ref()
                 .map_or(0, |s| s.iter().map(|x| x.len() as u32).sum::<u32>()),
         );
-        let (outcome, _record) =
-            self.host
-                .audit_mcp_tool_call("analyze_file", &canonical, args_size, |host| {
-                    let result: Result<CallToolResult, ErrorData> = (|| {
-                        ensure_template_analysis(host, &canonical)?;
-                        let analysis = host
-                            .get_analysis(&canonical)
-                            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
-                        let json = serde_json::to_string_pretty(&analysis)
-                            .map_err(|e| mcp_err(e.to_string()))?;
-                        Ok(CallToolResult::success(vec![Content::text(json)]))
-                    })();
-                    let (result_size, error) = audit_outcome_metrics(&result);
-                    verter_session::host_mcp_audit::McpToolOutcome {
-                        value: result,
-                        result_size_bytes: result_size,
-                        error,
-                    }
-                });
-        outcome
+        self.host
+            .audit_mcp_tool_call("analyze_file", &canonical, args_size, |host| {
+                let result: Result<CallToolResult, ErrorData> = (|| {
+                    ensure_template_analysis(host, &canonical)?;
+                    let analysis = host
+                        .get_analysis(&canonical)
+                        .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+                    let json = serde_json::to_string_pretty(&analysis)
+                        .map_err(|e| mcp_err(e.to_string()))?;
+                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                })();
+                mcp_tool_success(result)
+            })
+            .into_result()
     }
 
     #[tool(
@@ -452,74 +450,67 @@ impl VerterMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let canonical = self.resolve(&params.path);
         let args_size = params.path.len() as u32;
-        let (outcome, _record) =
-            self.host
-                .audit_mcp_tool_call("get_component_api", &canonical, args_size, |host| {
-                    let result: Result<CallToolResult, ErrorData> = (|| {
-                        ensure_template_analysis(host, &canonical)?;
-                        let analysis = host
-                            .get_analysis(&canonical)
-                            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+        self.host
+            .audit_mcp_tool_call("get_component_api", &canonical, args_size, |host| {
+                let result: Result<CallToolResult, ErrorData> = (|| {
+                    ensure_template_analysis(host, &canonical)?;
+                    let analysis = host
+                        .get_analysis(&canonical)
+                        .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
 
-                        let mut api = serde_json::json!({
-                            "props": [],
-                            "emits": [],
-                            "slots": [],
-                            "models": [],
-                            "expose": [],
-                        });
+                    let mut api = serde_json::json!({
+                        "props": [],
+                        "emits": [],
+                        "slots": [],
+                        "models": [],
+                        "expose": [],
+                    });
 
-                        for m in analysis.macros.iter() {
-                            match m.kind {
-                                AnalyzedMacroKind::DefineProps
-                                | AnalyzedMacroKind::WithDefaults => {
-                                    api["props"] = serde_json::to_value(m).unwrap_or_default();
-                                }
-                                AnalyzedMacroKind::DefineEmits => {
-                                    api["emits"] = serde_json::to_value(m).unwrap_or_default();
-                                }
-                                AnalyzedMacroKind::DefineModel => {
-                                    if let Some(models) = api["models"].as_array_mut() {
-                                        models.push(serde_json::to_value(m).unwrap_or_default());
-                                    }
-                                }
-                                AnalyzedMacroKind::DefineSlots => {
-                                    api["slots"] = serde_json::to_value(m).unwrap_or_default();
-                                }
-                                AnalyzedMacroKind::DefineExpose => {
-                                    api["expose"] = serde_json::to_value(m).unwrap_or_default();
-                                }
-                                _ => {}
+                    for m in analysis.macros.iter() {
+                        match m.kind {
+                            AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
+                                api["props"] = serde_json::to_value(m).unwrap_or_default();
                             }
+                            AnalyzedMacroKind::DefineEmits => {
+                                api["emits"] = serde_json::to_value(m).unwrap_or_default();
+                            }
+                            AnalyzedMacroKind::DefineModel => {
+                                if let Some(models) = api["models"].as_array_mut() {
+                                    models.push(serde_json::to_value(m).unwrap_or_default());
+                                }
+                            }
+                            AnalyzedMacroKind::DefineSlots => {
+                                api["slots"] = serde_json::to_value(m).unwrap_or_default();
+                            }
+                            AnalyzedMacroKind::DefineExpose => {
+                                api["expose"] = serde_json::to_value(m).unwrap_or_default();
+                            }
+                            _ => {}
                         }
-
-                        if let Some(tpl) = &analysis.template {
-                            if !tpl.defined_slots.is_empty() {
-                                api["template_slots"] =
-                                    serde_json::to_value(&tpl.defined_slots).unwrap_or_default();
-                            }
-                            if !tpl.prop_definitions.is_empty() {
-                                api["runtime_props"] =
-                                    serde_json::to_value(&tpl.prop_definitions).unwrap_or_default();
-                            }
-                            if !tpl.emit_definitions.is_empty() {
-                                api["runtime_emits"] =
-                                    serde_json::to_value(&tpl.emit_definitions).unwrap_or_default();
-                            }
-                        }
-
-                        let json = serde_json::to_string_pretty(&api)
-                            .map_err(|e| mcp_err(e.to_string()))?;
-                        Ok(CallToolResult::success(vec![Content::text(json)]))
-                    })();
-                    let (result_size, error) = audit_outcome_metrics(&result);
-                    verter_session::host_mcp_audit::McpToolOutcome {
-                        value: result,
-                        result_size_bytes: result_size,
-                        error,
                     }
-                });
-        outcome
+
+                    if let Some(tpl) = &analysis.template {
+                        if !tpl.defined_slots.is_empty() {
+                            api["template_slots"] =
+                                serde_json::to_value(&tpl.defined_slots).unwrap_or_default();
+                        }
+                        if !tpl.prop_definitions.is_empty() {
+                            api["runtime_props"] =
+                                serde_json::to_value(&tpl.prop_definitions).unwrap_or_default();
+                        }
+                        if !tpl.emit_definitions.is_empty() {
+                            api["runtime_emits"] =
+                                serde_json::to_value(&tpl.emit_definitions).unwrap_or_default();
+                        }
+                    }
+
+                    let json =
+                        serde_json::to_string_pretty(&api).map_err(|e| mcp_err(e.to_string()))?;
+                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                })();
+                mcp_tool_success(result)
+            })
+            .into_result()
     }
 
     #[tool(
@@ -993,68 +984,61 @@ impl VerterMcpServer {
             ..Default::default()
         };
 
-        let (outcome, _record) =
-            self.host
-                .audit_mcp_tool_call("compile_file", &canonical, args_size, |host| {
-                    let result: Result<CallToolResult, ErrorData> = (|| {
-                        ensure_loaded(host, &canonical)?;
+        self.host
+            .audit_mcp_tool_call("compile_file", &canonical, args_size, |host| {
+                let result: Result<CallToolResult, ErrorData> = (|| {
+                    ensure_loaded(host, &canonical)?;
 
-                        let mut outputs = serde_json::Map::new();
-                        for node_kind in [
-                            verter_session::VirtualNodeKind::Main,
-                            verter_session::VirtualNodeKind::Script,
-                            verter_session::VirtualNodeKind::Template,
-                        ] {
-                            if let Ok(resp) = host.get_virtual_file(verter_session::VirtualQuery {
-                                raw_id: None,
-                                canonical_id: Some(canonical.clone()),
-                                node_kind: Some(node_kind.clone()),
-                                compile_profile: profile.clone(),
-                            }) {
-                                outputs.insert(
-                                    format!("{:?}", node_kind),
-                                    serde_json::json!({
-                                        "code": resp.code.as_ref(),
-                                        "lang": resp.lang,
-                                        "stale": resp.stale,
-                                    }),
-                                );
-                            }
+                    let mut outputs = serde_json::Map::new();
+                    for node_kind in [
+                        verter_session::VirtualNodeKind::Main,
+                        verter_session::VirtualNodeKind::Script,
+                        verter_session::VirtualNodeKind::Template,
+                    ] {
+                        if let Ok(resp) = host.get_virtual_file(verter_session::VirtualQuery {
+                            raw_id: None,
+                            canonical_id: Some(canonical.clone()),
+                            node_kind: Some(node_kind.clone()),
+                            compile_profile: profile.clone(),
+                        }) {
+                            outputs.insert(
+                                format!("{:?}", node_kind),
+                                serde_json::json!({
+                                    "code": resp.code.as_ref(),
+                                    "lang": resp.lang,
+                                    "stale": resp.stale,
+                                }),
+                            );
                         }
-
-                        for i in 0..4 {
-                            let node_kind = verter_session::VirtualNodeKind::Style { index: i };
-                            if let Ok(resp) = host.get_virtual_file(verter_session::VirtualQuery {
-                                raw_id: None,
-                                canonical_id: Some(canonical.clone()),
-                                node_kind: Some(node_kind),
-                                compile_profile: profile.clone(),
-                            }) {
-                                outputs.insert(
-                                    format!("Style_{}", i),
-                                    serde_json::json!({
-                                        "code": resp.code.as_ref(),
-                                        "lang": resp.lang,
-                                    }),
-                                );
-                            } else {
-                                break;
-                            }
-                        }
-
-                        let json =
-                            serde_json::to_string_pretty(&serde_json::Value::Object(outputs))
-                                .map_err(|e| mcp_err(e.to_string()))?;
-                        Ok(CallToolResult::success(vec![Content::text(json)]))
-                    })();
-                    let (result_size, error) = audit_outcome_metrics(&result);
-                    verter_session::host_mcp_audit::McpToolOutcome {
-                        value: result,
-                        result_size_bytes: result_size,
-                        error,
                     }
-                });
-        outcome
+
+                    for i in 0..4 {
+                        let node_kind = verter_session::VirtualNodeKind::Style { index: i };
+                        if let Ok(resp) = host.get_virtual_file(verter_session::VirtualQuery {
+                            raw_id: None,
+                            canonical_id: Some(canonical.clone()),
+                            node_kind: Some(node_kind),
+                            compile_profile: profile.clone(),
+                        }) {
+                            outputs.insert(
+                                format!("Style_{}", i),
+                                serde_json::json!({
+                                    "code": resp.code.as_ref(),
+                                    "lang": resp.lang,
+                                }),
+                            );
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let json = serde_json::to_string_pretty(&serde_json::Value::Object(outputs))
+                        .map_err(|e| mcp_err(e.to_string()))?;
+                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                })();
+                mcp_tool_success(result)
+            })
+            .into_result()
     }
 
     #[tool(

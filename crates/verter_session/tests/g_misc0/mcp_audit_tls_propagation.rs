@@ -32,8 +32,10 @@
 
 use std::sync::Arc;
 
+use std::convert::Infallible;
 use verter_audit::{RequestKind, RequestKindPayload};
-use verter_session::host_mcp_audit::McpToolOutcome;
+
+use verter_session::host_mcp_audit::McpToolSuccess;
 use verter_session::tests::audit_tls_harness::assert_observer_reaches;
 use verter_session::{HostConfig, VerterHost};
 
@@ -53,17 +55,18 @@ fn audit_mcp_tool_call_propagates_observer_into_tool_closure() {
         // `RequestContextGuard` and invokes the closure under that
         // guard — so inside the closure body, the substrate observer
         // must be visible.
-        let (saw_inside, record) =
-            host.audit_mcp_tool_call("tls_probe_tool", "/probe.vue", 0, |_h| {
+        let (outcome, record) = host
+            .audit_mcp_tool_call::<bool, Infallible, _>("tls_probe_tool", "/probe.vue", 0, |_h| {
                 let saw = verter_audit::current_observer().is_some();
-                McpToolOutcome {
+                Ok(McpToolSuccess {
                     value: saw,
                     result_size_bytes: 0,
-                    error: None,
-                }
-            });
-        closure_saw_observer = saw_inside;
-        if let Some(rec) = record {
+                })
+            })
+            .into_parts();
+        closure_saw_observer = outcome.expect("infallible tool body");
+        {
+            let rec = &record;
             record_kind = Some(rec.kind.clone());
             // Sanity on the payload — the closure measured nothing
             // beyond the observer-visibility flag, but the wrapper
@@ -121,22 +124,22 @@ fn audit_mcp_tool_call_observer_absent_when_audit_disabled() {
     assert!(!host.config().audit_enabled);
 
     let mut closure_saw_observer: bool = true;
-    let mut record_was_some: bool = false;
+    let mut record_capture_state: Option<verter_audit::AuditCaptureState> = None;
     let report = assert_observer_reaches(false, || {
         // With audit disabled the registration takes the `Noop` arm,
         // no `RequestContextGuard` is installed, and the closure
         // must observe no substrate observer.
-        let (saw_inside, record) =
-            host.audit_mcp_tool_call("tls_probe_tool", "/probe.vue", 0, |_h| {
+        let (outcome, record) = host
+            .audit_mcp_tool_call::<bool, Infallible, _>("tls_probe_tool", "/probe.vue", 0, |_h| {
                 let saw = verter_audit::current_observer().is_some();
-                McpToolOutcome {
+                Ok(McpToolSuccess {
                     value: saw,
                     result_size_bytes: 0,
-                    error: None,
-                }
-            });
-        closure_saw_observer = saw_inside;
-        record_was_some = record.is_some();
+                })
+            })
+            .into_parts();
+        closure_saw_observer = outcome.expect("infallible tool body");
+        record_capture_state = Some(record.capture_state);
     });
 
     assert!(
@@ -146,10 +149,12 @@ fn audit_mcp_tool_call_observer_absent_when_audit_disabled() {
          `current_observer() == None`. A regression that always installed the \
          guard would surface here as a stray `Some`. report = {report:?}",
     );
-    assert!(
-        !record_was_some,
-        "audit_enabled=false ⇒ wrapper must NOT publish a record; \
-         a regression that published through the Noop arm would surface here",
+    assert_eq!(
+        record_capture_state,
+        Some(verter_audit::AuditCaptureState::AuditDisabled),
+        "audit_enabled=false ⇒ wrapper must NOT publish a stored record; the carrier \
+         still returns a record but it is marked AuditDisabled — a regression that \
+         published through an active arm would surface here",
     );
     assert!(
         !report.observer_seen_on_calling_thread,

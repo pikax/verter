@@ -64,9 +64,12 @@ fn analyze_with_audit_propagates_observer_through_calling_thread() {
         // state plus the in-call population indirectly through the
         // record (the audit registration only fires when the slot
         // was installed).
-        let (analysis, record) = host.analyze_with_audit("/probe.vue");
-        analysis.expect("analyze_with_audit must produce an artifact");
-        let record = record.expect("active SemanticAnalysis request must produce a record");
+        let (analysis, record) = host.analyze_with_audit("/probe.vue").into_parts();
+        analysis
+            .ok()
+            .flatten()
+            .expect("analyze_with_audit must produce an artifact");
+        // record is always present now (carrier `audit` field is mandatory).
         // Use the post-finalisation record's request_id to confirm
         // the audited window ran. A regression that never installs
         // the observer would still produce a record (the

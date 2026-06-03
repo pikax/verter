@@ -108,8 +108,8 @@ pub use payloads::{
     SlowRecordSummary, TypeResolutionPayload, WorkspaceOp, WorkspacePayload,
 };
 pub use record::{
-    Hash16, IncidentalFields, RequestAuditRecord, RequestKind, RequestKindPayload,
-    RequestPhaseAudit, WALKER_DEPTH_CAP,
+    AuditCaptureState, Hash16, IncidentalFields, RequestAuditRecord, RequestKind,
+    RequestKindPayload, RequestPhaseAudit, WALKER_DEPTH_CAP,
 };
 pub use scheduler::{SchedulerAudit, SchedulerDepths, WorkerPool};
 pub use store::RequestStoreAudit;

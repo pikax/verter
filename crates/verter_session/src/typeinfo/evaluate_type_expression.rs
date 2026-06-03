@@ -25,12 +25,13 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use verter_audit::{
-    ProjectionModeTag, RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit,
-    RequestStoreAudit, RequestTimingAudit, TypeResolutionPayload, WaitAudit,
+    AuditedResult, ProjectionModeTag, RequestAuditRecord, RequestKind, RequestKindPayload,
+    RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit, TypeResolutionPayload, WaitAudit,
 };
 
 use super::types::{EvaluateTypeExpressionRequest, ImportSpec, NamedImport};
 use crate::host_audit_runtime::AuditRequestRegistration;
+use crate::host_resolve_type_audit::TypeResolutionRequestError;
 use crate::instant::Instant;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::request_context::{RequestContext, RequestContextGuard};
@@ -76,25 +77,48 @@ impl VerterHost {
     /// scratch file is also removed from the host so memory does not
     /// grow unbounded.
     ///
-    /// Always emits exactly one `RequestAuditRecord` when the
-    /// audit-config consumer filter accepts `RequestKind::TypeResolution`.
+    /// Returns an [`crate::AuditedResult`] carrier. The error type is
+    /// the shared [`TypeResolutionRequestError`] — the SAME
+    /// dispatch-fault taxonomy [`Self::resolve_type_with_audit`] uses —
+    /// because this path resolves through the one shared typed-IR
+    /// engine, not the wire request validator. Outcome mapping:
+    /// - `Ok(Some(node))` — dispatch produced a value.
+    /// - `Ok(None)` — a non-fault miss (`Miss` / `RecursiveRef` /
+    ///   `DeclPlaceholder`, an upsert failure, or a missing scratch
+    ///   shallow state): the request was well-formed but resolved no
+    ///   node.
+    /// - `Err(fault)` — a genuine dispatch fault (`BudgetExceeded` /
+    ///   `UnstableState` / `AliasCycle` / `UnsupportedIntrinsic` /
+    ///   `Other`).
+    ///
+    /// The carrier's `audit` field is always populated:
+    /// [`verter_audit::AuditCaptureState::ActiveStored`] on the
+    /// full-capture path, or the cheap default-filled record marked
+    /// [`verter_audit::AuditCaptureState::FilteredNoop`] /
+    /// [`verter_audit::AuditCaptureState::AuditDisabled`].
     pub fn evaluate_type_expression_with_audit(
         &self,
         req: EvaluateTypeExpressionRequest,
-    ) -> (Option<SemanticNodeId>, Option<RequestAuditRecord>) {
+    ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
         let request_id = self.next_request_id();
         crate::request_context::increment_requests_created();
 
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
         let canonical_scope: Arc<str> = Arc::from(req.scope.as_str());
-        let ctx = RequestContext::with_kind_and_timing(
+        // Thread the host's projection-op budget so this dispatch path
+        // honours the same fuse as every other resolution entry-point;
+        // a tripped budget surfaces as a `BudgetExceeded` dispatch
+        // fault on the carrier's `Err` arm rather than running to the
+        // default 2000-op cap.
+        let ctx = RequestContext::with_kind_timing_and_projection_budget(
             request_id,
             Arc::clone(&canonical_scope),
             RequestKind::TypeResolution,
             footprint_capture,
             timing_capture,
             None,
+            self.config.projection_op_budget,
         );
 
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
@@ -104,7 +128,7 @@ impl VerterHost {
         let request_start = Instant::now();
         let scratch_uri = compute_scratch_uri(&req.scope, &req.expression, &req.extra_imports);
 
-        let (resolved, from_cache) = match registration.as_ref() {
+        let (outcome, from_cache) = match registration.as_ref() {
             AuditRequestRegistration::Active(_) => {
                 let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
                 evaluate_inner(self, &req, &scratch_uri)
@@ -117,7 +141,20 @@ impl VerterHost {
         let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
 
         if matches!(registration.as_ref(), AuditRequestRegistration::Noop) {
-            return (resolved, None);
+            let state = if self.config.audit_enabled {
+                verter_audit::AuditCaptureState::FilteredNoop
+            } else {
+                verter_audit::AuditCaptureState::AuditDisabled
+            };
+            let record = noop_evaluate_record(
+                request_id,
+                &req.scope,
+                ctx.parent_request_id,
+                from_cache,
+                ctx.trace_id.clone(),
+                state,
+            );
+            return audited_from_outcome(outcome, record);
         }
 
         let payload = TypeResolutionPayload {
@@ -186,31 +223,82 @@ impl VerterHost {
             files: Vec::new(),
             waits,
             kind_payload: RequestKindPayload::TypeResolution(payload),
+            capture_state: verter_audit::AuditCaptureState::ActiveStored,
             trace_id: ctx.trace_id.clone(),
         };
         let cloned = record.clone();
         registration.finalize(record);
-        (resolved, Some(cloned))
+        audited_from_outcome(outcome, cloned)
+    }
+}
+
+/// Package an evaluate-type-expression outcome and its audit record
+/// into the [`AuditedResult`] carrier.
+fn audited_from_outcome(
+    outcome: Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+    audit: RequestAuditRecord,
+) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+    match outcome {
+        Ok(value) => AuditedResult::ok(value, audit),
+        Err(error) => AuditedResult::err(error, audit),
+    }
+}
+
+/// Build the cheap default-filled [`RequestAuditRecord`] returned on
+/// the filtered / disabled evaluate path. No per-request counters are
+/// collected — the payload is the zero-valued default and
+/// `capture_state` records why the full path was skipped.
+fn noop_evaluate_record(
+    request_id: u64,
+    scope: &str,
+    parent_request_id: Option<u64>,
+    from_cache: bool,
+    trace_id: String,
+    capture_state: verter_audit::AuditCaptureState,
+) -> RequestAuditRecord {
+    RequestAuditRecord {
+        request_id,
+        canonical_id: scope.to_string(),
+        kind: RequestKind::TypeResolution,
+        parent_request_id: parent_request_id.map(|id| id.to_string()),
+        from_cache,
+        timings: RequestTimingAudit::default(),
+        memory: RequestMemoryAudit::default(),
+        store: RequestStoreAudit::default(),
+        footprint: None,
+        scheduler: None,
+        files: Vec::new(),
+        waits: None,
+        kind_payload: RequestKindPayload::TypeResolution(TypeResolutionPayload::default()),
+        capture_state,
+        trace_id,
     }
 }
 
 /// Inner synthesis + resolution logic shared by the audit /
 /// non-audit entry-points.
 ///
-/// Returns `(resolved_node, from_cache)`. `from_cache = true` means
-/// the scratch URI was found in the host's cache and resolution did
-/// not re-synthesise / re-upsert.
+/// Returns `(outcome, from_cache)`. `from_cache = true` means the
+/// scratch URI was found in the host's cache and resolution did not
+/// re-synthesise / re-upsert. `outcome` is `Err(fault)` on a genuine
+/// dispatch fault, `Ok(None)` on a non-fault miss (upsert failure,
+/// missing scratch shallow state, or a `Miss`/`RecursiveRef`/
+/// `DeclPlaceholder` from dispatch), and `Ok(Some(node))` on success.
+#[allow(clippy::type_complexity)]
 fn evaluate_inner(
     host: &VerterHost,
     req: &EvaluateTypeExpressionRequest,
     scratch_uri: &str,
-) -> (Option<SemanticNodeId>, bool) {
+) -> (
+    Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+    bool,
+) {
     // Cache fast-path. Only consulted when the caller asked for
     // caching — otherwise the cache is bypassed in both directions.
     if req.cacheable {
         let mut guard = host.scratch_cache().lock();
         if let Some(node_id) = guard.get(scratch_uri) {
-            return (Some(node_id), true);
+            return (Ok(Some(node_id)), true);
         }
     }
 
@@ -243,7 +331,7 @@ fn evaluate_inner(
         aliases: Vec::new(),
     });
     if upsert_result.is_err() {
-        return (None, false);
+        return (Ok(None), false);
     }
 
     // Resolve the synthesised alias by dispatching through
@@ -263,7 +351,7 @@ fn evaluate_inner(
     let scratch_canonical: Arc<str> = Arc::from(scratch_uri);
     let Some(shallow) = host.shallow_file_state(scratch_uri) else {
         cleanup_scratch(host, scratch_uri, req.cacheable);
-        return (None, false);
+        return (Ok(None), false);
     };
     let scope_node = crate::semantic_query::NodeScopeId::File {
         canonical_id: Arc::clone(&scratch_canonical),
@@ -282,10 +370,16 @@ fn evaluate_inner(
     };
     let resolved_alias_node = match dispatch.execute(instantiate_key) {
         QueryResult::Value(node) | QueryResult::Recursive(node) => node,
-        QueryResult::Error(_) => {
-            // Fall back to the bare-decl path so the caller sees a
-            // node id even when the body could not materialise (the
-            // audit record still emits with the chosen mode).
+        QueryResult::Error(err) => {
+            // A genuine dispatch fault is a request fault — surface it.
+            // A non-fault miss falls back to the bare-decl path so the
+            // caller sees a node id even when the body could not
+            // materialise (the audit record still emits with the
+            // chosen mode).
+            if let Some(fault) = TypeResolutionRequestError::from_query_error(&err) {
+                cleanup_scratch(host, scratch_uri, req.cacheable);
+                return (Err(fault), false);
+            }
             let resolve_decl_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                 scope: ScopeId {
                     canonical_id: Arc::clone(&scratch_canonical),
@@ -295,9 +389,14 @@ fn evaluate_inner(
             });
             match dispatch.execute(resolve_decl_key) {
                 QueryResult::Value(n) | QueryResult::Recursive(n) => n,
-                QueryResult::Error(_) => {
+                QueryResult::Error(err) => {
                     cleanup_scratch(host, scratch_uri, req.cacheable);
-                    return (None, false);
+                    // A genuine dispatch fault rides `Err`; a non-fault
+                    // miss rides `Ok(None)`.
+                    return (
+                        super::resolve_named_symbol::classify_dispatch_error(&err, None),
+                        false,
+                    );
                 }
             }
         }
@@ -309,7 +408,16 @@ fn evaluate_inner(
     // policy as `resolve_named_symbol`.
     let final_node = match req.mode {
         ProjectionMode::Identity => resolved_alias_node,
-        _ => materialize_through_aliases(host, &dispatch, resolved_alias_node, req.mode),
+        _ => match materialize_through_aliases(host, &dispatch, resolved_alias_node, req.mode) {
+            Ok(materialized) => materialized,
+            // A hard dispatch fault during nested materialization
+            // propagates as `Err` rather than silently degrading to the
+            // un-materialised placeholder.
+            Err(fault) => {
+                cleanup_scratch(host, scratch_uri, req.cacheable);
+                return (Err(fault), false);
+            }
+        },
     };
 
     // Publish to cache if asked. The cached node id is the one we
@@ -329,7 +437,7 @@ fn evaluate_inner(
         cleanup_scratch(host, scratch_uri, false);
     }
 
-    (Some(final_node), false)
+    (Ok(Some(final_node)), false)
 }
 
 /// Drop the synthesised scratch file. Called for non-cacheable
@@ -350,7 +458,7 @@ fn materialize_through_aliases(
     dispatch: &ProjectSemanticDispatch<'_>,
     start: SemanticNodeId,
     mode: ProjectionMode,
-) -> SemanticNodeId {
+) -> Result<SemanticNodeId, TypeResolutionRequestError> {
     debug_assert!(!matches!(mode, ProjectionMode::Identity));
     let store = host.project_type_store().semantic_graph();
     let mut current = start;
@@ -377,21 +485,23 @@ fn materialize_through_aliases(
                     args: Arc::from(Vec::new().into_boxed_slice()),
                     context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 };
-                match dispatch.execute(key) {
-                    QueryResult::Value(next) | QueryResult::Recursive(next) => {
-                        if next == current {
-                            return current;
-                        }
+                match super::resolve_named_symbol::classify_materialization_step(
+                    dispatch.execute(key),
+                    current,
+                )? {
+                    super::resolve_named_symbol::MaterializationStep::Continue(next) => {
                         current = next;
                         continue;
                     }
-                    QueryResult::Error(_) => return current,
+                    super::resolve_named_symbol::MaterializationStep::Stop(node) => {
+                        return Ok(node)
+                    }
                 }
             }
-            _ => return current,
+            _ => return Ok(current),
         }
     }
-    current
+    Ok(current)
 }
 
 /// Compute the scratch URI for the evaluate-type-expression

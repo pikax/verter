@@ -61,13 +61,13 @@ fn cross_crate_observer_reaches_compiler_via_compile_with_audit() {
         // per-request counter that surfaces as
         // `CompilePayload::code_transform_ops`. Non-zero ⇒ TLS observer
         // propagation reached the producer crate.
-        let (_result, record) =
-            host.compile_with_audit("/cross_crate_probe.vue", CompileTarget::BUNDLER);
-        if let Some(rec) = record {
-            record_kind = Some(rec.kind.clone());
-            if let Some(payload) = rec.compile_payload() {
-                code_transform_ops = payload.code_transform_ops;
-            }
+        let record = host
+            .compile_with_audit("/cross_crate_probe.vue", CompileTarget::BUNDLER)
+            .audit()
+            .clone();
+        record_kind = Some(record.kind.clone());
+        if let Some(payload) = record.compile_payload() {
+            code_transform_ops = payload.code_transform_ops;
         }
     });
 
@@ -97,22 +97,24 @@ fn cross_crate_observer_reaches_compiler_via_compile_with_audit() {
 #[test]
 fn cross_crate_observer_absent_when_audit_disabled() {
     let host = build_host(false);
-    let mut record_kind: Option<verter_audit::RequestKind> = None;
+    let mut capture_state: Option<verter_audit::AuditCaptureState> = None;
     let report = assert_observer_reaches(false, || {
-        // With `audit_enabled=false`, the registration is `Noop` and
-        // `compile_with_audit` returns `record = None`. The compile
-        // itself still runs but no observer is installed in TLS.
-        let (_result, record) =
-            host.compile_with_audit("/cross_crate_probe.vue", CompileTarget::BUNDLER);
-        record_kind = record.map(|r| r.kind);
+        // With `audit_enabled=false`, no observer is installed in TLS
+        // and the compile runs on the disabled fast path. The carrier
+        // still returns a record, marked `AuditDisabled`.
+        let record = host
+            .compile_with_audit("/cross_crate_probe.vue", CompileTarget::BUNDLER)
+            .audit()
+            .clone();
+        capture_state = Some(record.capture_state);
     });
 
-    assert!(
-        record_kind.is_none(),
-        "compile_with_audit must NOT publish a record when audit is disabled; \
-         a tautological producer that emits regardless of TLS state would still \
-         publish through the registration's `Noop` path being mis-wired and \
-         this assertion would fail. record_kind = {record_kind:?}",
+    assert_eq!(
+        capture_state,
+        Some(verter_audit::AuditCaptureState::AuditDisabled),
+        "compile_with_audit must NOT run the full-capture path when audit is disabled; \
+         a tautological producer that emits regardless of the `audit_enabled` gate \
+         would surface as ActiveStored here. capture_state = {capture_state:?}",
     );
     assert!(
         !report.observer_seen_on_calling_thread,

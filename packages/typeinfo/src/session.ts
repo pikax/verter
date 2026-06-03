@@ -21,10 +21,9 @@
 import { VerterHost, type AuditRecordFilter } from "@verter/native";
 import type { TypeDescriptor } from "@verter/type-ir";
 
+import { decodeResolveResult } from "./decode.js";
 import { descriptorToNative } from "./descriptor-to-native.js";
-import { nativeToDescriptor } from "./native-to-descriptor.js";
 import type {
-  AuditRecord,
   EvaluateTypeExpressionRequest,
   EvaluateTypeExpressionResult,
   ResolveSymbolOpts,
@@ -33,31 +32,9 @@ import type {
   TypeInfoSessionConfig,
 } from "./types.js";
 
-/**
- * Pre-existing extensions the substrate adds to `VerterHost` for
- * Phase 4. Declared here as a structural augment so the package
- * builds against the published `@verter/native` types whether or not
- * the JS-side declaration has been refreshed.
- */
-interface VerterHostTypeinfoExtensions {
-  listSymbols(canonicalId: string): Buffer;
-  resolveSymbolWithAudit(
-    canonicalId: string,
-    name: string,
-    typeArgs: Buffer | null,
-    mode: string | null,
-  ): { typeExpr: Buffer | null; auditRecord: Buffer | null };
-  evaluateTypeExpressionWithAudit(request: Buffer): {
-    typeExpr: Buffer | null;
-    auditRecord: Buffer | null;
-  };
-}
-
-type VerterHostWithTypeinfo = VerterHost & VerterHostTypeinfoExtensions;
-
 export class TypeInfoSession {
   /** Underlying native host. Exposed for shared-host integration. */
-  public readonly host: VerterHostWithTypeinfo;
+  public readonly host: VerterHost;
 
   private readonly config: TypeInfoSessionConfig;
 
@@ -67,7 +44,7 @@ export class TypeInfoSession {
     this.host = new VerterHost({
       auditEnabled,
       typeinfoScratchCacheCapacity: config.evaluateTypeExpressionCacheSize,
-    }) as VerterHostWithTypeinfo;
+    });
   }
 
   /**
@@ -163,22 +140,6 @@ function encodeTypeArgs(typeArgs: TypeDescriptor[] | undefined): Buffer | null {
   }
   const native = typeArgs.map(descriptorToNative);
   return Buffer.from(JSON.stringify(native), "utf-8");
-}
-
-function decodeResolveResult(result: {
-  typeExpr: Buffer | null;
-  auditRecord: Buffer | null;
-}): ResolveSymbolResult {
-  let descriptor: TypeDescriptor | undefined;
-  if (result.typeExpr && result.typeExpr.length > 0) {
-    const native = JSON.parse(result.typeExpr.toString("utf-8"));
-    descriptor = nativeToDescriptor(native);
-  }
-  let audit: AuditRecord | undefined;
-  if (result.auditRecord && result.auditRecord.length > 0) {
-    audit = JSON.parse(result.auditRecord.toString("utf-8")) as AuditRecord;
-  }
-  return { type: descriptor, auditRecord: audit };
 }
 
 /**

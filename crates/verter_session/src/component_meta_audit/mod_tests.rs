@@ -211,6 +211,7 @@ fn component_meta_payload_accessor_returns_none_for_other_kinds() {
         waits: None,
         kind_payload: RequestKindPayload::TypeResolution(Default::default()),
         trace_id: String::new(),
+        capture_state: verter_audit::AuditCaptureState::ActiveStored,
     };
     assert!(record.component_meta_payload().is_none());
     assert!(record.type_resolution_payload().is_some());

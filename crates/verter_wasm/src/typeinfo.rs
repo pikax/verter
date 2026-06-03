@@ -9,21 +9,40 @@
 use serde::Serialize;
 use verter_audit::RequestAuditRecord;
 use verter_protocol::typeinfo::{FfiEvaluateTypeExpressionRequest, FfiSymbolEntry};
-use verter_session::semantic_query::ProjectionMode;
+use verter_session::host_resolve_type_audit::TypeResolutionRequestError;
+use verter_session::semantic_query::{ProjectionMode, SemanticNodeId};
 use verter_type_expr::TypeExpr;
 use wasm_bindgen::prelude::*;
 
 /// Combined response shape for `resolveSymbolWithAudit` /
-/// `evaluateTypeExpressionWithAudit`. Both fields are JSON strings;
+/// `evaluateTypeExpressionWithAudit`. All fields are JSON strings;
 /// the consumer parses whichever it needs.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WasmTypeInfoResolveResult {
     /// JSON-serialised `TypeExpr`; `null` when the resolution could not
-    /// produce one.
+    /// produce one (a non-fault miss, or a dispatch fault — in which
+    /// case `error` is set).
     pub type_expr: Option<String>,
     /// JSON-serialised `RequestAuditRecord`; `null` when audit is off.
     pub audit_record: Option<String>,
+    /// Human-readable dispatch-fault description; `null` on success or
+    /// a non-fault miss.
+    pub error: Option<String>,
+}
+
+/// Split a resolve / evaluate outcome into the resolved node (if any)
+/// and an optional dispatch-fault description. Mirrors
+/// `crate::typeinfo` on the NAPI side: a genuine dispatch fault is
+/// surfaced through the result DTO's `error` channel instead of being
+/// silently erased to a `None` node.
+pub(crate) fn split_resolve_outcome(
+    outcome: Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+) -> (Option<SemanticNodeId>, Option<String>) {
+    match outcome {
+        Ok(node) => (node, None),
+        Err(fault) => (None, Some(format!("{fault:?}"))),
+    }
 }
 
 /// Encode a list of `FfiSymbolEntry` to a JSON string.
@@ -36,6 +55,21 @@ pub(crate) fn encode_symbol_list(entries: &[FfiSymbolEntry]) -> Result<String, J
 pub(crate) fn encode_type_expr(expr: &TypeExpr) -> Result<String, JsValue> {
     serde_json::to_string(expr)
         .map_err(|e| JsValue::from_str(&format!("type-expr serialization error: {e}")))
+}
+
+/// Encode a record into the optional `auditRecord` DTO slot,
+/// projecting the host carrier's mandatory record through the
+/// historical "null when audit is disabled / filtered" contract: only
+/// an [`verter_audit::AuditCaptureState::ActiveStored`] record encodes
+/// to a JSON string; a filtered or disabled record projects to `None`.
+pub(crate) fn encode_stored_audit_record(
+    rec: &RequestAuditRecord,
+) -> Result<Option<String>, JsValue> {
+    match rec.capture_state {
+        verter_audit::AuditCaptureState::ActiveStored => encode_audit_record(rec).map(Some),
+        verter_audit::AuditCaptureState::FilteredNoop
+        | verter_audit::AuditCaptureState::AuditDisabled => Ok(None),
+    }
 }
 
 /// Encode a `RequestAuditRecord` to a JSON string.

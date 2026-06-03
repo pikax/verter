@@ -341,10 +341,10 @@ impl NapiMetaSession {
     ) -> Result<Option<Buffer>> {
         let session = self.session()?;
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let Some((analysis, resolution, record)) = session
+            let (outcome, record) = session
                 .get_component_meta_with_audit(&canonical_or_alias)
-                .map_err(meta_err)?
-            else {
+                .into_parts();
+            let Some((analysis, resolution)) = outcome.map_err(meta_err)? else {
                 return Ok(None);
             };
             let ffi = verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(

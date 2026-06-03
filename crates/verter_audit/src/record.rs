@@ -169,6 +169,16 @@ pub struct RequestAuditRecord {
     /// Per-`RequestKind` strongly-typed payload. The variant tag
     /// MUST match [`Self::kind`].
     pub kind_payload: RequestKindPayload,
+    /// How much audit work the producing entry-point did for this
+    /// record. [`AuditCaptureState::ActiveStored`] is the full-capture
+    /// path; [`AuditCaptureState::FilteredNoop`] /
+    /// [`AuditCaptureState::AuditDisabled`] mark the cheap
+    /// default-filled records returned when the consumer filter
+    /// rejected the kind or audit was disabled. Serde-default
+    /// (`ActiveStored`) for back-compat with payloads emitted before
+    /// this field landed.
+    #[serde(default)]
+    pub capture_state: AuditCaptureState,
     /// Per-request correlation id for tracing-span association.
     /// Populated by the audited entry-point when an audit
     /// registration is installed; the matching tracing span emits
@@ -265,6 +275,39 @@ impl RequestAuditRecord {
             _ => None,
         }
     }
+}
+
+/// How much audit work the producing entry-point actually did for a
+/// given record.
+///
+/// Every audited entry-point now returns a [`RequestAuditRecord`]
+/// unconditionally (the [`crate::AuditedResult`] carrier's `audit`
+/// field is mandatory in both arms). This discriminant lets a consumer
+/// tell apart the three capture regimes without inspecting the rest of
+/// the envelope:
+///
+/// - [`AuditCaptureState::ActiveStored`] — the consumer filter accepted
+///   the request kind and the full payload was collected and published
+///   into the host records store.
+/// - [`AuditCaptureState::FilteredNoop`] — audit was enabled but the
+///   consumer filter rejected this request kind. The producer installed
+///   a no-op observer; the returned record is the cheap default-filled
+///   envelope (no heavy payload collection, nothing published).
+/// - [`AuditCaptureState::AuditDisabled`] — audit was disabled at the
+///   host config (`audit_enabled = false`). No observer was installed;
+///   the returned record is the cheap default-filled envelope.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash, Default)]
+#[ts(export_to = "audit.generated.ts")]
+pub enum AuditCaptureState {
+    /// Filter accepted the kind; full payload collected and published.
+    #[default]
+    ActiveStored,
+    /// Audit enabled but the consumer filter rejected this kind; a
+    /// cheap default-filled record is returned and nothing is stored.
+    FilteredNoop,
+    /// Audit disabled at host config; a cheap default-filled record is
+    /// returned and nothing is stored.
+    AuditDisabled,
 }
 
 /// Discriminant naming the producer surface that emitted the record.

@@ -31,14 +31,16 @@ fn typeinfo_footprint_reports_requested_import_and_excludes_unprojected_branch()
     upsert_ts(&host, "/fixtures/unused.ts", FOOTPRINT_UNUSED);
     upsert_ts(&host, "/fixtures/owner.ts", FOOTPRINT_OWNER);
 
-    let (_node, record) = host.evaluate_type_expression_with_audit(EvaluateTypeExpressionRequest {
-        scope: "/fixtures/owner.ts".to_string(),
-        expression: "Surface['keep']".to_string(),
-        extra_imports: Vec::new(),
-        mode: ProjectionMode::Expanded,
-        cacheable: false,
-    });
-    let record = record.expect("typeinfo request emits audit");
+    let record = host
+        .evaluate_type_expression_with_audit(EvaluateTypeExpressionRequest {
+            scope: "/fixtures/owner.ts".to_string(),
+            expression: "Surface['keep']".to_string(),
+            extra_imports: Vec::new(),
+            mode: ProjectionMode::Expanded,
+            cacheable: false,
+        })
+        .audit()
+        .clone();
     let footprint = record
         .footprint
         .as_ref()

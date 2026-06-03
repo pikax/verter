@@ -533,8 +533,8 @@ fn evaluate_type_expression_for_vue_default_export_matches_props() {
         mode: ProjectionMode::Expanded,
         cacheable: false,
     };
-    let (node, _record) = host.evaluate_type_expression_with_audit(req);
-    let node = node.expect(
+    let (node, _record) = host.evaluate_type_expression_with_audit(req).into_parts();
+    let node = node.ok().flatten().expect(
         "evaluate_type_expression must resolve \
          `InstanceType<typeof default>['$props']` against the .vue \
          scope. A None result indicates the synthesised \
@@ -611,8 +611,8 @@ fn evaluate_indexed_access_terminal_in_navigate_stays_shallow() {
         mode: ProjectionMode::Navigate,
         cacheable: false,
     };
-    let (node, _record) = host.evaluate_type_expression_with_audit(req);
-    let node = node.expect(
+    let (node, _record) = host.evaluate_type_expression_with_audit(req).into_parts();
+    let node = node.ok().flatten().expect(
         "evaluate_type_expression must resolve \
          `InstanceType<typeof default>['$props']` in Navigate against \
          the .vue scope",

@@ -108,6 +108,7 @@ fn finalize_then_drop_does_not_publish_a_second_record() {
             waits: None,
             kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
             trace_id: String::new(),
+            capture_state: verter_audit::AuditCaptureState::ActiveStored,
         };
         assert!(
             registration.finalize(record),

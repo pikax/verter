@@ -572,14 +572,19 @@ export declare class VerterHost {
    * (Navigate for generic carriers, Expanded otherwise).
    *
    * `typeExpr` is `null` when the symbol could not be resolved.
-   * `auditRecord` is `null` when audit is disabled.
+   * `auditRecord` is `null` when audit is disabled (and is preserved
+   * on the fault path — the audit envelope rides both the success and
+   * the `error` outcome). `error` carries a human-readable description
+   * of a genuine dispatch fault (`BudgetExceeded` / `UnstableState` /
+   * `AliasCycle` / `UnsupportedIntrinsic` / `Other`); `null` / absent
+   * means "no fault".
    */
   resolveSymbolWithAudit(
     canonicalId: string,
     name: string,
     typeArgs: Buffer | null,
     mode: string | null,
-  ): { typeExpr: Buffer | null; auditRecord: Buffer | null };
+  ): { typeExpr: Buffer | null; auditRecord: Buffer | null; error?: string | null };
 
   /**
    * Evaluate a synthetic type expression in a file scope and return
@@ -589,11 +594,17 @@ export declare class VerterHost {
    * `verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest`.
    *
    * `typeExpr` is `null` when the expression could not be resolved.
-   * `auditRecord` is `null` when audit is disabled.
+   * `auditRecord` is `null` when audit is disabled (and is preserved
+   * on the fault path — the audit envelope rides both the success and
+   * the `error` outcome). `error` carries a human-readable description
+   * of a genuine dispatch fault (`BudgetExceeded` / `UnstableState` /
+   * `AliasCycle` / `UnsupportedIntrinsic` / `Other`); `null` / absent
+   * means "no fault".
    */
   evaluateTypeExpressionWithAudit(request: Buffer): {
     typeExpr: Buffer | null;
     auditRecord: Buffer | null;
+    error?: string | null;
   };
 }
 

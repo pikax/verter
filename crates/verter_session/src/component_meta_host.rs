@@ -370,28 +370,49 @@ impl ComponentMetaSession {
             .collect())
     }
 
-    /// Get component metadata plus the resolved-state sidecar AND the
-    /// per-request audit record produced by the same resolution.
-    /// Synchronous — the audit record is retrievable immediately
-    /// after `get_component_meta_with_resolution` returns.
+    /// Get component metadata plus the resolved-state sidecar, packaged
+    /// in the shared [`verter_audit::AuditedResult`] carrier alongside
+    /// the per-request audit record produced by the same resolution.
+    /// Synchronous — the audit record is retrievable immediately after
+    /// `get_component_meta_with_resolution` returns.
     ///
-    /// Requires `HostConfig::audit_enabled` + `HostConfig::footprint_capture`
-    /// to be true on the underlying host; otherwise returns
-    /// [`ComponentMetaHostError::AuditNotEnabled`].
+    /// This is the audited component-meta host seam. It rides the same
+    /// always-a-record carrier every other `*_with_audit` entry-point
+    /// uses, so there is no tuple-with-record dual path:
+    /// - `Ok(Some((analysis, resolution)))` — the canonical resolved
+    ///   and audit capture produced a record (carried in `audit`).
+    /// - `Ok(None)` — the canonical does not resolve. The carrier still
+    ///   holds a cheap default-filled record so the always-a-record
+    ///   contract holds.
+    /// - `Err(ComponentMetaHostError)` — a genuine request fault
+    ///   (`AuditNotEnabled` when the host config does not enable
+    ///   `audit_enabled` + `footprint_capture`, or `AuditRecordMissing`
+    ///   when the bounded store evicted the record before retrieval).
+    ///   The carrier carries a cheap default-filled record marked
+    ///   `AuditDisabled` / `FilteredNoop` respectively so a consumer can
+    ///   still read `audit` regardless of outcome.
     pub fn get_component_meta_with_audit(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<
+    ) -> verter_audit::AuditedResult<
         Option<(
             verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
             crate::meta_resolve::ResolvedComponentMetaState,
-            crate::component_meta_audit::RequestAuditRecord,
         )>,
         ComponentMetaHostError,
     > {
         let host = self.inner.host();
         if !host.config.audit_enabled || !host.config.footprint_capture {
-            return Err(ComponentMetaHostError::AuditNotEnabled);
+            // No audit record is produced when capture is off — carry
+            // the cheap default-filled record marked `AuditDisabled`
+            // so the carrier's always-a-record contract still holds.
+            return verter_audit::AuditedResult::err(
+                ComponentMetaHostError::AuditNotEnabled,
+                cheap_component_meta_record(
+                    canonical_or_alias,
+                    verter_audit::AuditCaptureState::AuditDisabled,
+                ),
+            );
         }
         // Audit capture is instrumented on the host-level path — it
         // installs the `RequestContext` TLS, stamps the resolution's
@@ -406,13 +427,27 @@ impl ComponentMetaSession {
         let Some((analysis, resolution)) =
             host.get_component_meta_with_resolution(canonical_or_alias)
         else {
-            return Ok(None);
+            // No analysis behind the request: a non-fault miss rides
+            // `Ok(None)` with a cheap default-filled record.
+            return verter_audit::AuditedResult::ok(
+                None,
+                cheap_component_meta_record(
+                    canonical_or_alias,
+                    verter_audit::AuditCaptureState::FilteredNoop,
+                ),
+            );
         };
         let request_id = resolution.request_id;
-        let record = host
-            .take_audit_record(request_id)
-            .ok_or(ComponentMetaHostError::AuditRecordMissing { request_id })?;
-        Ok(Some((analysis, resolution, record)))
+        match host.take_audit_record(request_id) {
+            Some(record) => verter_audit::AuditedResult::ok(Some((analysis, resolution)), record),
+            None => verter_audit::AuditedResult::err(
+                ComponentMetaHostError::AuditRecordMissing { request_id },
+                cheap_component_meta_record(
+                    canonical_or_alias,
+                    verter_audit::AuditCaptureState::FilteredNoop,
+                ),
+            ),
+        }
     }
 
     /// Get component metadata plus the resolved-state sidecar in this session's
@@ -636,6 +671,37 @@ fn extract_sfc_structure(source: &str) -> SfcStructure {
         script,
         script_setup,
         template,
+    }
+}
+
+/// Build the cheap default-filled [`crate::component_meta_audit::RequestAuditRecord`]
+/// the audited component-meta seam returns on its no-record paths
+/// (audit disabled, non-fault miss, or evicted record). No per-request
+/// counters are collected — the payload is the zero-valued default and
+/// `capture_state` records why the full record was unavailable.
+fn cheap_component_meta_record(
+    canonical_id: &str,
+    capture_state: verter_audit::AuditCaptureState,
+) -> crate::component_meta_audit::RequestAuditRecord {
+    crate::component_meta_audit::RequestAuditRecord {
+        request_id: 0,
+        canonical_id: canonical_id.to_string(),
+        kind: verter_audit::RequestKind::ComponentMeta,
+        parent_request_id: verter_scheduler::request_context::current_request_id()
+            .map(|id| id.to_string()),
+        from_cache: false,
+        timings: crate::component_meta_audit::RequestTimingAudit::default(),
+        memory: crate::component_meta_audit::RequestMemoryAudit::default(),
+        store: crate::component_meta_audit::RequestStoreAudit::default(),
+        footprint: None,
+        scheduler: None,
+        files: Vec::new(),
+        waits: None,
+        kind_payload: verter_audit::RequestKindPayload::ComponentMeta(
+            crate::component_meta_audit::ComponentMetaPayload::default(),
+        ),
+        capture_state,
+        trace_id: String::new(),
     }
 }
 

@@ -72,8 +72,10 @@ fn type_resolution_audit_pathological_recursion_observes_depth_cap_exactly() {
         ),
     };
 
-    let (_resolved, record) = host.resolve_type_with_audit(key, "/pathological.ts");
-    let record = record.expect("active TypeResolution request must produce a record");
+    let (_resolved, record) = host
+        .resolve_type_with_audit(key, "/pathological.ts")
+        .into_parts();
+    // record is always present now (carrier `audit` mandatory).
     let payload = record
         .type_resolution_payload()
         .expect("kind must be TypeResolution");

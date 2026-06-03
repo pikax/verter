@@ -48,7 +48,13 @@ fn build_host(audit_enabled: bool) -> Arc<VerterHost> {
 #[test]
 fn compile_with_audit_vdom_publishes_record_with_compile_kind_and_vdom_tag() {
     let host = build_host(true);
-    let (result, record) = host.compile_with_audit("/v.vue", CompileTarget::BUNDLER);
+    let (result, record) = host
+        .compile_with_audit("/v.vue", CompileTarget::BUNDLER)
+        .into_parts();
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => match e {},
+    };
 
     // Compile result itself must be non-empty.
     assert!(
@@ -62,9 +68,10 @@ fn compile_with_audit_vdom_publishes_record_with_compile_kind_and_vdom_tag() {
     );
 
     // Audit record must be published with Compile kind + Vdom tag.
-    let record = record.expect(
-        "compile_with_audit must publish a record when audit_enabled=true; \
-         a regression that drops the registration finalize would surface as None",
+    assert_eq!(
+        record.capture_state,
+        verter_audit::AuditCaptureState::ActiveStored,
+        "audit_enabled=true ⇒ the record is the full-capture stored record",
     );
     assert_eq!(record.canonical_id, "/v.vue");
     match &record.kind {
@@ -104,11 +111,19 @@ fn compile_with_audit_vdom_publishes_record_with_compile_kind_and_vdom_tag() {
 #[test]
 fn compile_with_audit_vdom_returns_no_record_when_audit_disabled() {
     let host = build_host(false);
-    let (result, record) = host.compile_with_audit("/v.vue", CompileTarget::BUNDLER);
-    assert!(
-        record.is_none(),
-        "audit_enabled=false ⇒ no record. A regression that always publishes \
-         (e.g. forgetting the `audit_enabled` gate) would fail this assertion.",
+    let (result, record) = host
+        .compile_with_audit("/v.vue", CompileTarget::BUNDLER)
+        .into_parts();
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => match e {},
+    };
+    assert_eq!(
+        record.capture_state,
+        verter_audit::AuditCaptureState::AuditDisabled,
+        "audit_enabled=false ⇒ the carrier still returns a record, marked AuditDisabled. \
+         A regression that ran the full-capture path (forgetting the `audit_enabled` gate) \
+         would surface as ActiveStored here.",
     );
     assert!(
         result.script.is_some(),

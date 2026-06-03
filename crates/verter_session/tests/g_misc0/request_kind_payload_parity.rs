@@ -28,6 +28,7 @@ fn empty_envelope(kind: RequestKind, kind_payload: RequestKindPayload) -> Reques
         files: Vec::new(),
         waits: None,
         kind_payload,
+        capture_state: verter_audit::AuditCaptureState::ActiveStored,
         trace_id: String::new(),
     }
 }

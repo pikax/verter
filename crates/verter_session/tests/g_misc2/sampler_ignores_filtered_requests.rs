@@ -95,6 +95,7 @@ fn filtered_kind_registration_is_noop_and_invisible_to_sampler() {
         waits: None,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
         trace_id: String::new(),
+        capture_state: verter_audit::AuditCaptureState::ActiveStored,
     };
     assert!(
         !registration.finalize(bogus_record),

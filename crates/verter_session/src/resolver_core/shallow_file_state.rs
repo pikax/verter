@@ -237,7 +237,7 @@ pub struct ResolutionCounters {
 }
 
 /// Structured failure when a budget is exceeded.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BudgetExceededFailure {
     /// Which budget domain was exceeded.
     pub domain: BudgetDomain,

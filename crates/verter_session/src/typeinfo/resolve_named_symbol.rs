@@ -18,7 +18,7 @@
 //!     name: &str,
 //!     type_args: &[TypeExpr],
 //!     mode: ProjectionMode,
-//! ) -> (Option<SemanticNodeId>, Option<RequestAuditRecord>);
+//! ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError>;
 //!
 //! pub fn resolve_named_symbol(...)  -> Option<SemanticNodeId>;
 //! ```
@@ -39,12 +39,13 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use verter_audit::{
-    ProjectionModeTag, RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit,
-    RequestStoreAudit, RequestTimingAudit, TypeResolutionPayload, WaitAudit,
+    AuditedResult, ProjectionModeTag, RequestAuditRecord, RequestKind, RequestKindPayload,
+    RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit, TypeResolutionPayload, WaitAudit,
 };
 use verter_type_expr::TypeExpr;
 
 use crate::host_audit_runtime::AuditRequestRegistration;
+use crate::host_resolve_type_audit::TypeResolutionRequestError;
 use crate::instant::Instant;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::request_context::{RequestContext, RequestContextGuard};
@@ -71,10 +72,24 @@ impl VerterHost {
     /// generic carriers, Expanded otherwise). `Some(mode)` overrides
     /// the default.
     ///
-    /// Always emits exactly one [`RequestAuditRecord`] when the
-    /// audit-config consumer filter accepts `RequestKind::TypeResolution`;
-    /// returns `(node, None)` when the filter rejects (the resolution
-    /// still runs).
+    /// Returns an [`crate::AuditedResult`] carrier. The error type is
+    /// the shared [`TypeResolutionRequestError`] — the SAME
+    /// dispatch-fault taxonomy [`Self::resolve_type_with_audit`] uses —
+    /// because this path resolves through the one shared typed-IR
+    /// engine, not the wire request validator. Outcome mapping:
+    /// - `Ok(Some(node))` — dispatch produced a value.
+    /// - `Ok(None)` — a non-fault miss (`Miss` / `RecursiveRef` /
+    ///   `DeclPlaceholder` / lowering miss): the request was
+    ///   well-formed but resolved no node.
+    /// - `Err(fault)` — a genuine dispatch fault (`BudgetExceeded` /
+    ///   `UnstableState` / `AliasCycle` / `UnsupportedIntrinsic` /
+    ///   `Other`).
+    ///
+    /// The carrier's `audit` field is always populated:
+    /// [`verter_audit::AuditCaptureState::ActiveStored`] on the
+    /// full-capture path, or the cheap default-filled record marked
+    /// [`verter_audit::AuditCaptureState::FilteredNoop`] /
+    /// [`verter_audit::AuditCaptureState::AuditDisabled`].
     #[must_use]
     pub fn resolve_named_symbol_with_audit(
         &self,
@@ -82,7 +97,7 @@ impl VerterHost {
         name: &str,
         type_args: &[Arc<TypeExpr>],
         mode: ResolveMode,
-    ) -> (Option<SemanticNodeId>, Option<RequestAuditRecord>) {
+    ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
         // Registration / context setup mirrors
         // `resolve_type_with_audit`. We construct the registration
         // BEFORE installing the TLS guard so the `Noop` arm can
@@ -92,13 +107,19 @@ impl VerterHost {
 
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
-        let ctx = RequestContext::with_kind_and_timing(
+        // Thread the host's projection-op budget so this dispatch path
+        // honours the same fuse as every other resolution entry-point;
+        // a tripped budget surfaces as a `BudgetExceeded` dispatch
+        // fault on the carrier's `Err` arm rather than running to the
+        // default 2000-op cap.
+        let ctx = RequestContext::with_kind_timing_and_projection_budget(
             request_id,
             Arc::<str>::from(canonical_id),
             RequestKind::TypeResolution,
             footprint_capture,
             timing_capture,
             None,
+            self.config.projection_op_budget,
         );
 
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
@@ -106,7 +127,7 @@ impl VerterHost {
         let _ = ctx.install_audit_registration(Arc::clone(&registration));
 
         let request_start = Instant::now();
-        let (resolved, effective_mode) = match registration.as_ref() {
+        let (outcome, effective_mode) = match registration.as_ref() {
             AuditRequestRegistration::Active(_) => {
                 let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
                 resolve_named_symbol_inner(self, canonical_id, name, type_args, mode)
@@ -119,7 +140,19 @@ impl VerterHost {
         let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
 
         if matches!(registration.as_ref(), AuditRequestRegistration::Noop) {
-            return (resolved, None);
+            let state = if self.config.audit_enabled {
+                verter_audit::AuditCaptureState::FilteredNoop
+            } else {
+                verter_audit::AuditCaptureState::AuditDisabled
+            };
+            let record = noop_type_resolution_record(
+                request_id,
+                canonical_id,
+                ctx.parent_request_id,
+                ctx.trace_id.clone(),
+                state,
+            );
+            return audited_from_outcome(outcome, record);
         }
 
         // Build the audit record. Counters come straight off the
@@ -193,16 +226,20 @@ impl VerterHost {
             files: Vec::new(),
             waits,
             kind_payload: RequestKindPayload::TypeResolution(payload),
+            capture_state: verter_audit::AuditCaptureState::ActiveStored,
             trace_id: ctx.trace_id.clone(),
         };
 
         let cloned = record.clone();
         registration.finalize(record);
-        (resolved, Some(cloned))
+        audited_from_outcome(outcome, cloned)
     }
 
     /// Non-audit variant. Identical resolution semantics; the audit
-    /// record is dropped at the boundary.
+    /// record is dropped at the boundary. A dispatch fault collapses to
+    /// `None` here (the non-audit surface has no error channel) — use
+    /// [`Self::resolve_named_symbol_with_audit`] to observe the typed
+    /// fault.
     #[must_use]
     pub fn resolve_named_symbol(
         &self,
@@ -212,7 +249,51 @@ impl VerterHost {
         mode: ResolveMode,
     ) -> Option<SemanticNodeId> {
         self.resolve_named_symbol_with_audit(canonical_id, name, type_args, mode)
-            .0
+            .into_result()
+            .ok()
+            .flatten()
+    }
+}
+
+/// Package a resolve-named-symbol outcome and its audit record into the
+/// [`AuditedResult`] carrier.
+fn audited_from_outcome(
+    outcome: Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+    audit: RequestAuditRecord,
+) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+    match outcome {
+        Ok(value) => AuditedResult::ok(value, audit),
+        Err(error) => AuditedResult::err(error, audit),
+    }
+}
+
+/// Build the cheap default-filled [`RequestAuditRecord`] returned on
+/// the filtered / disabled path. No per-request counters are collected
+/// — the payload is the zero-valued default and `capture_state`
+/// records why the full path was skipped.
+fn noop_type_resolution_record(
+    request_id: u64,
+    canonical_id: &str,
+    parent_request_id: Option<u64>,
+    trace_id: String,
+    capture_state: verter_audit::AuditCaptureState,
+) -> RequestAuditRecord {
+    RequestAuditRecord {
+        request_id,
+        canonical_id: canonical_id.to_string(),
+        kind: RequestKind::TypeResolution,
+        parent_request_id: parent_request_id.map(|id| id.to_string()),
+        from_cache: false,
+        timings: RequestTimingAudit::default(),
+        memory: RequestMemoryAudit::default(),
+        store: RequestStoreAudit::default(),
+        footprint: None,
+        scheduler: None,
+        files: Vec::new(),
+        waits: None,
+        kind_payload: RequestKindPayload::TypeResolution(TypeResolutionPayload::default()),
+        capture_state,
+        trace_id,
     }
 }
 
@@ -220,13 +301,17 @@ impl VerterHost {
 /// points. Returns the resolved node and the *effective* mode (after
 /// default-mode resolution) so the audit payload can record what the
 /// resolver actually ran with.
+#[allow(clippy::type_complexity)]
 fn resolve_named_symbol_inner(
     host: &VerterHost,
     canonical_id: &str,
     name: &str,
     type_args: &[Arc<TypeExpr>],
     requested_mode: ResolveMode,
-) -> (Option<SemanticNodeId>, ProjectionMode) {
+) -> (
+    Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+    ProjectionMode,
+) {
     // Build a request-bound `HostResolverContext` for the dispatch so
     // resolver-tier reads bind to a real overlay-aware view rather
     // than the panic-shimmed bare-host `impl ResolverContext for
@@ -281,8 +366,11 @@ fn resolve_named_symbol_inner(
             Some(id) => lowered_args.push(id),
             None => {
                 // Lowering miss → bail out and surface a None
-                // resolution rather than partially instantiating.
-                return (None, effective_mode);
+                // resolution rather than partially instantiating. A
+                // lowering miss is a non-fault (`Ok(None)`); a genuine
+                // dispatch fault while lowering would have been raised
+                // inside the dispatch itself.
+                return (Ok(None), effective_mode);
             }
         }
     }
@@ -305,7 +393,17 @@ fn resolve_named_symbol_inner(
     });
     let decl_node_opt = match dispatch.execute(resolve_decl_key) {
         QueryResult::Value(node) | QueryResult::Recursive(node) => Some(node),
-        QueryResult::Error(_) => None,
+        QueryResult::Error(err) => {
+            // A genuine dispatch fault on the bare-decl probe is a
+            // request fault — surface it. A non-fault miss
+            // (`Miss` / `RecursiveRef` / `DeclPlaceholder`) leaves the
+            // fallback node `None` and the Instantiate path below
+            // continues.
+            match TypeResolutionRequestError::from_query_error(&err) {
+                Some(fault) => return (Err(fault), effective_mode),
+                None => None,
+            }
+        }
     };
 
     // Always dispatch through `Instantiate` so the body materialises
@@ -323,7 +421,7 @@ fn resolve_named_symbol_inner(
     //   chosen mode, unwrap one `SemanticNodeData::Alias(inner)`
     //   hop afterwards.
     let Some(shallow) = host.shallow_file_state(canonical_id) else {
-        return (decl_node_opt, effective_mode);
+        return (Ok(decl_node_opt), effective_mode);
     };
     let scope_node = NodeScopeId::File {
         canonical_id: Arc::clone(&scope_arc),
@@ -346,16 +444,50 @@ fn resolve_named_symbol_inner(
             let final_node = if matches!(effective_mode, ProjectionMode::Identity) {
                 node
             } else {
-                materialize_through_aliases(host, &dispatch, node, effective_mode)
+                match materialize_through_aliases(host, &dispatch, node, effective_mode) {
+                    Ok(materialized) => materialized,
+                    // A hard dispatch fault during nested materialization
+                    // propagates as `Err` rather than silently degrading to
+                    // the un-materialised placeholder.
+                    Err(fault) => return (Err(fault), effective_mode),
+                }
             };
-            (Some(final_node), effective_mode)
+            (Ok(Some(final_node)), effective_mode)
         }
-        QueryResult::Error(_) => {
-            // Instantiate failed. Fall back to the original
+        QueryResult::Error(err) => {
+            // Instantiate failed. A genuine dispatch fault is surfaced
+            // as `Err`; a non-fault miss falls back to the original
             // `ResolveDecl` node (when present) so callers still
             // receive *something* identifiable rather than a None.
-            (decl_node_opt, effective_mode)
+            (classify_dispatch_error(&err, decl_node_opt), effective_mode)
         }
+    }
+}
+
+/// Classify a `QueryResult::Error(err)` arm into the carrier outcome a
+/// typeinfo resolution entry-point returns.
+///
+/// This is the single decode point the resolve / evaluate paths route
+/// their dispatch errors through, mirroring
+/// [`crate::host_resolve_type_audit::resolve_type_with_audit`]'s split:
+/// - A genuine dispatch FAULT (`BudgetExceeded` / `UnstableState` /
+///   `AliasCycle` / `UnsupportedIntrinsic` / `Other`) → `Err(fault)`.
+/// - A non-fault MISS (`Miss` / `RecursiveRef` / `DeclPlaceholder`) →
+///   `Ok(fallback)`, where `fallback` is whatever identifiable node the
+///   caller already resolved (e.g. the bare `ResolveDecl` node) — `None`
+///   when there is none.
+///
+/// Both the top-level Instantiate path and the nested
+/// [`materialize_through_aliases`] placeholder hop route their
+/// `QueryResult::Error` arms through this single decode point, so a real
+/// dispatch fault is never indistinguishable from a miss.
+pub(crate) fn classify_dispatch_error(
+    err: &crate::semantic_query::QueryError,
+    fallback: Option<SemanticNodeId>,
+) -> Result<Option<SemanticNodeId>, TypeResolutionRequestError> {
+    match TypeResolutionRequestError::from_query_error(err) {
+        Some(fault) => Err(fault),
+        None => Ok(fallback),
     }
 }
 
@@ -375,7 +507,7 @@ fn materialize_through_aliases(
     dispatch: &ProjectSemanticDispatch<'_>,
     start: SemanticNodeId,
     mode: ProjectionMode,
-) -> SemanticNodeId {
+) -> Result<SemanticNodeId, TypeResolutionRequestError> {
     debug_assert!(!matches!(mode, ProjectionMode::Identity));
     let store = host.project_type_store().semantic_graph();
     let mut current = start;
@@ -404,21 +536,58 @@ fn materialize_through_aliases(
                     args: Arc::from(Vec::new().into_boxed_slice()),
                     context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 };
-                match dispatch.execute(key) {
-                    QueryResult::Value(next) | QueryResult::Recursive(next) => {
-                        if next == current {
-                            // Dispatch returned the same placeholder
-                            // — give up.
-                            return current;
-                        }
+                match classify_materialization_step(dispatch.execute(key), current)? {
+                    MaterializationStep::Continue(next) => {
                         current = next;
                         continue;
                     }
-                    QueryResult::Error(_) => return current,
+                    MaterializationStep::Stop(node) => return Ok(node),
                 }
             }
-            _ => return current,
+            _ => return Ok(current),
         }
     }
-    current
+    Ok(current)
+}
+
+/// The next action the placeholder-materialisation loop takes after a
+/// nested `Instantiate` dispatch.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MaterializationStep {
+    /// Advance the loop to `next` (the dispatch produced a fresh node).
+    Continue(SemanticNodeId),
+    /// Stop and return `node` as the materialised result.
+    Stop(SemanticNodeId),
+}
+
+/// Decide the loop's next step from the nested `Instantiate` result.
+///
+/// This is the single decode point the placeholder-materialisation loop
+/// (in both [`materialize_through_aliases`] and its
+/// `evaluate_type_expression` sibling) routes its nested dispatch result
+/// through, mirroring the top-level [`classify_dispatch_error`] split:
+/// - `Value(next)` / `Recursive(next)` → `Continue(next)`, unless the
+///   dispatch returned the same `current` placeholder (no progress), in
+///   which case `Stop(current)`.
+/// - `Error(err)` → a genuine dispatch FAULT propagates as
+///   `Err(fault)`; a non-fault miss keeps the degraded `current` node as
+///   `Ok(Stop(current))`.
+pub(crate) fn classify_materialization_step(
+    result: QueryResult<SemanticNodeId>,
+    current: SemanticNodeId,
+) -> Result<MaterializationStep, TypeResolutionRequestError> {
+    match result {
+        QueryResult::Value(next) | QueryResult::Recursive(next) => {
+            if next == current {
+                // No progress — give up on the degraded node.
+                Ok(MaterializationStep::Stop(current))
+            } else {
+                Ok(MaterializationStep::Continue(next))
+            }
+        }
+        QueryResult::Error(err) => match classify_dispatch_error(&err, Some(current)) {
+            Ok(node) => Ok(MaterializationStep::Stop(node.unwrap_or(current))),
+            Err(fault) => Err(fault),
+        },
+    }
 }

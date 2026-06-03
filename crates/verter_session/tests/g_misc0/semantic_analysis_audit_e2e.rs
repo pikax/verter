@@ -77,11 +77,11 @@ fn setup_host_with_sfc(canonical: &str, source: &str) -> Arc<VerterHost> {
 fn analyze_with_audit_populates_payload_and_reports_fresh_build_on_cold_call() {
     let host = setup_host_with_sfc("/Probe.vue", SFC);
 
-    let (analysis, record) = host.analyze_with_audit("/Probe.vue");
-    let analysis = analysis.expect(
+    let (analysis, record) = host.analyze_with_audit("/Probe.vue").into_parts();
+    let analysis = analysis.ok().flatten().expect(
         "analyze_with_audit must produce an AnalysisReady artifact for a freshly-upserted SFC",
     );
-    let record = record.expect("active SemanticAnalysis request must produce a record");
+    // record is always present now (carrier `audit` field is mandatory).
 
     // The record's discriminant matches the requested kind. A
     // regression that mis-tagged the kind variant would surface here.
@@ -159,9 +159,10 @@ fn analyze_with_audit_reports_warm_cache_reuse_on_repeat_call() {
     let host = setup_host_with_sfc("/Probe.vue", SFC);
 
     // Cold call warms the IndexedReady cache.
-    let (cold, cold_record) = host.analyze_with_audit("/Probe.vue");
-    cold.expect("cold call must produce AnalysisReady");
-    let cold_record = cold_record.expect("cold call must produce record");
+    let (cold, cold_record) = host.analyze_with_audit("/Probe.vue").into_parts();
+    cold.ok()
+        .flatten()
+        .expect("cold call must produce AnalysisReady");
     assert!(
         cold_record
             .semantic_analysis_payload()
@@ -172,9 +173,10 @@ fn analyze_with_audit_reports_warm_cache_reuse_on_repeat_call() {
     assert!(!cold_record.from_cache, "cold record must not be cached");
 
     // Warm call must reuse the populated cache entry.
-    let (warm, warm_record) = host.analyze_with_audit("/Probe.vue");
-    warm.expect("warm call must produce AnalysisReady from cache");
-    let warm_record = warm_record.expect("warm call must produce record");
+    let (warm, warm_record) = host.analyze_with_audit("/Probe.vue").into_parts();
+    warm.ok()
+        .flatten()
+        .expect("warm call must produce AnalysisReady from cache");
     let warm_payload = warm_record
         .semantic_analysis_payload()
         .expect("warm record must have SemanticAnalysisPayload");
@@ -213,13 +215,15 @@ fn analyze_with_audit_returns_none_for_missing_canonical() {
         },
         workspace,
     ));
-    let (analysis, record) = host.analyze_with_audit("/does-not-exist.vue");
+    let (analysis, record) = host.analyze_with_audit("/does-not-exist.vue").into_parts();
     assert!(
-        analysis.is_none(),
-        "missing canonical must yield no AnalysisReady artifact",
+        matches!(analysis, Ok(None)),
+        "missing canonical must ride the success arm as Ok(None) — no AnalysisReady artifact",
     );
+    // The always-a-record contract: even a missing canonical returns a
+    // populated record so consumers can observe the (empty) request.
     assert!(
-        record.is_none(),
-        "missing canonical must yield no record (no work done)",
+        matches!(record.kind, RequestKind::SemanticAnalysis),
+        "missing-canonical record must still carry the SemanticAnalysis kind",
     );
 }

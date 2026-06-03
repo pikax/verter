@@ -121,6 +121,7 @@ fn synthesize_record() -> RequestAuditRecord {
             solve_count: 1,
             ..Default::default()
         }),
+        capture_state: verter_audit::AuditCaptureState::ActiveStored,
         trace_id: String::new(),
     }
 }

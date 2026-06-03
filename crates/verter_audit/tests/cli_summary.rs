@@ -108,6 +108,7 @@ fn make_record(
         files: Vec::new(),
         waits: None,
         kind_payload,
+        capture_state: verter_audit::AuditCaptureState::ActiveStored,
         trace_id: String::new(),
     };
     record.timings.total_ms = total_ms;

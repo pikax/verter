@@ -522,6 +522,7 @@ impl AuditBuilder {
             files: self.files,
             waits,
             kind_payload: RequestKindPayload::ComponentMeta(self.component_meta_payload),
+            capture_state: verter_audit::AuditCaptureState::ActiveStored,
             trace_id,
         }
     }

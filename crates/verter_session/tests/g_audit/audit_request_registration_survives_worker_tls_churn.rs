@@ -167,6 +167,7 @@ fn active_request_registration_survives_worker_tls_install_drop_churn() {
         waits: None,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
         trace_id: String::new(),
+        capture_state: verter_audit::AuditCaptureState::ActiveStored,
     };
     assert!(
         registration.finalize(synthetic_record),

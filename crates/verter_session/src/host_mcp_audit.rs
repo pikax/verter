@@ -20,16 +20,21 @@
 //! is the propagation channel; this wrapper does not need to thread
 //! the id explicitly.
 //!
-//! Returns `(T, Option<RequestAuditRecord>)`. The record is `None`
-//! when the audit-config consumer filter rejects the
-//! `RequestKind::Mcp` kind (`AuditRequestRegistration::Noop`); the
-//! tool's work always runs.
+//! Returns an [`verter_audit::AuditedResult<T, E>`] carrier pairing the
+//! closure's outcome (`Ok(value)` / `Err(error)`) with the audit
+//! record. The carrier's `audit` field is mandatory: the full-capture
+//! path returns an [`verter_audit::AuditCaptureState::ActiveStored`]
+//! record, while the filtered / disabled paths return the cheap
+//! default-filled record marked
+//! [`verter_audit::AuditCaptureState::FilteredNoop`] /
+//! [`verter_audit::AuditCaptureState::AuditDisabled`].
 
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use verter_audit::{
-    McpToolPayload, RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit,
-    RequestStoreAudit, RequestTimingAudit, WaitAudit,
+    AuditedResult, McpToolPayload, RequestAuditRecord, RequestKind, RequestKindPayload,
+    RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit, WaitAudit,
 };
 
 use crate::host_audit_runtime::AuditRequestRegistration;
@@ -37,21 +42,21 @@ use crate::instant::Instant;
 use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::VerterHost;
 
-/// Outcome a caller closure produces. Carries the closure's value
-/// alongside two audit-payload facts the wrapper cannot infer on its
-/// own: the result size in bytes (caller measures the response body
-/// it intends to ship to the MCP client) and an optional error
-/// message. The wrapper assembles these into the
-/// [`McpToolPayload`] without inspecting the closure's value.
-pub struct McpToolOutcome<T> {
+/// Success payload a caller closure produces. Carries the tool's value
+/// alongside the one audit-payload fact the wrapper cannot infer on
+/// its own: the result size in bytes (the caller measures the response
+/// body it intends to ship to the MCP client).
+///
+/// The error half of the outcome rides the closure's `Err(E)` arm —
+/// the wrapper folds it into [`McpToolPayload::error`] via its `Debug`
+/// rendering and routes it to the carrier's `Err`. There is no nested
+/// `Result` inside the success arm.
+pub struct McpToolSuccess<T> {
     /// The value the tool produced. Returned to the caller verbatim.
     pub value: T,
     /// Approximate result size in bytes — the caller measures the
     /// response body it will ship to the MCP client.
     pub result_size_bytes: u32,
-    /// Optional error message. Tools that succeed leave this `None`;
-    /// tools that fail set it to a short human-readable summary.
-    pub error: Option<String>,
 }
 
 impl VerterHost {
@@ -75,32 +80,52 @@ impl VerterHost {
     ///    closure spawns (`get_component_meta_with_resolution`,
     ///    `compile_with_audit`, …) record the MCP request as their
     ///    parent.
-    /// 5. Runs the closure. The closure returns a
-    ///    [`McpToolOutcome`] carrying the value, the result size in
-    ///    bytes (caller-measured), and an optional error message.
+    /// 5. Runs the closure. The closure returns
+    ///    `Result<McpToolSuccess<T>, E>`: the success arm carries the
+    ///    tool value plus its caller-measured result size; the error
+    ///    arm carries the typed error `E` (folded into the payload's
+    ///    error string via `Debug`).
     /// 6. Assembles a [`McpToolPayload`] from the outcome plus the
     ///    caller-supplied `tool_name` / `args_size_bytes`, builds the
     ///    [`RequestAuditRecord`], and finalises through the
     ///    registration.
-    /// 7. Returns the closure's value paired with the audit record
-    ///    (or `None` when the consumer filter rejected the kind).
-    pub fn audit_mcp_tool_call<T, F>(
+    /// 7. Returns an [`crate::AuditedResult`] carrier pairing the
+    ///    outcome (`Ok(value)` / `Err(error)`) with the audit record.
+    ///    The carrier's `audit` field is always populated — the
+    ///    filtered / disabled paths carry the cheap default-filled
+    ///    record marked
+    ///    [`verter_audit::AuditCaptureState::FilteredNoop`] /
+    ///    [`verter_audit::AuditCaptureState::AuditDisabled`].
+    pub fn audit_mcp_tool_call<T, E, F>(
         self: &Arc<Self>,
         tool_name: &str,
         canonical_id: &str,
         args_size_bytes: u32,
         f: F,
-    ) -> (T, Option<RequestAuditRecord>)
+    ) -> AuditedResult<T, E>
     where
-        F: FnOnce(&Arc<Self>) -> McpToolOutcome<T>,
+        E: Debug,
+        F: FnOnce(&Arc<Self>) -> Result<McpToolSuccess<T>, E>,
     {
         // Audit-disabled fast path: drive the closure with NO
         // RequestContextGuard installed. Producer-side
         // current_observer() returns None and the instrumentation
-        // short-circuits.
+        // short-circuits. The carrier still carries a cheap
+        // default-filled record marked `AuditDisabled`.
         if !self.config.audit_enabled {
+            let request_id = self.next_request_id();
             let outcome = f(self);
-            return (outcome.value, None);
+            let parent_request_id =
+                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+            let record = noop_mcp_record(
+                request_id,
+                canonical_id,
+                parent_request_id,
+                tool_name,
+                args_size_bytes,
+                verter_audit::AuditCaptureState::AuditDisabled,
+            );
+            return audited_mcp_outcome(outcome, record);
         }
 
         // 1. Stamp request id and bump the harness multi-request guard.
@@ -151,17 +176,32 @@ impl VerterHost {
         };
         let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
-        // 5. Filtered kinds: skip record construction.
+        // 5. Filtered kinds: return the cheap default-filled record.
+        //    The tool's work still ran; no payload is collected.
         if matches!(registration.as_ref(), AuditRequestRegistration::Noop) {
-            return (outcome.value, None);
+            let record = noop_mcp_record(
+                request_id,
+                canonical_id,
+                ctx.parent_request_id.map(|id| id.to_string()),
+                tool_name,
+                args_size_bytes,
+                verter_audit::AuditCaptureState::FilteredNoop,
+            );
+            return audited_mcp_outcome(outcome, record);
         }
 
-        // 6. Assemble the payload and the envelope.
+        // 6. Assemble the payload and the envelope. The success arm
+        //    contributes `result_size_bytes`; the error arm contributes
+        //    the payload error string via `Debug`.
+        let (result_size_bytes, error) = match &outcome {
+            Ok(success) => (success.result_size_bytes, None),
+            Err(err) => (0, Some(format!("{err:?}"))),
+        };
         let payload = McpToolPayload {
             tool_name: tool_name.to_string(),
             args_size_bytes,
-            result_size_bytes: outcome.result_size_bytes,
-            error: outcome.error,
+            result_size_bytes,
+            error,
         };
 
         let timings = RequestTimingAudit {
@@ -207,11 +247,64 @@ impl VerterHost {
             files: Vec::new(),
             waits,
             kind_payload: RequestKindPayload::Mcp(payload),
+            capture_state: verter_audit::AuditCaptureState::ActiveStored,
             trace_id: String::new(),
         };
 
         let cloned = record.clone();
         registration.finalize(record);
-        (outcome.value, Some(cloned))
+        audited_mcp_outcome(outcome, cloned)
+    }
+}
+
+/// Package an MCP tool outcome and its audit record into the
+/// [`AuditedResult`] carrier. The success arm's
+/// [`McpToolSuccess::value`] becomes the carrier value; the size fact
+/// has already been folded into the record.
+fn audited_mcp_outcome<T, E>(
+    outcome: Result<McpToolSuccess<T>, E>,
+    audit: RequestAuditRecord,
+) -> AuditedResult<T, E> {
+    match outcome {
+        Ok(success) => AuditedResult::ok(success.value, audit),
+        Err(error) => AuditedResult::err(error, audit),
+    }
+}
+
+/// Build the cheap default-filled [`RequestAuditRecord`] returned on
+/// the filtered / disabled MCP path. No per-request counters are
+/// collected — the payload carries only the tool identity and args
+/// size, and `capture_state` records why the full path was skipped.
+fn noop_mcp_record(
+    request_id: u64,
+    canonical_id: &str,
+    parent_request_id: Option<String>,
+    tool_name: &str,
+    args_size_bytes: u32,
+    capture_state: verter_audit::AuditCaptureState,
+) -> RequestAuditRecord {
+    RequestAuditRecord {
+        request_id,
+        canonical_id: canonical_id.to_string(),
+        kind: RequestKind::Mcp {
+            tool: tool_name.to_string(),
+        },
+        parent_request_id,
+        from_cache: false,
+        timings: RequestTimingAudit::default(),
+        memory: RequestMemoryAudit::default(),
+        store: RequestStoreAudit::default(),
+        footprint: None,
+        scheduler: None,
+        files: Vec::new(),
+        waits: None,
+        kind_payload: RequestKindPayload::Mcp(McpToolPayload {
+            tool_name: tool_name.to_string(),
+            args_size_bytes,
+            result_size_bytes: 0,
+            error: None,
+        }),
+        capture_state,
+        trace_id: String::new(),
     }
 }

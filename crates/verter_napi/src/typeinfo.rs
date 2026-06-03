@@ -10,19 +10,45 @@ use napi::bindgen_prelude::*;
 use napi::{Error, Status};
 use napi_derive::napi;
 
-use verter_audit::RequestAuditRecord;
+use verter_audit::{AuditCaptureState, RequestAuditRecord};
 use verter_protocol::typeinfo::FfiSymbolEntry;
-use verter_session::semantic_query::ProjectionMode;
+use verter_session::host_resolve_type_audit::TypeResolutionRequestError;
+use verter_session::semantic_query::{ProjectionMode, SemanticNodeId};
 use verter_type_expr::TypeExpr;
+
+/// Split a resolve / evaluate outcome into the resolved node (if any)
+/// and an optional dispatch-fault description.
+///
+/// - `Ok(Some(node))` → `(Some(node), None)`.
+/// - `Ok(None)` (non-fault miss) → `(None, None)`.
+/// - `Err(fault)` (dispatch fault) → `(None, Some(description))`.
+///
+/// This is the FFI projection of the carrier's `Err` arm: a genuine
+/// dispatch fault is surfaced through the result DTO's `error` channel
+/// instead of being silently erased to a `None` node.
+pub(crate) fn split_resolve_outcome(
+    outcome: std::result::Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+) -> (Option<SemanticNodeId>, Option<String>) {
+    match outcome {
+        Ok(node) => (node, None),
+        Err(fault) => (None, Some(format!("{fault:?}"))),
+    }
+}
 
 /// Combined response shape for `resolveSymbolWithAudit` /
 /// `evaluateTypeExpressionWithAudit`. Both JSON Buffers — the consumer
 /// decodes whichever it needs.
 ///
 /// `typeExpr` carries a serde-JSON `TypeExpr` payload. `null` when
-/// resolution failed (e.g. unknown symbol, lowering miss, suppressed).
+/// resolution produced no node — either a non-fault miss (`Ok(None)`)
+/// or a dispatch fault (in which case `error` is set).
 /// `auditRecord` carries the per-request `RequestAuditRecord`. `null`
 /// when audit is disabled (the resolution still ran).
+/// `error` carries a human-readable description of a genuine dispatch
+/// fault (`BudgetExceeded` / `UnstableState` / `AliasCycle` /
+/// `UnsupportedIntrinsic` / `Other`). `null` on success or a non-fault
+/// miss — distinguishing "resolved nothing because the request was
+/// well-formed but empty" from "resolution faulted".
 #[napi(object)]
 pub struct NapiTypeInfoResolveResult {
     /// JSON-serialised `TypeExpr` Buffer; `null` when the resolution
@@ -31,6 +57,9 @@ pub struct NapiTypeInfoResolveResult {
     /// JSON-serialised `RequestAuditRecord` Buffer; `null` when audit
     /// is off.
     pub auditRecord: Option<Buffer>,
+    /// Human-readable dispatch-fault description; `null` on success or
+    /// a non-fault miss.
+    pub error: Option<String>,
 }
 
 /// Encode a list of `FfiSymbolEntry` to a JSON Buffer.
@@ -53,6 +82,18 @@ pub(crate) fn encode_type_expr(expr: &TypeExpr) -> Result<Buffer> {
         )
     })?;
     Ok(Buffer::from(bytes))
+}
+
+/// Encode a record into the optional `auditRecord` DTO slot, projecting
+/// the host carrier's mandatory record through the historical "null
+/// when audit is disabled / filtered" contract: only an
+/// [`AuditCaptureState::ActiveStored`] record encodes to a `Buffer`; a
+/// filtered or disabled record projects to `None`.
+pub(crate) fn encode_stored_audit_record(rec: &RequestAuditRecord) -> Result<Option<Buffer>> {
+    match rec.capture_state {
+        AuditCaptureState::ActiveStored => encode_audit_record(rec).map(Some),
+        AuditCaptureState::FilteredNoop | AuditCaptureState::AuditDisabled => Ok(None),
+    }
 }
 
 /// Encode a `RequestAuditRecord` to a JSON Buffer (parity with

@@ -12,18 +12,25 @@
 //! `take_audit_record(request_id)` work uniformly with the
 //! component-meta path.
 //!
-//! Returns `(VerterCompileResult, Option<RequestAuditRecord>)`. The
-//! record is `None` when the audit-config consumer filter rejects the
-//! `Compile { target }` kind (e.g. `audit_enabled = false`); the
-//! compile itself always runs.
+//! Returns an [`verter_audit::AuditedResult<VerterCompileResult,
+//! Infallible>`] carrier. Compile has no request-fault path —
+//! diagnostics live in `VerterCompileResult.errors` — so the outcome is
+//! always `Ok`. The carrier's `audit` field is mandatory: the
+//! full-capture path returns an
+//! [`verter_audit::AuditCaptureState::ActiveStored`] record, while the
+//! filtered / disabled / file-not-found paths return the cheap
+//! default-filled record marked
+//! [`verter_audit::AuditCaptureState::FilteredNoop`] /
+//! [`verter_audit::AuditCaptureState::AuditDisabled`].
 
+use std::convert::Infallible;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use oxc_allocator::Allocator;
 use verter_audit::{
-    payloads::tags::CompileTargetTag, CompilePayload, RequestAuditRecord, RequestKind,
-    RequestKindPayload,
+    payloads::tags::CompileTargetTag, AuditedResult, CompilePayload, RequestAuditRecord,
+    RequestKind, RequestKindPayload,
 };
 use verter_compiler::compile::{
     compile as compile_sfc, CodegenOptions, CompileTarget, VerterCompileOptions,
@@ -70,13 +77,14 @@ impl VerterHost {
     /// codegen counts.
     ///
     /// The compile path runs whether or not audit is enabled —
-    /// `audit_enabled = false` short-circuits to `record = None`
-    /// without any record-building cost.
+    /// `audit_enabled = false` returns the cheap default-filled record
+    /// marked [`verter_audit::AuditCaptureState::AuditDisabled`] without
+    /// any payload-building cost.
     pub fn compile_with_audit(
         self: &Arc<Self>,
         canonical_id: &str,
         target: CompileTarget,
-    ) -> (VerterCompileResult, Option<RequestAuditRecord>) {
+    ) -> AuditedResult<VerterCompileResult, Infallible> {
         self.compile_with_audit_options(
             canonical_id,
             target,
@@ -98,10 +106,13 @@ impl VerterHost {
         canonical_id: &str,
         target: CompileTarget,
         verter_options: VerterCompileOptions,
-    ) -> (VerterCompileResult, Option<RequestAuditRecord>) {
+    ) -> AuditedResult<VerterCompileResult, Infallible> {
+        let force_vapor = verter_options.force_vapor;
+        let request_tag = target_to_tag(target, force_vapor);
         // 1. Read source through workspace. On miss, return an empty
-        //    result with no record — the audit substrate has nothing
-        //    to attribute when the file does not exist.
+        //    result whose only diagnostic is the not-found error. The
+        //    carrier still carries a cheap default-filled record so the
+        //    always-a-record contract holds.
         let source_arc = match self.workspace().read_file(canonical_id) {
             Some(s) => s,
             None => {
@@ -129,7 +140,22 @@ impl VerterHost {
                         message: format!("file not found in workspace: {canonical_id}"),
                         span: None,
                     });
-                return (empty, None);
+                let request_id = self.next_request_id();
+                let state = if self.config.audit_enabled {
+                    verter_audit::AuditCaptureState::FilteredNoop
+                } else {
+                    verter_audit::AuditCaptureState::AuditDisabled
+                };
+                let parent_request_id = verter_scheduler::request_context::current_request_id()
+                    .map(|id| id.to_string());
+                let record = noop_compile_record(
+                    request_id,
+                    canonical_id,
+                    parent_request_id,
+                    request_tag,
+                    state,
+                );
+                return AuditedResult::ok(empty, record);
             }
         };
         let source: &str = source_arc.as_ref();
@@ -143,10 +169,22 @@ impl VerterHost {
         // 2. Audit-disabled fast path: drive the producer with NO
         //    `RequestContextGuard` installed. Producer-side
         //    `current_observer()` returns `None`, the instrumentation
-        //    short-circuits at the TLS check, and we publish nothing.
+        //    short-circuits at the TLS check, and nothing is published.
+        //    The carrier still carries a cheap default-filled record
+        //    marked `AuditDisabled`.
         if !self.config.audit_enabled {
             let result = compile_sfc(source, &codegen_options, &verter_options, &allocator);
-            return (result, None);
+            let request_id = self.next_request_id();
+            let parent_request_id =
+                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+            let record = noop_compile_record(
+                request_id,
+                canonical_id,
+                parent_request_id,
+                request_tag,
+                verter_audit::AuditCaptureState::AuditDisabled,
+            );
+            return AuditedResult::ok(result, record);
         }
 
         // 3. Stamp request id and increment created-counter so the
@@ -156,8 +194,7 @@ impl VerterHost {
         let request_id = self.next_request_id();
         crate::request_context::increment_requests_created();
 
-        let force_vapor = verter_options.force_vapor;
-        let tag = target_to_tag(target, force_vapor);
+        let tag = request_tag;
 
         // 4. Construct the request context with the Compile kind.
         let footprint_capture = self.config.footprint_capture;
@@ -180,18 +217,48 @@ impl VerterHost {
         ));
         let _ = ctx.install_audit_registration(Arc::clone(&registration));
 
-        // 6. Install the TLS guard so producers in `verter_compiler`
-        //    see `current_observer() = Some(ctx)`.
-        let _ctx_guard = RequestContextGuard::install(ctx);
+        // 6. Capture parent correlation off the RequestContext (sniffed
+        //    from the scheduler TLS at construction). A compile issued
+        //    inside another audited request's window inherits that
+        //    request's id as its `parent_request_id`.
+        let parent_request_id = ctx.parent_request_id.map(|id| id.to_string());
 
-        // 7. Drive the compile. Producers emit `record_phase_timing`
+        // 7. Branch Active / Noop BEFORE assembling any audit payload.
+        //    The compile RESULT computes on both arms (consumers asked
+        //    for it), but the Noop arm installs the cheap no-op observer
+        //    and skips all heavy payload-assembly work — matching the
+        //    analyze / resolve_type / typeinfo entry-points. This avoids
+        //    installing the real `RequestContextGuard` and assembling a
+        //    full `CompilePayload` only to discard it on a
+        //    consumer-filtered request.
+        if matches!(
+            registration.as_ref(),
+            crate::host_audit_runtime::AuditRequestRegistration::Noop
+        ) {
+            let _noop_guard = verter_audit::install_noop_observer();
+            let result = compile_sfc(source, &codegen_options, &verter_options, &allocator);
+            let record = noop_compile_record(
+                request_id,
+                canonical_id,
+                parent_request_id,
+                tag,
+                verter_audit::AuditCaptureState::FilteredNoop,
+            );
+            return AuditedResult::ok(result, record);
+        }
+
+        // 8. Active arm: install the TLS guard so producers in
+        //    `verter_compiler` see `current_observer() = Some(ctx)`.
+        let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
+
+        // 9. Drive the compile. Producers emit `record_phase_timing`
         //    + `record_event(CompileCodeTransformOp)` while this
         //    block runs.
         let total_start = Instant::now();
         let result = compile_sfc(source, &codegen_options, &verter_options, &allocator);
         let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
-        // 8. Read accumulators off the active request context.
+        // 10. Read accumulators off the active request context.
         let payload = self.assemble_compile_payload(tag, target, force_vapor, &result);
         let store = RequestStoreAudit::default();
         let memory = RequestMemoryAudit::default();
@@ -204,7 +271,7 @@ impl VerterHost {
             request_id,
             canonical_id: canonical_id.to_string(),
             kind: RequestKind::Compile { target: tag },
-            parent_request_id: None,
+            parent_request_id,
             from_cache: false,
             timings,
             memory,
@@ -214,20 +281,16 @@ impl VerterHost {
             files: Vec::new(),
             waits: None,
             kind_payload: RequestKindPayload::Compile(payload),
+            capture_state: verter_audit::AuditCaptureState::ActiveStored,
             trace_id: String::new(),
         };
 
-        // 9. Finalise the record. `finalize` returns `false` on a
-        //    `Noop` registration (consumer filter rejected the kind).
-        //    Drop the TLS guard AFTER finalize so the per-request
-        //    counters stay coherent with the record we publish.
-        let finalized = registration.finalize(record.clone());
+        // 11. Finalise the record. Drop the TLS guard AFTER finalize so
+        //     the per-request counters stay coherent with the record we
+        //     publish.
+        registration.finalize(record.clone());
         drop(_ctx_guard);
-        if finalized {
-            (result, Some(record))
-        } else {
-            (result, None)
-        }
+        AuditedResult::ok(result, record)
     }
 
     fn assemble_compile_payload(
@@ -325,5 +388,39 @@ impl VerterHost {
             num_script_blocks,
             code_transform_ops: ct_ops as u32,
         }
+    }
+}
+
+/// Build the cheap default-filled [`RequestAuditRecord`] returned on
+/// the filtered / disabled / file-not-found compile path. No
+/// per-request counters are collected — the payload is the zero-valued
+/// default carrying only the resolved `target` tag, and
+/// `capture_state` records why the full path was skipped.
+fn noop_compile_record(
+    request_id: u64,
+    canonical_id: &str,
+    parent_request_id: Option<String>,
+    target: CompileTargetTag,
+    capture_state: verter_audit::AuditCaptureState,
+) -> RequestAuditRecord {
+    RequestAuditRecord {
+        request_id,
+        canonical_id: canonical_id.to_string(),
+        kind: RequestKind::Compile { target },
+        parent_request_id,
+        from_cache: false,
+        timings: RequestTimingAudit::default(),
+        memory: RequestMemoryAudit::default(),
+        store: RequestStoreAudit::default(),
+        footprint: None,
+        scheduler: None,
+        files: Vec::new(),
+        waits: None,
+        kind_payload: RequestKindPayload::Compile(CompilePayload {
+            target,
+            ..CompilePayload::default()
+        }),
+        capture_state,
+        trace_id: String::new(),
     }
 }

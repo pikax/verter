@@ -232,6 +232,7 @@ mod tests {
                 }
                 _ => RequestKindPayload::None,
             },
+            capture_state: crate::record::AuditCaptureState::ActiveStored,
             trace_id: String::new(),
         };
         rec.timings.total_ms = total_ms;

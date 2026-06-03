@@ -79,6 +79,7 @@ fn active_registration_appears_in_active_requests_until_finalize_then_publishes_
         waits: None,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
         trace_id: String::new(),
+        capture_state: verter_audit::AuditCaptureState::ActiveStored,
     };
     assert!(
         registration.finalize(record.clone()),

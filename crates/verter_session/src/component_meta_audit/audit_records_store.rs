@@ -130,6 +130,7 @@ mod tests {
             kind_payload: super::super::RequestKindPayload::ComponentMeta(
                 ComponentMetaPayload::default(),
             ),
+            capture_state: verter_audit::AuditCaptureState::ActiveStored,
             trace_id: String::new(),
         }
     }

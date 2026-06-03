@@ -60,6 +60,21 @@ pub(crate) fn audit_record_to_json_string(record: &RequestAuditRecord) -> Result
         .map_err(|e| JsValue::from_str(&format!("audit record serialization error: {e}")))
 }
 
+/// Convert a record into a JSON string `JsValue`, projecting the host
+/// carrier's mandatory record through the historical "null when audit
+/// is disabled / filtered" contract: only an
+/// [`verter_audit::AuditCaptureState::ActiveStored`] record serialises;
+/// a filtered or disabled record returns `JsValue::NULL`.
+pub(crate) fn stored_audit_record_to_json_string(
+    record: &RequestAuditRecord,
+) -> Result<JsValue, JsValue> {
+    match record.capture_state {
+        verter_audit::AuditCaptureState::ActiveStored => audit_record_to_json_string(record),
+        verter_audit::AuditCaptureState::FilteredNoop
+        | verter_audit::AuditCaptureState::AuditDisabled => Ok(JsValue::NULL),
+    }
+}
+
 /// Convert a list of `RequestAuditRecord`s into a JSON string `JsValue`.
 pub(crate) fn audit_record_list_to_json_string(
     records: &[RequestAuditRecord],

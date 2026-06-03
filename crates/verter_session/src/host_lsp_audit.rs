@@ -76,6 +76,11 @@ pub struct ActiveLspSession {
     request_id: u64,
     method: LspMethodTag,
     canonical_id: String,
+    /// Parent-request id captured off the `RequestContext` at
+    /// `lsp_audit_begin` (sniffed from the scheduler TLS). Populates
+    /// the record's `parent_request_id` so a sub-request LSP handler
+    /// carries parent correlation.
+    parent_request_id: Option<u64>,
     registration: Arc<AuditRequestRegistration>,
     /// TLS guard for `current_observer()`. Held until finalise so
     /// per-request counters stay coherent with the record we
@@ -120,7 +125,12 @@ impl LspAuditSession {
         match self {
             Self::Noop => None,
             Self::Active(mut active) => {
-                let record = build_record(active.request_id, &active.canonical_id, payload);
+                let record = build_record(
+                    active.request_id,
+                    &active.canonical_id,
+                    active.parent_request_id,
+                    payload,
+                );
                 let won = active.registration.finalize(record.clone());
                 // Drop the TLS guard AFTER finalize so per-request
                 // counters stay coherent with the record we publish.
@@ -152,7 +162,12 @@ impl LspAuditSession {
                     error: Some("cancelled".to_string()),
                     ..LspRequestPayload::default()
                 };
-                let record = build_record(active.request_id, &active.canonical_id, payload);
+                let record = build_record(
+                    active.request_id,
+                    &active.canonical_id,
+                    active.parent_request_id,
+                    payload,
+                );
                 let won = active.registration.finalize(record.clone());
                 active.tls_guard.take();
                 if won {
@@ -168,6 +183,7 @@ impl LspAuditSession {
 fn build_record(
     request_id: u64,
     canonical_id: &str,
+    parent_request_id: Option<u64>,
     payload: LspRequestPayload,
 ) -> RequestAuditRecord {
     RequestAuditRecord {
@@ -176,7 +192,7 @@ fn build_record(
         kind: RequestKind::Lsp {
             method: payload.method.clone(),
         },
-        parent_request_id: None,
+        parent_request_id: parent_request_id.map(|id| id.to_string()),
         from_cache: false,
         timings: RequestTimingAudit::default(),
         memory: RequestMemoryAudit::default(),
@@ -186,6 +202,7 @@ fn build_record(
         files: Vec::new(),
         waits: None,
         kind_payload: RequestKindPayload::Lsp(payload),
+        capture_state: verter_audit::AuditCaptureState::ActiveStored,
         trace_id: String::new(),
     }
 }
@@ -248,11 +265,13 @@ impl VerterHost {
             AuditRequestRegistration::Noop => LspAuditSession::Noop,
             AuditRequestRegistration::Active(_) => {
                 let _ = ctx.install_audit_registration(Arc::clone(&registration));
+                let parent_request_id = ctx.parent_request_id;
                 let tls_guard = RequestContextGuard::install(ctx);
                 LspAuditSession::Active(ActiveLspSession {
                     request_id,
                     method,
                     canonical_id: canonical_id.to_string(),
+                    parent_request_id,
                     registration,
                     tls_guard: Some(tls_guard),
                 })

@@ -742,6 +742,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
             files,
             waits: None,
             kind_payload: RequestKindPayload::Workspace(payload),
+            capture_state: verter_audit::AuditCaptureState::ActiveStored,
             trace_id: String::new(),
         }
     }

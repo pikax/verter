@@ -22,9 +22,11 @@
 
 use std::sync::Arc;
 
-use verter_audit::{RequestKind, RequestKindPayload};
+use std::convert::Infallible;
+
+use verter_audit::{AuditCaptureState, RequestKind, RequestKindPayload};
 use verter_compiler::compile::CompileTarget;
-use verter_session::host_mcp_audit::McpToolOutcome;
+use verter_session::host_mcp_audit::McpToolSuccess;
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
@@ -62,24 +64,31 @@ fn audit_mcp_tool_call_publishes_record_with_mcp_kind_and_payload() {
     let args_json = "{\"path\":\"/m.vue\"}";
     let args_size = args_json.len() as u32;
 
-    let (compiled_bytes, record) =
-        host.audit_mcp_tool_call("compile_file", "/m.vue", args_size, |h| {
+    let (outcome, record) = host
+        .audit_mcp_tool_call::<u32, Infallible, _>("compile_file", "/m.vue", args_size, |h| {
             // Tool body: drive a real audited sub-request. The
             // RequestContextGuard installed by audit_mcp_tool_call is on
             // TLS during this closure, so the sub-request inherits the
             // MCP request as its parent.
-            let (result, _sub_record) = h.compile_with_audit("/m.vue", CompileTarget::IDE);
+            let result = match h
+                .compile_with_audit("/m.vue", CompileTarget::IDE)
+                .into_result()
+            {
+                Ok(r) => r,
+                Err(e) => match e {},
+            };
             let bytes = result
                 .tsx
                 .as_ref()
                 .map(|t| t.code.len() as u32)
                 .unwrap_or(0);
-            McpToolOutcome {
+            Ok(McpToolSuccess {
                 value: bytes,
                 result_size_bytes: bytes,
-                error: None,
-            }
-        });
+            })
+        })
+        .into_parts();
+    let compiled_bytes = outcome.expect("infallible tool body");
 
     // 1. Closure value plumbed through unchanged.
     assert!(
@@ -89,7 +98,6 @@ fn audit_mcp_tool_call_publishes_record_with_mcp_kind_and_payload() {
     );
 
     // 2. Record envelope is the MCP kind.
-    let record = record.expect("audit_enabled=true ⇒ MCP record must be published");
     match &record.kind {
         RequestKind::Mcp { tool } => {
             assert_eq!(
@@ -139,14 +147,16 @@ fn audit_mcp_tool_call_disabled_audit_returns_none_record_but_still_runs_closure
     let host = build_host(false);
 
     let mut closure_ran = false;
-    let (value, record) = host.audit_mcp_tool_call("get_component_api", "/m.vue", 0, |_h| {
-        closure_ran = true;
-        McpToolOutcome {
-            value: 42_u32,
-            result_size_bytes: 0,
-            error: None,
-        }
-    });
+    let (outcome, record) = host
+        .audit_mcp_tool_call::<u32, Infallible, _>("get_component_api", "/m.vue", 0, |_h| {
+            closure_ran = true;
+            Ok(McpToolSuccess {
+                value: 42_u32,
+                result_size_bytes: 0,
+            })
+        })
+        .into_parts();
+    let value = outcome.expect("infallible tool body");
 
     assert!(
         closure_ran,
@@ -156,10 +166,11 @@ fn audit_mcp_tool_call_disabled_audit_returns_none_record_but_still_runs_closure
         value, 42,
         "closure value must round-trip even with audit off"
     );
-    assert!(
-        record.is_none(),
-        "audit_enabled=false ⇒ no audit record produced — discriminates \
-         against a regression that always builds a record"
+    assert_eq!(
+        record.capture_state,
+        AuditCaptureState::AuditDisabled,
+        "audit_enabled=false ⇒ the carrier still returns a record, marked AuditDisabled — \
+         discriminates against a regression that mislabels the disabled path"
     );
 }
 
@@ -175,19 +186,18 @@ fn audit_mcp_tool_call_subrequest_records_mcp_request_as_parent_request_id() {
     let host = build_host(true);
 
     let mut sub_request_id: Option<u64> = None;
-    let (_, mcp_record) = host.audit_mcp_tool_call("get_component_meta", "/m.vue", 0, |h| {
-        let (_analysis, resolution) = h
-            .get_component_meta_with_resolution("/m.vue")
-            .expect("component-meta resolution must succeed for the fixture SFC");
-        sub_request_id = Some(resolution.request_id);
-        McpToolOutcome {
-            value: resolution.request_id,
-            result_size_bytes: 0,
-            error: None,
-        }
-    });
-
-    let mcp_record = mcp_record.expect("MCP record must be published");
+    let (_, mcp_record) = host
+        .audit_mcp_tool_call::<u64, Infallible, _>("get_component_meta", "/m.vue", 0, |h| {
+            let (_analysis, resolution) = h
+                .get_component_meta_with_resolution("/m.vue")
+                .expect("component-meta resolution must succeed for the fixture SFC");
+            sub_request_id = Some(resolution.request_id);
+            Ok(McpToolSuccess {
+                value: resolution.request_id,
+                result_size_bytes: 0,
+            })
+        })
+        .into_parts();
     let sub_request_id = sub_request_id.expect("component-meta resolution must stamp request_id");
     let sub_record = host
         .take_audit_record(sub_request_id)
@@ -219,22 +229,28 @@ fn audit_mcp_tool_call_subrequest_records_mcp_request_as_parent_request_id() {
 fn audit_mcp_tool_call_propagates_error_into_payload() {
     let host = build_host(true);
 
-    let (value, record) =
-        host.audit_mcp_tool_call("compile_file", "/m.vue", 0, |_h| McpToolOutcome {
-            value: 0_u32,
-            result_size_bytes: 0,
-            error: Some("simulated tool failure".to_string()),
-        });
+    let (outcome, record) = host
+        .audit_mcp_tool_call::<u32, String, _>("compile_file", "/m.vue", 0, |_h| {
+            Err("simulated tool failure".to_string())
+        })
+        .into_parts();
 
-    assert_eq!(value, 0);
-    let record = record.expect("audit_enabled=true ⇒ record published");
+    // The closure's `Err(E)` rides the carrier's `Err` arm — no
+    // nested Result inside `Ok`.
+    assert_eq!(
+        outcome.unwrap_err(),
+        "simulated tool failure",
+        "the typed error must round-trip through the carrier's Err arm"
+    );
     let payload = match &record.kind_payload {
         RequestKindPayload::Mcp(p) => p,
         other => panic!("expected Mcp payload, got {other:?}"),
     };
+    // The wrapper folds the error into the payload via its `Debug`
+    // rendering; a `String` Debug-renders quoted.
     assert_eq!(
         payload.error.as_deref(),
-        Some("simulated tool failure"),
+        Some("\"simulated tool failure\""),
         "error message must round-trip into the McpToolPayload — \
          discriminates a regression that drops or rewrites the message"
     );

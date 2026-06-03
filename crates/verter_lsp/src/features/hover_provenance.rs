@@ -352,6 +352,7 @@ mod tests {
             from_cache: false,
             kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
             trace_id: String::new(),
+            capture_state: verter_audit::AuditCaptureState::ActiveStored,
         };
 
         // Missing footprint → the renderer surfaces a clear hint

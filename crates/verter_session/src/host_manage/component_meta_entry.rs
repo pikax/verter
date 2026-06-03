@@ -1092,6 +1092,7 @@ impl VerterHost {
                     crate::component_meta_audit::ComponentMetaPayload::default(),
                 ),
                 trace_id,
+                capture_state: verter_audit::AuditCaptureState::ActiveStored,
             };
             debug_assert_eq!(synthesized.request_id, resolution.request_id);
             self.finalize_request_audit_record(synthesized);

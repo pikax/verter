@@ -51,8 +51,12 @@ fn type_resolution_audit_diamond_intra_request_interning() {
         },
         name: Arc::from("AB"),
     });
-    let (ab_node, _) = host.resolve_type_with_audit(resolve_ab, "/diamond.ts");
-    let ab_node = ab_node.expect("AB must resolve");
+    let (ab_node, _) = host
+        .resolve_type_with_audit(resolve_ab, "/diamond.ts")
+        .into_parts();
+    let ab_node = ab_node
+        .expect("AB must resolve")
+        .expect("resolved node must be present");
 
     // First visit: AB.a.left — walks through A and lands on Shared.
     let path_a = SemanticQueryKey::ProjectPath {
@@ -68,9 +72,13 @@ fn type_resolution_audit_diamond_intra_request_interning() {
             ProjectionMode::Expanded,
         ),
     };
-    let (left_node, record_a) = host.resolve_type_with_audit(path_a, "/diamond.ts");
-    let left_node = left_node.expect("AB.a.left must resolve to Shared");
-    let record_a = record_a.expect("active TypeResolution request must produce a record");
+    let (left_node, record_a) = host
+        .resolve_type_with_audit(path_a, "/diamond.ts")
+        .into_parts();
+    let left_node = left_node
+        .expect("AB.a.left must resolve to Shared")
+        .expect("resolved node must be present");
+    // record is always present now (carrier `audit` mandatory).
     let payload_a = record_a
         .type_resolution_payload()
         .expect("kind must be TypeResolution");
@@ -92,9 +100,13 @@ fn type_resolution_audit_diamond_intra_request_interning() {
             ProjectionMode::Expanded,
         ),
     };
-    let (right_node, record_b) = host.resolve_type_with_audit(path_b, "/diamond.ts");
-    let right_node = right_node.expect("AB.b.right must resolve to Shared");
-    let record_b = record_b.expect("active TypeResolution request must produce a record");
+    let (right_node, record_b) = host
+        .resolve_type_with_audit(path_b, "/diamond.ts")
+        .into_parts();
+    let right_node = right_node
+        .expect("AB.b.right must resolve to Shared")
+        .expect("resolved node must be present");
+    // record is always present now (carrier `audit` mandatory).
     let payload_b = record_b
         .type_resolution_payload()
         .expect("kind must be TypeResolution");
@@ -159,14 +171,18 @@ fn type_resolution_audit_diamond_intra_request_interning() {
             ProjectionMode::Expanded,
         ),
     };
-    let (third_node, third_record) = host.resolve_type_with_audit(third, "/diamond.ts");
-    let third_node = third_node.expect("third visit must resolve");
+    let (third_node, third_record) = host
+        .resolve_type_with_audit(third, "/diamond.ts")
+        .into_parts();
+    let third_node = third_node
+        .expect("third visit must resolve")
+        .expect("resolved node must be present");
     assert_eq!(
         third_node, left_node,
         "the third visit must return the same node id as the first \
          (memoised result of the cooperative dispatch)"
     );
-    let third_record = third_record.expect("active TypeResolution request must produce a record");
+    // record is always present now (carrier `audit` mandatory).
     let non_cache_files: Vec<&str> = third_record
         .files
         .iter()

@@ -72,6 +72,7 @@ fn publish_component_meta_record(host: &Arc<VerterHost>, canonical: &str) -> u64
         waits: None,
         kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
         trace_id: String::new(),
+        capture_state: verter_audit::AuditCaptureState::ActiveStored,
     };
     host.host_audit_runtime()
         .audit_records_store()

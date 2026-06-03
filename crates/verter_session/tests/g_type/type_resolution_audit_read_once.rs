@@ -70,9 +70,13 @@ fn type_resolution_audit_repeated_query_uses_warm_cache() {
     });
 
     // First (cold) request — populates the shared memo.
-    let (first_node, first_record) = host.resolve_type_with_audit(key.clone(), "/types.ts");
-    let first_node = first_node.expect("cold resolution must succeed");
-    let first_record = first_record.expect("active request must produce a record");
+    let (first_node, first_record) = host
+        .resolve_type_with_audit(key.clone(), "/types.ts")
+        .into_parts();
+    let first_node = first_node
+        .expect("cold resolution must succeed")
+        .expect("resolved node must be present");
+    // record is always present now (carrier `audit` mandatory).
     let first_payload = first_record
         .type_resolution_payload()
         .expect("kind must be TypeResolution");
@@ -80,9 +84,11 @@ fn type_resolution_audit_repeated_query_uses_warm_cache() {
 
     // Second (warm) request — the shared memo must satisfy this
     // without re-walking the body.
-    let (second_node, second_record) = host.resolve_type_with_audit(key, "/types.ts");
-    let second_node = second_node.expect("warm resolution must succeed");
-    let second_record = second_record.expect("active request must produce a record");
+    let (second_node, second_record) = host.resolve_type_with_audit(key, "/types.ts").into_parts();
+    let second_node = second_node
+        .expect("warm resolution must succeed")
+        .expect("resolved node must be present");
+    // record is always present now (carrier `audit` mandatory).
     let second_payload = second_record
         .type_resolution_payload()
         .expect("kind must be TypeResolution");

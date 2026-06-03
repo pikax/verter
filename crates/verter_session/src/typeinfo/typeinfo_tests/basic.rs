@@ -63,31 +63,33 @@ fn component_like_surface_resolves_through_structured_alias_imports() {
     upsert_ts(&host, "/fixtures/component-types.ts", COMPONENT_TYPES);
     upsert_ts(&host, "/fixtures/scope.ts", SCOPE_TYPES);
 
-    let (node, record) = host.evaluate_type_expression_with_audit(EvaluateTypeExpressionRequest {
-        scope: "/fixtures/scope.ts".to_string(),
-        expression: "Surface<string, Item>".to_string(),
-        extra_imports: vec![ImportSpec {
-            specifier: "/fixtures/component-types".to_string(),
-            bindings: vec![
-                NamedImport::Named {
-                    exported_name: "ComponentSurface".to_string(),
-                    local_alias: Some("Surface".to_string()),
-                    type_only: true,
-                },
-                NamedImport::Named {
-                    exported_name: "ConcreteItem".to_string(),
-                    local_alias: Some("Item".to_string()),
-                    type_only: true,
-                },
-            ],
-        }],
-        mode: ProjectionMode::Expanded,
-        cacheable: false,
-    });
+    let (outcome, record) = host
+        .evaluate_type_expression_with_audit(EvaluateTypeExpressionRequest {
+            scope: "/fixtures/scope.ts".to_string(),
+            expression: "Surface<string, Item>".to_string(),
+            extra_imports: vec![ImportSpec {
+                specifier: "/fixtures/component-types".to_string(),
+                bindings: vec![
+                    NamedImport::Named {
+                        exported_name: "ComponentSurface".to_string(),
+                        local_alias: Some("Surface".to_string()),
+                        type_only: true,
+                    },
+                    NamedImport::Named {
+                        exported_name: "ConcreteItem".to_string(),
+                        local_alias: Some("Item".to_string()),
+                        type_only: true,
+                    },
+                ],
+            }],
+            mode: ProjectionMode::Expanded,
+            cacheable: false,
+        })
+        .into_parts();
+    let node = outcome.ok().flatten();
     let expr = host
         .project_node_to_type_expr(node.expect("Surface<string, Item> must resolve"))
         .expect("resolved node projects to TypeExpr");
-    let record = record.expect("typeinfo request emits audit");
 
     let props = object_props(&expr);
     assert_eq!(

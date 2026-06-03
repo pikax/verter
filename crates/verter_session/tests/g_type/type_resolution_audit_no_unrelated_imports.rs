@@ -64,12 +64,10 @@ fn type_resolution_audit_does_not_visit_unreferenced_imports() {
         name: Arc::from("UseB"),
     });
 
-    let (resolved, record) = host.resolve_type_with_audit(key, "/a.ts");
+    let (resolved, record) = host.resolve_type_with_audit(key, "/a.ts").into_parts();
     let _resolved = resolved.expect("resolver must produce a value for UseB");
 
-    let record = record.expect(
-        "audit_enabled host must produce a Some(record) for an active TypeResolution request",
-    );
+    // record is always present now (carrier `audit` field is mandatory).
     assert_eq!(record.kind, RequestKind::TypeResolution);
     assert_eq!(record.canonical_id, "/a.ts");
 
@@ -122,12 +120,12 @@ fn type_resolution_audit_does_not_visit_unreferenced_imports() {
         },
         name: Arc::from("C"),
     });
-    let (resolved_c, record_c) = host.resolve_type_with_audit(key_c, "/c.ts");
+    let (resolved_c, record_c) = host.resolve_type_with_audit(key_c, "/c.ts").into_parts();
     assert!(
-        resolved_c.is_some(),
+        matches!(resolved_c, Ok(Some(_))),
         "C must resolve when explicitly requested through its own scope"
     );
-    let record_c = record_c.expect("active request must produce a record");
+    // record is always present now (carrier `audit` mandatory).
     let payload_c = record_c
         .type_resolution_payload()
         .expect("kind must be TypeResolution");

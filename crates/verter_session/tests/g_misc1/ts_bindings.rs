@@ -193,7 +193,34 @@ fn regenerate_audit_bindings_into_tempdir() -> String {
     )
     .expect("regenerate AuditedResult graph");
     let path = tempdir.path().join("audit.generated.ts");
-    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read regenerated `{path:?}`: {e}"))
+    let raw =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("read regenerated `{path:?}`: {e}"));
+    // ts-rs 12 emits a trailing space after the last field separator on
+    // every struct-field line (e.g. `capture_state: AuditCaptureState, `).
+    // Strip per-line trailing whitespace so the committed bindings stay
+    // clean for `git diff --check` (which fails on trailing whitespace).
+    // Applied to BOTH the refresh-write and the read-only comparison
+    // path so the committed file byte-equals this stripped form.
+    strip_trailing_whitespace(&raw)
+}
+
+/// Strip trailing whitespace from every line, preserving the final
+/// newline. Keeps the ts-rs output `git diff --check`-clean without
+/// reflowing any content.
+fn strip_trailing_whitespace(s: &str) -> String {
+    let had_trailing_newline = s.ends_with('\n');
+    let mut out = String::with_capacity(s.len());
+    let mut lines = s.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        out.push_str(line.trim_end());
+        if lines.peek().is_some() {
+            out.push('\n');
+        }
+    }
+    if had_trailing_newline && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 #[test]
@@ -265,6 +292,7 @@ fn audit_record_u64_fields_serialize_as_json_strings_not_numbers() {
             solve_count: 3,
             ..Default::default()
         }),
+        capture_state: verter_audit::AuditCaptureState::ActiveStored,
         trace_id: String::new(),
     };
 
@@ -400,6 +428,7 @@ fn rust_memory_audit_process_rss_delta_bytes_serializes_as_json_string() {
             waits: None,
             kind_payload: RequestKindPayload::ComponentMeta(ComponentMetaPayload::default()),
             trace_id: String::new(),
+            capture_state: verter_audit::AuditCaptureState::ActiveStored,
         };
         let value = serde_json::to_value(&record).expect("serialize");
         assert!(
@@ -640,6 +669,7 @@ fn json_emission_round_trips_structurally_equivalent_to_rust() {
             solve_count: 7,
             ..Default::default()
         }),
+        capture_state: verter_audit::AuditCaptureState::ActiveStored,
         trace_id: String::new(),
     };
 

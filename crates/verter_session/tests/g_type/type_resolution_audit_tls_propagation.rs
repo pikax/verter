@@ -78,16 +78,16 @@ fn resolve_type_with_audit_propagates_observer_through_dispatch() {
         // those increments flow through `current_observer()` and
         // surface as `TypeResolutionPayload::hops`. Non-zero ⇒ the
         // observer was reachable on the dispatch path.
-        let (resolved, record) = host.resolve_type_with_audit(outer_query(), "/types.ts");
+        let (resolved, record) = host
+            .resolve_type_with_audit(outer_query(), "/types.ts")
+            .into_parts();
         assert!(
-            resolved.is_some(),
+            matches!(resolved, Ok(Some(_))),
             "cold resolution of `Outer` must succeed under audit"
         );
-        if let Some(rec) = record {
-            record_kind = Some(rec.kind.clone());
-            if let Some(payload) = rec.type_resolution_payload() {
-                hops = payload.hops;
-            }
+        record_kind = Some(record.kind.clone());
+        if let Some(payload) = record.type_resolution_payload() {
+            hops = payload.hops;
         }
     });
 
@@ -135,7 +135,9 @@ fn resolve_type_with_audit_observer_absent_outside_harness_window() {
         // the duration of the dispatch, but the guard drops on
         // return — so when the harness's calling-thread probe runs
         // AFTER this closure returns, no observer must be visible.
-        let (_resolved, _record) = host.resolve_type_with_audit(outer_query(), "/types.ts");
+        let (_resolved, _record) = host
+            .resolve_type_with_audit(outer_query(), "/types.ts")
+            .into_parts();
     });
 
     assert!(

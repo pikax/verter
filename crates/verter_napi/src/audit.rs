@@ -42,8 +42,27 @@ use napi::bindgen_prelude::*;
 use napi::{Error, Status};
 use napi_derive::napi;
 
-use verter_audit::{payloads::tags::BundlerKindTag, RequestAuditRecord, RequestKind, WorkspaceOp};
+use verter_audit::{
+    payloads::tags::BundlerKindTag, AuditCaptureState, RequestAuditRecord, RequestKind, WorkspaceOp,
+};
 use verter_compiler::compile::CompileTarget;
+
+/// Encode a record only when it represents real stored capture
+/// ([`AuditCaptureState::ActiveStored`]); a filtered or disabled record
+/// projects to `None`.
+///
+/// The host always hands back a record now (the
+/// [`verter_audit::AuditedResult`] carrier's `audit` field is
+/// mandatory), but these audit-query NAPI surfaces preserve their
+/// historical "returns null when audit is disabled / the kind is
+/// filtered" contract by projecting the capture state into DTO
+/// optionality.
+pub(crate) fn encode_stored_record(record: &RequestAuditRecord) -> Result<Option<Buffer>> {
+    match record.capture_state {
+        AuditCaptureState::ActiveStored => encode_record(record).map(Some),
+        AuditCaptureState::FilteredNoop | AuditCaptureState::AuditDisabled => Ok(None),
+    }
+}
 
 /// Encode a `RequestAuditRecord` to a `Buffer` (JSON UTF-8).
 pub(crate) fn encode_record(record: &RequestAuditRecord) -> Result<Buffer> {

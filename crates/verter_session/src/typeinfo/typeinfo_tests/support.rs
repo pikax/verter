@@ -136,12 +136,14 @@ pub(super) fn resolve_expr(
     type_args: &[Arc<TypeExpr>],
     mode: ProjectionMode,
 ) -> (TypeExpr, verter_audit::RequestAuditRecord) {
-    let (node, record) =
-        host.resolve_named_symbol_with_audit(canonical_id, name, type_args, Some(mode));
+    let (outcome, record) = host
+        .resolve_named_symbol_with_audit(canonical_id, name, type_args, Some(mode))
+        .into_parts();
+    let node = outcome.ok().flatten();
     let expr = host
         .project_node_to_type_expr(node.unwrap_or_else(|| panic!("{name} must resolve")))
         .unwrap_or_else(|| panic!("{name} resolved node must project to TypeExpr"));
-    (expr, record.expect("typeinfo request emits audit"))
+    (expr, record)
 }
 
 /// Resolve `name` to its carrier node (in `Navigate`, so heritage /
@@ -203,17 +205,20 @@ pub(super) fn evaluate_expr(
     expression: &str,
     mode: ProjectionMode,
 ) -> (TypeExpr, verter_audit::RequestAuditRecord) {
-    let (node, record) = host.evaluate_type_expression_with_audit(EvaluateTypeExpressionRequest {
-        scope: scope.to_string(),
-        expression: expression.to_string(),
-        extra_imports: Vec::new(),
-        mode,
-        cacheable: false,
-    });
+    let (outcome, record) = host
+        .evaluate_type_expression_with_audit(EvaluateTypeExpressionRequest {
+            scope: scope.to_string(),
+            expression: expression.to_string(),
+            extra_imports: Vec::new(),
+            mode,
+            cacheable: false,
+        })
+        .into_parts();
+    let node = outcome.ok().flatten();
     let expr = host
         .project_node_to_type_expr(node.unwrap_or_else(|| panic!("{expression} must resolve")))
         .unwrap_or_else(|| panic!("{expression} resolved node must project to TypeExpr"));
-    (expr, record.expect("typeinfo request emits audit"))
+    (expr, record)
 }
 
 pub(super) fn assert_query_mode(

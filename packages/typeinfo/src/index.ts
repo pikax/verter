@@ -15,6 +15,7 @@
  */
 
 export { TypeInfoSession } from "./session.js";
+export { decodeResolveResult, TypeResolutionFaultError } from "./decode.js";
 
 export type {
   AuditRecord,
