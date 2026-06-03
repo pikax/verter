@@ -397,14 +397,13 @@ pub fn plan_user_expr<'a>(
                 suffix: resolved[idx + trimmed.len()..].to_string(),
             });
         } else {
-            // Resolver rewrote the expression entirely (e.g. `$props["class"]`):
-            // the core text is not a verbatim slice. Emit a synthesized core with
-            // no extra prefix/suffix so the whole resolved form is one mapped run.
-            pieces.push(ExprPiece::SynthesizedCore {
-                core: resolved,
-                core_source_start: SourceByteOffset(start),
-                prefix: String::new(),
-                suffix: String::new(),
+            // No recoverable core: the resolver rewrote the expression so the trimmed
+            // source token is not a verbatim slice of `resolved`. The value is NOT
+            // precisely mappable, so emit the whole synthetic text UNMAPPED rather
+            // than mapping synthetic resolver output to the user token (prove-or-drop:
+            // a None mapping is acceptable, a mismap is not).
+            pieces.push(ExprPiece::Synthetic {
+                text: EmitText::Owned(resolved),
             });
         }
         return ExprPlan { pieces };
@@ -834,8 +833,10 @@ fn parse_static_event_key(raw_key: &str) -> Option<&str> {
 /// TRANSFORM of the source token. `resolved` is the resolver output for `core`; the
 /// `core` identifier within it maps to `core_source_start` (the arg/key source
 /// token). The surrounding accessor prefix/suffix is unmapped. When `core` is not a
-/// substring of `resolved` (the resolver rewrote it entirely), the whole `resolved`
-/// is emitted as one mapped run pointing at the source token.
+/// substring of `resolved` (the resolver rewrote it entirely, or `core` is empty),
+/// the value is not precisely mappable, so the whole `resolved` is emitted UNMAPPED
+/// (prove-or-drop: a None mapping is acceptable; mapping synthetic text to the user
+/// token is not).
 pub fn emit_synthesized_shorthand_value<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
     at: SourceByteOffset,
@@ -850,13 +851,14 @@ pub fn emit_synthesized_shorthand_value<'alloc>(
             prefix: resolved[..idx].to_string(),
             suffix: resolved[idx + core.len()..].to_string(),
         },
-        // Resolver rewrote the expression entirely (or empty core): the whole
-        // resolved text maps to the source token as one run.
-        _ => ExprPiece::SynthesizedCore {
-            core: resolved.to_string(),
-            core_source_start,
-            prefix: String::new(),
-            suffix: String::new(),
+        // No recoverable core (resolver rewrote the expression so the core token is
+        // absent, or the core is empty): the value is NOT precisely mappable. Per the
+        // prove-or-drop principle a None mapping (feature drop) is acceptable, a mismap
+        // is not — so emit the whole synthetic text UNMAPPED rather than mapping the
+        // synthetic resolver output to the user token (which would violate
+        // "synthetic text maps to None").
+        _ => ExprPiece::Synthetic {
+            text: EmitText::Owned(resolved.to_string()),
         },
     };
     let plan = ExprPlan {

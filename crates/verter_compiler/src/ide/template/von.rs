@@ -9,11 +9,13 @@
 //!
 //! Every navigable user expression (handler value, dynamic event-name expression,
 //! object-property values) is planned through the unified `plan_user_expr` /
-//! `plan_object_literal` planner and emitted through the relocated sink, so each
-//! identifier maps 1:1 back to its source span; the event-key transformation,
-//! object braces, computed-key template literals, and handler-wrapper scaffolding
-//! are unmapped synthetic text. Extracted from `props.rs` to keep both files within
-//! the production line-count budget.
+//! `plan_object_literal` planner — relocated values via the relocated sink, in-place
+//! handler values via the in-place sink — so each identifier maps 1:1 back to its
+//! source span. The JSX event NAME (`onClick`, `onMy-event`) is a navigable semantic
+//! anchor MAPPED to the source event token. Object braces, computed-key template
+//! literals, the `($event) =>` / `eventCallbacks` handler-wrapper scaffolding, and
+//! the v-if narrowing guard are unmapped synthetic text. Extracted from `props.rs`
+//! to keep both files within the production line-count budget.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Expression;
@@ -350,56 +352,64 @@ pub(super) fn process_v_on<'alloc>(
         let trimmed_vs = vs + leading_ws as u32;
         let trimmed_ve = ve - trailing_ws as u32;
 
-        // Every in-place branch shares the SAME emission shape: overwrite the two
-        // synthetic boundaries (the JSX `onEvent={`-style prefix and the closing
-        // suffix) with UNMAPPED literal text, and keep the handler value PRESERVED
-        // IN PLACE — planned + emitted through the unified in-place sink so each
-        // identifier stays an `Original` (1:1-mapped) chunk while accessor
-        // prefixes/suffixes are applied as in-place prepends. The `expr_unchanged`
-        // fast path is subsumed: with no rewrite the plan's prefixes are empty, so
-        // the in-place sink is a pure no-op over the preserved bytes. The branches
-        // differ ONLY in the boundary prefix/suffix scaffolding text.
+        // Every in-place branch shares the SAME emission shape: the JSX boundary is
+        // decomposed through the typed `EmitOp` substrate (NOT one flat mapped
+        // overwrite). The event NAME is a navigable semantic anchor (mapped to the
+        // source event token), the synthetic wrapper scaffolding is UNMAPPED, the
+        // optional v-if narrowing guard is UNMAPPED synthetic text injected at the
+        // body start, and the handler value is PRESERVED IN PLACE — planned + emitted
+        // through the unified in-place sink so each identifier stays an `Original`
+        // (1:1-mapped) chunk while accessor prefixes/suffixes are applied as in-place
+        // prepends. The `expr_unchanged` fast path is subsumed: with no rewrite the
+        // plan's prefixes are empty, so the in-place sink is a pure no-op over the
+        // preserved bytes. The branches differ ONLY in the scaffolding text and
+        // whether a narrowing guard applies.
+        //
+        // `scaffold_after_event` is the synthetic text emitted AFTER the mapped event
+        // name and BEFORE the (optional) guard + body: `={`, `={() => {`, or the
+        // `eventCallbacks` wrapper. `guard_text` (when present) is the narrowing guard
+        // injected at the body start — a COMPOSED, span-erased compiler-synthesized
+        // scaffold (see `emit_in_place_handler` docs) → UNMAPPED. Guards apply only to
+        // the two wrapping branches ($event / inline expression); a function/object/
+        // simple-ident handler is already a valid handler value and takes no guard.
         let _ = expr_unchanged;
-        let (boundary_prefix, boundary_suffix): (String, &str) = if is_fn_expr || is_object_expr {
-            // Explicit function/object expressions are already valid handlers.
-            (format!("{}={{", jsx_event_name), "}")
-        } else if has_event_param {
-            // $event can only exist inside a callback parameter scope. Wrap with
-            // eventCallbacks for proper type inference.
-            let guard_prefix = v_if_guard
-                .map(|guard| format!("if (!({})) {{ return undefined; }} ", guard))
-                .unwrap_or_default();
-            (
-                format!(
-                    "{}={{(...___VERTER___eventArgs) => ___VERTER___eventCallbacks(___VERTER___eventArgs, ($event) => {{{}",
-                    jsx_event_name, guard_prefix
-                ),
-                "})}",
-            )
-        } else if is_simple_ident || is_member_expr {
-            // Simple handler: @click="handler" → onClick={handler}
-            (format!("{}={{", jsx_event_name), "}")
-        } else {
-            // Inline expression: @click="count++" → onClick={() => count++}
-            let guard_prefix = v_if_guard
-                .map(|guard| format!("if (!({})) {{ return undefined; }} ", guard))
-                .unwrap_or_default();
-            (
-                format!("{}={{() => {{{}", jsx_event_name, guard_prefix),
-                "}}",
-            )
-        };
+        let (scaffold_after_event, boundary_suffix, guard_text): (String, &str, Option<String>) =
+            if is_fn_expr || is_object_expr {
+                // Explicit function/object expressions are already valid handlers.
+                ("={".to_string(), "}", None)
+            } else if has_event_param {
+                // $event can only exist inside a callback parameter scope. Wrap with
+                // eventCallbacks for proper type inference.
+                (
+                    "={(...___VERTER___eventArgs) => ___VERTER___eventCallbacks(___VERTER___eventArgs, ($event) => {".to_string(),
+                    "})}",
+                    v_if_guard.map(|guard| format!("if (!({})) {{ return undefined; }} ", guard)),
+                )
+            } else if is_simple_ident || is_member_expr {
+                // Simple handler: @click="handler" → onClick={handler}
+                ("={".to_string(), "}", None)
+            } else {
+                // Inline expression: @click="count++" → onClick={() => count++}
+                (
+                    "={() => {".to_string(),
+                    "}}",
+                    v_if_guard.map(|guard| format!("if (!({})) {{ return undefined; }} ", guard)),
+                )
+            };
 
         emit_in_place_handler(
             out,
             resolver,
             source,
             prop.start,
+            arg_start,
+            &jsx_event_name,
+            &scaffold_after_event,
             trimmed_vs,
             trimmed_ve,
             prop_end,
-            &boundary_prefix,
             boundary_suffix,
+            guard_text.as_deref(),
             oxc_prop,
         );
     } else {
@@ -409,35 +419,79 @@ pub(super) fn process_v_on<'alloc>(
     }
 }
 
-/// Emit an in-place `v-on` handler: overwrite the two JSX boundaries (the
-/// `onEvent={`-style prefix and the closing suffix) and keep the handler VALUE
-/// PRESERVED IN PLACE through the unified in-place sink (each surviving identifier
-/// stays an `Original`, 1:1-mapped chunk; accessor prefixes/suffixes applied as
-/// in-place prepends).
+/// Emit an in-place `v-on` handler. The JSX boundary is DECOMPOSED through the typed
+/// `EmitOp` substrate — never one flat mapped `out.overwrite` carrying both synthetic
+/// scaffolding and the navigable event name:
 ///
-/// The boundaries are plain `out.overwrite` (mapped) — NOT unmapped
-/// `OverwriteSyntheticBoundary`. The JSX event NAME (`onCustom`) in the prefix is a
-/// NAVIGABLE semantic anchor: hover / go-to-definition on a component's `@custom`
-/// must map the source event name into the generated `onCustom` so the type
-/// provider resolves the event payload (and the LSP rewrites `onCustom` back to
-/// `@custom`). Mapping the boundary to the prop start preserves that navigation.
-/// This is NOT the desync class — the boundary text is synthetic event-name
-/// scaffolding, not a baked user EXPRESSION; the handler value (the navigable user
-/// expression) is the planned in-place emission below.
+/// - The leading `@` / `v-on:` prefix `[prop_start, arg_start)` is deleted (unmapped).
+/// - The JSX event NAME (`onClick`, `onMy-event`) is emitted MAPPED to the source
+///   event token (`arg_start`). It is a NAVIGABLE semantic anchor: hover /
+///   go-to-definition on a component's `@custom` resolves the child's `onCustom`
+///   payload (and the LSP rewrites `onCustom` back to `@custom`). This matches the
+///   v-on spread branch, which maps the event-name key via `InsertMapped@arg_start`.
+/// - `scaffold_after_event` (`={`, `={() => {`, the `eventCallbacks` wrapper) is
+///   synthetic JSX scaffolding → UNMAPPED.
+/// - The optional `guard_text` is a v-if narrowing guard injected at the body start.
+///   It is a COMPOSED, span-erased compiler-synthesized scaffold (own positive
+///   condition + sibling negations from OTHER elements + ancestor scopes, already
+///   flattened to a string and joined with synthetic `!(…) && (…)`), so it has no
+///   single source span → emitted UNMAPPED (None), exactly like the sibling
+///   `process_v_bind` guarded-value path's `out.prepend_alloc(injection.offset, …)`.
+/// - The handler VALUE is PRESERVED IN PLACE through the unified in-place sink (each
+///   surviving identifier stays an `Original`, 1:1-mapped chunk; accessor
+///   prefixes/suffixes applied as in-place prepends).
+/// - The closing `boundary_suffix` is synthetic → UNMAPPED.
+///
+/// The guard is emitted BEFORE the in-place value plan so that at a shared anchor (an
+/// inline handler whose first body identifier sits exactly at `trimmed_vs`) the
+/// stable-sorted same-position prepend order is `<guard><accessor-prefix><identifier>`.
 #[allow(clippy::too_many_arguments)]
 fn emit_in_place_handler<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
     resolver: &BindingResolver<'alloc>,
     source: &'alloc str,
     prop_start: u32,
+    arg_start: u32,
+    jsx_event_name: &str,
+    scaffold_after_event: &str,
     trimmed_vs: u32,
     trimmed_ve: u32,
     prop_end: u32,
-    boundary_prefix: &str,
     boundary_suffix: &str,
+    guard_text: Option<&str>,
     oxc_prop: Option<&OxcParsedProp<'alloc>>,
 ) {
-    out.overwrite(prop_start, trimmed_vs, boundary_prefix);
+    // Delete the leading `@` / `v-on:` prefix (unmapped — `overwrite(.., .., "")`).
+    out.overwrite(prop_start, arg_start, "");
+    let at = SourceByteOffset(arg_start);
+    // The event NAME is the navigable anchor → MAPPED to the source event token.
+    emit_op(
+        out,
+        &EmitOp::InsertMapped {
+            at,
+            text: EmitText::Owned(jsx_event_name.to_string()),
+            source_start: at,
+            content_offset: GeneratedByteLen(0),
+        },
+    );
+    // The synthetic scaffolding after the event name → UNMAPPED.
+    emit_op(
+        out,
+        &EmitOp::InsertUnmapped {
+            at,
+            text: EmitText::Owned(scaffold_after_event.to_string()),
+        },
+    );
+    // The arg-side span between the event token and the value start (`="`, modifiers,
+    // whitespace) is deleted; the synthetic scaffolding already supplied the `={`.
+    out.overwrite(arg_start, trimmed_vs, "");
+    // The v-if narrowing guard (synthetic) → UNMAPPED prepend at the body start,
+    // emitted before the in-place value so the same-position order keeps the guard
+    // ahead of any body identifier / accessor prefix.
+    if let Some(guard) = guard_text {
+        out.prepend_alloc(trimmed_vs, guard);
+    }
+    // The handler value is planned + emitted IN PLACE through the unified planner.
     let bindings = oxc_prop
         .and_then(|p| p.exp.as_ref())
         .and_then(|e| e.bindings.as_ref())
@@ -450,5 +504,6 @@ fn emit_in_place_handler<'alloc>(
         ExprOptions::in_place(),
     );
     emit_expr_plan(out, &plan, Placement::InPlace, source);
+    // Closing synthetic suffix → UNMAPPED.
     out.overwrite(trimmed_ve, prop_end, boundary_suffix);
 }

@@ -1196,7 +1196,7 @@ fn template_v_if_v_slot_skips_iife() {
     );
 }
 
-// ── Part C Step 8: v-bind function prop guards ──────────────────
+// ── v-bind function prop guards ──────────────────
 
 #[test]
 fn v_bind_arrow_expr_gets_ternary_guard() {
@@ -7861,5 +7861,161 @@ fn v_on_object_spread_handler_still_maps_after_unify() {
     assert!(
         has_token_for_src(&tokens, handler_src),
         "v-on object handler `doThis` must still map after unify. Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+/// An inline v-on handler under a v-if narrowing guard. The handler
+/// boundary was baked into a single flat `boundary_prefix` string and emitted via
+/// one mapped `out.overwrite(prop_start, trimmed_vs, boundary_prefix)`, so the
+/// generated `onClick={() => {if (!((ready))) { return undefined; } ` run — the
+/// event NAME plus all the synthetic wrapper/guard scaffolding — mapped back to the
+/// `@click` prop start (a foreign anchor). Post-fix the boundary is decomposed
+/// through the typed `EmitOp` substrate:
+///   - the synthetic JSX wrapper (`onClick={`, `() => {`) and the v-if narrowing
+///     guard (`if (!((ready))) { return undefined; }`) map to None. The guard is a
+///     COMPOSED, span-erased compiler-synthesized narrowing scaffold (own positive +
+///     sibling negations from OTHER elements + ancestor scopes, already flattened to
+///     a string and joined with synthetic `!(…) && (…)`); it has no single source
+///     span, so it is synthetic text → None (consistent with the sibling
+///     `process_v_bind` guarded-value path, whose `?undefined:` also maps to None).
+///   - the event NAME `onClick` maps to the SOURCE event token (`click` arg), NOT
+///     the `@click` prop start.
+///   - the handler BODY `count++` stays in place, mapped to its own source span.
+#[test]
+fn v_if_guarded_inline_handler_guard_maps_to_none() {
+    let source = r#"<template><button @click="count++" v-if="ready">x</button></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("ready", BindingType::SetupConst),
+            ("count", BindingType::SetupConst),
+        ],
+    );
+
+    // Semantics unchanged: the narrowing guard is still emitted.
+    assert!(
+        output.contains("return undefined"),
+        "inline handler under v-if must still get the narrowing guard: {output}"
+    );
+    assert!(
+        output.contains("onClick={() => {"),
+        "inline handler must emit the onClick arrow wrapper: {output}"
+    );
+
+    // Positive: the handler BODY identifier `count` maps to its OWN source span, at
+    // the generated body position (preserved in place, not a foreign anchor).
+    let count_src = source.find("count++").unwrap() as u32;
+    let count_gen = output.find("count++").unwrap();
+    let (cgl, cgc) = gen_offset_to_line_col(&output, count_gen);
+    assert!(
+        tokens
+            .iter()
+            .any(|&(dl, dc, sc)| dl == cgl && dc == cgc && sc == count_src),
+        "guarded inline handler body `count` (gen {cgl}:{cgc}) must map to its own source col \
+         {count_src}. Tokens: {:?}, output: {output}",
+        tokens.iter().map(|t| (t.0, t.1, t.2)).collect::<Vec<_>>()
+    );
+
+    // Positive: the event NAME `onClick` maps to the SOURCE event arg token (`click`),
+    // exactly like the v-on spread branch maps `arg_start`.
+    let event_arg_src = source.find("click").unwrap() as u32; // `click` arg of `@click`
+    let onclick_gen = output.find("onClick={").unwrap();
+    let (ekl, ekc) = gen_offset_to_line_col(&output, onclick_gen);
+    assert!(
+        tokens
+            .iter()
+            .any(|&(dl, dc, sc)| dl == ekl && dc == ekc && sc == event_arg_src),
+        "event name `onClick` (gen {ekl}:{ekc}) must map to the source event token col \
+         {event_arg_src}. Tokens: {tokens:?}, output: {output}"
+    );
+
+    // Negative (the desync): NO generated token may map back to the `@click` prop
+    // start (the desync anchor). Pre-fix the baked `boundary_prefix` overwrite mapped
+    // the whole `onClick={() => {…guard…} ` run to the prop start.
+    let prop_start = source.find("@click").unwrap() as u32;
+    assert!(
+        !tokens.iter().any(|&(_, _, sc)| sc == prop_start),
+        "no generated token may map back to the @click prop start (col {prop_start}) — the \
+         baked-boundary desync. Tokens: {tokens:?}, output: {output}"
+    );
+
+    // Negative: the injected guard text maps to None. The `if (!((ready)))` narrowing
+    // scaffold is compiler-synthesized → unmapped.
+    let guard_gen = output.find("if (!((ready)))").unwrap();
+    let (gl, gc) = gen_offset_to_line_col(&output, guard_gen);
+    assert!(
+        !has_token_at_gen(&tokens, gl, gc),
+        "the injected guard `if (!((ready)))` (gen {gl}:{gc}) must map to None. \
+         Tokens: {tokens:?}, output: {output}"
+    );
+
+    // Negative: the `() => {` arrow wrapper start maps to None.
+    let wrapper_gen = output.find("() => {").unwrap();
+    let (wl, wc) = gen_offset_to_line_col(&output, wrapper_gen);
+    assert!(
+        !has_token_at_gen(&tokens, wl, wc),
+        "the `() => {{` arrow wrapper (gen {wl}:{wc}) must map to None. Tokens: {tokens:?}"
+    );
+}
+
+/// `emit_synthesized_shorthand_value`'s no-core fallback. When the
+/// derived value `core` is NOT a substring of the resolver output `resolved` (the
+/// resolver rewrote the expression so the core token is absent), the value is not
+/// precisely mappable. Pre-fix the fallback mapped the ENTIRE synthetic `resolved`
+/// string to the user source token — violating "synthetic text maps to None". Per
+/// the prove-or-drop principle a feature drop (None mapping) is acceptable, a mismap
+/// is not. Post-fix the no-core fallback emits the synthetic text UNMAPPED.
+#[test]
+fn synthesized_core_not_found_falls_back_unmapped() {
+    use super::emit::emit_synthesized_shorthand_value;
+    use verter_span::SourceByteOffset;
+
+    let alloc = Allocator::new();
+    // The CodeTransform source is a single original char `x` so the inserted synthetic
+    // text is the only thing that could carry a (wrong) mapping.
+    let mut ct = CodeTransform::new("x", &alloc);
+    let mut out = CodeGenOutput::new(&alloc);
+
+    // `resolved` = `$setup.bar` (a resolver rewrite), `core` = `zzz` is NOT a
+    // substring of it → the no-core fallback path. `core_source_start` points at the
+    // user token (offset 0). Pre-fix the WHOLE `$setup.bar` mapped to source col 0.
+    emit_synthesized_shorthand_value(
+        &mut out,
+        SourceByteOffset(0),
+        "$setup.bar",
+        "zzz",
+        SourceByteOffset(0),
+    );
+    out.apply_to(&mut ct);
+
+    let built = ct.build_string();
+    // The synthetic text is still emitted verbatim (semantics preserved).
+    assert!(
+        built.starts_with("$setup.bar"),
+        "the synthetic value text must still be emitted: {built:?}"
+    );
+
+    let map = ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"));
+    let tokens: Vec<(u32, u32, u32)> = map
+        .get_tokens()
+        .filter(|t| t.get_source_id().is_some())
+        .map(|t| (t.get_dst_line(), t.get_dst_col(), t.get_src_col()))
+        .collect();
+
+    // The inserted synthetic `$setup.bar` starts at generated (0, 0). It must map to
+    // None — no token may anchor the synthetic insert to the user source token.
+    assert!(
+        !has_token_at_gen(&tokens, 0, 0),
+        "the no-core synthetic fallback `$setup.bar` (gen 0:0) must map to None, not to the \
+         user source token. Tokens: {tokens:?}, built: {built:?}"
+    );
+    // Discriminating: NO token at all may map back to source col 0 from the synthetic
+    // insert (the pre-fix bug mapped the whole run to src col 0).
+    assert!(
+        !tokens
+            .iter()
+            .any(|&(dl, dc, sc)| dl == 0 && dc == 0 && sc == 0),
+        "the no-core fallback must not map the synthetic string to source col 0. \
+         Tokens: {tokens:?}, built: {built:?}"
     );
 }
