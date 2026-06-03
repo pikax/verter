@@ -488,6 +488,16 @@ fn emit_in_place_handler<'alloc>(
     // The v-if narrowing guard (synthetic) → UNMAPPED prepend at the body start,
     // emitted before the in-place value so the same-position order keeps the guard
     // ahead of any body identifier / accessor prefix.
+    //
+    // Guard-injection offset is per-wrapper-shape but the mapping discipline is
+    // shared: this handler path injects at `trimmed_vs` (the guard scaffolds a
+    // statement-body `{ if (!(…)) return undefined; … }`, so it lands at the body
+    // start), while the sibling v-bind function-value path
+    // (`process_v_bind` → `compute_function_guard_injection`) computes a
+    // wrapper-shape-specific offset (arrow-expression body vs arrow-block / fn-expr
+    // body `{`). Both emit the guard as an UNMAPPED prepend (synthetic narrowing
+    // text → None) ordered ahead of the in-place body identifiers — the offsets
+    // differ, the unmapped-guard contract is identical.
     if let Some(guard) = guard_text {
         out.prepend_alloc(trimmed_vs, guard);
     }
@@ -504,6 +514,23 @@ fn emit_in_place_handler<'alloc>(
         ExprOptions::in_place(),
     );
     emit_expr_plan(out, &plan, Placement::InPlace, source);
-    // Closing synthetic suffix → UNMAPPED.
-    out.overwrite(trimmed_ve, prop_end, boundary_suffix);
+    // The closing `boundary_suffix` is synthetic JSX scaffolding (the `}` /
+    // `}}` / `})}` wrapper + container close) → UNMAPPED, exactly like the
+    // leading-prefix delete and the `scaffold_after_event` insert. Lowered
+    // through `OverwriteSyntheticBoundary`: the source tail `[trimmed_ve,
+    // prop_end)` (the close quote + trailing whitespace) is DELETED, then the
+    // synthetic suffix is inserted as an unmapped `Inserted` chunk. A mapped
+    // `out.overwrite(trimmed_ve, prop_end, suffix)` would instead map the
+    // synthetic braces back to the body end (the close quote) — the boundary
+    // desync this decomposition exists to prevent. The generated TSX text is
+    // unchanged: the suffix lands at the same position (right after the in-place
+    // body, where the deleted tail was), only its source mapping becomes None.
+    emit_op(
+        out,
+        &EmitOp::OverwriteSyntheticBoundary {
+            source: SourceByteRange::new(SourceByteOffset(trimmed_ve), SourceByteOffset(prop_end)),
+            text: EmitText::Borrowed(boundary_suffix),
+            anchor: None,
+        },
+    );
 }

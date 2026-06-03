@@ -2385,6 +2385,58 @@ fn event_handler_inline_expr_is_source_mapped() {
     );
 }
 
+/// The synthetic closing suffix of an in-place v-on handler (the `}}` wrapper
+/// close for an inline expression, the `}` JSX-container close for a simple
+/// handler) is compiler-synthesized scaffolding with no source token, so it must
+/// map to None — consistent with the rest of the decomposed handler boundary
+/// (prefix delete, scaffold-after-event, guard are all unmapped). A MAPPED
+/// overwrite of the closing span would point the synthetic braces at the body
+/// end (the close quote), which would land go-to-definition / hover on a
+/// synthetic brace.
+///
+/// Discriminating: pre-fix the closing suffix was emitted via a mapped
+/// `out.overwrite(trimmed_ve, prop_end, suffix)`, producing a token at the
+/// suffix's generated column → this assertion FAILS. Post-fix the suffix is an
+/// unmapped inserted chunk → no token at that column → PASSES. The generated TSX
+/// text is byte-identical across the fix (pinned by
+/// `event_handler_inline_expr_is_source_mapped` /
+/// `event_handler_simple_ident_is_source_mapped`).
+#[test]
+fn v_on_handler_closing_suffix_maps_to_none() {
+    // Inline expression: `@click="count++"` → `onClick={() => {count++}}`. The
+    // trailing `}}` is the wrapper + container close — synthetic.
+    let inline = r#"<template><button @click="count++">click</button></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(inline, &[("count", BindingType::SetupConst)]);
+    assert!(
+        output.contains("onClick={() => {count++}}"),
+        "inline handler output must be byte-stable: {output}"
+    );
+    // The synthetic suffix is the FINAL `}}` run before the closing `>` of the tag.
+    let gt = output.find("}}>").expect("expected `}}>` in output");
+    let suffix_col = gt as u32; // generated column of the first `}` of the synthetic suffix
+    assert!(
+        !tokens.iter().any(|&(_, dst_col, _)| dst_col == suffix_col),
+        "synthetic v-on closing suffix (gen col {suffix_col}) must NOT carry a source \
+         map token (synthetic → None). Tokens: {tokens:?}"
+    );
+
+    // Simple handler: `@click="handler"` → `onClick={handler}`. The trailing `}`
+    // is the JSX-container close — synthetic.
+    let simple = r#"<template><button @click="handler">click</button></template>"#;
+    let (o2, t2) = gen_tsx_template_with_map(simple, &[("handler", BindingType::SetupConst)]);
+    assert!(
+        o2.contains("onClick={handler}"),
+        "simple handler output must be byte-stable: {o2}"
+    );
+    let gt2 = o2.find("}>").expect("expected `}>` in simple output");
+    let suffix_col2 = gt2 as u32; // generated column of the synthetic `}` close
+    assert!(
+        !t2.iter().any(|&(_, dst_col, _)| dst_col == suffix_col2),
+        "synthetic v-on closing `}}` (gen col {suffix_col2}) must NOT carry a source \
+         map token (synthetic → None). Tokens: {t2:?}"
+    );
+}
+
 // ── Bug 1: Dynamic <component :is> uses extractRenderComponent ──
 
 #[test]
