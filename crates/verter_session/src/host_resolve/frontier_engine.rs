@@ -117,7 +117,22 @@ impl VerterHost {
             ctx,
             route_shallow_cache: RefCell::new(RouteShallowStateCache::default()),
         };
-        let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
+        // The frontier step budget is `None` in production (selecting the
+        // `MAX_EXTERNAL_TYPE_RESOLVE_STEPS` default baked into
+        // `ResolutionBudgets::default`), so the construction here is
+        // byte-identical to `ExternalTypeFrontier::new()` for every
+        // production caller. Tests inject a small ceiling via
+        // `HostConfig::external_resolution_step_budget` to drive the hard
+        // frontier step-limit on a small hermetic fixture.
+        let mut frontier = match ctx.config().external_resolution_step_budget {
+            Some(limit) => crate::resolver_core::ExternalTypeFrontier::with_budgets(
+                crate::resolver_core::ResolutionBudgets {
+                    frontier_symbol_visits: limit,
+                    ..crate::resolver_core::ResolutionBudgets::default()
+                },
+            ),
+            None => crate::resolver_core::ExternalTypeFrontier::new(),
+        };
         let mut inspected_symbols = rustc_hash::FxHashSet::default();
         frontier.seed(std::iter::once(
             crate::resolver_core::PendingExternalSymbol {

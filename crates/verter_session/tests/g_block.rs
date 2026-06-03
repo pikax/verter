@@ -67,7 +67,29 @@ mod block_6i_runtime_arch_guards;
 mod block_6i_slot_callable_realization;
 #[path = "g_block/block_6i_static_guards.rs"]
 mod block_6i_static_guards;
+#[path = "g_block/cache_runtime_no_external_cooperative.rs"]
+mod cache_runtime_no_external_cooperative;
+#[path = "g_block/cache_runtime_singleflight_rehome.rs"]
+mod cache_runtime_singleflight_rehome;
 #[path = "block_2_canary/harness.rs"]
 mod canary_harness;
+#[path = "g_block/compile_slots_encapsulation.rs"]
+mod compile_slots_encapsulation;
+#[path = "g_block/finalise_signature_or_empty_is_gone.rs"]
+mod finalise_signature_or_empty_is_gone;
 #[path = "component_meta_audit/harness.rs"]
 mod harness;
+#[path = "g_block/r6_query_identity_keys_content_free.rs"]
+mod r6_query_identity_keys_content_free;
+#[path = "g_block/separation_of_concerns.rs"]
+mod separation_of_concerns;
+#[path = "g_block/typeinfo_audit_contract_guards.rs"]
+mod typeinfo_audit_contract_guards;
+#[path = "g_block/typeinfo_graph_contract_guards.rs"]
+mod typeinfo_graph_contract_guards;
+#[path = "g_block/typeinfo_graph_taxonomy.rs"]
+mod typeinfo_graph_taxonomy;
+#[path = "g_block/typeinfo_request_contract_guards.rs"]
+mod typeinfo_request_contract_guards;
+#[path = "g_block/typeinfo_wire_surface_guards.rs"]
+mod typeinfo_wire_surface_guards;

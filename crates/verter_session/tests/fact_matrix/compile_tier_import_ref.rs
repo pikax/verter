@@ -1,9 +1,9 @@
 //! Matrix slice: `compile_tier` × `import_ref`.
 //!
-//! Discrimination: `CompileSlot.fact_dep_signature` MUST be able to
-//! carry `FactKey::ImportRef` facts so a consumer importing a
-//! type-only binding from a barrel that retargets is invalidated on
-//! the next warm read.
+//! Discrimination: `CompileSlot.fact_dep_signature` MUST be the
+//! `ReadSetSignature` carrier and able to carry `FactKey::ImportRef`
+//! facts so a consumer importing a type-only binding from a barrel
+//! that retargets is invalidated on the next warm read.
 
 #![cfg(test)]
 
@@ -25,10 +25,11 @@ fn read_session_src(rel: &str) -> String {
 fn compile_tier_signature_carries_import_ref() {
     let src = read_session_src("types.rs");
     assert!(
-        src.contains("fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>"),
-        "Block 1.8 compile_tier matrix slice: `CompileSlot` MUST \
-         carry `fact_dep_signature: Arc<[FactVersionRef]>` after the \
-         Block 1.A substrate migration."
+        src.contains("fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature"),
+        "compile_tier matrix slice: `CompileSlot` MUST carry \
+         `fact_dep_signature: ReadSetSignature` (the carrier that wraps \
+         `Arc<[FactVersionRef]>` + the overflow flag). A regression that \
+         drops the typed carrier would bypass per-domain fact validation."
     );
 
     let import_fact = FactVersionRef::Parse(ParseFactRef {

@@ -321,6 +321,13 @@ fn walk_production_rs_files(root: &Path) -> Vec<PathBuf> {
 fn scan_file(path: &Path, violations: &mut Vec<Violation>) {
     let src =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    // Textual pre-filter (coverage-identical): the scanner flags only calls
+    // (path or method form) whose name is `accumulate_dispatch_dep_signature`,
+    // so the file must contain that identifier substring to host a violation.
+    // The hard parse-error panic is preserved for files that pass the filter.
+    if !src.contains("accumulate_dispatch_dep_signature") {
+        return;
+    }
     let parsed =
         syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
     let mut scanner = Scanner::new(path, violations);

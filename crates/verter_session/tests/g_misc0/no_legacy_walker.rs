@@ -706,15 +706,29 @@ fn collect_production_sources() -> Vec<PathBuf> {
 fn retired_symbols_absent_from_production_source() {
     let files = collect_production_sources();
 
-    for symbol in RETIRED_SYMBOLS {
-        let mut hits: Vec<(PathBuf, Vec<usize>)> = Vec::new();
-        for file in &files {
-            let Ok(text) = std::fs::read_to_string(file) else {
+    // Read + preprocess each file ONCE, then test every retired symbol
+    // against the cached processed text. (Previously this read+preprocessed
+    // every file once PER symbol — O(symbols × files) — which dominated the
+    // runtime; the inversion is O(files) reads with identical assertions.)
+    let mut hits_by_symbol: std::collections::BTreeMap<&str, Vec<(PathBuf, Vec<usize>)>> =
+        RETIRED_SYMBOLS.iter().map(|s| (*s, Vec::new())).collect();
+    for file in &files {
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        let processed = preprocess(&text);
+        let plines: Vec<&str> = processed.lines().collect();
+        for symbol in RETIRED_SYMBOLS {
+            // Cheap whole-text reject (coverage-identical): the per-line
+            // tokenized `line_contains_identifier` scan can only match when the
+            // symbol appears as a substring on some line, which implies the
+            // processed text contains it. A file lacking the substring entirely
+            // cannot host a hit, so skip the per-line scan for this symbol.
+            if !processed.contains(symbol) {
                 continue;
-            };
-            let processed = preprocess(&text);
-            let lines: Vec<usize> = processed
-                .lines()
+            }
+            let lines: Vec<usize> = plines
+                .iter()
                 .enumerate()
                 .filter_map(|(i, l)| {
                     if line_contains_identifier(l, symbol) {
@@ -725,9 +739,15 @@ fn retired_symbols_absent_from_production_source() {
                 })
                 .collect();
             if !lines.is_empty() {
-                hits.push((file.clone(), lines));
+                hits_by_symbol
+                    .get_mut(symbol)
+                    .expect("symbol pre-seeded")
+                    .push((file.clone(), lines));
             }
         }
+    }
+    for symbol in RETIRED_SYMBOLS {
+        let hits = &hits_by_symbol[symbol];
         assert!(
             hits.is_empty(),
             "retired symbol `{symbol}` reintroduced in production source. \

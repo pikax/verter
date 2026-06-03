@@ -187,6 +187,23 @@ fn walk_production_rs_files(root: &Path) -> Vec<PathBuf> {
 fn scan_file(path: &Path, violations: &mut Vec<Violation>) {
     let src =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    // Necessary-condition pre-filter. The scanner records a violation ONLY for a
+    // `pub fn` whose name starts with a `FLAG_PREFIXES` entry AND which lives
+    // inside an inherent `impl VerterHost { … }` block. Both are jointly
+    // necessary:
+    //   1. `inside_verter_host_inherent_impl` is set only inside a literal
+    //      `impl VerterHost` block, so the file's text MUST contain the
+    //      substring `impl VerterHost` (the `Self`-type ident is `VerterHost`,
+    //      rendered verbatim in source). A file lacking it never enters the
+    //      flagging branch.
+    //   2. the flagged method's ident starts with one of `FLAG_PREFIXES`, so
+    //      the ident — and therefore the file text — MUST contain that prefix
+    //      substring.
+    // A file failing either condition cannot produce a violation, so skipping
+    // its `syn::parse_file` is coverage-safe.
+    if !src.contains("impl VerterHost") || !FLAG_PREFIXES.iter().any(|p| src.contains(p)) {
+        return;
+    }
     let parsed =
         syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
     let mut scanner = Scanner::new(path, violations);

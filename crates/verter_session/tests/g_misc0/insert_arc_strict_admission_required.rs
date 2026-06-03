@@ -515,6 +515,17 @@ fn scan_file_for_cache_kinds(
 ) {
     let src =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    // Necessary-condition pre-filter. `CacheKindCollector` only acts on
+    // `ExprMethodCall`s whose method is `insert_arc_with_kind`; every observed
+    // cache-kind literal (and every non-literal-kind violation) originates from
+    // such a call. A file whose text does NOT contain the `insert_arc_with_kind`
+    // identifier cannot contain that method call, so it can contribute neither an
+    // observed kind nor a non-literal violation — skipping its `syn::parse_file`
+    // is coverage-safe and cannot hide a `missing`/`unexpected`/non-literal
+    // result the unfiltered scan would have produced.
+    if !src.contains("insert_arc_with_kind") {
+        return;
+    }
     let parsed =
         syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
     let mut collector = CacheKindCollector::new(path.to_path_buf(), kinds, non_literal_kinds);

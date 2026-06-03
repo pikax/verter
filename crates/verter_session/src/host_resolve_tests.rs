@@ -2473,8 +2473,28 @@ defineProps<FirstProps>()
 
 #[test]
 fn external_type_resolution_step_budget_errors_on_wide_import_graph() {
-    let host = strict_host();
-    let import_count = crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS + 5;
+    // The hard frontier step-limit is the `frontier_symbol_visits` budget.
+    // Production caps it at `MAX_EXTERNAL_TYPE_RESOLVE_STEPS` (2000); this
+    // test injects a small ceiling so a small hermetic fixture straddles it
+    // the same way a 2005-symbol corpus straddled the production default,
+    // without building (and parsing) a 2005-interface file.
+    const INJECTED_STEP_BUDGET: usize = 40;
+
+    // Guard the production default separately and cheaply: a regression that
+    // lowered the constant would otherwise hide behind the injected ceiling.
+    assert_eq!(
+        crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
+        2_000,
+        "production external-type step budget must stay 2000"
+    );
+
+    let host = VerterHost::new_standalone(HostConfig {
+        dev_mode: false,
+        compile_error_policy: CompileErrorPolicy::StrictError,
+        external_resolution_step_budget: Some(INJECTED_STEP_BUDGET),
+        ..HostConfig::default()
+    });
+    let import_count = INJECTED_STEP_BUDGET + 5;
 
     let mut defs_source = String::new();
     for index in 0..import_count {
@@ -2555,7 +2575,7 @@ defineProps<Props>()
             type_name,
             last_dep,
         } => {
-            assert_eq!(limit, crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS);
+            assert_eq!(limit, INJECTED_STEP_BUDGET);
             assert_eq!(type_name, "Props");
             assert!(
                 !last_dep.is_empty(),

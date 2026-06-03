@@ -644,6 +644,17 @@ fn walk_production_rs_files(root: &Path) -> Vec<PathBuf> {
 fn scan_file(path: &Path, violations: &mut Vec<Violation>) {
     let src =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    // Necessary-condition pre-filter: every violation this scanner can
+    // record is a mutation of the `DerivedRawState.import_routes` field
+    // or its `import_routes_known_miss_recorded_at_generation` sidecar —
+    // both of which contain the substring `import_routes`. A file that
+    // never mentions `import_routes` cannot host either guarded mutation,
+    // so the `syn` parse + AST walk is pure overhead there. The substring
+    // is a strict prerequisite for both guards, so skipping cannot hide a
+    // violation.
+    if !src.contains("import_routes") {
+        return;
+    }
     let parsed =
         syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
     let mut scanner = Scanner::new(path, violations);

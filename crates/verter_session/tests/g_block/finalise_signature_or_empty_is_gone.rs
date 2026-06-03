@@ -101,6 +101,20 @@ fn no_call_site_constructs_empty_signature_from_overflow() {
             continue;
         }
 
+        // Necessary-condition pre-filter: every empty-rail boundary the
+        // `BypassWalker` flags is structurally type-anchored to the
+        // identifier `FactVersionRef` (the typed `let` binding, the
+        // `-> Arc<[FactVersionRef]>` return, the turbofish, and the
+        // argument anchor all require it). A file that never mentions
+        // `FactVersionRef` cannot produce a single finding, so the `syn`
+        // parse + walk is pure overhead there. The banned-identifier
+        // half (`finalise_signature_or_empty`) is already handled above
+        // by a textual scan, so skipping the AST walk here cannot hide
+        // either class of violation.
+        if !src.contains("FactVersionRef") {
+            continue;
+        }
+
         // The structural arch-guard requires every production file
         // to parse via `syn`. A parse failure indicates either a
         // stale `syn` version or newer Rust syntax the walker has

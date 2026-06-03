@@ -139,6 +139,14 @@ fn no_match_arm_reads_compat_variant() {
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
+        // Necessary-condition pre-filter: a `ComponentMetaQueryKind::Compat`
+        // match arm MUST contain the substring `Compat`. A file without it
+        // cannot host the offending arm, so skip the `syn` parse + AST walk
+        // entirely. This cannot hide a violation — the substring is a strict
+        // prerequisite for the pattern this test searches for.
+        if !text.contains("Compat") {
+            continue;
+        }
         let Ok(file) = syn::parse_file(&text) else {
             continue;
         };
@@ -181,6 +189,15 @@ fn no_get_declared_component_meta_function_remains() {
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
+        // Necessary-condition pre-filter: every retired function name in
+        // `RETIRED_DECLARED_FN_NAMES` begins with `get_declared_component_meta`,
+        // so a file declaring any of them MUST contain that substring. Skip the
+        // `syn` parse + item walk for files that lack it. The substring is a
+        // strict prerequisite for the declarations this test searches for, so
+        // filtering cannot hide a real offender.
+        if !text.contains("get_declared_component_meta") {
+            continue;
+        }
         let Ok(file) = syn::parse_file(&text) else {
             continue;
         };

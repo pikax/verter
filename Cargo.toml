@@ -59,3 +59,9 @@ opt-level = 0
 # For an interactive debugger that needs locals, override per run with
 # `CARGO_PROFILE_DEV_DEBUG=2 cargo ...`.
 debug = "line-tables-only"
+
+# Strip debug info from non-workspace dependencies entirely. Our own crates
+# keep `line-tables-only` (above) for backtraces; third-party deps do not need
+# even line tables, which shrinks dependency rlibs and cuts link input size.
+[profile.dev.package."*"]
+debug = false

@@ -1244,7 +1244,11 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
     /// import of the forbidden symbol. Only re-exports (`pub`/`pub(crate) use …
     /// as`) count — a private `use … as` inside an unrelated module does not make
     /// the alias importable elsewhere.
-    fn crate_reexport_aliases_of(canonical_forbidden: &str) -> Vec<String> {
+    /// Read + `syn::parse_file` the entire `verter_session/src` corpus ONCE. The
+    /// parsed `Vec<syn::File>` is identical across every `crate_reexport_aliases_of`
+    /// call (only the searched `canonical_forbidden` differs per call), so the
+    /// read+parse work is hoisted out of the per-call hot path and reused.
+    fn parse_session_src_corpus() -> Vec<syn::File> {
         fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 return;
@@ -1258,6 +1262,95 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
                 }
             }
         }
+        /// Necessary-condition pre-filter for the corpus parse. The parsed
+        /// corpus is consumed ONLY by `crate_reexport_aliases_of`, which gathers
+        /// re-export RENAMES from `Item::Use` items whose visibility is
+        /// `Public`/`Restricted` (`pub use … as A;` / `pub(crate)|pub(super) use
+        /// … as A;`), iterating to a fixpoint. Every alias it can ever discover
+        /// — in the first pass or any later fixpoint pass — originates from such
+        /// a public-`use` rename. Therefore a file that has NO public-`use`
+        /// rename cannot contribute an alias on ANY iteration, so skipping its
+        /// `syn::parse_file` is coverage-safe.
+        ///
+        /// Two textual conditions are jointly necessary for a public-`use`
+        /// rename and are checked here:
+        ///   1. a `pub` followed (after an optional `(crate)`/`(super)`/`(in …)`
+        ///      restriction and whitespace) by the `use` keyword — the only way
+        ///      to write a re-export `use`; a private `use … as` does not
+        ///      propagate the alias and is ignored by `crate_reexport_aliases_of`,
+        ///   2. the ` as ` rename token — `UseTree::Rename` always renders it.
+        ///
+        /// Both are NECESSARY (not merely sufficient), so the filter cannot hide
+        /// a re-export alias the unfiltered scan would have found.
+        fn has_public_use_rename(src: &str) -> bool {
+            if !src.contains(" as ") {
+                return false;
+            }
+            // Scan for a `pub` token whose next non-`(…)`/non-whitespace token is
+            // `use`. Covers `pub use`, `pub(crate) use`, `pub(super) use`, and any
+            // `pub(in path) use` restriction generically.
+            let bytes = src.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = src[search_from..].find("pub") {
+                let pub_end = search_from + rel + 3;
+                // Reject identifiers like `public`/`pubx` — require a non-ident
+                // boundary after `pub`.
+                let boundary_ok = bytes
+                    .get(pub_end)
+                    .map(|c| !(c.is_ascii_alphanumeric() || *c == b'_'))
+                    .unwrap_or(true);
+                if boundary_ok {
+                    let mut i = pub_end;
+                    // Optional `(…)` visibility restriction.
+                    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                    if i < bytes.len() && bytes[i] == b'(' {
+                        let mut depth = 0usize;
+                        while i < bytes.len() {
+                            match bytes[i] {
+                                b'(' => depth += 1,
+                                b')' => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        i += 1;
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            i += 1;
+                        }
+                    }
+                    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                    if src[i..].starts_with("use")
+                        && bytes
+                            .get(i + 3)
+                            .map(|c| !(c.is_ascii_alphanumeric() || *c == b'_'))
+                            .unwrap_or(true)
+                    {
+                        return true;
+                    }
+                }
+                search_from = pub_end;
+            }
+            false
+        }
+
+        let src_dir = workspace_root().join("crates/verter_session/src");
+        let mut rs_files = Vec::new();
+        collect_rs_files(&src_dir, &mut rs_files);
+        rs_files
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .filter(|src| has_public_use_rename(src))
+            .filter_map(|src| syn::parse_file(&src).ok())
+            .collect()
+    }
+
+    fn crate_reexport_aliases_of(parsed: &[syn::File], canonical_forbidden: &str) -> Vec<String> {
         /// Pull `pub`/`pub(crate)` re-export renames whose original ident is in
         /// `known` from one parsed file.
         fn reexport_renames_in_file(file: &syn::File, known: &[String], out: &mut Vec<String>) {
@@ -1293,20 +1386,11 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
             }
         }
 
-        let src_dir = workspace_root().join("crates/verter_session/src");
-        let mut rs_files = Vec::new();
-        collect_rs_files(&src_dir, &mut rs_files);
-        let parsed: Vec<syn::File> = rs_files
-            .iter()
-            .filter_map(|p| std::fs::read_to_string(p).ok())
-            .filter_map(|src| syn::parse_file(&src).ok())
-            .collect();
-
         let mut known = vec![canonical_forbidden.to_string()];
         // Fixpoint: each pass may discover aliases of aliases.
         loop {
             let mut discovered = Vec::new();
-            for file in &parsed {
+            for file in parsed {
                 reexport_renames_in_file(file, &known, &mut discovered);
             }
             let mut grew = false;
@@ -1369,6 +1453,7 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
     /// `APPROVED_MACROS`. Panics if the function is not found (the guard's
     /// anchor moved).
     fn assert_fn_free_of_symbol(
+        corpus: &[syn::File],
         file: &syn::File,
         fn_name: &str,
         canonical_forbidden: &str,
@@ -1380,7 +1465,7 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
         // name from a direct-alias scan: the guarded file's rename original is
         // `r0`, not `forbidden`. Treat every transitive re-export alias as a
         // forbidden ORIGINAL so the local re-import is caught.
-        let reexport_aliases = crate_reexport_aliases_of(canonical_forbidden);
+        let reexport_aliases = crate_reexport_aliases_of(corpus, canonical_forbidden);
 
         // Forbidden ORIGINAL names a guarded-file `use … as …` could rename:
         // the canonical symbol plus its crate re-export aliases.
@@ -1474,10 +1559,17 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
         );
     }
 
+    // Parse the entire `verter_session/src` corpus ONCE and reuse it across all
+    // `assert_fn_free_of_symbol` calls below. The corpus is identical per call
+    // (only the searched `canonical_forbidden` differs), so the read+parse cost
+    // is paid once instead of 9× inside `crate_reexport_aliases_of`.
+    let session_corpus = parse_session_src_corpus();
+
     let methods_src =
         read_workspace_file("crates/verter_session/src/host_manage/component_meta_methods.rs");
     let methods_file = syn::parse_file(&methods_src).expect("parse component_meta_methods.rs");
     assert_fn_free_of_symbol(
+        &session_corpus,
         &methods_file,
         "compute_component_meta_state_inner",
         "produce_macro_object_shapes_for_purpose",
@@ -1539,6 +1631,7 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
             "project_prepared_requested_member_from_symbol",
         ] {
             assert_fn_free_of_symbol(
+                &session_corpus,
                 &jsdoc_file,
                 owner_local_fn,
                 prepared_walker_symbol,
@@ -5481,6 +5574,57 @@ mod foundations_guards {
         false
     }
 
+    /// Coverage-identical whole-file pre-reject for
+    /// [`line_has_phase_archaeology`].
+    ///
+    /// Every line-level branch in the predicate requires the line to
+    /// contain at least one stable trigger substring. This function
+    /// returns `false` only when the WHOLE file contains NONE of those
+    /// triggers — in which case no line in the file can match, so the
+    /// per-line scan can be skipped without changing the result set.
+    ///
+    /// All branches except the `PE\d+` scan have a case-insensitive
+    /// necessary substring, checked against the lowercased file text.
+    /// The `PE\d+` branch is case-sensitive (uppercase `PE`), so it is
+    /// checked separately against the raw text (lowercasing it to `pe`
+    /// would match common words like `type`/`operation` and defeat the
+    /// pre-reject). The two checks together are a necessary condition
+    /// for ANY violation the predicate can report.
+    pub fn file_may_have_phase_archaeology(src: &str) -> bool {
+        // Lowercased necessary roots covering every branch except the
+        // uppercase-anchored `PE\d+` scan.
+        const LOWER_ROOTS: &[&str] = &[
+            "cutover",                   // d-cutover / post-cutover / runtime cutover
+            "phase",                     // pre-Phase / phase \d / phase-archaeology
+            "retired in",                // retirement history
+            "stage",                     // pre-Stage / stage \d
+            "audit infrastructure plan", // audit-plan archaeology (spaced)
+            "audit-infrastructure-plan", // audit-plan archaeology (hyphenated)
+            "cache-runtime overhaul",    // cache-runtime plan archaeology
+            "ax-wip",                    // orchestrator codename
+            "codex",                     // codex vocab + Codex Nth-consult
+            "§",                         // plan § / decimal-section refs
+            "slice",                     // Slice \d
+            "deleted in",                // deletion history
+            "deletion in",               // deletion history
+            "block",                     // \bblock \d\b / Block \d.x
+            "commit",                    // Commit \d / Commit XY
+            "revision",                  // revision \d
+            "rev ",                      // rev \d shorthand
+            "path ",                     // Path cluster marker
+            "round",                     // round \d markers
+            "cluster ",                  // Cluster [A-Z]
+            "/ fix ",                    // / Fix [A-Z]
+            "fix-",                      // Fix-[A-Z] / pre-Fix- / post-Fix-
+        ];
+        let lower = src.to_ascii_lowercase();
+        if LOWER_ROOTS.iter().any(|r| lower.contains(r)) {
+            return true;
+        }
+        // Uppercase-anchored `PE\d+` branch: check raw text.
+        src.contains("PE")
+    }
+
     /// Walk the production tree and return `(rel_path, line_no, line)`
     /// triples for every match. `rel_path` is `crates/<name>/src/...`
     /// with forward slashes.
@@ -5505,6 +5649,11 @@ mod foundations_guards {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
+                // Whole-file pre-reject: a file with none of the trigger
+                // roots cannot contain any matching line (coverage-safe).
+                if !file_may_have_phase_archaeology(&src) {
+                    continue;
+                }
                 let rel = relative_to_root(&file);
                 for (idx, line) in src.lines().enumerate() {
                     if line_has_phase_archaeology(line) {
@@ -7390,6 +7539,11 @@ mod w5f_test_archaeology {
                         .replace('\\', "/");
                     let src_text =
                         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+                    // Whole-file pre-reject (coverage-safe): skip files
+                    // with none of the predicate's trigger roots.
+                    if !super::foundations_guards::file_may_have_phase_archaeology(&src_text) {
+                        continue;
+                    }
                     for (line_no, line) in src_text.lines().enumerate() {
                         if super::foundations_guards::line_has_phase_archaeology(line) {
                             violations.push(format!("{rel}:{}", line_no + 1));
@@ -7436,6 +7590,10 @@ mod w5f_test_archaeology {
                             .replace('\\', "/");
                         let src_text = std::fs::read_to_string(path)
                             .unwrap_or_else(|e| panic!("read {rel}: {e}"));
+                        // Whole-file pre-reject (coverage-safe).
+                        if !super::foundations_guards::file_may_have_phase_archaeology(&src_text) {
+                            continue;
+                        }
                         for (line_no, line) in src_text.lines().enumerate() {
                             if super::foundations_guards::line_has_phase_archaeology(line) {
                                 violations.push(format!("{rel}:{}", line_no + 1));
@@ -8141,6 +8299,13 @@ fn audit_request_registration_lifecycle() {
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
             panic!("audit_request_registration_lifecycle: cannot read `{rel}`: {e}")
         });
+        // Textual pre-filter (coverage-identical): a forbidden call
+        // `x.register_active_request(...)` MUST contain that method name
+        // as a substring, so a file containing none of the three lifecycle
+        // names cannot possibly host a violation — skip the expensive parse.
+        if !methods.iter().any(|m| src.contains(m)) {
+            return;
+        }
         let parsed = match syn::parse_file(&src) {
             Ok(p) => p,
             // Files we cannot parse (e.g. macro-generated bodies)
@@ -8353,6 +8518,16 @@ fn audit_no_hot_loop_instrumentation() {
                  but `crates/{krate}/src/` does not exist; the denylist is stale."
             );
         }
+        // Leaf identifier names of THIS crate's denylisted function paths
+        // (`mod::sub::fn_name` → `fn_name`). A file can only HOST a denylisted
+        // function (the `matched`/staleness signal) if it contains that leaf
+        // name in its text; it can only host a VIOLATION if it also contains
+        // `current_observer`. Either condition is necessary, so a file
+        // containing none of them cannot affect the result — skip the parse.
+        let crate_leaf_names: Vec<&str> = by_crate[krate]
+            .iter()
+            .map(|(_, p)| p.rsplit("::").next().unwrap_or(p))
+            .collect();
         walk_dir_collect_rs(&crate_src, &mut |path: &std::path::Path| {
             let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
                 panic!(
@@ -8360,6 +8535,13 @@ fn audit_no_hot_loop_instrumentation() {
                     path.display()
                 )
             });
+            // Textual pre-filter (coverage-identical): keep the file only if it
+            // can contribute to either result dimension.
+            if !src.contains("current_observer")
+                && !crate_leaf_names.iter().any(|n| src.contains(n))
+            {
+                return;
+            }
             let parsed = match syn::parse_file(&src) {
                 Ok(p) => p,
                 Err(_) => return,
@@ -9262,6 +9444,13 @@ fn every_consumer_has_production_call_site() {
                     path.display()
                 )
             });
+            // Textual pre-filter (coverage-identical): the visitor only records a
+            // producer when the path segment before the variant is `RequestKind`
+            // (`RequestKind::<Variant>`). A file with no `RequestKind` substring
+            // cannot contain such a path, so skip the expensive parse.
+            if !src.contains("RequestKind") {
+                return;
+            }
             let parsed = match syn::parse_file(&src) {
                 Ok(p) => p,
                 Err(e) => panic!(

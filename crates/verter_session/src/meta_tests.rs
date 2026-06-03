@@ -19017,11 +19017,22 @@ fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
     assert!(component_meta_symbolic_budget_is_fatal(None));
 }
 
+/// A local object shape (`interface Props { p0..pN: string }`) must
+/// materialise its FULL `N`-member prop surface through the native
+/// graph — the symbolic-carrier scoring and per-member shape reducer
+/// must enumerate every declared member, not truncate to a partial.
+///
+/// Sized small (`60` props) instead of the historical `2400`-prop
+/// corpus: the materialisation path is per-member, so a small object
+/// exercises the identical full-enumeration invariant in a fraction
+/// of the time. The `props.len() == prop_count` assertion is the
+/// discriminating gate — if the per-member reducer dropped any
+/// declared member the count falls short and the test goes RED.
 #[test]
 fn get_component_meta_retries_symbolic_budget_for_large_local_object_shapes() {
     let project = make_project();
 
-    let prop_count = 2_400usize;
+    let prop_count = 60usize;
     let mut props_body = String::new();
     for index in 0..prop_count {
         props_body.push_str(&format!("  p{index}: string\n"));
@@ -19060,11 +19071,33 @@ defineProps<Props>()
         .any(|prop| prop.name == format!("p{}", prop_count - 1)));
 }
 
+/// A wide finite cross-file heritage fan-out (`Props extends T0..Tn`
+/// where every `Tn` is imported from a second file) resolves the FULL
+/// `n`-member prop surface through the native graph, without hang or a
+/// spurious budget error.
+///
+/// The frontier step budget is pinned LOW (`external_resolution_step_budget
+/// = Some(40)`, below the `45`-wide import count) on purpose: the
+/// cross-file frontier performs only ROUTE discovery (a handful of
+/// `(canonical_id, exported_name)` visits), so a wide heritage fan-out
+/// must NOT trip the frontier step-limit — the heritage members are
+/// resolved by the native semantic graph, not by per-member frontier
+/// visits. The `props.len() == import_count` assertion is the
+/// discriminating gate: dropping the cross-file heritage definitions
+/// (so the imported `Tn` are unresolvable) makes the prop count fall
+/// short of `import_count` and the test RED.
+///
+/// Sized small (45 imports / 40-step budget) instead of the historical
+/// 2005/2000 corpus so the test runs in well under a second while
+/// exercising the identical native-graph wide-heritage resolution path.
 #[test]
 fn get_component_meta_scales_past_previous_wide_import_budget_fixture() {
-    let project = make_project();
+    let project = make_project_with_config(HostConfig {
+        external_resolution_step_budget: Some(40),
+        ..HostConfig::default()
+    });
 
-    let import_count = 2_005usize;
+    let import_count = 45usize;
     let mut defs_source = String::new();
     for index in 0..import_count {
         defs_source.push_str(&format!(

@@ -295,6 +295,16 @@ fn no_cache_layer_keys_on_world_snapshot_as_a_whole() {
             .unwrap_or(&file)
             .to_string_lossy()
             .replace('\\', "/");
+        // Necessary-condition pre-filter: the guard rejects a `Key`/
+        // `Identity` struct field only when its type mentions the
+        // identifier `WorldSnapshot`. A file that never contains the
+        // substring `WorldSnapshot` cannot host such a field, so skip the
+        // `syn` parse + struct-field walk. The substring is a strict
+        // prerequisite for the rejection, so filtering cannot hide a
+        // violation.
+        if !body.contains("WorldSnapshot") {
+            continue;
+        }
         // Parse via `syn`; a production file that does not parse is a
         // hard error, not a silent skip — that would let a real
         // violation hide behind a parse failure.

@@ -202,6 +202,14 @@ fn walk_production_rs_files(root: &Path) -> Vec<PathBuf> {
 fn scan_file(path: &Path, sites: &mut Vec<Site>) {
     let src =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    // Textual pre-filter (coverage-identical): the scanner records only
+    // `install_fact_tracer` call sites, and any such call MUST contain that
+    // identifier as a substring. A file lacking it cannot host a site — skip
+    // the expensive parse. The hard parse-error panic is preserved for files
+    // that pass the filter (corruption signal).
+    if !src.contains(SYMBOL) {
+        return;
+    }
     let parsed =
         syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
     let mut scanner = Scanner::new(path, sites);

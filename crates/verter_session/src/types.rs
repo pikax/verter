@@ -605,6 +605,22 @@ pub struct HostConfig {
     /// match LSP-server hover/completion responsiveness expectations
     /// (see [`LspMethodTimeoutsConfig::default`]).
     pub lsp_method_timeouts: LspMethodTimeoutsConfig,
+    /// Override for the cross-file external-type frontier's
+    /// `frontier_symbol_visits` step budget
+    /// ([`crate::resolver_core::ResolutionBudgets::frontier_symbol_visits`]).
+    ///
+    /// `None` (the default) selects the production ceiling
+    /// [`crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS`] (2000), so
+    /// the frontier built at the single production construction site
+    /// behaves byte-identically to the historical default. `Some(n)`
+    /// caps the frontier at `n` `(canonical_id, exported_name)`
+    /// visits.
+    ///
+    /// Used by the wide-import-graph regression tests to drive the
+    /// hard frontier step-limit on a small hermetic fixture instead
+    /// of a 2005-symbol corpus, without mutating the global default
+    /// budget. Production code leaves this `None`.
+    pub external_resolution_step_budget: Option<usize>,
     /// Override hooks for resolver budgets. Used by tests to drive
     /// the synthesis path into deliberate budget breaches without
     /// mutating the global default budget.
@@ -897,6 +913,7 @@ impl Default for HostConfig {
             projection_op_budget: 2000,
             eviction_policy: EvictionPolicyConfig::default(),
             lsp_method_timeouts: LspMethodTimeoutsConfig::default(),
+            external_resolution_step_budget: None,
             recursion_budget_overrides: RecursionBudgetOverrides::default(),
             typeinfo_scratch_cache_capacity: None,
             host_cpu_threads: None,
@@ -3016,6 +3033,19 @@ pub(crate) struct HostMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // HostConfig default tests
+    // -----------------------------------------------------------------------
+
+    /// The external-resolution step budget defaults to `None` so the
+    /// production frontier construction site keeps using
+    /// `MAX_EXTERNAL_TYPE_RESOLVE_STEPS`. A non-`None` default would
+    /// silently re-cap every production resolution.
+    #[test]
+    fn host_config_default_external_resolution_step_budget_is_none() {
+        assert_eq!(HostConfig::default().external_resolution_step_budget, None);
+    }
 
     // -----------------------------------------------------------------------
     // SliceChanges tests

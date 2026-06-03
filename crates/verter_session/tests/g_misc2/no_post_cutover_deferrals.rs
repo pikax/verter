@@ -39,8 +39,19 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use regex::Regex;
+
+/// `// active-block: <token>` — accept `active-block` or `active_block`.
+/// Compiled once (hoisted out of the per-file `scan_source` loop).
+static ACTIVE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"//\s*active[-_]block\s*:\s*([A-Za-z0-9._-]+)").unwrap());
+
+/// `// TODO(block-<token>)` and `// TODO(block-<token>:...)`.
+/// Compiled once (hoisted out of the per-file `scan_source` loop).
+static TODO_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"//\s*TODO\s*\(\s*block-([A-Za-z0-9._-]+)").unwrap());
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -186,11 +197,8 @@ fn is_test_file(path: &Path) -> bool {
 /// Scan a single file's source text for `active-block:` / `TODO(block-...)`
 /// annotations and return matched `Hit`s.
 fn scan_source(file: &Path, src: &str, hits: &mut Vec<Hit>) {
-    // `// active-block: <token>` — accept `active-block` or
-    // `active_block` for robustness.
-    let active_re = Regex::new(r"//\s*active[-_]block\s*:\s*([A-Za-z0-9._-]+)").unwrap();
-    // `// TODO(block-<token>)` and `// TODO(block-<token>:...)`.
-    let todo_re = Regex::new(r"//\s*TODO\s*\(\s*block-([A-Za-z0-9._-]+)").unwrap();
+    let active_re = &*ACTIVE_RE;
+    let todo_re = &*TODO_RE;
 
     for (line_idx, line) in src.lines().enumerate() {
         if let Some(cap) = active_re.captures(line) {
@@ -224,6 +232,16 @@ fn collect_all_production_hits() -> Vec<Hit> {
         let Ok(src) = std::fs::read_to_string(&f) else {
             continue;
         };
+        // Necessary-condition pre-filter: an `// active-block:` /
+        // `// active_block:` annotation always contains the substring
+        // `active`, and a `// TODO(block-<N>)` annotation always contains
+        // `block-`. A file with neither substring cannot match either
+        // regex, so skip the (per-file) regex scan there. Both substrings
+        // are strict prerequisites for the two annotation forms this
+        // guard searches for, so filtering cannot hide a stale deferral.
+        if !src.contains("active") && !src.contains("block-") {
+            continue;
+        }
         scan_source(&f, &src, &mut hits);
     }
     hits

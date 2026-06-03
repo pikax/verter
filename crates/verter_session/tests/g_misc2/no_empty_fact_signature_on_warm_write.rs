@@ -422,6 +422,18 @@ fn walk_production_rs_files(root: &Path) -> Vec<PathBuf> {
 fn scan_file(path: &Path, violations: &mut Vec<Violation>) {
     let src =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    // Necessary-condition pre-filter: BOTH violation kinds require a
+    // tracer call AND a `ValidatedFactCache` admission in the same fn
+    // body. The tracer call is `install_fact_tracer` or
+    // `with_fact_tracer` (both contain `fact_tracer`); the admission is
+    // `insert_arc` or `insert_arc_with_kind` (both contain `insert_arc`).
+    // A file missing either substring cannot produce a pairing, so skip
+    // the `syn` parse + AST walk. Both substrings are strict
+    // prerequisites for the pairings this guard detects, so filtering
+    // cannot hide a violation.
+    if !(src.contains("fact_tracer") && src.contains("insert_arc")) {
+        return;
+    }
     let parsed =
         syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
     let mut scanner = Scanner::new(path, violations);

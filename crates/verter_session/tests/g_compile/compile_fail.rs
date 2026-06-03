@@ -16,7 +16,17 @@
 //! discrimination, so the red-then-green-within-commit invariant
 //! doesn't apply.
 
+// trybuild spawns a full `cargo build` of the fixture crate (linking
+// `verter_session`), which dominates this test's ~100s runtime. It is gated
+// out of the default inner-loop run and runs in CI via
+// `cargo nextest run -p verter_session --features compile-fail`. The
+// visibility constraint is still enforced on every CI push — only local
+// `cargo nextest run` skips it.
 #[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail (CI)"
+)]
 fn workspace_accessor_visibility() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/compile-fail/workspace_accessor_visibility.rs");

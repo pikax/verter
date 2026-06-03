@@ -186,11 +186,26 @@ fn slice_3b_audit_no_hot_loop_instrumentation_focused_regression() {
                  but `crates/{krate}/src/` does not exist; denylist is stale."
             );
         }
+        // Leaf identifier names of THIS crate's denylisted function paths. A
+        // file can host a denylisted function (the staleness `matched` signal)
+        // only if it contains that leaf name, and a VIOLATION only if it also
+        // contains `current_observer`. Either is necessary — a file with
+        // neither cannot affect the result, so skip its parse.
+        let crate_leaf_names: Vec<&str> = by_crate[krate]
+            .iter()
+            .map(|(_, p)| p.rsplit("::").next().unwrap_or(p))
+            .collect();
         walk_dir_collect_rs(&crate_src, &mut |path: &std::path::Path| {
             let src = match std::fs::read_to_string(path) {
                 Ok(s) => s,
                 Err(_) => return,
             };
+            // Textual pre-filter (coverage-identical).
+            if !src.contains("current_observer")
+                && !crate_leaf_names.iter().any(|n| src.contains(n))
+            {
+                return;
+            }
             let parsed = match syn::parse_file(&src) {
                 Ok(p) => p,
                 Err(_) => return,

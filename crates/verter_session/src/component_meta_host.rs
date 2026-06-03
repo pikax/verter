@@ -1113,15 +1113,37 @@ export type ComponentConfig<
         );
     }
 
-    /// The 2005-interface fixture is a large finite import/heritage fan-out,
-    /// not a recursive semantic case. The solver resolves it successfully
-    /// within operational limits. This test verifies that large finite
-    /// type graphs complete without hang or budget error.
+    /// A wide finite import/heritage fan-out (`Props extends T0..Tn`,
+    /// every `Tn` imported from a second file) is NOT a recursive
+    /// semantic case: the native graph resolves the full `n`-member prop
+    /// surface successfully, without hang or a spurious budget error.
+    ///
+    /// The frontier step budget is pinned LOW
+    /// (`external_resolution_step_budget = Some(40)`, below the `45`-wide
+    /// import count): the cross-file frontier only performs route
+    /// discovery, so a wide heritage fan-out must not trip the step-limit
+    /// — the heritage members come from the native semantic graph. The
+    /// `props.len() == import_count` assertion discriminates: dropping the
+    /// cross-file heritage definitions makes the prop count fall short and
+    /// the test RED.
+    ///
+    /// Sized small (45 / 40-step) instead of the historical 2005/2000
+    /// corpus so the test runs in well under a second while exercising the
+    /// identical native-graph wide-heritage resolution path.
     #[test]
     fn component_meta_budget_errors_surface_on_new_session_api() {
-        let host = make_host();
+        let host = ComponentMetaHost::new_standalone_with_scheduler_config(
+            crate::types::HostConfig {
+                external_resolution_step_budget: Some(40),
+                ..crate::types::HostConfig::default()
+            },
+            verter_scheduler::scheduler::SchedulerConfig {
+                cpu_threads: 1,
+                ..verter_scheduler::scheduler::SchedulerConfig::default()
+            },
+        );
 
-        let import_count = 2_005usize;
+        let import_count = 45usize;
         let mut defs_source = String::new();
         for index in 0..import_count {
             defs_source.push_str(&format!(

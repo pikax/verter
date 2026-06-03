@@ -5,10 +5,10 @@
 //! whose dep adds / removes / renames the referenced member is
 //! invalidated on the next warm read.
 //!
-//! Pre-substrate (legacy `Vec<FactVersionRef>` or absent field): the
+//! With a legacy `Vec<FactVersionRef>` or absent field, the
 //! field-shape grep below FAILS and the permissive view cannot
-//! accept the `MemberPresence` fact through the Arc-stored signature.
-//! Post-substrate: both assertions pass.
+//! accept the `MemberPresence` fact through the carried signature.
+//! With the `ReadSetSignature` carrier, both assertions pass.
 
 #![cfg(test)]
 
@@ -29,17 +29,17 @@ fn read_session_src(rel: &str) -> String {
 #[test]
 fn compile_tier_signature_carries_member_presence() {
     // Arch guard: `CompileSlot.fact_dep_signature` MUST be the
-    // `Arc<[FactVersionRef]>` substrate. The legacy carrier was a
+    // `ReadSetSignature` carrier (which wraps `Arc<[FactVersionRef]>`
+    // + the overflow flag). The legacy carrier was a
     // `Vec<FactVersionRef>` whose validation pumped through a
     // different path and dropped derived facts; this grep blocks the
     // regression.
     let src = read_session_src("types.rs");
     assert!(
-        src.contains("fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>"),
-        "Block 1.8 compile_tier matrix slice: `CompileSlot` MUST \
-         carry `fact_dep_signature: Arc<[FactVersionRef]>` after the \
-         Block 1.A substrate migration. A regression that swaps the \
-         field for `Vec<FactVersionRef>` would silently bypass \
+        src.contains("fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature"),
+        "compile_tier matrix slice: `CompileSlot` MUST carry \
+         `fact_dep_signature: ReadSetSignature`. A regression that swaps \
+         the field for `Vec<FactVersionRef>` would silently bypass \
          per-domain fact validation."
     );
 

@@ -218,6 +218,13 @@ fn walk_production_rs_files(root: &Path) -> Vec<PathBuf> {
 fn scan_file(path: &Path, violations: &mut Vec<Violation>) {
     let src =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    // Textual pre-filter (coverage-identical): the scanner flags only fields
+    // whose type's last path segment is `DepSignature`, so the file must
+    // contain that identifier substring to host a violation. The hard
+    // parse-error panic is preserved for files that pass the filter.
+    if !src.contains("DepSignature") {
+        return;
+    }
     let parsed =
         syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
     let mut scanner = Scanner {
@@ -416,6 +423,14 @@ fn has_cfg_test_attr(attrs: &[syn::Attribute]) -> bool {
 fn scan_file_rails(path: &Path, hits: &mut Vec<RailHit>) {
     let src =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    // Textual pre-filter (coverage-identical): the rail scanner flags only
+    // `validate_dep_signature` call/path sites and `<expr>.legacy` field
+    // accesses; either requires its identifier substring to be present, so a
+    // file with neither cannot host a hit. Parse-error panic preserved for
+    // files that pass the filter.
+    if !src.contains("validate_dep_signature") && !src.contains("legacy") {
+        return;
+    }
     let parsed =
         syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
     let mut scanner = RailScanner {

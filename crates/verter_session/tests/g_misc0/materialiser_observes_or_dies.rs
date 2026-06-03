@@ -1,14 +1,12 @@
-//! Sub-task L arch guard — materialiser cache lookups MUST be
-//! paired with `observe(...)` calls.
+//! Arch guard — materialiser cache lookups MUST be paired with
+//! `observe(...)` calls.
 //!
-//! Stage 6d's arch-guard contract (plan §783-805):
-//!
-//! > Every materialiser cache lookup observes the corresponding
-//! > `Member` / `MemberPresence` / `MemberShape` / `LocalDecl` /
-//! > `ImportRef` / `ResolvedImportClause` / route fact /
-//! > `ModuleAugmentationIndexShape` (when augmented surface is
-//! > consumed). **Arch-guard**: materialiser code MUST NOT read a
-//! > cache value without recording fact dependencies.
+//! Invariant: every materialiser cache lookup observes the
+//! corresponding `Member` / `MemberPresence` / `MemberShape` /
+//! `LocalDecl` / `ImportRef` / `ResolvedImportClause` / route fact /
+//! `ModuleAugmentationIndexShape` (when augmented surface is consumed).
+//! Materialiser code MUST NOT read a cache value without recording fact
+//! dependencies.
 //!
 //! The grep target is the production materialiser surface
 //! (`crates/verter_session/src/component_meta_materialize.rs` +
@@ -17,15 +15,11 @@
 //! source for cache-read patterns that should be paired with an
 //! `observe` / fact-merge call.
 //!
-//! **Discrimination.** Stage 6d wires the materialiser to consume
-//! observed signatures via `merge_dep_signature_into_local_fence`
-//! (the existing fence-merge path used by route + member reads).
-//! A future refactor that introduces a `cache.peek(...)` call
-//! WITHOUT a paired `merge_dep_signature_into_local_fence(...)` or
-//! `local_fence.push(...)` would slip past this guard — caught by
-//! a future Stage 7 follow-up that promotes the grep into a
-//! semantic dependence check. For Stage 6d we pin the architectural
-//! intent + the locations where observe-pairing already lives.
+//! **Discrimination.** The materialiser consumes observed signatures via
+//! `merge_dep_signature_into_local_fence` (the fence-merge path used by
+//! route + member reads). The guard pins the architectural intent + the
+//! locations where observe-pairing lives, so a dispatch family that drops
+//! its observe pairing trips a count floor.
 
 use std::fs;
 use std::path::PathBuf;
@@ -57,8 +51,8 @@ fn materialiser_pipeline_merges_dep_signature_after_every_dispatch() {
     // Discrimination 1: a real materialiser MUST call
     // `merge_dep_signature_into_local_fence` at least once per
     // dispatch family (route / pick / omit / indexed access /
-    // recursive helper). The Stage 0 baseline carries multiple
-    // call sites; we require at least one per family.
+    // recursive helper). The materialiser carries multiple call
+    // sites; we require at least one per family.
     let merge_count = src.matches("merge_dep_signature_into_local_fence").count();
     assert!(
         merge_count >= 5,
@@ -85,9 +79,12 @@ fn materialiser_pipeline_merges_dep_signature_after_every_dispatch() {
 }
 
 /// The materialiser cache (`component_meta_caches.rs::MaterializeStructureDb`)
-/// MUST store the observed dep-signature on every cached entry.
-/// The discriminating signal is the presence of `dep_signature` on
-/// `MaterializeStructureEntry`.
+/// MUST store the observed `ReadSetSignature` on every cached entry and
+/// own a reverse-indexed store so per-canonical invalidation can drain
+/// every candidate a canonical participates in. The discriminating
+/// signals are the `read_set_signature: ReadSetSignature` carrier, the
+/// `ReverseIndexedCandidateStore` ownership, and the public
+/// `invalidate_for_canonical` drain entry point.
 #[test]
 fn materialise_structure_entry_carries_dep_signature() {
     let path = crates_dir()
@@ -112,15 +109,106 @@ fn materialise_structure_entry_carries_dep_signature() {
          dropping it breaks the fact-validation contract."
     );
 
-    // The reverse index must hold the per-canonical drain set so
-    // `invalidate_for_canonical` can find every entry the
-    // canonical participates in.
+    // The per-canonical reverse index now lives inside the shared
+    // `ReverseIndexedCandidateStore` rather than a bare
+    // `canonical_to_keys` field on the Db. The invariant is the same:
+    // `MaterializeStructureDb` must own a reverse-indexed store so it
+    // can find — and drain — every candidate a given canonical
+    // participates in. Pin both the store ownership and the public
+    // per-canonical drain entry point.
+    let struct_decl = "pub struct MaterializeStructureDb {";
+    let struct_idx = src
+        .find(struct_decl)
+        .expect("expected `pub struct MaterializeStructureDb {` in component_meta_caches.rs");
+    let struct_window = {
+        let after = &src[struct_idx..];
+        let end = after
+            .find("\n}")
+            .expect("expected struct close for MaterializeStructureDb");
+        &after[..end]
+    };
     assert!(
-        src.contains("canonical_to_keys"),
-        "MaterializeStructureDb must carry the per-canonical reverse-index drain map. \
-         The arch-guard pins this field; dropping it would break per-canonical \
-         invalidation."
+        struct_window.contains("store: crate::cache_runtime::ReverseIndexedCandidateStore<"),
+        "MaterializeStructureDb must own a `ReverseIndexedCandidateStore` so the \
+         per-canonical reverse index can drain every candidate a canonical participates \
+         in. The arch-guard pins the reverse-indexed store; dropping it would break \
+         per-canonical invalidation."
     );
+    assert!(
+        !struct_window.contains("DashMap<"),
+        "MaterializeStructureDb must NOT regress to holding a bare `DashMap<...>` of \
+         entries with no per-canonical reverse index — the slots + reverse index belong \
+         to the shared `ReverseIndexedCandidateStore`. A plain map would force O(N) \
+         per-canonical invalidation and lose the reverse-index drain contract."
+    );
+    // Scope the entry-point check to the `impl MaterializeStructureDb`
+    // block so a sibling cache's `invalidate_for_canonical` cannot mask
+    // a drop here.
+    let impl_anchor = "impl MaterializeStructureDb {";
+    let impl_idx = src
+        .find(impl_anchor)
+        .expect("expected `impl MaterializeStructureDb {` in component_meta_caches.rs");
+    let impl_window = {
+        let after = &src[impl_idx + impl_anchor.len()..];
+        let end = ["\nimpl ", "\npub struct ", "\nstruct "]
+            .iter()
+            .filter_map(|m| after.find(m))
+            .min()
+            .unwrap_or(after.len());
+        &after[..end]
+    };
+    assert!(
+        impl_window.contains("pub fn invalidate_for_canonical("),
+        "MaterializeStructureDb must expose `pub fn invalidate_for_canonical(...)` that \
+         drains the store's per-canonical reverse index. The arch-guard pins this entry \
+         point; dropping it would break per-canonical invalidation."
+    );
+
+    // Asserting the entry point EXISTS is NON-discriminating: a no-op body
+    // `pub fn invalidate_for_canonical(&self, _: &str) {}` would pass. Pin
+    // the body: it MUST delegate to the store's per-canonical drain
+    // (`self.store.invalidate_canonical(canonical_id)`). Scope to the
+    // `invalidate_for_canonical` fn body (brace-balanced) so a stubbed /
+    // no-op invalidation — which silently leaks stale candidates after a
+    // content edit — flips the guard RED.
+    let invalidate_body = extract_fn_body(impl_window, "pub fn invalidate_for_canonical(");
+    assert!(
+        invalidate_body.contains("invalidate_canonical("),
+        "MaterializeStructureDb::invalidate_for_canonical MUST delegate to the store's \
+         per-canonical reverse-index drain via `self.store.invalidate_canonical(...)`. A \
+         no-op / stubbed body would advertise per-canonical invalidation while leaking \
+         every stale candidate the canonical participates in. Body:\n{invalidate_body}"
+    );
+}
+
+/// Extract the body of the function whose signature begins at `needle`
+/// in `src` — the brace-balanced span from the first `{` after the
+/// signature to its matching `}`.
+fn extract_fn_body<'a>(src: &'a str, needle: &str) -> &'a str {
+    let start = src
+        .find(needle)
+        .unwrap_or_else(|| panic!("expected `{needle}` in source"));
+    let after_sig = &src[start..];
+    let open = after_sig
+        .find('{')
+        .unwrap_or_else(|| panic!("expected an opening brace for `{needle}`"));
+    let bytes = after_sig.as_bytes();
+    let mut depth = 0usize;
+    let mut idx = open;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &after_sig[open..=idx];
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    panic!("expected a brace-balanced body for `{needle}`");
 }
 
 /// RouteDb consumers MUST emit fact-version refs into the

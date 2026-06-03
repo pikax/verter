@@ -19,6 +19,12 @@ session_metrics = []
 # the upstream nuxt-ui submodule) must gate themselves behind
 # `#[cfg(feature = "external-corpus")]`.
 external-corpus = []
+# Opt-in: enables the trybuild compile-fail driver
+# (`tests/g_compile/compile_fail.rs::workspace_accessor_visibility`). trybuild
+# spawns a full `cargo build` of a fixture crate linking `verter_session`
+# (~100s), so the test is `#[ignore]`d out of the default inner-loop run and
+# enabled in CI via `cargo nextest run -p verter_session --features compile-fail`.
+compile-fail = []
 # Phase 11b diagnosis benchmark: enables the corpus-driven
 # `repo_first_pass_diagnosis_corpus` integration test that the vitest
 # at `packages/benchmark/src/repo-first-pass.spec.ts` invokes via

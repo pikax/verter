@@ -1,34 +1,42 @@
-//! R3/R26/R28 arch guard for the Family A inner caches that
-//! migrated from `dep_signature: DepSignature` to
-//! `fact_dep_signature: Arc<[FactVersionRef]>` in Stage 7C.A1b.
+//! R3/R26/R28 arch guard for the Family A inner caches. The
+//! path-precise fact-dependency rail (`Arc<[FactVersionRef]>` + the
+//! overflow flag) is now carried by the `ReadSetSignature` carrier,
+//! and the four single-entry caches store their value + carrier in the
+//! generic `cache_runtime::CacheEntry<V>` rather than a bespoke
+//! per-cache `*Entry` struct.
 //!
-//! Live Family A `fact_dep_signature` caches (post walker-cluster
-//! deletion — the prepared-surface / prepared-member / prepared-target
-//! / routed-expr caches and their entries are DELETED):
-//!   - `ImportedRegistryEntry` / `ImportedRegistryDb`
-//!   - `DeclarationLookupEntry` / `DeclarationLookupDb`
-//!   - `ResolvabilityEntry` / `ResolvabilityDb`
-//!   - `OwnerCollectionEntry` / `OwnerCollectionDb`
-//!   - `ShapeCacheEntry` / `ShapeCacheDb` (the Block 6.i unification of
-//!     the former `MaterializeMemoEntry` + `MemberShapeCacheEntry`)
+//! Live Family A fact-validated caches (the prepared-surface /
+//! prepared-member / prepared-target / routed-expr caches and their
+//! entries are DELETED — their absence is guarded by
+//! `no_legacy_walker.rs::RETIRED_SYMBOLS`):
+//!   - `ImportedRegistryDb` — its producer's transient
+//!     `ImportedRegistryEntry` still carries
+//!     `fact_dep_signature: Arc<[FactVersionRef]>`, lowered at
+//!     admission to `CacheAdmission::Cacheable { signature:
+//!     ReadSetSignature::new(...), self_root_canonicals,
+//!     validated_at_generation }`.
+//!   - `DeclarationLookupDb` / `ResolvabilityDb` / `OwnerCollectionDb`
+//!     / `ShapeCacheDb` — each stores `Arc<CacheEntry<V>>` via the
+//!     shared `SingleEntryArtifactNode` adapter. The carrier is
+//!     `CacheEntry { signature: ReadSetSignature, self_root_canonicals,
+//!     validated_at_generation }`.
 //!
-//! Each entry MUST carry `fact_dep_signature: Arc<[FactVersionRef]>`
-//! and MUST NOT carry the legacy `dep_signature: DepSignature`. The
-//! warm-read validator routes through
-//! [`crate::fact_signature_helpers::validate_fact_signature_with_self_roots`]
-//! — the strict self-root validator, passing the entry's keyed
-//! canonical(s) as the self-root set — and the producer through the
+//! No cache entry may carry the legacy `dep_signature: DepSignature`
+//! field. The warm-read validator routes through the
+//! `ReadSetSignature::validate_with_self_roots(ctx, &self_roots)`
+//! method (the strict self-root validator, passing the entry's keyed
+//! canonical(s) as the self-root set) and the producer through the
 //! live engine wrappers [`engine_fact_signature_for_exported_type`] /
-//! [`engine_fact_signature_for_materialize_memo`] (and the central
-//! [`crate::fact_signature_helpers::fact_signature_for_canonical_member`]
-//! builder for single-member-keyed scopes) on cold compute.
+//! [`engine_fact_signature_for_materialize_memo`] on cold compute.
 //!
 //! ## Source-grep arch guards
 //!
-//! The first test scans `component_meta_caches.rs` for the migrated
-//! field name shape; the second confirms the legacy field name is
-//! gone. The third pair confirms the producer call-sites use the
-//! new `engine_fact_signature_*` helpers (not the legacy
+//! The first test scans `component_meta_caches.rs` for the carrier
+//! shapes (`Arc<CacheEntry<...>>` on the four single-entry caches,
+//! `fact_dep_signature: Arc<[FactVersionRef]>` on the imported-registry
+//! producer entry) and confirms the legacy field name is gone. The
+//! second confirms the producer call-sites use the new
+//! `engine_fact_signature_*` helpers (not the legacy
 //! `engine_dep_signature_for_canonical`).
 
 use std::fs;
@@ -43,47 +51,129 @@ fn read_session_source(relative: &str) -> String {
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
 }
 
-/// Every Family A entry struct carries `fact_dep_signature:
-/// Arc<[FactVersionRef]>`. Source-grep arch guard.
+/// The Family A fact-validated caches carry the path-precise rail
+/// through the `ReadSetSignature` carrier. The four single-entry caches
+/// store `Arc<CacheEntry<V>>` (the carrier lives on `CacheEntry`); the
+/// imported-registry producer entry still carries the raw
+/// `fact_dep_signature: Arc<[FactVersionRef]>` it lowers at admission.
+/// No cache entry carries the legacy `dep_signature: DepSignature`.
+/// Source-grep arch guard.
 #[test]
 fn family_a_entries_carry_fact_dep_signature() {
     let src = read_session_source("component_meta_caches.rs");
-    // The live Family A `fact_dep_signature` entry set. The walker
-    // cluster's `PreparedTargetEntry` / `PreparedSurfaceEntry` /
-    // `PreparedMemberEntry` / `RoutedExprSurfaceEntry` are DELETED; their
-    // absence is guarded by `no_legacy_walker.rs::RETIRED_SYMBOLS`.
-    const ENTRIES: &[&str] = &[
-        "ImportedRegistryEntry",
-        "DeclarationLookupEntry",
-        "ResolvabilityEntry",
-        "OwnerCollectionEntry",
-        // Block 6.i — `MaterializeMemoEntry` + `MemberShapeCacheEntry`
-        // unified into `ShapeCacheEntry` under the new `ShapeCacheDb`.
-        "ShapeCacheEntry",
+
+    // 1. The four single-entry caches store their value + carrier in the
+    //    generic `Arc<CacheEntry<V>>` rather than a bespoke `*Entry`
+    //    struct. The carrier owns the `ReadSetSignature` rail. A
+    //    regression that swapped the store back to a bespoke entry
+    //    without the carrier would drop this field-shape and FAIL here.
+    //    The walker cluster's `PreparedTargetEntry` / `PreparedSurfaceEntry`
+    //    / `PreparedMemberEntry` / `RoutedExprSurfaceEntry` are DELETED;
+    //    their absence is guarded by `no_legacy_walker.rs::RETIRED_SYMBOLS`.
+    const SINGLE_ENTRY_STORES: &[&str] = &[
+        "entries: DashMap<DeclarationLookupKey, Arc<CacheEntry<Arc<ResolvedTypeDeclaration>>>>",
+        "entries: DashMap<ResolvabilityKey, Arc<CacheEntry<bool>>>",
+        "entries: DashMap<OwnerCollectionKey, Arc<CacheEntry<Option<Arc<TypeExpr>>>>>",
+        "entries: DashMap<ShapeCacheKey, Arc<CacheEntry<MaterializedTypeExpr>>>",
     ];
-    for entry in ENTRIES {
-        let struct_decl = format!("pub struct {entry} {{");
-        let idx = src
-            .find(&struct_decl)
-            .unwrap_or_else(|| panic!("expected `{struct_decl}` in component_meta_caches.rs"));
-        // Window from struct start to the next `}` at column 0
-        // (struct close).
-        let after = &src[idx..];
-        let end = after
-            .find("\n}")
-            .unwrap_or_else(|| panic!("expected struct close for {entry}"));
-        let window = &after[..end];
+    for store in SINGLE_ENTRY_STORES {
         assert!(
-            window.contains("fact_dep_signature: Arc<[FactVersionRef]>"),
-            "{entry} must carry `fact_dep_signature: Arc<[FactVersionRef]>` (R28 migration), \
-             but the struct body did not contain that field. Window:\n{window}"
-        );
-        assert!(
-            !window.contains("dep_signature: DepSignature"),
-            "{entry} must NOT carry the legacy `dep_signature: DepSignature` field after the \
-             R28 migration. Both fields coexisting would violate the clean cutover. Window:\n{window}"
+            src.contains(store),
+            "Family A single-entry cache must store `{store}` — the value + \
+             `ReadSetSignature` carrier live in the generic `cache_runtime::CacheEntry<V>`. \
+             A regression that reverted to a bespoke per-cache `*Entry` struct without \
+             the carrier would drop the path-precise fact-validation rail."
         );
     }
+
+    // 2. The `cache_runtime::CacheEntry` carrier owns the path-precise
+    //    `signature: ReadSetSignature` rail every single-entry cache
+    //    validates through. Pin its presence on the carrier definition —
+    //    scoped STRICTLY to the `CacheEntry<V>` struct body. A file-wide
+    //    `contains("pub signature: ReadSetSignature")` is NON-discriminating:
+    //    the sibling `Candidate<D, V>` struct in the same file carries an
+    //    identical `pub signature: ReadSetSignature` field, so dropping the
+    //    carrier from `CacheEntry` while keeping `Candidate`'s would still
+    //    pass file-wide. Windowing to the `CacheEntry<V>` body makes that
+    //    drop flip the guard RED.
+    let admission = read_session_source("cache_runtime/admission.rs");
+    let cache_entry = struct_window(&admission, "pub(crate) struct CacheEntry<V> {");
+    assert!(
+        cache_entry.contains("pub signature: ReadSetSignature"),
+        "`cache_runtime::CacheEntry<V>` must carry `signature: ReadSetSignature` — the \
+         path-precise rail the four single-entry Family A caches validate against on \
+         every warm hit. Dropping it would leave the stored entries with no observed \
+         facts to revalidate. Window:\n{cache_entry}"
+    );
+    // Negative (scoped to the same `CacheEntry<V>` window): the carrier must
+    // NOT regress to either legacy cache-validity rail. A file-wide negative
+    // would false-match the materialiser carriers' explicitly-documented
+    // non-validity `dispatch_dep_signature: DepSignature` field — so this is
+    // window-scoped, mirroring the `ImportedRegistryEntry` negative below.
+    assert!(
+        !cache_entry.contains("dep_signature: DepSignature"),
+        "`cache_runtime::CacheEntry<V>` must NOT carry the legacy \
+         `dep_signature: DepSignature` cache-validity rail — the sole rail is the \
+         `ReadSetSignature` carrier. A surviving legacy field would mean two coexisting \
+         validity rails. Window:\n{cache_entry}"
+    );
+    assert!(
+        !cache_entry.contains("fact_dep_signature: Arc<["),
+        "`cache_runtime::CacheEntry<V>` must NOT carry the legacy \
+         `fact_dep_signature: Arc<[FactVersionRef]>` raw rail — that transient producer \
+         shape is lowered into the `ReadSetSignature` carrier at admission and must not \
+         survive as a second stored validity rail on the entry. Window:\n{cache_entry}"
+    );
+
+    // 3. The imported-registry producer entry still carries the raw
+    //    `fact_dep_signature: Arc<[FactVersionRef]>` it lowers at
+    //    admission into `CacheAdmission::Cacheable { signature:
+    //    ReadSetSignature::new(...), ... }`.
+    let import_entry = struct_window(&src, "pub struct ImportedRegistryEntry {");
+    assert!(
+        import_entry.contains("fact_dep_signature: Arc<[FactVersionRef]>"),
+        "ImportedRegistryEntry must carry `fact_dep_signature: Arc<[FactVersionRef]>` — \
+         the producer's transient carrier lowered to a `ReadSetSignature` at admission. \
+         Window:\n{import_entry}"
+    );
+    // Negative: the surviving entry struct must NOT carry the legacy
+    //    `dep_signature: DepSignature` cache-validity rail. (The
+    //    materialiser carriers DO keep a `dispatch_dep_signature:
+    //    DepSignature` field, explicitly documented as NOT a
+    //    cache-validity rail — so this negative is scoped to the entry
+    //    struct window, never file-wide, to avoid false-matching that
+    //    legitimate non-validity carrier.)
+    assert!(
+        !import_entry.contains("dep_signature: DepSignature"),
+        "ImportedRegistryEntry must NOT carry the legacy `dep_signature: DepSignature` \
+         cache-validity rail — the path-precise rail is the `ReadSetSignature` carrier. \
+         A surviving legacy field would mean two coexisting validity rails. Window:\n{import_entry}"
+    );
+
+    // 4. The lowering site folds the producer entry's raw rail into the
+    //    `ReadSetSignature` carrier at admission — pin the
+    //    `CacheAdmission::Cacheable { signature: ReadSetSignature::new(...) }`
+    //    shape so a regression that admitted without the carrier FAILS.
+    assert!(
+        src.contains("signature: crate::fact_signature_helpers::ReadSetSignature::new("),
+        "the imported-registry admission lowering must wrap the producer's \
+         `fact_dep_signature` into `ReadSetSignature::new(...)` on the \
+         `CacheAdmission::Cacheable` arm. Admitting without the carrier would bypass \
+         the path-precise validation rail."
+    );
+}
+
+/// Extract the `pub struct NAME { … }` window — from the struct start to
+/// the next `\n}` (column-0 struct close).
+fn struct_window<'a>(src: &'a str, struct_decl: &str) -> &'a str {
+    let idx = src
+        .find(struct_decl)
+        .unwrap_or_else(|| panic!("expected `{struct_decl}` in component_meta_caches.rs"));
+    let after = &src[idx..];
+    let end = after
+        .find("\n}")
+        .unwrap_or_else(|| panic!("expected struct close for `{struct_decl}`"));
+    &after[..end]
 }
 
 /// The legacy `engine_dep_signature_for_canonical` helper is no
@@ -131,221 +221,336 @@ fn family_a_producers_call_new_fact_helpers() {
     );
 }
 
-/// A single Family A `fact_dep_signature` cache and the exact set of
-/// validation/bubble SITES its live read/compute path carries.
+/// A shared validation adapter site and the exact set of
+/// validation/bubble tokens its body carries on the warm-read path.
 ///
-/// The site set is NOT uniform across caches: `ImportedRegistryDb` and
-/// `ShapeCacheDb` expose a separate compute-once `peek` entry point (an
-/// extra warm-read validator + bubble) on top of the cooperative
-/// `get_or_compute`(`_admit`) closures, whereas
-/// `DeclarationLookupDb` / `ResolvabilityDb` / `OwnerCollectionDb` have
-/// only the cooperative method. The guard asserts EACH cache's ACTUAL
-/// required sites, derived structurally from
-/// `component_meta_caches.rs`, never a uniform `>= N` count.
-struct FamilyACacheSpec {
-    /// The `impl XDb {` anchor that opens the cache's primary impl block.
-    impl_anchor: &'static str,
-    /// `Some("pub(crate) fn peek(")` for the two caches that expose a
-    /// compute-once `peek` entry point; `None` otherwise. When present,
-    /// the `peek` body MUST carry exactly one strict warm-read validator
-    /// and exactly one bubble.
-    peek_sig: Option<&'static str>,
-    /// The cooperative cold-compute method signature
-    /// (`get_or_compute`(`_admit`)). Its body MUST carry exactly two
-    /// strict validators (the warm-hit predicate + the post-compute
-    /// revalidator) and exactly two bubbles (the warm-hit bubble + the
-    /// cold-return bubble), partitioned so dropping ANY single one of
-    /// those four atomic sites flips the guard RED.
-    compute_sig: &'static str,
+/// The Family A caches no longer each carry their own per-body
+/// validate/bubble pair: the four single-entry caches
+/// (`DeclarationLookupDb` / `ResolvabilityDb` / `OwnerCollectionDb` /
+/// `ShapeCacheDb`) route their warm read through the SHARED
+/// `SingleEntryArtifactNode::validate` + `single_entry_peek` adapters,
+/// and the query-identity caches (`ImportedRegistryDb`,
+/// `MaterializeStructureDb`) route through `QueryCandidateNode::lookup_candidate`
+/// (plus the bespoke `ImportedRegistryDb::peek`). Each adapter body MUST
+/// carry exactly one strict warm-read validator + one bubble, so
+/// dropping the pair at any shared site flips the guard RED.
+struct AdapterSiteSpec {
+    /// Human-readable name of the adapter site (for panic messages).
+    name: &'static str,
+    /// The `fn` signature prefix that opens the adapter's body. Matched
+    /// against `component_meta_caches.rs` (or, when `impl_anchor` is set,
+    /// against that impl window so a sibling cache's same-named method
+    /// cannot mask a drop here).
+    fn_sig: &'static str,
+    /// When set, scope the `fn_sig` search to this `impl XDb {` window
+    /// first — needed for `ImportedRegistryDb::peek`, whose `pub(crate)
+    /// fn peek(` signature is shared with `ShapeCacheDb::peek`.
+    impl_anchor: Option<&'static str>,
 }
 
-/// The authoritative live inventory of Family A `fact_dep_signature`
-/// caches and their per-cache validation site sets. The
-/// prepared-surface / prepared-member / prepared-target / routed-expr
-/// DBs are DELETED (their absence is guarded by
-/// `no_legacy_walker.rs::RETIRED_SYMBOLS`).
-const FAMILY_A_CACHES: &[FamilyACacheSpec] = &[
-    FamilyACacheSpec {
-        impl_anchor: "impl ImportedRegistryDb {",
-        peek_sig: Some("pub(crate) fn peek("),
-        compute_sig: "pub(crate) fn get_or_compute_admit<F>(",
+/// The shared warm-read validation adapters every live Family A cache
+/// routes through. The prepared-surface / prepared-member /
+/// prepared-target / routed-expr DBs are DELETED (their absence is
+/// guarded by `no_legacy_walker.rs::RETIRED_SYMBOLS`).
+const ADAPTER_SITES: &[AdapterSiteSpec] = &[
+    // The cooperative warm-hit validator shared by the four single-entry
+    // caches (DeclarationLookupDb / ResolvabilityDb / OwnerCollectionDb /
+    // ShapeCacheDb) through `SingleEntryArtifactNode`.
+    AdapterSiteSpec {
+        name: "SingleEntryArtifactNode::validate",
+        fn_sig:
+            "fn validate(\n        &self,\n        _key: &Self::Key,\n        entry: &CacheEntry",
+        impl_anchor: None,
     },
-    FamilyACacheSpec {
-        impl_anchor: "impl DeclarationLookupDb {",
-        peek_sig: None,
-        compute_sig: "pub(crate) fn get_or_compute<F>(",
+    // The compute-once warm-read peek shared by the single-entry caches
+    // that expose a `peek()` entry point (e.g. ShapeCacheDb).
+    AdapterSiteSpec {
+        name: "single_entry_peek",
+        fn_sig: "fn single_entry_peek<K, V>(",
+        impl_anchor: None,
     },
-    FamilyACacheSpec {
-        impl_anchor: "impl ResolvabilityDb {",
-        peek_sig: None,
-        compute_sig: "pub(crate) fn get_or_compute<F>(",
+    // The warm-hit candidate validator shared by the query-identity
+    // caches (ImportedRegistryDb / MaterializeStructureDb) through
+    // `QueryCandidateNode`.
+    AdapterSiteSpec {
+        name: "QueryCandidateNode::lookup_candidate",
+        fn_sig: "fn lookup_candidate(\n        &self,\n        key: &Self::Key,",
+        impl_anchor: None,
     },
-    FamilyACacheSpec {
-        impl_anchor: "impl OwnerCollectionDb {",
-        peek_sig: None,
-        compute_sig: "pub(crate) fn get_or_compute<F>(",
-    },
-    FamilyACacheSpec {
-        impl_anchor: "impl ShapeCacheDb {",
-        peek_sig: Some("pub(crate) fn peek("),
-        compute_sig: "pub(crate) fn get_or_compute<F>(",
+    // The bespoke compute-once peek on the imported-registry cache, which
+    // validates a candidate inline rather than via `single_entry_peek`.
+    AdapterSiteSpec {
+        name: "ImportedRegistryDb::peek",
+        fn_sig: "pub(crate) fn peek(",
+        impl_anchor: Some("impl ImportedRegistryDb {"),
     },
 ];
 
-const STRICT_VALIDATOR: &str = "validate_fact_signature_with_self_roots(";
-const BUBBLE: &str = "bubble_fact_signature(ctx,";
+/// A named Family A cache's routing method: the cold/warm entry point
+/// that MUST construct the shared cache-runtime adapter node and hand it
+/// to the shared `lookup` entry point. Pins that the cache routes through
+/// the adapter rather than reading its backing store directly.
+struct RoutingSiteSpec {
+    /// Human-readable name (for panic messages).
+    name: &'static str,
+    /// The `impl XDb {` window to scope the routing-method search to, so a
+    /// sibling cache's same-named method cannot mask a bypass here.
+    impl_anchor: &'static str,
+    /// The routing-method signature prefix opening the body to scan.
+    fn_sig: &'static str,
+    /// The shared adapter node type the routing body MUST construct —
+    /// `SingleEntryArtifactNode` for the single-entry artifact caches or
+    /// `QueryCandidateNode` for the two query-identity caches. The guard
+    /// captures the `let <BIND> = <node_type> { … }` binding name and then
+    /// asserts the SAME body passes that binding to the shared `lookup`
+    /// (`lookup(&<BIND>,`). Matching by node type + captured binding is
+    /// name-agnostic (a `node`→`adapter` rename still passes) and
+    /// import-agnostic (any module-path prefix before `lookup` is allowed),
+    /// while still discriminating a bypass: a cache that read `self.entries`
+    /// / `self.store` directly never constructs the adapter node, so the
+    /// capture fails and the guard goes RED.
+    node_type: &'static str,
+    /// The backing-store field the constructed adapter node MUST borrow —
+    /// `entries: &self.entries,` / `store: &self.store,`. Pins that the
+    /// adapter node is wired to the cache's real backing store rather than a
+    /// detached throwaway.
+    store_field: &'static str,
+}
+
+/// Every live Family A cache routes its warm/cold read through one of the
+/// two shared cache-runtime adapter families:
+/// - the four single-entry caches build a `SingleEntryArtifactNode {
+///   entries: &self.entries, ... }` and hand it to the artifact-path
+///   `lookup(&node, ...)`.
+/// - the two query-identity caches build a `QueryCandidateNode { store:
+///   &self.store, ... }` and hand it to `crate::cache_runtime::query::lookup`.
+///
+/// Pinning the adapter-node construction + the shared `lookup` call per
+/// cache makes a regression that read the backing store directly (skipping
+/// the adapter's strict warm-read validation) flip the guard RED.
+const ROUTING_SITES: &[RoutingSiteSpec] = &[
+    RoutingSiteSpec {
+        name: "DeclarationLookupDb",
+        impl_anchor: "impl DeclarationLookupDb {",
+        fn_sig: "pub(crate) fn get_or_compute<F>(",
+        node_type: "SingleEntryArtifactNode",
+        store_field: "entries: &self.entries,",
+    },
+    RoutingSiteSpec {
+        name: "ResolvabilityDb",
+        impl_anchor: "impl ResolvabilityDb {",
+        fn_sig: "pub(crate) fn get_or_compute<F>(",
+        node_type: "SingleEntryArtifactNode",
+        store_field: "entries: &self.entries,",
+    },
+    RoutingSiteSpec {
+        name: "OwnerCollectionDb",
+        impl_anchor: "impl OwnerCollectionDb {",
+        fn_sig: "pub(crate) fn get_or_compute<F>(",
+        node_type: "SingleEntryArtifactNode",
+        store_field: "entries: &self.entries,",
+    },
+    RoutingSiteSpec {
+        name: "ShapeCacheDb",
+        impl_anchor: "impl ShapeCacheDb {",
+        fn_sig: "pub(crate) fn get_or_compute<F>(",
+        node_type: "SingleEntryArtifactNode",
+        store_field: "entries: &self.entries,",
+    },
+    RoutingSiteSpec {
+        name: "ImportedRegistryDb",
+        impl_anchor: "impl ImportedRegistryDb {",
+        fn_sig: "pub(crate) fn get_or_compute_admit<F>(",
+        node_type: "QueryCandidateNode",
+        store_field: "store: &self.store,",
+    },
+    RoutingSiteSpec {
+        name: "MaterializeStructureDb",
+        impl_anchor: "impl MaterializeStructureDb {",
+        fn_sig: "pub(crate) fn get_or_compute_admit<F>(",
+        node_type: "QueryCandidateNode",
+        store_field: "store: &self.store,",
+    },
+];
+
+/// The strict self-root validator method on the `ReadSetSignature`
+/// carrier — the SOLE warm-read validity gate. The free-fn form
+/// (`validate_fact_signature_with_self_roots`) is no longer called from
+/// any Family A cache; the carrier method is.
+const STRICT_VALIDATOR: &str = ".validate_with_self_roots(";
+/// The fact-bubble method on the carrier — propagates the entry's
+/// observed facts into the caller's outer tracer on a warm hit.
+const BUBBLE: &str = ".bubble(";
+/// The legacy lazy free-fn validator that routes a self-root
+/// `FileWholeHash` through the untracked-accept rule. Forbidden.
+const LAZY_VALIDATOR: &str = "validate_fact_signature(ctx,";
 
 /// Extract the primary `impl XDb { … }` window — from `anchor` up to
-/// the next top-level `\nimpl ` or `\npub struct ` (whichever comes
-/// first), exclusive. The validation/bubble call sites for a cache all
-/// live in its primary impl block, so this window is the exact scope to
-/// resolve the cache's methods within.
+/// the next top-level `\nimpl ` / `\npub struct ` / `\nstruct `,
+/// exclusive.
 fn extract_db_impl_window<'a>(src: &'a str, anchor: &str) -> &'a str {
     let start = src
         .find(anchor)
         .unwrap_or_else(|| panic!("expected `{anchor}` in component_meta_caches.rs"));
-    let body = &src[start..];
-    let after = &body[anchor.len()..];
-    let rel_end = ["\nimpl ", "\npub struct "]
+    let after = &src[start + anchor.len()..];
+    let rel_end = ["\nimpl ", "\npub struct ", "\nstruct "]
         .iter()
         .filter_map(|m| after.find(m))
         .min()
         .unwrap_or(after.len());
-    &body[..anchor.len() + rel_end]
+    &after[..rel_end]
 }
 
-/// Byte index (within `haystack`) of the start of the `n`-th (1-based)
-/// occurrence of `needle`, or `None` if there are fewer than `n`.
-fn nth_occurrence(haystack: &str, needle: &str, n: usize) -> Option<usize> {
-    haystack
-        .match_indices(needle)
-        .nth(n - 1)
-        .map(|(idx, _)| idx)
-}
-
-/// Assert that `region` (a named code site) carries EXACTLY one strict
+/// Assert that `region` (a named adapter site) carries EXACTLY one strict
 /// validator and EXACTLY one bubble — a binary present/absent check at
-/// that single site, not an aggregate `>= N` count. `site` and `cache`
-/// name the failing site in the panic.
-fn assert_one_validator_one_bubble(region: &str, site: &str, cache: &str) {
+/// that single site, not an aggregate `>= N` count.
+fn assert_one_validator_one_bubble(region: &str, site: &str) {
     let validators = region.matches(STRICT_VALIDATOR).count();
     assert_eq!(
         validators, 1,
-        "{cache} {site} MUST carry EXACTLY one `{STRICT_VALIDATOR}...)` — dropping it leaves a \
+        "{site} MUST carry EXACTLY one `{STRICT_VALIDATOR}...)` — dropping it leaves a \
          stale-serve hole, duplicating it signals a mis-split. Observed {validators}. Region:\n{region}"
     );
     let bubbles = region.matches(BUBBLE).count();
     assert_eq!(
         bubbles, 1,
-        "{cache} {site} MUST carry EXACTLY one `{BUBBLE} ...)` so outer tracers see the inner \
+        "{site} MUST carry EXACTLY one `{BUBBLE}...)` so outer tracers see the inner \
          observation set at this site. Observed {bubbles}. Region:\n{region}"
     );
 }
 
-/// Every live Family A `fact_dep_signature` cache validates strictly
-/// through `validate_fact_signature_with_self_roots` — the strict
-/// self-root validator: the entry's keyed canonical(s) are passed as the
-/// self-root set, so the leading self-root `FileWholeHash` is validated
-/// strictly (a same-canonical edit, or a keyed canonical untracked by the
-/// live store view, rejects the entry) while cross-file dependency facts
-/// keep lazy permissiveness. The legacy lazy `validate_fact_signature`
+/// Every live Family A cache validates its warm-read path strictly
+/// through the `ReadSetSignature::validate_with_self_roots(ctx,
+/// &self_roots)` carrier method — the strict self-root validator: the
+/// entry's keyed canonical(s) are passed as the self-root set, so the
+/// leading self-root `FileWholeHash` is validated strictly (a
+/// same-canonical edit, or a keyed canonical untracked by the live store
+/// view, rejects the entry) while cross-file dependency facts keep lazy
+/// permissiveness. The legacy lazy free-fn `validate_fact_signature`
 /// warm-hit validator is forbidden.
 ///
-/// BINARY per-named-SITE guard (NOT an aggregate `>= N` count): each
-/// cache's required sites are derived structurally from the source and
-/// asserted individually, so dropping ANY single live site flips the
-/// guard RED — and a stray validator added to an unrelated cache/scope
-/// can never mask a cache that dropped one (the windows are
-/// method/closure-scoped, never file-wide). The required sites are:
-///
-/// - `peek` (only `ImportedRegistryDb` / `ShapeCacheDb`): exactly one
-///   warm-read validator + one bubble in the brace-balanced `peek` body.
-/// - `get_or_compute`(`_admit`) **warm-hit region** — the method body up
-///   to the cold-return bubble (the 2nd bubble token): exactly one
-///   warm-hit validator + one warm-hit bubble.
-/// - `get_or_compute`(`_admit`) **post-compute region** — from the
-///   cold-return bubble to the method end: exactly one post-compute
-///   revalidator + one cold-return bubble.
-///
-/// Because the two `get_or_compute` validators live in two disjoint
-/// regions partitioned at the cold-return bubble, dropping the warm-hit
-/// validator (warm region → 0) is detected INDEPENDENTLY of the
-/// post-compute revalidator (and vice versa); a drop-one-add-one swap
-/// within the method cannot keep the guard green.
+/// BINARY per-named-SITE guard (NOT an aggregate `>= N` count): the four
+/// caches no longer each carry their own validate/bubble pair — they
+/// route through a small set of SHARED adapter bodies. The guard asserts
+/// each shared adapter carries exactly one validator + one bubble, so
+/// dropping the pair at any shared site (which would break every cache
+/// routing through it) flips the guard RED. The windows are
+/// fn-body-scoped, never file-wide, so a stray validator elsewhere can
+/// never mask a dropped pair.
 #[test]
 fn family_a_warm_hit_uses_fact_validation() {
     let src = read_session_source("component_meta_caches.rs");
 
-    for spec in FAMILY_A_CACHES {
-        let cache = spec.impl_anchor;
-        let window = extract_db_impl_window(&src, cache);
+    for spec in ADAPTER_SITES {
+        let search_scope: &str = match spec.impl_anchor {
+            Some(anchor) => extract_db_impl_window(&src, anchor),
+            None => &src,
+        };
+        let body = extract_fn_body(search_scope, spec.fn_sig);
+        assert_one_validator_one_bubble(body, spec.name);
+    }
 
-        // --- Site 1 (conditional): the compute-once `peek` entry point.
-        // Present only on the two caches that expose it. Exactly one
-        // warm-read validator + one bubble.
-        if let Some(peek_sig) = spec.peek_sig {
-            let peek_body = extract_fn_body(window, peek_sig);
-            assert_one_validator_one_bubble(peek_body, "peek", cache);
-        } else {
-            assert!(
-                !window.contains("pub(crate) fn peek("),
-                "{cache} unexpectedly grew a `peek` method — update FAMILY_A_CACHES to assert its \
-                 warm-read validator + bubble site instead of silently ignoring it."
-            );
-        }
+    // Proving the SHARED adapters validate is necessary but NOT sufficient:
+    // it does not prove each Family A cache actually ROUTES its warm read
+    // through those adapters. A cache that read `self.entries` / `self.store`
+    // directly — bypassing the adapter entirely — would still pass the
+    // adapter-body checks above. So pin, per named cache, that its
+    // cold/warm routing method constructs the shared adapter node and hands
+    // it to the shared `lookup` entry point. Each window is the cache's
+    // routing-method body (scoped to its own `impl XDb {`), so a sibling
+    // cache's routing cannot mask a bypass here.
+    //
+    // The check is STRUCTURAL, not name-pinned: capture the `let <BIND> =
+    // <node_type> { … }` binding identifier (regardless of the chosen name)
+    // and then assert the SAME body hands THAT binding to the shared
+    // `lookup(&<BIND>,` (regardless of any module-path prefix before
+    // `lookup`). A harmless local rename (`node`→`adapter`) or a query
+    // `lookup` import alias still passes; a bypass that reads `self.entries`
+    // / `self.store` directly never constructs the adapter node, so the
+    // capture fails and the guard goes RED — and a body that builds the node
+    // but never passes it to `lookup` has no `lookup(&<BIND>,` and also goes
+    // RED.
+    let node_binding_re =
+        regex::Regex::new(r"let\s+(\w+)\s*=\s*(SingleEntryArtifactNode|QueryCandidateNode)\s*\{")
+            .expect("routing node-binding regex");
+    for spec in ROUTING_SITES {
+        let impl_window = extract_db_impl_window(&src, spec.impl_anchor);
+        let body = extract_fn_body(impl_window, spec.fn_sig);
 
-        // The cooperative cold-compute method body. It carries the
-        // warm-hit closure, the cold-return closure, and the post-compute
-        // revalidator closure (the `compute` builder carries neither
-        // token). Partition the body at the cold-return bubble — the 2nd
-        // `bubble_fact_signature(ctx, ...)` occurrence — so the warm-hit
-        // validator (before) and post-compute revalidator (after) land in
-        // disjoint regions.
-        let compute_body = extract_fn_body(window, spec.compute_sig);
-        let split = nth_occurrence(compute_body, BUBBLE, 2).unwrap_or_else(|| {
+        // Capture the adapter-node binding for THIS spec's node type.
+        let captured = node_binding_re
+            .captures_iter(body)
+            .find(|c| &c[2] == spec.node_type);
+        let bind = captured.unwrap_or_else(|| {
             panic!(
-                "{cache} `{}` MUST carry two `{BUBBLE} ...)` sites (warm-hit + cold-return); fewer \
-                 than two means a bubble site was dropped. Body:\n{compute_body}",
-                spec.compute_sig
+                "{} MUST construct the shared cache-runtime adapter node \
+                 `{} {{ … }}` in its `{}` body — a cache that read its backing \
+                 store (`self.entries` / `self.store`) directly would carry no \
+                 adapter-node construction and bypass the strict warm-read fact \
+                 validation the adapter enforces. Body:\n{body}",
+                spec.name, spec.node_type, spec.fn_sig,
             )
         });
-        let (warm_region, post_region) = compute_body.split_at(split);
+        let bind = bind[1].to_string();
 
-        // --- Site 2: the warm-hit closure (validator + bubble before the
-        // cold-return bubble). The `compute` builder in this region
-        // carries neither token, so the region holds exactly the warm-hit
-        // pair.
-        assert_one_validator_one_bubble(warm_region, "get_or_compute warm-hit closure", cache);
-
-        // --- Sites 3 + 4: the cold-return bubble + the post-compute
-        // revalidator. Exactly one validator (revalidator) + one bubble
-        // (cold-return) from the split point onward.
-        assert_one_validator_one_bubble(
-            post_region,
-            "get_or_compute cold-return bubble + post-compute revalidator",
-            cache,
+        // The constructed node must borrow the cache's real backing store.
+        assert!(
+            body.contains(spec.store_field),
+            "{} adapter node `{}` must borrow its backing store (`{}`) in its \
+             `{}` body. Body:\n{body}",
+            spec.name,
+            spec.node_type,
+            spec.store_field,
+            spec.fn_sig,
         );
 
-        // The lazy `validate_fact_signature(ctx, …)` is forbidden inside
-        // a Family A cache impl: it routes a self-root `FileWholeHash`
-        // through the untracked-accept rule and would serve stale
-        // entries. Only the strict self-root variant is permitted.
+        // The SAME body must hand THAT captured binding to the shared
+        // `lookup`. The `lookup(&<BIND>,` substring is module-path-agnostic
+        // (any prefix before `lookup` is allowed) and name-agnostic (the
+        // captured binding, not a literal `node`).
+        let lookup_call = format!("lookup(&{bind},");
         assert!(
-            !window.contains("validate_fact_signature(ctx,"),
-            "{cache} MUST NOT call the lazy `validate_fact_signature(ctx, ...)` — the lazy \
-             validator routes a self-root FileWholeHash through the untracked-accept rule \
-             and serves stale entries. Use `validate_fact_signature_with_self_roots` with \
-             the entry's keyed canonical(s) as the self-root set."
+            body.contains(&lookup_call),
+            "{} MUST hand its adapter node `{bind}` to the shared `lookup` \
+             entry point: its `{}` body must contain `{lookup_call}`. A body \
+             that constructs the adapter node but never passes it to `lookup` \
+             skips the shared strict warm-read fact validation. Body:\n{body}",
+            spec.name,
+            spec.fn_sig,
         );
     }
 
-    // Belt-and-braces: the lazy validator must be absent file-wide for
-    // any Family A cache (no site outside the primary impl windows
-    // either).
+    // The cold winner bubbles + post-compute revalidates in the shared
+    // `cache_runtime` substrate (`node.rs`). There are TWO cold-projection
+    // sites — the artifact path (`fn lookup<N: ArtifactNode>`) and the
+    // query-identity path (`fn lookup<N: QueryNode>`) — and each carries its
+    // own cold-winner bubble closure + post-compute revalidator closure. A
+    // file-wide `contains(STRICT_VALIDATOR)` / `contains(BUBBLE)` is
+    // NON-discriminating: dropping the pair from EITHER cold path would still
+    // pass because the OTHER path's pair satisfies the file-wide match. Scope
+    // each cold-projection body separately and assert exactly-one validator +
+    // exactly-one bubble in EACH (mirroring the warm-adapter exact-count
+    // pattern), so dropping either pair flips the guard RED.
+    let node_src = read_session_source("cache_runtime/node.rs");
+    let artifact_lookup = extract_fn_body(&node_src, "pub(crate) fn lookup<N: ArtifactNode>(");
+    assert_one_validator_one_bubble(artifact_lookup, "cache_runtime::node::lookup<ArtifactNode>");
+    let query_lookup = extract_fn_body(&node_src, "pub(crate) fn lookup<N: QueryNode>(");
+    assert_one_validator_one_bubble(
+        query_lookup,
+        "cache_runtime::node::query::lookup<QueryNode>",
+    );
+
+    // The lazy free-fn `validate_fact_signature(ctx, …)` is forbidden
+    // file-wide: it routes a self-root `FileWholeHash` through the
+    // untracked-accept rule and would serve stale entries. Only the
+    // strict carrier method is permitted for Family A caches.
     assert!(
-        !src.contains("validate_fact_signature(ctx,"),
-        "component_meta_caches.rs must NOT call the lazy `validate_fact_signature(ctx, ...)` \
-         anywhere — only the strict self-root variant is permitted for Family A caches."
+        !src.contains(LAZY_VALIDATOR),
+        "component_meta_caches.rs must NOT call the lazy `{LAZY_VALIDATOR} ...)` anywhere — \
+         the lazy validator routes a self-root FileWholeHash through the untracked-accept \
+         rule and serves stale entries. Use the strict \
+         `ReadSetSignature::validate_with_self_roots(ctx, &self_roots)` carrier method \
+         with the entry's keyed canonical(s) as the self-root set."
     );
 }
 
