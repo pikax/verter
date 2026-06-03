@@ -14,12 +14,31 @@ plus the two per-track landed-vs-remaining analyses. **This document SUPERSEDES
 the two original plans for all REMAINING work.** The originals stay as
 historical / per-item detail reference only.
 
+### Native-typeinfo-parity doc set (indexed here)
+
+The native TypeScript-parity typeinfo architecture is documented as one parent
+plus four children. This unified plan is their **sequencing authority** and
+indexes the whole set at the owning U-blocks below; each subplan links back here
+and to the parent architecture via its standard subplan header.
+
+| File | Owns | Owning U-block(s) |
+|---|---|---|
+| `docs/arch/native-typeinfo-parity.md` | **Parent architecture** — engine architecture, capability map, query/fact authority, the per-block contract template, the two-table manifest ledger, the crash-safe cutover/ledger transaction contract, the guards index | spans `U0`–`U15`; indexed at U0/U2/U6/U15 |
+| `docs/arch/native-typeinfo-parity-u2-reducers.md` | U2 reducer / relation / utility / indexed / mapped / template / class / enum / module / JSX foundations + the U0 manifest/ledger substrate | U0, U2 |
+| `docs/arch/native-flow-return.md` | U6 flow chapter — the demand-sliced `ReturnPathPeeker` (two-frontier model) and the flow IR | U6 |
+| `docs/arch/native-typeinfo-parity-cache-export-session.md` | U3 / U8 / U10 / U11 / U12 / U13 — facts, exporter, DB, session, projections, wire | U3, U8, U10, U11, U12, U13 |
+| `docs/arch/native-typeinfo-parity-adapters-final-lift.md` | U14 / U15 — framework adapters, integrations, final lift | U14, U15 |
+
+The foundation those documents build on is
+`docs/arch/semantic-type-graph-plan-recovered.md` (graph / wire / cache
+foundation).
+
 ---
 
 ## 1. Landed-context preamble
 
-**Current tip:** `b36e0835` on `refactor/semantic-db-overhaul` (== the B7c land
-tip; clean working tree).
+**Current tip:** `51a49a35` on `refactor/semantic-db-overhaul` (clean working
+tree). `b36e0835` was the B7c land point, now 13 commits back.
 
 ### What is LANDED
 
@@ -83,12 +102,12 @@ tip; clean working tree).
   reshaped from 9× `exactness_*: u32` scalar fields to one
   `exactness_counts: BTreeMap<ExactnessTag, u32>` map field.
 
-### Known-failure baseline at the tip
+### Known-failure baseline (recorded at the B7c land; re-derived at implementation)
 
-The tree carries a **stable 8-failure baseline** at `b36e0835`, all
-long-standing and **OUT OF SCOPE for this unified plan** (they are a Block-1.A
-`fact_dep_signature` substrate migration cluster carried forward since
-reconcile-#2/#3):
+The recorded historical baseline is the **long-standing 8-failure cluster recorded
+at the B7c land (`b36e0835`)** — all long-standing and **OUT OF SCOPE for this
+unified plan** (a Block-1.A `fact_dep_signature` substrate migration cluster carried
+forward since reconcile-#2/#3):
 
 - `compile_tier_signature_carries_*` ×5
   (`member`, `member_presence`, `import_ref`, `route_surface`,
@@ -97,12 +116,20 @@ reconcile-#2/#3):
   `family_a_warm_hit_uses_fact_validation`)
 - `materialise_structure_entry_carries_dep_signature` ×1
 
+This is the **historical reference point** as of `b36e0835`, NOT a verified count at
+the current tip. HEAD `51a49a35` is **13 commits ahead** of `b36e0835`, and this plan
+does NOT itself run the workspace — so implementation **re-derives the live baseline
+at each block's entry gate at the then-current tip** (the separate later effort), and
+treats the cluster above as the recorded starting set to reconcile against, not a
+frozen count to assert at `51a49a35`.
+
 Plus one **environment-only** non-failure: `typeinfo_ts_bindings_*` fails in a
 `node_modules`-less worktree (it regenerates TS bindings via the workspace `buf`
 binary) and **PASSES on the main checkout with `node_modules` present** /
 post-`pnpm install`. It is not a code failure.
 
-Every block's verification expects this exact baseline and zero NEW failures.
+Every block's verification expects ZERO NEW failures over the baseline re-derived at
+that block's entry gate (at the then-current tip), not a count frozen to an old commit.
 
 ---
 
@@ -254,6 +281,10 @@ guards**. Sequence is faithful to §A; do not reorder.
 ### U0 — Finish Typeinfo Contract Gaps  **(NEXT primary block)**
 
 - **Source track:** semantic-graph (R-0a).
+- **Parity docs:** parent `docs/arch/native-typeinfo-parity.md` (manifest ledger
+  §10, cutover transaction §§11–14) + child
+  `docs/arch/native-typeinfo-parity-u2-reducers.md` (the U0 manifest/ledger
+  foundation block, `U0.MANIFEST_SUBSTRATE`).
 - **Scope:** Close the contract gaps A0a left.
   - Add the `AuditedResult<T, E>` carrier in **`crates/verter_audit/src/audited_result.rs`**
     (NOT `verter_protocol`: it is generic over `T`/`E`, which protobuf cannot
@@ -262,18 +293,46 @@ guards**. Sequence is faithful to §A; do not reorder.
     inversion). It does not exist anywhere in the tree (genuinely net-new, 0 hits).
     `packages/typeinfo` imports the generated TS type; there is no hand-written
     mirror.
-  - **Unignore-manifest — EXTEND/RECONCILE the A0a-landed manifest, do NOT create a
-    second one.** A0a already landed the manifest as a Rust test, not a doc:
+  - **Unignore-manifest — EXTEND the A0a-landed manifest into the two-table
+    ledger end-state, do NOT create a second one.** A0a already landed the manifest
+    as a Rust test, not a doc:
     `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs` +
-    `tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs` (363 rows, schema
-    `IgnoredTestRow { file, function, substrate: TargetSubstrate, unblocker }`,
-    `EXPECTED_TOTAL_IGNORED_COUNT = 363`), with ~10 backing guards. U0 EXTENDS this
-    landed manifest + its guards to cover any new Phase-0a contract scope. The
-    schema is already the intended one — keep the landed `substrate` /
-    `unblocker` columns (do NOT introduce a competing `target_phase` /
-    `target_substrate` / `unblocked_by` schema at a different path). There is no
-    separate `typeinfo_tests_unignore_plan.md` doc — the manifest IS the `.rs`
-    test, so the reconciliation is a no-op schema confirm.
+    `tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs` (363 rows,
+    `EXPECTED_TOTAL_IGNORED_COUNT = 363`), with ~10 backing guards. U0 keeps that
+    same in-repo `.rs` test as the single ledger (there is no separate
+    `typeinfo_tests_unignore_plan.md` doc and no second manifest at a competing
+    path) and EXTENDS it to the **two-table ledger** the parent architecture
+    requires (`native-typeinfo-parity.md` §10):
+    - **`IgnoredTestRow`** holds EXACTLY the 363 ignored test-site rows — count-guarded
+      at 363 and bijective with the source `#[ignore]`s — with the extended row schema
+      (`substrate: TargetSubstrate`, `capability`, `organ`, `owning_u_block`,
+      `block_id`, `semantic_queries`, `proof: ProofRequirement`, `status: IgnoreStatus`,
+      `unblocker`).
+    - **`AdditionalProofRow`** is a SEPARATE coverage-only table for new/additional
+      fixtures (the JSX no-new-key submatrix, an additional-tests bucket). It is
+      EXCLUDED from the ignored-count + bijection guards (it carries no `IgnoreStatus`)
+      but still requires a `ProofRequirement` + a coverage-table entry; a fixture
+      corresponding to an existing ignored row stays an `IgnoredTestRow` (never
+      duplicated).
+    - **`IgnoreStatus { Ignored, Verifying, Lifted }`** is the per-`IgnoredTestRow`
+      lifecycle; `ProofRequirement` + the GENERATED proof registry + the row-test
+      wrapper make "every row resolves to an executable proof its own test consumes"
+      mechanical; the U0 row-exact capability→mechanism→proof coverage table
+      (`native-typeinfo-parity.md` §10.4 / §10.4.1) DEFINES completeness.
+    Do NOT migrate to a competing `target_phase` / `target_substrate` / `unblocked_by`
+    schema at a different path — the landed `substrate` / `unblocker` columns are
+    preserved and extended in place. See `native-typeinfo-parity.md` §10 for the full
+    two-table ledger schema, the proof model, and the exact-363 count/bijection
+    contract (cited, not duplicated here).
+  - **Cutover state — namespace the `.cutover-state` `[typeinfo_parity]` tokens
+    (U0 deliverable).** Add the parallel-safe `[typeinfo_parity]` section to
+    `.cutover-state` (block tokens under `.typeinfo_parity.landed_blocks` /
+    `.active_blocks`, NOT the legacy top-level keys), the two-namespace TOML schema,
+    the namespaced two-phase xtask command, and the crash-safe two-phase
+    prepare-verify → gate → accept/abort cutover transaction (revision-CAS,
+    pending-transaction journal/WAL, the 4-part done predicate). The legacy top-level
+    cutover tokens are neither migrated nor reset. See `native-typeinfo-parity.md`
+    §§11–14 for the transaction contract (cited, not duplicated).
   - Add the remaining Phase-0a static guards not covered by A0a (symbol-node
     invariants, origin-edge taxonomy, closure-bound, substitution-canonicalisation,
     request-uniformity, the schema-version closed-surface pins) — see the Guards
@@ -287,12 +346,14 @@ guards**. Sequence is faithful to §A; do not reorder.
 - **Risk:** small-medium (the `AuditedResult` carrier + additive guards + a
   manifest reconciliation/rename of the A0a-landed test).
 - **Required deletions:** none net-new for the contract surface, BUT the
-  unignore-manifest is a reconciliation, not a fresh add: do NOT create a duplicate
-  manifest at a second path with a competing schema — the A0a-landed
-  `typeinfo_ignored_test_manifest.rs` + its `manifest_data/` rows + its backing
-  guards stay in place under the already-landed `substrate` / `unblocker`
-  schema (a no-op confirm; do NOT migrate to a competing schema). `AuditedResult`
-  is genuinely net-new.
+  unignore-manifest is an EXTENSION of the A0a-landed manifest into the two-table
+  ledger end-state, not a fresh add: do NOT create a duplicate manifest at a second
+  path with a competing schema — the A0a-landed `typeinfo_ignored_test_manifest.rs`
+  + its `manifest_data/` rows + its backing guards stay in place and grow the
+  `IgnoredTestRow` schema + the separate `AdditionalProofRow` table + `IgnoreStatus`
+  / `ProofRequirement` in place (preserving the landed `substrate` / `unblocker`
+  columns; do NOT migrate to a competing `target_phase` / `target_substrate` /
+  `unblocked_by` schema). `AuditedResult` is genuinely net-new.
 - **Guards (the exhaustive Phase-0a remaining set per §R-0a / §8.0 / §A.23 — no
   silent "subset + etc."):**
   - **Dependency / projection:** `dependency_direction_one_way` (the typeinfo
@@ -368,24 +429,65 @@ guards**. Sequence is faithful to §A; do not reorder.
 
 - **Source track:** MERGED (semantic-graph R-1 + cache-runtime B4-completion).
   See the dedicated co-sequencing section (§5).
+- **Parity docs:** parent `docs/arch/native-typeinfo-parity.md` (query-key
+  taxonomy §2, typed `SemanticQueryValue` value-domain §3) + child
+  `docs/arch/native-typeinfo-parity-u2-reducers.md` (the U2 reducer / relation /
+  utility / indexed / mapped / template / class / enum / module / JSX blocks).
 - **Scope (ONE clean cutover — no migrate-twice):**
   1. Finalize the **`SemanticQueryKey` identity SHAPE once** (the slot-identity
      model for every variant): migrate existing `Instantiate { base }` /
      `ResolveMacroPayload { owner }` from `DeclKey` → `ResolvedDeclSlotIdentity`
-     (slot identity), AND add the **7 new variants** in that identity shape
-     (`ResolveMergedDeclaration`, `ResolveModuleAugmentation`,
+     (slot identity), AND add the **7 U2 variants** in that identity shape
+     (`ResolveMergedDeclaration`, **`ResolveDeclarationAugmentation`**,
      `ResolveAmbientNamespace`, `ResolveOverloadSet`, `ResolveEnum`,
-     `FlowNarrowingAt`, `ContextualTypeAt`). Every variant routes through
+     `FlowNarrowingAt`, `ContextualTypeAt`). The seventh variant is the
+     **generalized** augmentation key: the former `ResolveModuleAugmentation` slot
+     is broadened to `ResolveDeclarationAugmentation { target: Module | Global,
+     context: DeclarationAnalysisContext }` so module AND global
+     declaration-environment-mutation facts share ONE concrete `SemanticQueryKey`
+     identity (resolving to `SemanticQueryValue::DeclarationAnalysis`, never a
+     `GraphTypeNode` arm). This is an existing-slot generalization, NOT a sixth U2
+     variant — the slot count stays **seven** and the added-key count stays exactly
+     **five** (below). Every variant routes through
      `ProjectSemanticDispatch::execute` (the one-engine rule). This finalizes the
      identity SHAPE — later ADDITIVE variants land in that same slot-identity shape
-     with NO cache re-key (notably U6's `SemanticQueryKey::FlowReturn`, B11); adding
-     a later variant is additive, not a second migration.
-  2. Add the matching `SemanticNodeData::{MergedDeclaration, ModuleAugmentation,
-     AmbientNamespace, Class, Enum}` producers in `verter_semantic::analysis`
-     (namespace / merge / class analysis) + `verter_session::semantic_query`.
+     with NO cache re-key; adding a later variant is additive, not a second
+     migration.
+     - **Added query keys (exactly five beyond the seven; parent §2.3).** Register
+       the five new `SemanticQueryKey` variants in the final slot-identity shape,
+       each dispatched through `ProjectSemanticDispatch::execute`:
+       - **`ResolveClassSurface`** (lands here, U2) — instance/static heritage with
+         generic substitution, member-demand aware (`{ decl_slot, type_args, side,
+         demand, context: ClassSurfaceContext }`). Generic `ResolveClass` folds in.
+       - **`ApparentType`** (lands here, U2) — primitive/array/constrained-generic
+         apparent member lookup via lib facts (`{ base, demand, context:
+         ApparentTypeContext }`). Named `ApparentType`, not `GetApparentType`.
+       - **`TemplateLiteralReduce`** (lands here, U2) — template-literal distribution,
+         intrinsics, and `infer` splitting (`{ pattern, args, context:
+         TemplateLiteralReduceContext }`).
+       - **`FlowReturn`** (lands in **U6**, additive in this same shape, no re-key) —
+         the demand-sliced return/body flow query (`{ function_slot,
+         normalized_type_args, context, demand, input }`).
+       - **`ResolveCall`** (lands in **U6** with the U2 `ResolveOverloadSet` key as a
+         dependency) — reusable call resolution with its own cache identity
+         (`{ callee, call_kind, receiver_this, args, explicit_type_args,
+         contextual_result, policy, context }`); `CallResolve` is PROMOTED to
+         first-class, not folded.
+       Each added key carries an explicit per-key `*Context` (split env hashes only,
+       R21; no content/version hash or `fact_dep_signature`, R6) and a
+       no-cross-context-warm-hit guard. The existing `Relate` key is upgraded in the
+       same shape (full relation identity, parent §2.7) — an existing-key upgrade,
+       not a sixth added key.
+  2. Add the matching producers in `verter_semantic::analysis` (namespace / merge /
+     class analysis) + `verter_session::semantic_query`: the type-value
+     `SemanticNodeData::{MergedDeclaration, AmbientNamespace, Class, Enum}` producers
+     plus the `DeclarationAnalysisGraph` (module + global augmentation) facts that
+     `ResolveDeclarationAugmentation` resolves to — declaration/environment-mutation
+     facts are NOT smuggled into `GraphTypeNode` (parent §1.3, §3).
      **Cross-file declaration merging lands HERE** (not deferred) per §9.5;
-     `ResolveModuleAugmentation` rides `FileArtifactStore::augmentation_index`
-     (landed).
+     `ResolveDeclarationAugmentation` rides `FileArtifactStore::augmentation_index`
+     (landed), its `AugmentationTargetKey` derived from `DeclarationAnalysisContext`
+     at execution time.
   3. Enumerate the remaining B4 caches onto `ArtifactNode` / `QueryNode` against
      that same final key model: `FileArtifactStore`, `ResolvedImportFacts`,
      typed-IR resolve, `MemberSemanticFactStore`, `MemberDisplayFactStore`,
@@ -423,6 +525,9 @@ guards**. Sequence is faithful to §A; do not reorder.
 ### U3 — Delete Bespoke Invalidation (B8)
 
 - **Source track:** cache-runtime (with semantic coupling).
+- **Parity docs:** child `docs/arch/native-typeinfo-parity-cache-export-session.md`
+  (owns U3 / U8 / U10 / U11 / U12 / U13 — facts, exporter, DB, session, projections,
+  wire), under parent `docs/arch/native-typeinfo-parity.md`.
 - **Scope:** Route the 10 typed component-meta DB wrappers + remaining host
   caches through the U2 nodes. DELETE `component_meta_caches.rs` per-DB `clear_*`
   reverse-dependent eviction authority (replaced by validated lazy revalidation
@@ -490,20 +595,27 @@ guards**. Sequence is faithful to §A; do not reorder.
 ### U6 — Native Flow Return (B11)
 
 - **Source track:** cache-runtime (with a semantic-key touch).
-- **Scope:** Move `/tmp/verter-native-flow-return-coverage.md` →
-  `docs/arch/native-flow-return.md` (FIRST task). Add `FlowBodyHashNode` /
+- **Parity docs:** child `docs/arch/native-flow-return.md` (the U6 flow chapter —
+  the demand-sliced `ReturnPathPeeker` two-frontier model + the flow IR), under
+  parent `docs/arch/native-typeinfo-parity.md`. The flow-return coverage detail
+  lives in this in-repo doc and the parent's coverage table (§10.4 / §10.4.1), never
+  a scratch/temp artifact.
+- **Scope:** The flow-return architecture is documented at
+  `docs/arch/native-flow-return.md` (the demand-sliced `ReturnPathPeeker` +
+  flow IR). Add `FlowBodyHashNode` /
   `FlowBodyHashKey` / `FlowBodyHashOutcome` (fail-closed: `BudgetExceeded` →
   `ReturnOnly`, `Hash(_)` → `Cacheable`) and `FlowLoweredBodyNode` /
   `FlowLoweredBodyKey` / `FlowLoweredBody` as B4-style nodes. Add
-  `SemanticQueryKey::FlowReturn` query-node variant (routes through
-  `ProjectSemanticDispatch::execute`). Body-hash production is SPLIT from body
-  lowering (`FlowLoweredBodyNode::compute` must NOT call
-  `compute_body_semantic_hash`).
+  `SemanticQueryKey::FlowReturn` query-node variant (the additive U6 key, registered
+  in the U2 final slot-identity shape with no cache re-key; routes through
+  `ProjectSemanticDispatch::execute`); `ResolveCall` also lands here (parent §2.3).
+  Body-hash production is SPLIT from body lowering
+  (`FlowLoweredBodyNode::compute` must NOT call `compute_body_semantic_hash`).
 - **Deps:** U2 + U4.
 - **Parallelism:** Cache-runtime lane; beside the semantic-graph lane.
 - **Risk:** large — touches `FileArtifactStore` + adds a new query-node kind.
-- **Required deletions:** none of substance (the coverage doc is MOVED, not
-  deleted).
+- **Required deletions:** none of substance (the flow-return architecture already
+  lives at `docs/arch/native-flow-return.md`).
 - **Guards:** a guard that `FlowLoweredBodyNode::compute` does not call
   `compute_body_semantic_hash` (the split); `FlowReturn` routes through the one
   engine; fail-closed budget tests (`BudgetExceeded` → `ReturnOnly`).
@@ -544,6 +656,9 @@ guards**. Sequence is faithful to §A; do not reorder.
 ### U8 — TypeInfo Graph Exporter
 
 - **Source track:** semantic-graph (R-2).
+- **Parity docs:** child `docs/arch/native-typeinfo-parity-cache-export-session.md`
+  (owns the exporter), under parent `docs/arch/native-typeinfo-parity.md` (wire-surface
+  purity §1.3–§1.5, `TypeInfoGraphPayload` shape).
 - **Scope:** `crates/verter_session/src/typeinfo/exporter.rs` — a PURE lowering
   pass. Dispatch root semantic queries, snapshot reachable `SemanticNodeData`,
   build `node_id_map` / `symbol_id_map` / `signatures` arena / `StringTable`,
@@ -611,6 +726,9 @@ guards**. Sequence is faithful to §A; do not reorder.
 ### U10 — TypeInfo DB / Fence / Degraded Store + QueryError Lowering
 
 - **Source track:** semantic-graph (R-3 + R-4).
+- **Parity docs:** child `docs/arch/native-typeinfo-parity-cache-export-session.md`
+  (owns the result DB / fence / session), under parent
+  `docs/arch/native-typeinfo-parity.md`.
 - **Scope:**
   - `crates/verter_session/src/typeinfo/completion_fence.rs` —
     `publish_with_retry` wrapping `InflightTable`, consuming the canonical
@@ -643,6 +761,9 @@ guards**. Sequence is faithful to §A; do not reorder.
 ### U11 — Native TypeInfoSession + Audit Execution
 
 - **Source track:** semantic-graph (R-6 + R-5).
+- **Parity docs:** child `docs/arch/native-typeinfo-parity-cache-export-session.md`
+  (owns the native session + audit execution), under parent
+  `docs/arch/native-typeinfo-parity.md`.
 - **Scope:** `crates/verter_session/src/typeinfo/session.rs` — 8 `_with_audit`
   methods returning `AuditedResult<Arc<...>, TypeInfoRequestError>`;
   validate-before-execute; route through `TypeInfoGraphResultDb`. The §5.6
@@ -683,6 +804,9 @@ guards**. Sequence is faithful to §A; do not reorder.
 ### U12 — FFI / TS Decoder + Legacy Rust/TS Deletion
 
 - **Source track:** semantic-graph (R-7 + R-8).
+- **Parity docs:** child `docs/arch/native-typeinfo-parity-cache-export-session.md`
+  (owns the FFI / TS decoder + downlevel encoders), under parent
+  `docs/arch/native-typeinfo-parity.md`.
 - **Scope:** `verter_napi/src/typeinfo.rs` + `verter_wasm/src/typeinfo.rs`
   (binary protobuf `Buffer` / `Uint8Array`); `packages/typeinfo/src/decode.ts`
   (pure mechanical) + new `session.ts`. Migrate the `component_meta.rs`
@@ -725,6 +849,9 @@ guards**. Sequence is faithful to §A; do not reorder.
 ### U13 — Public TS Session + Projections
 
 - **Source track:** semantic-graph (R-9 + R-10).
+- **Parity docs:** child `docs/arch/native-typeinfo-parity-cache-export-session.md`
+  (owns the public TS session + projections), under parent
+  `docs/arch/native-typeinfo-parity.md`.
 - **Scope:** Wire every `TypeInfoSession` method through NAPI/WASM; migrate legacy
   `resolveSymbol` / `evaluateTypeExpression` consumers to the graph API +
   `toTypeDescriptor`; TS graph helpers; nested audit.
@@ -745,6 +872,9 @@ guards**. Sequence is faithful to §A; do not reorder.
 ### U14 — Vue Framework Adapter Rebuild
 
 - **Source track:** semantic-graph / component-meta (R-11).
+- **Parity docs:** child `docs/arch/native-typeinfo-parity-adapters-final-lift.md`
+  (owns U14 / U15 — framework adapters, integrations, final lift), under parent
+  `docs/arch/native-typeinfo-parity.md`.
 - **Scope:** Rebuild `@verter/component-meta` as a thin `FrameworkSurfacePayload`
   adapter + `FrameworkAdapterRegistry` (A.15); `compat` as a projection wrapper.
   Fix the 4 known Vue mismatch cases: Popover `SlotProps<M>`, theme-alias display,
@@ -766,16 +896,22 @@ guards**. Sequence is faithful to §A; do not reorder.
 
 - **Source track:** MERGED terminal (semantic-graph Phases 6/7/8 + cache-runtime
   B12).
+- **Parity docs:** child `docs/arch/native-typeinfo-parity-adapters-final-lift.md`
+  (the U14 / U15 framework-adapter + integrations + final-lift blocks), under parent
+  `docs/arch/native-typeinfo-parity.md` (terminal acceptance §10.5 / §13).
 - **Scope:** Zod/schema client helpers; LSP hover→graph+display,
   completion→framework-surface, MCP `typeinfo.*` / `component-meta.*` tools,
-  playground type explorer; lift the U0-derived majority of the typeinfo
-  `#[ignore]` tests on the U0 manifest schedule (the target fraction is computed
-  against the live count U0 re-derives — the A0a manifest baseline is 363 rows /
-  `EXPECTED_TOTAL_IGNORED_COUNT`, distinct from the ~384 raw `#[ignore]` SITES
-  before macro-family collapse; do NOT hard-code a stale absolute); Svelte/React
-  STOP-gate files
-  (`svelte_adapter_stop_gate.rs`, `react_adapter_stop_gate.rs`); final find-grep
-  sweep. Plus the B12 typed bench schema: `BenchResultRow`
+  playground type explorer; lift **EVERY one of the 363 `IgnoredTestRow`s to
+  `Lifted`** on the U0 manifest schedule — **zero remaining parity `#[ignore]`s**.
+  The ONLY permitted residual `#[ignore]`s are the registered Svelte/React
+  STOP-gate files (`svelte_adapter_stop_gate.rs`, `react_adapter_stop_gate.rs`),
+  which are NOT among the 363. The binding total is exactly 363 `IgnoredTestRow`s
+  (count-guarded + bijective with the source `#[ignore]`s; the ~384 figure is the
+  raw `#[ignore]` SITES before macro-family collapse, and `AdditionalProofRow`
+  coverage fixtures are excluded from the count); do NOT hard-code a stale absolute,
+  and do NOT settle for a majority/fraction — terminal acceptance requires all 363
+  `Lifted` (parent §10.5 / §13 `all_typeinfo_parity_rows_lifted_except_stop_gates`).
+  Plus the B12 typed bench schema: `BenchResultRow`
   (`packages/benchmark/src/cache-runtime-bench.ts`) reporting cache mode /
   source-map policy / batch shape / thread count / hit count / fallback count;
   vendored cm corpus benches (`component_meta_cold` / `_warm`);
@@ -786,12 +922,16 @@ guards**. Sequence is faithful to §A; do not reorder.
   + gating).
 - **Required deletions:** any remaining legacy entry-point names surfaced by the
   final sweep.
-- **Guards:** the reconciled U0 unignore-manifest guards (the ~10 backing guards
-  from the A0a-landed `typeinfo_ignored_test_manifest.rs`, now asserting the lifted
-  count against the U0-re-derived total — `total_ignored_typeinfo_test_count_matches_expected`
-  + `manifest_length_matches_documented_total` track the post-lift count, not a
-  hard-coded stale absolute); `merged_interfaces_across_files` 5-property test (§9.5)
-  green; Svelte/React STOP-gate guards; hermeticity guard
+- **Guards:** the extended two-table-ledger guards (the backing guards on the
+  A0a-landed `typeinfo_ignored_test_manifest.rs`): `ignored_test_row_table_holds_exactly_363_rows`
+  (binding-total + table disjointness), the exact-363 count/bijection guards
+  (`total_ignored_typeinfo_test_count_matches_expected` +
+  `manifest_length_matches_documented_total` track the live `Ignored` count via the
+  locked-transaction accounting, not a hard-coded stale absolute), and the terminal
+  **`all_typeinfo_parity_rows_lifted_except_stop_gates`** (asserting every one of the
+  363 `IgnoredTestRow`s is `Lifted` and the only residual `#[ignore]`s are the
+  registered Svelte/React STOP-gates); `merged_interfaces_across_files` 5-property
+  test (§9.5) green; Svelte/React STOP-gate guards; hermeticity guard
   (`external_corpus_paths_not_present_outside_gated_tests`) — bench corpora are
   vendored, no `.integration-tests/repos/<third-party>/`.
 
@@ -816,14 +956,33 @@ What U2 fixes once is the identity model every variant keys on:
    the whole-hash R6 violation is already resolved (§2.2), so this is a
    slot-precision change, not a re-key from scratch.
 
-2. **7 new variants in the final shape.** `ResolveMergedDeclaration`,
-   `ResolveModuleAugmentation`, `ResolveAmbientNamespace`, `ResolveOverloadSet`,
-   `ResolveEnum`, `FlowNarrowingAt`, `ContextualTypeAt` — each added directly in
-   the slot-identity shape, each dispatched through
-   `ProjectSemanticDispatch::execute` (the one-engine rule). Their
-   `SemanticNodeData` producers (`MergedDeclaration`, `ModuleAugmentation`,
-   `AmbientNamespace`, `Class`, `Enum`) land in the same block. Cross-file
-   declaration merging is implemented here, not deferred (§9.5).
+2. **7 U2 variants in the final shape.** `ResolveMergedDeclaration`,
+   **`ResolveDeclarationAugmentation`**, `ResolveAmbientNamespace`,
+   `ResolveOverloadSet`, `ResolveEnum`, `FlowNarrowingAt`, `ContextualTypeAt` —
+   each added directly in the slot-identity shape, each dispatched through
+   `ProjectSemanticDispatch::execute` (the one-engine rule). The seventh variant is
+   the **generalized** augmentation key: the former `ResolveModuleAugmentation` is
+   broadened to `ResolveDeclarationAugmentation { target: Module | Global, context:
+   DeclarationAnalysisContext }` so module AND global declaration-environment-mutation
+   facts share ONE concrete identity (parent `native-typeinfo-parity.md` §2.1–§2.2).
+   This is an existing-slot generalization, **not a sixth U2 variant** — the slot
+   count stays seven. The type-value `SemanticNodeData` producers
+   (`MergedDeclaration`, `AmbientNamespace`, `Class`, `Enum`) land in the same block
+   alongside the `DeclarationAnalysisGraph` augmentation facts (module + global) that
+   `ResolveDeclarationAugmentation` resolves to. Cross-file declaration merging is
+   implemented here, not deferred (§9.5).
+
+   **Five added keys beyond the seven (parent §2.3) — register them in this same
+   slot-identity shape.** `ResolveClassSurface`, `ApparentType`, and
+   `TemplateLiteralReduce` land HERE (U2); `FlowReturn` and `ResolveCall` land in U6
+   as additive variants in the identical shape (no cache re-key). `Relate` is an
+   existing-key upgrade to its full relation identity (parent §2.7), not a sixth
+   added key. The added-key count is exactly five; every key routes through
+   `ProjectSemanticDispatch::execute`, carries an explicit R21/R6-clean per-key
+   `*Context`, and resolves to its correct `SemanticQueryValue` value domain (type
+   keys → `TypeNode`; `ResolveDeclarationAugmentation` → `DeclarationAnalysis`;
+   `FlowReturn` / `ResolveCall` / `Relate` → their typed result domains) — no
+   non-type value is smuggled into `GraphTypeNode`.
 
 3. **Semantic + component-meta caches onto `QueryNode` / `ArtifactNode` against
    the same key model.** The query-identity caches owned by the semantic track —
@@ -910,9 +1069,13 @@ pnpm build                                        # native → lsp → wasm → 
 - Trust-but-verify: re-run the full gate independently of any sub-agent's
   `tail -N` summary.
 
-**Expected outcome for every block:** the **exact 8-failure baseline** (§1) and
-**ZERO new failures**. The `typeinfo_ts_bindings_*` env-only failure is a
-non-failure on the main checkout (passes with `node_modules` present).
+**Expected outcome for every block:** **ZERO new failures** over the baseline
+RE-DERIVED at that block's entry gate at the then-current tip (§1) — not a count
+frozen to the old `b36e0835` land point. The recorded historical reference is the
+8-failure cluster at `b36e0835`; implementation re-derives the live baseline at each
+block's entry (this plan does not run the workspace). The `typeinfo_ts_bindings_*`
+env-only failure is a non-failure on the main checkout (passes with `node_modules`
+present).
 
 `sixteen_cold_concurrent…attribute_per_joiner_contract` was a load-flake earlier
 in the chain and is now stable (fixed at `27c25a7a`); treat any recurrence under
@@ -993,17 +1156,23 @@ The unified effort is "done" when ALL of the following hold:
   docs) ship; `TypeDescriptor` is a projection; descriptor-bridge deleted.
 - [ ] **`@verter/component-meta`** is a thin `FrameworkSurfacePayload` adapter over
   the graph; the 4 known Vue mismatches are fixed; no second resolver/expander.
-- [ ] **Ignored-test lift:** the U0-derived majority of typeinfo `#[ignore]` tests
-  lifted per the U0 manifest schedule (target fraction computed against the
-  U0-re-derived live count — A0a baseline 363 manifest rows, not a hard-coded stale
-  absolute); the reconciled manifest guards assert the final post-lift counts;
-  Svelte/React STOP-gate files present.
+- [ ] **Ignored-test lift:** ALL 363 `IgnoredTestRow`s are `Lifted` (zero remaining
+  parity `#[ignore]`s) per the U0 manifest schedule — NOT a majority/fraction. The
+  binding total is exactly 363 (A0a baseline, count-guarded + bijective; not a
+  hard-coded stale absolute and not the ~384 raw `#[ignore]` SITES). The only
+  permitted residual `#[ignore]`s are the registered Svelte/React STOP-gate files
+  (not among the 363). The extended two-table-ledger guards assert it
+  (`ignored_test_row_table_holds_exactly_363_rows` +
+  `all_typeinfo_parity_rows_lifted_except_stop_gates`); Svelte/React STOP-gate files
+  present.
 - [ ] **Bench schema:** `BenchResultRow` reports cache mode / source-map policy /
   batch shape / thread count / hit count / fallback count; cm corpus benches
   vendored and hermetic.
 - [ ] **Gate green:** `cargo check` / `clippy -D warnings` / `fmt` clean;
-  `verter_scheduler` + `verter_session` + full workspace = the 8-failure baseline
-  and ZERO new; `pnpm test` + `pnpm build` (native → lsp → wasm → ts) fully green;
+  `verter_scheduler` + `verter_session` + full workspace = ZERO new failures over the
+  baseline re-derived at this block's entry gate (§1 records the historical 8-failure
+  cluster at `b36e0835`; the live baseline is re-derived at the then-current tip);
+  `pnpm test` + `pnpm build` (native → lsp → wasm → ts) fully green;
   `pnpm install --frozen-lockfile` in sync.
 - [ ] **Architecture clean:** every new CRITICAL rule has a registered guard (R6
   meta-guard green); `no_phase_archaeology_in_production_code` green;
