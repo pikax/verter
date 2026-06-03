@@ -285,7 +285,20 @@ pub(super) fn process_v_model<'alloc>(
 
     // Append the modifiers prop (each modifier name maps back to source).
     if !prop.modifiers.is_empty() && !empty_replacement {
-        pieces.push(Piece::Syn(format!(" {}={{{{ ", modifier_prop)));
+        if is_dynamic_arg {
+            // Dynamic arg: the modifiers prop name is COMPUTED. A computed name is
+            // NOT a valid bare JSX attribute (`[`…`]={…}` is illegal, and an empty
+            // `modifier_prop` would emit an invalid ` ={{`), so emit it as a spread
+            // with a computed object key — `{...{[`${ARG}Modifiers`]: { … }}}` —
+            // matching how the dynamic-arg model value/event are also spread. The
+            // arg expression is a mapped `Piece::Arg`; the surrounding punctuation is
+            // unmapped.
+            pieces.push(Piece::Syn(" {...{[`${".to_string()));
+            pieces.push(Piece::Arg);
+            pieces.push(Piece::Syn("}Modifiers`]: { ".to_string()));
+        } else {
+            pieces.push(Piece::Syn(format!(" {}={{{{ ", modifier_prop)));
+        }
         for (i, m) in prop.modifiers.iter().enumerate() {
             if i > 0 {
                 pieces.push(Piece::Syn(", ".to_string()));
@@ -299,7 +312,12 @@ pub(super) fn process_v_model<'alloc>(
             )));
             pieces.push(Piece::Syn(": true".to_string()));
         }
-        pieces.push(Piece::Syn(" }}".to_string()));
+        if is_dynamic_arg {
+            // Close the inner object + the spread object + the JSX expression.
+            pieces.push(Piece::Syn(" }}}".to_string()));
+        } else {
+            pieces.push(Piece::Syn(" }}".to_string()));
+        }
     }
 
     // Delete the original prop span; everything is re-emitted as ordered pieces

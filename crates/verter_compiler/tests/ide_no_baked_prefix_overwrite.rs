@@ -1,21 +1,30 @@
-//! IDE-emit architecture guard: no baked `prefix + identifier` mapped overwrite.
+//! IDE-emit architecture guard: no navigable user expression baked into a mapped
+//! `out.overwrite`.
 //!
-//! The four confirmed go-to-definition desync sites (v-html, v-text, dynamic-key
-//! bind `:[key]`, native `v-model`) used to collapse `prefix + user_identifier`
-//! into ONE `out.overwrite(prop.start, prop_end, &format!("…{resolved}…"))`. A
-//! `Chunk::Overwritten` maps its whole generated run back to the overwrite's
-//! source start — so the user identifier mapped to the prop start, breaking
-//! hover / go-to-definition. The typed `EmitOp` substrate
-//! (`crates/verter_compiler/src/ide/template/emit.rs`) makes that shape
-//! impossible; this guard pins it mechanically.
+//! A go-to-definition desync occurs when IDE codegen collapses a binding-resolved
+//! user expression into ONE `out.overwrite(start, end, &format!("…{resolved}…"))`.
+//! The resulting `Chunk::Overwritten` maps its whole generated run back to the
+//! overwrite's source start — so the user identifier maps to a FOREIGN position
+//! (the prop start), and under Phase-1's strict mapper the identifier drops to
+//! `None`. Either way the identifier is no longer navigable. Every navigable user
+//! expression MUST instead flow through the typed `EmitOp` substrate
+//! (`crates/verter_compiler/src/ide/template/emit.rs`): the user expression is
+//! emitted via `emit_jsx_binding_value` / `emit_relocated_value` (each identifier a
+//! mapped `InsertMapped` / preserved `Original`), and all synthetic scaffolding is
+//! an unmapped `InsertUnmapped` / `OverwriteSyntheticBoundary`. This guard pins
+//! that invariant mechanically — it CATCHES the bug class rather than exempting it.
 //!
 //! Two checks:
 //! 1. `no_ide_codegen_bakes_prefix_into_mapped_overwrite` — source scan over
-//!    `crates/verter_compiler/src/ide/template/**` forbidding the four desync
-//!    sites' specific shape: a mapped `out.overwrite(…)` whose `&format!`
-//!    replacement emits a binding-resolved expression as a **bare JSX attribute
-//!    value** (`NAME={resolved}` / `NAME={{[…]: resolved}}`). This is the exact
-//!    pattern that mapped the user identifier to the prop start.
+//!    `crates/verter_compiler/src/ide/template/**` forbidding ANY `out.overwrite(…)`
+//!    whose `&format!` replacement interpolates a binding-resolved expression
+//!    variable (`resolved` / `resolved_expr` / `resolved_arg` / `resolved_value` /
+//!    `final_expr` / `resolved_style`). A NARROW, explicitly-justified allowlist
+//!    (`ALLOWED_NON_NAVIGABLE_OVERWRITES`) permits only PROVABLY-non-navigable
+//!    emissions (no in-place user value identifier — synthesized no-value
+//!    attributes). v-on spreads, the dynamic event-name spread, native + dynamic
+//!    v-model, and v-show all route through the substrate and have ZERO baked
+//!    navigable overwrites.
 //! 2. `retired_ide_emit_symbols_absent` — the flat-string producers
 //!    `resolve_prefixed_expr` / `resolve_prefixed_dynamic_arg` must be ABSENT from
 //!    `crates/verter_compiler/src/**` (they were deleted; a lingering producer
@@ -23,15 +32,6 @@
 //!
 //! Each check is paired with a discriminating sanity test proving the scanner
 //! actually fires on a synthetic violation (so the guard is not vacuous).
-//!
-//! Scope note (residuals, NOT over-claimed): wrapped / structurally-transformed
-//! emit sites — the v-on object-literal spread (`{...{ … }}` via
-//! `rewrite_v_on_object_literal_expr`), the v-on `eventCallbacks` / arrow
-//! wrappers, the dynamic event-name computed-key spread, v-show's
-//! `style={{display: … }}`, and synthesized no-value attribute values — do not
-//! emit the expression as a bare navigable JSX value and are out of this phase's
-//! mapping scope. They resolve through the shared `build_prefixed_expr` helper
-//! (the sanctioned flat-string path) and are intentionally not covered here.
 
 use std::path::{Path, PathBuf};
 
@@ -71,28 +71,88 @@ fn rust_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The four desync sites' specific bare-JSX-value emission signatures. Each is a
-/// substring that appears ONLY inside the pre-change `&format!` replacement of one
-/// of the four sites — a mapped overwrite emitting a binding-resolved expression
-/// as a bare, navigable JSX attribute value:
-/// - `innerHTML={` — v-html `format!("innerHTML={{{}}}", resolved)`.
-/// - `textContent={` — v-text `format!("textContent={{{}}}", resolved)`.
-/// - `{[{}]: {}}` — dynamic-key bind `format!("{{...{{[{}]: {}}}}}", arg, value)`
-///   (the arg placeholder sits DIRECTLY in the `[ ]`; the v-on dynamic event-name
-///   spread instead has a template literal `[`on${}` as any]` there, so this does
-///   not match it).
-/// - `) = $event)}` — native v-model's baked assignment handler `format!`.
+/// Binding-resolver output variable names. A `&format!` argument to `out.overwrite`
+/// that interpolates one of these is baking a binding-resolved user expression into
+/// a single `Chunk::Overwritten` — the desync shape this guard forbids. (These are
+/// the conventional names the IDE prop emitters use for `build_prefixed_expr` /
+/// `resolve_simple_expr` output.)
+const RESOLVER_OUTPUT_VARS: &[&str] = &[
+    "resolved",
+    "resolved_expr",
+    "resolved_arg",
+    "resolved_value",
+    "resolved_style",
+    "final_expr",
+    // `rewritten` is `rewrite_v_on_object_literal_expr(&resolved)` — the v-on
+    // object-literal spread's structurally-rewritten resolved expression. Baking it
+    // into a mapped overwrite is the same desync (it embeds the handler identifiers).
+    "rewritten",
+];
+
+/// Normalised (whitespace-collapsed) statement snippets that are EXPLICITLY allowed
+/// to bake a resolved expression into a mapped overwrite because they are PROVABLY
+/// non-navigable: a synthesized no-value attribute (`prop.value_start` is `None`),
+/// so there is no in-place user value identifier to map. Both sites resolve the
+/// ATTRIBUTE NAME (not a user value expression) and emit it as a constant
+/// attribute value.
 ///
-/// The wrapped / transformed out-of-scope sites (v-on spreads, eventCallbacks /
-/// arrow wrappers, dynamic event-name computed keys, v-show) never emit these
-/// substrings inside a `format!` argument to `out.overwrite`.
-const DESYNC_FORMAT_SIGNATURES: &[&str] =
-    &["innerHTML={", "textContent={", "{[{}]: {}}", ") = $event)}"];
+/// This is the ONLY sanctioned exception. It is keyed by exact normalised statement
+/// text (not a fuzzy match) so any NEW baked overwrite — or a change to these two —
+/// trips the guard and must be re-justified.
+const ALLOWED_NON_NAVIGABLE_OVERWRITES: &[&str] = &[
+    // `process_v_bind`: `.foo` modifier shorthand with no value — `resolved` is the
+    // resolved attribute NAME (`kebab_to_camel_case(key)`), not a user expression.
+    r#"out.overwrite(prop.start, prop_end, &format!("{}={{{}}}", key, resolved));"#,
+    // `process_v_bind`: `:foo` shorthand with no value — `resolved` is the resolved
+    // attribute NAME (`kebab_to_camel_case(arg_name)`), not a user expression.
+    r#"out.overwrite(arg_end, prop_end, &format!("={{{}}}", resolved));"#,
+];
+
+/// Whitespace-collapse a statement snippet for stable comparison/allowlisting.
+fn normalize_stmt(stmt: &str) -> String {
+    stmt.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `true` iff the `&format!` replacement in `stmt` interpolates a binding-resolver
+/// output variable as a `{}` argument. Detects both `&format!("…", resolved)` and
+/// `&format!("…{resolved}…")` (inline-captured) forms.
+fn format_interpolates_resolver_var(stmt: &str) -> bool {
+    let Some(fmt_pos) = stmt.find("&format!(") else {
+        return false;
+    };
+    let args = &stmt[fmt_pos..];
+    RESOLVER_OUTPUT_VARS.iter().any(|var| {
+        // Match the variable as a whole token: preceded by a non-ident char and
+        // followed by a non-ident char (avoids matching `resolved` inside
+        // `resolved_expr`, and `final_expr` inside a longer ident).
+        token_present(args, var)
+    })
+}
+
+/// `true` iff `needle` appears in `hay` as a whole identifier token (not a substring
+/// of a longer identifier).
+fn token_present(hay: &str, needle: &str) -> bool {
+    let mut from = 0usize;
+    while let Some(rel) = hay[from..].find(needle) {
+        let at = from + rel;
+        let before_ok = at == 0
+            || !hay.as_bytes()[at - 1].is_ascii_alphanumeric() && hay.as_bytes()[at - 1] != b'_';
+        let after = at + needle.len();
+        let after_ok = after >= hay.len()
+            || !hay.as_bytes()[after].is_ascii_alphanumeric() && hay.as_bytes()[after] != b'_';
+        if before_ok && after_ok {
+            return true;
+        }
+        from = at + needle.len();
+    }
+    false
+}
 
 /// Scan a source string for a baked desync mapped-overwrite: an `out.overwrite(`
-/// call whose statement (up to the next `;`) contains a `&format!(` replacement
-/// carrying one of the four desync bare-JSX-value signatures. Returns the
-/// offending statement snippets.
+/// call whose statement (up to the next `;`) bakes a binding-resolved expression
+/// into a `&format!` replacement, EXCLUDING the explicitly-allowed
+/// provably-non-navigable sites. Returns the offending normalised statement
+/// snippets.
 fn baked_prefix_overwrites(src: &str) -> Vec<String> {
     let mut hits = Vec::new();
     let bytes = src.as_bytes();
@@ -103,15 +163,14 @@ fn baked_prefix_overwrites(src: &str) -> Vec<String> {
         // Statement extends to the next `;` (the overwrite call terminator).
         let stmt_end = src[start..]
             .find(';')
-            .map(|e| start + e)
+            .map(|e| start + e + 1)
             .unwrap_or(bytes.len());
         let stmt = &src[start..stmt_end];
-        if stmt.contains("&format!(")
-            && DESYNC_FORMAT_SIGNATURES
-                .iter()
-                .any(|sig| stmt.contains(sig))
-        {
-            hits.push(stmt.split_whitespace().collect::<Vec<_>>().join(" "));
+        if format_interpolates_resolver_var(stmt) {
+            let norm = normalize_stmt(stmt);
+            if !ALLOWED_NON_NAVIGABLE_OVERWRITES.contains(&norm.as_str()) {
+                hits.push(norm);
+            }
         }
         search_from = stmt_end.max(start + needle.len());
     }
@@ -149,8 +208,9 @@ fn no_ide_codegen_bakes_prefix_into_mapped_overwrite() {
 
 #[test]
 fn baked_prefix_scanner_detects_violation() {
-    // Discriminating: the scanner must fire on the exact pre-change shape and on a
-    // multi-line variant, and must NOT fire on the typed-substrate replacement.
+    // Discriminating: the scanner must fire on every baked-resolved-expression
+    // overwrite shape (single-line, multi-line) and must NOT fire on the
+    // typed-substrate replacement nor the allowlisted no-value attributes.
     let single_line =
         r#"        out.overwrite(prop.start, prop_end, &format!("innerHTML={{{}}}", resolved));"#;
     assert_eq!(
@@ -159,21 +219,14 @@ fn baked_prefix_scanner_detects_violation() {
         "scanner must detect the single-line baked overwrite — else the guard is vacuous"
     );
 
-    let multi_line = "        out.overwrite(\n            prop.start,\n            prop_end,\n            &format!(\"textContent={{{}}}\", resolved),\n        );";
+    let multi_line = "        out.overwrite(\n            prop.start,\n            prop_end,\n            &format!(\"textContent={{{}}}\", resolved_expr),\n        );";
     assert_eq!(
         baked_prefix_overwrites(multi_line).len(),
         1,
         "scanner must detect the multi-line baked overwrite"
     );
 
-    // Each of the four desync signatures must independently trip the scanner —
-    // proves no signature is dead.
-    let dynamic_key = r#"out.overwrite(prop.start, prop_end, &format!("{{...{{[{}]: {}}}}}", arg_resolved, value_resolved));"#;
-    assert_eq!(
-        baked_prefix_overwrites(dynamic_key).len(),
-        1,
-        "scanner must detect the dynamic-key bind baked overwrite"
-    );
+    // Native v-model's baked assignment handler must trip the scanner.
     let vmodel = r#"out.overwrite(prop.start, prop_end, &format!("{}={{{}}} {}={{({}) => (({}) = $event)}}", dom_prop, resolved, event_name, event_param, resolved));"#;
     assert_eq!(
         baked_prefix_overwrites(vmodel).len(),
@@ -181,21 +234,69 @@ fn baked_prefix_scanner_detects_violation() {
         "scanner must detect the native v-model baked overwrite"
     );
 
-    // The typed-substrate replacement (unmapped boundary + preserved expression)
-    // must NOT trip the scanner.
+    // CRITICAL (FINDING 3): the v-on baked handler overwrites — object spread,
+    // dynamic event-name spread, and the duplicate-event spread — MUST now be
+    // DETECTED. The previous guard EXEMPTED these (a gate-bypass). Each is a
+    // navigable handler baked into a mapped overwrite → the desync bug.
+    // The exact pre-fix object-literal shape baked `rewritten`
+    // (= `rewrite_v_on_object_literal_expr(&resolved)`) into the overwrite.
+    let v_on_object = r#"out.overwrite(prop.start, prop_end, &format!("{{...{}}}", rewritten));"#;
+    assert_eq!(
+        baked_prefix_overwrites(v_on_object).len(),
+        1,
+        "scanner MUST detect the v-on object-literal baked `rewritten` spread (was exempted — gate-bypass)"
+    );
+    let v_on_dynamic = r#"out.overwrite(prop.start, prop_end, &format!("{{...{{[`on${{{}}}` as any]: {}}}}}", resolved_arg, resolved_value));"#;
+    assert_eq!(
+        baked_prefix_overwrites(v_on_dynamic).len(),
+        1,
+        "scanner MUST detect the v-on dynamic event-name baked spread (was exempted — gate-bypass)"
+    );
+    let v_on_spread = r#"out.overwrite(prop.start, prop_end, &format!("{{...{{\"{}\": {}}}}}", jsx_event_name, resolved_expr));"#;
+    assert_eq!(
+        baked_prefix_overwrites(v_on_spread).len(),
+        1,
+        "scanner MUST detect the v-on duplicate-event baked spread (was exempted — gate-bypass)"
+    );
+    // v-show's baked display style must also be detected.
+    let v_show = r#"out.overwrite(show.start, prop_end, &format!("style={{{{display: {} ? undefined : 'none'}}}}", resolved_expr));"#;
+    assert_eq!(
+        baked_prefix_overwrites(v_show).len(),
+        1,
+        "scanner MUST detect the v-show baked display-style overwrite"
+    );
+
+    // The typed-substrate replacement (unmapped boundary / mapped relocated value)
+    // must NOT trip the scanner — it has no `&format!`-baked resolved expression.
     let clean = r#"        out.overwrite(source.start.0, source.end.0, "");
         out.prepend_static(source.start.0, "innerHTML={");"#;
     assert!(
         baked_prefix_overwrites(clean).is_empty(),
         "scanner false-positived on the clean typed-substrate emission"
     );
-
-    // The out-of-scope v-on dynamic event-name spread must NOT trip the scanner
-    // (it is a wrapped computed-key emission, not a bare JSX value).
-    let v_on_dynamic = r#"out.overwrite(prop.start, prop_end, &format!("{{...{{[`on${{{}}}` as any]: {}}}}}", resolved_arg, resolved_value));"#;
+    let clean_relocated = r#"            out.overwrite(prop.start, prop_end, "");
+            emit_relocated_value(out, at, source, value_range, value_bindings, resolver);"#;
     assert!(
-        baked_prefix_overwrites(v_on_dynamic).is_empty(),
-        "scanner false-positived on the out-of-scope v-on dynamic event-name spread"
+        baked_prefix_overwrites(clean_relocated).is_empty(),
+        "scanner false-positived on the clean emit_relocated_value substrate path"
+    );
+
+    // The two allowlisted PROVABLY-non-navigable no-value attribute sites must NOT
+    // trip the scanner (they resolve the attribute NAME, no user value identifier).
+    for allowed in ALLOWED_NON_NAVIGABLE_OVERWRITES {
+        assert!(
+            baked_prefix_overwrites(allowed).is_empty(),
+            "scanner false-positived on an explicitly-allowlisted no-value overwrite: {allowed}"
+        );
+    }
+
+    // The token matcher must not match a resolver var as a substring of a longer
+    // identifier (e.g. `resolved` inside `resolved_handler_name`).
+    let longer_ident =
+        r#"out.overwrite(prop.start, prop_end, &format!("{}", resolved_handler_name));"#;
+    assert!(
+        baked_prefix_overwrites(longer_ident).is_empty(),
+        "scanner must match resolver vars as whole tokens, not substrings of longer idents"
     );
 }
 

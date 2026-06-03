@@ -6972,3 +6972,309 @@ fn emit_codegen_crlf_and_tabs() {
          Tokens: {tokens:?}, output: {output:?}"
     );
 }
+
+#[test]
+fn vmodel_dynamic_arg_modifier_maps_and_is_valid() {
+    // <input v-model:[eventName].trim="val"/> — dynamic arg + modifier.
+    // The modifiers prop name must be the COMPUTED `[`${...}Modifiers`]` name with
+    // the arg expression embedded, NOT an empty JSX attribute name (` ={{`), which
+    // is invalid TSX. The embedded arg `eventName` must map back to its source span.
+    let source = r#"<template><input v-model:[eventName].trim="val"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("eventName", BindingType::SetupConst),
+            ("val", BindingType::SetupRef),
+        ],
+    );
+
+    // Positive: a computed `[`${...}Modifiers`]` prop name is present.
+    assert!(
+        output.contains("Modifiers`]"),
+        "dynamic-arg v-model with a modifier must emit a computed `[`${{...}}Modifiers`]` \
+         prop name: {output}"
+    );
+    // Negative: the empty-attribute-name shape ` ={{` (the regression) must NOT appear.
+    assert!(
+        !output.contains(" ={{"),
+        "dynamic-arg v-model must NOT emit an empty JSX attribute name ` ={{` (invalid TSX). \
+         The computed modifiers name was dropped: {output}"
+    );
+
+    // The arg identifier `eventName` must map back to its source span. The arg
+    // appears multiple times (computed prop name, event key, modifiers name); at
+    // least one occurrence maps back.
+    let arg_src = source.find("[eventName]").unwrap() as u32 + 1; // inside the [ ]
+    assert!(
+        has_token_for_src(&tokens, arg_src),
+        "v-model dynamic arg `eventName` must map to source col {arg_src}. \
+         Tokens: {tokens:?}, output: {output}"
+    );
+
+    // The whole emission must be valid TSX (no empty attribute name, balanced
+    // braces). Wrap as a JSX element attribute list and parse.
+    let wrapper = format!("const x = <input {} />", output_attrs(&output));
+    let val_alloc = oxc_allocator::Allocator::new();
+    let parsed = oxc_parser::Parser::new(&val_alloc, &wrapper, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "dynamic-arg v-model + modifier must produce valid TSX. Errors: {:?}\n--- output ---\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        output
+    );
+}
+
+/// Extract the attribute portion of a generated single-element template
+/// (`<input ...attrs.../>`) for re-parsing as a JSX attribute list.
+fn output_attrs(output: &str) -> String {
+    // Strip the leading `<input` / `<tag` and trailing `/>` or `>` so the inner
+    // attribute list can be re-wrapped in a fresh element for syntax validation.
+    let after_tag = output
+        .find(char::is_whitespace)
+        .map(|i| &output[i..])
+        .unwrap_or(output);
+    let trimmed = after_tag.trim();
+    let body = trimmed
+        .strip_suffix("/>")
+        .or_else(|| trimmed.strip_suffix('>'))
+        .unwrap_or(trimmed);
+    body.trim().to_string()
+}
+
+#[test]
+fn v_on_object_spread_handler_maps_to_source() {
+    // <div v-on="{ mousedown: doThis }"/> → {...{ mousedown: doThis }}.
+    // The handler identifier `doThis` is a navigable user expression — it MUST map
+    // back to its source span. The object punctuation (`{...{`, `: `, `}}`) and the
+    // event key map to None.
+    let source = r#"<template><div v-on="{ mousedown: doThis }"/></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("doThis", BindingType::SetupConst)]);
+
+    assert!(
+        output.contains("{...{"),
+        "v-on object literal should emit a spread `{{...{{ ... }}}}`: {output}"
+    );
+    assert!(
+        !output.contains("v-on"),
+        "v-on directive must be removed: {output}"
+    );
+
+    // Positive: `doThis` maps to its source byte offset.
+    let handler_src = source.find("doThis").unwrap() as u32;
+    assert!(
+        has_token_for_src(&tokens, handler_src),
+        "v-on handler `doThis` must map to source col {handler_src}. \
+         Tokens: {tokens:?}, output: {output}"
+    );
+
+    // Negative: the `{...{` spread boundary start maps to None (the old baked
+    // overwrite mapped the whole run — including the handler — back to prop.start).
+    let boundary_gen = output.find("{...{").unwrap();
+    let (bl, bc) = gen_offset_to_line_col(&output, boundary_gen);
+    assert!(
+        !has_token_at_gen(&tokens, bl, bc),
+        "{{...{{ spread boundary start (gen {bl}:{bc}) must map to None. Tokens: {tokens:?}"
+    );
+
+    // Negative: no generated token may map back to the v-on prop start (the desync).
+    let prop_start = source.find("v-on").unwrap() as u32;
+    assert!(
+        !tokens.iter().any(|&(_, _, sc)| sc == prop_start),
+        "no generated token may map back to the v-on prop start (col {prop_start}). \
+         Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+#[test]
+fn v_on_dynamic_event_name_expr_maps() {
+    // <div @[event]="handler"/> → {...{[`on${event}` as any]: handler}}.
+    // BOTH the dynamic event-name expression `event` and the handler `handler` are
+    // navigable user expressions — each must map back to its source span. The
+    // computed-key template literal and object punctuation map to None.
+    let source = r#"<template><div @[event]="handler"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("event", BindingType::SetupConst),
+            ("handler", BindingType::SetupConst),
+        ],
+    );
+
+    assert!(
+        output.contains("as any]:"),
+        "dynamic event name should emit the computed-key spread `[`on${{...}}` as any]: ...`: {output}"
+    );
+    assert!(
+        !output.contains("@["),
+        "dynamic event syntax must be removed: {output}"
+    );
+
+    // Positive: both `event` (arg) and `handler` (value) map back to source.
+    let event_src = source.find("[event]").unwrap() as u32 + 1; // inside the [ ]
+    let handler_src = source.find("\"handler\"").unwrap() as u32 + 1;
+    assert!(
+        has_token_for_src(&tokens, event_src),
+        "dynamic event-name expr `event` must map to source col {event_src}. \
+         Tokens: {tokens:?}, output: {output}"
+    );
+    assert!(
+        has_token_for_src(&tokens, handler_src),
+        "dynamic event handler `handler` must map to source col {handler_src}. \
+         Tokens: {tokens:?}, output: {output}"
+    );
+
+    // Negative: the `{...{[` boundary start maps to None.
+    let boundary_gen = output.find("{...{[").unwrap();
+    let (bl, bc) = gen_offset_to_line_col(&output, boundary_gen);
+    assert!(
+        !has_token_at_gen(&tokens, bl, bc),
+        "{{...{{[ boundary start (gen {bl}:{bc}) must map to None. Tokens: {tokens:?}"
+    );
+
+    // Negative: no generated token may map back to the prop start (the desync).
+    let prop_start = source.find('@').unwrap() as u32;
+    assert!(
+        !tokens.iter().any(|&(_, _, sc)| sc == prop_start),
+        "no generated token may map back to the @[event] prop start (col {prop_start}). \
+         Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+#[test]
+fn v_show_condition_maps_to_source() {
+    // <div v-show="visible"/> → style={{display: visible ? undefined : 'none'}}.
+    // The condition `visible` is a navigable user expression relocated into the
+    // synthetic style attribute; it MUST map back. The `style={{display: ` prefix
+    // and ` ? undefined : 'none'}}` suffix map to None.
+    let source = r#"<template><div v-show="visible"/></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("visible", BindingType::SetupConst)]);
+
+    assert!(
+        output.contains("display:"),
+        "v-show should emit a display style: {output}"
+    );
+    assert!(
+        !output.contains("v-show"),
+        "v-show directive must be removed: {output}"
+    );
+
+    // Positive: `visible` maps to its source byte offset.
+    let visible_src = source.find("\"visible\"").unwrap() as u32 + 1;
+    assert!(
+        has_token_for_src(&tokens, visible_src),
+        "v-show condition `visible` must map to source col {visible_src}. \
+         Tokens: {tokens:?}, output: {output}"
+    );
+
+    // Negative: the `style={{display: ` boundary start maps to None (the old baked
+    // overwrite mapped the whole run — including `visible` — back to prop.start).
+    let boundary_gen = output.find("style={{display:").unwrap();
+    let (bl, bc) = gen_offset_to_line_col(&output, boundary_gen);
+    assert!(
+        !has_token_at_gen(&tokens, bl, bc),
+        "style={{{{display: boundary start (gen {bl}:{bc}) must map to None. Tokens: {tokens:?}"
+    );
+
+    // Negative: no generated token may map back to the v-show prop start.
+    let prop_start = source.find("v-show").unwrap() as u32;
+    assert!(
+        !tokens.iter().any(|&(_, _, sc)| sc == prop_start),
+        "no generated token may map back to the v-show prop start (col {prop_start}). \
+         Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+#[test]
+fn v_show_merged_style_both_expressions_map() {
+    // <div v-show="ready" :style="itemStyle"/> → the v-show condition merges into
+    // the existing :style. BOTH `itemStyle` and `ready` are navigable and must map
+    // back; the synthetic `style={{...(`, `), display: `, ` ? undefined ...}}` is None.
+    let source = r#"<template><div v-show="ready" :style="itemStyle"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("ready", BindingType::SetupConst),
+            ("itemStyle", BindingType::SetupConst),
+        ],
+    );
+
+    assert!(
+        output.matches("style=").count() == 1,
+        "v-show + :style must merge into one style attribute: {output}"
+    );
+    assert!(
+        output.contains("display:"),
+        "merged style should include the display condition: {output}"
+    );
+
+    let ready_src = source.find("\"ready\"").unwrap() as u32 + 1;
+    let item_src = source.find("\"itemStyle\"").unwrap() as u32 + 1;
+    assert!(
+        has_token_for_src(&tokens, ready_src),
+        "v-show condition `ready` must map to source col {ready_src}. \
+         Tokens: {tokens:?}, output: {output}"
+    );
+    assert!(
+        has_token_for_src(&tokens, item_src),
+        ":style binding `itemStyle` must map to source col {item_src}. \
+         Tokens: {tokens:?}, output: {output}"
+    );
+
+    // Negative: neither the v-show nor :style prop start carries a mapping.
+    let show_start = source.find("v-show").unwrap() as u32;
+    assert!(
+        !tokens.iter().any(|&(_, _, sc)| sc == show_start),
+        "no generated token may map back to the v-show prop start (col {show_start}). \
+         Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+#[test]
+fn migrated_sites_binding_notation_characterization() {
+    // P3 characterization — pin the prop-accessor notation the migrated relocated
+    // emitters produce, so it is INTENTIONAL, not accidental:
+    //
+    // 1. A keyword-named prop accessed as a bindingless SIMPLE identifier (e.g.
+    //    `v-show="class"`) → BRACKET notation (`__props["class"]`). `emit_relocated_value`
+    //    routes a bindingless simple identifier through `resolve_simple_expr`, which
+    //    emits the bracket form for keywords (dot notation `__props.class` is valid TS
+    //    too, but bracket matches the pre-migration shared-helper behaviour).
+    let v_show_kw = gen_tsx_template_with_bindings(
+        r#"<template><div v-show="class"/></template>"#,
+        &[("class", BindingType::Props)],
+    );
+    assert!(
+        v_show_kw.contains(r#"__props["class"]"#),
+        "v-show keyword prop must use bracket notation `__props[\"class\"]`: {v_show_kw}"
+    );
+    assert!(
+        !v_show_kw.contains("__props.class"),
+        "v-show keyword prop must NOT use dot notation `__props.class`: {v_show_kw}"
+    );
+
+    // 2. A non-keyword prop emitted through the v-on object-spread substrate (where
+    //    OXC DOES extract the binding) → DOT notation (`__props.handler`), identical to
+    //    the in-place `@click="handler"` form. The migration keeps the two consistent.
+    let v_on_obj = gen_tsx_template_with_bindings(
+        r#"<template><div v-on="{ click: handler }"/></template>"#,
+        &[("handler", BindingType::Props)],
+    );
+    assert!(
+        v_on_obj.contains("__props.handler"),
+        "v-on object-spread Props handler must use dot notation `__props.handler`: {v_on_obj}"
+    );
+    let at_click = gen_tsx_template_with_bindings(
+        r#"<template><div @click="handler"/></template>"#,
+        &[("handler", BindingType::Props)],
+    );
+    assert!(
+        at_click.contains("__props.handler"),
+        "@click Props handler uses dot notation (the spread form must match it): {at_click}"
+    );
+}

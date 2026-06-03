@@ -9,7 +9,10 @@
 
 use oxc_allocator::Allocator;
 
+use verter_span::{SourceByteOffset, SourceByteRange};
+
 use crate::ast::types::{ElementNode, ElementNodeConditionKind};
+use crate::ide::template::emit::{emit_op, emit_relocated_value, trim_span, EmitOp, EmitText};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
@@ -367,6 +370,23 @@ pub fn emit_v_for_close(el: &ElementNode, _source: &str, out: &mut CodeGenOutput
 
 /// Emit v-show as a style attribute.
 ///
+/// Emit unmapped synthetic text at `at` (an `Inserted` chunk → maps to `None`),
+/// order-preserving so it interleaves with adjacent mapped value emissions.
+#[inline]
+fn emit_unmapped<'alloc>(
+    out: &mut CodeGenOutput<'alloc>,
+    at: SourceByteOffset,
+    text: &'static str,
+) {
+    emit_op(
+        out,
+        &EmitOp::InsertUnmapped {
+            at,
+            text: EmitText::Static(text),
+        },
+    );
+}
+
 /// `v-show="expr"` → appends `style={{display: expr ? undefined : 'none'}}`
 pub fn emit_v_show<'alloc>(
     el: &ElementNode,
@@ -390,24 +410,19 @@ pub fn emit_v_show<'alloc>(
     };
 
     if let (Some(vs), Some(ve)) = (show.value_start, show.value_end) {
-        let expr = &source[vs as usize..ve as usize];
         let prop_end = super::props::get_prop_end(show);
 
-        // Build fully resolved expression BEFORE overwrite to avoid orphaning
-        // binding patches (same pattern as v-if/v-for).
-        let resolved_expr = if let Some(oxc_el) = oxc_el {
-            if let Some(oxc_prop) = oxc_el.props.iter().find(|p| p.prop_index == show_idx) {
-                if let Some(ref exp) = oxc_prop.exp {
-                    build_prefixed_expr(expr, vs, exp, resolver, &[])
-                } else {
-                    resolver.resolve_simple_expr(expr)
-                }
-            } else {
-                resolver.resolve_simple_expr(expr)
-            }
-        } else {
-            resolver.resolve_simple_expr(expr)
-        };
+        // The v-show condition is a navigable user expression relocated into a
+        // synthetic `style={{ display: … }}` attribute; capture its trimmed source
+        // span + bindings so it can be emitted mapped through the typed substrate.
+        let (show_tvs, show_tve) = trim_span(source, vs, ve);
+        let show_range =
+            SourceByteRange::new(SourceByteOffset(show_tvs), SourceByteOffset(show_tve));
+        let show_bindings = oxc_el
+            .and_then(|e| e.props.iter().find(|p| p.prop_index == show_idx))
+            .and_then(|p| p.exp.as_ref())
+            .and_then(|exp| exp.bindings.as_ref())
+            .map(|b| b.bindings.as_slice());
 
         // Check if the element already has a :style binding. If so, merge the
         // v-show display condition into it to avoid duplicate `style` attributes.
@@ -426,45 +441,39 @@ pub fn emit_v_show<'alloc>(
 
         if let Some((style_idx, style_prop)) = existing_style {
             // Merge: remove v-show, transform :style to include display condition.
-            // :style="itemStyle" → style={{...itemStyle, display: expr ? undefined : 'none'}}
+            // :style="itemStyle" → style={{...(itemStyle), display: expr ? undefined : 'none'}}
+            // Both `itemStyle` and the v-show condition stay mapped; the synthetic
+            // `style={{...(`, `), display: `, ` ? undefined : 'none'}}` is unmapped.
             out.overwrite(show.start, prop_end, "");
 
             if let (Some(svs), Some(sve)) = (style_prop.value_start, style_prop.value_end) {
-                let style_expr = &source[svs as usize..sve as usize];
-                let resolved_style = if let Some(oxc_el) = oxc_el {
-                    if let Some(oxc_prop) = oxc_el.props.iter().find(|p| p.prop_index == style_idx)
-                    {
-                        if let Some(ref exp) = oxc_prop.exp {
-                            build_prefixed_expr(style_expr, svs, exp, resolver, &[])
-                        } else {
-                            resolver.resolve_simple_expr(style_expr)
-                        }
-                    } else {
-                        resolver.resolve_simple_expr(style_expr)
-                    }
-                } else {
-                    resolver.resolve_simple_expr(style_expr)
-                };
+                let (style_tvs, style_tve) = trim_span(source, svs, sve);
+                let style_range =
+                    SourceByteRange::new(SourceByteOffset(style_tvs), SourceByteOffset(style_tve));
+                let style_bindings = oxc_el
+                    .and_then(|e| e.props.iter().find(|p| p.prop_index == style_idx))
+                    .and_then(|p| p.exp.as_ref())
+                    .and_then(|exp| exp.bindings.as_ref())
+                    .map(|b| b.bindings.as_slice());
 
                 let style_end = super::props::get_prop_end(style_prop);
-                out.overwrite(
-                    style_prop.start,
-                    style_end,
-                    &format!(
-                        "style={{{{...({resolved_style}), display: {resolved_expr} ? undefined : 'none'}}}}",
-                    ),
-                );
+                let at = SourceByteOffset(style_prop.start);
+                out.overwrite(style_prop.start, style_end, "");
+                emit_unmapped(out, at, "style={{...(");
+                emit_relocated_value(out, at, source, style_range, style_bindings, resolver);
+                emit_unmapped(out, at, "), display: ");
+                emit_relocated_value(out, at, source, show_range, show_bindings, resolver);
+                emit_unmapped(out, at, " ? undefined : 'none'}}");
             }
         } else {
             // No existing :style — replace v-show with style attribute directly.
-            out.overwrite(
-                show.start,
-                prop_end,
-                &format!(
-                    "style={{{{display: {} ? undefined : 'none'}}}}",
-                    resolved_expr
-                ),
-            );
+            // `style={{display: ` / ` ? undefined : 'none'}}` is unmapped synthetic
+            // scaffolding; the v-show condition stays mapped to its source span.
+            let at = SourceByteOffset(show.start);
+            out.overwrite(show.start, prop_end, "");
+            emit_unmapped(out, at, "style={{display: ");
+            emit_relocated_value(out, at, source, show_range, show_bindings, resolver);
+            emit_unmapped(out, at, " ? undefined : 'none'}}");
         }
     }
 }

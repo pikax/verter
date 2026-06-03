@@ -317,6 +317,90 @@ pub fn binding_slice<'a>(
     }
 }
 
+/// Trim a source span of leading/trailing ASCII whitespace, returning the trimmed
+/// `[start, end)` offsets. Mirrors the `value_expr.trim()` offset arithmetic used
+/// throughout the IDE prop emitters.
+pub fn trim_span(source: &str, start: u32, end: u32) -> (u32, u32) {
+    let raw = &source[start as usize..end as usize];
+    let lead = (raw.len() - raw.trim_start().len()) as u32;
+    let trail = (raw.len() - raw.trim_end().len()) as u32;
+    (start + lead, end - trail)
+}
+
+/// Filter an expression's extracted bindings down to those whose source position
+/// falls inside `[start, end)`. Used when ONE sub-expression (e.g. a single
+/// object-property value) is emitted relocated through [`emit_jsx_binding_value`]
+/// while the parsed `BindingExtractionResult` spans a LARGER expression: a binding
+/// before the sub-span has `pos < start` and `emit_one_occurrence` would otherwise
+/// mis-emit it (its `rel` saturates to 0, inside the sub-span text).
+fn bindings_in_span<'a>(
+    bindings: &[crate::utils::oxc::Binding<'a>],
+    start: u32,
+    end: u32,
+) -> Vec<crate::utils::oxc::Binding<'a>> {
+    bindings
+        .iter()
+        .filter(|b| b.pos >= start && b.pos < end)
+        .cloned()
+        .collect()
+}
+
+/// Emit a single user value expression RELOCATED at `at`, with every identifier
+/// mapped back to its source position through the typed [`emit_jsx_binding_value`]
+/// substrate. `span` is the (trimmed) source span of the value; `all_bindings` is
+/// the enclosing expression's extracted bindings (filtered to `span` here). When no
+/// bindings are available the whole span is emitted as one mapped run with the
+/// resolver's simple-expression accessor split (prefix/suffix unmapped, identifier
+/// core mapped at its source start).
+///
+/// This is the relocated analogue of the in-place `collect_binding_patches` path:
+/// v-on spreads and v-show delete the prop span and re-emit the value inside
+/// synthetic scaffolding, so the value cannot stay in place — but each identifier
+/// still maps 1:1 to its source span.
+pub fn emit_relocated_value<'alloc>(
+    out: &mut CodeGenOutput<'alloc>,
+    at: SourceByteOffset,
+    source: &'alloc str,
+    span: SourceByteRange,
+    all_bindings: Option<&[crate::utils::oxc::Binding<'alloc>]>,
+    resolver: &BindingResolver<'alloc>,
+) {
+    let filtered: Vec<crate::utils::oxc::Binding<'alloc>> = match all_bindings {
+        Some(bs) => bindings_in_span(bs, span.start.0, span.end.0),
+        None => Vec::new(),
+    };
+    let trimmed = &source[span.start.0 as usize..span.end.0 as usize];
+    let (prefix, suffix): (Option<String>, Option<String>) = if filtered.is_empty() {
+        let resolved = resolver.resolve_simple_expr(trimmed);
+        if let Some(idx) = resolved.find(trimmed) {
+            let pre = resolved[..idx].to_string();
+            let suf = resolved[idx + trimmed.len()..].to_string();
+            (
+                (!pre.is_empty()).then_some(pre),
+                (!suf.is_empty()).then_some(suf),
+            )
+        } else {
+            // Resolver rewrote the expression entirely — emit the trimmed span as
+            // one mapped run with no extra prefix/suffix.
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+    let jsx = JsxBindingValue {
+        source_expr: span,
+        prefix: prefix.as_deref(),
+        suffix: suffix.as_deref(),
+        occurrences: 1,
+        bindings: if filtered.is_empty() {
+            binding_slice(None)
+        } else {
+            &filtered
+        },
+    };
+    emit_jsx_binding_value(out, at, source, &jsx, resolver);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
