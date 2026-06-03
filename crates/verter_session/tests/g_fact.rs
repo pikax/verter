@@ -1,5 +1,7 @@
 //! Consolidated integration-test group `fact`: each module below was
 //! a separate top-level tests/*.rs binary, merged to cut test-link count.
+#[path = "g_fact/class_dual_space.rs"]
+mod class_dual_space;
 #[path = "g_fact/fact_emission_parse_time_budget.rs"]
 mod fact_emission_parse_time_budget;
 #[path = "g_fact/fact_fingerprint_stability.rs"]
