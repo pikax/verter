@@ -7575,3 +7575,291 @@ fn migrated_sites_binding_notation_characterization() {
         "@click Props handler uses dot notation (the spread form must match it): {at_click}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unified user-expression emission — discriminating tests.
+//
+// These pin that every IDE user-expression emission routes through the single
+// `plan_user_expr` planner + InPlace/Relocated sinks (and the object-literal layer
+// above it): v-on object shorthand emits value-only (no doubled key), non-object
+// `v-on="obj"` spreads a mapped expr, relocated ignored locals stay mapped, `:ref`
+// values stay navigable, and a redundant native v-model still emits its modifiers.
+// Each fails against the pre-unification hand-rolled emission.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Q1 — `v-on="{ click }"` shorthand object property. The object-literal layer
+/// emits the synthetic event key `onClick: `, then the shorthand VALUE in
+/// value-only mode → `onClick: __props.click`. Pre-refactor the value was emitted
+/// through `emit_relocated_value`, whose `emit_one_occurrence` saw the binding's
+/// `is_shorthand=true` flag and re-expanded the key → the broken double
+/// `onClick: click: __props.click` (or `onClick: click` when no prefix applies).
+#[test]
+fn v_on_object_shorthand_emits_value_only() {
+    // Props binding → `__props.` prefix so the shorthand re-expansion is visible.
+    let source = r#"<template><div v-on="{ click }"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("click", BindingType::Props)]);
+
+    // Positive: exactly the value-only form. The event key `onClick:` is emitted
+    // once by the object layer; the value is the resolved `__props.click`.
+    assert!(
+        output.contains("onClick: __props.click"),
+        "v-on shorthand must emit `onClick: __props.click` (value-only): {output}"
+    );
+    // Negative: NO double key. The pre-refactor bug emitted the key twice.
+    assert!(
+        !output.contains("onClick: click: "),
+        "v-on shorthand must NOT double the key (`onClick: click: __props.click`): {output}"
+    );
+    assert!(
+        !output.contains("click: __props.click: "),
+        "v-on shorthand must NOT emit a stray `click:` shorthand expansion: {output}"
+    );
+
+    // The VALUE identifier `click` maps back to its source span.
+    let click_src = source.find("{ click }").unwrap() as u32 + "{ ".len() as u32;
+    assert!(
+        has_token_for_src(&tokens, click_src),
+        "v-on shorthand value `click` must map to source col {click_src}. Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+/// Q1 — `v-on="handlers"` where the value is NOT an object literal. The whole
+/// expression spreads as `{...<mapped user expr>}` and the identifier maps back to
+/// source. Pre-refactor the non-object branch resolved through
+/// `rewrite_v_on_object_literal_expr` + a flat UNMAPPED insert, so `handlers` had
+/// no source mapping (ctrl+click failed).
+#[test]
+fn v_on_non_object_expr_spread_maps() {
+    let source = r#"<template><div v-on="handlers"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("handlers", BindingType::Props)]);
+
+    assert!(
+        output.contains("{...__props.handlers}"),
+        "v-on non-object expr must spread the mapped user expr `{{...__props.handlers}}`: {output}"
+    );
+
+    // Positive: `handlers` maps to its source span.
+    let handlers_src = source.find("\"handlers\"").unwrap() as u32 + 1;
+    assert!(
+        has_token_for_src(&tokens, handlers_src),
+        "v-on non-object expr `handlers` must map to source col {handlers_src}. Tokens: {tokens:?}, output: {output}"
+    );
+
+    // Negative: nothing maps back to the prop start.
+    let prop_start = source.find("v-on").unwrap() as u32;
+    assert!(
+        !tokens.iter().any(|&(_, _, sc)| sc == prop_start),
+        "no generated token may map back to the v-on prop start (col {prop_start}). Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+/// Q1 — an IGNORED local binding (a v-slot scoped local) used in a RELOCATED value
+/// (here a v-on object handler) must emit the MAPPED bare identifier — no accessor
+/// prefix/suffix, but a source-map token so ctrl+click lands on the local. The
+/// relocated-value path must map ignored locals, not emit them unmapped.
+#[test]
+fn relocated_value_ignored_local_binding_maps() {
+    // `item` is a v-slot scoped local; inside `v-on="{ click: item }"` it is an
+    // ignored binding. It stays bare (no prefix) AND maps back to its source span.
+    let source =
+        r#"<template><Comp v-slot="{ item }"><div v-on="{ click: item }"/></Comp></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[]);
+
+    // The handler value `item` is a scoped local → bare (no `__props.` / `_ctx.`).
+    assert!(
+        output.contains("onClick: item"),
+        "ignored local handler must stay bare `onClick: item`: {output}"
+    );
+    assert!(
+        !output.contains("onClick: _ctx.item") && !output.contains("onClick: __props.item"),
+        "ignored local must NOT be prefixed: {output}"
+    );
+
+    // The `item` INSIDE the v-on object must map to its source span. Two `item`
+    // tokens exist (the v-slot destructure + the handler); assert a token maps to
+    // the handler occurrence specifically.
+    let handler_item_src = source.find("click: item").unwrap() as u32 + "click: ".len() as u32;
+    assert!(
+        has_token_for_src(&tokens, handler_item_src),
+        "ignored local handler `item` must map to source col {handler_item_src} (emitted MAPPED, not unmapped). Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+/// Q3 — dynamic `:ref="expr"` → `ref={expr}` IN PLACE. The parser routes a dynamic
+/// `:ref` through `el.props` → `process_v_bind` (static-key path), which preserves
+/// the value expression in place: the VALUE identifier `myRef` maps to its source
+/// span, and (the desync check) it must NOT collapse to the foreign prop start.
+/// The `ref` JSX attribute NAME is the preserved `ref` arg token and legitimately
+/// maps to source — that is NOT the desync (the desync was a baked VALUE).
+#[test]
+fn ref_expr_value_maps_to_source() {
+    let source = r#"<template><div :ref="myRef"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("myRef", BindingType::SetupRef)]);
+
+    assert!(
+        output.contains("ref={myRef}"),
+        ":ref should emit ref={{myRef}} in place: {output}"
+    );
+    assert!(
+        !output.contains(":ref"),
+        ":ref directive must be removed: {output}"
+    );
+
+    // Positive: the VALUE identifier `myRef` maps to its source byte offset.
+    let myref_src = source.find("\"myRef\"").unwrap() as u32 + 1;
+    let value_gen_col = output.find("ref={myRef}").unwrap() as u32 + "ref={".len() as u32;
+    let value_maps_to_source = tokens
+        .iter()
+        .any(|&(_dl, dc, sc)| dc == value_gen_col && sc == myref_src);
+    assert!(
+        value_maps_to_source,
+        ":ref VALUE `myRef` (gen col {value_gen_col}) must map to source col {myref_src}. \
+         Tokens: {tokens:?}, output: {output}"
+    );
+
+    // Negative (the desync): the value identifier must NOT collapse to the `:` prop
+    // start (a baked `out.overwrite(prop.start, .., &format!(\"ref={{{}}}\", value))`
+    // would map the value back to the prop start).
+    let prop_start = source.find(":ref").unwrap() as u32;
+    let value_maps_to_prop_start = tokens
+        .iter()
+        .any(|&(_dl, dc, sc)| dc == value_gen_col && sc == prop_start);
+    assert!(
+        !value_maps_to_prop_start,
+        ":ref VALUE must not map to the prop start (col {prop_start}). Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+/// Q3 — static `ref="myRef"` → `ref={"myRef"}` is a STRING LITERAL ref (non-navigable).
+/// It must be emitted as an UNMAPPED synthetic replacement (delete + unmapped insert),
+/// NOT a mapped `out.overwrite` whose `ref={"…"}` run maps back to the prop start.
+#[test]
+fn static_ref_emits_unmapped_string_literal() {
+    let source = r#"<template><div ref="myRef"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[]);
+
+    assert!(
+        output.contains(r#"ref={"myRef"}"#),
+        "static ref should emit ref={{\"myRef\"}}: {output}"
+    );
+
+    // The `ref={"…"}` synthetic run is unmapped — no generated token maps back to
+    // the `ref` prop start (the string literal carries no navigation).
+    let prop_start = source.find("ref=").unwrap() as u32;
+    assert!(
+        !tokens.iter().any(|&(_, _, sc)| sc == prop_start),
+        "static ref's synthetic `ref={{\"…\"}}` must not map back to the prop start (col {prop_start}). \
+         Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+/// Q4 — native v-model whose value/event generation is redundant
+/// (`has_explicit_prop && has_explicit_handler`) but which carries MODIFIERS. The
+/// modifiers prop MUST still be emitted. Pre-refactor `empty_replacement = true`
+/// suppressed the whole emission INCLUDING modifiers — the modifier was silently
+/// dropped.
+#[test]
+fn vmodel_redundant_still_emits_modifiers() {
+    // <input v-model.trim="x" :value="..." @input="..."> — both the value prop and
+    // the input handler are explicitly present, so value/event generation is
+    // redundant; only the `.trim` modifier prop should be emitted.
+    let source = r#"<template><input v-model.trim="x" :value="x" @input="e => x = e.target.value"/></template>"#;
+    let (output, _tokens) = gen_tsx_template_with_map(source, &[("x", BindingType::SetupRef)]);
+
+    // The modifiers prop must survive even though value/event are suppressed.
+    assert!(
+        output.contains("modelModifiers={{"),
+        "redundant native v-model with modifiers MUST still emit the modifiers prop: {output}"
+    );
+    assert!(
+        output.contains("trim: true"),
+        "the `.trim` modifier must be emitted as `trim: true`: {output}"
+    );
+}
+
+/// Q2 — the broken-interpolation recovery path's keyword-bracket case
+/// (`SynthesizedResolved`) routes through the unified synthesized-shorthand emission
+/// instead of a baked `out.overwrite(ident.start, ident.end, &resolved)`. `class` is
+/// a JS keyword used as a Props member → `__props["class"]`; the `class` core must
+/// map to its source token and must NOT collapse the whole bracket form onto the
+/// prop start.
+#[test]
+fn broken_interpolation_keyword_member_maps_via_synthesized() {
+    let source = r#"<template><div>{{ class + }}</div></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("class", BindingType::Props)]);
+
+    // Keyword member → bracket notation (dot would be a syntax error).
+    assert!(
+        output.contains(r#"__props["class"]"#),
+        "broken-interpolation keyword member must resolve to bracket notation: {output}"
+    );
+
+    // The `class` core inside the brackets maps to its source token.
+    let class_src = source.find("class").unwrap() as u32;
+    let bracket_gen = output.find(r#"__props["class"]"#).unwrap();
+    let core_gen = bracket_gen + r#"__props[""#.len();
+    let (cl, cc) = gen_offset_to_line_col(&output, core_gen);
+    let core_maps = tokens
+        .iter()
+        .any(|&(dl, dc, sc)| dl == cl && dc == cc && sc == class_src);
+    assert!(
+        core_maps,
+        "the `class` core (gen {cl}:{cc}) must map to source col {class_src}. Tokens: {tokens:?}, output: {output}"
+    );
+
+    // The `__props["` prefix start must be unmapped (a baked overwrite would map it
+    // back to the identifier/prop position).
+    let (pl, pc) = gen_offset_to_line_col(&output, bracket_gen);
+    assert!(
+        !has_token_at_gen(&tokens, pl, pc),
+        "the `__props[\"` prefix start (gen {pl}:{pc}) must map to None. Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+/// The v-on SPREAD path (hyphenated event name → `{...{"onMy-event": …}}`) keeps
+/// the event NAME navigable: the `onMy-event` string key maps to the source event
+/// token so hover / go-to-definition on a component `@my-event` resolves the child's
+/// `onMyEvent` payload. The handler value also maps. Byte-identical output to the
+/// pre-unification baked spread (only the source map gains the event-name token).
+#[test]
+fn v_on_spread_event_name_and_handler_map_to_source() {
+    let source = r#"<template><MyComp @my-event="handler"/></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("handler", BindingType::SetupConst)]);
+
+    // Hyphenated JSX event name forces the spread form.
+    assert!(
+        output.contains(r#"{...{"onMy-event": handler}}"#),
+        "hyphenated @my-event must spread as {{...{{\"onMy-event\": handler}}}}: {output}"
+    );
+
+    // The event-name key maps to the source `my-event` token.
+    let event_src = source.find("my-event").unwrap() as u32;
+    let key_gen = output.find(r#""onMy-event""#).unwrap() + 1; // past the opening quote
+    let (kl, kc) = gen_offset_to_line_col(&output, key_gen);
+    assert!(
+        tokens.iter().any(|&(dl, dc, sc)| dl == kl && dc == kc && sc == event_src),
+        "the `onMy-event` key (gen {kl}:{kc}) must map to the source event token col {event_src}. Tokens: {tokens:?}, output: {output}"
+    );
+
+    // The handler value maps to its source span.
+    let handler_src = source.find("\"handler\"").unwrap() as u32 + 1;
+    assert!(
+        has_token_for_src(&tokens, handler_src),
+        "spread handler `handler` must map to source col {handler_src}. Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+/// Q1 — atomicity / unification sanity: the v-on object-spread handler still maps
+/// to source through the unified planner (kept green across the refactor).
+#[test]
+fn v_on_object_spread_handler_still_maps_after_unify() {
+    let source = r#"<template><div v-on="{ mousedown: doThis }"/></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("doThis", BindingType::SetupConst)]);
+    let handler_src = source.find("doThis").unwrap() as u32;
+    assert!(
+        has_token_for_src(&tokens, handler_src),
+        "v-on object handler `doThis` must still map after unify. Tokens: {tokens:?}, output: {output}"
+    );
+}

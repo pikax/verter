@@ -3,10 +3,12 @@
 //! `v-model` is the hardest IDE emit site: it emits the bound expression 2-3
 //! times (a read occurrence plus an assignment occurrence inside the update
 //! handler), and for a dynamic arg the computed prop/event names embed the arg
-//! expression. Each occurrence becomes its own mapped emission through the typed
-//! `EmitOp` substrate (`emit_jsx_binding_value`); all assignment / call /
-//! punctuation scaffolding is unmapped. Extracted from `props.rs` to keep both
-//! files within the production line-count budget.
+//! expression. The value/arg expressions are planned ONCE through the unified
+//! `plan_user_expr` planner; each occurrence re-emits the plan through the
+//! relocated sink (`emit_expr_plan`), so every occurrence's identifier maps back
+//! to the same source span while all assignment / call / punctuation scaffolding
+//! is unmapped. Extracted from `props.rs` to keep both files within the production
+//! line-count budget.
 
 use verter_span::{GeneratedByteLen, SourceByteOffset, SourceByteRange};
 
@@ -14,7 +16,7 @@ use super::props::{get_prop_end, kebab_to_camel_case};
 use crate::ast::types::ElementNode;
 use crate::ide::get_directive_name;
 use crate::ide::template::emit::{
-    binding_slice, emit_jsx_binding_value, emit_op, EmitOp, EmitText, JsxBindingValue,
+    emit_expr_plan, emit_op, plan_user_expr, EmitOp, EmitText, ExprOptions, ExprPlan, Placement,
 };
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
@@ -50,58 +52,31 @@ pub(super) fn process_v_model<'alloc>(
     let value_trailing_ws = (raw_expr.len() - raw_expr.trim_end().len()) as u32;
     let tvs = vs + value_leading_ws;
     let tve = ve - value_trailing_ws;
-    let trimmed_expr = raw_expr.trim();
 
-    // Pre-resolve the value-expression accessor decision for the no-bindings
-    // fallback (single bare identifier / parse failure). When OXC produced
-    // bindings, `emit_jsx_binding_value` maps each identifier directly.
+    // Plan the value expression ONCE through the unified planner. Each generated
+    // occurrence (v-model emits the value 2-3×: a read plus an assignment LHS)
+    // re-emits this plan through the relocated sink, so every occurrence's
+    // identifier maps back to the SAME source span.
     let value_bindings = oxc_prop
         .and_then(|p| p.exp.as_ref())
-        .and_then(|e| e.bindings.as_ref());
-    let (value_prefix, value_suffix): (Option<String>, Option<String>) = if value_bindings
-        .map(|b| !b.bindings.is_empty())
-        .unwrap_or(false)
-    {
-        (None, None)
-    } else {
-        // No extracted bindings: split the resolved simple expression into a
-        // mapped identifier core plus unmapped prefix/suffix (mirrors the legacy
-        // prefix-only split). If the resolved form does not contain the trimmed
-        // expression verbatim, fall back to an unmapped prefix only.
-        let resolved = resolver.resolve_simple_expr(trimmed_expr);
-        if let Some(idx) = resolved.find(trimmed_expr) {
-            let pre = resolved[..idx].to_string();
-            let suf = resolved[idx + trimmed_expr.len()..].to_string();
-            (
-                (!pre.is_empty()).then_some(pre),
-                (!suf.is_empty()).then_some(suf),
-            )
-        } else {
-            // Resolved form rewrote the expression entirely — emit it all as the
-            // (still mapped-at-start) core with no extra prefix/suffix.
-            (None, None)
-        }
-    };
-    let value_jsx = JsxBindingValue {
-        source_expr: SourceByteRange::new(SourceByteOffset(tvs), SourceByteOffset(tve)),
-        prefix: value_prefix.as_deref(),
-        suffix: value_suffix.as_deref(),
-        occurrences: 1,
-        bindings: binding_slice(value_bindings),
-    };
+        .and_then(|e| e.bindings.as_ref())
+        .map(|b| b.bindings.as_slice());
+    let value_plan = plan_user_expr(
+        source,
+        SourceByteRange::new(SourceByteOffset(tvs), SourceByteOffset(tve)),
+        value_bindings,
+        resolver,
+        ExprOptions::default(),
+    );
 
     // Determine prop name: default "modelValue" or named v-model:xxx.
     // For a dynamic arg, the computed prop/event/modifier names embed the arg
     // expression, which must itself map back to source; `dyn_arg` captures the
     // arg span + bindings for those mapped emissions.
     let is_dynamic_arg = prop.is_dynamic == Some(true);
-    struct DynArg<'a> {
-        span: SourceByteRange,
-        bindings: &'a [crate::utils::oxc::Binding<'a>],
-        prefix: Option<String>,
-        suffix: Option<String>,
-    }
-    let mut dyn_arg: Option<DynArg<'_>> = None;
+    // The dynamic-arg expression is planned ONCE (computed prop/event/modifier
+    // names embed it); each `Piece::Arg` re-emits this plan relocated.
+    let mut dyn_arg_plan: Option<ExprPlan<'_>> = None;
     let (value_prop, update_event, modifier_prop) = if let (Some(arg_s), Some(arg_e)) =
         (prop.arg_start, prop.arg_end)
     {
@@ -119,34 +94,18 @@ pub(super) fn process_v_model<'alloc>(
             let raw_arg_end = raw_arg_start + raw_arg.len() as u32;
             let arg_bindings = oxc_prop
                 .and_then(|p| p.arg.as_ref())
-                .and_then(|a| a.bindings.as_ref());
-            let (arg_prefix, arg_suffix): (Option<String>, Option<String>) = if arg_bindings
-                .map(|b| !b.bindings.is_empty())
-                .unwrap_or(false)
-            {
-                (None, None)
-            } else {
-                let resolved = resolver.resolve_simple_expr(raw_arg);
-                if let Some(idx) = resolved.find(raw_arg) {
-                    let pre = resolved[..idx].to_string();
-                    let suf = resolved[idx + raw_arg.len()..].to_string();
-                    (
-                        (!pre.is_empty()).then_some(pre),
-                        (!suf.is_empty()).then_some(suf),
-                    )
-                } else {
-                    (None, None)
-                }
-            };
-            dyn_arg = Some(DynArg {
-                span: SourceByteRange::new(
+                .and_then(|a| a.bindings.as_ref())
+                .map(|b| b.bindings.as_slice());
+            dyn_arg_plan = Some(plan_user_expr(
+                source,
+                SourceByteRange::new(
                     SourceByteOffset(raw_arg_start),
                     SourceByteOffset(raw_arg_end),
                 ),
-                bindings: binding_slice(arg_bindings),
-                prefix: arg_prefix,
-                suffix: arg_suffix,
-            });
+                arg_bindings,
+                resolver,
+                ExprOptions::default(),
+            ));
             // The textual placeholders are unused once we emit the arg as a
             // mapped piece, but the surrounding scaffolding still needs the
             // literal punctuation, captured directly in the piece list below.
@@ -187,7 +146,6 @@ pub(super) fn process_v_model<'alloc>(
     // embedded `resolved` becomes a `Piece::Value`; each embedded `resolved_arg`
     // becomes a `Piece::Arg`.
     let mut pieces: Vec<Piece> = Vec::new();
-    let mut empty_replacement = false;
 
     if is_dynamic_arg {
         // Byte-identical to the prior single-`format!` emission
@@ -246,7 +204,9 @@ pub(super) fn process_v_model<'alloc>(
         });
 
         if has_explicit_prop && has_explicit_handler {
-            empty_replacement = true;
+            // The element already declares BOTH the DOM prop and its handler, so
+            // v-model's generated value/event pieces would be redundant — push
+            // none. Any MODIFIERS are still emitted by the modifier block below.
         } else if has_explicit_prop {
             // <event_name>={(<param>) => ((<value>) = $event)}
             pieces.push(Piece::Syn(format!(
@@ -284,7 +244,16 @@ pub(super) fn process_v_model<'alloc>(
     }
 
     // Append the modifiers prop (each modifier name maps back to source).
-    if !prop.modifiers.is_empty() && !empty_replacement {
+    //
+    // The modifier prop is emitted whenever modifiers are present — even when
+    // value/event generation is redundant (`empty_replacement`, i.e. the element
+    // already declares both the DOM prop and its handler). `empty_replacement`
+    // suppresses ONLY the generated value/event pieces, NOT the modifier prop:
+    // `<input v-model.trim :value @input>` must still publish `modelModifiers={{
+    // trim: true }}`. (The dynamic-arg computed-name modifier path below is never
+    // reached under `empty_replacement` — that flag is set only on the native
+    // static-arg branch.)
+    if !prop.modifiers.is_empty() {
         if is_dynamic_arg {
             // Dynamic arg: the modifiers prop name is COMPUTED. A computed name is
             // NOT a valid bare JSX attribute (`[`…`]={…}` is illegal, and an empty
@@ -321,9 +290,11 @@ pub(super) fn process_v_model<'alloc>(
     }
 
     // Delete the original prop span; everything is re-emitted as ordered pieces
-    // anchored at `prop.start`. (Empty-replacement branches just delete.)
+    // anchored at `prop.start`. Return early ONLY when the final piece list is
+    // empty — `empty_replacement` (redundant value/event) still emits modifier
+    // pieces, so a v-model with modifiers is never a bare deletion.
     out.overwrite(prop.start, prop_end, "");
-    if empty_replacement {
+    if pieces.is_empty() {
         return;
     }
 
@@ -342,18 +313,13 @@ pub(super) fn process_v_model<'alloc>(
                 );
             }
             Piece::Value => {
-                emit_jsx_binding_value(out, at, source, &value_jsx, resolver);
+                // Re-emit the value plan relocated for this occurrence — every
+                // occurrence's identifier maps back to the same source span.
+                emit_expr_plan(out, &value_plan, Placement::Relocated { at }, source);
             }
             Piece::Arg => {
-                if let Some(ref da) = dyn_arg {
-                    let arg_jsx = JsxBindingValue {
-                        source_expr: da.span,
-                        prefix: da.prefix.as_deref(),
-                        suffix: da.suffix.as_deref(),
-                        occurrences: 1,
-                        bindings: da.bindings,
-                    };
-                    emit_jsx_binding_value(out, at, source, &arg_jsx, resolver);
+                if let Some(ref plan) = dyn_arg_plan {
+                    emit_expr_plan(out, plan, Placement::Relocated { at }, source);
                 }
             }
             Piece::Modifier(span) => {

@@ -21,7 +21,6 @@ use verter_span::{GeneratedByteLen, SourceByteOffset, SourceByteRange};
 
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
-use crate::utils::oxc::BindingExtractionResult;
 
 /// Text payload for an emit op. Avoids needless allocation: static scaffolding
 /// stays `&'static str`, source slices stay borrowed, and only genuinely
@@ -91,6 +90,13 @@ pub enum EmitOp<'a> {
     /// `OverwriteSyntheticBoundary` ops. `source` documents the preserved span for
     /// the typed contract; the no-op lowering intentionally never dereferences it
     /// (the bytes already live in the source as an `Original` chunk).
+    ///
+    /// The unified planner now expresses in-place preservation as plan-level
+    /// `Verbatim`/`Ident` NO-OPS rather than a standalone `PreserveOriginal` op, so
+    /// this variant is no longer constructed in production. It is retained as part
+    /// of the typed `EmitOp` substrate (the `emit_op_has_no_mapped_overwrite_variant`
+    /// guard enumerates it) and as the explicit "preserve one span" affordance.
+    #[allow(dead_code)]
     PreserveOriginal {
         #[allow(dead_code)]
         source: SourceByteRange,
@@ -116,26 +122,6 @@ pub enum EmitOp<'a> {
         source: SourceByteRange,
         at: SourceByteOffset,
     },
-}
-
-/// A user binding value to emit as JSX. Structured pieces — never a flat mapped
-/// string. `occurrences > 1` means the SAME source expression is emitted multiple
-/// times (native `v-model`: a read occurrence plus an assignment-LHS occurrence);
-/// each occurrence becomes its own mapped emission pointing at the same source span.
-#[derive(Debug)]
-pub struct JsxBindingValue<'a> {
-    /// The user expression span (already trimmed of surrounding whitespace).
-    pub source_expr: SourceByteRange,
-    /// Synthetic accessor prefix for a SIMPLE identifier (e.g. `___VERTER___instance.`),
-    /// or `None` when per-identifier prefixes come from `bindings`.
-    pub prefix: Option<&'a str>,
-    /// Synthetic trailing text for a SIMPLE identifier (e.g. `.value`), if any.
-    pub suffix: Option<&'a str>,
-    /// Number of generated occurrences of the expression (1 for most; 2-3 for v-model).
-    pub occurrences: u8,
-    /// Per-identifier sub-expression mapping for compound expressions
-    /// (`collect_binding_patches` input). Empty for a single bare identifier.
-    pub bindings: &'a [crate::utils::oxc::Binding<'a>],
 }
 
 /// Lower a single [`EmitOp`] into the deferred [`CodeGenOutput`] operation buffer.
@@ -185,138 +171,6 @@ pub fn emit_op<'alloc>(out: &mut CodeGenOutput<'alloc>, op: &EmitOp<'_>) {
     }
 }
 
-/// Emit a binding value `occurrences` times as mapped JSX insertions anchored at
-/// `at` (used when the prop span is fully overwritten and the expression is
-/// RELOCATED / duplicated, e.g. native `v-model`).
-///
-/// Each occurrence reproduces the resolved expression so that every user
-/// identifier carries its own `InsertMapped` token pointing at the original
-/// source position. Synthetic accessor prefixes / suffixes and any verbatim
-/// punctuation between identifiers are emitted unmapped. For a compound
-/// expression the `bindings` drive a per-identifier split (the mapped analogue of
-/// `build_prefixed_expr`); for a single bare identifier the whole expression is
-/// one mapped run.
-///
-/// In-place sites (v-html / v-text / `:[key]` / static `:prop`) do NOT use this:
-/// they keep the expression bytes via `PreserveOriginal` + `collect_binding_patches`
-/// and only emit `OverwriteSyntheticBoundary` ops around them.
-pub fn emit_jsx_binding_value<'alloc>(
-    out: &mut CodeGenOutput<'alloc>,
-    at: SourceByteOffset,
-    source: &str,
-    v: &JsxBindingValue<'_>,
-    resolver: &BindingResolver<'_>,
-) {
-    let expr_start = v.source_expr.start.0 as usize;
-    let expr_end = v.source_expr.end.0 as usize;
-    let expr = &source[expr_start..expr_end];
-
-    for _ in 0..v.occurrences.max(1) {
-        emit_one_occurrence(out, at, v, expr, resolver);
-    }
-}
-
-fn emit_one_occurrence<'alloc>(
-    out: &mut CodeGenOutput<'alloc>,
-    at: SourceByteOffset,
-    v: &JsxBindingValue<'_>,
-    expr: &str,
-    resolver: &BindingResolver<'_>,
-) {
-    let expr_start = v.source_expr.start.0;
-
-    // All emissions here are RELOCATED (anchored at `at`, not at their source
-    // bytes). Each piece is a typed `EmitOp` lowered through `emit_op`:
-    // `InsertUnmapped` (order-preserving, no mapping) for synthetic/verbatim text
-    // and `InsertMapped` for each user identifier.
-    let unmapped = |out: &mut CodeGenOutput<'alloc>, text: EmitText<'_>| {
-        emit_op(out, &EmitOp::InsertUnmapped { at, text });
-    };
-    let mapped = |out: &mut CodeGenOutput<'alloc>, text: &str, source_start: u32| {
-        emit_op(
-            out,
-            &EmitOp::InsertMapped {
-                at,
-                text: EmitText::Borrowed(text),
-                source_start: SourceByteOffset(source_start),
-                content_offset: GeneratedByteLen(0),
-            },
-        );
-    };
-
-    // No extracted bindings (parse failed or a single bare identifier with no
-    // binding data): emit the explicit prefix (unmapped) + the whole expression
-    // mapped at its source start + the suffix (unmapped). The prefix/suffix on
-    // `JsxBindingValue` carry the simple-identifier accessor decision.
-    if v.bindings.is_empty() {
-        if let Some(prefix) = v.prefix {
-            unmapped(out, EmitText::Borrowed(prefix));
-        }
-        mapped(out, expr, expr_start);
-        if let Some(suffix) = v.suffix {
-            unmapped(out, EmitText::Borrowed(suffix));
-        }
-        return;
-    }
-
-    // Bindings present: walk them and emit verbatim slices unmapped, each
-    // non-ignored identifier mapped at its own source position (with the
-    // resolver's accessor prefix/suffix). This is the mapped analogue of
-    // `build_prefixed_expr` and handles both single-ident and compound cases.
-    let mut last_end = 0usize; // expr-relative byte cursor
-    for binding in v.bindings {
-        let rel = (binding.pos as usize).saturating_sub(expr_start as usize);
-        if rel > expr.len() {
-            continue;
-        }
-        // Verbatim text before this identifier → unmapped.
-        if rel > last_end {
-            unmapped(out, EmitText::Borrowed(&expr[last_end..rel]));
-        }
-        let name_end = rel + binding.name.len();
-        if binding.ignore {
-            // v-for / v-slot local: bare, unmapped, no prefix.
-            unmapped(
-                out,
-                EmitText::Borrowed(&expr[rel..name_end.min(expr.len())]),
-            );
-            last_end = name_end;
-            continue;
-        }
-        let prefix = resolver.resolve_prefix(binding.name);
-        let suffix = resolver.resolve_suffix(binding.name);
-        if binding.is_shorthand && (!prefix.is_empty() || !suffix.is_empty()) {
-            unmapped(out, EmitText::Owned(format!("{}: ", binding.name)));
-        }
-        if !prefix.is_empty() {
-            unmapped(out, EmitText::Borrowed(prefix));
-        }
-        // Identifier text mapped back to its source position.
-        mapped(out, binding.name, binding.pos);
-        if !suffix.is_empty() {
-            unmapped(out, EmitText::Borrowed(suffix));
-        }
-        last_end = name_end;
-    }
-    // Trailing verbatim text → unmapped.
-    if last_end < expr.len() {
-        unmapped(out, EmitText::Borrowed(&expr[last_end..]));
-    }
-}
-
-/// Build the `JsxBindingValue.bindings` slice from a parsed expression's
-/// extracted bindings, or an empty slice when the expression is a single bare
-/// identifier with no binding data.
-#[inline]
-pub fn binding_slice<'a>(
-    bindings: Option<&'a BindingExtractionResult<'a>>,
-) -> &'a [crate::utils::oxc::Binding<'a>] {
-    match bindings {
-        Some(b) => &b.bindings,
-        None => &[],
-    }
-}
-
 /// Trim a source span of leading/trailing ASCII whitespace, returning the trimmed
 /// `[start, end)` offsets. Mirrors the `value_expr.trim()` offset arithmetic used
 /// throughout the IDE prop emitters.
@@ -327,36 +181,442 @@ pub fn trim_span(source: &str, start: u32, end: u32) -> (u32, u32) {
     (start + lead, end - trail)
 }
 
-/// Filter an expression's extracted bindings down to those whose source position
-/// falls inside `[start, end)`. Used when ONE sub-expression (e.g. a single
-/// object-property value) is emitted relocated through [`emit_jsx_binding_value`]
-/// while the parsed `BindingExtractionResult` spans a LARGER expression: a binding
-/// before the sub-span has `pos < start` and `emit_one_occurrence` would otherwise
-/// mis-emit it (its `rel` saturates to 0, inside the sub-span text).
-fn bindings_in_span<'a>(
-    bindings: &[crate::utils::oxc::Binding<'a>],
-    start: u32,
-    end: u32,
-) -> Vec<crate::utils::oxc::Binding<'a>> {
-    bindings
-        .iter()
-        .filter(|b| b.pos >= start && b.pos < end)
-        .cloned()
-        .collect()
+// ─────────────────────────────────────────────────────────────────────────────
+// Unified user-expression emission planner + placement sinks.
+//
+// THE single owner of template-binding emission semantics. Every IDE user
+// expression — v-html / v-text / dynamic-key `:[key]` / native + dynamic
+// v-model / v-on (object-spread, dynamic-event, duplicate, inline, `$event`,
+// non-object) / v-show / no-value `:foo` / `.foo` / `:ref` — builds an
+// [`ExprPlan`] via [`plan_user_expr`] and emits it through [`emit_expr_plan`]
+// with a [`Placement`]. The object-literal rewriting layer ([`plan_object_literal`])
+// sits ABOVE the expression planner and handles static keys / computed keys /
+// spreads / shorthand exactly once.
+//
+// The planner owns the binding semantics ONCE (replacing the hand-rolled
+// `emit_relocated_value` / `emit_v_on_object_spread` / `build_prefixed_expr`
+// re-derivations):
+//   - resolved binding → synthetic prefix, MAPPED identifier, synthetic suffix
+//   - ignored / local binding → MAPPED bare identifier, NO prefix/suffix
+//   - verbatim punctuation / operators / literals → unmapped
+//   - shorthand → controlled by the EXPLICIT [`ShorthandMode`], NOT inferred
+//     blindly from `binding.is_shorthand`
+//
+// The IN-PLACE sink emits over the same plan: in-place mapped identifiers are
+// NO-OPS (the original bytes stay an `Original`, 1:1-mapped chunk); only the
+// prefix / suffix / shorthand-expansion inserts are emitted (the exact analogue
+// of `collect_binding_patches`). The RELOCATED sink emits each surviving
+// identifier as an `InsertMapped` at the target anchor and every verbatim /
+// synthetic slice as an `InsertUnmapped`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Where an [`ExprPlan`] is emitted.
+#[derive(Debug, Clone, Copy)]
+pub enum Placement {
+    /// The user expression bytes stay verbatim in the source; only prefix /
+    /// suffix / shorthand-expansion inserts are emitted (mapped identifiers are
+    /// already `Original` chunks). Synthetic boundaries are the caller's separate
+    /// [`EmitOp::OverwriteSyntheticBoundary`] ops AROUND the plan.
+    InPlace,
+    /// The prop span is deleted and the expression re-emitted at `at`; every
+    /// surviving identifier becomes its own mapped insertion.
+    Relocated { at: SourceByteOffset },
 }
 
-/// Emit a single user value expression RELOCATED at `at`, with every identifier
-/// mapped back to its source position through the typed [`emit_jsx_binding_value`]
-/// substrate. `span` is the (trimmed) source span of the value; `all_bindings` is
-/// the enclosing expression's extracted bindings (filtered to `span` here). When no
-/// bindings are available the whole span is emitted as one mapped run with the
-/// resolver's simple-expression accessor split (prefix/suffix unmapped, identifier
-/// core mapped at its source start).
+/// How the planner treats a shorthand-property value identifier (`{ foo }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShorthandMode {
+    /// Default: a shorthand binding that gets an accessor prefix/suffix is
+    /// expanded to `name: <prefixed>` (otherwise `{ _ctx.foo }` is invalid JS).
+    /// This mirrors `build_prefixed_expr` / `collect_binding_patches`.
+    Auto,
+    /// The enclosing object-literal layer has ALREADY emitted the property key
+    /// (`onClick: `), so the value must be emitted WITHOUT a key expansion —
+    /// otherwise `onClick: ` + auto-expand `click: ` would double the key
+    /// (`onClick: click: __props.click`). Used by [`plan_object_literal`].
+    ValueOnly,
+}
+
+/// Options driving [`plan_user_expr`].
+#[derive(Debug, Clone, Copy)]
+pub struct ExprOptions {
+    /// Shorthand-expansion policy (see [`ShorthandMode`]).
+    pub shorthand: ShorthandMode,
+    /// How to plan an expression with NO extracted bindings (parse failure / an
+    /// opaque value). When `true` (RELOCATED sites: the value moves into synthetic
+    /// scaffolding and must carry its own accessor prefix), the resolver's
+    /// simple-expression split is applied (`resolve_simple_expr`). When `false`
+    /// (IN-PLACE sites: the value's bytes stay authoritative as authored), the span
+    /// is preserved verbatim with NO resolution — matching the legacy in-place
+    /// behaviour where `collect_binding_patches` only ran when bindings existed.
+    pub resolve_unbound: bool,
+}
+
+impl Default for ExprOptions {
+    fn default() -> Self {
+        // The default is a RELOCATED value (the common case for the planner's
+        // explicit callers): resolve an unbound expression so it carries its prefix.
+        Self {
+            shorthand: ShorthandMode::Auto,
+            resolve_unbound: true,
+        }
+    }
+}
+
+impl ExprOptions {
+    /// Options for an IN-PLACE value: never resolve an unbound expression (its bytes
+    /// stay authoritative as authored).
+    pub fn in_place() -> Self {
+        Self {
+            shorthand: ShorthandMode::Auto,
+            resolve_unbound: false,
+        }
+    }
+}
+
+/// One piece of a planned user expression. The planner is the SOLE producer; the
+/// two placement sinks are the sole consumers.
+#[derive(Debug, Clone)]
+enum ExprPiece<'a> {
+    /// Synthetic scaffolding text that is NOT a source slice — object braces /
+    /// separators / rewritten event keys produced by [`plan_object_literal`].
+    /// Always unmapped. Only valid in a RELOCATED plan (object-literal rewriting
+    /// deletes the prop span); in-place emission of one is a caller bug.
+    Synthetic { text: EmitText<'a> },
+    /// Verbatim source slice between identifiers (punctuation, operators,
+    /// literals, whitespace). `range` is the source span. In-place: stays an
+    /// `Original` chunk (no-op). Relocated: emitted as an unmapped insert (a
+    /// relocated verbatim slice has no navigation meaning).
+    Verbatim { range: SourceByteRange },
+    /// A navigable identifier that survives in the output. In-place: the
+    /// identifier stays an `Original` chunk; the `prefix` / `suffix` /
+    /// `shorthand_key` are emitted as in-place prepends. Relocated: prefix +
+    /// shorthand-key + MAPPED identifier + suffix at the anchor.
+    Ident {
+        source_start: SourceByteOffset,
+        name: &'a str,
+        prefix: &'static str,
+        suffix: &'static str,
+        /// `Some("name: ")` when an `Auto`-shorthand binding needs key expansion.
+        shorthand_key: Option<String>,
+    },
+    /// A scoped local (v-for / v-slot) — MAPPED bare identifier, NO prefix/suffix.
+    /// In-place: stays an `Original` chunk (no-op). Relocated: a bare
+    /// `InsertMapped`.
+    IgnoredIdent {
+        source_start: SourceByteOffset,
+        name: &'a str,
+    },
+    /// A synthetic value identifier whose mapped core is NOT a verbatim slice of
+    /// the source (the no-value `:foo` / `.foo` shorthands derive `fooBar` from the
+    /// `foo-bar` arg token). `core` maps to `core_source_start`; the surrounding
+    /// `prefix` / `suffix` are unmapped. Only ever emitted RELOCATED (the value text
+    /// does not exist in the source).
+    SynthesizedCore {
+        core: String,
+        core_source_start: SourceByteOffset,
+        prefix: String,
+        suffix: String,
+    },
+}
+
+/// A planned user expression: an ordered piece list owning the binding semantics.
+#[derive(Debug)]
+pub struct ExprPlan<'a> {
+    pieces: Vec<ExprPiece<'a>>,
+}
+
+/// Plan a user value expression `[span.start, span.end)` (already trimmed) into an
+/// ordered [`ExprPlan`]. `all_bindings` is the enclosing expression's extracted
+/// bindings (a binding outside `span` is filtered out). When no bindings are
+/// available (parse failure / single bare identifier), the resolver's
+/// simple-expression accessor split drives a single-identifier plan.
 ///
-/// This is the relocated analogue of the in-place `collect_binding_patches` path:
-/// v-on spreads and v-show delete the prop span and re-emit the value inside
-/// synthetic scaffolding, so the value cannot stay in place — but each identifier
-/// still maps 1:1 to its source span.
+/// This is the ONE place binding semantics are derived for IDE emission; both
+/// sinks consume the result.
+pub fn plan_user_expr<'a>(
+    source: &'a str,
+    span: SourceByteRange,
+    all_bindings: Option<&[crate::utils::oxc::Binding<'a>]>,
+    resolver: &BindingResolver<'_>,
+    opts: ExprOptions,
+) -> ExprPlan<'a> {
+    let start = span.start.0;
+    let end = span.end.0;
+    let expr = &source[start as usize..end as usize];
+
+    // Filter bindings to those inside the span (a larger enclosing expression's
+    // bindings may include identifiers before/after this sub-span).
+    let in_span: Vec<&crate::utils::oxc::Binding<'a>> = match all_bindings {
+        Some(bs) => bs
+            .iter()
+            .filter(|b| b.pos >= start && b.pos < end)
+            .collect(),
+        None => Vec::new(),
+    };
+
+    let mut pieces: Vec<ExprPiece<'a>> = Vec::new();
+
+    if in_span.is_empty() {
+        // No extracted bindings (parse failure / opaque value).
+        if !opts.resolve_unbound {
+            // IN-PLACE: the bytes stay authoritative as authored — preserve the
+            // whole span verbatim (1:1 mapped, no resolution). This matches the
+            // legacy in-place behaviour (`collect_binding_patches` only ran when
+            // bindings existed; otherwise the original bytes were preserved).
+            if end > start {
+                pieces.push(ExprPiece::Verbatim {
+                    range: SourceByteRange::new(SourceByteOffset(start), SourceByteOffset(end)),
+                });
+            }
+            return ExprPlan { pieces };
+        }
+        // RELOCATED: split the resolved simple expression into a mapped identifier
+        // core plus unmapped prefix/suffix (the resolver's simple-expression
+        // accessor decision). If the resolved form does not contain the trimmed
+        // expression verbatim (keyword bracket-notation rewrite, etc.), emit a
+        // synthesized core so the identifier still maps.
+        let trimmed = expr.trim();
+        let resolved = resolver.resolve_simple_expr(trimmed);
+        if resolved == trimmed {
+            // Unchanged — the whole span is one verbatim/identifier run that maps
+            // 1:1 in place and as one mapped run relocated.
+            pieces.push(ExprPiece::Ident {
+                source_start: SourceByteOffset(start),
+                name: expr,
+                prefix: "",
+                suffix: "",
+                shorthand_key: None,
+            });
+        } else if let Some(idx) = resolved.find(trimmed) {
+            // `prefix + ident + suffix`: the core maps; prefix/suffix unmapped.
+            pieces.push(ExprPiece::SynthesizedCore {
+                core: trimmed.to_string(),
+                core_source_start: SourceByteOffset(start),
+                prefix: resolved[..idx].to_string(),
+                suffix: resolved[idx + trimmed.len()..].to_string(),
+            });
+        } else {
+            // Resolver rewrote the expression entirely (e.g. `$props["class"]`):
+            // the core text is not a verbatim slice. Emit a synthesized core with
+            // no extra prefix/suffix so the whole resolved form is one mapped run.
+            pieces.push(ExprPiece::SynthesizedCore {
+                core: resolved,
+                core_source_start: SourceByteOffset(start),
+                prefix: String::new(),
+                suffix: String::new(),
+            });
+        }
+        return ExprPlan { pieces };
+    }
+
+    // Bindings present: walk them in source order, emitting verbatim slices
+    // between identifiers and a typed identifier piece per binding. This is the
+    // unified analogue of `build_prefixed_expr` / `collect_binding_patches`.
+    let mut cursor = start;
+    for binding in in_span {
+        let pos = binding.pos;
+        if pos < cursor || pos > end {
+            continue;
+        }
+        // Verbatim text before this identifier.
+        if pos > cursor {
+            pieces.push(ExprPiece::Verbatim {
+                range: SourceByteRange::new(SourceByteOffset(cursor), SourceByteOffset(pos)),
+            });
+        }
+        let name_end = pos + binding.name.len() as u32;
+        if binding.ignore {
+            pieces.push(ExprPiece::IgnoredIdent {
+                source_start: SourceByteOffset(pos),
+                name: binding.name,
+            });
+            cursor = name_end;
+            continue;
+        }
+        let prefix = resolver.resolve_prefix(binding.name);
+        let suffix = resolver.resolve_suffix(binding.name);
+        // Shorthand key expansion is controlled by the EXPLICIT mode: only `Auto`
+        // expands. `ValueOnly` (object-literal layer already emitted the key)
+        // never does — this is the fix for the doubled `onClick: click:` bug.
+        let shorthand_key = if opts.shorthand == ShorthandMode::Auto
+            && binding.is_shorthand
+            && (!prefix.is_empty() || !suffix.is_empty())
+        {
+            Some(format!("{}: ", binding.name))
+        } else {
+            None
+        };
+        pieces.push(ExprPiece::Ident {
+            source_start: SourceByteOffset(pos),
+            name: binding.name,
+            prefix,
+            suffix,
+            shorthand_key,
+        });
+        cursor = name_end;
+    }
+    // Trailing verbatim text.
+    if cursor < end {
+        pieces.push(ExprPiece::Verbatim {
+            range: SourceByteRange::new(SourceByteOffset(cursor), SourceByteOffset(end)),
+        });
+    }
+
+    ExprPlan { pieces }
+}
+
+/// Emit an [`ExprPlan`] at a [`Placement`]. The two sinks share the plan but
+/// differ in how each piece lowers (see [`ExprPiece`]).
+pub fn emit_expr_plan<'alloc>(
+    out: &mut CodeGenOutput<'alloc>,
+    plan: &ExprPlan<'_>,
+    placement: Placement,
+    source: &'alloc str,
+) {
+    match placement {
+        Placement::InPlace => emit_plan_in_place(out, plan),
+        Placement::Relocated { at } => emit_plan_relocated(out, plan, at, source),
+    }
+}
+
+/// IN-PLACE sink: the original expression bytes stay verbatim (`Original` chunks);
+/// only prefix / suffix / shorthand-key inserts are emitted at source positions.
+/// This is the exact analogue of `collect_binding_patches` — verbatim slices,
+/// surviving identifiers, and ignored locals are all NO-OPS.
+fn emit_plan_in_place<'alloc>(out: &mut CodeGenOutput<'alloc>, plan: &ExprPlan<'_>) {
+    for piece in &plan.pieces {
+        match piece {
+            // Verbatim / surviving identifier / ignored local: already in the
+            // source as an `Original` (1:1-mapped) chunk → NO-OP.
+            ExprPiece::Verbatim { .. } | ExprPiece::IgnoredIdent { .. } => {}
+            // Synthetic scaffolding is only produced by the object-literal layer,
+            // which always relocates. An in-place synthetic piece is a caller bug.
+            ExprPiece::Synthetic { .. } => {
+                debug_assert!(
+                    false,
+                    "Synthetic piece (object-literal scaffolding) cannot be emitted IN-PLACE"
+                );
+            }
+            ExprPiece::Ident {
+                source_start,
+                name,
+                prefix,
+                suffix,
+                shorthand_key,
+            } => {
+                // Shorthand expansion + accessor prefix at the identifier start;
+                // accessor suffix right after it. Stable-sorted same-position
+                // prepends preserve `<shorthand-key><prefix><ident>` order, exactly
+                // matching `collect_binding_patches`.
+                if let Some(key) = shorthand_key {
+                    out.prepend_alloc(source_start.0, key);
+                }
+                if !prefix.is_empty() {
+                    out.prepend_static(source_start.0, prefix);
+                }
+                if !suffix.is_empty() {
+                    out.prepend_static(source_start.0 + name.len() as u32, suffix);
+                }
+            }
+            // A synthesized core cannot stay in place — its mapped text is not a
+            // verbatim source slice. It is only ever planned for the relocated
+            // shorthands; in-place emission of one is a planner/caller bug.
+            ExprPiece::SynthesizedCore { .. } => {
+                debug_assert!(
+                    false,
+                    "SynthesizedCore piece cannot be emitted IN-PLACE (its text is not a source slice)"
+                );
+            }
+        }
+    }
+}
+
+/// RELOCATED sink: the prop span is deleted and the expression re-emitted at `at`.
+/// Each surviving identifier is an `InsertMapped` pointing at its source start;
+/// verbatim slices, accessor prefixes/suffixes, and shorthand keys are unmapped
+/// inserts. Ignored locals are MAPPED bare identifiers.
+fn emit_plan_relocated<'alloc>(
+    out: &mut CodeGenOutput<'alloc>,
+    plan: &ExprPlan<'_>,
+    at: SourceByteOffset,
+    source: &'alloc str,
+) {
+    let unmapped = |out: &mut CodeGenOutput<'alloc>, text: EmitText<'_>| {
+        emit_op(out, &EmitOp::InsertUnmapped { at, text });
+    };
+    let mapped =
+        |out: &mut CodeGenOutput<'alloc>, text: EmitText<'_>, source_start: SourceByteOffset| {
+            emit_op(
+                out,
+                &EmitOp::InsertMapped {
+                    at,
+                    text,
+                    source_start,
+                    content_offset: GeneratedByteLen(0),
+                },
+            );
+        };
+
+    for piece in &plan.pieces {
+        match piece {
+            ExprPiece::Synthetic { text } => {
+                if !text.is_empty() {
+                    unmapped(out, EmitText::Borrowed(text.as_str()));
+                }
+            }
+            ExprPiece::Verbatim { range } => {
+                let slice = &source[range.start.0 as usize..range.end.0 as usize];
+                if !slice.is_empty() {
+                    unmapped(out, EmitText::Borrowed(slice));
+                }
+            }
+            ExprPiece::IgnoredIdent { source_start, name } => {
+                // Scoped local: MAPPED (so ctrl+click lands on the local) but bare.
+                mapped(out, EmitText::Borrowed(name), *source_start);
+            }
+            ExprPiece::Ident {
+                source_start,
+                name,
+                prefix,
+                suffix,
+                shorthand_key,
+            } => {
+                if let Some(key) = shorthand_key {
+                    unmapped(out, EmitText::Borrowed(key));
+                }
+                if !prefix.is_empty() {
+                    unmapped(out, EmitText::Borrowed(prefix));
+                }
+                mapped(out, EmitText::Borrowed(name), *source_start);
+                if !suffix.is_empty() {
+                    unmapped(out, EmitText::Borrowed(suffix));
+                }
+            }
+            ExprPiece::SynthesizedCore {
+                core,
+                core_source_start,
+                prefix,
+                suffix,
+            } => {
+                if !prefix.is_empty() {
+                    unmapped(out, EmitText::Borrowed(prefix.as_str()));
+                }
+                if !core.is_empty() {
+                    mapped(out, EmitText::Borrowed(core.as_str()), *core_source_start);
+                }
+                if !suffix.is_empty() {
+                    unmapped(out, EmitText::Borrowed(suffix.as_str()));
+                }
+            }
+        }
+    }
+}
+
+/// Emit a single user value expression RELOCATED at `at`. Convenience wrapper that
+/// plans `span` (filtered to `all_bindings`) and emits it through the relocated
+/// sink. `opts` carries the shorthand policy (object-literal callers pass
+/// [`ShorthandMode::ValueOnly`]).
 pub fn emit_relocated_value<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
     at: SourceByteOffset,
@@ -364,61 +624,218 @@ pub fn emit_relocated_value<'alloc>(
     span: SourceByteRange,
     all_bindings: Option<&[crate::utils::oxc::Binding<'alloc>]>,
     resolver: &BindingResolver<'alloc>,
+    opts: ExprOptions,
 ) {
-    let filtered: Vec<crate::utils::oxc::Binding<'alloc>> = match all_bindings {
-        Some(bs) => bindings_in_span(bs, span.start.0, span.end.0),
-        None => Vec::new(),
-    };
-    let trimmed = &source[span.start.0 as usize..span.end.0 as usize];
-    let (prefix, suffix): (Option<String>, Option<String>) = if filtered.is_empty() {
-        let resolved = resolver.resolve_simple_expr(trimmed);
-        if let Some(idx) = resolved.find(trimmed) {
-            let pre = resolved[..idx].to_string();
-            let suf = resolved[idx + trimmed.len()..].to_string();
-            (
-                (!pre.is_empty()).then_some(pre),
-                (!suf.is_empty()).then_some(suf),
-            )
-        } else {
-            // Resolver rewrote the expression entirely — emit the trimmed span as
-            // one mapped run with no extra prefix/suffix.
-            (None, None)
-        }
-    } else {
-        (None, None)
-    };
-    let jsx = JsxBindingValue {
-        source_expr: span,
-        prefix: prefix.as_deref(),
-        suffix: suffix.as_deref(),
-        occurrences: 1,
-        bindings: if filtered.is_empty() {
-            binding_slice(None)
-        } else {
-            &filtered
-        },
-    };
-    emit_jsx_binding_value(out, at, source, &jsx, resolver);
+    let plan = plan_user_expr(source, span, all_bindings, resolver, opts);
+    emit_expr_plan(out, &plan, Placement::Relocated { at }, source);
 }
 
-/// Emit a SYNTHESIZED shorthand value whose navigable identifier `core` is NOT a
-/// verbatim slice of the source.
+/// Key-rewriting policy for [`plan_object_literal`]. A property-aware layer above
+/// the expression planner; today only `v-on`'s event-object rewriting exists.
+#[derive(Debug, Clone, Copy)]
+pub enum KeyRewritePolicy {
+    /// `v-on="{ … }"`: a static key is an event name rewritten via
+    /// `event_to_jsx_name` (`click` → `onClick`, quoted when not a JSX identifier);
+    /// a computed key stays a navigable expression; shorthand values are emitted in
+    /// [`ShorthandMode::ValueOnly`] because the rewritten key is emitted separately.
+    VOnEventObject,
+}
+
+/// Plan a `{ … }` object literal as a mapped spread `{...{ … }}`, RELOCATED.
 ///
-/// Used by the no-value v-bind shorthands: `<div :foo/>` ≡ `:foo="foo"` and
-/// `<div .foo/>` ≡ `.foo="foo"`. Vue derives the value identifier from the
-/// arg/key name (kebab→camel: `:foo-bar` → `fooBar`), so the generated value text
-/// is a TRANSFORM of the source token and cannot stay in place. `resolved` is the
-/// binding-resolver output for `core` (`$setup.fooBar`, `fooBar.value`, bare
-/// `foo`, …); the `core` identifier within it is emitted as a single mapped
-/// [`EmitOp::InsertMapped`] pointing at `core_source_start` (the arg/key source
-/// token), so go-to-definition on the generated value lands on the template
-/// identifier whose binding resolves to the declaration. The surrounding accessor
-/// prefix/suffix is unmapped synthetic text. All ops anchor at `at`.
+/// The property-aware layer that sits ABOVE [`plan_user_expr`]: it handles static
+/// key rewriting, computed keys, spread properties, and shorthand EXACTLY ONCE.
+/// Each property VALUE is planned through the shared [`plan_user_expr`] (so its
+/// identifiers map to source); the rewritten key, braces, and separators are
+/// synthetic. For a shorthand `{ click }` it emits the synthetic key `onClick: `
+/// and then the value in [`ShorthandMode::ValueOnly`] → `onClick: __props.click`
+/// (never the doubled `onClick: click: __props.click`).
 ///
-/// When `core` is not a substring of `resolved` (the resolver rewrote the
-/// expression entirely), the whole `resolved` text is emitted UNMAPPED — never a
-/// mapped overwrite, so no token is fabricated for a position the core does not
-/// occupy.
+/// Walks the SOURCE object AST — never a reparsed flat string. Returns `None` when
+/// the object cannot be rewritten structurally (an unsupported static-key shape),
+/// so the caller can fall back to a flat unmapped spread of the whole expression.
+pub fn plan_object_literal<'a>(
+    source: &'a str,
+    obj: &oxc_ast::ast::ObjectExpression<'a>,
+    base: u32,
+    bindings: Option<&[crate::utils::oxc::Binding<'a>]>,
+    resolver: &BindingResolver<'_>,
+    policy: KeyRewritePolicy,
+) -> Option<ExprPlan<'a>> {
+    use oxc_ast::ast::ObjectPropertyKind;
+    use oxc_span::GetSpan;
+
+    let KeyRewritePolicy::VOnEventObject = policy;
+
+    let mut pieces: Vec<ExprPiece<'a>> = Vec::new();
+    pieces.push(ExprPiece::Synthetic {
+        text: EmitText::Static("{...{"),
+    });
+
+    let mut first = true;
+    for prop in &obj.properties {
+        match prop {
+            ObjectPropertyKind::SpreadProperty(spread) => {
+                let span = spread.argument.span();
+                if span.end <= span.start {
+                    continue;
+                }
+                if !first {
+                    pieces.push(ExprPiece::Synthetic {
+                        text: EmitText::Static(", "),
+                    });
+                }
+                first = false;
+                pieces.push(ExprPiece::Synthetic {
+                    text: EmitText::Static("..."),
+                });
+                let (s, e) = trim_span(source, base + span.start, base + span.end);
+                extend_plan_with_value(
+                    &mut pieces,
+                    source,
+                    SourceByteRange::new(SourceByteOffset(s), SourceByteOffset(e)),
+                    bindings,
+                    resolver,
+                    ShorthandMode::Auto,
+                );
+            }
+            ObjectPropertyKind::ObjectProperty(p) => {
+                let key_span = p.key.span();
+                let value_span = p.value.span();
+                if key_span.end <= key_span.start || value_span.end <= value_span.start {
+                    continue;
+                }
+                let (vs, ve) = trim_span(source, base + value_span.start, base + value_span.end);
+                let value_range = SourceByteRange::new(SourceByteOffset(vs), SourceByteOffset(ve));
+
+                if p.computed {
+                    // Computed key `[expr]: value` — both navigable.
+                    if !first {
+                        pieces.push(ExprPiece::Synthetic {
+                            text: EmitText::Static(", "),
+                        });
+                    }
+                    first = false;
+                    let (ks, ke) = trim_span(source, base + key_span.start, base + key_span.end);
+                    pieces.push(ExprPiece::Synthetic {
+                        text: EmitText::Static("["),
+                    });
+                    extend_plan_with_value(
+                        &mut pieces,
+                        source,
+                        SourceByteRange::new(SourceByteOffset(ks), SourceByteOffset(ke)),
+                        bindings,
+                        resolver,
+                        ShorthandMode::Auto,
+                    );
+                    pieces.push(ExprPiece::Synthetic {
+                        text: EmitText::Static("]: "),
+                    });
+                    extend_plan_with_value(
+                        &mut pieces,
+                        source,
+                        value_range,
+                        bindings,
+                        resolver,
+                        ShorthandMode::Auto,
+                    );
+                } else {
+                    // Static event key (`click`, `"my-event"`) → JSX event name.
+                    let raw_key =
+                        &source[(base + key_span.start) as usize..(base + key_span.end) as usize];
+                    let event_key = parse_static_event_key(raw_key.trim())?;
+                    let mapped_name = crate::ide::event_to_jsx_name(event_key);
+                    let key = if crate::template::code_gen::binding::is_simple_ident(&mapped_name) {
+                        mapped_name
+                    } else {
+                        format!("\"{}\"", mapped_name)
+                    };
+                    if !first {
+                        pieces.push(ExprPiece::Synthetic {
+                            text: EmitText::Static(", "),
+                        });
+                    }
+                    first = false;
+                    // The rewritten event key is synthetic → unmapped. The value is
+                    // emitted in ValueOnly mode (the key is already here), so a
+                    // shorthand `{ click }` does NOT re-expand its key.
+                    pieces.push(ExprPiece::Synthetic {
+                        text: EmitText::Owned(format!("{}: ", key)),
+                    });
+                    extend_plan_with_value(
+                        &mut pieces,
+                        source,
+                        value_range,
+                        bindings,
+                        resolver,
+                        ShorthandMode::ValueOnly,
+                    );
+                }
+            }
+        }
+    }
+    pieces.push(ExprPiece::Synthetic {
+        text: EmitText::Static("}}"),
+    });
+    Some(ExprPlan { pieces })
+}
+
+/// Plan one object-property VALUE through the shared [`plan_user_expr`] and append
+/// its pieces to `pieces`. Centralises the per-value planning so the object-literal
+/// layer never re-derives binding semantics.
+fn extend_plan_with_value<'a>(
+    pieces: &mut Vec<ExprPiece<'a>>,
+    source: &'a str,
+    span: SourceByteRange,
+    bindings: Option<&[crate::utils::oxc::Binding<'a>]>,
+    resolver: &BindingResolver<'_>,
+    shorthand: ShorthandMode,
+) {
+    // Object-literal values are RELOCATED (the prop span is deleted), so an unbound
+    // value must carry its accessor prefix → `resolve_unbound: true`.
+    let plan = plan_user_expr(
+        source,
+        span,
+        bindings,
+        resolver,
+        ExprOptions {
+            shorthand,
+            resolve_unbound: true,
+        },
+    );
+    pieces.extend(plan.pieces);
+}
+
+/// Parse a static object-property event key: an unquoted simple identifier or a
+/// quoted string literal. Returns the inner event name, or `None` for an
+/// unsupported key shape.
+fn parse_static_event_key(raw_key: &str) -> Option<&str> {
+    let trimmed = raw_key.trim();
+    if let Some(stripped) = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|s| s.strip_suffix('\''))
+        })
+    {
+        return Some(stripped.trim());
+    }
+    if crate::template::code_gen::binding::is_simple_ident(trimmed) {
+        return Some(trimmed);
+    }
+    None
+}
+
+/// Plan + emit a SYNTHESIZED no-value shorthand value RELOCATED at `at`. `<div
+/// :foo/>` ≡ `:foo="foo"` and `<div .foo/>` ≡ `.foo="foo"`; Vue derives the value
+/// identifier from the arg/key name (kebab→camel), so the generated value text is a
+/// TRANSFORM of the source token. `resolved` is the resolver output for `core`; the
+/// `core` identifier within it maps to `core_source_start` (the arg/key source
+/// token). The surrounding accessor prefix/suffix is unmapped. When `core` is not a
+/// substring of `resolved` (the resolver rewrote it entirely), the whole `resolved`
+/// is emitted as one mapped run pointing at the source token.
 pub fn emit_synthesized_shorthand_value<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
     at: SourceByteOffset,
@@ -426,39 +843,26 @@ pub fn emit_synthesized_shorthand_value<'alloc>(
     core: &str,
     core_source_start: SourceByteOffset,
 ) {
-    let unmapped = |out: &mut CodeGenOutput<'alloc>, text: &str| {
-        emit_op(
-            out,
-            &EmitOp::InsertUnmapped {
-                at,
-                text: EmitText::Owned(text.to_string()),
-            },
-        );
+    let piece = match resolved.find(core) {
+        Some(idx) if !core.is_empty() => ExprPiece::SynthesizedCore {
+            core: resolved[idx..idx + core.len()].to_string(),
+            core_source_start,
+            prefix: resolved[..idx].to_string(),
+            suffix: resolved[idx + core.len()..].to_string(),
+        },
+        // Resolver rewrote the expression entirely (or empty core): the whole
+        // resolved text maps to the source token as one run.
+        _ => ExprPiece::SynthesizedCore {
+            core: resolved.to_string(),
+            core_source_start,
+            prefix: String::new(),
+            suffix: String::new(),
+        },
     };
-
-    match resolved.find(core) {
-        Some(idx) if !core.is_empty() => {
-            if idx > 0 {
-                unmapped(out, &resolved[..idx]);
-            }
-            emit_op(
-                out,
-                &EmitOp::InsertMapped {
-                    at,
-                    text: EmitText::Owned(resolved[idx..idx + core.len()].to_string()),
-                    source_start: core_source_start,
-                    content_offset: GeneratedByteLen(0),
-                },
-            );
-            let tail = &resolved[idx + core.len()..];
-            if !tail.is_empty() {
-                unmapped(out, tail);
-            }
-        }
-        // Resolver rewrote the expression entirely (or empty core): emit it all as
-        // unmapped synthetic text. No mapped overwrite, no fabricated token.
-        _ => unmapped(out, resolved),
-    }
+    let plan = ExprPlan {
+        pieces: vec![piece],
+    };
+    emit_expr_plan(out, &plan, Placement::Relocated { at }, "");
 }
 
 #[cfg(test)]

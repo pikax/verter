@@ -13,7 +13,10 @@ use oxc_ast::ast::Expression;
 use verter_span::{SourceByteOffset, SourceByteRange};
 
 use crate::ast::types::{ElementNode, TagType};
-use crate::ide::template::emit::{emit_op, emit_synthesized_shorthand_value, EmitOp, EmitText};
+use crate::ide::template::emit::{
+    emit_expr_plan, emit_op, emit_synthesized_shorthand_value, plan_user_expr, trim_span, EmitOp,
+    EmitText, ExprOptions, Placement,
+};
 use crate::ide::{event_to_jsx_name, get_directive_name};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
@@ -529,14 +532,23 @@ fn process_v_bind<'alloc>(
                     anchor: None,
                 },
             );
-            // `key` preserved in place; per-identifier prefixes via arg bindings.
-            if let Some(oxc_p) = oxc_prop {
-                if let Some(ref arg) = oxc_p.arg {
-                    if let Some(ref bindings) = arg.bindings {
-                        resolver.collect_binding_patches(bindings, out);
-                    }
-                }
-            }
+            // `key` preserved in place; per-identifier prefixes via arg bindings,
+            // planned + emitted IN PLACE through the unified planner.
+            let arg_bindings = oxc_prop
+                .and_then(|p| p.arg.as_ref())
+                .and_then(|a| a.bindings.as_ref())
+                .map(|b| b.bindings.as_slice());
+            let arg_plan = plan_user_expr(
+                source,
+                SourceByteRange::new(
+                    SourceByteOffset(arg_expr_start),
+                    SourceByteOffset(arg_expr_end),
+                ),
+                arg_bindings,
+                resolver,
+                ExprOptions::in_place(),
+            );
+            emit_expr_plan(out, &arg_plan, Placement::InPlace, source);
             // `]: ` between the arg and the value identifier.
             emit_op(
                 out,
@@ -549,14 +561,20 @@ fn process_v_bind<'alloc>(
                     anchor: None,
                 },
             );
-            // `val` preserved in place; per-identifier prefixes via value bindings.
-            if let Some(oxc_p) = oxc_prop {
-                if let Some(ref exp) = oxc_p.exp {
-                    if let Some(ref bindings) = exp.bindings {
-                        resolver.collect_binding_patches(bindings, out);
-                    }
-                }
-            }
+            // `val` preserved in place; per-identifier prefixes via value bindings,
+            // planned + emitted IN PLACE through the unified planner.
+            let value_bindings = oxc_prop
+                .and_then(|p| p.exp.as_ref())
+                .and_then(|e| e.bindings.as_ref())
+                .map(|b| b.bindings.as_slice());
+            let value_plan = plan_user_expr(
+                source,
+                SourceByteRange::new(SourceByteOffset(tvs), SourceByteOffset(tve)),
+                value_bindings,
+                resolver,
+                ExprOptions::in_place(),
+            );
+            emit_expr_plan(out, &value_plan, Placement::InPlace, source);
             // `}}` closing the computed-key object (`{[key]: val}`) + the spread
             // (`{...}`).
             emit_op(
@@ -595,9 +613,9 @@ fn process_v_bind<'alloc>(
         let tvs = vs + leading_ws;
         let tve = ve - trailing_ws;
 
-        // Type narrowing guard for function-typed props under a v-if scope
-        // (Part C Step 8). Located in SOURCE coordinates from the OXC AST so the
-        // user expression stays preserved IN PLACE and only the guard is synthetic.
+        // Type narrowing guard for function-typed props under a v-if scope.
+        // Located in SOURCE coordinates from the OXC AST so the user expression
+        // stays preserved IN PLACE and only the guard is synthetic.
         let guard_injection =
             v_if_guard.and_then(|guard| compute_function_guard_injection(guard, oxc_prop));
 
@@ -620,15 +638,23 @@ fn process_v_bind<'alloc>(
             // inject after the body `{`, strictly before any body identifier, so
             // there is no position collision there.
             out.prepend_alloc(injection.source_offset, &injection.text);
-            // Per-identifier accessor prefixes/suffixes applied in place — each maps
-            // its identifier back to source.
-            if let Some(oxc_p) = oxc_prop {
-                if let Some(ref exp) = oxc_p.exp {
-                    if let Some(ref bindings) = exp.bindings {
-                        resolver.collect_binding_patches(bindings, out);
-                    }
-                }
-            }
+            // The value expression is planned + emitted IN PLACE through the unified
+            // planner — each identifier stays an `Original` chunk (1:1 mapped) while
+            // accessor prefixes/suffixes are applied as in-place prepends. The guard
+            // prepend above was emitted FIRST, so at a shared anchor the stable-sorted
+            // same-position order is `<guard><accessor-prefix><identifier>`.
+            let value_bindings = oxc_prop
+                .and_then(|p| p.exp.as_ref())
+                .and_then(|e| e.bindings.as_ref())
+                .map(|b| b.bindings.as_slice());
+            let value_plan = plan_user_expr(
+                source,
+                SourceByteRange::new(SourceByteOffset(tvs), SourceByteOffset(tve)),
+                value_bindings,
+                resolver,
+                ExprOptions::in_place(),
+            );
+            emit_expr_plan(out, &value_plan, Placement::InPlace, source);
             return;
         }
 
@@ -702,14 +728,16 @@ fn process_v_bind<'alloc>(
 
 /// Emit a directive whose value is a single JSX-attribute expression kept
 /// IN PLACE — `lead`/`trail` are the synthetic JSX boundaries (`innerHTML={` …
-/// `}`) and the user expression bytes are preserved 1:1 so the identifier keeps
-/// its exact source-map mapping.
+/// `}`, `ref={` … `}`) and the user expression bytes are preserved 1:1 so each
+/// identifier keeps its exact source-map mapping.
 ///
-/// Lowering (typed [`EmitOp`] discipline):
+/// THE canonical in-place emission helper: the value is planned through the unified
+/// [`plan_user_expr`] and emitted through the in-place sink ([`Placement::InPlace`]),
+/// so the binding semantics live in ONE place shared with the relocated sites. The
+/// synthetic boundaries are unmapped [`EmitOp::OverwriteSyntheticBoundary`] ops:
 /// - `OverwriteSyntheticBoundary(prop.start..tvs, lead)` — delete + unmapped insert.
-/// - `PreserveOriginal(tvs..tve)` — pure no-op; bytes stay an `Original` chunk.
-/// - per-identifier prefix/suffix via `collect_binding_patches` (in-place prepends,
-///   maps each sub-identifier).
+/// - the planned value in place (verbatim/identifier bytes stay `Original`,
+///   1:1-mapped; only accessor prefix/suffix/shorthand inserts are emitted).
 /// - `OverwriteSyntheticBoundary(tve..prop_end, trail)` — delete + unmapped insert.
 #[allow(clippy::too_many_arguments)]
 fn emit_in_place_jsx_value<'alloc>(
@@ -723,39 +751,41 @@ fn emit_in_place_jsx_value<'alloc>(
     lead: &str,
     trail: &str,
 ) {
-    let value_expr = &source[vs as usize..ve as usize];
-    let leading_ws = (value_expr.len() - value_expr.trim_start().len()) as u32;
-    let trailing_ws = (value_expr.len() - value_expr.trim_end().len()) as u32;
-    let tvs = vs + leading_ws;
-    let tve = ve - trailing_ws;
+    let (tvs, tve) = trim_span(source, vs, ve);
     let prop_end = get_prop_end(prop);
 
-    let lead_op = EmitOp::OverwriteSyntheticBoundary {
-        source: SourceByteRange::new(SourceByteOffset(prop.start), SourceByteOffset(tvs)),
-        text: EmitText::Borrowed(lead),
-        anchor: None,
-    };
-    let preserve = EmitOp::PreserveOriginal {
-        source: SourceByteRange::new(SourceByteOffset(tvs), SourceByteOffset(tve)),
-    };
-    let trail_op = EmitOp::OverwriteSyntheticBoundary {
-        source: SourceByteRange::new(SourceByteOffset(tve), SourceByteOffset(prop_end)),
-        text: EmitText::Borrowed(trail),
-        anchor: None,
-    };
-
-    emit_op(out, &lead_op);
-    emit_op(out, &preserve);
-    // Per-identifier accessor prefixes/suffixes (e.g. `___VERTER___instance.`,
-    // `.value`) applied in place — each maps its identifier back to source.
-    if let Some(oxc_p) = oxc_prop {
-        if let Some(ref exp) = oxc_p.exp {
-            if let Some(ref bindings) = exp.bindings {
-                resolver.collect_binding_patches(bindings, out);
-            }
-        }
-    }
-    emit_op(out, &trail_op);
+    emit_op(
+        out,
+        &EmitOp::OverwriteSyntheticBoundary {
+            source: SourceByteRange::new(SourceByteOffset(prop.start), SourceByteOffset(tvs)),
+            text: EmitText::Borrowed(lead),
+            anchor: None,
+        },
+    );
+    // The value is planned + emitted IN PLACE: each identifier stays an `Original`
+    // chunk (1:1 mapped) while accessor prefixes/suffixes/shorthand expansions are
+    // applied as in-place prepends. The exact analogue of `collect_binding_patches`,
+    // but routed through the single shared planner.
+    let bindings = oxc_prop
+        .and_then(|p| p.exp.as_ref())
+        .and_then(|e| e.bindings.as_ref())
+        .map(|b| b.bindings.as_slice());
+    let plan = plan_user_expr(
+        source,
+        SourceByteRange::new(SourceByteOffset(tvs), SourceByteOffset(tve)),
+        bindings,
+        resolver,
+        ExprOptions::in_place(),
+    );
+    emit_expr_plan(out, &plan, Placement::InPlace, source);
+    emit_op(
+        out,
+        &EmitOp::OverwriteSyntheticBoundary {
+            source: SourceByteRange::new(SourceByteOffset(tve), SourceByteOffset(prop_end)),
+            text: EmitText::Borrowed(trail),
+            anchor: None,
+        },
+    );
 }
 
 /// Process `v-html="expr"` → `innerHTML={expr}`.

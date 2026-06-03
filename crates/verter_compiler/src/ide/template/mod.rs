@@ -27,11 +27,14 @@ pub mod von;
 use oxc_allocator::Allocator;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use verter_span::SourceByteOffset;
+
 use crate::ast::types::{
     AstNodeKind, CommentNode, ConditionalChain, ElementNode, ElementNodeConditionKind,
     InterpolationNode, TagType, TextNode,
 };
 use crate::ide::condition::{self, ConditionScope};
+use crate::ide::template::emit::emit_synthesized_shorthand_value;
 use crate::template::code_gen::binding::{BindingResolver, BindingType};
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::oxc::types::{OxcNodeData, OxcParsedAst, OxcParsedElement};
@@ -328,23 +331,23 @@ fn walk_element<'a, 'alloc>(
         let prop_end = props::get_prop_end(v_once);
         ctx.out.overwrite(start, prop_end, "");
     }
-    // Convert cached `ref` attribute to JSX expression syntax.
-    // `ref="myRef"` → `ref={"myRef"}` (static string ref)
-    // `:ref="expr"` → `ref={expr}` (dynamic binding ref)
+    // Convert a cached STATIC `ref` attribute to JSX expression syntax:
+    //   `ref="myRef"` → `ref={"myRef"}`
+    // Only a NON-directive `ref="…"` is cached on `el.v_ref` (the parser routes a
+    // dynamic `:ref="expr"` / `v-bind:ref="expr"` through `el.props` →
+    // `process_v_bind`, which already emits `ref={expr}` IN PLACE with the value
+    // navigable). The static ref value is a string literal, NOT a navigable binding,
+    // so it is emitted as an UNMAPPED synthetic replacement (delete the original span
+    // + unmapped insert) — never a mapped `out.overwrite(v_ref.start, prop_end,
+    // &format!("ref={{\"{}\"}}", value))` (which would map the synthetic `ref={"…"}`
+    // back to the prop start).
     if let Some(ref v_ref) = el.v_ref {
         if let (Some(vs), Some(ve)) = (v_ref.value_start, v_ref.value_end) {
             let prop_end = props::get_prop_end(v_ref);
-            if v_ref.is_directive {
-                // :ref="expr" or v-bind:ref="expr" → ref={expr}
-                let value = &ctx.source[vs as usize..ve as usize];
-                ctx.out
-                    .overwrite(v_ref.start, prop_end, &format!("ref={{{}}}", value));
-            } else {
-                // ref="myRef" → ref={"myRef"}
-                let value = &ctx.source[vs as usize..ve as usize];
-                ctx.out
-                    .overwrite(v_ref.start, prop_end, &format!("ref={{\"{}\"}}", value));
-            }
+            let value = &ctx.source[vs as usize..ve as usize];
+            ctx.out.overwrite(v_ref.start, prop_end, "");
+            ctx.out
+                .prepend_alloc(v_ref.start, &format!("ref={{\"{}\"}}", value));
         }
     }
 
@@ -1867,9 +1870,13 @@ enum RecoveredInterpolationPatch {
         prefix: &'static str,
         suffix: &'static str,
     },
-    OverwriteResolved {
-        resolved: String,
-    },
+    /// The resolved form is NOT a plain `prefix + ident + suffix` (e.g. a keyword
+    /// rewritten to bracket notation `$props["class"]`). The recovered identifier
+    /// `ident` still occurs inside `resolved`, so it is emitted via the unified
+    /// synthesized-shorthand path: the `ident` core maps to its source token, the
+    /// surrounding accessor scaffolding is unmapped — never baked into one mapped
+    /// overwrite of the identifier span.
+    SynthesizedResolved { ident: String, resolved: String },
 }
 
 fn recover_broken_interpolation_expr<'alloc>(
@@ -1911,7 +1918,10 @@ fn recover_broken_interpolation_expr<'alloc>(
                     suffix,
                 }
             } else {
-                RecoveredInterpolationPatch::OverwriteResolved { resolved }
+                RecoveredInterpolationPatch::SynthesizedResolved {
+                    ident: ident.to_string(),
+                    resolved,
+                }
             };
             recovered.push(RecoveredInterpolationIdent {
                 start,
@@ -1986,11 +1996,21 @@ fn recover_broken_interpolation_expr<'alloc>(
                     );
                 }
             }
-            RecoveredInterpolationPatch::OverwriteResolved { resolved } => {
-                out.overwrite(
-                    expr_start + recovered_ident.start as u32,
-                    expr_start + recovered_ident.end as u32,
+            RecoveredInterpolationPatch::SynthesizedResolved { ident, resolved } => {
+                // Delete the recovered identifier span (replace with "" — unmapped)
+                // and re-emit the resolved form through the unified
+                // synthesized-shorthand path: the `ident` core maps back to its
+                // source token, the accessor scaffolding (`$props["` / `"]`) is
+                // unmapped. The deletion writes an empty string, so it is never a
+                // mapped bake of the resolved expression onto the identifier span.
+                let ident_start = expr_start + recovered_ident.start as u32;
+                out.overwrite(ident_start, expr_start + recovered_ident.end as u32, "");
+                emit_synthesized_shorthand_value(
+                    out,
+                    SourceByteOffset(ident_start),
                     &resolved,
+                    &ident,
+                    SourceByteOffset(ident_start),
                 );
             }
         }

@@ -12,7 +12,9 @@ use oxc_allocator::Allocator;
 use verter_span::{SourceByteOffset, SourceByteRange};
 
 use crate::ast::types::{ElementNode, ElementNodeConditionKind};
-use crate::ide::template::emit::{emit_op, emit_relocated_value, trim_span, EmitOp, EmitText};
+use crate::ide::template::emit::{
+    emit_op, emit_relocated_value, trim_span, EmitOp, EmitText, ExprOptions,
+};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
@@ -460,9 +462,25 @@ pub fn emit_v_show<'alloc>(
                 let at = SourceByteOffset(style_prop.start);
                 out.overwrite(style_prop.start, style_end, "");
                 emit_unmapped(out, at, "style={{...(");
-                emit_relocated_value(out, at, source, style_range, style_bindings, resolver);
+                emit_relocated_value(
+                    out,
+                    at,
+                    source,
+                    style_range,
+                    style_bindings,
+                    resolver,
+                    ExprOptions::default(),
+                );
                 emit_unmapped(out, at, "), display: ");
-                emit_relocated_value(out, at, source, show_range, show_bindings, resolver);
+                emit_relocated_value(
+                    out,
+                    at,
+                    source,
+                    show_range,
+                    show_bindings,
+                    resolver,
+                    ExprOptions::default(),
+                );
                 emit_unmapped(out, at, " ? undefined : 'none'}}");
             }
         } else {
@@ -472,7 +490,15 @@ pub fn emit_v_show<'alloc>(
             let at = SourceByteOffset(show.start);
             out.overwrite(show.start, prop_end, "");
             emit_unmapped(out, at, "style={{display: ");
-            emit_relocated_value(out, at, source, show_range, show_bindings, resolver);
+            emit_relocated_value(
+                out,
+                at,
+                source,
+                show_range,
+                show_bindings,
+                resolver,
+                ExprOptions::default(),
+            );
             emit_unmapped(out, at, " ? undefined : 'none'}}");
         }
     }
