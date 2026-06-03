@@ -65,7 +65,9 @@ fn type_resolution_audit_does_not_visit_unreferenced_imports() {
     });
 
     let (resolved, record) = host.resolve_type_with_audit(key, "/a.ts").into_parts();
-    let _resolved = resolved.expect("resolver must produce a value for UseB");
+    let _resolved = resolved
+        .expect("resolver must produce a value for UseB")
+        .expect("resolved node must be present");
 
     // record is always present now (carrier `audit` field is mandatory).
     assert_eq!(record.kind, RequestKind::TypeResolution);

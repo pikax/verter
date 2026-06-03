@@ -58,10 +58,12 @@ fn type_resolution_audit_long_chain_terminates_without_stack_overflow() {
     });
 
     let (resolved, record) = host.resolve_type_with_audit(key, "/chain.ts").into_parts();
-    let resolved = resolved.expect(
-        "long chain must resolve — terminator T200 = number is a primitive that \
-         cannot recurse further",
-    );
+    let resolved = resolved
+        .expect(
+            "long chain must resolve — terminator T200 = number is a primitive that \
+             cannot recurse further",
+        )
+        .expect("resolved node must be present");
     let _ = resolved;
 
     // record is always present now (carrier `audit` mandatory).
