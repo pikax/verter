@@ -89,6 +89,18 @@ const RESOLVER_OUTPUT_VARS: &[&str] = &[
     "rewritten",
 ];
 
+/// Resolver-output PRODUCER functions. A `let VAR = build_prefixed_expr(...)`
+/// (etc.) binds a binding-resolved expression string to `VAR`; baking `VAR` into a
+/// mapped overwrite is the same desync as baking the inline `&format!(...resolved...)`.
+/// These are the shared producers the IDE prop emitters call to obtain a flat
+/// resolved expression.
+const RESOLVER_OUTPUT_PRODUCERS: &[&str] = &[
+    "build_prefixed_expr",
+    "resolve_simple_expr",
+    "resolve_prefixed_expr",
+    "resolve_prefixed_dynamic_arg",
+];
+
 /// Normalised (whitespace-collapsed) statement snippets that are EXPLICITLY allowed
 /// to bake a resolved expression into a mapped overwrite because they are PROVABLY
 /// non-navigable (no in-place user value identifier to map).
@@ -176,6 +188,227 @@ fn baked_prefix_overwrites(src: &str) -> Vec<String> {
     hits
 }
 
+/// `true` iff `rhs` (the right-hand side of a `let` binding, up to its terminating
+/// `;`) yields a binding-resolved expression: either it interpolates a
+/// resolver-output variable inside a `format!`, or it calls a resolver-output
+/// PRODUCER (`build_prefixed_expr`, `resolve_simple_expr`, …). Such a value is a
+/// navigable user expression in flat-string form — baking it into a mapped
+/// overwrite is the desync this guard forbids.
+fn rhs_is_resolver_output(rhs: &str) -> bool {
+    // A `format!(…)` interpolating a resolver-output var (e.g. `final_expr`).
+    if let Some(fmt_pos) = rhs.find("format!(") {
+        let args = &rhs[fmt_pos..];
+        if RESOLVER_OUTPUT_VARS
+            .iter()
+            .any(|var| token_present(args, var))
+        {
+            return true;
+        }
+    }
+    // A direct call to a resolver-output producer.
+    RESOLVER_OUTPUT_PRODUCERS
+        .iter()
+        .any(|producer| token_present(rhs, producer))
+}
+
+/// Collect the names of local variables bound (via `let <ident> = …;`) to a
+/// resolver-output value within `src`. These are the "tainted" vars whose later
+/// use as an `out.overwrite` replacement re-opens the baked-overwrite desync
+/// through a `let`-indirection (the inline-`&format!` check alone misses it).
+///
+/// Structural, not fuzzy: matches the `let [mut] <ident> = <rhs>;` binding form and
+/// classifies `<rhs>` via [`rhs_is_resolver_output`]. (`<rhs>` extends to the next
+/// `;`, which over-approximates for multi-statement-on-one-line code but the IDE
+/// emitters use one binding per statement.)
+fn resolver_output_bound_vars(src: &str) -> Vec<String> {
+    let mut vars = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = src[from..].find("let ") {
+        let at = from + rel;
+        // `let ` must start a token (preceded by a non-ident char) to avoid matching
+        // inside an identifier like `complete_set`.
+        let preceded_ok = at == 0 || {
+            let b = src.as_bytes()[at - 1];
+            !b.is_ascii_alphanumeric() && b != b'_'
+        };
+        let after_let = at + "let ".len();
+        if !preceded_ok {
+            from = after_let;
+            continue;
+        }
+        // Skip an optional `mut `.
+        let mut name_start = after_let;
+        if src[name_start..].starts_with("mut ") {
+            name_start += "mut ".len();
+        }
+        // The binding name runs until a non-ident char.
+        let name_end = src[name_start..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map(|i| name_start + i)
+            .unwrap_or(src.len());
+        let name = &src[name_start..name_end];
+        // Require a `=` (not `==`) before the next `;` to be a binding with an RHS.
+        let rest = &src[name_end..];
+        let stmt_end = rest.find(';').map(|e| e + 1).unwrap_or(rest.len());
+        let stmt = &rest[..stmt_end];
+        if !name.is_empty() {
+            if let Some(eq) = stmt.find('=') {
+                let is_assignment = stmt.as_bytes().get(eq + 1) != Some(&b'=');
+                if is_assignment {
+                    let rhs = &stmt[eq + 1..];
+                    if rhs_is_resolver_output(rhs) {
+                        vars.push(name.to_string());
+                    }
+                }
+            }
+        }
+        from = name_end;
+    }
+    vars
+}
+
+/// Split the argument list of an `out.overwrite( … )` statement into its
+/// top-level comma-separated arguments (respecting nested `(`/`)` and `[`/`]`).
+/// Returns `None` if the call's parentheses are unbalanced within `stmt`.
+fn overwrite_args(stmt: &str) -> Option<Vec<String>> {
+    let open = stmt.find("out.overwrite(")? + "out.overwrite".len();
+    let bytes = stmt.as_bytes();
+    // `open` points at the `(`.
+    let mut depth = 0i32;
+    let mut args: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for &b in &bytes[open..] {
+        let c = b as char;
+        match c {
+            '(' | '[' => {
+                depth += 1;
+                if depth > 1 {
+                    cur.push(c);
+                }
+            }
+            ')' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    args.push(cur.trim().to_string());
+                    return Some(args);
+                }
+                cur.push(c);
+            }
+            ',' if depth == 1 => {
+                args.push(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    None
+}
+
+/// Extract the receiver root of a `<recv>.start` / `<recv>.end` member-access
+/// occurring inside `arg`, returning `(recv, "start" | "end")`. E.g.
+/// `"expr_start + recovered_ident.start as u32"` → `("recovered_ident", "start")`.
+/// Returns `None` if `arg` contains no `.start`/`.end` member access.
+fn span_endpoint(arg: &str) -> Option<(String, &'static str)> {
+    for (field, tag) in [(".start", "start"), (".end", "end")] {
+        if let Some(pos) = arg.find(field) {
+            // Walk backward from `pos` to capture the receiver identifier root
+            // (the contiguous ident/`.`/`_` run immediately preceding `.start`).
+            let recv_bytes = &arg.as_bytes()[..pos];
+            let mut s = pos;
+            while s > 0 {
+                let b = recv_bytes[s - 1];
+                if b.is_ascii_alphanumeric() || b == b'_' || b == b'.' {
+                    s -= 1;
+                } else {
+                    break;
+                }
+            }
+            let recv = arg[s..pos].to_string();
+            if !recv.is_empty() {
+                return Some((recv, tag));
+            }
+        }
+    }
+    None
+}
+
+/// `true` iff the `out.overwrite(start, end, …)` statement is SELF-ANCHORED: its
+/// `start` and `end` arguments are the `.start` / `.end` endpoints of the SAME
+/// source node (e.g. `out.overwrite(base + ident.start, base + ident.end, &v)`).
+///
+/// A self-anchored overwrite replaces exactly one source node's `[start, end)` span
+/// with its own resolved form, so the replacement maps to that node's own start —
+/// it is navigable, NOT the foreign-anchored desync class. The partial-interpolation
+/// recovery path (`recover_broken_interpolation_expr`) is the canonical example and
+/// must not be flagged. A foreign-anchored desync (`out.overwrite(arg_end, prop_end,
+/// &close)`) uses two UNRELATED boundary variables and is NOT self-anchored.
+fn is_self_anchored_overwrite(stmt: &str) -> bool {
+    let Some(args) = overwrite_args(stmt) else {
+        return false;
+    };
+    if args.len() < 2 {
+        return false;
+    }
+    match (span_endpoint(&args[0]), span_endpoint(&args[1])) {
+        (Some((recv_a, tag_a)), Some((recv_b, tag_b))) => {
+            recv_a == recv_b && tag_a == "start" && tag_b == "end"
+        }
+        _ => false,
+    }
+}
+
+/// Scan `src` for a baked desync mapped-overwrite reached via a `let`-indirection:
+/// an `out.overwrite(start, end, &VAR)` whose `&VAR` references a variable bound to
+/// a resolver-output value (collected by [`resolver_output_bound_vars`]), EXCLUDING
+/// self-anchored overwrites (which replace one node's own span and stay navigable).
+/// Returns the offending normalised statement snippets.
+fn indirected_baked_overwrites(src: &str) -> Vec<String> {
+    let tainted = resolver_output_bound_vars(src);
+    if tainted.is_empty() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    let needle = "out.overwrite(";
+    let mut search_from = 0usize;
+    while let Some(rel) = src[search_from..].find(needle) {
+        let start = search_from + rel;
+        let stmt_end = src[start..]
+            .find(';')
+            .map(|e| start + e + 1)
+            .unwrap_or(src.len());
+        let stmt = &src[start..stmt_end];
+        // The replacement argument is `&VAR` for some tainted VAR. Match `&VAR` as a
+        // whole reference token (the `&` immediately precedes the ident, and the
+        // ident is whole). This avoids matching `&format!(... VAR ...)` (handled by
+        // the inline check) and substrings of longer idents.
+        let flagged = tainted.iter().any(|var| {
+            let pat = format!("&{var}");
+            let mut scan = 0usize;
+            while let Some(r) = stmt[scan..].find(&pat) {
+                let p = scan + r;
+                let after = p + pat.len();
+                let after_ok = after >= stmt.len() || {
+                    let b = stmt.as_bytes()[after];
+                    !b.is_ascii_alphanumeric() && b != b'_'
+                };
+                if after_ok {
+                    return true;
+                }
+                scan = p + pat.len();
+            }
+            false
+        });
+        if flagged && !is_self_anchored_overwrite(stmt) {
+            let norm = normalize_stmt(stmt);
+            if !ALLOWED_NON_NAVIGABLE_OVERWRITES.contains(&norm.as_str()) {
+                hits.push(norm);
+            }
+        }
+        search_from = stmt_end.max(start + needle.len());
+    }
+    hits
+}
+
 #[test]
 fn no_ide_codegen_bakes_prefix_into_mapped_overwrite() {
     let dir = ide_template_dir();
@@ -190,7 +423,12 @@ fn no_ide_codegen_bakes_prefix_into_mapped_overwrite() {
         }
         let src = std::fs::read_to_string(&file)
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", file.display()));
+        // Inline form: `out.overwrite(.., &format!(.. resolved ..))`.
         for stmt in baked_prefix_overwrites(&src) {
+            violations.push((file.clone(), stmt));
+        }
+        // `let`-indirected form: `let v = …format!(..resolved..)…; out.overwrite(.., &v)`.
+        for stmt in indirected_baked_overwrites(&src) {
             violations.push((file.clone(), stmt));
         }
     }
@@ -198,10 +436,13 @@ fn no_ide_codegen_bakes_prefix_into_mapped_overwrite() {
     assert!(
         violations.is_empty(),
         "IDE codegen bakes a binding prefix + user expression into a single mapped \
-         `out.overwrite(.., .., &format!(.. resolved ..))`. This maps the user identifier to the \
-         prop start (the go-to-definition desync bug). Emit the expression via the typed `EmitOp` \
-         substrate (`emit_jsx_binding_value` / `OverwriteSyntheticBoundary` + `PreserveOriginal`) \
-         instead. Violations: {violations:#?}"
+         `out.overwrite(.., .., &format!(.. resolved ..))` (inline) OR via a \
+         `let v = …format!(.. resolved ..)…; out.overwrite(.., &v)` indirection. This maps the \
+         user identifier to the overwrite start (the go-to-definition desync bug). Emit the \
+         expression via the typed `EmitOp` substrate (`emit_jsx_binding_value` / \
+         `OverwriteSyntheticBoundary` + `PreserveOriginal`, or an in-place boundary split + \
+         `collect_binding_patches` with the synthetic guard as an unmapped prepend) instead. \
+         Violations: {violations:#?}"
     );
 }
 
@@ -313,6 +554,121 @@ fn baked_prefix_scanner_detects_violation() {
     assert!(
         baked_prefix_overwrites(longer_ident).is_empty(),
         "scanner must match resolver vars as whole tokens, not substrings of longer idents"
+    );
+}
+
+#[test]
+fn indirected_baked_overwrite_scanner_detects_violation() {
+    // Discriminating: the strengthened scanner must FIRE on the `let`-indirected
+    // baked overwrite (the FINDING-A guard hole) and must NOT fire on the clean
+    // typed-substrate emission.
+
+    // 1. `let close = format!(… final_expr …); out.overwrite(.., .., &close);` —
+    //    the exact pre-fix props.rs `guarded.is_some()` shape. `final_expr` is a
+    //    resolver-output var, so `close` is tainted, so the overwrite is flagged.
+    let let_format_final_expr = r#"
+        let final_expr = guarded.as_deref().unwrap_or(&resolved);
+        let close = format!("={{{}}}", final_expr);
+        out.overwrite(arg_end, prop_end, &close);
+    "#;
+    assert_eq!(
+        indirected_baked_overwrites(let_format_final_expr).len(),
+        1,
+        "scanner MUST detect `let close = format!(.. final_expr ..); out.overwrite(.., &close)` — \
+         else the guard hole (FINDING A) stays open"
+    );
+
+    // 2. `let close = format!(… resolved …); out.overwrite(.., .., &close);` — the
+    //    generic resolver-var indirection.
+    let let_format_resolved = r#"
+        let close = format!("={{{}}}", resolved);
+        out.overwrite(arg_end, prop_end, &close);
+    "#;
+    assert_eq!(
+        indirected_baked_overwrites(let_format_resolved).len(),
+        1,
+        "scanner MUST detect the `let close = format!(.. resolved ..); overwrite(.., &close)` indirection"
+    );
+
+    // 3. A var bound DIRECTLY to a resolver-output PRODUCER, then baked at a FOREIGN
+    //    anchor: `let v = build_prefixed_expr(...); out.overwrite(arg_end, prop_end,
+    //    &v);`. Producer-bound taint is in scope (codex: the absence of `format!`
+    //    does not make it safe), and the overwrite is NOT self-anchored → flagged.
+    let let_producer_foreign = r#"
+        let v = build_prefixed_expr(value_expr, vs, exp, resolver, &[]);
+        out.overwrite(arg_end, prop_end, &v);
+    "#;
+    assert_eq!(
+        indirected_baked_overwrites(let_producer_foreign).len(),
+        1,
+        "scanner MUST detect a producer-bound var baked into a FOREIGN-anchored overwrite \
+         (the future-pattern desync codex flagged)"
+    );
+
+    // 4. CLEAN: the migrated in-place substrate — boundary split + unmapped guard
+    //    prepend + `collect_binding_patches`. The guard text is computed via a
+    //    resolver-output producer (`build_block_guard` is NOT a producer), the value
+    //    stays in place, and NO tainted var is baked into an overwrite. Must NOT fire.
+    let clean_substrate = r#"
+        out.overwrite(prop.start, arg_start, "");
+        out.overwrite(arg_end, tvs, "={");
+        out.overwrite(tve, prop_end, close_brace);
+        out.prepend_alloc(injection.source_offset, &injection.text);
+        resolver.collect_binding_patches(bindings, out);
+    "#;
+    assert!(
+        indirected_baked_overwrites(clean_substrate).is_empty(),
+        "scanner false-positived on the clean in-place substrate (guard as unmapped prepend, \
+         value preserved in place)"
+    );
+
+    // 5. CLEAN: the SELF-ANCHORED partial-interpolation recovery overwrite. `resolved`
+    //    IS producer-bound earlier in the SAME function (`let resolved =
+    //    resolver.resolve_simple_expr(ident)`), so file-wide name-taint marks it — but
+    //    the overwrite replaces the identifier's OWN `[ident.start, ident.end)` span
+    //    with its own resolved form (maps to its own start = navigable), so the
+    //    self-anchored exclusion keeps it unflagged WITHOUT an allowlist entry.
+    let clean_recover = r#"
+        let resolved = resolver.resolve_simple_expr(ident);
+        // ... later, applying the patch:
+        RecoveredInterpolationPatch::OverwriteResolved { resolved } => {
+            out.overwrite(
+                expr_start + recovered_ident.start as u32,
+                expr_start + recovered_ident.end as u32,
+                &resolved,
+            );
+        }
+    "#;
+    assert!(
+        indirected_baked_overwrites(clean_recover).is_empty(),
+        "scanner false-positived on the self-anchored partial-interpolation recovery overwrite \
+         (`out.overwrite(base + ident.start, base + ident.end, &resolved)` replaces one node's \
+         own span → navigable; the self-anchored exclusion must keep it unflagged)"
+    );
+
+    // 5b. Discriminating: the self-anchored detector must be SPECIFIC. The SAME
+    //     `&resolved` baked at a FOREIGN anchor (two unrelated boundary vars) MUST
+    //     fire — proving the exclusion keys on self-anchoring, not on the var name.
+    let recover_var_foreign = r#"
+        let resolved = resolver.resolve_simple_expr(ident);
+        out.overwrite(arg_end, prop_end, &resolved);
+    "#;
+    assert_eq!(
+        indirected_baked_overwrites(recover_var_foreign).len(),
+        1,
+        "the self-anchored exclusion must NOT exempt a producer-bound var baked at a FOREIGN \
+         anchor — else it would mask the real desync class"
+    );
+
+    // 6. The token matcher must not flag `&close_handler` when only `close` is tainted.
+    let longer_ident = r#"
+        let close = format!("={{{}}}", resolved);
+        out.overwrite(arg_end, prop_end, &close_handler);
+    "#;
+    assert!(
+        indirected_baked_overwrites(longer_ident).is_empty(),
+        "scanner must match the baked `&VAR` reference as a whole token, not a substring of a \
+         longer identifier"
     );
 }
 

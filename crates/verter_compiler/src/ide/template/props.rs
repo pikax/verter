@@ -590,59 +590,71 @@ fn process_v_bind<'alloc>(
 
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
         let value_expr = &source[vs as usize..ve as usize];
-        // Flat resolution drives guard-injection detection + the in-place split
-        // branch decisions below; the identifier itself stays preserved in place.
+        let leading_ws = (value_expr.len() - value_expr.trim_start().len()) as u32;
+        let trailing_ws = (value_expr.len() - value_expr.trim_end().len()) as u32;
+        let tvs = vs + leading_ws;
+        let tve = ve - trailing_ws;
+
+        // Type narrowing guard for function-typed props under a v-if scope
+        // (Part C Step 8). Located in SOURCE coordinates from the OXC AST so the
+        // user expression stays preserved IN PLACE and only the guard is synthetic.
+        let guard_injection =
+            v_if_guard.and_then(|guard| compute_function_guard_injection(guard, oxc_prop));
+
+        if let Some(injection) = guard_injection {
+            // Function value under v-if: keep the whole expression in place (each
+            // identifier mapped via `collect_binding_patches`) and splice the guard
+            // as UNMAPPED synthetic text into the middle. NEVER bake the guarded
+            // expression into a mapped overwrite — that mapped the user body to the
+            // foreign overwrite start (the go-to-definition desync).
+            out.overwrite(prop.start, arg_start, "");
+            out.overwrite(arg_end, tvs, "={");
+            out.overwrite(tve, prop_end, close_brace);
+            // The guard is synthetic narrowing text → unmapped prepend at the
+            // injection offset. Emitted BEFORE `collect_binding_patches` so that at a
+            // shared anchor — an arrow-EXPRESSION body whose first identifier sits
+            // exactly at the injection offset (`() => handle()` injects at `handle`) —
+            // the stable-sorted same-position prepend order is
+            // `<guard><accessor-prefix><identifier>`, preserving
+            // `() => !((cond))?undefined:$setup.handle()`. Arrow-block / fn-expr
+            // inject after the body `{`, strictly before any body identifier, so
+            // there is no position collision there.
+            out.prepend_alloc(injection.source_offset, &injection.text);
+            // Per-identifier accessor prefixes/suffixes applied in place — each maps
+            // its identifier back to source.
+            if let Some(oxc_p) = oxc_prop {
+                if let Some(ref exp) = oxc_p.exp {
+                    if let Some(ref bindings) = exp.bindings {
+                        resolver.collect_binding_patches(bindings, out);
+                    }
+                }
+            }
+            return;
+        }
+
+        // No guard injection. Resolve the expression and choose the in-place split
+        // (the identifier stays preserved in place for source mapping / TSGO hover).
         let resolved = match oxc_prop.and_then(|p| p.exp.as_ref()) {
             Some(exp) => build_prefixed_expr(value_expr, vs, exp, resolver, &[]),
             None => resolver.resolve_simple_expr(value_expr),
         };
 
-        // Inject type narrowing guard into function-typed props (Part C Step 8).
-        let guarded = if let Some(guard) = v_if_guard {
-            inject_function_guard(&resolved, guard, oxc_prop)
-        } else {
-            None
-        };
-        let final_expr = guarded.as_deref().unwrap_or(&resolved);
-
-        // When the expression is unchanged, split the overwrite to preserve
-        // the original expression span for source mapping (TSGO hover).
         let trimmed_expr = value_expr.trim();
-        if final_expr == trimmed_expr {
-            let leading_ws = value_expr.len() - value_expr.trim_start().len();
-            let trailing_ws = value_expr.len() - value_expr.trim_end().len();
-            let tvs = vs + leading_ws as u32;
-            let tve = ve - trailing_ws as u32;
+        if resolved == trimmed_expr {
+            // Expression unchanged — split to preserve the original expression span.
             out.overwrite(prop.start, arg_start, "");
             out.overwrite(arg_end, tvs, "={");
             out.overwrite(tve, prop_end, close_brace);
-        } else if let Some(prefix) = final_expr.strip_suffix(trimmed_expr) {
+        } else if let Some(prefix) = resolved.strip_suffix(trimmed_expr) {
             // Prefix-only change (e.g., "___VERTER___instance." + "$attrs").
             // Split overwrite to preserve the original identifier's source map position.
-            let leading_ws = (value_expr.len() - value_expr.trim_start().len()) as u32;
-            let trailing_ws = (value_expr.len() - value_expr.trim_end().len()) as u32;
-            let tvs = vs + leading_ws;
-            let tve = ve - trailing_ws;
             out.overwrite(prop.start, arg_start, "");
             out.overwrite(arg_end, tvs, &format!("={{{}", prefix));
             out.overwrite(tve, prop_end, close_brace);
-        } else if guarded.is_some() {
-            // Guard was injected — the expression was rewritten, can't patch individually
-            let close = if is_style_object && !is_jsx {
-                format!("={{{} satisfies import('vue').CSSProperties}}", final_expr)
-            } else {
-                format!("={{{}}}", final_expr)
-            };
-            out.overwrite(prop.start, arg_start, "");
-            out.overwrite(arg_end, prop_end, &close);
         } else {
             // Patch-based: overwrite only boundaries, apply binding patches individually.
             // This preserves source map tokens for each identifier in the expression,
             // enabling TSGO hover on sub-expressions (e.g., `props.x` in `:class="{ 'key': props.x }"`).
-            let leading_ws = (value_expr.len() - value_expr.trim_start().len()) as u32;
-            let trailing_ws = (value_expr.len() - value_expr.trim_end().len()) as u32;
-            let tvs = vs + leading_ws;
-            let tve = ve - trailing_ws;
             out.overwrite(prop.start, arg_start, "");
             out.overwrite(arg_end, tvs, "={");
             out.overwrite(tve, prop_end, close_brace);
@@ -838,79 +850,77 @@ pub(crate) fn get_prop_end(prop: &NodeProp) -> u32 {
     }
 }
 
-/// Inject a type narrowing guard into a function-typed v-bind expression.
+/// A synthetic v-if narrowing guard to inject into a function-typed value
+/// expression, located in SOURCE coordinates.
 ///
-/// Detects function types via OXC AST and injects appropriate guards:
-/// - Arrow expression `() => expr` → `() => !(guard)?undefined:expr`
-/// - Arrow block `() => { stmts }` → `() => {if(!(guard))return; stmts}`
-/// - Function expression `function() { stmts }` → `function() {if(!(guard))return; stmts}`
-/// - Non-function: returns None (no guard needed)
-fn inject_function_guard(
-    resolved: &str,
+/// The guard is unmapped synthetic text spliced into the MIDDLE of the user
+/// expression at `source_offset`. It is NEVER baked into a mapped overwrite — the
+/// user expression bytes stay in place (each identifier 1:1 mapped via
+/// `collect_binding_patches`), and only this guard text maps to `None`.
+struct GuardInjection {
+    /// File-relative byte offset (inside the value expression span) where the
+    /// guard text is inserted as an unmapped prepend.
+    source_offset: u32,
+    /// The synthetic guard text (ternary `!((cond))?undefined:` for an
+    /// arrow-expression body, block `if(!((cond))) return;` after an opening `{`).
+    text: String,
+}
+
+/// Compute the type-narrowing guard injection for a function-typed v-bind value
+/// expression, in SOURCE coordinates, from the OXC AST.
+///
+/// Detects function types via the OXC AST and locates the injection point so the
+/// user expression can stay PRESERVED IN PLACE while only the guard is synthetic:
+/// - Arrow expression `() => expr` → guard `!((cond))?undefined:` before the body
+///   expression (at the body expression's source start).
+/// - Arrow block `() => { stmts }` → guard `if(!((cond))) return;` right after the
+///   body `{`.
+/// - Function expression `function() { stmts }` → guard `if(!((cond))) return;`
+///   right after the body `{`.
+/// - Non-function: returns `None` (no guard needed).
+///
+/// The returned offset is file-relative (`exp.offset + substring-relative span`),
+/// so it indexes directly into `source`.
+fn compute_function_guard_injection(
     guard: &str,
     oxc_prop: Option<&OxcParsedProp<'_>>,
-) -> Option<String> {
+) -> Option<GuardInjection> {
+    use oxc_span::GetSpan;
+
     let oxc_p = oxc_prop?;
     let exp = oxc_p.exp.as_ref()?;
     let expression = exp.expression.as_ref()?;
+    let base = exp.offset;
 
     match expression {
         Expression::ArrowFunctionExpression(arrow) => {
-            // Find `=>` in the resolved string
-            let arrow_pos = resolved.find("=>")?;
-            let after_arrow = arrow_pos + 2;
-
             if arrow.expression {
-                // Arrow expression body: inject ternary guard before body
-                // () => expr → () => !(guard)?undefined:expr
-                let body_start = resolved[after_arrow..]
-                    .find(|c: char| !c.is_whitespace())
-                    .map(|i| after_arrow + i)
-                    .unwrap_or(after_arrow);
-                let mut result = String::with_capacity(resolved.len() + guard.len() + 30);
-                result.push_str(&resolved[..body_start]);
-                result.push_str(&crate::ide::condition::build_ternary_guard(guard));
-                result.push_str(&resolved[body_start..]);
-                Some(result)
+                // Arrow expression body: the body is wrapped in a synthetic
+                // ExpressionStatement whose span IS the body expression. Inject the
+                // ternary guard right before it (the `=>` and any whitespace stay as
+                // preserved source).
+                let body = arrow.body.statements.first()?;
+                Some(GuardInjection {
+                    source_offset: base + body.span().start,
+                    text: crate::ide::condition::build_ternary_guard(guard),
+                })
             } else {
-                // Arrow block body: inject block guard after opening {
-                // () => { stmts } → () => {if(!(guard))return; stmts}
-                let brace_offset = resolved[after_arrow..].find('{')?;
-                let brace_pos = after_arrow + brace_offset;
-                let mut result = String::with_capacity(resolved.len() + guard.len() + 30);
-                result.push_str(&resolved[..=brace_pos]);
-                result.push_str(&crate::ide::condition::build_block_guard(guard));
-                result.push_str(&resolved[brace_pos + 1..]);
-                Some(result)
+                // Arrow block body: `arrow.body.span()` covers `{ … }`; inject the
+                // block guard right after the opening `{`.
+                Some(GuardInjection {
+                    source_offset: base + arrow.body.span().start + 1,
+                    text: crate::ide::condition::build_block_guard(guard),
+                })
             }
         }
-        Expression::FunctionExpression(_) => {
-            // Function expression: inject block guard after opening { of body
-            // function() { stmts } → function() {if(!(guard))return; stmts}
-            // Find the closing `)` of parameters, then the next `{`
-            let mut depth = 0i32;
-            let mut paren_close = None;
-            for (i, ch) in resolved.char_indices() {
-                if ch == '(' {
-                    depth += 1;
-                }
-                if ch == ')' {
-                    depth -= 1;
-                    if depth == 0 {
-                        paren_close = Some(i);
-                        // Don't break — we want the FIRST balanced close
-                        break;
-                    }
-                }
-            }
-            let paren_close = paren_close?;
-            let brace_offset = resolved[paren_close..].find('{')?;
-            let brace_pos = paren_close + brace_offset;
-            let mut result = String::with_capacity(resolved.len() + guard.len() + 30);
-            result.push_str(&resolved[..=brace_pos]);
-            result.push_str(&crate::ide::condition::build_block_guard(guard));
-            result.push_str(&resolved[brace_pos + 1..]);
-            Some(result)
+        Expression::FunctionExpression(func) => {
+            // Function expression: `func.body` spans `{ … }`; inject the block guard
+            // right after the opening `{`.
+            let body = func.body.as_ref()?;
+            Some(GuardInjection {
+                source_offset: base + body.span().start + 1,
+                text: crate::ide::condition::build_block_guard(guard),
+            })
         }
         _ => None, // Non-function: no guard needed
     }

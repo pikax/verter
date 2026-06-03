@@ -1255,6 +1255,81 @@ fn v_bind_function_expr_gets_block_guard() {
 }
 
 #[test]
+fn v_if_guarded_function_value_tsx_is_byte_equivalent() {
+    // Characterization: the v-if narrowing-guard injection for function-typed value
+    // props produces EXACTLY the same generated TSX after the EmitOp in-place
+    // migration as the pre-migration baked-overwrite form. Only the SOURCE MAP
+    // improves; the bytes (narrowing structure + accessor prefixes) are identical.
+    // SetupConst → bare identifier; Props → `__props.` accessor prefix.
+
+    // Arrow-expression body, SetupConst (no prefix).
+    let arrow_expr = gen_tsx_template_with_bindings(
+        r#"<template><div v-if="ok" :onX="() => handle()"/></template>"#,
+        &[
+            ("ok", BindingType::SetupConst),
+            ("handle", BindingType::SetupConst),
+        ],
+    );
+    assert!(
+        arrow_expr.contains("onX={() => !((ok))?undefined:handle()}"),
+        "arrow-expr guard must be byte-identical `onX={{() => !((ok))?undefined:handle()}}`: {arrow_expr}"
+    );
+
+    // Arrow-expression body, Props (accessor prefix on the body identifier; the v-if
+    // condition is resolved independently by the directive layer).
+    let arrow_expr_props = gen_tsx_template_with_bindings(
+        r#"<template><div v-if="ok" :onX="() => handle()"/></template>"#,
+        &[
+            ("ok", BindingType::SetupConst),
+            ("handle", BindingType::Props),
+        ],
+    );
+    assert!(
+        arrow_expr_props.contains("?undefined:__props.handle()"),
+        "arrow-expr Props body must keep its `__props.` accessor prefix after the guard: {arrow_expr_props}"
+    );
+
+    // Arrow-block body, SetupConst.
+    let arrow_block = gen_tsx_template_with_bindings(
+        r#"<template><div v-if="ok" :onX="() => { handle() }"/></template>"#,
+        &[
+            ("ok", BindingType::SetupConst),
+            ("handle", BindingType::SetupConst),
+        ],
+    );
+    assert!(
+        arrow_block.contains("onX={() => {if(!((ok))) return; handle() }}"),
+        "arrow-block guard must be byte-identical `() => {{if(!((ok))) return; handle() }}`: {arrow_block}"
+    );
+
+    // Function-expression body, SetupConst.
+    let fn_expr = gen_tsx_template_with_bindings(
+        r#"<template><div v-if="ok" :onX="function() { handle() }"/></template>"#,
+        &[
+            ("ok", BindingType::SetupConst),
+            ("handle", BindingType::SetupConst),
+        ],
+    );
+    assert!(
+        fn_expr.contains("onX={function() {if(!((ok))) return; handle() }}"),
+        "fn-expr guard must be byte-identical `function() {{if(!((ok))) return; handle() }}`: {fn_expr}"
+    );
+
+    // Negative (all shapes): the guarded expression must NOT be doubled or mangled —
+    // exactly ONE guard per prop.
+    assert_eq!(
+        arrow_expr.matches("?undefined:").count(),
+        1,
+        "exactly one ternary guard per arrow-expr prop: {arrow_expr}"
+    );
+    assert_eq!(
+        arrow_block.matches("if(!((ok))) return;").count(),
+        1,
+        "exactly one block guard per arrow-block prop: {arrow_block}"
+    );
+}
+
+#[test]
 fn v_bind_non_function_no_guard() {
     // Non-function props should NOT get any guard
     let result = gen_tsx_template(r#"<template><div v-if="show" :class="msg">hi</div></template>"#);
@@ -7288,6 +7363,127 @@ fn v_show_condition_maps_to_source() {
         !tokens.iter().any(|&(_, _, sc)| sc == prop_start),
         "no generated token may map back to the v-show prop start (col {prop_start}). \
          Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+#[test]
+fn v_if_guarded_value_binding_maps_to_source() {
+    // <div v-if="ok" :onSomething="() => handle()"/> exercises the props.rs
+    // `guarded.is_some()` branch: a function-typed value prop under a v-if narrowing
+    // guard. The guard `!((ok))?undefined:` is injected into the MIDDLE of the
+    // expression (after `=>`). Pre-fix the WHOLE expression — guard plus the user
+    // body `handle()` — was baked into one mapped `out.overwrite(arg_end, prop_end,
+    // &close)`, so the body identifier `handle` mapped to the foreign overwrite
+    // start (arg_end) instead of its own source span → ctrl+click failed. Post-fix
+    // the value is preserved in place (each identifier mapped) and ONLY the guard
+    // text is unmapped.
+    let source = r#"<template><div v-if="ok" :onSomething="() => handle()"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("ok", BindingType::SetupConst),
+            ("handle", BindingType::SetupConst),
+        ],
+    );
+
+    // The narrowing guard must still be present (semantics unchanged).
+    assert!(
+        output.contains("?undefined:"),
+        "function-typed prop under v-if must still get the ternary narrowing guard: {output}"
+    );
+    assert!(
+        !output.contains("v-if"),
+        "v-if directive must be removed: {output}"
+    );
+
+    // Positive: the user body identifier `handle` maps back to its source byte offset.
+    let handle_src = source.find("handle()").unwrap() as u32;
+    assert!(
+        has_token_for_src(&tokens, handle_src),
+        "the guarded value body `handle` must map to source col {handle_src} (NOT the foreign \
+         overwrite start). Pre-fix the baked overwrite mapped the whole run to arg_end. \
+         Tokens: {:?}, output: {output}",
+        tokens.iter().map(|t| (t.1, t.2)).collect::<Vec<_>>()
+    );
+
+    // Negative: the injected guard text maps to None. Locate the generated `?undefined:`
+    // (the ternary guard tail) and assert no token starts there.
+    let guard_gen = output.find("?undefined:").unwrap();
+    let (gl, gc) = gen_offset_to_line_col(&output, guard_gen);
+    assert!(
+        !has_token_at_gen(&tokens, gl, gc),
+        "the injected guard `?undefined:` (gen {gl}:{gc}) must map to None. Tokens: {tokens:?}"
+    );
+
+    // Negative: no generated token may map back to the prop start (`:` of :onSomething)
+    // — that was the desync anchor.
+    let prop_start = source.find(":onSomething").unwrap() as u32;
+    assert!(
+        !tokens.iter().any(|&(_, _, sc)| sc == prop_start),
+        "no generated token may map back to the :onSomething prop start (col {prop_start}). \
+         Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+#[test]
+fn v_if_guarded_inline_handler_maps_to_source() {
+    // <div v-if="ok" @click="count++"/> — an inline v-on handler under a v-if
+    // narrowing guard. The guard `() => {if (!((ok))) { return undefined; } ` wraps
+    // the handler body. The user body `count++` must map back to source; the `() => {`
+    // wrapper and the guard map to None. (The von.rs handler emission already
+    // preserves the body in place via the prefix/suffix boundary split; this test
+    // pins that invariant so a regression that bakes the body would be caught.)
+    let source = r#"<template><div v-if="ok" @click="count++"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("ok", BindingType::SetupConst),
+            ("count", BindingType::SetupRef),
+        ],
+    );
+
+    assert!(
+        output.contains("return undefined"),
+        "inline handler under v-if must still get the narrowing guard: {output}"
+    );
+    assert!(
+        output.contains("() => {"),
+        "inline handler must be wrapped in an arrow body: {output}"
+    );
+
+    // Positive: the user body identifier `count` maps back to its OWN source byte
+    // offset, AND the generated `count` token sits at the generated body position
+    // (preserved in place, not relocated to a foreign anchor).
+    let count_src = source.find("count++").unwrap() as u32;
+    let count_gen = output.find("count++").unwrap() as u32;
+    let (cgl, cgc) = gen_offset_to_line_col(&output, count_gen as usize);
+    assert!(
+        tokens
+            .iter()
+            .any(|&(dl, dc, sc)| dl == cgl && dc == cgc && sc == count_src),
+        "the guarded inline handler body `count` (gen {cgl}:{cgc}) must map to its own source \
+         col {count_src}. Tokens: {:?}, output: {output}",
+        tokens.iter().map(|t| (t.1, t.2)).collect::<Vec<_>>()
+    );
+
+    // Negative: the `() => {` arrow wrapper start maps to None.
+    let wrapper_gen = output.find("() => {").unwrap();
+    let (wl, wc) = gen_offset_to_line_col(&output, wrapper_gen);
+    assert!(
+        !has_token_at_gen(&tokens, wl, wc),
+        "the `() => {{` arrow wrapper (gen {wl}:{wc}) must map to None. Tokens: {tokens:?}"
+    );
+
+    // Negative: the generated body identifier `count` must NOT map to the @click prop
+    // start (the desync anchor). (The synthetic `onClick` prop NAME legitimately maps
+    // near the event arg — this assertion targets the BODY identifier specifically.)
+    let prop_start = source.find("@click").unwrap() as u32;
+    assert!(
+        !tokens
+            .iter()
+            .any(|&(dl, dc, sc)| dl == cgl && dc == cgc && sc == prop_start),
+        "the body identifier `count` (gen {cgl}:{cgc}) must not map to the @click prop start \
+         (col {prop_start}). Tokens: {tokens:?}, output: {output}"
     );
 }
 
