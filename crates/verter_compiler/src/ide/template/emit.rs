@@ -401,6 +401,66 @@ pub fn emit_relocated_value<'alloc>(
     emit_jsx_binding_value(out, at, source, &jsx, resolver);
 }
 
+/// Emit a SYNTHESIZED shorthand value whose navigable identifier `core` is NOT a
+/// verbatim slice of the source.
+///
+/// Used by the no-value v-bind shorthands: `<div :foo/>` ≡ `:foo="foo"` and
+/// `<div .foo/>` ≡ `.foo="foo"`. Vue derives the value identifier from the
+/// arg/key name (kebab→camel: `:foo-bar` → `fooBar`), so the generated value text
+/// is a TRANSFORM of the source token and cannot stay in place. `resolved` is the
+/// binding-resolver output for `core` (`$setup.fooBar`, `fooBar.value`, bare
+/// `foo`, …); the `core` identifier within it is emitted as a single mapped
+/// [`EmitOp::InsertMapped`] pointing at `core_source_start` (the arg/key source
+/// token), so go-to-definition on the generated value lands on the template
+/// identifier whose binding resolves to the declaration. The surrounding accessor
+/// prefix/suffix is unmapped synthetic text. All ops anchor at `at`.
+///
+/// When `core` is not a substring of `resolved` (the resolver rewrote the
+/// expression entirely), the whole `resolved` text is emitted UNMAPPED — never a
+/// mapped overwrite, so no token is fabricated for a position the core does not
+/// occupy.
+pub fn emit_synthesized_shorthand_value<'alloc>(
+    out: &mut CodeGenOutput<'alloc>,
+    at: SourceByteOffset,
+    resolved: &str,
+    core: &str,
+    core_source_start: SourceByteOffset,
+) {
+    let unmapped = |out: &mut CodeGenOutput<'alloc>, text: &str| {
+        emit_op(
+            out,
+            &EmitOp::InsertUnmapped {
+                at,
+                text: EmitText::Owned(text.to_string()),
+            },
+        );
+    };
+
+    match resolved.find(core) {
+        Some(idx) if !core.is_empty() => {
+            if idx > 0 {
+                unmapped(out, &resolved[..idx]);
+            }
+            emit_op(
+                out,
+                &EmitOp::InsertMapped {
+                    at,
+                    text: EmitText::Owned(resolved[idx..idx + core.len()].to_string()),
+                    source_start: core_source_start,
+                    content_offset: GeneratedByteLen(0),
+                },
+            );
+            let tail = &resolved[idx + core.len()..];
+            if !tail.is_empty() {
+                unmapped(out, tail);
+            }
+        }
+        // Resolver rewrote the expression entirely (or empty core): emit it all as
+        // unmapped synthetic text. No mapped overwrite, no fabricated token.
+        _ => unmapped(out, resolved),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

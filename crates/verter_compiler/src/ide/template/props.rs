@@ -13,7 +13,7 @@ use oxc_ast::ast::Expression;
 use verter_span::{SourceByteOffset, SourceByteRange};
 
 use crate::ast::types::{ElementNode, TagType};
-use crate::ide::template::emit::{emit_op, EmitOp, EmitText};
+use crate::ide::template::emit::{emit_op, emit_synthesized_shorthand_value, EmitOp, EmitText};
 use crate::ide::{event_to_jsx_name, get_directive_name};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
@@ -439,9 +439,45 @@ fn process_v_bind<'alloc>(
                     "}",
                 );
             } else {
-                let resolved = resolver.resolve_simple_expr(&kebab_to_camel_case(key));
+                // `.foo` shorthand ≡ `.foo="foo"` → `foo={foo}`; `.foo-bar` uses
+                // camelCase lookup for the value (≡ `.foo-bar="fooBar"`). The key
+                // `foo` is PRESERVED IN PLACE as the JSX attribute name (delete only
+                // the leading `.` + whitespace), keeping its source mapping. The
+                // synthesized VALUE identifier routes through the typed `EmitOp`
+                // substrate so its navigable core maps back to the key source token.
+                let key_start =
+                    prop.start + (key.as_ptr() as usize - raw_name.as_ptr() as usize) as u32;
+                let key_end = key_start + key.len() as u32;
                 let prop_end = get_prop_end(prop);
-                out.overwrite(prop.start, prop_end, &format!("{}={{{}}}", key, resolved));
+                let core = kebab_to_camel_case(key);
+                let resolved = resolver.resolve_simple_expr(&core);
+                // Delete the leading `.` and any trailing span (whitespace /
+                // modifiers) so only the key `foo` survives in place; the value is
+                // inserted right after it.
+                out.overwrite(prop.start, key_start, "");
+                out.overwrite(key_end, prop_end, "");
+                let at = SourceByteOffset(key_end);
+                emit_op(
+                    out,
+                    &EmitOp::InsertUnmapped {
+                        at,
+                        text: EmitText::Static("={"),
+                    },
+                );
+                emit_synthesized_shorthand_value(
+                    out,
+                    at,
+                    &resolved,
+                    &core,
+                    SourceByteOffset(key_start),
+                );
+                emit_op(
+                    out,
+                    &EmitOp::InsertUnmapped {
+                        at,
+                        text: EmitText::Static("}"),
+                    },
+                );
             }
             return;
         }
@@ -619,10 +655,36 @@ fn process_v_bind<'alloc>(
             }
         }
     } else {
-        // `:foo` shorthand → `foo={ctx.foo}`; `:foo-bar` uses camelCase lookup.
-        let resolved = resolver.resolve_simple_expr(&kebab_to_camel_case(arg_name.trim()));
+        // `:foo` shorthand ≡ `:foo="foo"` → `foo={foo}`; `:foo-bar` uses camelCase
+        // lookup (≡ `:foo-bar="fooBar"`). The arg name `foo` is PRESERVED IN PLACE
+        // as the JSX attribute name (delete only the leading `:`), keeping its
+        // source mapping. The synthesized VALUE identifier (the camelCased name,
+        // resolved through the binding resolver) routes through the typed `EmitOp`
+        // substrate so its navigable core maps back to the arg source token —
+        // never baked into a mapped overwrite.
+        let core = kebab_to_camel_case(arg_name.trim());
+        let resolved = resolver.resolve_simple_expr(&core);
+        // Delete the leading `:` and any trailing span (modifiers) so only the arg
+        // `foo` survives in place as the JSX attribute name; the value is inserted
+        // right after it.
         out.overwrite(prop.start, arg_start, "");
-        out.overwrite(arg_end, prop_end, &format!("={{{}}}", resolved));
+        out.overwrite(arg_end, prop_end, "");
+        let at = SourceByteOffset(arg_end);
+        emit_op(
+            out,
+            &EmitOp::InsertUnmapped {
+                at,
+                text: EmitText::Static("={"),
+            },
+        );
+        emit_synthesized_shorthand_value(out, at, &resolved, &core, SourceByteOffset(arg_start));
+        emit_op(
+            out,
+            &EmitOp::InsertUnmapped {
+                at,
+                text: EmitText::Static("}"),
+            },
+        );
     }
 }
 

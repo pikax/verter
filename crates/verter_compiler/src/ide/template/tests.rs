@@ -3215,6 +3215,107 @@ fn v_bind_shorthand_no_value_source_map_accuracy() {
     );
 }
 
+/// v-bind shorthand without value: `:foo` ≡ `:foo="foo"`. The generated VALUE
+/// identifier (inside `foo={…}`) must map back to the source `foo` arg token so
+/// go-to-definition on the binding-resolved value lands on the template `foo`
+/// (whose binding resolves to the declaration). Distinct from
+/// `v_bind_shorthand_no_value_source_map_accuracy`, which pins the NAME (LHS)
+/// mapping. Pre-fix the value was baked into a single `out.overwrite(arg_end, …,
+/// "={foo}")` whose `Overwritten` chunk maps the whole run back to `arg_end`, so
+/// the value identifier had NO token at the source `foo` start — this test fails
+/// against that tree and passes once the value routes through the `EmitOp`
+/// substrate.
+#[test]
+fn v_bind_shorthand_no_value_value_maps_to_source() {
+    let source = r#"<template><Comp :foo/></template>"#;
+
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("foo", BindingType::SetupConst)]);
+
+    assert!(
+        output.contains("foo={foo}"),
+        "should convert :foo to foo={{foo}}: {output}"
+    );
+
+    let colon_src_col = source.find(":foo").unwrap() as u32;
+    let foo_src_col = colon_src_col + 1; // the `f` of the arg token
+
+    // The VALUE identifier is the `foo` INSIDE the braces: `foo={foo}` → value at
+    // `+ "foo={".len()`. (The first `foo` is the NAME / LHS.)
+    let pair_gen_col = output.find("foo={foo}").unwrap() as u32;
+    let value_gen_col = pair_gen_col + "foo={".len() as u32;
+
+    // Post-fix: a token at the value's generated column maps to the source `foo`
+    // arg start. Pre-fix: the baked overwrite maps the run to `arg_end`, so no
+    // token at `value_gen_col` points to `foo_src_col`.
+    let value_maps_to_source = tokens
+        .iter()
+        .any(|&(_dl, dc, sc)| dc == value_gen_col && sc == foo_src_col);
+    assert!(
+        value_maps_to_source,
+        "the generated VALUE identifier `foo` (gen col {value_gen_col}) must map to source col \
+         {foo_src_col} (the `f` in the `:foo` arg). Pre-fix it was baked into a mapped overwrite \
+         anchored at arg_end and had no such token. Tokens: {:?}",
+        tokens.iter().map(|t| (t.1, t.2)).collect::<Vec<_>>()
+    );
+
+    // Negative: the value identifier must NOT collapse to the prop start (`:`).
+    let value_maps_to_colon = tokens
+        .iter()
+        .any(|&(_dl, dc, sc)| dc == value_gen_col && sc == colon_src_col);
+    assert!(
+        !value_maps_to_colon,
+        "the generated VALUE identifier must not map to the `:` (col {colon_src_col}). \
+         Tokens: {:?}",
+        tokens.iter().map(|t| (t.1, t.2)).collect::<Vec<_>>()
+    );
+}
+
+/// `.foo` v-bind prop-modifier shorthand without value: `.foo` ≡ `.foo="foo"`.
+/// The generated VALUE identifier (inside `foo={…}`) must map back to the source
+/// `foo` key token (after the `.`). Pre-fix the WHOLE prop span was overwritten
+/// with `format!("{}={{{}}}", key, resolved)`, baking both name and value into one
+/// `Overwritten` chunk anchored at `prop.start` (the `.`), so the value
+/// identifier had NO token at the source `foo` start.
+#[test]
+fn dot_prop_shorthand_no_value_value_maps_to_source() {
+    let source = r#"<template><Comp .foo/></template>"#;
+
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("foo", BindingType::SetupConst)]);
+
+    assert!(
+        output.contains("foo={foo}"),
+        "should convert .foo to foo={{foo}}: {output}"
+    );
+
+    let dot_src_col = source.find(".foo").unwrap() as u32;
+    let key_src_col = dot_src_col + 1; // the `f` of the key token (after `.`)
+
+    let pair_gen_col = output.find("foo={foo}").unwrap() as u32;
+    let value_gen_col = pair_gen_col + "foo={".len() as u32;
+
+    let value_maps_to_source = tokens
+        .iter()
+        .any(|&(_dl, dc, sc)| dc == value_gen_col && sc == key_src_col);
+    assert!(
+        value_maps_to_source,
+        "the generated VALUE identifier `foo` (gen col {value_gen_col}) must map to source col \
+         {key_src_col} (the `f` in the `.foo` key). Pre-fix the whole `.foo` span was baked into a \
+         mapped overwrite anchored at the `.` and had no such token. Tokens: {:?}",
+        tokens.iter().map(|t| (t.1, t.2)).collect::<Vec<_>>()
+    );
+
+    // Negative: the value identifier must NOT collapse to the prop start (`.`).
+    let value_maps_to_dot = tokens
+        .iter()
+        .any(|&(_dl, dc, sc)| dc == value_gen_col && sc == dot_src_col);
+    assert!(
+        !value_maps_to_dot,
+        "the generated VALUE identifier must not map to the `.` (col {dot_src_col}). \
+         Tokens: {:?}",
+        tokens.iter().map(|t| (t.1, t.2)).collect::<Vec<_>>()
+    );
+}
+
 /// Long-form `v-bind:prop="expr"` — the prop name token should map to `prop`, not `v`.
 #[test]
 fn v_bind_longform_prop_name_source_map_accuracy() {

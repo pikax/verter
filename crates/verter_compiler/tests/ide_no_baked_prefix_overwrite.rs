@@ -19,12 +19,12 @@
 //!    `crates/verter_compiler/src/ide/template/**` forbidding ANY `out.overwrite(…)`
 //!    whose `&format!` replacement interpolates a binding-resolved expression
 //!    variable (`resolved` / `resolved_expr` / `resolved_arg` / `resolved_value` /
-//!    `final_expr` / `resolved_style`). A NARROW, explicitly-justified allowlist
-//!    (`ALLOWED_NON_NAVIGABLE_OVERWRITES`) permits only PROVABLY-non-navigable
-//!    emissions (no in-place user value identifier — synthesized no-value
-//!    attributes). v-on spreads, the dynamic event-name spread, native + dynamic
-//!    v-model, and v-show all route through the substrate and have ZERO baked
-//!    navigable overwrites.
+//!    `final_expr` / `resolved_style`). The allowlist
+//!    (`ALLOWED_NON_NAVIGABLE_OVERWRITES`) is EMPTY: every navigable user
+//!    expression routes through the substrate. v-on spreads, the dynamic
+//!    event-name spread, native + dynamic v-model, v-show, AND the no-value
+//!    `:foo` / `.foo` shorthands (whose value `foo` ≡ `:foo="foo"` is navigable)
+//!    all emit through the substrate and have ZERO baked navigable overwrites.
 //! 2. `retired_ide_emit_symbols_absent` — the flat-string producers
 //!    `resolve_prefixed_expr` / `resolve_prefixed_dynamic_arg` must be ABSENT from
 //!    `crates/verter_compiler/src/**` (they were deleted; a lingering producer
@@ -91,22 +91,21 @@ const RESOLVER_OUTPUT_VARS: &[&str] = &[
 
 /// Normalised (whitespace-collapsed) statement snippets that are EXPLICITLY allowed
 /// to bake a resolved expression into a mapped overwrite because they are PROVABLY
-/// non-navigable: a synthesized no-value attribute (`prop.value_start` is `None`),
-/// so there is no in-place user value identifier to map. Both sites resolve the
-/// ATTRIBUTE NAME (not a user value expression) and emit it as a constant
-/// attribute value.
+/// non-navigable (no in-place user value identifier to map).
 ///
-/// This is the ONLY sanctioned exception. It is keyed by exact normalised statement
-/// text (not a fuzzy match) so any NEW baked overwrite — or a change to these two —
-/// trips the guard and must be re-justified.
-const ALLOWED_NON_NAVIGABLE_OVERWRITES: &[&str] = &[
-    // `process_v_bind`: `.foo` modifier shorthand with no value — `resolved` is the
-    // resolved attribute NAME (`kebab_to_camel_case(key)`), not a user expression.
-    r#"out.overwrite(prop.start, prop_end, &format!("{}={{{}}}", key, resolved));"#,
-    // `process_v_bind`: `:foo` shorthand with no value — `resolved` is the resolved
-    // attribute NAME (`kebab_to_camel_case(arg_name)`), not a user expression.
-    r#"out.overwrite(arg_end, prop_end, &format!("={{{}}}", resolved));"#,
-];
+/// This allowlist is EMPTY: every navigable user expression in `ide/template/**`
+/// — including the no-value `:foo` / `.foo` shorthands, whose value `foo` ≡
+/// `:foo="foo"` IS a navigable binding-resolved identifier — routes through the
+/// typed `EmitOp` substrate. The earlier entries that exempted those two shorthand
+/// sites were a gate-bypass: they baked the resolved VALUE identifier (`$setup.foo`
+/// / `foo.value`) into a mapped overwrite, mapping it to a foreign position so
+/// ctrl+click failed. They are now emitted via `emit_synthesized_shorthand_value`
+/// (the value core a mapped `InsertMapped` pointing at the arg/key source token,
+/// the accessor prefix/suffix unmapped) and removed from this allowlist.
+///
+/// Keyed by exact normalised statement text (not a fuzzy match) so any NEW baked
+/// overwrite trips the guard and must be re-justified before it can be added here.
+const ALLOWED_NON_NAVIGABLE_OVERWRITES: &[&str] = &[];
 
 /// Whitespace-collapse a statement snippet for stable comparison/allowlisting.
 fn normalize_stmt(stmt: &str) -> String {
@@ -281,14 +280,31 @@ fn baked_prefix_scanner_detects_violation() {
         "scanner false-positived on the clean emit_relocated_value substrate path"
     );
 
-    // The two allowlisted PROVABLY-non-navigable no-value attribute sites must NOT
-    // trip the scanner (they resolve the attribute NAME, no user value identifier).
-    for allowed in ALLOWED_NON_NAVIGABLE_OVERWRITES {
-        assert!(
-            baked_prefix_overwrites(allowed).is_empty(),
-            "scanner false-positived on an explicitly-allowlisted no-value overwrite: {allowed}"
-        );
-    }
+    // The allowlist is EMPTY — nothing is exempt.
+    assert!(
+        ALLOWED_NON_NAVIGABLE_OVERWRITES.is_empty(),
+        "the baked-overwrite allowlist must stay empty: every navigable user expression routes \
+         through the EmitOp substrate. A new entry re-opens the desync gate-bypass."
+    );
+
+    // The two FORMERLY-allowlisted no-value shorthand bakes (`:foo` / `.foo`) were a
+    // gate-bypass: the resolved VALUE identifier (`$setup.foo` / `foo.value`) IS
+    // navigable. The scanner MUST now DETECT both shapes — they have been migrated to
+    // the EmitOp substrate, and re-introducing either flat-string bake must trip.
+    let v_bind_shorthand_no_value =
+        r#"out.overwrite(arg_end, prop_end, &format!("={{{}}}", resolved));"#;
+    assert_eq!(
+        baked_prefix_overwrites(v_bind_shorthand_no_value).len(),
+        1,
+        "scanner MUST detect the `:foo` no-value shorthand baked value (was allowlisted — gate-bypass)"
+    );
+    let dot_prop_shorthand_no_value =
+        r#"out.overwrite(prop.start, prop_end, &format!("{}={{{}}}", key, resolved));"#;
+    assert_eq!(
+        baked_prefix_overwrites(dot_prop_shorthand_no_value).len(),
+        1,
+        "scanner MUST detect the `.foo` no-value shorthand baked value (was allowlisted — gate-bypass)"
+    );
 
     // The token matcher must not match a resolver var as a substring of a longer
     // identifier (e.g. `resolved` inside `resolved_handler_name`).
