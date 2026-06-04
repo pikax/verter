@@ -21,6 +21,17 @@ overload / generic-inference resolution as it drives flow. It cites — never
 restates — the parent for the engine architecture (PART 1 §5 owns the
 cross-cutting flow contract; this chapter is the U6 implementation detail).
 
+> **Locked cross-cutting design (read FIRST):** `docs/arch/u6-flow-call-resolution-design.md` is the
+> DESIGN-LOCKED authority for the U6 cross-cutting mechanisms — `ResolveCall` overload order + speculative
+> sessions + the loser-abandonment admission predicate (D1), the flow narrowing-invalidation rooting rail (D2:
+> the whole-function `flow_body_stable_hash` + unioned consumed facts is the SOLE warm rail; the slice's
+> `selected_*_ids` are candidate discriminants, NOT a re-derived rail; per-slice tightening REJECTED),
+> predicate/assertion + the fi08 ownership (D3), contextual-callback ordering + the strengthened
+> `CompletedDeterministic` predicate (D4), `satisfies`/value-inference (D5), the consistency invariants + the
+> flow depth-sentinel retirement assigned to U6.FLOW_RETURN_SUBSTRATE (D6), the impl mini-DAG + the REQUIRED
+> CONTEXTUAL_CALLBACK fixation-time mechanism-ownership split, and the named-but-deferred guard registry. Where a
+> block contract below and that locked design differ on a cross-cutting mechanism, the locked design governs.
+
 The parent is the architecture authority. Every block below cites the parent
 section that defines the architecture it implements and states only the concrete
 **block contract** — what changes, what is deleted, which named guards land, which
@@ -392,18 +403,27 @@ bound-expansion slice and never satisfies it. The flow fact signature includes
 selected_effect_ids, selected_control_region_ids, closure_summary_ids }`, plus
 `MemberPresence`, `Member`, `RouteGeneration`, `ExportSurface`, `ModuleAugmentation`,
 `AmbientGlobal`, `LibIntrinsic`, `TypeEnvOptions`, and project-generation facts as
-read. The extra `FlowSlice` fields beyond `selected_binding_ids` are required
-because effect-only changes (an earlier sibling's assignment, an assertion call, a
-closure write summary, a control-flow region) must invalidate a cached slice even
-when no selected binding's identity changed. The `FlowSlice` fact lives in the
-**`FactDomain::ProgramAnalysis`** domain (the fourth closed `FactDomain` —
+read. The extra `FlowSlice` fields beyond `selected_binding_ids` are
+**candidate-selection discriminants**, NOT a re-derived invalidation rail — see the
+locked `docs/arch/u6-flow-call-resolution-design.md` §2.2, which GOVERNS this:
+`flow_body_stable_hash` is the SOLE re-derived intra-function warm gate, and because
+it is whole-body-sensitive it busts on effect-only changes (an earlier sibling's
+assignment, an assertion call, a closure write summary, a control-flow region) AND on
+the *introduction* of a previously-absent effect; `slice_semantic_hash` /
+`selected_*_ids` are discriminants only (re-deriving them on the warm path is either
+cache-defeating re-planning or a no-op masquerading as a rail). The `FlowSlice` fact
+lives in the **`FactDomain::ProgramAnalysis`** domain (the fourth closed `FactDomain` —
 `docs/arch/fact-based-cache.md`), NOT in the parse / resolve-imports / route-surface
 domains: it carries a `FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef { .. })`
 rooting the slice on the live flow-region identity (`function_slot`,
-`projection_path`, `flow_body_stable_hash`) plus the stored slice semantic hash, and
-is validated on every warm hit by `StoreView::validates_program_analysis_domain`,
-which re-derives the live region's `flow_body_stable_hash` and the recorded slice
-hash and validates BOTH gates. That validator **FAILS CLOSED** on a missing,
+`projection_path`, `flow_body_stable_hash`) plus the stored slice semantic hash (the
+discriminant), and is validated on every warm hit by
+`StoreView::validates_program_analysis_domain`. The **two warm-validity gates** are
+(a) the re-derived live `flow_body_stable_hash` equals the recorded hash — the SOLE
+intra-function gate — AND (b) the unioned consumed `ReadSetSignature.facts` revalidate
+(the cross-function / cross-file gate); the recorded slice hash is carried for
+candidate selection, NOT re-derived as an independent gate. That validator **FAILS
+CLOSED** on a missing,
 overflowed, stale (body edited → `flow_body_stable_hash` differs), or unrooted
 `FlowSlice` fact — a fail-closed miss recomputes the slice rather than serving a torn
 result. Budget, overflow, cycle, cancellation, or partial slice results are
