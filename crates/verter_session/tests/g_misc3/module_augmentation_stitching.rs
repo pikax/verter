@@ -27,8 +27,8 @@ use rustc_hash::FxHashMap;
 use verter_semantic::facts::registry::{InternedGlobPattern, InternedSpecifier};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::{
-    AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, FileArtifactStore,
-    FileArtifacts, ProjectIdentity, LEGACY_PARSER_VERSION,
+    AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey,
+    FileArtifactStore, FileArtifacts, ProjectIdentity, LEGACY_PARSER_VERSION,
 };
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
@@ -239,6 +239,7 @@ fn augmentation_external_specifier_stitches() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
     };
     let effective = route_db.get_or_compute_effective_export_set(
         key,
@@ -286,6 +287,7 @@ fn augmentation_resolved_relative_canonical_stitches() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
     };
     let effective = route_db.get_or_compute_effective_export_set(
         key,
@@ -334,6 +336,7 @@ fn augmentation_wildcard_ambient_stitches() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
     };
     let effective = route_db.get_or_compute_effective_export_set(
         key,
@@ -373,6 +376,7 @@ fn augmentation_global_stitches() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
     };
     let effective = route_db.get_or_compute_effective_export_set(
         key,
@@ -481,6 +485,7 @@ fn augmenter_set_refresh_invalidates_downstream() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
     };
 
     // Cold compute under view A; captures the initial fingerprint.
@@ -644,6 +649,7 @@ fn edit_augmenting_file_invalidates_consumer() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
     };
 
     // Cold compute records contributor_whole_hash = original_hash.
@@ -743,6 +749,7 @@ fn edit_unrelated_file_does_not_invalidate_consumer() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
     };
 
     let _ = route_db.get_or_compute_effective_export_set(
@@ -860,6 +867,7 @@ fn rekeyed_augmenter_with_unchanged_skeleton_is_not_dropped() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
     };
 
     // Cold compute on the first RouteDb — this populates the
@@ -1157,6 +1165,7 @@ fn effective_export_set_session_view_stitches_overlay_augmenter() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
     };
     let whole_hash = |c: &str| match c {
         "/aug-base.ts" => Some([11u8; 16]),
@@ -1338,6 +1347,247 @@ fn session_overlay_augmenter_isolated_from_base_index() {
     assert_ne!(
         base_set.fingerprint, session_set.fingerprint,
         "base and session augmenter sets must be distinct (overlay isolation)"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────
+// Population-keyed warm cache — base/session entries occupy distinct
+// `EffectiveExportSetKey` slots on the SAME `RouteDb` (FIX A).
+//
+// `effective_export_set_session_view_stitches_overlay_augmenter` above
+// proves the cold scan is overlay-correct, but it uses SEPARATE
+// `RouteDb` instances for the base and session reads, so it can never
+// exercise the warm-cache collision. The hazard the deleted base-only
+// assert guarded is reintroduced at the cache layer if
+// `EffectiveExportSetKey` is population-blind: a base-populated warm
+// entry then satisfies a session lookup (base-as-session) and vice
+// versa, because both reads hash to the same slot.
+//
+// These two tests share ONE `RouteDb`. Both views' `validates()`
+// accepts every fact, so warm validation never spuriously misses — the
+// ONLY thing that can separate the base and session results is the
+// cache key carrying the augmentation `population` dimension.
+//
+// - **Pre-fix tree** (`EffectiveExportSetKey` has no `population`
+//   field): the first read populates the shared slot, the second read
+//   hashes to the SAME slot and warm-hits the wrong-population entry —
+//   so the session read sees base-only augmenters / the base read sees
+//   the session overlay augmenter. Both asserts below FAIL.
+// - **Post-fix tree**: base keys under `Base`, session keys under
+//   `Session(overlay-set fingerprint)`; the second read misses the warm
+//   slot and cold-computes its own population. PASSES.
+// ────────────────────────────────────────────────────────────────
+
+/// Seed a shared store with a base augmenter (`/aug-base.ts`, legacy
+/// key) and a session-overlay augmenter (`/aug-overlay.ts`, keyed under
+/// the overlay discriminator for `fingerprint`). Both augment `"vue"`.
+fn seed_base_and_overlay_augmenters(
+    store: &FileArtifactStore,
+    fingerprint: u64,
+) -> verter_session::Hash16 {
+    let _base_key = insert_artifact_from_fixture(
+        store,
+        "/aug-base.ts",
+        "module_augmentation_external.ts",
+        [11u8; 16],
+    );
+
+    let overlay_discriminator =
+        verter_session::session_view::overlay_artifact_discriminator_for_fingerprint(fingerprint);
+    let raw = fixture("module_augmentation_external.ts");
+    let indexed = build_indexed_with_source(&raw, [99u8; 16]);
+    let emission = emit_parse_facts(&indexed);
+    let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
+    let overlay_key = FileArtifactKey {
+        canonical: Arc::from("/aug-overlay.ts"),
+        content_hash: [99u8; 16],
+        parse_env_hash: overlay_discriminator,
+        parser_version: LEGACY_PARSER_VERSION,
+    };
+    store.insert_artifacts(
+        overlay_key,
+        Arc::new(FileArtifacts {
+            indexed,
+            facts: Arc::new(emission.facts),
+            parsed_edges: Arc::new(verter_session::file_artifact_store::ParsedEdges::empty()),
+            parse_stable_hash,
+            augmentations: Arc::new(emission.augmentations),
+        }),
+    );
+    overlay_discriminator
+}
+
+fn aug_whole_hash(c: &str) -> Option<verter_session::Hash16> {
+    match c {
+        "/aug-base.ts" => Some([11u8; 16]),
+        "/aug-overlay.ts" => Some([99u8; 16]),
+        _ => None,
+    }
+}
+
+/// Base-first → session-second on a SHARED `RouteDb`: the base read
+/// populates the warm slot; the session read MUST still stitch its
+/// overlay augmenter (not warm-hit the base-only entry).
+#[test]
+fn effective_export_set_warm_base_entry_does_not_satisfy_session_lookup() {
+    let store = FileArtifactStore::new();
+    let fingerprint: u64 = 7;
+    let _overlay_discriminator = seed_base_and_overlay_augmenters(&store, fingerprint);
+
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let key = EffectiveExportSetKey {
+        provider_canonical: "vue".to_owned(),
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
+    };
+
+    let route_db = RouteDb::new();
+
+    // BASE read first — populates the warm slot with the base-only set.
+    let base_store_view = AcceptAllView::new(1);
+    let base_effective = route_db.get_or_compute_effective_export_set(
+        EffectiveExportSetKey {
+            population: verter_session::file_artifact_store::AugmentationPopulation::Base,
+            ..key.clone()
+        },
+        target.clone(),
+        &base_store_view,
+        None,
+        &store,
+        aug_whole_hash,
+        |_, _| None,
+    );
+    let base_contributors: Vec<&str> = base_effective
+        .entries
+        .iter()
+        .map(|e| e.contributor_canonical.as_ref())
+        .collect();
+    assert!(
+        !base_contributors.contains(&"/aug-overlay.ts"),
+        "base read must see base-only augmenters; got {base_contributors:?}"
+    );
+
+    // SESSION read second on the SAME db — must NOT warm-hit the
+    // base-only entry; must stitch the overlay augmenter.
+    let session_store_view = SessionScopedView::new(1, 42);
+    let overlay_session = OverlayFingerprintView {
+        fingerprint,
+        project_identity: ProjectIdentity([1u8; 16]),
+        env_hashes: verter_session::session_view::EnvHashes::default(),
+    };
+    let session_effective = route_db.get_or_compute_effective_export_set(
+        EffectiveExportSetKey {
+            population: verter_session::file_artifact_store::AugmentationPopulation::Session(
+                fingerprint,
+            ),
+            ..key
+        },
+        target,
+        &session_store_view,
+        Some(&overlay_session),
+        &store,
+        aug_whole_hash,
+        |_, _| None,
+    );
+    let session_contributors: Vec<&str> = session_effective
+        .entries
+        .iter()
+        .map(|e| e.contributor_canonical.as_ref())
+        .collect();
+
+    assert!(
+        session_contributors.contains(&"/aug-overlay.ts"),
+        "session read on a shared RouteDb must stitch its overlay augmenter, \
+         NOT warm-hit the base-only entry; got {session_contributors:?}"
+    );
+    assert!(
+        session_contributors.contains(&"/aug-base.ts"),
+        "session read must still union the base augmenter; got {session_contributors:?}"
+    );
+}
+
+/// Session-first → base-second on a SHARED `RouteDb`: the session read
+/// populates the warm slot with the base ∪ overlay set; the base read
+/// MUST still see the base-only surface (no overlay augmenter bleed).
+#[test]
+fn effective_export_set_warm_session_entry_does_not_satisfy_base_lookup() {
+    let store = FileArtifactStore::new();
+    let fingerprint: u64 = 7;
+    let _overlay_discriminator = seed_base_and_overlay_augmenters(&store, fingerprint);
+
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let key = EffectiveExportSetKey {
+        provider_canonical: "vue".to_owned(),
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
+    };
+
+    let route_db = RouteDb::new();
+
+    // SESSION read first — populates the warm slot with base ∪ overlay.
+    let session_store_view = SessionScopedView::new(1, 42);
+    let overlay_session = OverlayFingerprintView {
+        fingerprint,
+        project_identity: ProjectIdentity([1u8; 16]),
+        env_hashes: verter_session::session_view::EnvHashes::default(),
+    };
+    let session_effective = route_db.get_or_compute_effective_export_set(
+        EffectiveExportSetKey {
+            population: verter_session::file_artifact_store::AugmentationPopulation::Session(
+                fingerprint,
+            ),
+            ..key.clone()
+        },
+        target.clone(),
+        &session_store_view,
+        Some(&overlay_session),
+        &store,
+        aug_whole_hash,
+        |_, _| None,
+    );
+    let session_contributors: Vec<&str> = session_effective
+        .entries
+        .iter()
+        .map(|e| e.contributor_canonical.as_ref())
+        .collect();
+    assert!(
+        session_contributors.contains(&"/aug-overlay.ts"),
+        "session read must stitch its overlay augmenter; got {session_contributors:?}"
+    );
+
+    // BASE read second on the SAME db — must NOT warm-hit the session
+    // entry; must see base-only.
+    let base_store_view = AcceptAllView::new(1);
+    let base_effective = route_db.get_or_compute_effective_export_set(
+        EffectiveExportSetKey {
+            population: verter_session::file_artifact_store::AugmentationPopulation::Base,
+            ..key
+        },
+        target,
+        &base_store_view,
+        None,
+        &store,
+        aug_whole_hash,
+        |_, _| None,
+    );
+    let base_contributors: Vec<&str> = base_effective
+        .entries
+        .iter()
+        .map(|e| e.contributor_canonical.as_ref())
+        .collect();
+
+    assert!(
+        !base_contributors.contains(&"/aug-overlay.ts"),
+        "base read on a shared RouteDb must NOT see the session overlay \
+         augmenter (no base-as-session bleed); got {base_contributors:?}"
+    );
+    assert!(
+        base_contributors.contains(&"/aug-base.ts"),
+        "base read must include the base augmenter; got {base_contributors:?}"
     );
 }
 

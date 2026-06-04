@@ -121,6 +121,21 @@ pub struct HostStoreView {
     compat_token: crate::resolver_core::StoreViewCompatToken,
     mutation_epoch: u64,
     session_id: Option<u64>,
+    /// Overlay-set fingerprint of the active session view (R29 +
+    /// overlay isolation). `0` for a base / overlay-free view;
+    /// non-zero once [`Self::with_session_overlay`] captures the
+    /// session's [`crate::session_view::SessionView::fingerprint`].
+    ///
+    /// This is the augmentation-index population identity for the
+    /// view: the route-surface validator composes
+    /// [`Self::augmentation_population`] from it so a session read
+    /// validates against the `Session(fingerprint)` augmenter-set
+    /// fingerprint and a base read against the `Base` one — the
+    /// `EffectiveExportSetKey` / `RouteSurfaceIndexShapeKey` population
+    /// dimension can never be cross-validated. Mirrors the SINGLE
+    /// derivation in
+    /// [`crate::session_view::augmentation_population_for_view`].
+    session_overlay_fingerprint: u64,
     whole_hashes: FxHashMap<String, Hash16>,
     derived_hashes: FxHashMap<(String, crate::resolver_core::DerivedFactKind), Hash16>,
     import_routes: FxHashMap<(String, String), crate::types::DependencyResolution>,
@@ -231,13 +246,24 @@ pub struct HostStoreView {
 
 /// Structural key for snapshotting `ModuleAugmentationIndexShape`
 /// fingerprints into [`HostStoreView`]. Mirrors the parallel
-/// optional fields of `FactKey::ModuleAugmentationIndexShape`.
+/// optional fields of `FactKey::ModuleAugmentationIndexShape`, plus the
+/// augmentation-index `population` dimension.
+///
+/// `population` keeps the base and session augmenter-set fingerprints in
+/// DISTINCT snapshot slots: the store's augmentation index holds both a
+/// `(target, Base) → base_fp` and a `(target, Session(fp)) → session_fp`
+/// entry, and folding them into a population-blind key would collide
+/// (last-writer-wins), letting a base fact validate against a session
+/// fingerprint or vice versa. The route-surface validator composes the
+/// active view's population ([`HostStoreView::augmentation_population`])
+/// so warm validation is population-aware.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RouteSurfaceIndexShapeKey {
     pub target_kind_tag: verter_semantic::facts::registry::AugmentationTargetKindTag,
     pub external_specifier: Option<String>,
     pub resolved_relative_canonical: Option<String>,
     pub wildcard_pattern: Option<String>,
+    pub population: crate::file_artifact_store::AugmentationPopulation,
 }
 
 impl Default for HostStoreView {
@@ -249,6 +275,7 @@ impl Default for HostStoreView {
             },
             mutation_epoch: 0,
             session_id: None,
+            session_overlay_fingerprint: 0,
             whole_hashes: FxHashMap::default(),
             derived_hashes: FxHashMap::default(),
             import_routes: FxHashMap::default(),
@@ -430,17 +457,22 @@ impl HostStoreView {
     ///   content-scoped; a pure overlay content edit does not advance
     ///   the project generation, so the base snapshot is correct.
     /// - **`route_surface_index_fingerprints`** — keyed by the
-    ///   structural augmentation-target shape, not by canonical /
-    ///   content hash. The augmentation index this snapshot mirrors is
-    ///   base-only: it has no base/session population identity, so an
-    ///   overlay that edits a `declare module` block would still be
-    ///   summarised by the BASE augmenter set. The base snapshot is
-    ///   carried unchanged here only because `EffectiveExportSet`
-    ///   consumption is itself base-only —
-    ///   `RouteDb::get_or_compute_effective_export_set` fails closed on
-    ///   a session view, so no session consumer reads these
-    ///   fingerprints. Session-correct augmentation stitching lands with
-    ///   the overlay-aware augmentation-index schema.
+    ///   structural augmentation-target shape PLUS the augmentation
+    ///   `population` dimension, not by canonical / content hash. The
+    ///   snapshot mirrors the store's overlay-aware augmentation index:
+    ///   it carries both the `(target, Base) → base_fp` and the
+    ///   `(target, Session(fp)) → session_fp` entries, so a session
+    ///   read's `EffectiveExportSet` consumer validates against the
+    ///   session fingerprint and a base read against the base one. The
+    ///   base snapshot is carried unchanged because population
+    ///   discrimination lives in the key, not in a per-canonical
+    ///   re-root: the validator composes [`Self::augmentation_population`]
+    ///   (derived from `session_overlay_fingerprint`, re-rooted below)
+    ///   so it selects the correct-population slot.
+    /// - **`session_overlay_fingerprint`** — re-rooted from
+    ///   `view.fingerprint()` so [`Self::augmentation_population`]
+    ///   reports `Session(fingerprint)` for this view; the route-surface
+    ///   validator composes the matching population slot.
     /// - **`import_routes`** — populated by `build` but read by no
     ///   `HostStoreView` validator; nothing to re-root.
     /// - **`env_hashes`** / **`project_identity`** / **`project_generation`**
@@ -472,6 +504,15 @@ impl HostStoreView {
         host: &VerterHost,
         view: &dyn crate::session_view::SessionView,
     ) -> Self {
+        // Capture the session's overlay-set fingerprint — the
+        // augmentation-index population identity for this view. A
+        // base/overlay-free view reports `0` (stays `Base`); an
+        // overlay-bearing view reports its non-zero fingerprint so the
+        // route-surface validator composes `Session(fingerprint)`,
+        // matching the producer's `augmentation_population_for_view`
+        // derivation.
+        self.session_overlay_fingerprint = view.fingerprint();
+
         // Tombstone-only canonicals: deleted by the session and never
         // re-upserted, so absent from `overlay_canonicals()`. This is
         // the delete-case analogue of the overlay-Upsert re-rooting
@@ -565,6 +606,22 @@ impl HostStoreView {
             }
         }
         self
+    }
+
+    /// Augmentation-index population identity for this view (overlay
+    /// isolation). Mirrors the SINGLE derivation in
+    /// [`crate::session_view::augmentation_population_for_view`]: a
+    /// non-zero overlay-set fingerprint means `Session(fingerprint)`,
+    /// otherwise `Base`. The route-surface validator composes the
+    /// matching population so base and session augmenter-set
+    /// fingerprints never cross-validate.
+    fn augmentation_population(&self) -> crate::file_artifact_store::AugmentationPopulation {
+        use crate::file_artifact_store::AugmentationPopulation;
+        if self.session_overlay_fingerprint != 0 {
+            AugmentationPopulation::Session(self.session_overlay_fingerprint)
+        } else {
+            AugmentationPopulation::Base
+        }
     }
 
     fn build(host: &VerterHost, snapshot_epoch: u64, session_id: Option<u64>) -> Self {
@@ -848,6 +905,10 @@ impl HostStoreView {
                     &key.target,
                 ),
                 wildcard_pattern: augmentation_target_wildcard_pattern(&key.target),
+                // Carry the population from the store's
+                // `AugmentationTargetKey` so base and session
+                // fingerprints stay in distinct snapshot slots.
+                population: key.population,
             };
             self.route_surface_index_fingerprints
                 .insert(snap_key, fingerprint);
@@ -1426,6 +1487,14 @@ impl crate::resolver_core::StoreView for HostStoreView {
                         .as_ref()
                         .map(|s| s.as_ref().to_owned()),
                     wildcard_pattern: wildcard_pattern.as_ref().map(|s| s.as_ref().to_owned()),
+                    // Population-aware validation: a session view
+                    // validates against the `Session(fingerprint)`
+                    // augmenter-set fingerprint, a base view against the
+                    // `Base` one. The fact carries no population (it is a
+                    // content-free target shape); the population is the
+                    // VIEW's, derived through the SAME single derivation
+                    // as the producer.
+                    population: self.augmentation_population(),
                 };
                 match self.route_surface_index_fingerprints.get(&key) {
                     Some(current) => current == &fact.expected_hash,
@@ -1458,6 +1527,10 @@ impl crate::resolver_core::StoreView for HostStoreView {
                     project_identity: self.project_identity,
                     resolve_env_hash: self.env_hashes.resolve_env_hash,
                     lib_env_hash: self.env_hashes.lib_env_hash,
+                    // Compose the view's augmentation population so a
+                    // session consumer validates against the session
+                    // slot's fingerprint, never the base slot's.
+                    population: self.augmentation_population(),
                 };
                 route_db.lookup_effective_export_set_fingerprint(&target_key)
                     == Some(fact.expected_hash)

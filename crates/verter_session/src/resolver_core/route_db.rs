@@ -93,9 +93,23 @@ pub struct BarrelRouteSurface {
 /// Key for the per-provider effective export surface (R29 + R21).
 ///
 /// Identifies one effective surface scoped to a `(provider, project,
-/// resolve env, lib env)` quadruple. `lib_env_hash` enters this key
-/// because module augmentations live in libs / ambient corpora and
+/// resolve env, lib env, population)` tuple. `lib_env_hash` enters this
+/// key because module augmentations live in libs / ambient corpora and
 /// can change which augmenters are visible — see R21 scoping rule.
+///
+/// `population` is the augmentation-index population dimension: a base
+/// read stitches only base augmenters (`AugmentationPopulation::Base`),
+/// while a session read stitches the session's overlay augmenters
+/// UNIONED with base under `AugmentationPopulation::Session(overlay-set
+/// fingerprint)`. The two surfaces genuinely differ, so they MUST occupy
+/// distinct cache slots — without this dimension a base-populated warm
+/// entry would satisfy a session lookup (the "base-as-session" hazard)
+/// on a shared `RouteDb`. It is a proper R21 keyed env/scope dimension,
+/// NOT a content/version hash (R6 query-identity keys stay content-free)
+/// — it is derived once through
+/// [`crate::session_view::augmentation_population_for_view`], the SINGLE
+/// derivation both the cold producer and the route-surface validator
+/// route through.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EffectiveExportSetKey {
     /// Canonical id of the provider whose surface this is.
@@ -106,6 +120,11 @@ pub struct EffectiveExportSetKey {
     pub resolve_env_hash: Hash16,
     /// Lib-env hash dimension (R21).
     pub lib_env_hash: Hash16,
+    /// Augmentation-index population dimension (overlay isolation).
+    /// `Base` for a base read; `Session(overlay-set fingerprint)` for a
+    /// session read. Derived from the active view through
+    /// [`crate::session_view::augmentation_population_for_view`].
+    pub population: crate::file_artifact_store::AugmentationPopulation,
 }
 
 /// One contribution from an augmenter into a provider's effective
@@ -731,6 +750,16 @@ impl RouteDb {
         // overlay-correct — never a base-only set under a session key.
         let (population, overlay_discriminator) =
             crate::session_view::augmentation_population_for_view(session_view);
+
+        // The population dimension is OWNED by the derivation, never by
+        // the caller: overwrite it so the cache slot, the warm lookup,
+        // and the augmentation-index scan all agree on the SAME
+        // population. A base read and a session read therefore occupy
+        // distinct `EffectiveExportSetKey` slots — a base-populated warm
+        // entry can never satisfy a session lookup (and vice versa) on a
+        // shared `RouteDb`.
+        let mut key = key;
+        key.population = population;
 
         if let Some(existing) = self.effective_export_sets.get_if_valid(&key, view) {
             return existing;

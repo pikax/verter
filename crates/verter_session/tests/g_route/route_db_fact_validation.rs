@@ -28,8 +28,8 @@ use verter_semantic::facts::registry::{
 };
 use verter_semantic::facts::{FactKey, FactLane};
 use verter_session::file_artifact_store::{
-    AugmentationTargetKey, AugmentationTargetKind, AugmenterEntry, AugmenterSet, FileArtifactKey,
-    FileArtifactStore, ProjectIdentity,
+    AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind, AugmenterEntry,
+    AugmenterSet, FileArtifactKey, FileArtifactStore, ProjectIdentity,
 };
 use verter_session::resolver_core::{
     BarrelRouteSurface, EffectiveExportEntry, EffectiveExportSetEntry, EffectiveExportSetKey,
@@ -179,6 +179,7 @@ fn syntactic_export_set_differs_from_effective_export_set() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
     };
     let effective = route_db.get_or_compute_effective_export_set(
         key.clone(),
@@ -274,6 +275,7 @@ fn paths_edit_invalidates_route_db() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16], // env A
         lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
     };
     let key_b = EffectiveExportSetKey {
         resolve_env_hash: [4u8; 16], // env B (paths edited)
@@ -329,6 +331,7 @@ fn lib_env_hash_change_invalidates_route_db_effective_set() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [10u8; 16], // lib A
+        population: AugmentationPopulation::Base,
     };
     let key_lib_b = EffectiveExportSetKey {
         lib_env_hash: [11u8; 16], // lib B
@@ -455,6 +458,7 @@ fn effective_export_set_carries_fact_dep_signature() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
     };
 
     let effective = db.get_or_compute_effective_export_set(
@@ -534,6 +538,7 @@ fn effective_export_set_invalidates_when_augmenter_set_fingerprint_changes() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
     };
 
     // Compute under initial fingerprint with an accepting view.
