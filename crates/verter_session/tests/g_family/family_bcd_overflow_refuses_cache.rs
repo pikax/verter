@@ -9,10 +9,8 @@
 //! cache admission so the next request cold-recomputes.
 //!
 //! Discrimination: overflowing the tracer inside an outer scope
-//! that exceeds the cap advances `SIGNATURE_OVERFLOW_AT_INSTALL`
+//! that exceeds the cap advances the per-host `signature_overflow_at_install` counter
 //! and the outer install returns `FactReadSetFinalise::Overflow`.
-
-use std::sync::Mutex;
 
 use verter_session::for_tests::{
     install_fact_tracer_for_tests, observe_fan_out_borrowed_for_tests,
@@ -20,10 +18,6 @@ use verter_session::for_tests::{
 };
 use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef};
 use verter_session::VerterHost;
-
-// Serialize this test against other process-global SIGNATURE_OVERFLOW_AT_INSTALL
-// observers so the counter delta isolation is robust under `--test-threads > 1`.
-static MUTEX: Mutex<()> = Mutex::new(());
 
 fn sig_fact(n: u32) -> FactVersionRef {
     FactVersionRef::FileWholeHash {
@@ -34,14 +28,13 @@ fn sig_fact(n: u32) -> FactVersionRef {
 
 #[test]
 fn overflow_at_install_refuses_admission_and_advances_telemetry() {
-    let _serial = MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let host = VerterHost::new_standalone(Default::default());
 
-    let overflow_before = read_signature_overflow_at_install();
+    let overflow_before = read_signature_overflow_at_install(&host);
 
     // Observe more than FACT_SIGNATURE_CAP (1024) distinct facts
     // inside one tracer scope. The tracer's `finalise` returns
-    // `Overflow` and the SIGNATURE_OVERFLOW_AT_INSTALL counter
+    // `Overflow` and the per-host `signature_overflow_at_install` counter
     // advances.
     let ((), finalise) = install_fact_tracer_for_tests(&host, || {
         // 1100 > 1024 (FACT_SIGNATURE_CAP) — guarantees overflow.
@@ -50,7 +43,7 @@ fn overflow_at_install_refuses_admission_and_advances_telemetry() {
         }
     });
 
-    let overflow_after = read_signature_overflow_at_install();
+    let overflow_after = read_signature_overflow_at_install(&host);
 
     match finalise {
         FactReadSetFinalise::Overflow => {
@@ -65,6 +58,6 @@ fn overflow_at_install_refuses_admission_and_advances_telemetry() {
     }
     assert!(
         overflow_after > overflow_before,
-        "SIGNATURE_OVERFLOW_AT_INSTALL must advance on overflow. before={overflow_before}, after={overflow_after}"
+        "the per-host signature-overflow counter must advance on overflow. before={overflow_before}, after={overflow_after}"
     );
 }

@@ -1,8 +1,6 @@
 //! RED test: exceeding FACT_SIGNATURE_CAP causes `install_fact_tracer` to emit
 //! `StructuredAuditEvent::FactSignatureOverflow` and increment
-//! `SIGNATURE_OVERFLOW_AT_INSTALL`.
-
-use std::sync::Mutex;
+//! the per-host `signature_overflow_at_install` counter.
 
 use verter_session::for_tests::{
     install_fact_tracer_for_tests, observe_fan_out_borrowed_for_tests,
@@ -10,12 +8,6 @@ use verter_session::for_tests::{
 };
 use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef, FACT_SIGNATURE_CAP};
 use verter_session::VerterHost;
-
-// Serializes the two tests that trigger overflow against the process-global
-// `SIGNATURE_OVERFLOW_AT_INSTALL` counter. Without this guard, parallel test
-// scheduling lets both overflows fire concurrently and `overflow_increments_counter`
-// observes a delta > 1.
-static OVERFLOW_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
 fn make_host() -> VerterHost {
     VerterHost::new_standalone(Default::default())
@@ -39,9 +31,6 @@ fn overflow_facts() -> Vec<FactVersionRef> {
 
 #[test]
 fn install_fact_tracer_returns_overflow_when_cap_exceeded() {
-    let _serial = OVERFLOW_TEST_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let host = make_host();
     let facts = overflow_facts();
 
@@ -57,19 +46,16 @@ fn install_fact_tracer_returns_overflow_when_cap_exceeded() {
 
 #[test]
 fn overflow_increments_counter() {
-    let _serial = OVERFLOW_TEST_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let host = make_host();
     let facts = overflow_facts();
 
-    let before = read_signature_overflow_at_install();
+    let before = read_signature_overflow_at_install(&host);
 
     let (_value, finalise) = install_fact_tracer_for_tests(&host, || {
         observe_fan_out_borrowed_for_tests(&facts);
     });
 
-    let after = read_signature_overflow_at_install();
+    let after = read_signature_overflow_at_install(&host);
 
     assert!(
         matches!(finalise, FactReadSetFinalise::Overflow),
@@ -78,7 +64,7 @@ fn overflow_increments_counter() {
     assert_eq!(
         after,
         before + 1,
-        "SIGNATURE_OVERFLOW_AT_INSTALL must increment by 1 on overflow; before={before}, after={after}"
+        "the per-host signature-overflow counter must increment by 1 on overflow; before={before}, after={after}"
     );
 }
 

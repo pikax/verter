@@ -12,7 +12,8 @@
 //!    a fresh `FactReadSetCell` on TLS, runs the body, finalises
 //!    the read set, and on `FactReadSetFinalise::Overflow` emits a
 //!    `FactSignatureOverflow` event and increments
-//!    `SIGNATURE_OVERFLOW_AT_INSTALL`. Without the install scope,
+//!    the per-host `signature_overflow_at_install` counter.
+//!    Without the install scope,
 //!    the cold body's per-fact `observe_fan_out_borrowed` calls
 //!    fan into NOTHING — the producer publishes a value with an
 //!    empty (or worse, an outer scope's) read-set signature.

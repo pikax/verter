@@ -61,7 +61,7 @@ fn cold_compute_with_overflow_signature_does_not_publish_compile_slot() {
 
     // First cold compute under forced overflow — no slot lands.
     {
-        let _guard = compile_force_overflow_observations_for_tests(1100);
+        let _guard = compile_force_overflow_observations_for_tests(&host, 1100);
         prime_compile(&host, "/src/Comp.vue");
     }
     assert!(
@@ -84,7 +84,7 @@ fn cold_compute_with_overflow_signature_does_not_publish_compile_slot() {
     // post-fix the producer cold-recomputes and refuses publication
     // again.
     {
-        let _guard = compile_force_overflow_observations_for_tests(1100);
+        let _guard = compile_force_overflow_observations_for_tests(&host, 1100);
         prime_compile(&host, "/src/Comp.vue");
     }
     assert!(

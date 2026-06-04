@@ -21,8 +21,6 @@
 //! an empty signature. Against the post-change tree, the assertion
 //! holds.
 
-use std::sync::Mutex;
-
 use verter_session::for_tests::{
     compile_force_overflow_observations_for_tests, compile_scheduler_artifact_present_for_tests,
     compile_scheduler_last_known_good_artifact_present_for_tests,
@@ -30,12 +28,6 @@ use verter_session::for_tests::{
 use verter_session::{
     CompileProfile, FileKind, HostConfig, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
-
-// `COMPILE_TEST_FORCE_OVERFLOW_OBSERVATIONS` is a process-global atomic;
-// concurrent tests in this file (and any other file in this crate) that
-// arm the knob would race on its value. Serialize across this file so
-// each test owns the global state for its duration.
-static FORCE_OVERFLOW_MUTEX: Mutex<()> = Mutex::new(());
 
 fn upsert_vue(host: &VerterHost, canonical: &str, source: &str) {
     let _ = host
@@ -68,9 +60,6 @@ fn prime_compile(host: &VerterHost, canonical: &str) {
 /// state. Post-fix the producer refuses the insert on overflow.
 #[test]
 fn compile_fact_signature_overflow_does_not_publish_compile_slot() {
-    let _serial = FORCE_OVERFLOW_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
@@ -84,7 +73,7 @@ fn compile_fact_signature_overflow_does_not_publish_compile_slot() {
     // Force the compile-tier tracer past FACT_SIGNATURE_CAP (1024)
     // by injecting 1100 synthetic `FileWholeHash` observations into
     // the tracer scope. The finalised tracer returns `Overflow`.
-    let _guard = compile_force_overflow_observations_for_tests(1100);
+    let _guard = compile_force_overflow_observations_for_tests(&host, 1100);
 
     prime_compile(&host, "/src/Comp.vue");
 
@@ -128,9 +117,6 @@ fn compile_fact_signature_overflow_does_not_publish_compile_slot() {
 /// calls `compile_slots.remove(&profile_hash)` first.
 #[test]
 fn overflow_recompile_removes_prior_slot_for_same_key() {
-    let _serial = FORCE_OVERFLOW_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
@@ -155,7 +141,7 @@ fn overflow_recompile_removes_prior_slot_for_same_key() {
 
     // Phase 2: force overflow on the next compile. The producer
     // observes 1100 synthetic facts → tracer finalises with `Overflow`.
-    let _guard = compile_force_overflow_observations_for_tests(1100);
+    let _guard = compile_force_overflow_observations_for_tests(&host, 1100);
 
     // Re-prime: same `(canonical, profile)` cold-recomputes (the
     // upsert tick bump invalidates the warm-hit fast path, so the
@@ -197,9 +183,6 @@ fn overflow_recompile_removes_prior_slot_for_same_key() {
 /// commit is gated on `Cacheable` admission.
 #[test]
 fn overflow_skips_scheduler_artifact_commit() {
-    let _serial = FORCE_OVERFLOW_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
@@ -214,7 +197,7 @@ fn overflow_skips_scheduler_artifact_commit() {
 
     // Force the tracer past FACT_SIGNATURE_CAP. The finalised tracer
     // returns `Overflow`.
-    let _guard = compile_force_overflow_observations_for_tests(1100);
+    let _guard = compile_force_overflow_observations_for_tests(&host, 1100);
     prime_compile(&host, "/src/Comp.vue");
 
     // The compile_slots refusal already pins the per-slot invariant.
@@ -253,9 +236,6 @@ fn overflow_skips_scheduler_artifact_commit() {
 /// `remove_artifact_if_not_newer_than_preserves_newer_generation_artifact`.
 #[test]
 fn overflow_recompile_evicts_prior_scheduler_artifact() {
-    let _serial = FORCE_OVERFLOW_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
@@ -283,7 +263,7 @@ fn overflow_recompile_evicts_prior_scheduler_artifact() {
 
     // Re-upsert + forced overflow drives the producer's refusal arm
     // after a prior successful artifact was committed.
-    let _guard = compile_force_overflow_observations_for_tests(1100);
+    let _guard = compile_force_overflow_observations_for_tests(&host, 1100);
     upsert_vue(
         &host,
         "/src/Comp.vue",

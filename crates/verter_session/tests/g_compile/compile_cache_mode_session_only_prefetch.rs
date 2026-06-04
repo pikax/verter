@@ -23,8 +23,6 @@
 //! `Stateless` assertions (`== 0`) fail because the counter increments
 //! for them too. They pass only once the call is gated to `Session`.
 
-use std::sync::Mutex;
-
 use verter_session::for_tests::{
     compile_tier_prefetch_invocations_for_tests, reset_compile_tier_prefetch_invocations_for_tests,
 };
@@ -32,16 +30,6 @@ use verter_session::{
     CompileCacheMode, CompileProfile, FileKind, HostConfig, UpsertRequest, VerterHost,
     VirtualNodeKind, VirtualQuery,
 };
-
-// `COMPILE_TIER_PREFETCH_INVOCATIONS` is a process-global atomic. The
-// three tests in this file each reset it, run one cold compute, and read
-// it back; run in parallel they would race on the shared counter (one
-// test's `Session` compute would increment the count another test reads
-// between its own reset and read). Serialize across the file so each
-// test owns the global for the full reset→compute→read window. No other
-// test file touches this counter (integration tests are per-file
-// binaries), so a file-scoped mutex is sufficient.
-static PREFETCH_COUNTER_MUTEX: Mutex<()> = Mutex::new(());
 
 fn upsert(host: &VerterHost, canonical: &str, source: &str, kind: FileKind) {
     let _ = host
@@ -77,14 +65,10 @@ fn seed_cross_file_sfc(host: &VerterHost) {
 }
 
 /// Drive exactly ONE cold compute of `/src/Comp.vue` under
-/// `requested_mode` on a FRESH host, holding the file-scoped serial lock
-/// across the reset→compute→read window so the process-global counter
-/// reflects only this compute. Returns the observed invocation count.
+/// `requested_mode` on a FRESH host. The prefetch invocation counter is
+/// per-host, so each fresh host owns its own counter and no cross-test
+/// serialization is needed. Returns the observed invocation count.
 fn cold_compute_prefetch_count(requested_mode: CompileCacheMode) -> usize {
-    let _serial = PREFETCH_COUNTER_MUTEX
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-
     let host = VerterHost::new_standalone(HostConfig::default());
     seed_cross_file_sfc(&host);
 
@@ -95,7 +79,7 @@ fn cold_compute_prefetch_count(requested_mode: CompileCacheMode) -> usize {
 
     // Reset right before the cold compute so the read reflects only this
     // compute's prefetch invocations.
-    reset_compile_tier_prefetch_invocations_for_tests();
+    reset_compile_tier_prefetch_invocations_for_tests(&host);
     let response = host
         .get_virtual_file(VirtualQuery {
             raw_id: None,
@@ -121,7 +105,7 @@ fn cold_compute_prefetch_count(requested_mode: CompileCacheMode) -> usize {
         ),
     }
 
-    compile_tier_prefetch_invocations_for_tests()
+    compile_tier_prefetch_invocations_for_tests(&host)
 }
 
 #[test]
