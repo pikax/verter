@@ -1388,32 +1388,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         decl_name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<AugmentationContributions> {
-        use crate::file_artifact_store::{
-            AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
-        };
+        use crate::file_artifact_store::{AugmentationTargetKey, AugmentationTargetKind};
         use verter_semantic::analysis::type_eval::AugmentationScopeKind;
 
         let host = self.ctx.host_for_fact_tracer_install();
         let env_hashes = host.host_view_env_hashes();
         let project_identity = host.host_view_project_identity();
 
-        // Population identity (overlay-aware augmentation index, SCOPE-LOCK
-        // 11/15e): under an active session view the augmenter set is keyed
-        // under `Session(id)` and the cold scan unions the session's overlay
-        // artifacts (matched by the session overlay discriminator) with base;
-        // otherwise base-only. A session overlay's `declare module` augmenters
-        // stay isolated from the base index.
-        let (population, overlay_discriminator) = match self.ctx.active_session_view() {
-            // The overlay-set fingerprint is the stable per-session-overlay-set
-            // id: it keys the population slot AND derives the artifact
-            // discriminator, so the build and read agree. A session with no
-            // overlays (fingerprint 0) collapses to base.
-            Some(sv) if sv.fingerprint() != 0 => (
-                AugmentationPopulation::Session(sv.fingerprint()),
-                crate::session_view::session_overlay_discriminator(sv),
-            ),
-            _ => (AugmentationPopulation::Base, None),
-        };
+        // Population identity (overlay-aware augmentation index): under an
+        // active session view the augmenter set is keyed under
+        // `Session(overlay-set fingerprint)` and the cold scan unions the
+        // session's overlay artifacts (matched by the session overlay
+        // discriminator) with base; otherwise base-only. A session overlay's
+        // `declare module` augmenters stay isolated from the base index. The
+        // population + discriminator are derived through the shared
+        // `augmentation_population_for_view` so the names stitch
+        // (`RouteDb::get_or_compute_effective_export_set`) agrees on the
+        // `Session(u64)` semantics.
+        let (population, overlay_discriminator) =
+            crate::session_view::augmentation_population_for_view(self.ctx.active_session_view());
 
         let key = AugmentationTargetKey {
             project_identity,

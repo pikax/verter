@@ -250,6 +250,7 @@ fn augmentation_external_specifier_stitches() {
         key,
         target,
         &view,
+        None,
         &store,
         |_| Some([11u8; 16]),
         |_, _| None,
@@ -296,6 +297,7 @@ fn augmentation_resolved_relative_canonical_stitches() {
         key,
         target,
         &view,
+        None,
         &store,
         |_| Some([12u8; 16]),
         |augmenter, specifier| {
@@ -343,6 +345,7 @@ fn augmentation_wildcard_ambient_stitches() {
         key,
         target,
         &view,
+        None,
         &store,
         |_| Some([13u8; 16]),
         |_, _| None,
@@ -381,6 +384,7 @@ fn augmentation_global_stitches() {
         key,
         target,
         &view,
+        None,
         &store,
         |_| Some([14u8; 16]),
         |_, _| None,
@@ -490,6 +494,7 @@ fn augmenter_set_refresh_invalidates_downstream() {
         key.clone(),
         target.clone(),
         &AcceptAllView::new(1),
+        None,
         &store,
         |c| {
             if c == "/primary-aug.ts" {
@@ -602,6 +607,7 @@ fn augmenter_set_refresh_invalidates_downstream() {
         key,
         target,
         &post_refresh_view,
+        None,
         &store,
         |c| match c {
             "/primary-aug.ts" => Some([31u8; 16]),
@@ -651,6 +657,7 @@ fn edit_augmenting_file_invalidates_consumer() {
         key.clone(),
         target.clone(),
         &AcceptAllView::new(1),
+        None,
         &store,
         |c| {
             if c == "/aug.ts" {
@@ -748,6 +755,7 @@ fn edit_unrelated_file_does_not_invalidate_consumer() {
         key.clone(),
         target.clone(),
         &AcceptAllView::new(1),
+        None,
         &store,
         |c| {
             if c == "/aug.ts" {
@@ -868,6 +876,7 @@ fn rekeyed_augmenter_with_unchanged_skeleton_is_not_dropped() {
         key.clone(),
         target.clone(),
         &AcceptAllView::new(1),
+        None,
         &store,
         |c| {
             if c == augmenter_canonical {
@@ -940,6 +949,7 @@ fn rekeyed_augmenter_with_unchanged_skeleton_is_not_dropped() {
         key.clone(),
         target.clone(),
         &AcceptAllView::new(2),
+        None,
         &store,
         |c| {
             if c == augmenter_canonical {
@@ -1013,29 +1023,28 @@ fn rekeyed_augmenter_with_unchanged_skeleton_is_not_dropped() {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Base-only contract tripwire — a session view is rejected.
+// Overlay-correct session contract — a session view stitches its OWN
+// overlay augmenters.
 //
-// The augmentation index (`ModuleAugmentationIndex` on
-// `FileArtifactStore`) is keyed by a base resolve-domain identity
-// (`project_identity`, `resolve_env_hash`, `lib_env_hash`) with no
-// base/session discriminator: its cold scan and refresh path filter
-// to base (`FileArtifactKey::is_legacy`) artifacts, so a session that
-// overlays a `declare module` block would observe the base augmenter
-// set, not its own. `EffectiveExportSet` is therefore base-only until
-// the augmentation index gains artifact-population identity.
+// `RouteDb::get_or_compute_effective_export_set` derives its
+// augmentation-index population identity + overlay discriminator from the
+// active `SessionView` through the shared
+// `session_view::augmentation_population_for_view` — the SAME derivation the
+// body stitch uses. The base-only `session.is_none()` assert is RETIRED, and
+// the session branch no longer returns a base-only set under a session key:
+// a session view keys its augmenter set under `Session(overlay-set
+// fingerprint)` and the cold scan unions the session's own overlay augmenters
+// (matched by the overlay discriminator) with base, while a base view stays
+// base-only.
 //
-// `RouteDb::get_or_compute_effective_export_set` fails closed on a
-// session view (`StoreViewCompatToken::session.is_some()`): a session
-// call panics rather than silently returning a base-only result
-// presented as session-correct. This test locks that contract — it
-// must keep failing the same way until the future block that adds the
-// overlay-aware augmentation-index schema and wires the live session
-// `EffectiveExportSet` consumer.
+// The guard `no_effective_export_set_base_only_session_assert`
+// (`g_misc0/critical_rules_have_guards.rs`) statically pins the assert deletion
+// so it cannot be re-introduced.
 // ────────────────────────────────────────────────────────────────
 
 /// A `StoreView` carrying a session identity — `compat_token().session`
-/// is `Some`. Accepts every fact (the guard fires before any fact
-/// validation runs, so `validates` is never reached in this test).
+/// is `Some`. Accepts every fact (so the cold compute is reached and warm
+/// validation never spuriously misses in this test).
 #[derive(Debug)]
 struct SessionScopedView {
     token: StoreViewCompatToken,
@@ -1061,32 +1070,92 @@ impl StoreView for SessionScopedView {
     }
 }
 
-/// Discriminator (SCOPE-LOCK 11 / guard 16-iv): the base-only
-/// `assert!(view.compat_token().session.is_none(), …)` is RETIRED — a session
-/// view passed to `get_or_compute_effective_export_set` is now ACCEPTED and
-/// keyed under [`AugmentationPopulation::Session`], NOT rejected with a panic.
+/// A minimal overlay-bearing `SessionView` whose `fingerprint()` derives the
+/// overlay artifact discriminator that the session's overlay augmenter was
+/// inserted under. Only `fingerprint()` participates in
+/// `augmentation_population_for_view`, so the other accessors return the
+/// base-only defaults.
+#[derive(Debug)]
+struct OverlayFingerprintView {
+    fingerprint: u64,
+    project_identity: ProjectIdentity,
+    env_hashes: verter_session::session_view::EnvHashes,
+}
+
+impl verter_session::session_view::SessionView for OverlayFingerprintView {
+    fn source(&self, _canonical: &str) -> Option<Arc<str>> {
+        None
+    }
+    fn content_hash_for(&self, _canonical: &str) -> Option<verter_session::Hash16> {
+        None
+    }
+    fn project_identity(&self) -> ProjectIdentity {
+        self.project_identity
+    }
+    fn env_hashes(&self) -> &verter_session::session_view::EnvHashes {
+        &self.env_hashes
+    }
+    fn resolved_import_facts(
+        &self,
+        _canonical: &str,
+    ) -> Option<Arc<verter_session::resolved_import_facts::ResolvedImportFacts>> {
+        None
+    }
+    fn fingerprint(&self) -> u64 {
+        self.fingerprint
+    }
+}
+
+/// Discriminator (overlay-aware augmentation index, names stitch): a session
+/// view passed to `get_or_compute_effective_export_set` stitches its OWN overlay
+/// augmenter (matched by the overlay discriminator) UNIONED with base, while a
+/// base view sees ONLY the base augmenter.
 ///
-/// - **Against the pre-deletion tree**: the entry guard panics with
-///   `"EffectiveExportSet is base-only"`, so the call never returns and this
-///   test FAILS (panic, not a returned entry).
-/// - **Post-deletion tree**: the session view flows through to the cold compute
-///   and returns an `Arc<EffectiveExportSetEntry>` — this test PASSES.
-///
-/// The guard `no_effective_export_set_base_only_session_assert`
-/// (`g_misc0/critical_rules_have_guards.rs`) statically pins the deletion so the
-/// assert cannot be re-introduced.
+/// - **Against the pre-fix tree** (`overlay_discriminator: None`,
+///   `Session(session_id)`): the session call scans base artifacts only, so the
+///   overlay augmenter `/aug-overlay.ts` NEVER contributes — this test FAILS.
+/// - **Post-fix tree**: the session call threads the real overlay discriminator
+///   (derived from `fingerprint()` via `augmentation_population_for_view`), so
+///   the overlay augmenter contributes to the session surface and is absent from
+///   the base surface — PASSES.
 #[test]
-fn effective_export_set_accepts_session_view_after_base_only_assert_retired() {
+fn effective_export_set_session_view_stitches_overlay_augmenter() {
     let store = FileArtifactStore::new();
-    let _key = insert_artifact_from_fixture(
+
+    // Base augmenter (legacy key) that `declare module "vue" {}` augments.
+    let _base_key = insert_artifact_from_fixture(
         &store,
-        "/aug-external.ts",
+        "/aug-base.ts",
         "module_augmentation_external.ts",
         [11u8; 16],
     );
-    let route_db = RouteDb::new();
-    // A session-scoped view — previously rejected, now accepted.
-    let session_view = SessionScopedView::new(1, 42);
+
+    // Session-overlay augmenter: a DIFFERENT file, keyed under the non-legacy
+    // overlay discriminator derived from fingerprint 7. It augments the same
+    // `"vue"` target but exists ONLY in this session's overlay.
+    let fingerprint: u64 = 7;
+    let overlay_discriminator =
+        verter_session::session_view::overlay_artifact_discriminator_for_fingerprint(fingerprint);
+    let raw = fixture("module_augmentation_external.ts");
+    let indexed = build_indexed_with_source(&raw, [99u8; 16]);
+    let emission = emit_parse_facts(&indexed);
+    let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
+    let overlay_key = FileArtifactKey {
+        canonical: Arc::from("/aug-overlay.ts"),
+        content_hash: [99u8; 16],
+        parse_env_hash: overlay_discriminator,
+        parser_version: LEGACY_PARSER_VERSION,
+    };
+    store.insert_artifacts(
+        overlay_key,
+        Arc::new(FileArtifacts {
+            indexed,
+            facts: Arc::new(emission.facts),
+            parsed_edges: Arc::new(verter_session::file_artifact_store::ParsedEdges::empty()),
+            parse_stable_hash,
+            augmentations: Arc::new(emission.augmentations),
+        }),
+    );
 
     let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
     let key = EffectiveExportSetKey {
@@ -1095,23 +1164,78 @@ fn effective_export_set_accepts_session_view_after_base_only_assert_retired() {
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
     };
+    let whole_hash = |c: &str| match c {
+        "/aug-base.ts" => Some([11u8; 16]),
+        "/aug-overlay.ts" => Some([99u8; 16]),
+        _ => None,
+    };
 
-    // Returns a real entry — no panic. The session view keys its augmenter set
-    // under `Session(42)` population (isolated from the base index).
-    let effective = route_db.get_or_compute_effective_export_set(
-        key,
-        target,
-        &session_view,
+    // SESSION read: derives the overlay discriminator from the session view's
+    // fingerprint and unions the overlay augmenter with base. Separate RouteDb
+    // instances keep the base and session result caches from cross-pollinating
+    // (the `EffectiveExportSetKey` carries no population dimension).
+    let session_store_view = SessionScopedView::new(1, 42);
+    let overlay_session = OverlayFingerprintView {
+        fingerprint,
+        project_identity: ProjectIdentity([1u8; 16]),
+        env_hashes: verter_session::session_view::EnvHashes::default(),
+    };
+    let session_db = RouteDb::new();
+    let session_effective = session_db.get_or_compute_effective_export_set(
+        key.clone(),
+        target.clone(),
+        &session_store_view,
+        Some(&overlay_session),
         &store,
-        |_| Some([11u8; 16]),
+        whole_hash,
         |_, _| None,
     );
-    // The names-stitcher scans base artifacts (the live overlay-aware augmenter
-    // scan is the body stitch); the call completing without panic is the
-    // discriminating assertion.
+
+    // BASE read: no session view → base-only augmenter set.
+    let base_store_view = AcceptAllView::new(1);
+    let base_db = RouteDb::new();
+    let base_effective = base_db.get_or_compute_effective_export_set(
+        key,
+        target,
+        &base_store_view,
+        None,
+        &store,
+        whole_hash,
+        |_, _| None,
+    );
+
+    let session_contributors: Vec<&str> = session_effective
+        .entries
+        .iter()
+        .map(|e| e.contributor_canonical.as_ref())
+        .collect();
+    let base_contributors: Vec<&str> = base_effective
+        .entries
+        .iter()
+        .map(|e| e.contributor_canonical.as_ref())
+        .collect();
+
+    // The overlay augmenter contributes to the SESSION surface…
     assert!(
-        effective.augmenter_count <= 1,
-        "session-view call must return a real entry, not panic"
+        session_contributors.contains(&"/aug-overlay.ts"),
+        "session view MUST stitch its overlay augmenter; got {session_contributors:?}"
+    );
+    assert!(
+        session_contributors.contains(&"/aug-base.ts"),
+        "session view must also include the base augmenter (union with base); got {session_contributors:?}"
+    );
+    // …and is ABSENT from the BASE surface.
+    assert!(
+        !base_contributors.contains(&"/aug-overlay.ts"),
+        "base view MUST NOT see the session-overlay augmenter; got {base_contributors:?}"
+    );
+    assert!(
+        base_contributors.contains(&"/aug-base.ts"),
+        "base view must include the base augmenter; got {base_contributors:?}"
+    );
+    assert!(
+        session_effective.augmenter_count > base_effective.augmenter_count,
+        "session augmenter set (base ∪ overlay) must be larger than base-only"
     );
 }
 
@@ -1143,7 +1267,8 @@ fn session_overlay_augmenter_isolated_from_base_index() {
     // Session-overlay augmenter: a DIFFERENT file, keyed under a non-legacy
     // overlay discriminator `D` (the `parse_env_hash` dimension). It augments
     // the same `"vue"` target but exists ONLY in this session's overlay.
-    let overlay_discriminator: [u8; 16] = *b"vovl-art\x07\0\0\0\0\0\0\0";
+    let overlay_discriminator =
+        verter_session::session_view::overlay_artifact_discriminator_for_fingerprint(7);
     let raw = fixture("module_augmentation_external.ts");
     let indexed = build_indexed_with_source(&raw, [99u8; 16]);
     let emission = emit_parse_facts(&indexed);

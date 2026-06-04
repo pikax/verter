@@ -922,6 +922,51 @@ pub fn session_overlay_discriminator(view: &dyn SessionView) -> Option<Hash16> {
     Some(overlay_artifact_discriminator_from_fingerprint(fingerprint))
 }
 
+/// Derive the overlay-aware augmentation-index population identity and the
+/// matching overlay artifact discriminator for an optional active session view.
+///
+/// This is the SINGLE derivation every augmentation-index producer routes
+/// through (the body stitch in
+/// [`crate::project_semantic_dispatch::build::ProjectSemanticDispatch`] and the
+/// names stitch in
+/// [`crate::resolver_core::route_db::RouteDb::get_or_compute_effective_export_set`]),
+/// so the two producers can never disagree on what
+/// [`crate::file_artifact_store::AugmentationPopulation::Session`] means.
+///
+/// The `Session` discriminant is keyed by the overlay-set
+/// [`SessionView::fingerprint`] — NOT a raw session id — because the fingerprint
+/// captures *which* overlays are installed: two sessions with identical overlay
+/// sets share an augmenter set, and a session whose overlays change gets a fresh
+/// key. A bare session id would let a session presenting a base-only augmenter
+/// set be cached as session-correct (the "base presented as session" hazard).
+///
+/// A view with no overlays (`fingerprint() == 0`) collapses to
+/// [`AugmentationPopulation::Base`] with a `None` discriminator — the scan stays
+/// base-only, identical to no session view at all.
+#[must_use]
+pub fn augmentation_population_for_view(
+    view: Option<&dyn SessionView>,
+) -> (crate::file_artifact_store::AugmentationPopulation, Option<Hash16>) {
+    use crate::file_artifact_store::AugmentationPopulation;
+    match view {
+        Some(sv) if sv.fingerprint() != 0 => (
+            AugmentationPopulation::Session(sv.fingerprint()),
+            session_overlay_discriminator(sv),
+        ),
+        _ => (AugmentationPopulation::Base, None),
+    }
+}
+
+/// The overlay artifact discriminator (`FileArtifactKey::parse_env_hash`
+/// dimension) for a given overlay-set [`SessionView::fingerprint`]. This is the
+/// canonical derivation [`session_overlay_discriminator`] applies to a non-zero
+/// fingerprint; it is exposed so producers and tests share ONE source of truth
+/// for the overlay key bytes rather than hand-rolling them.
+#[must_use]
+pub fn overlay_artifact_discriminator_for_fingerprint(fingerprint: u64) -> Hash16 {
+    overlay_artifact_discriminator_from_fingerprint(fingerprint)
+}
+
 fn overlay_artifact_discriminator_from_fingerprint(fingerprint: u64) -> Hash16 {
     // Arbitrary fixed namespace tag — distinguishes an overlay-scoped
     // key from any zeroed / real `parse_env_hash` value.

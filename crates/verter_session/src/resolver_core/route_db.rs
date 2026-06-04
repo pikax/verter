@@ -695,11 +695,22 @@ impl RouteDb {
     ///
     /// `resolve_relative_canonical` is the caller-supplied resolver
     /// hook used for the `ResolvedRelativeCanonical` target archetype.
+    ///
+    /// `session_view` is the active overlay-bearing view (or `None` for a
+    /// base read). The augmentation-index population identity + overlay
+    /// discriminator are derived from it through the shared
+    /// [`crate::session_view::augmentation_population_for_view`] — the SAME
+    /// derivation the body stitch uses — so a session read scans its own
+    /// overlay augmenters (matched by the session overlay discriminator)
+    /// UNIONED with base, keyed under `Session(overlay-set fingerprint)`. A
+    /// `None` (or overlay-free) view stays base-only. The session branch never
+    /// returns a base-only augmenter set presented under a session key.
     pub fn get_or_compute_effective_export_set<V, FH, RR>(
         &self,
         key: EffectiveExportSetKey,
         target: AugmentationTargetKind,
         view: &V,
+        session_view: Option<&dyn crate::session_view::SessionView>,
         artifact_store: &FileArtifactStore,
         contributor_whole_hash: FH,
         resolve_relative_canonical: RR,
@@ -709,25 +720,17 @@ impl RouteDb {
         FH: Fn(&str) -> Option<Hash16>,
         RR: Fn(&str, &str) -> Option<Arc<str>>,
     {
-        // Population identity (overlay-aware augmentation index): a session
-        // view keys its augmenter set under `Session(id)`; a base view keys
-        // under `Base`. The base-only `session.is_none()` assert is RETIRED —
-        // a session call is now correct rather than a hard error.
-        //
-        // NOTE: this names-stitcher (not on the live resolution path — see
-        // `/type-resolution`) scans base artifacts only (`None` discriminator
-        // below); the live overlay-correct augmenter scan is the body stitch in
-        // `project_semantic_dispatch::build::stitch_module_augmentations`, which
-        // threads the session overlay discriminator from the active
-        // `SessionView`. Wiring the discriminator here is deferred to the live
-        // `EffectiveExportSet` consumer's arrival (it has no caller today).
-        let population = match view.compat_token().session {
-            Some(session_id) => {
-                crate::file_artifact_store::AugmentationPopulation::Session(session_id)
-            }
-            None => crate::file_artifact_store::AugmentationPopulation::Base,
-        };
-        let overlay_discriminator: Option<Hash16> = None;
+        // Population identity (overlay-aware augmentation index): derived from
+        // the active overlay-bearing view through the shared
+        // `augmentation_population_for_view`, the SAME derivation the body
+        // stitch uses. A session view keys its augmenter set under
+        // `Session(overlay-set fingerprint)` and the cold scan unions the
+        // session's overlay augmenters (matched by the overlay discriminator)
+        // with base; a base/overlay-free view stays `Base` with a `None`
+        // discriminator. This makes the session branch genuinely
+        // overlay-correct — never a base-only set under a session key.
+        let (population, overlay_discriminator) =
+            crate::session_view::augmentation_population_for_view(session_view);
 
         if let Some(existing) = self.effective_export_sets.get_if_valid(&key, view) {
             return existing;
