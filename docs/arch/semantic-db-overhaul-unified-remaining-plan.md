@@ -165,24 +165,41 @@ demand-dependency graph, not a temporal phase:
    are a **first-class, named substrate — `BinderIdentityFacts`** — **produced FROM `IndexedReady`** by
    `verter_semantic::analysis` and **CONSUMED BY the `U2` reducers BEFORE those reducers run** (it is a
    `U2`-tier *prerequisite* substrate, not a `U2` reducer output and not an `N0` projection). It is
-   **demand-produced per canonical file, keyed off `IndexedReady`'s content identity — NOT an eager
-   whole-program binder pass** (the demand-driven core invariant and the one-engine rule forbid a second
-   eager symbol authority). `BinderIdentityFacts` is the typed carrier of every SYNTACTIC/structural
-   identity fact U2 and `N0` later read:
-   - **lexical-scope identity** — the per-file scope tree + each scope's stable scope id (the
-     `binder_scope_id` that enters context-sensitive query identity, layer-2/checker below);
-   - **declaration slots** — `ResolvedDeclSlotIdentity` slots that are **stable, symbol-space-scoped
-     facts** (a slot is identified within its declaration-space — value / type / namespace — so a
-     value and a type sharing a name occupy DISTINCT slots; the slot is NOT a raw name);
-   - **per-file declaration-merge + augmentation CONTRIBUTOR-ORDER provenance** — declaration
-     source-order, overload-group membership, and the per-file module / global / ambient
-     contribution-order facts, recorded at shallow-analysis time;
-   - **ambient / global / lib-corpus COMPLETENESS facts** — whether the ambient/global/`lib` corpus a
-     name could bind to has been fully enumerated, so a NEGATIVE (name-not-found) answer is backed by a
-     recorded completeness fact rather than an un-rooted guess.
+   **demand-produced — NOT an eager whole-program binder pass** (the demand-driven core invariant and the
+   one-engine rule forbid a second eager symbol authority). Producer vs carrier are distinct:
+   `IndexedReady` holds the raw shallow symbol inventory + raw per-file provenance; `BinderIdentityFacts`
+   is the demand-produced **typed projection** over it. Per the project's two-family cache rule
+   (Cache-Architecture, R21 split-don't-bundle), `BinderIdentityFacts` is **not one cache** — it names
+   TWO explicitly-keyed fact families plus the query-identity discriminator each feeds, never asserting
+   both content-addressed and content-free keying of one entry:
+   - **(family A) per-file binder facts — a content-addressed ARTIFACT cache**, keyed
+     `(canonical, parse_stable_hash, parse_env_hash)` exactly like `IndexedReady` / `FileArtifactStore`
+     (R6 does NOT govern artifact keys — it governs query-identity keys; an artifact key legitimately
+     carries `parse_stable_hash`). It carries:
+     - **lexical-scope identity** — the per-file scope tree + each scope's **stable structural scope id**
+       (cosmetic-edit invariant, the analogue of `parse_stable_hash`; NOT a positional ordinal that
+       renumbers when a scope is inserted above);
+     - **declaration slots** — `ResolvedDeclSlotIdentity` slots that are **stable, symbol-space-scoped
+       facts** (a slot is identified within its declaration-space — value / type / namespace — so a
+       value and a type sharing a name occupy DISTINCT slots; the slot is NOT a raw name);
+     - **per-file declaration-merge + augmentation CONTRIBUTOR-ORDER provenance** — declaration
+       source-order, overload-group membership, and the per-file module / global / ambient
+       contribution-order facts, recorded at shallow-analysis time.
+   - **(family B) ambient / global / lib-corpus COMPLETENESS facts — a separate corpus-scoped store**
+     keyed by **`lib_env_hash` + the ambient/global contributor set** (NOT a single file's content
+     identity — corpus completeness is whole-corpus, so keying it per-file would falsely validate when a
+     *different* ambient contributor or the `lib` set changes), `ReadSetSignature`-validated over those
+     cross-file facts. It records whether the corpus a name could bind to has been fully enumerated, so a
+     NEGATIVE (name-not-found) answer is backed by a recorded completeness fact rather than an un-rooted
+     guess. This is the `B.4`-fed family (guard `ambient_global_and_lib_corpus_have_completeness_facts`,
+     owned at the `B.4` gate).
 
-   Every `BinderIdentityFacts` entry is `ReadSetSignature`-validated (the sole cache-validity rail) and
-   carries no content/version hash in its key (R6). The **cross-file merged contributor SEQUENCE** (TS
+   Each family is validated by `ReadSetSignature` (the sole cache-validity rail) over its own keying
+   dimensions. The **`binder_scope_id` a context-sensitive query carries in its `SemanticQueryKey`
+   identity is the QUERY-IDENTITY projection** of family A's stable structural scope id — it is a
+   resolution-context discriminator (like generic type-args), content-free per R6, never a content/version
+   hash; its R6-consistency rests on that scope id being a stable structural identity, not a positional
+   counter (guard `binder_scope_id_enters_context_sensitive_query_identity`). The **cross-file merged contributor SEQUENCE** (TS
    binder order assembled OVER this recorded per-file provenance) is then computed and
    `ReadSetSignature`-validated by the `U2.MODULE_AUGMENTATION` reducer — child
    `native-typeinfo-parity-u2-reducers.md`, guard
@@ -246,14 +263,18 @@ fixture** the moment its substrate lands (per §3.2(e) — the guard appears the
    over recorded provenance, never re-derived from raw `IndexedReady` (gate: `U2.MODULE_AUGMENTATION`;
    composes with `declaration_merge_records_binder_overload_augmentation_order_as_facts`).
 6. `ambient_global_and_lib_corpus_have_completeness_facts` — the ambient / global / `lib` corpus carries
-   recorded completeness facts (gate: `B.4` stdlib/intrinsics authority + `BinderIdentityFacts`).
+   recorded completeness facts in the corpus-scoped family-B store keyed by `lib_env_hash` + the
+   ambient/global contributor set (NOT per-file content identity) (gate: `B.4` stdlib/intrinsics
+   authority — listed in `B.4`'s Guards deliverable, §0.5.4).
 7. `negative_name_lookup_requires_recorded_completeness_or_returnonly` — a negative (name-not-found)
    binder answer must be backed by a recorded completeness fact, else it routes through `ReturnOnly`
    (never warms a cache as a falsely-authoritative miss) (gate: `BinderIdentityFacts` / `N0`).
 8. `binder_scope_id_enters_context_sensitive_query_identity` — a query whose result depends on the
-   lexical scope it is resolved from carries the `binder_scope_id` in its `SemanticQueryKey` identity
-   (a semantic discriminator like generic substitutions, NOT a content/version hash — R6-consistent)
-   (gate: the context-sensitive `SemanticQueryKey` finalization, `U2`).
+   lexical scope it is resolved from carries the `binder_scope_id` in its `SemanticQueryKey` identity as a
+   **resolution-context discriminator** (the role generic type-args play), content-free per R6 and NOT a
+   content/version hash. Its R6-consistency REQUIRES `binder_scope_id` to be a **stable structural scope
+   id** (cosmetic-edit invariant), not a positional ordinal — the guard asserts that stability (gate: the
+   context-sensitive `SemanticQueryKey` finalization, `U2`).
 
 **Session / overlay augmentation FAIL-CLOSED (registered STOP / degradation gate).** A base-only
 `augmentation_index` (the landed `FileArtifactStore::augmentation_index` keyed by
@@ -299,7 +320,8 @@ surface fundamentally IS, applying the one dividing line (`N0` = identity/locati
 the one resolver = every type query):
 
 - **identity / location** (def / refs / rename, document symbols, document highlights, call
-  hierarchy, semantic-token classification) → `N0` (binder/identity index; no type walk).
+  hierarchy, semantic-token classification) → `N0` (navigation/location projection over
+  `BinderIdentityFacts`; no type walk).
 - **type-display & contextual** (hover, completion, signature-help, inlay hints) → `B.7` (routes
   every type query through the ONE resolver; never a nav-side or completion-side walker).
 - **nav-by-type** (`textDocument/typeDefinition` — composes a typeinfo VALUE with a declaration
@@ -484,7 +506,11 @@ each pair is stated ONCE here.
   the authority for WHICH caches include `lib_env_hash` — do not redefine it.
 - **Sequence:** `U0`-tier, before `U2` (every reducer's LibIntrinsic facts consume it).
 - **Required deletions:** none (formalizes the live `IntrinsicRegistry` + `lib_env_hash` semantics).
-- **Guard:** `lib_authority_pinned_ts_version_single_owner` (reuses the existing SDK audit guard).
+- **Guards:** `lib_authority_pinned_ts_version_single_owner` (reuses the existing SDK audit guard) +
+  `ambient_global_and_lib_corpus_have_completeness_facts` (§0.5.1 family-B guard, owned at this gate —
+  the corpus-scoped completeness store keyed by `lib_env_hash` + the ambient/global contributor set
+  records full enumeration, so a downstream negative name lookup is backed by a completeness fact, never
+  an un-rooted miss; registered with its `CRITICAL_RULE_GUARDS` entry at the `B.4` gate per §0.5.7).
 
 #### N0.NAV_LOCATION_INDEX — Navigation / Location Index  (A.10 ≡ B.3)
 
@@ -540,10 +566,12 @@ each pair is stated ONCE here.
   `N0` stays zero-dispatch.
 - **Guards:** `nav_location_index_runs_zero_typed_ir_dispatch` + the projection-contract guards
   registered at the `N0` gate per §0.5.7 (named in §0.5.1):
-  `n0_does_not_write_semantic_query_identity_or_route_facts`,
-  `u2_queries_do_not_read_n0_navigation_indexes`, and
+  `n0_does_not_write_semantic_query_identity_or_route_facts` and
   `negative_name_lookup_requires_recorded_completeness_or_returnonly` — these pin `N0` as a pure
-  read-only projection over `BinderIdentityFacts`. Plus the NET-NEW
+  read-only projection over `BinderIdentityFacts`. (The dependency-edge guard
+  `u2_queries_do_not_read_n0_navigation_indexes` is `U2`-OWNED — registered at the `U2` gate, since it
+  must hold the moment `U2` reducers run, before `N0` exists — and is listed in `U2.MODULE_AUGMENTATION`'s
+  Guards, not here.) Plus the NET-NEW
   `native_navigation_replaces_ts_navigation_backend` (asserts def/refs/rename locations come from
   `N0` / `BinderIdentityFacts` and no tsgo **def/refs/rename** path survives — scoped to def/refs/rename,
   NOT the whole struct, since the code-action path is B.8's; registered with its `CRITICAL_RULE_GUARDS`
@@ -1309,8 +1337,8 @@ unchanged:
 - **`B.14 ← all blocks`** (terminal, §10).
 
 Because every new edge points from a later block to an earlier one in the order above
-(foundation → `U0`/`U2`; `N0` → `U2`; the LS/emit tail → `U15`; `B.14` terminal), no cycle
-is introduced; the combined graph remains a DAG.
+(foundation → `U0`/`U2`; `BinderIdentityFacts` → `U2`; `N0` → `{BinderIdentityFacts, U2}`; the LS/emit
+tail → `U15`; `B.14` terminal), no cycle is introduced; the combined graph remains a DAG.
 
 Because `S5.B5 ← U2`, `U8 ← S5.B12`, `G.P3 ← U2`, and `G.P4 ← U3` all point from a
 later block to an earlier one in the order above, no cycle is introduced; the combined
