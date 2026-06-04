@@ -249,6 +249,22 @@ pub(crate) fn display_type_node(
                 .collect();
             rendered.join(" & ")
         }
+        // A same-name merged declaration renders its ACTUAL peer-merged surface
+        // (member union + accumulated overload groups), not the bare contributor
+        // list — reduce through the single declaration-merge reducer every other
+        // MergedDecl consumer routes through, then display the resulting Object.
+        // This keeps display structural (it only reads the reduced graph node)
+        // and consistent with raise/expand/relation, which see the same surface.
+        SemanticNodeData::MergedDecl { contributors } => {
+            let reduced = crate::project_semantic_dispatch::walk::reduce_merged_decl_with_graph(
+                store,
+                contributors,
+            );
+            // The reduced node is a fresh `Object`; render it under the same
+            // depth budget. `visited` already contains this MergedDecl id, so a
+            // self-referential contributor still terminates via the cycle break.
+            display_type_node(store, reduced, needs, child_depth, visited).0
+        }
         SemanticNodeData::Primitive(kind) => primitive_keyword(*kind).to_string(),
         SemanticNodeData::Literal(value) => literal_token(value),
         // Error carrier riding through display — a concise token, NOT a panic.
@@ -748,6 +764,8 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         // `Alias` is transparent (rendered as its target); its precedence is
         // resolved through the chain by `node_precedence`. Reaching it here
         // means the chain bottomed out — treat as atomic.
+        // A merged declaration renders its peer-merged `Object` surface (`{…}`),
+        // which is atomic — see the `display_type_node` MergedDecl arm.
         SemanticNodeData::Alias(_)
         | SemanticNodeData::Object(_)
         | SemanticNodeData::Primitive(_)
@@ -759,6 +777,7 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         | SemanticNodeData::TypeOf { .. }
         | SemanticNodeData::TypeParam { .. }
         | SemanticNodeData::VueMacroElements(_)
+        | SemanticNodeData::MergedDecl { .. }
         | SemanticNodeData::DeclRef { .. }
         | SemanticNodeData::InstantiationRef { .. } => Prec::Atom,
     }

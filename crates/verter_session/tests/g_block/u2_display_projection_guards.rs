@@ -844,6 +844,50 @@ fn declaration_analysis_contributors_apply_intersection_precedence() {
 }
 
 // ----------------------------------------------------------------------
+// GUARD 10 — a `MergedDecl` carrier renders its ACTUAL peer-merged surface
+// (the member union of all contributors), NOT a placeholder/constant and NOT
+// just the first contributor. A `todo!()` / stub arm would panic; a
+// single-contributor or constant arm would drop the second contributor's
+// member. This proves the display arm reduces through the real
+// declaration-merge reducer.
+// ----------------------------------------------------------------------
+
+#[test]
+fn merged_decl_renders_peer_merged_member_union() {
+    let store = SemanticGraphStore::new();
+    let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    // Two same-name `interface` contributors in source order:
+    //   interface Foo { x: number }   interface Foo { y: string }
+    let part_x = object(&store, vec![member("x", number_id, false)], vec![], vec![]);
+    let part_y = object(&store, vec![member("y", string_id, false)], vec![], vec![]);
+
+    let merged = store.intern_node(SemanticNodeData::MergedDecl {
+        contributors: Arc::from([part_x, part_y]),
+    });
+
+    // DISCRIMINATING: the merged surface must expose BOTH members. A stub arm
+    // (`todo!()`) panics; a constant/placeholder arm renders neither; a
+    // first-contributor-only arm drops `y`.
+    let r = render(&store, merged);
+    assert_eq!(r, "{ x: number; y: string }");
+    assert!(r.contains("x: number"), "first contributor member missing: {r}");
+    assert!(r.contains("y: string"), "second contributor member missing: {r}");
+    assert_ne!(r, "{ x: number }", "must not be first-contributor-only");
+
+    // NEGATIVE: a `MergedDecl` is atomic (`{…}`) — as an array element it must
+    // NOT parenthesise (a non-Atom precedence arm would wrap it).
+    let arr = store.intern_node(SemanticNodeData::Array {
+        element: merged,
+        readonly: false,
+    });
+    let ra = render(&store, arr);
+    assert_eq!(ra, "{ x: number; y: string }[]");
+    assert!(!ra.contains("({"), "merged decl is atomic — must not parenthesise: {ra}");
+}
+
+// ----------------------------------------------------------------------
 // GUARD 9 — the Vue-macro carrier renders content DERIVED from the live
 // `ResolvedElements` payload, not a fixed `"<vue-macro>"` constant.
 // ----------------------------------------------------------------------
