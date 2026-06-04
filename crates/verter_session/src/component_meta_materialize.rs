@@ -1575,7 +1575,7 @@ pub fn fact_signature_from_fence(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::semantic_query::{HashValue, ResolveDeclKey, ScopeId, ScopeKind};
+    use crate::semantic_query::{HashValue, ResolveDeclKey, ScopeId};
 
     fn dummy_node(n: u64) -> SemanticNodeId {
         SemanticNodeId(n)
@@ -1751,7 +1751,6 @@ mod tests {
             scope: ScopeId {
                 canonical_id: Arc::from("/x.ts"),
                 local_scope: None,
-                kind: ScopeKind::File,
             },
             name: Arc::from("Foo"),
         };

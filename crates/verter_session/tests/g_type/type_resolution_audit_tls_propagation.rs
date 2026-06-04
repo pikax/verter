@@ -29,7 +29,7 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{ResolveDeclKey, ScopeId, ScopeKind, SemanticQueryKey};
+use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
 use verter_session::tests::audit_tls_harness::assert_observer_reaches;
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
@@ -60,7 +60,6 @@ fn outer_query() -> SemanticQueryKey {
         scope: ScopeId {
             canonical_id: Arc::from("/types.ts"),
             local_scope: None,
-            kind: ScopeKind::File,
         },
         name: Arc::from("Outer"),
     })

@@ -18,8 +18,7 @@ use std::sync::Arc;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey, ScopeId,
-    ScopeKind, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
-    SemanticQueryOutput,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
 };
 use crate::typeinfo::surface::TypeInfoSurface;
 use crate::typeinfo::types::{ShallowSurfaceRequest, TypeInfoQueryLevel};
@@ -86,7 +85,6 @@ impl VerterHost {
             scope: ScopeId {
                 canonical_id: Arc::clone(&request.canonical_id),
                 local_scope: None,
-                kind: ScopeKind::File,
             },
             name: Arc::clone(&request.name),
         })) {

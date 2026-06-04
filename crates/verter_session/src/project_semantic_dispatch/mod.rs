@@ -65,9 +65,9 @@ use crate::resolver_core::{BudgetDomain, BudgetExceededFailure, ResolverContext}
 use crate::semantic_query::{
     BranchSelection, CacheRead, DeclIdentity, DepSignature, DepVersion, IndexKey, LiteralValue,
     NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
-    QueryError, QueryResult, ResolveDeclKey, ResultProvenance, ScopeId, ScopeKind,
-    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
-    SemanticQueryValue, SurfaceView,
+    QueryError, QueryResult, ResolveDeclKey, ResultProvenance, ScopeId, SemanticNodeData,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+    SurfaceView,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_type_expr::{PrimitiveName, TypeExpr};
@@ -1168,7 +1168,6 @@ pub fn resolve_decl_key(canonical_id: &str, name: &str) -> ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from(canonical_id),
             local_scope: None,
-            kind: ScopeKind::File,
         },
         name: Arc::from(name),
     }

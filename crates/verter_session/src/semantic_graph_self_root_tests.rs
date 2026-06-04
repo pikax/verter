@@ -45,8 +45,8 @@ use verter_semantic::facts::{FactKey, FactLane};
 use crate::fact_signature_helpers::ReadSetSignature;
 use crate::resolver_core::{FactReadSetFinalise, FactVersionRef, ResolverContext};
 use crate::semantic_query::{
-    DepSignature, ResolveDeclKey, ScopeId, ScopeKind, SemanticNodeData, SemanticNodeId,
-    SemanticQueryApi, SemanticQueryKey,
+    DepSignature, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
+    SemanticQueryKey,
 };
 use crate::semantic_query_memo::{semantic_graph_read_set_signature, SemanticGraphStore};
 use crate::{FileKind, HostConfig, UpsertRequest, VerterHost};
@@ -81,7 +81,6 @@ fn resolve_decl_key(canonical: &str, name: &str) -> ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from(canonical),
             local_scope: None,
-            kind: ScopeKind::File,
         },
         name: Arc::from(name),
     }
@@ -155,7 +154,6 @@ fn typeof_same_canonical_edit_rejects_warm_entry() {
             scope: ScopeId {
                 canonical_id: Arc::from(c),
                 local_scope: None,
-                kind: ScopeKind::File,
             },
             name: Arc::from("val"),
         },

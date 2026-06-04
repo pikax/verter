@@ -738,9 +738,7 @@ impl WasmVerterHost {
         canonical_id: &str,
         decl_name: &str,
     ) -> Result<JsValue, JsValue> {
-        use verter_session::semantic_query::{
-            ResolveDeclKey, ScopeId, ScopeKind, SemanticQueryKey,
-        };
+        use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
         let host = std::sync::Arc::clone(&self.inner);
         let canonical_id_owned = canonical_id.to_string();
         let decl_name_owned = decl_name.to_string();
@@ -749,7 +747,6 @@ impl WasmVerterHost {
                 scope: ScopeId {
                     canonical_id: std::sync::Arc::<str>::from(canonical_id_owned.as_str()),
                     local_scope: None,
-                    kind: ScopeKind::File,
                 },
                 name: std::sync::Arc::<str>::from(decl_name_owned.as_str()),
             });

@@ -195,7 +195,7 @@ fn realize_callable_member_inner(
         // (5) DeclRef — resolve the declaration, then recurse. The
         // `whole_hash` on the DeclIdentity participates in DeclRef
         // interning but the resolver picks the current artifact via
-        // `ScopeId { canonical_id, local_scope, kind: ScopeKind::File }` — the canonical
+        // `ScopeId { canonical_id, local_scope }` — the canonical
         // ResolveDecl dispatch pattern from
         // `project_semantic_dispatch::mod::resolve_decl_key`.
         SemanticNodeData::DeclRef { identity } => {
@@ -205,7 +205,6 @@ fn realize_callable_member_inner(
                 scope: crate::semantic_query::ScopeId {
                     canonical_id: Arc::clone(&identity.canonical_id),
                     local_scope: None,
-                    kind: crate::semantic_query::ScopeKind::File,
                 },
                 name: Arc::clone(&identity.decl_name),
             }));

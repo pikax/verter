@@ -18,8 +18,7 @@ use verter_session::for_tests::{
 
 // Re-export the shared semantic types the harness consumes.
 use verter_session::semantic_query::{
-    DeclIdentity, OriginEdgeKind, ResolveDeclKey, ScopeId, ScopeKind, SemanticNodeId,
-    SemanticQueryKey,
+    DeclIdentity, OriginEdgeKind, ResolveDeclKey, ScopeId, SemanticNodeId, SemanticQueryKey,
 };
 
 #[test]
@@ -172,7 +171,6 @@ fn key_family_matches_resolve_decl_for_resolved_name() {
         scope: ScopeId {
             canonical_id: Arc::from("/scope.ts"),
             local_scope: None,
-            kind: ScopeKind::File,
         },
         name: Arc::from("UIMessage"),
     });
@@ -296,7 +294,6 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
         scope: ScopeId {
             canonical_id: Arc::from("/scope.ts"),
             local_scope: None,
-            kind: ScopeKind::File,
         },
         name: Arc::from("UIMessage"),
     });

@@ -33,7 +33,7 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, ScopeId, ScopeKind,
+    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, ScopeId,
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
     ValueRootKey,
 };
@@ -277,7 +277,6 @@ fn typeof_default_construct_return_node(
             scope: ScopeId {
                 canonical_id: Arc::from(canonical_id),
                 local_scope: None,
-                kind: ScopeKind::File,
             },
             name: Arc::from("default"),
         },

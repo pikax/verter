@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::semantic_query::{
-    DeclIdentity, QueryError, ScopeKind, SemanticQueryApi, SemanticQueryOutput, SurfaceMember,
+    DeclIdentity, QueryError, SemanticQueryApi, SemanticQueryOutput, SurfaceMember,
 };
 
 /// Per-walk maximum frame-stack depth observed by
@@ -516,7 +516,8 @@ pub(crate) fn reduce_merged_decl_with_graph(
         collect_merged_contributor_arms(graph, *contributor, &mut own_surfaces, &mut heritage_arms);
     }
     let merged = merge_declaration_surfaces(graph, &own_surfaces);
-    let own_object = graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
+    let own_object =
+        graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
     if heritage_arms.is_empty() {
         return own_object;
     }
@@ -524,7 +525,9 @@ pub(crate) fn reduce_merged_decl_with_graph(
     // reducer lets the merged own members shadow inherited same-name members.
     let mut arms = heritage_arms;
     arms.push(own_object);
-    graph.intern_node(SemanticNodeData::Intersection(Arc::from(arms.into_boxed_slice())))
+    graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        arms.into_boxed_slice(),
+    )))
 }
 
 /// Split one merged-declaration contributor into its OWN-body surface(s) and
@@ -1522,7 +1525,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let scope = ScopeId {
                         canonical_id: Arc::clone(&identity.canonical_id),
                         local_scope: None,
-                        kind: ScopeKind::File,
                     };
                     let name = Arc::clone(&identity.decl_name);
                     drop(data);
@@ -1717,7 +1719,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 let scope = ScopeId {
                     canonical_id: Arc::clone(&identity.canonical_id),
                     local_scope: None,
-                    kind: ScopeKind::File,
                 };
                 let name = Arc::clone(&identity.decl_name);
                 drop(data);
@@ -2852,7 +2853,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 let scope = ScopeId {
                     canonical_id: Arc::clone(&identity.canonical_id),
                     local_scope: None,
-                    kind: ScopeKind::File,
                 };
                 let name = Arc::clone(&identity.decl_name);
                 drop(data);

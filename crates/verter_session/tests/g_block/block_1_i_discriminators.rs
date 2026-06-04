@@ -221,8 +221,7 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
     use verter_session::for_tests::{ReadSetSignature, SemanticGraphStore};
     use verter_session::resolver_core::{FactVersionRef, ParseFactRef};
     use verter_session::semantic_query::{
-        PrimitiveKind, QueryResult, ResolveDeclKey, ScopeId, ScopeKind, SemanticNodeData,
-        SemanticQueryKey,
+        PrimitiveKind, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticQueryKey,
     };
 
     let store = SemanticGraphStore::new();
@@ -234,7 +233,6 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
         scope: ScopeId {
             canonical_id: Arc::from("/test/scope.ts"),
             local_scope: None,
-            kind: ScopeKind::File,
         },
         name: Arc::from("MemoTarget"),
     });

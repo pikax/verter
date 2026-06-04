@@ -27,8 +27,8 @@ use crate::resolver_core::component_meta_query_engine::{
 use crate::semantic_query::{
     DepSignature, IndexKey, MapperKey, OptionalityMod, PrimitiveKind as SemanticPrimitiveKind,
     ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ReadonlyMod,
-    ReductionDemand, ResolveDeclKey, ScopeId, ScopeKind, SemanticNodeData, SemanticNodeId,
-    SemanticQueryKey, SurfaceMember, SurfaceView, TupleElement,
+    ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    SurfaceMember, SurfaceView, TupleElement,
 };
 
 // =====================================================================
@@ -1286,7 +1286,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let scope = ScopeId {
                     canonical_id: Arc::clone(&identity.canonical_id),
                     local_scope: None,
-                    kind: ScopeKind::File,
                 };
                 let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                     scope,

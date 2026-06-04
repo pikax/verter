@@ -3,7 +3,7 @@
 //! `DepSignatureInterner`.
 
 use super::*;
-use crate::semantic_query::{DepVersion, PrimitiveKind, ResolveDeclKey, ScopeId, ScopeKind};
+use crate::semantic_query::{DepVersion, PrimitiveKind, ResolveDeclKey, ScopeId};
 use crate::{HostConfig, VerterHost};
 
 /// A standalone host used purely as a
@@ -26,7 +26,6 @@ fn scope(canonical: &str) -> ScopeId {
     ScopeId {
         canonical_id: Arc::from(canonical),
         local_scope: None,
-        kind: ScopeKind::File,
     }
 }
 

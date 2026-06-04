@@ -60,7 +60,7 @@ use verter_session::for_tests::{
     install_fact_tracer_for_tests,
 };
 use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef, ParseFactRef};
-use verter_session::semantic_query::{ResolveDeclKey, ScopeId, ScopeKind, SemanticQueryKey};
+use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
 use verter_session::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
 
 // Serialise this test against any concurrent test that arms the same
@@ -132,7 +132,6 @@ fn dispatch_warm_hit_bubbles_traced_parse_fact_into_outer_tracer() {
         scope: ScopeId {
             canonical_id: Arc::from("/w/types.ts"),
             local_scope: None,
-            kind: ScopeKind::File,
         },
         name: Arc::from("Foo"),
     });

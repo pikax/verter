@@ -207,7 +207,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope: crate::semantic_query::ScopeId {
                                 canonical_id: Arc::from(target_canonical.as_str()),
                                 local_scope: None,
-                                kind: crate::semantic_query::ScopeKind::File,
                             },
                             name: Arc::from(target_name.as_str()),
                         };

@@ -77,7 +77,7 @@ use std::sync::Arc;
 
 use verter_audit::ProjectionModeTag;
 use verter_session::semantic_query::{
-    PathSegment, ProjectionMode, ResolveDeclKey, ScopeId, ScopeKind, SemanticQueryKey,
+    PathSegment, ProjectionMode, ResolveDeclKey, ScopeId, SemanticQueryKey,
 };
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
@@ -120,7 +120,6 @@ fn path_a_c_full_bar_navigates_intermediates_and_expands_terminal() {
         scope: ScopeId {
             canonical_id: Arc::from("/types.ts"),
             local_scope: None,
-            kind: ScopeKind::File,
         },
         name: Arc::from("A"),
     });

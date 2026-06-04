@@ -1,6 +1,6 @@
 use super::*;
 use crate::semantic_query::{
-    IndexSignature, NodeScopeId, OriginEdgeKind, PathSegment, ProjectionMode, ScopeId, ScopeKind,
+    IndexSignature, NodeScopeId, OriginEdgeKind, PathSegment, ProjectionMode, ScopeId,
     SemanticNodeData, SemanticQueryOutput, SurfaceMember, SurfaceView, ValueRootKey,
 };
 use crate::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
@@ -1374,7 +1374,6 @@ fn type_of_resolves_value_binding() {
         scope: ScopeId {
             canonical_id: Arc::from("/w/v.ts"),
             local_scope: None,
-            kind: ScopeKind::File,
         },
         name: Arc::from("foo"),
     };
@@ -1387,7 +1386,6 @@ fn type_of_resolves_value_binding() {
         scope: ScopeId {
             canonical_id: Arc::from("/w/v.ts"),
             local_scope: None,
-            kind: ScopeKind::File,
         },
         name: Arc::from("notThere"),
     };
@@ -4618,7 +4616,6 @@ fn return_type_of_typeof_local_fn_resolves_via_dispatch() {
             scope: ScopeId {
                 canonical_id: Arc::from("/w/fns.ts"),
                 local_scope: None,
-                kind: ScopeKind::File,
             },
             name: Arc::from("makeLabel"),
         },
@@ -8450,7 +8447,6 @@ fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
             scope: ScopeId {
                 canonical_id: Arc::from("/consumer.ts"),
                 local_scope: None,
-                kind: ScopeKind::File,
             },
             name: Arc::from("Derived"),
         },

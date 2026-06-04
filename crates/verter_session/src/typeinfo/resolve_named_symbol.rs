@@ -50,7 +50,7 @@ use crate::instant::Instant;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::semantic_query::{
-    NodeScopeId, ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, ScopeKind, SemanticNodeData,
+    NodeScopeId, ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
 };
 use crate::VerterHost;
@@ -389,7 +389,6 @@ fn resolve_named_symbol_inner(
         scope: ScopeId {
             canonical_id: Arc::clone(&scope_arc),
             local_scope: None,
-            kind: ScopeKind::File,
         },
         name: Arc::from(name),
     });

@@ -946,7 +946,10 @@ pub fn session_overlay_discriminator(view: &dyn SessionView) -> Option<Hash16> {
 #[must_use]
 pub fn augmentation_population_for_view(
     view: Option<&dyn SessionView>,
-) -> (crate::file_artifact_store::AugmentationPopulation, Option<Hash16>) {
+) -> (
+    crate::file_artifact_store::AugmentationPopulation,
+    Option<Hash16>,
+) {
     use crate::file_artifact_store::AugmentationPopulation;
     match view {
         Some(sv) if sv.fingerprint() != 0 => (

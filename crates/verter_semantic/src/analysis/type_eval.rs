@@ -666,7 +666,8 @@ mod shallow_index_tests {
             TypeExpr::named("Base"),
             object(vec![prop("a", TypeExpr::primitive(PrimitiveName::Number))]),
         ]);
-        let plain_contributor = object(vec![prop("b", TypeExpr::primitive(PrimitiveName::Boolean))]);
+        let plain_contributor =
+            object(vec![prop("b", TypeExpr::primitive(PrimitiveName::Boolean))]);
         let body = TypeDeclBody::Merged(MergedTypeBody {
             contributors: vec![heritage_contributor, plain_contributor],
             kinds: vec![TypeDeclKind::Interface, TypeDeclKind::Interface],
