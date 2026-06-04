@@ -197,13 +197,24 @@ demand-dependency graph, not a temporal phase:
        source-order, overload-group membership, and the per-file module / global / ambient
        contribution-order facts, recorded at shallow-analysis time.
    - **(family B) ambient / global / lib-corpus COMPLETENESS facts — a separate corpus-scoped store**
-     keyed by **`lib_env_hash` + the ambient/global contributor set** (NOT a single file's content
-     identity — corpus completeness is whole-corpus, so keying it per-file would falsely validate when a
-     *different* ambient contributor or the `lib` set changes), `ReadSetSignature`-validated over those
-     cross-file facts. It records whether the corpus a name could bind to has been fully enumerated, so a
-     NEGATIVE (name-not-found) answer is backed by a recorded completeness fact rather than an un-rooted
-     guess. This is the `B.4`-fed family (guard `ambient_global_and_lib_corpus_have_completeness_facts`,
-     owned at the `B.4` gate).
+     (NOT a single file's content identity — corpus completeness is whole-corpus, so keying it per-file
+     would falsely validate when a *different* ambient contributor or the `lib` set changes). Keying a
+     whole-corpus completeness answer by `lib_env_hash` + contributor-set ALONE is too weak — two
+     projects, or two resolution modes within one project, could then share a negative/global answer they
+     must not. So the family **SPLITS its key by completeness scope** (R21 split-don't-bundle):
+     - **global / `lib` completeness:** `project_identity + lib_env_hash + contributor_set_fingerprint`;
+     - **ambient / module-augmentation-target completeness:** `project_identity + resolve_env_hash +
+       lib_env_hash + target + contributor_set_fingerprint` (mirroring the live
+       `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, target }` isolation).
+
+     The `contributor_set_fingerprint` is **FACT-ROOTED and schema/versioned** — derived from the
+     recorded contributor FACTS (not an opaque parser/emitter side product) under an explicit schema
+     version, so hidden parser/emitter drift cannot silently change the fingerprint without a version
+     bump. Each split entry is `ReadSetSignature`-validated over its cross-file contributor facts. The
+     store records whether the corpus a name could bind to has been fully enumerated, so a NEGATIVE
+     (name-not-found) answer is backed by a recorded completeness fact rather than an un-rooted guess.
+     This is the `B.4`-fed family (guard `ambient_global_and_lib_corpus_have_completeness_facts`, owned
+     at the `B.4` gate).
 
    Each family is validated by `ReadSetSignature` (the sole cache-validity rail) over its own keying
    dimensions. The **`binder_scope_id` a context-sensitive query carries in its `SemanticQueryKey`
@@ -278,12 +289,19 @@ fixture** the moment its substrate lands (per §3.2(e) — the guard appears the
    over recorded provenance, never re-derived from raw `IndexedReady` (gate: `U2.MODULE_AUGMENTATION`;
    composes with `declaration_merge_records_binder_overload_augmentation_order_as_facts`).
 6. `ambient_global_and_lib_corpus_have_completeness_facts` — the ambient / global / `lib` corpus carries
-   recorded completeness facts in the corpus-scoped family-B store keyed by `lib_env_hash` + the
-   ambient/global contributor set (NOT per-file content identity) (gate: `B.4` stdlib/intrinsics
-   authority — listed in `B.4`'s Guards deliverable, §0.5.4).
+   recorded completeness facts in the corpus-scoped family-B store with SCOPE-SPLIT keys (NOT per-file
+   content identity, NOT a single bundled key): global/`lib` completeness keyed
+   `project_identity + lib_env_hash + contributor_set_fingerprint`; ambient / module-augmentation-target
+   completeness keyed `project_identity + resolve_env_hash + lib_env_hash + target +
+   contributor_set_fingerprint`. The guard asserts the split (a bundled `lib_env_hash`-only key fails)
+   AND that `contributor_set_fingerprint` is fact-rooted + schema/versioned (gate: `B.4`
+   stdlib/intrinsics authority — listed in `B.4`'s Guards deliverable, §0.5.4).
 7. `negative_name_lookup_requires_recorded_completeness_or_returnonly` — a negative (name-not-found)
-   binder answer must be backed by a recorded completeness fact, else it routes through `ReturnOnly`
-   (never warms a cache as a falsely-authoritative miss) (gate: `BinderIdentityFacts` / `N0`).
+   binder answer must be backed by a recorded completeness fact AT THE MATCHING SPLIT SCOPE (the
+   global/`lib` key for a global/lib name; the ambient/target key for an ambient / augmentation-target
+   name), else it routes through `ReturnOnly` (never warms a cache as a falsely-authoritative miss; a
+   completeness fact at the wrong scope does NOT authorize the negative) (gate: `BinderIdentityFacts` /
+   `N0`).
 8. `binder_scope_id_enters_context_sensitive_query_identity` — a query whose result depends on the
    lexical scope it is resolved from carries the `binder_scope_id` in its `SemanticQueryKey` identity as a
    **resolution-context discriminator** (the role generic type-args play), content-free per R6 and NOT a
@@ -523,9 +541,12 @@ each pair is stated ONCE here.
 - **Required deletions:** none (formalizes the live `IntrinsicRegistry` + `lib_env_hash` semantics).
 - **Guards:** `lib_authority_pinned_ts_version_single_owner` (reuses the existing SDK audit guard) +
   `ambient_global_and_lib_corpus_have_completeness_facts` (§0.5.1 family-B guard, owned at this gate —
-  the corpus-scoped completeness store keyed by `lib_env_hash` + the ambient/global contributor set
-  records full enumeration, so a downstream negative name lookup is backed by a completeness fact, never
-  an un-rooted miss; registered with its `CRITICAL_RULE_GUARDS` entry at the `B.4` gate per §0.5.7).
+  the corpus-scoped completeness store uses scope-split keys (`project_identity + lib_env_hash +
+  contributor_set_fingerprint` for global/`lib`; `project_identity + resolve_env_hash + lib_env_hash +
+  target + contributor_set_fingerprint` for ambient / module-augmentation-target) with a fact-rooted,
+  schema/versioned `contributor_set_fingerprint`, and records full enumeration, so a downstream negative
+  name lookup is backed by a completeness fact at the matching scope, never an un-rooted miss; registered
+  with its `CRITICAL_RULE_GUARDS` entry at the `B.4` gate per §0.5.7).
 
 #### N0.NAV_LOCATION_INDEX — Navigation / Location Index  (A.10 ≡ B.3)
 
