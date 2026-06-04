@@ -54,6 +54,14 @@ the facts are stable is a thin layer that reads them. The typeinfo blocks alread
 reserve every seam the checker needs (parent §3, §5), so the checker is an additive
 block, not a re-shape of the typeinfo engine.
 
+> **Role in the full-replacement endgoal.** This native checker is the **checker surface**
+> of the Verter-as-full-TypeScript-replacement endgoal: in the seven-surface ownership
+> statement ("Checker owns diagnostics"), it is the diagnostics owner.
+> `docs/arch/semantic-db-overhaul-unified-remaining-plan.md` §0.5 (block `B.5`) is the
+> **sequencing authority** that places this plan after the `U0`–`U15` typeinfo-parity
+> increment; its §10 terminal acceptance gates the native checker's manifest-green criterion.
+> This doc keeps its own rescope gate and is NOT rewritten by that plan.
+
 This plan is **not** part of the 363-row parity scope (parent §10.4.1). It does not
 modify the `U0`–`U15` blocks, the 363-row partition, the seven `AdditionalProofRow`s,
 or any typeinfo manifest. Diagnostic parity gets its **own** future manifest

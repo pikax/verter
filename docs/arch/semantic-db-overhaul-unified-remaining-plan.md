@@ -25,6 +25,15 @@ scope**, not a flow-return patch. The bounded near-term lifts this plan sequence
 the **363-row ledger** plus the Vue-macro / component-meta / IDE surfaces — are the
 **first measurable increments** toward that target, not the target itself.
 
+**The full endgoal is Verter as a complete TypeScript replacement** (project model,
+resolution parity, binder/nav, stdlib authority, checker, language service, emit) — framed
+in §0.5, with the foundation / language-service / emit blocks named there and the
+full-replacement done-bar in §10. **Native Emit Boundary (§0.5.2):** Verter natively owns
+emit that is a PROJECTION over the one resolver — checker, language service, `.vue`
+compilation, and `.d.ts` / `.d.ts.map` declaration emit (a CodeTransform producer over typed
+facts) — and permanently DEFERS general, type-independent TS/JS transpile emit to
+`tsc` / swc / esbuild / bundlers.
+
 **The 363-row ledger tracks COVERAGE / wiring, NOT semantic tsc-parity.** A green
 363 proves every row has an owner block, an executable proof, and a wired mechanism
 (coverage completeness — "detects un-wired"). It does **not** prove the engine
@@ -94,6 +103,486 @@ It is **RESCOPE-GATE-REQUIRED (effort weight HIGH, §3.3): deep design produced 
 its own rescope session before its `Check*` queries implement** — its
 diagnostics-algorithm depth + the per-family `tsgo`-oracle baseline are produced at
 the gate, depending on the parity blocks (U2/U6) it layers over.
+
+---
+
+## 0.5 Native TypeScript Replacement Foundations (the full-replacement ENDGOAL frame)
+
+This section frames the **endgoal**, the **ownership model**, and the **new foundation /
+language-service / emit blocks** that complete it. It **EXTENDS** this plan; it does **not**
+replace the 363-row typeinfo-parity scope (§Scope) or the rescope-gate governing process
+(§3.2). The existing `U0`–`U15` backlog (§4) is the **typeinfo-parity INCREMENT** toward the
+endgoal — the first measurable lifts — and the new blocks named here (`B.1`, `U0.RESOLVER_CORE`,
+`B.4`, `B.13`, the emit boundary, `N0`, `N1`, `B.7`, `B.8`, `B.5`, `B.10`, `B.11`, `B.14`)
+are the foundation, language-service, and emit layers that carry the increment to a full
+TypeScript replacement. The cross-plan ORDER (§3.1.3) and dep-map (§3) thread these blocks in;
+the per-block deep design is produced at each block's rescope gate (§3.2), exactly as the
+`U2`/`U6`/`U7`/`S5.B5` phases are.
+
+### 0.5.0 Endgoal
+
+The TARGET is **Verter as a full TypeScript replacement** across the whole language-service
+and compiler surface: the **project / program model**, **module / package resolution parity**,
+the **binder / name-and-location index**, the **stdlib / intrinsics authority**, the
+**typeinfo type-value engine**, the **checker** (diagnostics), the **language service**
+(completion / hover / signature help / code actions / refactors / organize imports),
+**emit** (the projection over the resolver — checker + LS + `.vue` compilation + `.d.ts`
+declaration emit), **declaration emit**, and **JSDoc / JavaScript mode**. The `U0`–`U15`
+typeinfo-parity blocks are the increment that lands the one resolver and its type-value
+facts; this section names the foundation, language-service, and emit blocks that build on
+that increment to reach the endgoal. Nothing here weakens a landed `(CRITICAL)` invariant —
+one engine, typed-IR-only, shallow-by-default, the R21 five split env hashes, R6 rule↔guard
+coupling, wire purity, and CodeTransform-as-sole-output-path are all **reinforced** by the
+ownership statement and the acceptance gates below.
+
+### 0.5.1 The ownership statement (LOAD-BEARING — the anti-side-path frame; B.15, resolves ledger #19)
+
+The seven-surface ownership boundary is the single sentence that prevents a hidden
+TypeScript-shaped side path. Each surface owns exactly one thing; no surface grows a second
+resolver, a second expander, or a second cache authority:
+
+> **Project model owns files/configs. Resolver owns module/package routes. Binder/index owns
+> names and locations. Typeinfo owns semantic type values. Checker owns diagnostics. Language
+> service owns editor orchestration. Emit owns generated JS/declarations.**
+
+This is the resolution of **ledger #19** (reason-to-exist / authority boundary — "the deepest
+strategic gap, root of the scope problem", §3.2.1) and pairs with **ledger #15** (the hard
+typeinfo↔checker negative boundary). It is the framework-agnostic north-star of
+`docs/arch/native-checker.md` §9 made concrete for the whole replacement, and it is consistent
+with the one-engine rule (no surface owns a second resolver), shallow-by-default (binder/index
+is the `IndexedReady` shallow inventory, not an eager expander), the typed-IR-only rule (every
+semantic decision reads typed values, never display text), and the navigation zero-dispatch
+guard (location surfaces never resolve types). It is written EARLY because it frames `U0` and
+every foundation block, not deferred to the block that happens to need it last.
+
+**Planned guard (named as a deliverable, NOT added to `CLAUDE.md`/skills here):**
+`ownership_boundaries_no_typescript_side_path` — registered with its `CRITICAL_RULE_GUARDS`
+entry at the gate→implementation boundary of the foundation section's first implementing block
+(per §3.2(e)), asserting no surface imports another surface's private resolver/expander/cache
+authority.
+
+### 0.5.2 The Native Emit Boundary (B.9 — DECIDED, codex + claude converged)
+
+**Verter natively owns all emit that is a PROJECTION over its one type resolver** — the native
+checker + language service (semantic surfaces), `.vue` compilation (render-function emit
+VDOM/Vapor + IDE TSX emit, already shipped), and future `.d.ts` / `.d.ts.map` declaration emit
+(including for `.vue` components) as a `CodeTransform` producer over typed semantic values —
+and **Verter permanently DEFERS general, type-independent TS/JS transpile emit** (`.ts`→`.js`
+target/module lowering, helpers, import elision, decorator downleveling, JSX modes, interop
+flags, bundler integration) to `tsc` / swc / esbuild / bundlers. This is the correct division
+of labor, not a missing feature: Verter wins the SEMANTIC axis (the only tool that understands
+`.vue` types + macro contracts) and refuses to compete on the commodity SYNTACTIC axis. A
+`.d.ts` is a package's public SEMANTIC contract, not commodity syntax lowering, and `.vue`
+always needs declaration emit that `tsc` never provides — so Verter must own it; `isolatedDeclarations`
+is a fast path within that ownership, not a different decision. §Scope names this emit boundary;
+`B.10` (declaration emit) is IN scope as a late block (below).
+
+**Source FORMATTING is an explicit commodity non-goal** (parallel to transpile emit): the
+TS-language-service formatting surface (`getFormattingEditsForRange` /
+`getFormattingEditsForDocument` / `getFormattingEditsAfterKeystroke`) is type-independent syntactic
+reflowing, NOT a projection over the one type resolver. Verter does NOT own it — it is deferred to
+the editor's formatter (Prettier / `tsfmt` / the host's built-in formatter), exactly like commodity
+transpile.
+
+**The LS-surface owner set is EXHAUSTIVE-BY-CONSTRUCTION over surface ROLES** — not a closed
+hand-list of surfaces (which can never be provably complete and leaks composed surfaces like
+type-definition). Every TS language-service surface belongs to EXACTLY ONE role-owner by what the
+surface fundamentally IS, applying the one dividing line (`N0` = identity/location, zero type walk;
+the one resolver = every type query):
+
+- **identity / location** (def / refs / rename, document symbols, document highlights, call
+  hierarchy, semantic-token classification) → `N0` (binder/identity index; no type walk).
+- **type-display & contextual** (hover, completion, signature-help, inlay hints) → `B.7` (routes
+  every type query through the ONE resolver; never a nav-side or completion-side walker).
+- **nav-by-type** (`textDocument/typeDefinition` — composes a typeinfo VALUE with a declaration
+  LOCATION) → the **`N1`-orchestrated goto line**: the type-of-expression hop runs through the one
+  engine (`ProjectSemanticDispatch`) and the location render comes from `N0`. It is neither pure
+  location (so not `N0` alone) nor pure type-display (so not `B.7`) — `N1` composes the two, which
+  is exactly its orchestration role.
+- **diagnostics** → `B.5` (native checker).
+- **edits / quick-fixes / refactors / organize-imports** → `B.8` (CodeTransform producers off
+  checker diagnostics + `N0` shape).
+- **request orchestration** (snapshot / cancellation / degradation) → `N1`.
+- **commodity SYNTACTIC, type-independent** (source formatting; transpile emit) → named non-goal
+  (deferred to the editor formatter / `tsc`/swc/esbuild), per the boundary above.
+
+The role test is the catch-all: any not-yet-named LS surface maps to exactly one role-owner by this
+partition (identity/location → N0; type-query → B.7; value+location compose → N1 goto; diagnostic →
+B.5; edit → B.8; orchestration → N1; type-independent syntactic → non-goal), so no surface is
+delegated-by-omission and the §0.5.1 enumeration is complete by construction, not by list length.
+
+**Deletion-ownership is per-surface, not deferred to the terminal sweep.** Each LS surface assigned
+to an owner block above carries THAT block's Required-deletion of the corresponding runtime tsgo
+`TypeProvider` path (`get_definition`/`get_references`/`get_rename`, `get_semantic_tokens`,
+`get_document_highlights`, `get_inlay_hints`, `get_type_definition`,
+`get_diagnostics` / `publish_merged_diagnostics`, …; call hierarchy is already native, so its
+owner-block obligation is to STAY native with no tsgo path introduced, not a deletion), gated
+BEFORE `§10` and registered with a guard at the owning block's gate (§0.5.4 names each). The
+`§10` (7) deletion sweep CONSUMES these per-block deletions — it is the audit that none survive, not
+the block that owns removing them. No assigned surface's tsgo path is left implicitly side-pathed to
+the `§10` (1) catch-all.
+
+**Planned guard:** `declaration_emit_derives_from_typed_facts_via_codetransform` — decl/`.d.ts`
+shape derives from typed facts (binder/nav public-API shape + typeinfo VALUES) via CodeTransform,
+never source-slicing, never `rawType`, never printed-type-string reparse; registered with `B.10`.
+
+### 0.5.3 The global Broken-Code / Recovery contract (B.13 — generalizes ledger #18)
+
+The editor steady-state is half-written source, so EVERY surface must produce a useful result
+over syntactically / semantically broken, partial, stale, or mid-edit input. Ledger **#18**
+(`u2-query-value-domain-design.md §18`, FORK-B) already designs this for the TYPEINFO QUERY
+domain (`ResultTaint` Clean/Partial/Broken, `admit_decision`, taint join); `B.13` GENERALIZES
+that into a **global broken-code / recovery contract spanning binder/nav, completion, checker,
+and the language service**:
+
+- **Producers stay `U0`-owned** (FORK-B): the broken-input taint producers are foundation work,
+  not re-designed per surface.
+- **Per-surface CONSUMPTION rules land WITH each surface block** — each surface declares how it
+  degrades (the stage5 valid-empty-vs-unresolved distinction becomes one instance of this one
+  taxonomy; see also the unified degradation taxonomy, ledger #9).
+- **Nav "recovery" = location-graceful-degradation, NOT a typed-IR walk** — a location surface
+  that cannot resolve a name returns a degraded location result; it never reaches for the type
+  engine to "recover" (that would breach the navigation zero-dispatch guard).
+
+**Planned guard:** `broken_code_recovery_contract_global_every_surface_degrades` — every
+foundation/LS surface has a declared, tested degradation path; no surface hard-fails on broken
+input and no nav surface escalates to type resolution to recover.
+
+### 0.5.4 The foundation / language-service / emit blocks (named contracts)
+
+Each block below carries a short contract — **scope / deps / sequence-position / required
+deletions (if any) / named-guard deliverable** — matching the per-item rows of the integration
+map. De-dup is already applied (`A.5≡B.2`, `A.10≡B.3`, `A.11≡B.6`, `A.12⊂B.15`, `A.3⊂B.12`):
+each pair is stated ONCE here.
+
+#### B.1 — Native Project / Program Model  (NET-NEW as a named block)
+
+- **Scope:** the single project/program authority — **tsconfig DISCOVERY** (locating the governing
+  `tsconfig.json` for a file), **`extends` / config INHERITANCE** (the full extends-chain merge,
+  including package-relative `extends`), **solution-style configs** (a root config that only
+  `references` leaf projects, with no own files), **normalized-option PRODUCTION** (the resolved,
+  inheritance-merged, defaulted compiler-option set every downstream owner reads), include/exclude →
+  root-file set, allowJs/checkJs file-graph gating, project-reference build-graph (composite /
+  `tsbuildinfo`), lib selection as a program input, watch-driven program revalidation, AND
+  **config-chain-edit invalidation** (an edit to ANY config in the discovery/extends chain
+  re-derives the normalized options + root-file set under the canonical-dependency cache rule) —
+  built on the landed `project_identity` cache-key + `IdeProjectConfig` (root / workspace_root /
+  tsconfig_path / references / paths / baseUrl / Membership) substrate and the landed multi-project
+  membership. `B.1` is the SOLE owner of discovery/inheritance/normalization — no other block
+  re-derives configs.
+- **Deps:** none new (extends landed substrate). Feeds `U0.RESOLVER_CORE` (#21) + `B.4` (stdlib);
+  emits the normalized-option set that `A.3`/`B.12` config semantics branch on.
+- **Sequence:** PRE-`U0` / `U0`-tier; gates `U0.RESOLVER_CORE` and `B.4`.
+- **Required deletions:** none (additive; it must NOT bundle a program-hash — it keys THROUGH
+  `project_identity` + the R21 split, per `r21_no_bundled_config_hash`).
+- **Guard:** `program_model_is_single_project_authority_keys_through_project_identity`.
+
+#### U0.RESOLVER_CORE — Project / Package Resolution Parity  (A.5 ≡ B.2; promotes ledger #21 to a named block)
+
+- **Scope:** the host-backed module/package resolution matrix to TS parity across the full
+  moduleResolution mode set — **`Classic` / `Node10` / `Node16` / `NodeNext` / `Bundler`** — over
+  relative / alias / project-refs (live) resolution PLUS the
+  `exports`/`imports`/`typesVersions`/`paths`/`baseUrl`/`rootDirs`/`typeRoots`/`types`/
+  `moduleSuffixes`/`customConditions`/`resolveJsonModule`/`allowImportingTsExtensions`/
+  `allowArbitraryExtensions` config surface and the conditional `exports`/`imports`
+  walker. It owns resolution SEMANTICS, not merely fixtures: **symlink / `preserveSymlinks`
+  realpath resolution, pnpm / hoisted `node_modules` layouts, and workspace-linked packages**,
+  and the **`package.json`-edit + in-place package-source-edit invalidation** path (an edited
+  dependency manifest or dependency source re-resolves under the canonical-dependency cache
+  rule). The full matrix is designed to executable depth as ledger **#21**
+  (`u2-query-value-domain-design.md §21`, FORK-C LOCKED to `U0`); this promotes it to a named
+  `U0`-tier block beside `U0.MANIFEST_SUBSTRATE`.
+- **Deps:** `B.1` (program model) first. Shares the ambient corpus with `B.4` (resolve_env = WHERE
+  to look; lib_env = WHICH corpus). KEYING stays contracted at the `U2.QUERY_VALUE_DOMAIN` gate;
+  IMPL is `U0`.
+- **Sequence:** `U0`, before `U2`; oracle-gated with one discriminating fixture per scope case —
+  the moduleResolution modes (`classic` / `node10` / `node16-vs-bundler` / `nodenext`), the
+  resolution-target cases (`relative` / `alias` / `project-references` (live, into a referenced
+  project)) and the config-surface cases (`conditional-exports` / `conditional-imports` / `paths` /
+  `baseUrl` / `typesVersions` / `rootDirs` / `typeRoots` / `types` / `moduleSuffixes` /
+  `customConditions` / `resolveJsonModule` / `allowImportingTsExtensions` /
+  `allowArbitraryExtensions`) PLUS the layout cases (`symlink` / `preserveSymlinks` / `pnpm-hoisted`
+  / `workspace-linked-package`) PLUS the two edit-cycle invalidation fixtures (`package.json`-edit;
+  in-place package-source-edit).
+  The contract is **one discriminating fixture per scope case** (scope ⇄ fixtures ⇄ §8 row stay
+  mutually consistent); the A.1 (4) rescope-gate deliverable backstops this enumeration — the gate
+  rejects any scope case that lacks its discriminating fixture.
+- **Required deletions:** none (extends the live resolver; no second resolution authority — CJS
+  interop folds into this one matrix, per `B.11`).
+- **Guards (already in the #21 design):** `module_resolution_keys_on_resolve_env_not_type_or_lib`
+  + `resolve_env_does_not_fold_lib_dims` (`lib_env` — `typeRoots`/`types` — is NEVER folded into
+  `resolve_env`); registered in `CRITICAL_RULE_GUARDS` at the `U0` gate.
+
+#### B.4 — Standard Library / Intrinsics Authority  (promotes ledger #11 / #17 to a named U0-tier block)
+
+- **Scope:** the formal stdlib authority — (a) `lib.d.ts` selection **pinned to a specific TS
+  version**, (b) the `IntrinsicRegistry` as the formal intrinsics authority (the SDK audit already
+  asserts every `= intrinsic` decl has a registry entry), (c) the JSX-namespace defaults owner, and
+  (d) the `lib_env_hash` invalidation contract. The TS-version pin is the SAME pin as the §3.4
+  `tsgo` parity oracle (single source).
+- **Deps:** `B.4 ← {B.1, U0.RESOLVER_CORE}` — `B.1` (program model: lib selection is a program
+  input) + `U0.RESOLVER_CORE` (the resolver feeds stdlib's shared ambient corpus), matching the
+  §3.1.3 dep-map / §0.5.6 order `B.1 → U0.RESOLVER_CORE → B.4`. The R21 `lib_env` scoping rule is
+  the authority for WHICH caches include `lib_env_hash` — do not redefine it.
+- **Sequence:** `U0`-tier, before `U2` (every reducer's LibIntrinsic facts consume it).
+- **Required deletions:** none (formalizes the live `IntrinsicRegistry` + `lib_env_hash` semantics).
+- **Guard:** `lib_authority_pinned_ts_version_single_owner` (reuses the existing SDK audit guard).
+
+#### N0.BINDER_NAV_INDEX — Binder / Name-and-Location Index  (A.10 ≡ B.3)
+
+- **Scope:** the unified identity/location index substrate — **identity and location ONLY, ZERO
+  type expansion, ZERO typed-IR dispatch** (location ≠ type expansion: producing a definition /
+  references / rename LOCATION is an identity-and-location answer, NOT a type walk, so `N0` owns it
+  without becoming an expander). Reads the `IndexedReady` shallow inventory and reuses the
+  U2-reducers' merged-declaration ordering facts (does NOT fork a second ordering computation); adds
+  document/workspace symbols (as a substrate query), rename ranges, and validation tokens. **`N0` is
+  the native PRODUCER of definition / references / rename LOCATION answers** — it succeeds the
+  **def/refs/rename LOCATION methods** of the tsgo-backed `verter_lsp::tsgo::TsgoNavigationBackend`
+  (`getDefinitionAtPosition` / `getReferences` / `getRenameLocations`,
+  `docs/arch/goto-definition-overhaul-plan.md` §Phase 5) that produce those locations TODAY, rather
+  than sitting as an unowned layer over `TsNavigationBackend` (+ `SfcComponentAnchor`, G.P3). **`N0`
+  does NOT own that backend's `getCodeActions` method** — code-actions are a B.8 surface (they need
+  checker diagnostics + `CodeTransform`, not identity/location), so the code-action path of the
+  struct is succeeded + deleted by `B.8`, not `N0` (see B.8).
+- **Deps:** `U2` (reuses its merged-decl ordering facts + `IndexedReady` finalized shape).
+- **Sequence:** post-`U2`, ~alongside `G.P3`; before `N1`. Its `TsgoNavigationBackend`
+  **def/refs/rename** deletion is gated BEFORE `§10` (a named deletion `§10` (1)+(7) depend on for
+  navigation).
+- **Required deletions (gated BEFORE §10):** the **def/refs/rename LOCATION paths** of
+  `verter_lsp::tsgo::TsgoNavigationBackend` (`getDefinitionAtPosition` / `getReferences` /
+  `getRenameLocations`) — once `N0` produces those locations natively, the tsgo def/refs/rename path
+  is DELETED (no dual nav path, no fallback to a TS service). This is the named deletion that makes
+  `§10` (1)+(7) satisfiable for navigation. The struct's `getCodeActions` path is NOT deleted here —
+  it survives until `B.8` produces native code-actions and owns its deletion; the struct is fully
+  removed once BOTH the `N0` (def/refs/rename) and `B.8` (code-actions) deletions land, both gated
+  before `§10`. Carving def/refs/rename out of `§10` as a deferred non-goal is REJECTED — it
+  contradicts the full-replacement endgoal. Preserves the nav one-engine guard; `N0` must not become
+  an expander. **`N0` also owns the deletion of the aux identity/location tsgo `TypeProvider`
+  paths it produces natively** — `TypeProvider::get_semantic_tokens` and `get_document_highlights`
+  (`aux_features.rs`): once `N0` produces semantic-token classification and document highlights from
+  binder/identity facts, those runtime tsgo paths are DELETED (gated before `§10`, no dual path).
+  Call hierarchy is ALREADY native (`features/call_hierarchy.rs` reads `FileAnalysisSnapshot`; there
+  is no tsgo call-hierarchy path to delete) — `N0` owns it as an identity/location surface and the
+  guard asserts it STAYS native. These are identity/location surfaces (§0.5.2), NOT type walks —
+  `N0` stays zero-dispatch.
+- **Guards:** `binder_nav_index_runs_zero_typed_ir_dispatch` + the NET-NEW
+  `native_navigation_replaces_ts_navigation_backend` (asserts def/refs/rename locations come from
+  `N0` / binder facts and no tsgo **def/refs/rename** path survives — scoped to def/refs/rename, NOT
+  the whole struct, since the code-action path is B.8's; registered with its `CRITICAL_RULE_GUARDS`
+  entry at the `N0` gate per §0.5.7) + the NET-NEW
+  `native_binder_surfaces_replace_ts_aux_nav_paths` (asserts semantic tokens / document highlights
+  come from `N0` binder facts and no tsgo `get_semantic_tokens` / `get_document_highlights`
+  `TypeProvider` path survives, and that call hierarchy stays native with no tsgo path introduced;
+  registered at the `N0` gate per §0.5.7).
+
+#### N1.NATIVE_LANGUAGE_SERVICE_LAYER — Native Language Service Layer  (A.11 ≡ B.6)
+
+- **Scope:** orchestration ONLY over typeinfo + `N0` + the checker — owns the request
+  snapshot, cancellation, degradation routing, and public-API consistency. It is **not** a second
+  engine: every type answer comes from the one resolver, every location answer from `N0`, every
+  diagnostic from the checker. **`N1` owns the one nav-by-type composed surface,
+  `textDocument/typeDefinition`** (§0.5.2): the type-of-expression hop runs through the one engine
+  (`ProjectSemanticDispatch::execute`) and the declaration location render comes from `N0`. It is
+  neither pure location (so not `N0` alone — it needs a type value) nor pure type-display (so not
+  `B.7` — it returns a location), which is exactly the compose `N1` orchestrates; it adds NO second
+  resolver.
+- **Deps:** `U15` (typeinfo parity) + `N0`. Realizes ledger #19 (what native OWNS vs DEFERS) +
+  #15; cites `native-checker.md` §9.
+- **Sequence:** LATE — after `U15` + `N0`; before/with `B.7` / `B.8`.
+- **Required deletions (gated BEFORE §10):** the tsgo `TypeProvider::get_type_definition` path
+  (`nav_features.rs::handle_goto_type_definition`) — once `N1` produces type-definition by composing
+  the one engine's type value with the `N0` location, the runtime tsgo type-definition path is
+  DELETED (no dual path). (It MUST NOT import private reducers or write cache entries.)
+- **Guards:** `language_service_layer_does_not_write_caches_or_import_private_reducers` + the NET-NEW
+  `native_type_definition_replaces_ts_type_definition_path` (asserts type-definition composes the one
+  engine's type value + an `N0` location and no tsgo `get_type_definition` `TypeProvider` path
+  survives; registered at the `N1` gate per §0.5.7).
+
+#### B.7 — Completion / Hover / Signature-Help Semantics  (FUTURE Verter-engine successor to U15's tsserver/tsgo path)
+
+- **Scope:** the native contextual completion / hover / signature-help semantics. **It does NOT
+  remove U15's near-term tsserver/tsgo delegation** (see §0.5.5) — `B.7` is the LATER native
+  successor, cut over progressively only once native contextual-type / inference facts are stable.
+  Contextual completion needs contextual types, so `B.7` routes **every** type query through the
+  ONE resolver (`ContextualTypeAt` / `ResolveCall` / `Relate`), never a nav-side or completion-side
+  type walker. Dividing line: `N0` = location-only; `B.7`-types = through-resolver. The
+  rescope-gate sub-surface inventory (the A.1 (1) checklist the gate enforces) is at minimum:
+  candidate sources + auto-imports, member / property completions, JSX completions, template
+  completions, the overload-selection policy, signature-help display parts, deprecation surfacing,
+  broken-code completion, and **inlay hints** (parameter-name / type / return-type display, §0.5.2)
+  — each routing its type queries through the one resolver.
+- **Deps:** `N1` + `U2.RELATION_INFER` + `U6`.
+- **Sequence:** after `N1` + `U2.RELATION_INFER` + `U6`; strictly LATER than U15's near-term
+  delegation (which stays).
+- **Required deletions (gated BEFORE §10):** the hover / completion / signature-help tsgo
+  delegation is retired progressively as `B.7` reaches parity (not ripped out up front), AND the
+  tsgo `TypeProvider::get_inlay_hints` path (`aux_features.rs`) is DELETED once `B.7` produces inlay
+  hints through the one resolver (inlay hints are type-display, §0.5.2 — owned here, not a nav
+  surface). Both are complete before `§10` (no residual runtime-TS type-display path).
+- **Guards:** `completion_semantics_route_types_through_one_resolver` + the NET-NEW
+  `native_inlay_hints_replace_ts_inlay_hint_path` (asserts inlay hints route every type query through
+  the one resolver and no tsgo `get_inlay_hints` `TypeProvider` path survives; registered at the
+  `B.7` gate per §0.5.7).
+
+#### B.8 — Code Actions / Refactors / Organize Imports  (LAST LS block)
+
+- **Scope:** native code actions, refactors, and organize-imports. Quick-fixes derive from the
+  native-checker diagnostics; ALL edit generation goes through `CodeTransform` (the landed
+  CRITICAL rule); rename-file import updates / organize / extract read the `N0` / project-model
+  shape.
+- **Deps:** `N0` / `N1` + the native checker (`B.5`).
+- **Sequence:** LAST LS block — after `N0` / `N1` + checker diagnostics.
+- **Required deletions (gated BEFORE §10):** the **`getCodeActions` path** of
+  `verter_lsp::tsgo::TsgoNavigationBackend` — once `B.8` produces native code-actions, the tsgo
+  code-action path is DELETED (no dual path, no fallback). This is the code-action half of the
+  `TsgoNavigationBackend` retirement (the def/refs/rename half is `N0`'s, §0.5.4); with both landed,
+  the struct is fully removed and the `§10` (7) deletion sweep has no residual tsgo nav/code-action
+  path. `B.8` owns this deletion because it owns the replacement (N0 cannot produce code-actions —
+  they need checker diagnostics + `CodeTransform`, not identity/location).
+- **Guard:** `native_code_actions_replace_ts_navigation_backend_code_action_path` (asserts
+  code-actions come from the native checker + `CodeTransform` and no tsgo `getCodeActions` path
+  survives; registered with its `CRITICAL_RULE_GUARDS` entry at the `B.8` gate per §0.5.7) — plus
+  the reused CodeTransform-is-single-source-of-truth rule + the `N1` guard.
+
+#### B.5 — Native Checker Manifest  (POINTER into the replacement framing; does NOT rewrite native-checker.md)
+
+- **Scope:** folds `docs/arch/native-checker.md` into the full-replacement framing — diagnostics
+  are the **checker surface** of the endgoal (the ownership statement's "Checker owns diagnostics").
+  This is a pointer, NOT a rewrite: the diagnostic-ROW manifest (codes / messages / categories /
+  fixability) stays owned by native-checker's OWN rescope gate (effort weight HIGH, §3.3), produced
+  at that gate, not here.
+- **Deps:** AFTER typeinfo parity; consumes the reserved `Check*` / `DiagnosticAnalysis` /
+  `ExecutableRegion` / `ProgramAnalysisContributor` seams (parent reserves them NON-LIVE).
+- **Sequence:** after `U2`/`U6`/`U8`/`U10` facts stable, at native-checker's own rescope gate.
+- **Required deletions (gated BEFORE §10):** the runtime tsgo diagnostics path — the
+  `TypeProvider::get_diagnostics` delegation, its `get_diagnostics_background` background-priority
+  variant (`tsgo/ipc.rs`), and the `publish_merged_diagnostics` tsgo merge
+  (`sync_coordinator.rs` / `background_init.rs` / `sync_orchestration.rs`). Once the native checker
+  produces diagnostics, the LSP publishes native diagnostics ONLY; the tsgo `get_diagnostics` merge
+  is DELETED (no dual path, no belt-and-suspenders union). Diagnostics are the checker-role surface
+  in the §0.5.2 per-surface deletion-ownership rule — `B.5` owns this deletion because it owns the
+  native diagnostic producer. (The diagnostic-ROW manifest itself: new `Check*` keys beyond the
+  reserved set need a `schema_version` bump and must NOT merge into the 363-row typeinfo manifest.)
+- **Guards (at its land):** `checker_diagnostic_manifest_bijection` (manifest↔emitted bijection,
+  DISTINCT from the 363 guard) + the NET-NEW `native_checker_replaces_ts_diagnostics_path` (asserts
+  published diagnostics come from the native checker and no tsgo `get_diagnostics` /
+  `publish_merged_diagnostics` runtime path survives — the bijection guard is compatible with a
+  still-merging tsgo path, so a SEPARATE deletion guard is required; registered at the `B.5` gate per
+  §0.5.7).
+
+#### B.10 — Native Declaration Emit  (IN scope per B.9; one of the LAST blocks)
+
+- **Scope:** `.d.ts` / `.d.ts.map` generation — public-API-shape extraction, re-export
+  preservation, `stripInternal`, JSDoc preservation, and Vue/SFC component declaration output —
+  as a `CodeTransform` producer that reads binder/nav public-API shape (`N0` / `IndexedReady`) +
+  typeinfo VALUES. It NEVER source-slices, reads `rawType`, parses printed type strings, or runs
+  over IDE TSX as semantic source (typed-IR-only). `.d.ts.map` maps public declarations to original
+  user spans; render-fn maps, IDE-TSX maps, and declaration maps stay SEPARATE products; declarations
+  cache as artifacts keyed by canonical file + parse/compiler/profile identity + the five split env
+  hashes (incl. `lib_env_hash`, since decl emit depends on lib data) + decl policy + source-map
+  policy + validated `ReadSetSignature` facts.
+- **Deps:** `B.9` decision (in scope) + typeinfo VALUES stable + `N0` + (for SFC) `U14`.
+- **Sequence:** one of the LAST blocks — after typeinfo values + `N0` + `U14`.
+- **Required deletions:** none net-new; transpile emit is the permanent non-goal (§0.5.2).
+- **Guard:** `declaration_emit_derives_from_typed_facts_via_codetransform`.
+
+#### B.11 — JSDoc / JavaScript Mode  (EXPLICIT multi-slice umbrella — NOT one atomic block)
+
+`B.11` is an umbrella over THREE independently-sequenced slices, each gated at its own point (it is
+deliberately NOT a single block landing at one position): the **JSDoc-type-system slice** (near
+`U2`), the **`checkJs` JS-mode slice** (after `B.5`), and the **CJS-interop slice** (folded into the
+`#21` matrix at `U0`/`U2`). The deps/sequence rows below enumerate the three slices.
+
+- **Scope:** (a) JSDoc `{Type}` payload text-parse is **ALREADY the sole text exception** under the
+  Typed-IR-Only rule — do NOT widen it to JS-source regex/slicing; (b) JSDoc type CONSTRUCTS
+  (`@template` / `@typedef` / `@satisfies` / `@import` as type-bearing decls) resolve through the
+  ONE engine, lowered once at shallow analysis exactly like `lower_ts_type` (near `U2`); (c)
+  `checkJs` / `allowJs` mixed-project diagnostics ride the native checker (`B.5`); (d) CommonJS
+  interop folds into the `#21` module-resolution matrix (`U0.RESOLVER_CORE`) — NOT a second
+  module-resolution authority.
+- **Deps:** JSDoc-type-system near `U2`; `checkJs` after `B.5`; CJS interop with `#21` at `U0`/`U2`.
+- **Sequence:** JSDoc-type-system near `U2`; `checkJs` JS-mode after `B.5`; CJS at `U0`/`U2`.
+- **Required deletions:** none (upholds one-resolver + typed-IR-only; `{Type}` stays the SOLE text
+  exception).
+- **Guard:** `jsdoc_and_js_mode_resolve_through_one_engine_jsdoc_payload_only_text`.
+
+### 0.5.5 U15 succession note (binding — near-term tsgo delegation STAYS)
+
+U15's hover / completion / signature-help currently DELEGATE to tsserver/tsgo. **That is the
+NEAR-TERM and STAYS** (see the U15 block, §4, and the forward-pointer there). `B.7`
+(Completion/Hover/Signature-Help Semantics) + `N1` (the Native Language Service Layer) ARE the
+FUTURE Verter-engine architecture that supersedes it, sequenced as a LATER phase. The succession
+is progressive: U15's tsgo path is retired surface-by-surface, to the extent parity allows, only
+as `B.7` reaches parity through the one resolver — it is never ripped out up front. This
+gradual "to the extent parity allows" cutover is a NEAR-TERM narrative ONLY; the §10 terminal
+bar (item (3)) is unconditional — at §10 done, ALL in-scope tsgo delegation MUST be fully
+retired with zero residual runtime-TS path.
+
+**Navigation (def / refs / rename) + code-action succession.** The tsgo-backed
+`verter_lsp::tsgo::TsgoNavigationBackend` today serves FOUR methods across TWO native owners:
+`getDefinitionAtPosition` / `getReferences` / `getRenameLocations` (def/refs/rename LOCATION
+answers) → `N0.BINDER_NAV_INDEX`, which PRODUCES those locations from binder/identity facts
+(location ≠ type expansion, so `N0` owns this without becoming an expander); and `getCodeActions`
+(code-actions) → `B.8`, which produces native code-actions from checker diagnostics + `CodeTransform`
+(`N0` cannot produce code-actions). The struct's deletion is therefore SPLIT into two
+Required-deletions, each owned by the block that produces its replacement and each gated BEFORE
+`§10`: `N0` deletes the def/refs/rename paths; `B.8` deletes the `getCodeActions` path. Unlike the
+hover/completion/sig-help delegation above — which is retired surface-by-surface as `B.7` reaches
+parity — each nav/code-action deletion is a single outright cutover (no dual path) at its owner's
+gate; the struct is fully removed once BOTH land. `§10` (1)+(7) depend on these two named deletions
+for navigation + code-actions.
+
+**The other live tsgo `TypeProvider` LS paths follow the same per-producer succession** (§0.5.2
+deletion-ownership rule, §0.5.4 per-block contracts): `get_semantic_tokens` /
+`get_document_highlights` → `N0` (call hierarchy is already native — owned by `N0`, no tsgo path to
+delete); `get_inlay_hints` → `B.7`; `get_type_definition` → `N1` (the nav-by-type compose);
+`get_diagnostics` / `publish_merged_diagnostics` → `B.5` (the native checker). Each tsgo path is
+deleted by its producing block, gated BEFORE `§10`, with a registered guard — so no live
+LS/diagnostics tsgo path is left to the `§10` (1) catch-all. `§10` (1)+(7) depend on
+these named per-surface deletions for the full LS + diagnostics surface, not only navigation +
+code-actions.
+
+### 0.5.6 Sequencing of the foundation / replacement blocks (relative to U0–U15 / S5.B* / G.P*)
+
+This reproduces the integration map's sequencing diagram, threaded coherently with §3.1.3:
+
+```
+FOUNDATION (pre-U0 / U0-tier, before U2):
+  Ownership statement (B.15, §0.5.1) + ledger #19 boundary ─┐  (frames everything)
+  B.1 Program Model ─► U0.RESOLVER_CORE (A.5/B.2, #21) ─► B.4 Stdlib/Intrinsics Authority
+  B.13 Broken-Code/Recovery (global contract; U0-owned producers)
+  B.9 Native Emit Boundary (decision; stated at §Scope)
+  A.1 rescope-rejection rubric (§3.2 meta)
+
+→ U0 → U1 → U2 (CONVERGENCE GATE) → [existing U3..U15 / S5.B* / G.P*]
+
+AFTER U2:            N0.BINDER_NAV_INDEX (~G.P3)
+  A.3/#20 strict matrix + B.12 config matrix  → produced AT the U2.RELATION_INFER gate
+  A.2/A.7/A.8/A.9 → folded into the U2.RELATION_INFER #1/#2/#5 cache-admission algebra
+  A.4/#7 warm-hit validity → BLOCKING the U3 + U10 gates
+  A.6/#9 degradation taxonomy → contract BEFORE U12/U9/U11
+
+AFTER typeinfo parity (U15):
+  B.5 Native Checker Manifest (its own rescope gate)
+  B.11 JSDoc-type-system (near U2) / checkJs JS-mode (after B.5) / CJS (#21 at U0)
+  N1.NATIVE_LANGUAGE_SERVICE_LAYER
+  B.7 Completion/Hover/SigHelp semantics (after N1 + U2.RELATION_INFER + U6; U15 tsgo STAYS)
+  B.10 Native Declaration Emit
+  B.8 Code Actions / Refactors / Organize Imports (LAST LS block)
+
+TERMINAL:
+  B.14 Replacement Acceptance Gates (§10; fenced from §9)
+```
+
+### 0.5.7 New-rule guards are NAMED deliverables here, NOT added to `CLAUDE.md`/skills now
+
+Every guard named in §0.5 is a **block/gate deliverable**, committed together with its
+`CRITICAL_RULE_GUARDS` registry entry at the owning block's gate→implementation boundary (per
+§3.2(e)), so `every_critical_rule_in_docs_has_registered_guard` stays green the moment a rule
+appears. This plan edit does **NOT** add any `(CRITICAL)` heading to `CLAUDE.md` or
+`.claude/skills/*` — pre-adding a `(CRITICAL)` rule with no landed guard would trip the R6
+meta-guard and violate the gate-only rules-update rule (§3.2(e)). The §8 documentation-update
+map carries each block's land-time owning-doc updates.
 
 ---
 
@@ -512,14 +1001,20 @@ code, exactly as §8's intentional-divergence note governs the typeinfo blocks).
 #### 3.1.3 The concrete cross-plan ORDER
 
 ```
-X0  re-home + docs index  (this integration itself — §3.1)
+X0  re-home + docs index  (this integration itself — §3.1; FRAMES the foundation box below)
+       │
+       ▼
+FOUNDATION (framed at X0, sequenced pre-U0 / U0-tier — see §0.5.6; impl lands AFTER X0, before U0):
+   Ownership statement (B.15) + ledger #19 boundary  (frames everything)
+   B.1 Program Model → U0.RESOLVER_CORE (A.5/B.2, #21) → B.4 Stdlib/Intrinsics Authority
+   B.13 Broken-Code/Recovery (global; U0-owned producers)   B.9 Emit Boundary (at §Scope)
        │
        ▼
 parallel-safe early:   G.P1 → G.P2   ∥   S5.B1   ∥   U0   ∥   U1
        │
        ▼
 U2  = CONVERGENCE GATE  (finalizes ResolveMacroPayload identity + the slot-identity shape)
-       │
+       │   (A.3/#20 strict matrix + B.12 config matrix produced AT the U2.RELATION_INFER gate)
        ├──────────────────────────── after U2 ────────────────────────────┐
        │                                                                    │
   Stage5 macro chain (shared gate):                                         │
@@ -527,16 +1022,26 @@ U2  = CONVERGENCE GATE  (finalizes ResolveMacroPayload identity + the slot-ident
          → S5.B6 / S5.B7 / S5.B8 → S5.B9 → S5.B10 → S5.B11 → S5.B12         │
                                                                             │
   parallel after U2:                                                        │
-       U4 → U6        U5        scheduler U7 → U9        G.P3               │
+       U4 → U6        U5        scheduler U7 → U9        G.P3 ∥ N0.BINDER_NAV_INDEX │
                                                                             │
   U8  ONLY after  U6 + S5.B12   ◄── HARD GATE (no U8+ around the sidecar)   │
-       │                                                                    │
-       ▼                                                                    │
+       │   (#7 warm-hit-validity BLOCKS U3 + U10; #9 degradation taxonomy   │
+       ▼    ready BEFORE U12/U9/U11)                                        │
   U3   (canonical fact-signature model)                                     │
        │                                                                    │
        ├──────────────────────────── after U3 ────────────────────────────┤
        │                                                                    │
   goto tail:   G.P4 → G.P5 → G.P6/7     ∥     U10 → U12 → U11/U13 → U14 → U15
+       │
+       ▼
+AFTER typeinfo parity (U15):
+   B.5 Native Checker Manifest (own rescope gate)
+   N1.NATIVE_LANGUAGE_SERVICE_LAYER  →  B.7 Completion/Hover/SigHelp (U15 tsgo STAYS)
+   B.10 Native Declaration Emit      →  B.8 Code Actions / Refactors / Organize (LAST LS)
+   B.11 JSDoc-type (near U2) / checkJs (after B.5) / CJS (#21 at U0)
+       │
+       ▼
+TERMINAL:  B.14 Replacement Acceptance Gates (§10; fenced from §9)
 ```
 
 **Cross-plan dep-map edges (added to the typeinfo dep-map above; the whole graph
@@ -554,6 +1059,41 @@ edges:
   to U8, it does not change the U8↔U2/U6 edges.)
 - `G.P2 ← G.P1` (early, no typeinfo dep); `G.P3 ← U2`; `G.P4 ← U3`;
   `G.P5 ← G.P4`; `G.P6/7 ← G.P5`.
+
+**Foundation / language-service / emit edges (the §0.5 blocks; whole graph stays
+ACYCLIC).** These ADD the new-block edges; the typeinfo + `S5.*` + `G.*` edges above are
+unchanged:
+
+- **Foundation cluster precedes `U0`/`U2`:** `U0.RESOLVER_CORE ← B.1`,
+  `B.4 ← {B.1, U0.RESOLVER_CORE}` (the resolver feeds stdlib's shared ambient corpus, so
+  stdlib depends on the resolver + program model — §0.5.6 order
+  `B.1 → U0.RESOLVER_CORE → B.4`). The ownership statement
+  (`B.15`), `B.13` (broken-code/recovery producers, `U0`-owned), and the `B.9` emit
+  boundary are foundation statements that gate `U0` and carry no incoming edge.
+- **`N0.BINDER_NAV_INDEX ← U2`** (reuses the U2 merged-decl ordering facts + finalized
+  `IndexedReady`); runs ~alongside `G.P3`. `N0` PRODUCES def/refs/rename locations natively and its
+  `TsgoNavigationBackend` **def/refs/rename** deletion is gated `N0 → before B.14/§10` (a later→earlier
+  edge: the deletion sweep `§10` (7) consumes `N0`). The same backend's **`getCodeActions`** deletion
+  is owned by `B.8` (it produces native code-actions) and is gated `B.8 → before B.14/§10` (the sweep
+  `§10` (7) also consumes `B.8`); the struct is fully removed once both land. The live tsgo
+  `TypeProvider` LS paths carry the same per-producer deletion edges, all consumed by `§10` (7):
+  `N0 → before B.14/§10` (semantic tokens / document highlights; call hierarchy already native),
+  `B.7 → before B.14/§10` (inlay hints), `N1 → before B.14/§10` (type-definition),
+  `B.5 → before B.14/§10` (the `get_diagnostics` / `publish_merged_diagnostics` tsgo merge). Every
+  such edge is later→earlier, preserving DAG acyclicity.
+- **`A.3`/`#20` strict matrix + `B.12` config matrix** are produced AT the
+  `U2.RELATION_INFER` gate (gate deliverables, not separate blocks).
+- **`#7` warm-hit validity BLOCKS the `U3` + `U10` gates**; **`#9` degradation taxonomy
+  ready BEFORE `U12`/`U9`/`U11`** (consume-before-rely, §3.2.1).
+- **After typeinfo parity (`U15`):** `B.5 ← {U2, U6, U8, U10}` (its own rescope gate);
+  `N1 ← {U15, N0}`; `B.7 ← {N1, U2.RELATION_INFER, U6}`; `B.8 ← {N0, N1, B.5}`;
+  `B.10 ← {B.9, U14, N0}` (typeinfo values + SFC); `B.11` JSDoc-type ← near `U2`,
+  `B.11` checkJs ← `B.5`, `B.11` CJS ← `U0.RESOLVER_CORE` (#21).
+- **`B.14 ← all blocks`** (terminal, §10).
+
+Because every new edge points from a later block to an earlier one in the order above
+(foundation → `U0`/`U2`; `N0` → `U2`; the LS/emit tail → `U15`; `B.14` terminal), no cycle
+is introduced; the combined graph remains a DAG.
 
 Because `S5.B5 ← U2`, `U8 ← S5.B12`, `G.P3 ← U2`, and `G.P4 ← U3` all point from a
 later block to an earlier one in the order above, no cycle is introduced; the combined
@@ -597,6 +1137,31 @@ block contract currently says only "route through `Relate`" / "route through the
 reducers" / "route through the one engine" for a HARD core, that phrasing states the
 one-engine *wiring* constraint — it is **not** the algorithm. The deep algorithm for a
 RESCOPE-GATE-REQUIRED phase is produced at its rescope session, not asserted here.
+
+**Gate-pass bar — the rescope-rejection rubric (A.1).** A rescope gate does **NOT**
+pass — it **FAILS** — if it produces only guard NAMES, "route through `Relate`" /
+"route through the reducers" / "route through the one engine" wiring statements, or
+high-level prose. Those state the one-engine *wiring* constraint; they are **not** a
+design. To PASS, a gate MUST produce ALL FIVE deliverables below. This is a fail-criteria framing
+of the gate-OUTPUT requirements — it does NOT restate, and does NOT supersede, the
+rescope-session output list that follows (in particular the session's `(b)` `tsgo`-oracle
+baseline and `(d)` rescope-of-subsequent-phases items are NOT covered by this rubric and
+must still be produced):
+
+- **(1) data structures** — the real types the algorithm operates on, not a sketch.
+- **(2) an executable-pseudocode algorithm** — the actual control flow, not a name on a
+  seam.
+- **(3) a termination / convergence / admission proof** — for any recursive or iterative
+  design, a monotone measure + a well-founded bound (or an SCC-discharge argument showing
+  non-convergence never yields a WARM admission).
+- **(4) discriminating fail-today fixtures** — tests that FAIL against the pre-change tree
+  and PASS after.
+- **(5) the docs / guard updates** — the new `(CRITICAL)` rule(s) + their registered R6
+  guards, updated AT the gate (per §3.2(e)).
+
+A gate output missing any one of (1)–(5) is rejected and re-run; guard names without an
+algorithm, or an algorithm without a termination proof, are the two most common rejected
+shapes.
 
 **The rescope session (autonomous, minimal-token).** A planner drafts the phase's
 algorithm-depth design; a **rescope review panel — 1 Claude Code + 2 codex, all under
@@ -731,7 +1296,20 @@ phase that happens to need it last.
     captures the live comparison stack + the in-flight inference context (the
     `InferenceContextKey` fingerprint must be complete) — otherwise the choice is
     unsoundness (a warm hit reuses a relation decided under different assumptions) or a
-    perf collapse (the identity is so wide it never hits).
+    perf collapse (the identity is so wide it never hits). **The persistent-vs-transient
+    decision is gated on an explicit ENUMERATED proof-obligation list (A.2)** — if
+    persistent, the cache identity MUST provably capture EVERY one of:
+    1. the live **relation/comparison stack** (the in-flight `relate` reentry chain);
+    2. the in-flight **inference context** (the complete `InferenceContextKey` fingerprint);
+    3. the **strict-policy** family in force (per #20 — a relation decided strict-on must
+       not warm-hit a strict-off request);
+    4. **freshness** (the `ReadSetSignature.facts` of BOTH related types' structural
+       reachability — per #4);
+    5. the **five split env dimensions** (R21; never bundled);
+    6. **reentry** state (the coinductive-cycle assumption stack of #2 — a result decided
+       under an open assumption is not admissible until the assumption is discharged).
+    Each obligation either enters the identity or is proven irrelevant; an unproven
+    obligation routes the result through `ReturnOnly` (no warm admission).
   - **#2 — Coinductive cycle discharge as a first-class
     `ProjectSemanticDispatch::execute` PRIMITIVE.** A cross-query reentry / assumption
     stack — spanning `FlowReturn` / `ResolveCall` / `FlowNarrowingAt` /
@@ -744,12 +1322,32 @@ phase that happens to need it last.
   - **#5 — Relation-proof structural shape.** A derivation witness / reason code, so
     `Relate` is the sole assignability authority with a DEFINED public payload, not a
     name on a side table. (Feeds the `RelationPayload` + payload-side `relation_proofs`
-    proof table the U8 wire surface already names.)
+    proof table the U8 wire surface already names.) **The gate enumerates the FOUR relation
+    outcome proof shapes (A.9):** (1) **assignable** (witness derivation), (2)
+    **not-assignable** (reason code + the failing structural sub-relation), (3) **unknown**
+    (budget/recursion-cap reached without a decision), (4) **coinductive-cycle** (decided
+    under an open assumption, per #2). All four ride the payload-side `relation_proofs`
+    table by opaque proof id — they stay OFF the type-values surface (NO `GraphTypeNode`
+    arm; guard `relation_proofs_not_graph_type_nodes`).
   - **Cache-admission algebra** (codex). An exact, impossible-to-misread
     publish / no-publish matrix over the full discriminant set: `Cacheable` /
     `ReturnOnly` / overflow / budget-exhaustion / unresolved-provenance /
     incomplete-self-rooting / generation-supersession / overlay-only → which states
-    PUBLISH a warm entry and which return-only.
+    PUBLISH a warm entry and which return-only. **Explicit relation/cycle + inference-session
+    ROWS (A.7 + A.8 — these are ALREADY-COVERED to executable depth by parent §4.1
+    coinductive-cycle / §4.2 inference-session; enumerated here so no row is implicit):**
+    | Discriminant | Admission |
+    |---|---|
+    | relation **cycle sentinel** (open coinductive assumption) | `ReturnOnly` (no publish) |
+    | **unconverged SCC** (assumption not yet discharged) | `ReturnOnly` (no publish) |
+    | **budget-abandoned fixed point** (relation/flow budget exceeded mid-iteration) | `ReturnOnly` (no publish) |
+    | **speculative / losing inference session** (a non-winning candidate attempt) | `ReturnOnly` (no publish) |
+    | **session-local delta** (overlay-only result) | `ReturnOnly` (no publish to base/persistent) |
+    | **abandoned inference session** | `ReturnOnly` (no publish) |
+    | **in-flight inference session** (not yet `CompletedDeterministic`) | `ReturnOnly` (no publish) |
+    | `CompletedDeterministic`, fully self-rooted, in-generation, non-overflowed | `Cacheable` (publish) |
+    Only the last row PUBLISHES a warm entry; every cycle/SCC/budget/speculative/session
+    state returns the computed value WITHOUT admitting it.
   - **#10 — Request-consistency model.** ONE request view held consistent across every
     nested query, so a parent and its sub-queries observe one immutable snapshot. The
     reentry / assumption stack of **#2** IS this request-consistency frame; the gate
@@ -761,7 +1359,58 @@ phase that happens to need it last.
   - **#20 — Strict-family semantics.** Reducers and assignability must BRANCH on
     `strictNullChecks` (and the strict family), not merely KEY a cache on it: the result
     differs under strict-on vs strict-off, so the difference is computed, not just
-    isolated.
+    isolated. **The gate produces an explicit strict-family MATRIX (A.3) — columns:
+    `option` / `affected reducers` / `cache-env dim` / `behavioral branch` / `oracle
+    fixture` — with at minimum the rows `strictNullChecks`, `strictFunctionTypes`,
+    `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `strictBindCallApply`,
+    `strictPropertyInitialization`, `alwaysStrict`, `useUnknownInCatchVariables`, `noImplicitAny`,
+    `noImplicitThis`, and `strictBuiltinIteratorReturn` (the full strict family, pinned to the
+    project's TS version — the `strict`-umbrella members plus the strictness-affecting
+    `exactOptionalPropertyTypes` / `noUncheckedIndexedAccess`). The non-strict JSX / decorator / class-field /
+    `lib` option sets are NOT A.3 rows — they belong to `B.12` / `B.4` (see the exhaustive partition
+    below).** The matrix is **produced BEFORE `U2.RELATION_INFER`
+    lands** (the relation core branches on it). **A.3 ⊂ B.12** — the strict matrix is the
+    strict SLICE of the full TS Config Semantics Matrix (below); the strict rows belong to
+    A.3/#20 and are NOT duplicated in B.12.
+    - **Guard (at the `U2.RELATION_INFER` gate, §3.2(e)):**
+      `reducers_branch_on_strict_family_not_only_key` — a discriminating fixture proves a
+      reducer's RESULT differs under strict-on vs strict-off, not merely its cache key.
+  - **TS Config Semantics Matrix (B.12)** — the full "config option → behavioral branch"
+    SEMANTICS matrix that A.3 is a slice of. The KEYING side is already contracted (R21 +
+    the U10 guard `cache_keys_cover_ts_jsx_moduleresolution_decorator_lib_dimensions`); the
+    NEW part is the **behavioral-branch column** over the meaning-affecting options not yet
+    enumerated as behavioral branches: the **JSX family**
+    (`jsx` / `jsxFactory` / `jsxFragmentFactory` / `jsxImportSource`), the
+    **decorator / class-field family** (`experimentalDecorators` / `emitDecoratorMetadata` /
+    `useDefineForClassFields`), and the **module/interop family** (`target`, `module`,
+    `moduleDetection`, `esModuleInterop`, `allowSyntheticDefaultImports`, `skipLibCheck`,
+    `isolatedModules`, `verbatimModuleSyntax`). This is a sibling deliverable to #20; it does NOT
+    duplicate the strict rows (those are A.3/#20's), and it reuses the U10 keying guard's dimension
+    list rather than adding a new keying guard.
+  - **The config-semantics partition is EXHAUSTIVE-BY-CONSTRUCTION over OWNER DOMAINS** — not a
+    closed hand-list of options (which can never be provably complete and would re-mint the
+    false-completeness defect). Every meaning-affecting tsconfig option belongs to EXACTLY ONE owner
+    domain, by the option's role:
+    - **config derivation** (discovery / `extends`-inheritance / normalized-option production) → `B.1`;
+    - **module/path RESOLUTION surface** (the `moduleResolution` mode set + `exports` / `imports` /
+      `paths` / `baseUrl` / `rootDirs` / `typeRoots` / `types` / `typesVersions` / `moduleSuffixes` /
+      `customConditions` / `resolveJsonModule` / `allowImportingTsExtensions` /
+      `allowArbitraryExtensions` / `preserveSymlinks` — i.e. anything that changes WHICH file a
+      specifier resolves to) → `U0.RESOLVER_CORE` (#21);
+    - **type-checking STRICTNESS** → `A.3`/#20;
+    - **`lib` corpus selection** → `B.4`;
+    - **emit/syntax SEMANTICS that branch type meaning** (the JSX, decorator/class-field, and
+      module/interop families above) → `B.12`;
+    - **cache KEYING dimensions** → the U10 guard
+      `cache_keys_cover_ts_jsx_moduleresolution_decorator_lib_dimensions`.
+    The named option lists above are EXEMPLARS of each domain, not the closed set; the catch-all is
+    the role test (resolution-affecting → U0; strictness → A.3; emit-meaning → B.12; lib → B.4;
+    derivation → B.1), so a not-yet-listed option (`moduleDetection`, `resolveJsonModule`,
+    `allowImportingTsExtensions`, `allowArbitraryExtensions`, … now placed above; any future addition)
+    is still owned by exactly one domain with no ownerless margin. The full per-option behavioral
+    census stays a gate deliverable produced AT the `U2.RELATION_INFER` gate (the A.1 (4) backstop
+    rejects any meaning-affecting option lacking a domain assignment + discriminating fixture) — this
+    section fixes the OWNER DOMAINS, not the full behavior table.
 - **`U2.QUERY_VALUE_DOMAIN` gate:**
   - **#3 — Formalize the `ProjectionDemand × EvalPolicy` lattice.** The partial order,
     the join / meet, the dominance + backfill rules, the satisfaction relation PROVEN,
@@ -810,16 +1459,32 @@ phase that happens to need it last.
   cache. (Same justify-or-cut question already on the `U7` tag; #6 binds it to a measured
   workload.)
 - **Architecture-wide (substrate deliverable, stated once):**
-  - **#7 — One unified soundness statement.** Define ONCE what "**a warm hit is valid**"
-    means uniformly across EVERY query family + fact domain, and require every cache to
-    uphold that single invariant — versus the implicit distributed R1–R31 + per-family
-    rules.
+  - **#7 — One unified soundness statement (BLOCKING the `U3` + `U10` gates; A.4).** Define
+    ONCE what "**a warm hit is valid**" means uniformly across EVERY query family + fact
+    domain, and require every cache to uphold that single invariant — versus the implicit
+    distributed R1–R31 + per-family rules. **Re-filed from a free-floating architecture-wide
+    deliverable to a BLOCKING prerequisite on the `U3` and `U10` gates: neither gate passes
+    until the one warm-hit-validity statement is written AND every family's admission cites
+    it.** Coupled with **#4** (the `ReadSetSignature` read-set tracer completeness is the
+    MECHANISM #7's soundness statement audits — an incomplete tracer makes the single
+    invalidation rail unsound). Added to the §9 terminal checklist.
+    - **Candidate guard:** `unified_warm_hit_validity_statement_is_single_rail` — one
+      soundness rail (`ReadSetSignature.facts` validation) is the sole warm-hit-validity
+      authority; no family carries a private validity oracle.
   - **#8 — The differential `tsgo`-parity oracle as a DESIGNED structural surface** (tie
     to §3.4). Divergence from the oracle is observable BY CONSTRUCTION (a structural
     surface the engine emits), not ONLY via an external test harness.
-  - **#9 — Unified degradation taxonomy.** ONE model for how every query degrades —
-    miss / partial / fallback / unresolved — so every family reports the same degradation
-    shape. Couples the FFI / client-compat surface (**#12**) and per-family fallback.
+  - **#9 — Unified degradation taxonomy (a NAMED contract; A.6).** ONE model for how every
+    query degrades — miss / partial / fallback / unresolved — so every family reports the
+    same degradation shape. Couples the FFI / client-compat surface (**#12**) and per-family
+    fallback. **Promoted to a named degradation-taxonomy CONTRACT that the exporter (`U12`)
+    and the session surfaces (`U9` / `U11`) consume BEFORE relying on reducer outputs** —
+    sequencing note: the degradation taxonomy must be ready BEFORE `U12`/`U9`/`U11` depend on
+    reducer outputs (added as a dep-map note, §3). This does NOT re-author the per-reducer
+    absorption / admission table — that table already exists in
+    `u2-query-value-domain-design.md §18/§22` and stays its authority; #9 only promotes the
+    cross-family taxonomy + its consume-before-rely sequencing. Candidate guard at the
+    `U12`/`U9` boundary: `unified_degradation_taxonomy`.
   - **#11 — Formal lib / intrinsics authority + TS-version pinning.** Define WHO owns
     `lib.d.ts` and the intrinsics, pinned to a specific TS version. Ties `lib_env_hash`
     and the pinned-`tsgo` oracle.
@@ -1755,6 +2420,12 @@ guards**. Sequence is faithful to §A; do not reorder.
   completion→framework-surface, MCP `typeinfo.*` / `component-meta.*` tools,
   playground type explorer; lift **EVERY one of the 363 `IgnoredTestRow`s to
   `Lifted`** on the U0 manifest schedule — **zero remaining parity `#[ignore]`s**.
+  - **Hover / completion / signature-help delegation STAYS near-term.** U15 keeps
+    delegating hover / completion / signature-help to tsserver/tsgo for the editor surface;
+    that is the NEAR-TERM and is NOT removed here. The FUTURE native successor is
+    `N1.NATIVE_LANGUAGE_SERVICE_LAYER` + `B.7` (Completion/Hover/Signature-Help Semantics),
+    a LATER phase that supersedes this delegation progressively through the one resolver —
+    see §0.5.4 (`B.7`) and the succession note §0.5.5.
   The ONLY permitted residual `#[ignore]`s are the registered Svelte/React
   STOP-gate files (`svelte_adapter_stop_gate.rs`, `react_adapter_stop_gate.rs`),
   which are NOT among the 363. The binding total is exactly 363 `IgnoredTestRow`s
@@ -1998,6 +2669,21 @@ intentional, tracked deliverable, not an oversight.
 | **U13** | `/component-meta` (native-vs-compat, the structural `TypeDescriptor` projection) + `/architecture` (projections); `/type-resolution` (typed-schema-contract notes); `@verter/type-ir` schema docs; `docs/` API pages. |
 | **U14** | `/component-meta` (native-vs-compat, framework adapter registry, Vue surface). |
 | **U15** | `/e2e-vscode-testing`, `/build-and-profiling` (bench schema), `/testing`; `/architecture` (MCP/LSP/playground integration); the unignore manifest's final counts. |
+| **B.1** (program model) | `/host-session` (project/program model authority, watch-driven revalidation); `/type-cache-architecture` (`project_identity` keying, no bundled program-hash); `/type-resolution` (program as resolver input). |
+| **U0.RESOLVER_CORE** (A.5/B.2, #21) | `/type-resolution` (the full moduleResolution-mode matrix — classic / node10 / node16 / nodenext / bundler — over conditional-exports / imports / paths / baseUrl / typesVersions / rootDirs / typeRoots / types / moduleSuffixes / customConditions / resolveJsonModule / allowImportingTsExtensions / allowArbitraryExtensions, PLUS symlink/`preserveSymlinks` realpath + pnpm/hoisted layouts + workspace-linked package resolution and `package.json`-edit / in-place package-source-edit invalidation); `/type-cache-architecture` (`resolve_env` vs `lib_env` split, R21). |
+| **B.4** (stdlib/intrinsics) | `/type-resolution` (lib.d.ts selection pinned to a TS version, JSX-namespace defaults); `/type-cache-architecture` (`lib_env_hash` invalidation contract); `/architecture` (`IntrinsicRegistry` authority). |
+| **N0.BINDER_NAV_INDEX** (A.10/B.3) | `/host-session` (the identity/location index substrate, zero typed-IR dispatch; native def/refs/rename location production + the `TsgoNavigationBackend` **def/refs/rename** deletion gated before §10 — its `getCodeActions` deletion is `B.8`'s — + the aux `TypeProvider` `get_semantic_tokens`/`get_document_highlights` deletions gated before §10 (call hierarchy already native) + the `native_navigation_replaces_ts_navigation_backend` & `native_binder_surfaces_replace_ts_aux_nav_paths` guards); `/architecture` (doc/workspace symbols, rename ranges, document highlights, semantic tokens, call hierarchy); `docs/arch/goto-definition-overhaul-plan.md` (nav-surface integration + `TsgoNavigationBackend` retirement). |
+| **N1.NATIVE_LANGUAGE_SERVICE_LAYER** (A.11/B.6) | `/host-session` (request snapshot/cancellation/degradation orchestration; the `textDocument/typeDefinition` nav-by-type compose + its `TypeProvider::get_type_definition` deletion gated before §10 + the `native_type_definition_replaces_ts_type_definition_path` guard); `/architecture` (LS layering); `docs/arch/goto-definition-overhaul-plan.md`. |
+| **B.7** (completion/hover/sig-help) | `/host-session` (the native LS semantics; the U15 tsgo→native succession; inlay hints as a type-display surface + its `TypeProvider::get_inlay_hints` deletion gated before §10 + the `native_inlay_hints_replace_ts_inlay_hint_path` guard); `/architecture`; `docs/arch/goto-definition-overhaul-plan.md`. |
+| **B.8** (code actions/refactors/organize) | `/host-session` (action routing; the `TsgoNavigationBackend` `getCodeActions` deletion gated before §10 + the `native_code_actions_replace_ts_navigation_backend_code_action_path` guard); `/architecture`; `/compiler-codegen` (CodeTransform-only edit generation). |
+| **B.5** (native checker manifest) | `docs/arch/native-checker.md` (the diagnostic-row manifest, at its own rescope gate — pointer only here; the runtime tsgo `get_diagnostics` / `publish_merged_diagnostics` deletion gated before §10 + the `native_checker_replaces_ts_diagnostics_path` guard). |
+| **B.10** (native declaration emit) | `/compiler-codegen` (the `.d.ts`/`.d.ts.map` CodeTransform producer, separate-products map policy); `/component-meta` (SFC component decl output). |
+| **B.11** (JSDoc / JS mode) | `/type-resolution` (JSDoc type constructs through the one engine; `{Type}` the sole text exception); `docs/arch/native-checker.md` (checkJs diagnostics); `/type-cache-architecture` (CJS interop in the #21 matrix). |
+| **B.14** (replacement acceptance, §10) | `CLAUDE.md` only if a summary/skill pointer changes; the §10 terminal gates are self-contained. |
+
+These rows are land-time deliverables of each block (consistent with the
+intentional-current-state-divergence note above) — the skills are NOT pre-edited now; each
+block updates its owning docs at its `Docs updated:` step when it lands.
 
 The two original plans (`cache-runtime-overhaul-plan.md`,
 `semantic-type-graph-plan-recovered.md`) carry a SUPERSEDED-for-remaining-work
@@ -2020,6 +2706,10 @@ The unified effort is "done" when ALL of the following hold:
 - [ ] **All B4 caches** are `ArtifactNode` / `QueryNode` impls on the B2 substrate;
   bespoke reverse-dependent `clear_*` invalidation deleted; validated lazy
   revalidation is the sole invalidation rail.
+- [ ] **Unified warm-hit-validity statement** (A.4 / ledger #7) written ONCE; every cache
+  family's admission cites that single statement
+  (`unified_warm_hit_validity_statement_is_single_rail` green); no family carries a private
+  validity oracle. BLOCKS the U3 + U10 gates from counting as passed.
 - [ ] **`TypeInfoGraphResultDb`** admits through the singleflight / fact-validation
   substrate (NOT `submit_dag`), with warm-exact-only admission, the canonical
   3-retry fence, no second retry constant, and zero-alloc warm hits.
@@ -2066,3 +2756,83 @@ The unified effort is "done" when ALL of the following hold:
   meta-guard green); `no_phase_archaeology_in_production_code` green;
   one-engine / typed-IR-only / shallow-by-default / CodeTransform invariants
   intact.
+
+---
+
+## 10. Full-replacement terminal acceptance (the ENDGOAL done-bar)
+
+**Fenced from §9 (binding).** **§9 is the typeinfo-parity INCREMENT done-bar** (the
+`U0`–`U15` blocks + the 363-row lift); **§10 is the full-TypeScript-replacement done-bar**
+(the §0.5 foundation / language-service / emit blocks). **Neither loosens the other:** §9
+passing does NOT imply §10 passes, and §10 does NOT relax any §9 gate. §10 is reached only
+AFTER §9 is green AND the native checker + `N1` language service + emit blocks have landed.
+
+The full-replacement effort is "done" when ALL of the following hold:
+
+- [ ] **(1) No runtime TypeScript at query time** — there are NO runtime calls into a
+  TypeScript service / compiler (tsserver / tsgo / `tsc`) on any query path; every type,
+  location, diagnostic, completion, and emit answer comes from native Verter surfaces.
+  Guard `no_runtime_typescript_calls`. **(tsgo stays the OFFLINE parity oracle (§3.4) — §10
+  forbids RUNTIME TS, NOT the oracle harness, which runs out-of-band at the rescope gates.)**
+- [ ] **(2) Native checker manifest green + tsgo diagnostics path retired** — `B.5`'s
+  diagnostic-row manifest is complete and bijective with the emitted diagnostics
+  (`checker_diagnostic_manifest_bijection`), gated by the native-checker `tsgo`-oracle baseline at
+  its own rescope gate; AND the live tsgo diagnostics path (`TypeProvider::get_diagnostics` /
+  `publish_merged_diagnostics`) is DELETED, asserted by `native_checker_replaces_ts_diagnostics_path`
+  (a bijective manifest is compatible with a still-merging tsgo path, so the deletion is a SEPARATE
+  bar — §0.5.4 B.5).
+- [ ] **(3) Native language-service manifest green** — the FULL LS surface (§0.5.2 role
+  partition) passes its native manifest with zero residual runtime-TS path: `N0` (def / refs /
+  rename / document symbols / **document highlights / semantic tokens / call hierarchy**, zero
+  typed-IR dispatch) + `N1` (orchestration + **`textDocument/typeDefinition`** nav-by-type) + `B.7`
+  (completion / hover / signature-help / **inlay hints**, every type query through the one resolver)
+  + `B.8` (code actions / refactors / organize-imports). ALL in-scope tsgo delegation across these
+  surfaces — hover/completion/sig-help behind `B.7`, AND the aux `TypeProvider` paths
+  (`get_semantic_tokens` / `get_document_highlights` / `get_inlay_hints` / `get_type_definition`)
+  per their per-producer deletions (§0.5.2/§0.5.4), with call hierarchy already native — is FULLY
+  retired; any
+  residual runtime-TS path on ANY of these surfaces means §10 fails (consistent with the absolute
+  item (1) bar + the item (7) deletion sweep). The PROGRESSIVE surface-by-surface cutover that gets
+  there lives in §0.5.5, not in this terminal bar.
+- [ ] **(4) Declaration-emit parity OR explicit non-goal** — `B.10` `.d.ts` / `.d.ts.map`
+  output matches the `tsgo`-oracle baseline for in-scope inputs (incl. `.vue` components),
+  OR the specific construct is recorded as an explicit non-goal; general transpile emit is
+  the permanent non-goal (§0.5.2). Guard `declaration_emit_derives_from_typed_facts_via_codetransform`.
+- [ ] **(5) Resolver / config parity green** — the `#21` module-resolution matrix
+  (`U0.RESOLVER_CORE`) + the tsconfig semantics matrix (`A.3`/#20 strict + `B.12` config)
+  pass their `tsgo`-oracle baselines; `module_resolution_keys_on_resolve_env_not_type_or_lib`
+  + `reducers_branch_on_strict_family_not_only_key` green.
+- [ ] **(6) Perf + memory budgets green at scale** — the per-family `#16` interactive-latency
+  SLOs (p50 / p95 on the MISS path) and the memory budgets hold on the full-scale corpus, not
+  only the vendored slice.
+- [ ] **(7) Deletion sweep — no dual path** — every TS-backed entry point that the native
+  surfaces replace is DELETED (no compatibility shim, no second resolver/expander, no fallback
+  to a TS service); the ownership statement (§0.5.1) holds with no surface owning a second
+  authority. This includes BOTH halves of `verter_lsp::tsgo::TsgoNavigationBackend`: its
+  def/refs/rename location paths (deletion owned by `N0`, §0.5.4) and its `getCodeActions` path
+  (deletion owned by `B.8`, §0.5.4); AND the live tsgo `TypeProvider` LS paths, each deleted by its
+  producing block (§0.5.2 per-surface deletion-ownership rule): `get_semantic_tokens` /
+  `get_document_highlights` → `N0` (call hierarchy already native, nothing to delete);
+  `get_inlay_hints` → `B.7`; `get_type_definition` → `N1`;
+  `get_diagnostics` / `publish_merged_diagnostics` → `B.5` — each gated
+  BEFORE `§10` by its owning block, with no §10-deferred carve-out and nothing left to this sweep's
+  catch-all. The sweep AUDITS that none survive; it does not own removing them. Ties ledger #19's
+  deletion-sweep scope.
+- [ ] **(8) Architecture clean (carried from §9, not loosened)** — every new `(CRITICAL)`
+  rule from the §0.5 blocks has a registered R6 guard;
+  `ownership_boundaries_no_typescript_side_path`,
+  `broken_code_recovery_contract_global_every_surface_degrades`,
+  `program_model_is_single_project_authority_keys_through_project_identity`,
+  `lib_authority_pinned_ts_version_single_owner`,
+  `binder_nav_index_runs_zero_typed_ir_dispatch`,
+  `native_navigation_replaces_ts_navigation_backend`,
+  `native_binder_surfaces_replace_ts_aux_nav_paths`,
+  `native_code_actions_replace_ts_navigation_backend_code_action_path`,
+  `native_type_definition_replaces_ts_type_definition_path`,
+  `native_inlay_hints_replace_ts_inlay_hint_path`,
+  `native_checker_replaces_ts_diagnostics_path`,
+  `language_service_layer_does_not_write_caches_or_import_private_reducers`,
+  `completion_semantics_route_types_through_one_resolver`,
+  `jsdoc_and_js_mode_resolve_through_one_engine_jsdoc_payload_only_text` all green; the
+  one-engine / typed-IR-only / shallow-by-default / R21 / wire-purity / CodeTransform
+  invariants intact.
