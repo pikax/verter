@@ -81,18 +81,23 @@ impl TypeDeclGroup {
     ///
     /// Multiple same-name `interface` declarations in one scope are merged by
     /// TypeScript: their members union and same-name methods accumulate into an
-    /// ordered overload group. Such a group lowers to a [`TypeDeclBody::Merged`]
-    /// carrier so the project-semantic reducer can peer-merge it (NOT a bare
-    /// intersection, which would heritage-shadow). Classes and type aliases do
-    /// NOT merge (a duplicate-identifier error in TS), so any non-interface or
-    /// mixed-kind group keeps today's last-wins [`TypeDeclBody::Single`].
+    /// ordered overload group. An `interface` + `class` group ALSO merges — the
+    /// interface members augment the class INSTANCE type (the class's
+    /// value / static / constructor side lives on a SEPARATE value declaration,
+    /// untouched by this type-side merge; the class's type-side `body` is its
+    /// instance-member `Object`). Such a group lowers to a
+    /// [`TypeDeclBody::Merged`] carrier so the project-semantic reducer can
+    /// peer-merge it (NOT a bare intersection, which would heritage-shadow).
+    ///
+    /// A type `alias` never merges (a duplicate-identifier error in TS); any
+    /// group containing an alias — or any single-contributor group — keeps
+    /// today's last-wins [`TypeDeclBody::Single`].
     pub fn merged_body(&self) -> TypeDeclBody {
-        if self.contributors.len() > 1
-            && self
-                .contributors
-                .iter()
-                .all(|decl| decl.kind == TypeDeclKind::Interface)
-        {
+        let all_mergeable = self
+            .contributors
+            .iter()
+            .all(|decl| matches!(decl.kind, TypeDeclKind::Interface | TypeDeclKind::Class));
+        if self.contributors.len() > 1 && all_mergeable {
             TypeDeclBody::Merged(MergedTypeBody {
                 contributors: self.contributors.iter().map(|d| d.body.clone()).collect(),
                 kinds: self.contributors.iter().map(|d| d.kind).collect(),

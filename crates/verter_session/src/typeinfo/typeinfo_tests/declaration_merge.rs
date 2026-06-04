@@ -220,6 +220,41 @@ fn unrelated_consts_do_not_merge() {
     assert_number_literal(&q_expr, 2.0);
 }
 
+// ---------------------------------------------------------------------------
+// 6. interface + class merge (SCOPE-LOCK 4): the interface members augment the
+//    class INSTANCE type. The merged type-side surface unions both — the class
+//    value / static / ctor side is a separate value declaration and is
+//    unaffected.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn same_file_interface_class_merge_unions_instance_members() {
+    let host = make_host_with_footprint();
+    upsert_ts(
+        &host,
+        PATH,
+        "export interface Foo { a: string }\nexport class Foo { b: number = 1 }\n",
+    );
+
+    let (expr, record) = resolve_expr(&host, PATH, "Foo", &[], ProjectionMode::Expanded);
+    let props = object_props(&expr);
+    let names = prop_names(&props);
+
+    // The interface member `a` augments the class instance type alongside `b`.
+    // Last-wins keeps only the class's `b` (drops the interface `a`).
+    assert!(
+        names.contains(&"a"),
+        "interface+class merge must expose the interface member `a`; got {names:?}"
+    );
+    assert!(
+        names.contains(&"b"),
+        "interface+class merge must expose the class instance member `b`; got {names:?}"
+    );
+    assert_primitive(&props["a"].ty, PrimitiveName::String);
+    assert_primitive(&props["b"].ty, PrimitiveName::Number);
+    assert_query_mode(&record, ProjectionModeTag::Expanded);
+}
+
 #[test]
 fn distinct_interface_names_stay_distinct() {
     let host = make_host_with_footprint();
