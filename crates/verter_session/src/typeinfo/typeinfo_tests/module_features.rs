@@ -256,7 +256,6 @@ fn module_features_typeof_import_named_value_resolves_to_literal() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "typeinfo currently does not discover module augmentations contributed by a sibling file pulled in via a side-effect `import \"./patch\";` — the consumer sees only the base interface members. Keep as the future side-effect-imported-augmentation discovery contract"]
 fn module_features_module_augmentation_merges_plugin_surface() {
     // TS7 contract: `AugmentedPlugin = Plugin` (imported from
     //   `./module_features_base`) must surface every member contributed

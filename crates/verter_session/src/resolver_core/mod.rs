@@ -111,8 +111,9 @@ pub use fallthrough::{
 };
 pub use fallthrough_request::{run_fallthrough_request, FallthroughRequestHost};
 pub use prepared_decl::{
-    build_prepared_type_decl_cache, build_prepared_value_decl_cache, prepare_exported_type_decl,
-    prepare_exported_value_decl, prepare_local_type_decl, prepare_local_value_decl,
+    build_prepared_type_decl_cache, build_prepared_value_decl_cache,
+    prepare_augmentation_type_decl, prepare_exported_type_decl, prepare_exported_value_decl,
+    prepare_local_type_decl, prepare_local_value_decl,
 };
 pub use route_demand::{
     merge_route_demands, RouteDemand, RouteProvenance, RouteProvenanceKind, RoutedExternalDep,

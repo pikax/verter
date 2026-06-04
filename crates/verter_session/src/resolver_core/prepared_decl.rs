@@ -112,6 +112,56 @@ pub fn prepare_local_type_decl(
         return None;
     }
 
+    Some(prepare_type_decl_from_symbol(
+        canonical_id,
+        state,
+        symbol_name,
+        symbol,
+        dep_edges,
+    ))
+}
+
+/// Prepare a type declaration retained in an ambient-augmentation scope
+/// (`declare module "X" { ... }` / `declare global { ... }`).
+///
+/// The augmenter file's `declare module`/`declare global` inner declarations
+/// never enter file-scope `symbols`; they live in
+/// [`ShallowFileState::augmentation_scopes`] keyed by `(scope, name)`. The
+/// cross-file augmentation stitch lowers each augmenter's contributed body
+/// through the SAME `PreparedTypeDecl` → `MergedDecl` machinery as a file
+/// symbol, so it builds the prepared decl from the augmentation symbol's body
+/// and the augmenter file's own `name_resolution` (its file symbols + import
+/// bindings). Returns `None` when the augmenter has no contributor for
+/// `(scope, symbol_name)`.
+pub fn prepare_augmentation_type_decl(
+    canonical_id: &str,
+    state: &ShallowFileState,
+    scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+    symbol_name: &str,
+    dep_edges: Option<&FxHashMap<String, String>>,
+) -> Option<PreparedTypeDecl> {
+    let symbol = state.augmentation_symbol(scope, symbol_name)?;
+    Some(prepare_type_decl_from_symbol(
+        canonical_id,
+        state,
+        symbol_name,
+        symbol,
+        dep_edges,
+    ))
+}
+
+/// Build a [`PreparedTypeDecl`] from an already-resolved
+/// [`ShallowTypeSymbol`]. Shared by [`prepare_local_type_decl`] (file-scope
+/// symbol) and [`prepare_augmentation_type_decl`] (augmentation-scope symbol):
+/// both categories lower their body through the identical name-resolution +
+/// merged-contributor path, differing only in WHERE the symbol was looked up.
+fn prepare_type_decl_from_symbol(
+    canonical_id: &str,
+    state: &ShallowFileState,
+    symbol_name: &str,
+    symbol: &super::shallow_file_state::ShallowTypeSymbol,
+    dep_edges: Option<&FxHashMap<String, String>>,
+) -> PreparedTypeDecl {
     #[cfg(test)]
     PREPARED_TYPE_DECL_BUILD_COUNT.with(|count| {
         count.set(count.get().saturating_add(1));
@@ -183,7 +233,7 @@ pub fn prepare_local_type_decl(
     prepared.build_member_index();
     prepared.classify_wrapper_shape();
     prepared.classify_projection();
-    Some(prepared)
+    prepared
 }
 
 /// Prepare a named exported type declaration after routing has selected the

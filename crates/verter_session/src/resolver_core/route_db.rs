@@ -1081,7 +1081,7 @@ impl Default for RouteDb {
 /// payload that an `EffectiveExportSet` consumer observes for the
 /// queried target. The parallel optional fields hold the concrete
 /// target value; the `target_kind_tag` discriminates.
-fn build_module_augmentation_index_shape_fact_key(
+pub(crate) fn build_module_augmentation_index_shape_fact_key(
     target: &AugmentationTargetKind,
 ) -> verter_semantic::facts::FactKey {
     use verter_semantic::facts::registry::AugmentationTargetKindTag;

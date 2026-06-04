@@ -25,6 +25,15 @@ use crate::semantic_query::{
     ValueRootKey,
 };
 
+/// Result of a cross-file declaration-augmentation stitch
+/// ([`ProjectSemanticDispatch::stitch_module_augmentations`]): the folded
+/// [`SemanticNodeData::MergedDecl`] node plus the per-augmenter `FileWholeHash`
+/// self-roots that must enter the cached value's `self_root_canonicals`.
+struct AugmentationStitch {
+    merged: SemanticNodeId,
+    augmenter_self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)>,
+}
+
 /// Encode a [`ProjectionReductionContext`] as a compact u32 bit
 /// pattern used in the Phase G mapped-member-materialization
 /// identity tuple. Layout: bits 0–1 (demand tag) and 2+ (mode tag).
@@ -1159,6 +1168,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &mut substitutions,
             context,
         );
+
+        // Cross-file declaration augmentation (`declare module "X"` /
+        // `declare global` interface merging from sibling files). Fold every
+        // augmenter file's contributed body into the base body through the ONE
+        // `MergedDecl` peer-merge carrier — there is no second merge engine.
+        // Performed while `(decl_canonical, decl_name)` is still on the
+        // instantiate-active stack so a self-referential augmenter body
+        // terminates at the recursive-ref back-edge instead of recursing.
+        let mut augmenter_self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)> =
+            Vec::new();
+        if !is_non_file_base {
+            if let Some(stitch) =
+                self.stitch_module_augmentations(decl_canonical, decl_name, result, &scope, context)
+            {
+                result = stitch.merged;
+                augmenter_self_roots = stitch.augmenter_self_roots;
+            }
+        }
         self.pop_instantiate_active();
 
         // 6. Emit origin edges + build dep signature.
@@ -1231,11 +1258,235 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 observed_self_roots.push(arg_root);
             }
         }
+        // Cross-file augmentation self-roots: each augmenter file's whole-hash
+        // (SCOPE-LOCK 12 — `self_root_canonicals = {base} ∪ {augmenters}`), so a
+        // content edit to ANY augmenter misses the warm read.
+        for aug_root in augmenter_self_roots {
+            if !observed_self_roots
+                .iter()
+                .any(|(c, h)| *c == aug_root.0 && *h == aug_root.1)
+            {
+                observed_self_roots.push(aug_root);
+            }
+        }
         crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
             QueryResult::Value(result),
             fence,
         ))
         .with_observed_self_roots(observed_self_roots)
+    }
+
+    /// Cross-file declaration-augmentation stitch (`declare module "./local"`
+    /// relative interface merging from sibling files).
+    ///
+    /// Given a base declaration `(decl_canonical, decl_name)` and its
+    /// already-lowered base body `base_result`, this finds every augmenter file
+    /// whose `declare module "<rel>"` block resolves to `decl_canonical` and
+    /// augments `decl_name`, lowers each augmenter's RETAINED inner body in the
+    /// augmenter's own file context, and folds all contributions into a single
+    /// [`SemanticNodeData::MergedDecl`] peer-merge carrier — the ONE
+    /// declaration-merge path (no second merge engine; no source slicing —
+    /// bodies come from the typed `augmentation_scopes` inventory).
+    ///
+    /// Returns `None` when there are no contributing augmenters (the caller
+    /// keeps `base_result` unchanged). On a hit it returns the merged node and
+    /// the per-augmenter `FileWholeHash` self-roots, and observes the
+    /// `ModuleAugmentationIndexShape` (augmenter-set) fact plus each augmenter's
+    /// `FileWholeHash` onto the active fact tracer so the cached value
+    /// invalidates on an augmenter add/remove OR an augmenter content edit
+    /// (SCOPE-LOCK 12). It reuses the same fact rail as
+    /// [`crate::resolver_core::route_db::RouteDb::get_or_compute_effective_export_set`].
+    fn stitch_module_augmentations(
+        &self,
+        decl_canonical: &Arc<str>,
+        decl_name: &Arc<str>,
+        base_result: SemanticNodeId,
+        base_scope: &NodeScopeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<AugmentationStitch> {
+        use crate::file_artifact_store::{AugmentationTargetKey, AugmentationTargetKind};
+        use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+
+        let host = self.ctx.host_for_fact_tracer_install();
+        let env_hashes = host.host_view_env_hashes();
+        let project_identity = host.host_view_project_identity();
+
+        let target = AugmentationTargetKind::ResolvedRelativeCanonical(Arc::clone(decl_canonical));
+        let key = AugmentationTargetKey {
+            project_identity,
+            resolve_env_hash: env_hashes.resolve_env_hash,
+            lib_env_hash: env_hashes.lib_env_hash,
+            target: target.clone(),
+        };
+
+        // Candidate-augmenter discovery (program completeness for relative
+        // augmentation): an augmenter `declare module "./base"` block lives in a
+        // file that depends on the base — so the base's reverse-dependency set
+        // is exactly the candidate-augmenter set. Ensure each is indexed BEFORE
+        // the augmentation-index scan (which only sees loaded artifacts), so a
+        // sibling augmenter pulled in via a side-effect `import "./base"` is
+        // discovered rather than silently dropped. Loads are idempotent /
+        // content-hash cached; the augmentation index is then built once.
+        for rdep in host.workspace().reverse_deps_for(decl_canonical.as_ref()) {
+            let _ = self.ctx.ensure_indexed_ready(&rdep);
+        }
+
+        let artifact_store = self.ctx.project_type_store().indexed();
+        let resolve_rel = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
+            self.ctx
+                .resolve_type_dependency_canonical(augmenter, spec)
+                .map(Arc::from)
+        };
+        let augmenter_set = artifact_store.ensure_augmentation_index_populated(&key, resolve_rel);
+        if augmenter_set.entries.is_empty() {
+            return None;
+        }
+
+        // Lower each augmenter's contributed body in the augmenter's own
+        // context, in stable (canonical, parse_stable_hash) order
+        // (`AugmenterSet.entries` is pre-sorted that way — deterministic,
+        // discovery-order-independent).
+        let mut contributor_nodes: Vec<SemanticNodeId> = Vec::new();
+        let mut self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)> = Vec::new();
+        for augmenter in augmenter_set.entries.iter() {
+            let augmenter_canonical = augmenter.canonical();
+            let Some(indexed) = self.ctx.ensure_indexed_ready(augmenter_canonical.as_ref()) else {
+                continue;
+            };
+            let state = &indexed.shallow_state;
+
+            // The addressable contribution pointers: each augmenter
+            // `ModuleAugmentationFact` that targets THIS decl gives the raw
+            // `declare module "<spec>"` specifier under which the typed inner
+            // body is retained in `augmentation_scopes`.
+            let Some(art) = artifact_store.get_artifacts(&augmenter.artifact_key) else {
+                continue;
+            };
+            let mut matched_specs: Vec<String> = Vec::new();
+            for fact in art.augmentations.iter() {
+                if fact.augmented_name.as_ref() != decl_name.as_ref() {
+                    continue;
+                }
+                if !crate::file_artifact_store::augmenter_matches_target(
+                    fact,
+                    &key,
+                    augmenter_canonical.as_ref(),
+                    resolve_rel,
+                ) {
+                    continue;
+                }
+                let spec = fact.specifier.as_ref().to_string();
+                if !matched_specs.contains(&spec) {
+                    matched_specs.push(spec);
+                }
+            }
+            if matched_specs.is_empty() {
+                continue;
+            }
+
+            let bundle = self.ctx.prepared_decl_bundle(augmenter_canonical.as_ref());
+            let dep_edges = bundle.as_ref().map(|b| Arc::clone(&b.dep_edges));
+            let aug_scope = NodeScopeId::File {
+                canonical_id: Arc::clone(augmenter_canonical),
+                whole_hash: indexed.whole_hash,
+                local_scope: None,
+            };
+            let aug_scope_payload = bundle.as_ref().map(|bundle| {
+                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(bundle)
+            });
+            let aug_shadowing =
+                crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+                    aug_scope_payload.as_ref(),
+                );
+            let aug_env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
+
+            let mut any_contribution = false;
+            for spec in &matched_specs {
+                let Some(aug_prepared) = crate::resolver_core::prepare_augmentation_type_decl(
+                    augmenter_canonical.as_ref(),
+                    state,
+                    &AugmentationScopeKind::Module(spec.clone()),
+                    decl_name.as_ref(),
+                    dep_edges.as_deref(),
+                ) else {
+                    continue;
+                };
+                let mut aug_subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+                // An augmenter contribution is never the macro-T own body —
+                // downgrade provenance to structural (same rule the builtin /
+                // heritage paths apply).
+                let node = self.lower_decl_body_with_provenance(
+                    &aug_prepared,
+                    &aug_env,
+                    &aug_scope,
+                    aug_scope_payload.as_ref(),
+                    &aug_shadowing,
+                    &mut aug_subs,
+                    context.into_structural_provenance(),
+                );
+                contributor_nodes.push(node);
+                any_contribution = true;
+            }
+            if any_contribution {
+                if let Some(hash) = self.ctx.get_whole_hash(augmenter_canonical.as_ref()) {
+                    self_roots.push((Arc::clone(augmenter_canonical), hash));
+                }
+            }
+        }
+
+        if contributor_nodes.is_empty() {
+            return None;
+        }
+
+        // Fact rail (SCOPE-LOCK 12): the augmenter-set shape fact (invalidates
+        // on augmenter add/remove/reorder) + each augmenter's whole-hash
+        // (invalidates on augmenter content edit). Observed onto the active
+        // tracer so they enter this build's `ReadSetSignature.facts`.
+        crate::resolver_core::resolver_context::observe_fan_out(
+            crate::resolver_core::FactVersionRef::RouteSurface(
+                crate::resolver_core::RouteSurfaceFactRef {
+                    canonical_id: decl_canonical.as_ref().to_owned(),
+                    key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
+                        &target,
+                    ),
+                    lane: verter_semantic::facts::FactLane::Semantic,
+                    expected_hash: augmenter_set.fingerprint,
+                },
+            ),
+        );
+        for (canon, hash) in &self_roots {
+            crate::resolver_core::resolver_context::observe_fan_out(
+                crate::resolver_core::FactVersionRef::FileWholeHash {
+                    canonical_id: canon.as_ref().to_owned(),
+                    hash: *hash,
+                },
+            );
+        }
+
+        // Build the single peer-merge carrier: base contributors ∪ augmenter
+        // contributions. If the base body is itself a `MergedDecl` (same-file
+        // merge), flatten its contributors so the augmenter peers merge AT THE
+        // SAME LEVEL — a nested `MergedDecl` contributor would be dropped by the
+        // surface extractor (`shallow_surface_of_node` only reads Object /
+        // Intersection).
+        let mut all_contributors: Vec<SemanticNodeId> = match self.graph().node_data(base_result) {
+            Some(data) => match data.as_ref() {
+                SemanticNodeData::MergedDecl { contributors } => contributors.to_vec(),
+                _ => vec![base_result],
+            },
+            None => vec![base_result],
+        };
+        all_contributors.extend(contributor_nodes);
+        let merged = self.graph().intern_node_with_scope(
+            SemanticNodeData::MergedDecl {
+                contributors: Arc::from(all_contributors.into_boxed_slice()),
+            },
+            base_scope.clone(),
+        );
+        Some(AugmentationStitch {
+            merged,
+            augmenter_self_roots: self_roots,
+        })
     }
 
     /// Resolve the typed declaration kind of a prepared declaration rooted at
