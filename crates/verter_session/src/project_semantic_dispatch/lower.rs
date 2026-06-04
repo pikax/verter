@@ -25,8 +25,8 @@ use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
     DeclIdentity, HashValue, IndexSignature, NodeScopeId, PathSegment, PrimitiveKind,
     ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ResolveDeclKey, ScopeId,
-    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SurfaceMember,
-    SurfaceView, TupleElement, ValueRootKey,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    SurfaceMember, SurfaceView, TupleElement, ValueRootKey,
 };
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -389,12 +389,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope.clone(),
                         );
                     }
-                    return match self.execute(SemanticQueryKey::Instantiate {
+                    return match self.execute_type_node(SemanticQueryKey::Instantiate {
                         base: builtin_identity.to_decl_key(),
                         args: Arc::from(arg_ids.into_boxed_slice()),
                         context: reduction_context,
                     }) {
-                        QueryResult::Value(id) => id,
+                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => self.opaque(QueryError::Miss),
                     };
                 }
@@ -548,16 +548,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
 
-                let anchor = match self.execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                    scope: ScopeId {
-                        canonical_id: resolved_canonical,
-                        local_scope: None,
-                    },
-                    name: resolved_name,
-                })) {
-                    QueryResult::Value(id) => id,
-                    _ => return self.opaque(QueryError::Miss),
-                };
+                let anchor =
+                    match self.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                        scope: ScopeId {
+                            canonical_id: resolved_canonical,
+                            local_scope: None,
+                        },
+                        name: resolved_name,
+                    })) {
+                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                        _ => return self.opaque(QueryError::Miss),
+                    };
                 // Route through Instantiate when the caller supplied
                 // type arguments OR when the decl has type parameters
                 // (defaults must apply). Non-generic declarations with
@@ -596,12 +597,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             )
                         })
                         .collect();
-                    match self.execute(SemanticQueryKey::Instantiate {
+                    match self.execute_type_node(SemanticQueryKey::Instantiate {
                         base: decl_identity.to_decl_key(),
                         args: Arc::from(arg_ids.into_boxed_slice()),
                         context: reduction_context,
                     }) {
-                        QueryResult::Value(id) => id,
+                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => self.opaque(QueryError::Miss),
                     }
                 }
@@ -1143,11 +1144,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         );
                         let key_space =
                             if crate::semantic_query::may_reduce_operator(reduction_context) {
-                                match self.execute(SemanticQueryKey::KeyOf {
+                                match self.execute_type_node(SemanticQueryKey::KeyOf {
                                     base: inner_id,
                                     context: reduction_context,
                                 }) {
-                                    QueryResult::Value(id) => id,
+                                    QueryResult::Value(SemanticQueryOutput {
+                                        value: id, ..
+                                    }) => id,
                                     _ => self.opaque(QueryError::Miss),
                                 }
                             } else {
@@ -1241,12 +1244,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     kind,
                 };
 
-                match self.execute(SemanticQueryKey::MappedType {
+                match self.execute_type_node(SemanticQueryKey::MappedType {
                     source: source_sem,
                     mapper,
                     context: reduction_context,
                 }) {
-                    QueryResult::Value(id) => id,
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => self.opaque(QueryError::Miss),
                 }
             }
@@ -1263,11 +1266,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     reduction_context,
                 );
                 if crate::semantic_query::may_reduce_operator(reduction_context) {
-                    match self.execute(SemanticQueryKey::KeyOf {
+                    match self.execute_type_node(SemanticQueryKey::KeyOf {
                         base: base_id,
                         context: reduction_context,
                     }) {
-                        QueryResult::Value(id) => id,
+                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => self.opaque(QueryError::Miss),
                     }
                 } else {
@@ -1419,12 +1422,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // demanded `Expanded` single-hop terminal still reduces.
                     // A structural-transit caller keeps transit/Navigate via
                     // its own `reduction_context.mode`.
-                    match self.execute(SemanticQueryKey::IndexedAccess {
+                    match self.execute_type_node(SemanticQueryKey::IndexedAccess {
                         base: obj_id,
                         index: index_key,
                         mode: reduction_context.mode,
                     }) {
-                        QueryResult::Value(id) => id,
+                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => self.opaque(QueryError::Miss),
                     }
                 }
@@ -1545,14 +1548,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     substitutions,
                     reduction_context,
                 );
-                match self.execute(SemanticQueryKey::Conditional {
+                match self.execute_type_node(SemanticQueryKey::Conditional {
                     check: check_id,
                     extends: extends_id,
                     true_branch: true_id,
                     false_branch: false_id,
                     distributive: matches!(check.as_ref(), TypeExpr::TypeParameter(_)),
                 }) {
-                    QueryResult::Value(id) => id,
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => self.opaque(QueryError::Miss),
                 }
             }
@@ -1595,7 +1598,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // outer caller's responsibility (per CLAUDE.md "type
                 // navigation must stay narrower than expansion").
                 let single_root: Arc<str> = Arc::from(value_ref.path[0].as_str());
-                let single_query = self.execute(SemanticQueryKey::TypeOf {
+                let single_query = self.execute_type_node(SemanticQueryKey::TypeOf {
                     value_root: ValueRootKey {
                         scope: ScopeId {
                             canonical_id: Arc::clone(&scope_canonical_id),
@@ -1605,7 +1608,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                 });
                 let (mut result, consumed_segments) = match single_query {
-                    QueryResult::Value(id) => (id, 1usize),
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => (id, 1usize),
                     _ if value_ref.path.len() > 1 => {
                         // Namespace-member fallback: join the first two
                         // segments into `Ns.Foo` and let
@@ -1616,7 +1619,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             "{}.{}",
                             value_ref.path[0], value_ref.path[1]
                         ));
-                        match self.execute(SemanticQueryKey::TypeOf {
+                        match self.execute_type_node(SemanticQueryKey::TypeOf {
                             value_root: ValueRootKey {
                                 scope: ScopeId {
                                     canonical_id: scope_canonical_id,
@@ -1625,7 +1628,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 name: joined,
                             },
                         }) {
-                            QueryResult::Value(id) => (id, 2usize),
+                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => {
+                                (id, 2usize)
+                            }
                             _ => return self.opaque(QueryError::Miss),
                         }
                     }
@@ -1639,14 +1644,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             .collect::<Vec<_>>()
                             .into_boxed_slice(),
                     );
-                    result = match self.execute(SemanticQueryKey::ProjectPath {
+                    result = match self.execute_type_node(SemanticQueryKey::ProjectPath {
                         base: result,
                         path,
                         context: crate::semantic_query::ProjectionReductionContext::published(
                             ProjectionMode::Navigate,
                         ),
                     }) {
-                        QueryResult::Value(id) => id,
+                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => return self.opaque(QueryError::Miss),
                     };
                 }

@@ -1338,12 +1338,14 @@ impl VerterHost {
             // through the one engine.
             let instantiate_context =
                 ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
-            let node = match dispatch.execute(SemanticQueryKey::Instantiate {
+            let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
                 base: base.to_decl_key(),
                 args: std::sync::Arc::clone(args),
                 context: instantiate_context,
             }) {
-                crate::semantic_query::QueryResult::Value(node) => node,
+                crate::semantic_query::QueryResult::Value(
+                    crate::semantic_query::SemanticQueryOutput { value: node, .. },
+                ) => node,
                 crate::semantic_query::QueryResult::Recursive(_)
                 | crate::semantic_query::QueryResult::Error(_) => return None,
             };

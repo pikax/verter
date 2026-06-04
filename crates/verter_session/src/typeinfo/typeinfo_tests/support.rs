@@ -175,23 +175,29 @@ pub(super) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: 
     // U3 `resolve_surface_view` replacement consumes. Resolving via
     // `ResolveDecl` (rather than `resolve_named_symbol`, which instantiates)
     // keeps that carrier intact.
-    let base = match dispatch.execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+    let base = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from(canonical_id),
             local_scope: None,
         },
         name: Arc::from(name),
     })) {
-        crate::semantic_query::QueryResult::Value(node) => node,
+        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+            value: node,
+            ..
+        }) => node,
         other => panic!("{name} must resolve to a declaration carrier: {other:?}"),
     };
 
-    let terminal = match dispatch.execute(SemanticQueryKey::ProjectPath {
+    let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     }) {
-        crate::semantic_query::QueryResult::Value(node) => node,
+        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+            value: node,
+            ..
+        }) => node,
         other => panic!("empty-path Shallow projection of {name} failed: {other:?}"),
     };
     dispatch

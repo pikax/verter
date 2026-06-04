@@ -759,6 +759,7 @@ pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
     };
     use crate::semantic_query::{
         PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryOutput,
     };
 
     if engine.projection_op_budget_exhausted() {
@@ -787,13 +788,15 @@ pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
         expr,
         ProjectionMode::Navigate,
     )?;
-    let QueryResult::Value(node) = dispatch.execute(SemanticQueryKey::ProjectPath {
-        base,
-        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            ProjectionMode::Shallow,
-        ),
-    }) else {
+    let QueryResult::Value(SemanticQueryOutput { value: node, .. }) =
+        dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Shallow,
+            ),
+        })
+    else {
         return None;
     };
     let surface = projected_surface_from_semantic_node(ctx, node)?;

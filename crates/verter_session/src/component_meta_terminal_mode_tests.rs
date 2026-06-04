@@ -100,7 +100,7 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_route_target_pick_omit(
     // Drive the dispatch — this populates the warm cache (terminal
     // entry in Expanded mode, intermediate prefixes in Navigate
     // mode via backfill_prefixes).
-    let _ = host.semantic_dispatch().execute(key.clone());
+    let _ = host.semantic_dispatch().execute_type_node(key.clone());
 
     // Read the post-hoc trace.
     let trace = host.dispatch_trace_for(&key);
@@ -149,7 +149,7 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_fallthrough_inheritance
         ),
     };
 
-    let _ = host.semantic_dispatch().execute(key.clone());
+    let _ = host.semantic_dispatch().execute_type_node(key.clone());
 
     let trace = host.dispatch_trace_for(&key);
     let decomposition = trace.path_decomposition();
@@ -208,7 +208,7 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_userland_shadowing_pick
         ),
     };
 
-    let _ = host.semantic_dispatch().execute(key.clone());
+    let _ = host.semantic_dispatch().execute_type_node(key.clone());
 
     let trace = host.dispatch_trace_for(&key);
     let decomposition = trace.path_decomposition();
@@ -269,7 +269,7 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_exclude_extract_reducti
         ),
     };
 
-    let _ = host.semantic_dispatch().execute(key.clone());
+    let _ = host.semantic_dispatch().execute_type_node(key.clone());
 
     let trace = host.dispatch_trace_for(&key);
     let decomposition = trace.path_decomposition();
@@ -331,7 +331,7 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_slot_binding_lowering()
         ),
     };
 
-    let _ = host.semantic_dispatch().execute(key.clone());
+    let _ = host.semantic_dispatch().execute_type_node(key.clone());
 
     let trace = host.dispatch_trace_for(&key);
     let decomposition = trace.path_decomposition();
@@ -393,7 +393,7 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_typeof_substitution() {
         ),
     };
 
-    let _ = host.semantic_dispatch().execute(key.clone());
+    let _ = host.semantic_dispatch().execute_type_node(key.clone());
 
     let trace = host.dispatch_trace_for(&key);
     let decomposition = trace.path_decomposition();
@@ -452,7 +452,7 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_engine_state_promotion(
         ),
     };
 
-    let _ = host.semantic_dispatch().execute(key.clone());
+    let _ = host.semantic_dispatch().execute_type_node(key.clone());
 
     let trace = host.dispatch_trace_for(&key);
     let decomposition = trace.path_decomposition();

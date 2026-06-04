@@ -29,7 +29,9 @@ use std::sync::Arc;
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey};
+use crate::semantic_query::{
+    ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+};
 use crate::types::HostConfig;
 use crate::VerterHost;
 
@@ -104,7 +106,7 @@ interface Cfg {
 /// that broke the engine's same-identity guard would stack-overflow
 /// this test.
 ///
-/// The query goes through `dispatch.execute(SemanticQueryKey::
+/// The query goes through `dispatch.execute_type_node(SemanticQueryKey::
 /// Instantiate)` directly so the test exercises the engine's
 /// recursion handling on a single dispatcher (the same dispatcher
 /// surface 5h's `ScopeShadowing` thread plumbs through). The
@@ -167,7 +169,7 @@ fn pathological_self_shadowing_userland_pick() {
                     ProjectionMode::Expanded,
                 ),
             };
-            dispatch.execute(key)
+            dispatch.execute_type_node(key)
         })
         .expect("spawn worker thread for pathological recursion fixture");
     let result = join.join().expect(
@@ -185,7 +187,7 @@ fn pathological_self_shadowing_userland_pick() {
     // terminated. We then verify the result shape carries the
     // recursion sentinel.
     match result {
-        QueryResult::Value(node_id) => {
+        QueryResult::Value(SemanticQueryOutput { value: node_id, .. }) => {
             let graph = host.project_type_store().semantic_graph();
             let data = graph.node_data(node_id).expect("result node must exist");
             // Discriminating: the engine's same-identity guard
@@ -284,7 +286,7 @@ fn pathological_exclude_self_recursive() {
                     ProjectionMode::Expanded,
                 ),
             };
-            dispatch.execute(key)
+            dispatch.execute_type_node(key)
         })
         .expect("spawn worker thread for pathological recursion fixture");
     let result = join.join().expect(
@@ -294,7 +296,7 @@ fn pathological_exclude_self_recursive() {
     );
 
     match result {
-        QueryResult::Value(node_id) => {
+        QueryResult::Value(SemanticQueryOutput { value: node_id, .. }) => {
             let graph = host.project_type_store().semantic_graph();
             let data = graph.node_data(node_id).expect("result node must exist");
             let dbg = format!("{:?}", data.as_ref());
@@ -481,7 +483,7 @@ fn pathological_template_literal_key_recursion() {
                     ProjectionMode::Expanded,
                 ),
             };
-            dispatch.execute(key)
+            dispatch.execute_type_node(key)
         })
         .expect("spawn worker thread for pathological recursion fixture");
     let result = join.join().expect(
@@ -491,7 +493,7 @@ fn pathological_template_literal_key_recursion() {
     );
 
     match result {
-        QueryResult::Value(node_id) => {
+        QueryResult::Value(SemanticQueryOutput { value: node_id, .. }) => {
             let graph = host.project_type_store().semantic_graph();
             let data = graph.node_data(node_id).expect("result node must exist");
             let dbg = format!("{:?}", data.as_ref());

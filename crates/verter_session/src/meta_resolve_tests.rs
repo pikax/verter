@@ -6562,6 +6562,7 @@ fn spike_dispatch_handles_props_t_substitution_via_macro_shell() {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{
         PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryOutput,
     };
     use std::sync::Arc as StdArc;
     use verter_type_expr::TypeExpr;
@@ -6612,7 +6613,7 @@ defineProps<Props<T>>()
         .lower_type_expr_in_scope_with_mode("/Generic.vue", &props_t, ProjectionMode::Expanded)
         .expect("dispatch must lower the Props<T> shell rooted at /Generic.vue");
 
-    let projected = dispatch.execute(SemanticQueryKey::ProjectPath {
+    let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
         path: StdArc::from(vec![PathSegment::Member(StdArc::from("items"))]),
         context: crate::semantic_query::ProjectionReductionContext::published(
@@ -6621,7 +6622,7 @@ defineProps<Props<T>>()
     });
 
     let raised = match projected {
-        QueryResult::Value(node_id) => dispatch
+        QueryResult::Value(SemanticQueryOutput { value: node_id, .. }) => dispatch
             .raise_node_to_type_expr(node_id)
             .expect("raise must succeed on a ProjectPath result"),
         other => panic!(
@@ -6927,6 +6928,7 @@ fn dispatch_only_imported_mapped_slots_resolved_shape_via_dispatch_only() {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{
         PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryOutput,
     };
     use std::sync::Arc as StdArc;
     use verter_type_expr::{empty_type_args, TypeExpr};
@@ -7010,7 +7012,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     // can navigate the Mapped+Conditional pair to extract the badge slot.
     let badge_path: StdArc<[PathSegment]> =
         StdArc::from(vec![PathSegment::Member(StdArc::from("badge"))]);
-    let projected = dispatch.execute(SemanticQueryKey::ProjectPath {
+    let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
         path: badge_path,
         context: crate::semantic_query::ProjectionReductionContext::published(
@@ -7019,7 +7021,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     });
 
     let badge_node = match projected {
-        QueryResult::Value(id) => id,
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!(
             "dispatch-only ProjectPath(['badge']) on PricingPlansSlots<…> \
              must return Value(id); got {other:?}\n\

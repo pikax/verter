@@ -65,9 +65,10 @@ pub type TypeResolutionResult = SemanticNodeId;
 ///   faults — they ride the success arm as `Ok(None)` (no resolved
 ///   node, but the request was well-formed and serviced).
 /// - `UnsupportedIntrinsic`, `BudgetExceeded`, `UnstableState`,
-///   `AliasCycle`, and `Other` ARE request faults — they map to the
-///   matching [`TypeResolutionRequestError`] arm and ride the
-///   carrier's `Err`.
+///   `AliasCycle`, `Other`, and `ValueDomainMismatch` ARE request
+///   faults — they map to the matching [`TypeResolutionRequestError`]
+///   arm and ride the carrier's `Err`. `ValueDomainMismatch` has no
+///   dedicated arm; it rides the text-bearing `Other` carrier.
 ///
 /// The split is the entire reason the type-resolution entry-points
 /// return an [`crate::AuditedResult`] with a typed `E` rather than a
@@ -124,6 +125,14 @@ impl TypeResolutionRequestError {
                 chain: Arc::clone(chain),
             }),
             QueryError::Other(text) => Some(Self::Other(Arc::clone(text))),
+            // A typed caller asked for a value domain the query could not
+            // provide. This is a genuine request fault; it surfaces through
+            // the text-bearing carrier. (Unreachable until non-`TypeNode`
+            // value producers exist, since every live key resolves to a
+            // type node.)
+            QueryError::ValueDomainMismatch { expected, actual } => Some(Self::Other(Arc::from(
+                format!("value-domain mismatch: expected {expected:?}, got {actual:?}").as_str(),
+            ))),
         }
     }
 }
@@ -150,7 +159,8 @@ impl VerterHost {
     ///   well-formed but resolved no node.
     /// - `Err(fault)` — dispatch returned a genuine request fault
     ///   (`BudgetExceeded` / `UnstableState` / `AliasCycle` /
-    ///   `UnsupportedIntrinsic` / `Other`).
+    ///   `UnsupportedIntrinsic` / `Other` / `ValueDomainMismatch`).
+    ///   `ValueDomainMismatch` rides the text-bearing `Other` carrier.
     ///
     /// The carrier's `audit` field is always populated: an active
     /// registration carries the full payload
@@ -218,12 +228,12 @@ impl VerterHost {
             AuditRequestRegistration::Active(_) => {
                 let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
                 let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
-                dispatch.execute(query)
+                dispatch.execute_type_node(query)
             }
             AuditRequestRegistration::Noop => {
                 let _noop_guard = verter_audit::install_noop_observer();
                 let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
-                dispatch.execute(query)
+                dispatch.execute_type_node(query)
             }
         };
         let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
@@ -234,8 +244,10 @@ impl VerterHost {
         // - Error(request fault) → Err(fault).
         let outcome: Result<Option<TypeResolutionResult>, TypeResolutionRequestError> =
             match &result {
-                crate::semantic_query::QueryResult::Value(node)
-                | crate::semantic_query::QueryResult::Recursive(node) => Ok(Some(*node)),
+                crate::semantic_query::QueryResult::Value(
+                    crate::semantic_query::SemanticQueryOutput { value: node, .. },
+                ) => Ok(Some(*node)),
+                crate::semantic_query::QueryResult::Recursive(node) => Ok(Some(*node)),
                 crate::semantic_query::QueryResult::Error(err) => {
                     match TypeResolutionRequestError::from_query_error(err) {
                         Some(fault) => Err(fault),

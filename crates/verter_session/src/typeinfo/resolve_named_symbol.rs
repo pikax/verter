@@ -51,7 +51,7 @@ use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::semantic_query::{
     NodeScopeId, ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
-    SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
 };
 use crate::VerterHost;
 
@@ -83,7 +83,8 @@ impl VerterHost {
     ///   well-formed but resolved no node.
     /// - `Err(fault)` — a genuine dispatch fault (`BudgetExceeded` /
     ///   `UnstableState` / `AliasCycle` / `UnsupportedIntrinsic` /
-    ///   `Other`).
+    ///   `Other` / `ValueDomainMismatch`). `ValueDomainMismatch` rides
+    ///   the text-bearing `Other` carrier.
     ///
     /// The carrier's `audit` field is always populated:
     /// [`verter_audit::AuditCaptureState::ActiveStored`] on the
@@ -391,8 +392,9 @@ fn resolve_named_symbol_inner(
         },
         name: Arc::from(name),
     });
-    let decl_node_opt = match dispatch.execute(resolve_decl_key) {
-        QueryResult::Value(node) | QueryResult::Recursive(node) => Some(node),
+    let decl_node_opt = match dispatch.execute_type_node(resolve_decl_key) {
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => Some(node),
+        QueryResult::Recursive(node) => Some(node),
         QueryResult::Error(err) => {
             // A genuine dispatch fault on the bare-decl probe is a
             // request fault — surface it. A non-fault miss
@@ -439,29 +441,29 @@ fn resolve_named_symbol_inner(
         args: Arc::from(lowered_args.into_boxed_slice()),
         context: crate::semantic_query::ProjectionReductionContext::published(effective_mode),
     };
-    match dispatch.execute(instantiate_key) {
-        QueryResult::Value(node) | QueryResult::Recursive(node) => {
-            let final_node = if matches!(effective_mode, ProjectionMode::Identity) {
-                node
-            } else {
-                match materialize_through_aliases(host, &dispatch, node, effective_mode) {
-                    Ok(materialized) => materialized,
-                    // A hard dispatch fault during nested materialization
-                    // propagates as `Err` rather than silently degrading to
-                    // the un-materialised placeholder.
-                    Err(fault) => return (Err(fault), effective_mode),
-                }
-            };
-            (Ok(Some(final_node)), effective_mode)
-        }
+    let node = match dispatch.execute_type_node(instantiate_key) {
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+        QueryResult::Recursive(node) => node,
         QueryResult::Error(err) => {
             // Instantiate failed. A genuine dispatch fault is surfaced
             // as `Err`; a non-fault miss falls back to the original
             // `ResolveDecl` node (when present) so callers still
             // receive *something* identifiable rather than a None.
-            (classify_dispatch_error(&err, decl_node_opt), effective_mode)
+            return (classify_dispatch_error(&err, decl_node_opt), effective_mode);
         }
-    }
+    };
+    let final_node = if matches!(effective_mode, ProjectionMode::Identity) {
+        node
+    } else {
+        match materialize_through_aliases(host, &dispatch, node, effective_mode) {
+            Ok(materialized) => materialized,
+            // A hard dispatch fault during nested materialization
+            // propagates as `Err` rather than silently degrading to
+            // the un-materialised placeholder.
+            Err(fault) => return (Err(fault), effective_mode),
+        }
+    };
+    (Ok(Some(final_node)), effective_mode)
 }
 
 /// Classify a `QueryResult::Error(err)` arm into the carrier outcome a
@@ -471,7 +473,9 @@ fn resolve_named_symbol_inner(
 /// their dispatch errors through, mirroring
 /// [`crate::host_resolve_type_audit::resolve_type_with_audit`]'s split:
 /// - A genuine dispatch FAULT (`BudgetExceeded` / `UnstableState` /
-///   `AliasCycle` / `UnsupportedIntrinsic` / `Other`) → `Err(fault)`.
+///   `AliasCycle` / `UnsupportedIntrinsic` / `Other` /
+///   `ValueDomainMismatch`, the last riding the text-bearing `Other`
+///   carrier) → `Err(fault)`.
 /// - A non-fault MISS (`Miss` / `RecursiveRef` / `DeclPlaceholder`) →
 ///   `Ok(fallback)`, where `fallback` is whatever identifiable node the
 ///   caller already resolved (e.g. the bare `ResolveDecl` node) — `None`
@@ -536,7 +540,14 @@ fn materialize_through_aliases(
                     args: Arc::from(Vec::new().into_boxed_slice()),
                     context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 };
-                match classify_materialization_step(dispatch.execute(key), current)? {
+                let step_result = match dispatch.execute_type_node(key) {
+                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                        QueryResult::Value(node)
+                    }
+                    QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                    QueryResult::Error(err) => QueryResult::Error(err),
+                };
+                match classify_materialization_step(step_result, current)? {
                     MaterializationStep::Continue(next) => {
                         current = next;
                         continue;

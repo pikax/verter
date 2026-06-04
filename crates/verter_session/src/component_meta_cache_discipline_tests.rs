@@ -115,7 +115,7 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
     const N: usize = 8;
     let dispatch = host.semantic_dispatch();
     for _ in 0..N {
-        let _ = dispatch.execute(key.clone());
+        let _ = dispatch.execute_type_node(key.clone());
     }
 
     let cold = counter.family_cold(&key) - baseline_cold;
@@ -149,7 +149,7 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
     };
     let unrelated_baseline_cold = counter.family_cold(&unrelated_key);
     let unrelated_baseline_warm = counter.family_warm(&unrelated_key);
-    let _ = dispatch.execute(unrelated_key.clone());
+    let _ = dispatch.execute_type_node(unrelated_key.clone());
     let unrelated_cold = counter.family_cold(&unrelated_key) - unrelated_baseline_cold;
     let unrelated_warm = counter.family_warm(&unrelated_key) - unrelated_baseline_warm;
     assert_eq!(

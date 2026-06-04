@@ -256,20 +256,22 @@ pub fn dispatch_inject_parse_fact_for_tests(
     crate::project_semantic_dispatch::DispatchInjectParseFactGuard::arm(fact)
 }
 
-/// Drive [`crate::project_semantic_dispatch::ProjectSemanticDispatch::execute`]
-/// from integration tests. Constructs a `ProjectSemanticDispatch`
-/// from the `host` (the standard internal pattern) and forwards
-/// the call. Used by tests that need to exercise the dispatch's
-/// `install_fact_tracer` wrapper directly — the dispatch is
-/// `pub(crate)` so integration test crates cannot reach it
-/// otherwise.
-pub fn dispatch_execute_for_tests(
+/// Test-visibility shim exposing the canonical
+/// [`execute_type_node`](crate::semantic_query::SemanticQueryApi::execute_type_node)
+/// to integration-test crates (dispatch is `pub(crate)`); it returns the typed
+/// [`SemanticQueryOutput<SemanticNodeId>`](crate::semantic_query::SemanticQueryOutput)
+/// verbatim — NOT a stripped node API and NOT a second resolver/admission path.
+/// `ProjectSemanticDispatch` is `pub(crate)`, so test crates in
+/// `crates/verter_session/tests/**` cannot construct it directly; this forwards
+/// to the one canonical dispatch and hands back its result unchanged.
+pub fn dispatch_execute_type_node_for_tests(
     host: &crate::VerterHost,
     key: crate::semantic_query::SemanticQueryKey,
-) -> crate::semantic_query::QueryResult<crate::semantic_query::SemanticNodeId> {
+) -> crate::semantic_query::QueryResult<
+    crate::semantic_query::SemanticQueryOutput<crate::semantic_query::SemanticNodeId>,
+> {
     use crate::semantic_query::SemanticQueryApi;
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-    dispatch.execute(key)
+    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host).execute_type_node(key)
 }
 
 /// Drive `ProjectSemanticDispatch::lower_type_expr_in_scope_with_context`

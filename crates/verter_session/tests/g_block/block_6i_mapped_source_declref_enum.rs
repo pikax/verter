@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use verter_session::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
-    SemanticQueryKey,
+    SemanticQueryKey, SemanticQueryOutput,
 };
 use verter_session::{for_tests, FileKind, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
@@ -95,8 +95,8 @@ fn shallow_walker_enumerates_declref_source_via_source_surface_helper() {
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     };
-    let surface_node = match for_tests::dispatch_execute_for_tests(&host, project_query) {
-        QueryResult::Value(node) => node,
+    let surface_node = match for_tests::dispatch_execute_type_node_for_tests(&host, project_query) {
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         other => panic!(
             "ProjectPath {{ MapDeclRefSource, [], Published(Shallow) }} must yield a value node, \
              got {other:?}",

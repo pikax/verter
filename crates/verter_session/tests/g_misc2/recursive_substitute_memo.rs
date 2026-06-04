@@ -47,7 +47,7 @@ use std::sync::Arc;
 use verter_session::request_context::{RequestContext, RequestContextGuard};
 use verter_session::semantic_query::{
     LiteralValue, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
 };
 use verter_session::{for_tests, FileKind, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
@@ -137,8 +137,8 @@ fn lower_mapped(host: &Arc<VerterHost>) -> SemanticNodeId {
                     ProjectionMode::Navigate,
                 ),
             };
-            match for_tests::dispatch_execute_for_tests(host, key) {
-                QueryResult::Value(id) => id,
+            match for_tests::dispatch_execute_type_node_for_tests(host, key) {
+                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                 other => panic!("Instantiate dispatch must succeed; got {other:?}"),
             }
         }
@@ -173,8 +173,8 @@ fn extract_mapper_inputs(
                         ProjectionMode::Navigate,
                     ),
                 };
-                current = match for_tests::dispatch_execute_for_tests(host, key) {
-                    QueryResult::Value(id) => id,
+                current = match for_tests::dispatch_execute_type_node_for_tests(host, key) {
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     other => {
                         panic!("Instantiate of DeclRef must yield a value node; got {other:?}")
                     }
@@ -188,8 +188,8 @@ fn extract_mapper_inputs(
                         ProjectionMode::Navigate,
                     ),
                 };
-                current = match for_tests::dispatch_execute_for_tests(host, key) {
-                    QueryResult::Value(id) => id,
+                current = match for_tests::dispatch_execute_type_node_for_tests(host, key) {
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     other => panic!(
                         "Instantiate of InstantiationRef must yield a value node; got {other:?}"
                     ),

@@ -252,7 +252,9 @@ fn repeated_indexed_lookups_return_same_arc() {
 #[test]
 fn semantic_subqueries_dedup_across_request_boundaries() {
     use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
-    use crate::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
+    use crate::semantic_query::{
+        QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    };
 
     let host = host();
     upsert_ts(
@@ -267,11 +269,14 @@ fn semantic_subqueries_dedup_across_request_boundaries() {
         .semantic_graph()
         .memo_entry_count();
     let key = resolve_decl_key("/w/types.ts", "C");
-    let first = dispatch.execute(SemanticQueryKey::ResolveDecl(key.clone()));
-    let second = dispatch.execute(SemanticQueryKey::ResolveDecl(key));
+    let first = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key.clone()));
+    let second = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key));
 
     let (a, b) = match (first, second) {
-        (QueryResult::Value(a), QueryResult::Value(b)) => (a, b),
+        (
+            QueryResult::Value(SemanticQueryOutput { value: a, .. }),
+            QueryResult::Value(SemanticQueryOutput { value: b, .. }),
+        ) => (a, b),
         other => panic!("expected two values from ResolveDecl, got {other:?}"),
     };
     assert_eq!(a, b, "same key must memoize to one node id");
@@ -283,6 +288,74 @@ fn semantic_subqueries_dedup_across_request_boundaries() {
         after - before,
         1,
         "two identical queries must share one warm memo entry"
+    );
+}
+
+/// The canonical `execute` entry returns the domain-agnostic
+/// `SemanticQueryValue`: a live `ResolveDecl` resolves to a
+/// `TypeNode` carried in a `SemanticQueryOutput` with `clean` boundary
+/// provenance. Negative: the value is NOT any non-`TypeNode` domain.
+#[test]
+fn execute_returns_typed_type_node_with_clean_provenance() {
+    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
+    use crate::semantic_query::{
+        QueryResult, ResultProvenance, ResultTaint, SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryValue, SemanticQueryValueTag,
+    };
+
+    let host = host();
+    upsert_ts(&host, "/w/types.ts", "export type C = { foo: number }");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let key = resolve_decl_key("/w/types.ts", "C");
+    match dispatch.execute(SemanticQueryKey::ResolveDecl(key)) {
+        QueryResult::Value(out) => {
+            assert_eq!(
+                out.provenance,
+                ResultProvenance {
+                    taint: ResultTaint::Clean
+                },
+                "boundary provenance must be clean"
+            );
+            assert!(
+                matches!(&out.value, SemanticQueryValue::TypeNode(_)),
+                "a live ResolveDecl must resolve to the TypeNode domain, got {:?}",
+                out.value.tag()
+            );
+            // Negative: it is exactly TypeNode, not any other domain tag.
+            assert_eq!(out.value.tag(), SemanticQueryValueTag::TypeNode);
+            assert_ne!(out.value.tag(), SemanticQueryValueTag::OverloadSet);
+            assert_ne!(out.value.tag(), SemanticQueryValueTag::Relation);
+            assert_ne!(out.value.tag(), SemanticQueryValueTag::DeclarationAnalysis);
+        }
+        other => panic!("expected typed Value(TypeNode), got {other:?}"),
+    }
+}
+
+/// Wrapper parity: `resolve_decl` (the provenance-stripped convenience
+/// wrapper) returns the same node id that `execute_type_node` carries on
+/// its `Value` arm for the same key.
+#[test]
+fn resolve_decl_wrapper_matches_execute_type_node_node() {
+    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
+    use crate::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
+
+    let host = host();
+    upsert_ts(&host, "/w/types.ts", "export type C = { foo: number }");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let key = resolve_decl_key("/w/types.ts", "C");
+    let wrapper = match dispatch.resolve_decl(key.clone()) {
+        QueryResult::Value(node) => node,
+        other => panic!("expected wrapper Value, got {other:?}"),
+    };
+    let typed = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key)) {
+        QueryResult::Value(out) => out.value,
+        other => panic!("expected typed Value, got {other:?}"),
+    };
+    assert_eq!(
+        wrapper, typed,
+        "resolve_decl wrapper node must equal execute_type_node's node"
     );
 }
 
@@ -1152,7 +1225,9 @@ fn empty_import_routes_default_is_zero_len() {
 #[test]
 fn semantic_query_second_call_hits_warm_memo_slice11() {
     use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
-    use crate::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
+    use crate::semantic_query::{
+        QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    };
 
     let host = host();
     upsert_ts(&host, "/w/t.ts", "export type T = { x: number }");
@@ -1163,19 +1238,22 @@ fn semantic_query_second_call_hits_warm_memo_slice11() {
         .project_type_store()
         .semantic_graph()
         .memo_entry_count();
-    let first = dispatch.execute(SemanticQueryKey::ResolveDecl(key.clone()));
+    let first = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key.clone()));
     let after_first = host
         .project_type_store()
         .semantic_graph()
         .memo_entry_count();
-    let second = dispatch.execute(SemanticQueryKey::ResolveDecl(key));
+    let second = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key));
     let after_second = host
         .project_type_store()
         .semantic_graph()
         .memo_entry_count();
 
     match (first, second) {
-        (QueryResult::Value(a), QueryResult::Value(b)) => assert_eq!(a, b),
+        (
+            QueryResult::Value(SemanticQueryOutput { value: a, .. }),
+            QueryResult::Value(SemanticQueryOutput { value: b, .. }),
+        ) => assert_eq!(a, b, "same key must memoize to one node id"),
         other => panic!("expected two values, got {other:?}"),
     }
     assert_eq!(
@@ -1204,7 +1282,9 @@ fn semantic_query_second_call_hits_warm_memo_slice11() {
 #[test]
 fn semantic_query_unrelated_edit_keeps_memo_warm_slice11() {
     use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
-    use crate::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
+    use crate::semantic_query::{
+        QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    };
 
     let host = host();
     upsert_ts(&host, "/w/a.ts", "export type A = { a: number }");
@@ -1212,8 +1292,11 @@ fn semantic_query_unrelated_edit_keeps_memo_warm_slice11() {
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     let a_key = resolve_decl_key("/w/a.ts", "A");
-    let first = dispatch.execute(SemanticQueryKey::ResolveDecl(a_key.clone()));
-    let QueryResult::Value(first_id) = first else {
+    let first = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(a_key.clone()));
+    let QueryResult::Value(SemanticQueryOutput {
+        value: first_id, ..
+    }) = first
+    else {
         panic!("expected value");
     };
     let warm_before = host
@@ -1240,9 +1323,11 @@ fn semantic_query_unrelated_edit_keeps_memo_warm_slice11() {
     }
 
     // And a fresh execute yields the same id — no cold rebuild.
-    let refreshed = dispatch.execute(SemanticQueryKey::ResolveDecl(a_key));
+    let refreshed = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(a_key));
     match refreshed {
-        QueryResult::Value(id) => assert_eq!(id, first_id, "warm hit must return the original id"),
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => {
+            assert_eq!(id, first_id, "warm hit must return the original id")
+        }
         other => panic!("expected value, got {other:?}"),
     }
 }
@@ -1261,7 +1346,7 @@ fn semantic_query_warm_entry_has_non_empty_dep_signature_slice11() {
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     let key = resolve_decl_key("/w/a.ts", "A");
-    let _ = dispatch.execute(SemanticQueryKey::ResolveDecl(key.clone()));
+    let _ = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key.clone()));
     let warm = host
         .project_type_store()
         .semantic_graph()
@@ -1309,7 +1394,7 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
     let key = SemanticQueryKey::NormalizeUnion {
         members: members.clone(),
     };
-    let _ = dispatch.execute(key.clone());
+    let _ = dispatch.execute_type_node(key.clone());
     // After canonicalization, the on-memo key is sorted — fetch via the
     // same sorted identity.
     let mut sorted: Vec<SemanticNodeId> = members.iter().copied().collect();

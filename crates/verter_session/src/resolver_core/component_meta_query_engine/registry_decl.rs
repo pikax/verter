@@ -50,6 +50,7 @@ use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch
 use crate::resolver_core::{FuseTrip, RouteDemand};
 use crate::semantic_query::{
     PathSegment, ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+    SemanticQueryOutput,
 };
 
 impl<'a> ComponentMetaQueryEngine<'a> {
@@ -902,11 +903,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         .map(|root| (root.canonical_id, root.symbol_name))
         .unwrap_or_else(|| (scope_canonical_id.to_string(), symbol_name.to_string()));
         let dispatch = self.semantic_dispatch();
-        match dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+        match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
             resolved_root.0.as_str(),
             resolved_root.1.as_str(),
         ))) {
-            QueryResult::Value(id) => Some(id),
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => Some(id),
             _ => None,
         }
     }
@@ -930,11 +931,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         .map(|root| (root.canonical_id, root.symbol_name))
         .unwrap_or_else(|| (scope_canonical_id.to_string(), symbol_name.to_string()));
         let dispatch = self.semantic_dispatch();
-        let anchor = match dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key(
-            resolved_root.0.as_str(),
-            resolved_root.1.as_str(),
-        ))) {
-            QueryResult::Value(id) => id,
+        let anchor = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(
+            resolve_decl_key(resolved_root.0.as_str(), resolved_root.1.as_str()),
+        )) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
             _ => return None,
         };
         // R6: Instantiate.base is content-free `DeclKey`; the
@@ -944,7 +944,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             canonical_id: std::sync::Arc::from(resolved_root.0.as_str()),
             decl_name: std::sync::Arc::from(resolved_root.1.as_str()),
         };
-        match dispatch.execute(SemanticQueryKey::Instantiate {
+        match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
             base,
             args: empty_semantic_args(),
             // `dispatch_root_instantiated` feeds
@@ -956,7 +956,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
         }) {
-            QueryResult::Value(id) => Some(id),
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => Some(id),
             _ => Some(anchor),
         }
     }
@@ -1005,14 +1005,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         .into_boxed_slice(),
                 );
                 let dispatch = self.semantic_dispatch();
-                match dispatch.execute(SemanticQueryKey::ProjectPath {
+                match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
                     base: root,
                     path: query_path,
                     context: crate::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                 }) {
-                    QueryResult::Value(node) => dispatch
+                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => dispatch
                         .raise_node_to_type_expr(node)
                         .filter(dispatch_route_expr_is_materialized),
                     _ => None,
@@ -1069,14 +1069,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // Step B: instantiate the shared builtin Pick/Omit carrier on
         // `[body, keys]` in the publication Expanded mode — the same path as a
         // userland `Pick<…>` / `Omit<…>`, so fix-#1's public gate applies.
-        match dispatch.execute(SemanticQueryKey::Instantiate {
+        match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
             base: builtin_identity,
             args: std::sync::Arc::from(vec![body_id, keys_node].into_boxed_slice()),
             context: crate::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Expanded,
             ),
         }) {
-            QueryResult::Value(node) => dispatch
+            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => dispatch
                 .raise_node_to_type_expr(node)
                 .filter(dispatch_route_expr_is_materialized),
             _ => None,

@@ -888,19 +888,22 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         decl_name: Arc::from("ColorModeSelectProps"),
     };
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
-    let node = match dispatch.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
-        base: key,
-        args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            ProjectionMode::Expanded,
-        ),
-    }) {
-        crate::semantic_query::QueryResult::Value(n)
-        | crate::semantic_query::QueryResult::Recursive(n) => n,
-        crate::semantic_query::QueryResult::Error(e) => {
-            panic!("Instantiate(ColorModeSelectProps, Expanded) errored: {e:?}")
-        }
-    };
+    let node =
+        match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::Instantiate {
+            base: key,
+            args: Arc::from(Vec::new().into_boxed_slice()),
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Expanded,
+            ),
+        }) {
+            crate::semantic_query::QueryResult::Value(
+                crate::semantic_query::SemanticQueryOutput { value: n, .. },
+            ) => n,
+            crate::semantic_query::QueryResult::Recursive(n) => n,
+            crate::semantic_query::QueryResult::Error(e) => {
+                panic!("Instantiate(ColorModeSelectProps, Expanded) errored: {e:?}")
+            }
+        };
     let mut names = Vec::new();
     collect_surface_member_names(store, node, &mut names);
     for inherited in ["open", "defaultOpen", "disabled"] {

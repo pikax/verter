@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 use verter_session::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
-    SemanticQueryKey,
+    SemanticQueryKey, SemanticQueryOutput,
 };
 use verter_session::{for_tests, FileKind, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
@@ -110,8 +110,8 @@ fn evaluate_alias(
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     };
-    match for_tests::dispatch_execute_for_tests(host, project_query) {
-        QueryResult::Value(node) => node,
+    match for_tests::dispatch_execute_type_node_for_tests(host, project_query) {
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         other => panic!(
             "ProjectPath {{ {alias_name}, [], Published(Expanded) }} must yield a value node, \
              got {other:?}"

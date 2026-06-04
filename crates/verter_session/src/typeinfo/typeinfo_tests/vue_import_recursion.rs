@@ -34,7 +34,8 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, ScopeId,
-    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, ValueRootKey,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    ValueRootKey,
 };
 use crate::typeinfo::types::TypeInfoQueryLevel;
 use crate::types::{FileKind, HostConfig, UpsertRequest};
@@ -97,7 +98,7 @@ fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<Stri
         .ensure_indexed_ready(canonical_id)
         .expect("indexed ready")
         .whole_hash;
-    let node = match dispatch.execute(SemanticQueryKey::Instantiate {
+    let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: crate::semantic_query::DeclKey {
             canonical_id: Arc::from(canonical_id),
             decl_name: Arc::from("default"),
@@ -105,7 +106,8 @@ fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<Stri
         args: Arc::from(Vec::new().into_boxed_slice()),
         context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
     }) {
-        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+        QueryResult::Recursive(node) => node,
         QueryResult::Error(e) => {
             panic!("Instantiate(.vue default) for {canonical_id} errored: {e:?}")
         }
@@ -145,7 +147,7 @@ fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Op
         .ensure_indexed_ready(canonical_id)
         .expect("indexed ready")
         .whole_hash;
-    let node = match dispatch.execute(SemanticQueryKey::Instantiate {
+    let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: crate::semantic_query::DeclKey {
             canonical_id: Arc::from(canonical_id),
             decl_name: Arc::from("default"),
@@ -153,7 +155,8 @@ fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Op
         args: Arc::from(Vec::new().into_boxed_slice()),
         context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
     }) {
-        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+        QueryResult::Recursive(node) => node,
         QueryResult::Error(_) => return None,
     };
     let graph = {
@@ -191,7 +194,7 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
         .ensure_indexed_ready(canonical_id)
         .expect("indexed ready")
         .whole_hash;
-    let base = match dispatch.execute(SemanticQueryKey::Instantiate {
+    let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: crate::semantic_query::DeclKey {
             canonical_id: Arc::from(canonical_id),
             decl_name: Arc::from("default"),
@@ -199,7 +202,8 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
         args: Arc::from(Vec::new().into_boxed_slice()),
         context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
     }) {
-        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+        QueryResult::Recursive(node) => node,
         QueryResult::Error(e) => {
             panic!("Instantiate(.vue default) base for {canonical_id} errored: {e:?}")
         }
@@ -209,12 +213,13 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
         .map(|s| PathSegment::Member(Arc::from(*s)))
         .collect::<Vec<_>>()
         .into();
-    let terminal = match dispatch.execute(SemanticQueryKey::ProjectPath {
+    let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
         path: segments,
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     }) {
-        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+        QueryResult::Recursive(node) => node,
         QueryResult::Error(e) => {
             panic!("ProjectPath {path:?} for {canonical_id} errored: {e:?}")
         }
@@ -237,7 +242,7 @@ fn instantiate_vue_default_node(
         .ensure_indexed_ready(canonical_id)
         .expect("indexed ready")
         .whole_hash;
-    match dispatch.execute(SemanticQueryKey::Instantiate {
+    match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: crate::semantic_query::DeclKey {
             canonical_id: Arc::from(canonical_id),
             decl_name: Arc::from("default"),
@@ -245,7 +250,8 @@ fn instantiate_vue_default_node(
         args: Arc::from(Vec::new().into_boxed_slice()),
         context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
     }) {
-        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+        QueryResult::Recursive(node) => node,
         QueryResult::Error(e) => {
             panic!("Instantiate(.vue default) for {canonical_id} errored: {e:?}")
         }
@@ -266,7 +272,7 @@ fn typeof_default_construct_return_node(
 ) -> SemanticNodeId {
     use crate::resolver_core::ResolverContext;
     let _ = host;
-    let typeof_node = match dispatch.execute(SemanticQueryKey::TypeOf {
+    let typeof_node = match dispatch.execute_type_node(SemanticQueryKey::TypeOf {
         value_root: ValueRootKey {
             scope: ScopeId {
                 canonical_id: Arc::from(canonical_id),
@@ -275,7 +281,8 @@ fn typeof_default_construct_return_node(
             name: Arc::from("default"),
         },
     }) {
-        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+        QueryResult::Recursive(node) => node,
         QueryResult::Error(e) => panic!("TypeOf(default) for {canonical_id} errored: {e:?}"),
     };
     let graph = host_ctx.project_type_store().semantic_graph();
@@ -905,7 +912,7 @@ fn project_vue_default_path_eager(
     // EAGER base: `Published(Expanded)` (NOT structural-transit/Navigate), so the
     // body of the instance shape is lowered while `(canonical, "default")` is on
     // the active-instantiation stack.
-    let base = match dispatch.execute(SemanticQueryKey::Instantiate {
+    let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: crate::semantic_query::DeclKey {
             canonical_id: Arc::from(canonical_id),
             decl_name: Arc::from("default"),
@@ -913,7 +920,8 @@ fn project_vue_default_path_eager(
         args: Arc::from(Vec::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     }) {
-        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+        QueryResult::Recursive(node) => node,
         QueryResult::Error(e) => {
             panic!("eager Instantiate(.vue default) base for {canonical_id} errored: {e:?}")
         }
@@ -923,12 +931,13 @@ fn project_vue_default_path_eager(
         .map(|s| PathSegment::Member(Arc::from(*s)))
         .collect::<Vec<_>>()
         .into();
-    let terminal = match dispatch.execute(SemanticQueryKey::ProjectPath {
+    let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
         path: segments,
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     }) {
-        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+        QueryResult::Recursive(node) => node,
         QueryResult::Error(e) => {
             panic!("ProjectPath {path:?} for {canonical_id} errored: {e:?}")
         }

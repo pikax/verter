@@ -144,13 +144,13 @@ fn request_projection_budget_caps_distinct_dispatch_cold_builds() {
     let _ctx_guard = RequestContextGuard::install(ctx);
     let dispatch = host.semantic_dispatch();
 
-    let first = dispatch.execute(first_key);
+    let first = dispatch.execute_type_node(first_key);
     assert!(
         matches!(first, QueryResult::Value(_)),
         "first cold projection within budget must succeed, got {first:?}",
     );
 
-    let second = dispatch.execute(second_key);
+    let second = dispatch.execute_type_node(second_key);
     match second {
         QueryResult::Error(QueryError::BudgetExceeded(failure)) => {
             assert_eq!(failure.domain, BudgetDomain::ProjectionOperation);
@@ -235,7 +235,7 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
     // (2/1 → BudgetExceeded with actual=2). Both calls enter the
     // cooperative-admission machinery; only the second is rejected by
     // the in-closure cap check.
-    let first_keyof = dispatch.execute(SemanticQueryKey::KeyOf {
+    let first_keyof = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
         base: bases[0],
         context,
     });
@@ -243,7 +243,7 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
         matches!(first_keyof, QueryResult::Value(_)),
         "1st keyof within budget should succeed (got {first_keyof:?})"
     );
-    let second_keyof = dispatch.execute(SemanticQueryKey::KeyOf {
+    let second_keyof = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
         base: bases[1],
         context,
     });
@@ -266,7 +266,7 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
     // value (peek-only — the executed counter MUST NOT advance).
     for (i, &base) in bases.iter().enumerate().take(6).skip(2) {
         let key = SemanticQueryKey::KeyOf { base, context };
-        let result = dispatch.execute(key);
+        let result = dispatch.execute_type_node(key);
         match result {
             QueryResult::Error(QueryError::BudgetExceeded(failure)) => {
                 assert_eq!(
@@ -349,11 +349,11 @@ fn post_trip_non_projection_queries_still_dispatch_normally() {
     let dispatch = host.semantic_dispatch();
 
     // Trip the projection-op fuse with two distinct KeyOf calls.
-    let _ = dispatch.execute(SemanticQueryKey::KeyOf {
+    let _ = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
         base: base_a,
         context,
     });
-    let trip = dispatch.execute(SemanticQueryKey::KeyOf {
+    let trip = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
         base: base_b,
         context,
     });
@@ -375,7 +375,7 @@ fn post_trip_non_projection_queries_still_dispatch_normally() {
     let normalize_key = SemanticQueryKey::NormalizeUnion {
         members: single_member,
     };
-    let normalize_result = dispatch.execute(normalize_key);
+    let normalize_result = dispatch.execute_type_node(normalize_key);
     assert!(
         matches!(normalize_result, QueryResult::Value(_)),
         "post-trip NormalizeUnion must dispatch normally; \
@@ -423,7 +423,7 @@ fn no_cache_promotion_for_budget_exceeded_resolve_macro_payload() {
 
     // First query — should report a budget-exceeded sentinel.
     let dispatch = host.semantic_dispatch();
-    let r1 = dispatch.execute(key.clone());
+    let r1 = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(r1, QueryResult::Recursive(_) | QueryResult::Error(_)),
         "constrained host (depth_budget=2) MUST report a budget-exceeded sentinel for a 3-segment path (got {r1:?})"
@@ -434,7 +434,7 @@ fn no_cache_promotion_for_budget_exceeded_resolve_macro_payload() {
     let counter = DispatchCounter;
     let baseline_cold = counter.family_cold(&key);
     let baseline_warm = counter.family_warm(&key);
-    let _r2 = dispatch.execute(key.clone());
+    let _r2 = dispatch.execute_type_node(key.clone());
     let cold_delta = counter.family_cold(&key) - baseline_cold;
     let warm_delta = counter.family_warm(&key) - baseline_warm;
     assert_eq!(
@@ -475,7 +475,7 @@ fn no_cache_promotion_for_budget_exceeded_route_target_pick_omit() {
     };
 
     let dispatch = host.semantic_dispatch();
-    let r1 = dispatch.execute(key.clone());
+    let r1 = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(r1, QueryResult::Recursive(_) | QueryResult::Error(_)),
         "constrained host (depth_budget=2) MUST report a budget-exceeded sentinel for the 5e route-target 3-segment path (got {r1:?})"
@@ -484,7 +484,7 @@ fn no_cache_promotion_for_budget_exceeded_route_target_pick_omit() {
     let counter = DispatchCounter;
     let baseline_cold = counter.family_cold(&key);
     let baseline_warm = counter.family_warm(&key);
-    let _r2 = dispatch.execute(key.clone());
+    let _r2 = dispatch.execute_type_node(key.clone());
     let cold_delta = counter.family_cold(&key) - baseline_cold;
     let warm_delta = counter.family_warm(&key) - baseline_warm;
     assert_eq!(
@@ -522,7 +522,7 @@ fn no_cache_promotion_for_budget_exceeded_fallthrough_inheritance() {
     };
 
     let dispatch = host.semantic_dispatch();
-    let r1 = dispatch.execute(key.clone());
+    let r1 = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(r1, QueryResult::Recursive(_) | QueryResult::Error(_)),
         "constrained host (depth_budget=2) MUST report a budget-exceeded sentinel for the 5f fallthrough 3-segment path (got {r1:?})"
@@ -531,7 +531,7 @@ fn no_cache_promotion_for_budget_exceeded_fallthrough_inheritance() {
     let counter = DispatchCounter;
     let baseline_cold = counter.family_cold(&key);
     let baseline_warm = counter.family_warm(&key);
-    let _r2 = dispatch.execute(key.clone());
+    let _r2 = dispatch.execute_type_node(key.clone());
     let cold_delta = counter.family_cold(&key) - baseline_cold;
     let warm_delta = counter.family_warm(&key) - baseline_warm;
     assert_eq!(
@@ -578,7 +578,7 @@ fn no_cache_promotion_for_budget_exceeded_userland_shadowing_pick() {
     };
 
     let dispatch = host.semantic_dispatch();
-    let r1 = dispatch.execute(key.clone());
+    let r1 = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(r1, QueryResult::Recursive(_) | QueryResult::Error(_)),
         "constrained host (depth_budget=2) MUST report a budget-exceeded sentinel for the 5h userland-shadowing 3-segment path (got {r1:?})"
@@ -587,7 +587,7 @@ fn no_cache_promotion_for_budget_exceeded_userland_shadowing_pick() {
     let counter = DispatchCounter;
     let baseline_cold = counter.family_cold(&key);
     let baseline_warm = counter.family_warm(&key);
-    let _r2 = dispatch.execute(key.clone());
+    let _r2 = dispatch.execute_type_node(key.clone());
     let cold_delta = counter.family_cold(&key) - baseline_cold;
     let warm_delta = counter.family_warm(&key) - baseline_warm;
     assert_eq!(
@@ -638,7 +638,7 @@ fn no_cache_promotion_for_budget_exceeded_exclude_extract_reduction() {
     };
 
     let dispatch = host.semantic_dispatch();
-    let r1 = dispatch.execute(key.clone());
+    let r1 = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(r1, QueryResult::Recursive(_) | QueryResult::Error(_)),
         "constrained host (depth_budget=2) MUST report a budget-exceeded sentinel for the 5i Exclude/Extract reduction 3-segment path (got {r1:?})"
@@ -647,7 +647,7 @@ fn no_cache_promotion_for_budget_exceeded_exclude_extract_reduction() {
     let counter = DispatchCounter;
     let baseline_cold = counter.family_cold(&key);
     let baseline_warm = counter.family_warm(&key);
-    let _r2 = dispatch.execute(key.clone());
+    let _r2 = dispatch.execute_type_node(key.clone());
     let cold_delta = counter.family_cold(&key) - baseline_cold;
     let warm_delta = counter.family_warm(&key) - baseline_warm;
     assert_eq!(
@@ -698,7 +698,7 @@ fn no_cache_promotion_for_budget_exceeded_slot_binding_lowering() {
     };
 
     let dispatch = host.semantic_dispatch();
-    let r1 = dispatch.execute(key.clone());
+    let r1 = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(r1, QueryResult::Recursive(_) | QueryResult::Error(_)),
         "constrained host (depth_budget=2) MUST report a budget-exceeded sentinel \
@@ -708,7 +708,7 @@ fn no_cache_promotion_for_budget_exceeded_slot_binding_lowering() {
     let counter = DispatchCounter;
     let baseline_cold = counter.family_cold(&key);
     let baseline_warm = counter.family_warm(&key);
-    let _r2 = dispatch.execute(key.clone());
+    let _r2 = dispatch.execute_type_node(key.clone());
     let cold_delta = counter.family_cold(&key) - baseline_cold;
     let warm_delta = counter.family_warm(&key) - baseline_warm;
     assert_eq!(
@@ -758,7 +758,7 @@ fn no_cache_promotion_for_budget_exceeded_typeof_substitution() {
     };
 
     let dispatch = host.semantic_dispatch();
-    let r1 = dispatch.execute(key.clone());
+    let r1 = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(r1, QueryResult::Recursive(_) | QueryResult::Error(_)),
         "constrained host (depth_budget=2) MUST report a budget-exceeded sentinel \
@@ -768,7 +768,7 @@ fn no_cache_promotion_for_budget_exceeded_typeof_substitution() {
     let counter = DispatchCounter;
     let baseline_cold = counter.family_cold(&key);
     let baseline_warm = counter.family_warm(&key);
-    let _r2 = dispatch.execute(key.clone());
+    let _r2 = dispatch.execute_type_node(key.clone());
     let cold_delta = counter.family_cold(&key) - baseline_cold;
     let warm_delta = counter.family_warm(&key) - baseline_warm;
     assert_eq!(
@@ -823,7 +823,7 @@ fn no_cache_promotion_for_budget_exceeded_engine_state_promotion() {
     };
 
     let dispatch = host.semantic_dispatch();
-    let r1 = dispatch.execute(key.clone());
+    let r1 = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(r1, QueryResult::Recursive(_) | QueryResult::Error(_)),
         "constrained host (depth_budget=2) MUST report a budget-exceeded sentinel \
@@ -833,7 +833,7 @@ fn no_cache_promotion_for_budget_exceeded_engine_state_promotion() {
     let counter = DispatchCounter;
     let baseline_cold = counter.family_cold(&key);
     let baseline_warm = counter.family_warm(&key);
-    let _r2 = dispatch.execute(key.clone());
+    let _r2 = dispatch.execute_type_node(key.clone());
     let cold_delta = counter.family_cold(&key) - baseline_cold;
     let warm_delta = counter.family_warm(&key) - baseline_warm;
     assert_eq!(

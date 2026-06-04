@@ -708,7 +708,7 @@ impl VerterHost {
                         use crate::project_semantic_dispatch::ProjectSemanticDispatch;
                         use crate::semantic_query::{
                             PathSegment as SemanticPathSegment, ProjectionMode, QueryResult,
-                            SemanticQueryApi, SemanticQueryKey,
+                            SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
                         };
                         use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
 
@@ -1034,13 +1034,13 @@ impl VerterHost {
                                                     .collect::<Vec<_>>(),
                                             );
                                         let projected =
-                                            dispatch.execute(SemanticQueryKey::ProjectPath {
+                                            dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
                                                 base: base_id,
                                                 path: dispatch_path,
                                                 context: crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
                                             });
                                         match projected {
-                                            QueryResult::Value(node_id) => {
+                                            QueryResult::Value(SemanticQueryOutput { value: node_id, .. }) => {
                                                 //
                                                 // capture production node
                                                 // id for the audit record

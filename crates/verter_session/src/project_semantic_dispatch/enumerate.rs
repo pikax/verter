@@ -14,6 +14,7 @@ use rustc_hash::FxHashSet;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     HashValue, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
+    SemanticQueryOutput,
 };
 use verter_semantic::facts::registry::{FactKey, InternedName, SymbolSpace};
 
@@ -193,7 +194,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     decl_name: Arc::clone(name),
                 };
                 drop(data);
-                match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
+                match self.execute_type_node(crate::semantic_query::SemanticQueryKey::Instantiate {
                     base,
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     // Key-name enumeration consumes the body's structural
@@ -209,9 +210,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         crate::semantic_query::ProjectionMode::Expanded,
                     ),
                 }) {
-                    crate::semantic_query::QueryResult::Value(instantiated)
-                        if instantiated != resolved =>
-                    {
+                    crate::semantic_query::QueryResult::Value(SemanticQueryOutput {
+                        value: instantiated,
+                        ..
+                    }) if instantiated != resolved => {
                         work.push(KeyNamesFrame::Expand(instantiated));
                     }
                     _ => {
@@ -263,15 +265,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::ProjectionMode::Shallow,
             "resolve_typeinfo_surface_view synthesises a one-level surface; mode must be Shallow"
         );
-        let terminal = match self.execute(crate::semantic_query::SemanticQueryKey::ProjectPath {
-            base,
-            path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
-            context,
-        }) {
-            crate::semantic_query::QueryResult::Value(node)
-            | crate::semantic_query::QueryResult::Recursive(node) => node,
-            crate::semantic_query::QueryResult::Error(_) => return None,
-        };
+        let terminal =
+            match self.execute_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
+                base,
+                path: Arc::from(
+                    Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice(),
+                ),
+                context,
+            }) {
+                crate::semantic_query::QueryResult::Value(SemanticQueryOutput {
+                    value: node,
+                    ..
+                }) => node,
+                crate::semantic_query::QueryResult::Recursive(node) => node,
+                crate::semantic_query::QueryResult::Error(_) => return None,
+            };
         match self.graph().node_data(terminal).as_deref() {
             Some(SemanticNodeData::Object(view)) => Some(view.clone()),
             _ => None,
@@ -313,34 +321,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // through the shared dispatch (`Instantiate`) and recurse. This is
             // path-precise (the demanded key set), not a breadth walk.
             SemanticNodeData::DeclRef { identity } => {
-                let instantiated =
-                    match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
+                let instantiated = match self.execute_type_node(
+                    crate::semantic_query::SemanticQueryKey::Instantiate {
                         base: identity.to_decl_key(),
                         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         context: crate::semantic_query::ProjectionReductionContext::published(
                             crate::semantic_query::ProjectionMode::Expanded,
                         ),
-                    }) {
-                        crate::semantic_query::QueryResult::Value(id) => id,
-                        _ => return self.key_names_from_base_node(resolved),
-                    };
+                    },
+                ) {
+                    crate::semantic_query::QueryResult::Value(SemanticQueryOutput {
+                        value: id,
+                        ..
+                    }) => id,
+                    _ => return self.key_names_from_base_node(resolved),
+                };
                 if instantiated == resolved {
                     return self.key_names_from_base_node(resolved);
                 }
                 self.key_names_from_keyspace_node(instantiated)
             }
             SemanticNodeData::InstantiationRef { base, args } => {
-                let instantiated =
-                    match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
+                let instantiated = match self.execute_type_node(
+                    crate::semantic_query::SemanticQueryKey::Instantiate {
                         base: base.to_decl_key(),
                         args: Arc::clone(args),
                         context: crate::semantic_query::ProjectionReductionContext::published(
                             crate::semantic_query::ProjectionMode::Expanded,
                         ),
-                    }) {
-                        crate::semantic_query::QueryResult::Value(id) => id,
-                        _ => return self.key_names_from_base_node(resolved),
-                    };
+                    },
+                ) {
+                    crate::semantic_query::QueryResult::Value(SemanticQueryOutput {
+                        value: id,
+                        ..
+                    }) => id,
+                    _ => return self.key_names_from_base_node(resolved),
+                };
                 if instantiated == resolved {
                     return self.key_names_from_base_node(resolved);
                 }

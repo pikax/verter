@@ -58,7 +58,7 @@ use std::sync::Arc;
 
 use verter_session::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
-    SemanticNodeId, SemanticQueryKey,
+    SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
 };
 use verter_session::{for_tests, FileKind, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::{
@@ -216,8 +216,9 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
         args,
         context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
     };
-    let body_node = match for_tests::dispatch_execute_for_tests(&host, instantiate_query) {
-        QueryResult::Value(node) => node,
+    let body_node = match for_tests::dispatch_execute_type_node_for_tests(&host, instantiate_query)
+    {
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         other => panic!(
             "Instantiate {{ ..., StructuralTransit(Navigate) }} must produce a body node, \
              got {other:?}"
@@ -232,8 +233,8 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     };
-    let surface_node = match for_tests::dispatch_execute_for_tests(&host, project_query) {
-        QueryResult::Value(node) => node,
+    let surface_node = match for_tests::dispatch_execute_type_node_for_tests(&host, project_query) {
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         other => panic!(
             "ProjectPath {{ body, [], Published(Shallow) }} must produce an Object surface, \
              got {other:?}"

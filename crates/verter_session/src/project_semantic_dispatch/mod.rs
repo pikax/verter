@@ -65,8 +65,9 @@ use crate::resolver_core::{BudgetDomain, BudgetExceededFailure, ResolverContext}
 use crate::semantic_query::{
     BranchSelection, CacheRead, DeclIdentity, DepSignature, DepVersion, IndexKey, LiteralValue,
     NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
-    QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId,
-    SemanticQueryApi, SemanticQueryKey, SurfaceView,
+    QueryError, QueryResult, ResolveDeclKey, ResultProvenance, ScopeId, SemanticNodeData,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+    SurfaceView,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_type_expr::{PrimitiveName, TypeExpr};
@@ -1083,7 +1084,10 @@ fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> boo
 }
 
 impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
-    fn execute(&self, key: SemanticQueryKey) -> QueryResult<SemanticNodeId> {
+    fn execute(
+        &self,
+        key: SemanticQueryKey,
+    ) -> QueryResult<SemanticQueryOutput<SemanticQueryValue>> {
         // Type-resolution audit: bump the per-request hop / mode /
         // projection / conditional counters BEFORE admission-time
         // rewriting so we attribute the dispatch to the caller's
@@ -1134,7 +1138,20 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         // build-output threading live in one place. `execute`
         // discards the dep-signature rails from the helper's
         // `CacheRead`; `execute_read` keeps them.
-        self.execute_via_cold_build_helper(key).value
+        //
+        // The helper resolves to a bare node id; wrap it into the
+        // domain-agnostic value here at the public boundary. Every live
+        // key resolves to a type, so the value is always `TypeNode`. The
+        // boundary provenance is `clean` — a wrapper only, never a cached
+        // semantic fact.
+        match self.execute_via_cold_build_helper(key).value {
+            QueryResult::Value(node) => QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::TypeNode(node),
+                provenance: ResultProvenance::clean(),
+            }),
+            QueryResult::Recursive(n) => QueryResult::Recursive(n),
+            QueryResult::Error(e) => QueryResult::Error(e),
+        }
     }
 }
 
@@ -1255,11 +1272,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mode: ProjectionMode,
     ) -> QueryResult<SemanticNodeId> {
         let key_set = self.intern_string_literal_union(members);
-        self.execute(SemanticQueryKey::Instantiate {
-            base: crate::semantic_query::DeclKey::builtin("Pick"),
-            args: Arc::from(vec![base, key_set].into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(mode),
-        })
+        crate::semantic_query::strip_output_provenance(self.execute_type_node(
+            SemanticQueryKey::Instantiate {
+                base: crate::semantic_query::DeclKey::builtin("Pick"),
+                args: Arc::from(vec![base, key_set].into_boxed_slice()),
+                context: crate::semantic_query::ProjectionReductionContext::published(mode),
+            },
+        ))
     }
 
     /// `Omit<base, members>` via the existing builtin
@@ -1277,14 +1296,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mode: ProjectionMode,
     ) -> QueryResult<SemanticNodeId> {
         let key_set = self.intern_string_literal_union(members);
-        self.execute(SemanticQueryKey::Instantiate {
-            base: crate::semantic_query::DeclKey::builtin("Omit"),
-            args: Arc::from(vec![base, key_set].into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(mode),
-        })
+        crate::semantic_query::strip_output_provenance(self.execute_type_node(
+            SemanticQueryKey::Instantiate {
+                base: crate::semantic_query::DeclKey::builtin("Omit"),
+                args: Arc::from(vec![base, key_set].into_boxed_slice()),
+                context: crate::semantic_query::ProjectionReductionContext::published(mode),
+            },
+        ))
     }
 
-    /// `execute(key)` + `raise_node_to_type_expr` in one call,
+    /// `execute_read(key)` + `raise_node_to_type_expr` in one call,
     /// returning the full `CacheRead` so `dep_signature` is
     /// preserved for the caller's fence merge. A lossy
     /// `Option<TypeExpr>` return would erase the dep-signature and

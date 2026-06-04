@@ -27,7 +27,7 @@ use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     DeclIdentity, DepSignature, FunctionParam, IndexSignature, InferBinding, LiteralValue,
     PrimitiveKind, QueryError, QueryResult, RelationResult, SemanticNodeData, SemanticNodeId,
-    SemanticQueryApi, SemanticQueryKey, SurfaceMember, SurfaceView,
+    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceMember, SurfaceView,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
@@ -254,14 +254,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // identity-carrier audit footprint does NOT reify per-member
         // anchors during binding.
         let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
-        let unwrapped = match self.execute(SemanticQueryKey::Instantiate {
+        let unwrapped = match self.execute_type_node(SemanticQueryKey::Instantiate {
             base: identity.to_decl_key(),
             args,
             context: transit,
         }) {
-            QueryResult::Value(unwrapped) => {
-                self.evaluate_deferred_semantic_node_with_context(unwrapped, transit)
-            }
+            QueryResult::Value(SemanticQueryOutput {
+                value: unwrapped, ..
+            }) => self.evaluate_deferred_semantic_node_with_context(unwrapped, transit),
             _ => return IdentityCarrierUnwrap::Unresolvable,
         };
         let Some(unwrapped_data) = graph.node_data(unwrapped) else {
@@ -341,12 +341,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // index / call-construct signatures off a one-level surface
         // without re-reducing nested `keyof` / `Mapped` operators.
         let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
-        let unwrapped = match self.execute(SemanticQueryKey::Instantiate {
+        let unwrapped = match self.execute_type_node(SemanticQueryKey::Instantiate {
             base: identity.to_decl_key(),
             args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             context: transit,
         }) {
-            QueryResult::Value(id) => {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => {
                 self.evaluate_deferred_semantic_node_with_context(id, transit)
             }
             _ => return Some(RelationResult::Unknown),

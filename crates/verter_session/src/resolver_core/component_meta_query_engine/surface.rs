@@ -324,6 +324,9 @@ pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
         QueryError::AliasCycle { chain } => format!("aliasCycle({})", chain.len()),
         QueryError::RecursiveRef { name } => format!("recursiveRef({name})"),
         QueryError::DeclPlaceholder { name, .. } => format!("declPlaceholder({name})"),
+        QueryError::ValueDomainMismatch { expected, actual } => {
+            format!("valueDomainMismatch(expected={expected:?},actual={actual:?})")
+        }
     }
 }
 

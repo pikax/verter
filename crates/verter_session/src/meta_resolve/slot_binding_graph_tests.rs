@@ -1143,7 +1143,7 @@ defineSlots<Slots>()
 // and pushes `(canonical_id, WholeHash)` carrier facts into the
 // per-request dep-signature accumulator (drained at publish into
 // the cached entry's `dep_signature`). Without this, an inner
-// walker that uses bare `dispatch.execute(ResolveDecl(..))` would
+// walker that uses bare `dispatch.execute_type_node(ResolveDecl(..))` would
 // discard the carrier's whole-hash via `build_project_path`'s
 // project-generation-only fence and the warm cache would not
 // invalidate when the carrier is edited.

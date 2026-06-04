@@ -56,7 +56,8 @@ use verter_semantic::facts::registry::InternedName;
 use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
 
 use verter_session::for_tests::{
-    dispatch_execute_for_tests, dispatch_inject_parse_fact_for_tests, install_fact_tracer_for_tests,
+    dispatch_execute_type_node_for_tests, dispatch_inject_parse_fact_for_tests,
+    install_fact_tracer_for_tests,
 };
 use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef, ParseFactRef};
 use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
@@ -145,7 +146,7 @@ fn dispatch_warm_hit_bubbles_traced_parse_fact_into_outer_tracer() {
     // MemoEntry.fact_dep_signature.
     let cold_result = {
         let _inject_guard = dispatch_inject_parse_fact_for_tests(want.clone());
-        dispatch_execute_for_tests(&host, key.clone())
+        dispatch_execute_type_node_for_tests(&host, key.clone())
     };
     // Discriminating side-check: the cold dispatch returned a real
     // result. Catches a regression where future refactoring turns the
@@ -168,7 +169,7 @@ fn dispatch_warm_hit_bubbles_traced_parse_fact_into_outer_tracer() {
         // organically. Any presence in the outer tracer's finalised
         // signature comes from the warm-hit bubble, not from a fresh
         // cold compute.
-        let _warm = dispatch_execute_for_tests(&host, key.clone());
+        let _warm = dispatch_execute_type_node_for_tests(&host, key.clone());
     });
 
     match warm_finalise {

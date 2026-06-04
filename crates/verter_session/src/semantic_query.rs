@@ -1485,6 +1485,14 @@ pub enum QueryError {
         name: Arc<str>,
         whole_hash: HashValue,
     },
+    /// A typed caller asked a query to narrow to a specific value domain
+    /// (e.g. `execute_type_node` expects [`SemanticQueryValue::TypeNode`])
+    /// but the query produced a different domain. Carries both
+    /// discriminant tags so diagnostics can name the mismatch precisely.
+    ValueDomainMismatch {
+        expected: SemanticQueryValueTag,
+        actual: SemanticQueryValueTag,
+    },
 }
 
 // `SemanticNodeData` structurally interns under a compound
@@ -1518,6 +1526,16 @@ impl PartialEq for QueryError {
                     whole_hash: b_h,
                 },
             ) => a_c == b_c && a_n == b_n && a_h == b_h,
+            (
+                Self::ValueDomainMismatch {
+                    expected: a_e,
+                    actual: a_a,
+                },
+                Self::ValueDomainMismatch {
+                    expected: b_e,
+                    actual: b_a,
+                },
+            ) => a_e == b_e && a_a == b_a,
             _ => false,
         }
     }
@@ -1566,6 +1584,11 @@ impl std::hash::Hash for QueryError {
                 name.hash(state);
                 whole_hash.hash(state);
             }
+            Self::ValueDomainMismatch { expected, actual } => {
+                8u8.hash(state);
+                expected.hash(state);
+                actual.hash(state);
+            }
         }
     }
 }
@@ -1578,6 +1601,204 @@ pub enum QueryResult<T> {
     Value(T),
     Recursive(SemanticNodeId),
     Error(QueryError),
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Value domains
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Canonical typed value a semantic query resolves to.
+///
+/// Every live [`SemanticQueryKey`] produces [`TypeNode`](Self::TypeNode):
+/// the interned graph node id for the resolved type. The other arms are
+/// shells with no live producer — overload sets, flow / contextual program
+/// analysis, declaration / augmentation analysis, and relations. They carry
+/// honest data shapes so the value domain is closed and exhaustive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticQueryValue {
+    /// The interned graph node id for the resolved type — the only domain a
+    /// live query produces today.
+    TypeNode(SemanticNodeId),
+    /// Narrowed / contextual type produced by flow or contextual program
+    /// analysis. No live producer.
+    ProgramAnalysis(ProgramAnalysisValue),
+    /// Merged declaration / module-augmentation surface produced by
+    /// declaration analysis. No live producer.
+    DeclarationAnalysis(DeclarationAnalysisValue),
+    /// An ordered set of call/construct signatures (an overload set).
+    /// No live producer.
+    OverloadSet(Arc<[SignatureRef]>),
+    /// The tri-state outcome of a relation query. No live producer; the
+    /// live relation path is the separate relation memo.
+    Relation(RelationPayload),
+    /// Reserved native-checker seam for diagnostic analysis. NON-LIVE: no
+    /// producer, no key spec row. Uses a local shell so this crate keeps no
+    /// back-edge to `verter_tsc::CheckResult`.
+    DiagnosticAnalysis(DiagnosticAnalysisShell),
+}
+
+/// Content-free discriminant for [`SemanticQueryValue`]. Used by
+/// [`QueryError::ValueDomainMismatch`] to name a value's domain without a
+/// payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SemanticQueryValueTag {
+    TypeNode,
+    ProgramAnalysis,
+    DeclarationAnalysis,
+    OverloadSet,
+    Relation,
+    DiagnosticAnalysis,
+}
+
+impl SemanticQueryValue {
+    /// The content-free discriminant tag for this value.
+    #[must_use]
+    pub fn tag(&self) -> SemanticQueryValueTag {
+        match self {
+            Self::TypeNode(_) => SemanticQueryValueTag::TypeNode,
+            Self::ProgramAnalysis(_) => SemanticQueryValueTag::ProgramAnalysis,
+            Self::DeclarationAnalysis(_) => SemanticQueryValueTag::DeclarationAnalysis,
+            Self::OverloadSet(_) => SemanticQueryValueTag::OverloadSet,
+            Self::Relation(_) => SemanticQueryValueTag::Relation,
+            Self::DiagnosticAnalysis(_) => SemanticQueryValueTag::DiagnosticAnalysis,
+        }
+    }
+}
+
+/// A single call/construct signature, identified by its graph node.
+/// No live producer; carried by the overload-set domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureRef {
+    pub node: SemanticNodeId,
+}
+
+/// A type produced by flow / contextual program analysis (the narrowed or
+/// contextual node). No live producer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramAnalysisValue {
+    pub node: SemanticNodeId,
+}
+
+/// The merged surface of a declaration plus its module augmentations, named
+/// by the contributing declaration nodes. No live producer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclarationAnalysisValue {
+    pub contributors: Arc<[SemanticNodeId]>,
+}
+
+/// Tri-state outcome of a relation query (assignability / subtype / identity).
+/// No live producer; the live relation path is the separate relation memo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationPayload {
+    Holds,
+    DoesNotHold,
+    Unknown,
+}
+
+/// Reserved native-checker seam for diagnostic analysis. NON-LIVE: no
+/// producer, no key spec row, never `verter_tsc::CheckResult`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticAnalysisShell;
+
+/// A query value paired with the provenance of the work that produced it.
+///
+/// Provenance lives ONLY on the [`Value`](QueryResult::Value) arm of a
+/// [`QueryResult`]; the `Recursive` / `Error` arms are control / failure arms
+/// that never carry provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticQueryOutput<T> {
+    pub value: T,
+    pub provenance: ResultProvenance,
+}
+
+/// Provenance of a resolved value: how trustworthy the inputs that produced it
+/// were. Provenance is shape-only at this layer: every result is
+/// [`clean`](Self::clean). Taint producers and the taint join live with the
+/// passes that introduce broken inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultProvenance {
+    pub taint: ResultTaint,
+}
+
+impl ResultProvenance {
+    /// Provenance for a value derived from fully resolved, well-formed inputs.
+    #[must_use]
+    pub fn clean() -> Self {
+        Self {
+            taint: ResultTaint::Clean,
+        }
+    }
+}
+
+/// Whether a resolved value was derived from broken or incomplete inputs.
+///
+/// Shape only at this layer — every value the dispatch produces is
+/// [`Clean`](Self::Clean). Taint producers and the taint join live with the
+/// passes that introduce broken inputs; this enum just closes the domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResultTaint {
+    /// Every input was fully resolved and well-formed.
+    Clean,
+    /// Some, but not all, of the value was derived from a broken input.
+    Partial(BrokenInputClass),
+    /// The value as a whole stands on a broken input.
+    Broken(BrokenInputClass),
+}
+
+/// The class of broken input that tainted a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BrokenInputClass {
+    /// The source for an input did not parse.
+    SyntaxError,
+    /// A referenced symbol could not be resolved.
+    UnresolvedReference,
+    /// A declaration was found but its body was incomplete.
+    IncompleteDeclaration,
+    /// A cached read observed a torn / mid-flight state.
+    TornRead,
+    /// A required dependency was absent.
+    MissingDependency,
+}
+
+/// Narrow a domain-agnostic query result to the [`TypeNode`] domain.
+///
+/// [`SemanticQueryApi::execute_type_node`] is defined in terms of this free
+/// function so the narrowing decision lives in exactly one place. A non-
+/// [`TypeNode`] value becomes a [`QueryError::ValueDomainMismatch`]; provenance
+/// rides through unchanged on the [`Value`](QueryResult::Value) arm.
+///
+/// [`TypeNode`]: SemanticQueryValue::TypeNode
+#[must_use]
+pub(crate) fn narrow_output_to_type_node(
+    result: QueryResult<SemanticQueryOutput<SemanticQueryValue>>,
+) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+    match result {
+        QueryResult::Value(out) => match out.value {
+            SemanticQueryValue::TypeNode(node) => QueryResult::Value(SemanticQueryOutput {
+                value: node,
+                provenance: out.provenance,
+            }),
+            other => QueryResult::Error(QueryError::ValueDomainMismatch {
+                expected: SemanticQueryValueTag::TypeNode,
+                actual: other.tag(),
+            }),
+        },
+        QueryResult::Recursive(n) => QueryResult::Recursive(n),
+        QueryResult::Error(e) => QueryResult::Error(e),
+    }
+}
+
+/// Drop provenance from a typed-node result, recovering the node-or-control
+/// [`QueryResult`] the convenience wrappers expose.
+#[must_use]
+pub(crate) fn strip_output_provenance<T>(
+    result: QueryResult<SemanticQueryOutput<T>>,
+) -> QueryResult<T> {
+    match result {
+        QueryResult::Value(out) => QueryResult::Value(out.value),
+        QueryResult::Recursive(n) => QueryResult::Recursive(n),
+        QueryResult::Error(e) => QueryResult::Error(e),
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -2461,10 +2682,30 @@ pub trait SemanticGraphRead {
 /// [`execute`](Self::execute) is the single entry point; the convenience
 /// methods are thin wrappers, not a second API surface.
 pub trait SemanticQueryApi {
-    fn execute(&self, key: SemanticQueryKey) -> QueryResult<SemanticNodeId>;
+    /// Canonical entry point. Returns the domain-agnostic
+    /// [`SemanticQueryValue`] wrapped with the provenance of the producing
+    /// work. Every live key resolves to [`SemanticQueryValue::TypeNode`];
+    /// callers that want the node narrow with [`execute_type_node`].
+    ///
+    /// [`execute_type_node`]: Self::execute_type_node
+    fn execute(
+        &self,
+        key: SemanticQueryKey,
+    ) -> QueryResult<SemanticQueryOutput<SemanticQueryValue>>;
+
+    /// Narrow [`execute`](Self::execute) to the type-node domain, preserving
+    /// provenance. A non-[`TypeNode`](SemanticQueryValue::TypeNode) value
+    /// becomes a [`QueryError::ValueDomainMismatch`]. This is the single
+    /// narrowing definition — there is no second admission path.
+    fn execute_type_node(
+        &self,
+        key: SemanticQueryKey,
+    ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+        narrow_output_to_type_node(self.execute(key))
+    }
 
     fn resolve_decl(&self, key: ResolveDeclKey) -> QueryResult<SemanticNodeId> {
-        self.execute(SemanticQueryKey::ResolveDecl(key))
+        strip_output_provenance(self.execute_type_node(SemanticQueryKey::ResolveDecl(key)))
     }
     fn instantiate(
         &self,
@@ -2472,11 +2713,11 @@ pub trait SemanticQueryApi {
         args: Arc<[SemanticNodeId]>,
         body_mode: ProjectionMode,
     ) -> QueryResult<SemanticNodeId> {
-        self.execute(SemanticQueryKey::Instantiate {
+        strip_output_provenance(self.execute_type_node(SemanticQueryKey::Instantiate {
             base,
             args,
             context: ProjectionReductionContext::published(body_mode),
-        })
+        }))
     }
     fn project_member(
         &self,
@@ -2484,7 +2725,11 @@ pub trait SemanticQueryApi {
         member: Arc<str>,
         mode: ProjectionMode,
     ) -> QueryResult<SemanticNodeId> {
-        self.execute(SemanticQueryKey::ProjectMember { base, member, mode })
+        strip_output_provenance(self.execute_type_node(SemanticQueryKey::ProjectMember {
+            base,
+            member,
+            mode,
+        }))
     }
     fn indexed_access(
         &self,
@@ -2492,7 +2737,11 @@ pub trait SemanticQueryApi {
         index: IndexKey,
         mode: ProjectionMode,
     ) -> QueryResult<SemanticNodeId> {
-        self.execute(SemanticQueryKey::IndexedAccess { base, index, mode })
+        strip_output_provenance(self.execute_type_node(SemanticQueryKey::IndexedAccess {
+            base,
+            index,
+            mode,
+        }))
     }
     fn project_path(
         &self,
@@ -2500,11 +2749,11 @@ pub trait SemanticQueryApi {
         path: Arc<[PathSegment]>,
         mode: ProjectionMode,
     ) -> QueryResult<SemanticNodeId> {
-        self.execute(SemanticQueryKey::ProjectPath {
+        strip_output_provenance(self.execute_type_node(SemanticQueryKey::ProjectPath {
             base,
             path,
             context: ProjectionReductionContext::published(mode),
-        })
+        }))
     }
 }
 
@@ -2741,5 +2990,125 @@ mod tests {
             context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         };
         assert_eq!(map.get(&key2), Some(&1), "same args dedup to one entry");
+    }
+
+    /// `narrow_output_to_type_node` — the single narrowing definition that
+    /// backs `execute_type_node` — maps a `TypeNode` value through with its
+    /// provenance preserved, and converts any other domain into a
+    /// `ValueDomainMismatch` carrying both tags.
+    #[test]
+    fn narrow_output_maps_type_node_and_rejects_other_domains() {
+        let node = SemanticNodeId(7);
+        let clean = QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::TypeNode(node),
+            provenance: ResultProvenance::clean(),
+        });
+        match narrow_output_to_type_node(clean) {
+            QueryResult::Value(out) => {
+                assert_eq!(out.value, node, "TypeNode must narrow to the same node");
+                assert_eq!(
+                    out.provenance,
+                    ResultProvenance::clean(),
+                    "provenance must ride through narrowing unchanged"
+                );
+            }
+            other => panic!("expected Value(TypeNode), got {other:?}"),
+        }
+
+        // A non-TypeNode domain (an overload set) must NOT narrow to a node.
+        let overloads = QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::OverloadSet(Arc::from(Vec::<SignatureRef>::new())),
+            provenance: ResultProvenance::clean(),
+        });
+        match narrow_output_to_type_node(overloads) {
+            QueryResult::Error(QueryError::ValueDomainMismatch { expected, actual }) => {
+                assert_eq!(expected, SemanticQueryValueTag::TypeNode);
+                assert_eq!(actual, SemanticQueryValueTag::OverloadSet);
+            }
+            other => panic!("expected ValueDomainMismatch, got {other:?}"),
+        }
+
+        // Control arms pass through untouched.
+        match narrow_output_to_type_node(
+            QueryResult::<SemanticQueryOutput<SemanticQueryValue>>::Recursive(node),
+        ) {
+            QueryResult::Recursive(n) => assert_eq!(n, node),
+            other => panic!("expected Recursive passthrough, got {other:?}"),
+        }
+        match narrow_output_to_type_node(
+            QueryResult::<SemanticQueryOutput<SemanticQueryValue>>::Error(QueryError::Miss),
+        ) {
+            QueryResult::Error(QueryError::Miss) => {}
+            other => panic!("expected Error passthrough, got {other:?}"),
+        }
+    }
+
+    /// Every value-domain tag round-trips through
+    /// [`SemanticQueryValue::tag`], and the discriminants are distinct so
+    /// `ValueDomainMismatch` can name an exact mismatch.
+    #[test]
+    fn value_domain_tags_are_exhaustive_and_distinct() {
+        let node = SemanticNodeId(1);
+        let cases = [
+            (
+                SemanticQueryValue::TypeNode(node),
+                SemanticQueryValueTag::TypeNode,
+            ),
+            (
+                SemanticQueryValue::ProgramAnalysis(ProgramAnalysisValue { node }),
+                SemanticQueryValueTag::ProgramAnalysis,
+            ),
+            (
+                SemanticQueryValue::DeclarationAnalysis(DeclarationAnalysisValue {
+                    contributors: Arc::from(vec![node].into_boxed_slice()),
+                }),
+                SemanticQueryValueTag::DeclarationAnalysis,
+            ),
+            (
+                SemanticQueryValue::OverloadSet(Arc::from(
+                    vec![SignatureRef { node }].into_boxed_slice(),
+                )),
+                SemanticQueryValueTag::OverloadSet,
+            ),
+            (
+                SemanticQueryValue::Relation(RelationPayload::Unknown),
+                SemanticQueryValueTag::Relation,
+            ),
+            (
+                SemanticQueryValue::DiagnosticAnalysis(DiagnosticAnalysisShell),
+                SemanticQueryValueTag::DiagnosticAnalysis,
+            ),
+        ];
+        for (value, tag) in &cases {
+            assert_eq!(value.tag(), *tag, "tag must match the value domain");
+        }
+        // Distinctness: six cases, six unique tags. Sort before dedup so
+        // non-adjacent duplicates are caught (`Vec::dedup` only collapses
+        // consecutive runs).
+        let mut tags: Vec<SemanticQueryValueTag> = cases.iter().map(|(_, t)| *t).collect();
+        tags.sort_by_key(|t| *t as u8);
+        tags.dedup();
+        assert_eq!(tags.len(), 6, "every value domain must have a distinct tag");
+    }
+
+    /// Taint shape: every `ResultTaint` / `BrokenInputClass` variant is
+    /// representable, and the boundary provenance constructor is `Clean`.
+    /// (No join is asserted — this layer carries provenance shape only.)
+    #[test]
+    fn result_taint_shape_is_representable_and_clean_by_default() {
+        assert_eq!(ResultProvenance::clean().taint, ResultTaint::Clean);
+        let classes = [
+            BrokenInputClass::SyntaxError,
+            BrokenInputClass::UnresolvedReference,
+            BrokenInputClass::IncompleteDeclaration,
+            BrokenInputClass::TornRead,
+            BrokenInputClass::MissingDependency,
+        ];
+        // All taint variants are constructible over every broken-input class.
+        for class in classes {
+            assert_ne!(ResultTaint::Partial(class), ResultTaint::Clean);
+            assert_ne!(ResultTaint::Broken(class), ResultTaint::Clean);
+            assert_ne!(ResultTaint::Partial(class), ResultTaint::Broken(class));
+        }
     }
 }

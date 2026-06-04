@@ -108,7 +108,7 @@ fn resolve_decl_same_canonical_edit_rejects_warm_entry() {
     let key = SemanticQueryKey::ResolveDecl(resolve_decl_key(c, "Foo"));
 
     // Prime the warm memo entry.
-    let primed = dispatch.execute(key.clone());
+    let primed = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(primed, crate::semantic_query::QueryResult::Value(_)),
         "ResolveDecl must resolve before the edit"
@@ -159,7 +159,7 @@ fn typeof_same_canonical_edit_rejects_warm_entry() {
         },
     };
 
-    let primed = dispatch.execute(key.clone());
+    let primed = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(primed, crate::semantic_query::QueryResult::Value(_)),
         "TypeOf must resolve before the edit"
@@ -206,7 +206,7 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
 
     // Resolve the declaration so the observed whole hash is reachable.
     let decl_key = SemanticQueryKey::ResolveDecl(resolve_decl_key(c, "Box"));
-    let _ = dispatch.execute(decl_key);
+    let _ = dispatch.execute_type_node(decl_key);
     let _ = host
         .ensure_indexed_ready(c)
         .map(|indexed| indexed.whole_hash)
@@ -225,7 +225,7 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
         ),
     };
 
-    let primed = dispatch.execute(key.clone());
+    let primed = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(primed, crate::semantic_query::QueryResult::Value(_)),
         "Instantiate must resolve before the edit"
@@ -291,7 +291,7 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
         mode: crate::semantic_query::ProjectionMode::Expanded,
     };
 
-    let primed = dispatch.execute(key.clone());
+    let primed = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(primed, crate::semantic_query::QueryResult::Value(_)),
         "ResolveMacroPayload must resolve before the edit"
@@ -692,7 +692,7 @@ fn family_memo_validate_rejects_stale_project_generation() {
             crate::semantic_query::ProjectionMode::Expanded,
         ),
     };
-    let _ = dispatch.execute(key.clone());
+    let _ = dispatch.execute_type_node(key.clone());
 
     // Fixture invariants — the published entry has empty
     // self-root-canonicals and carries no FileWholeHash on its facts
@@ -796,7 +796,7 @@ fn structural_node_kind_publishes_no_file_self_root() {
             crate::semantic_query::ProjectionMode::Expanded,
         ),
     };
-    let _ = dispatch.execute(key.clone());
+    let _ = dispatch.execute_type_node(key.clone());
 
     if let Some(carrier) = graph.entry_read_set_signature_for_tests(&key) {
         assert!(
@@ -832,7 +832,7 @@ fn structural_node_kind_publishes_no_file_self_root() {
 fn file_derived_object_node(host: &VerterHost, canonical: &str) -> SemanticNodeId {
     let dispatch = host.semantic_dispatch();
     let _graph = host.project_type_store().semantic_graph();
-    let _ = dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+    let _ = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
         canonical, "Foo",
     )));
     let _ = host
@@ -849,8 +849,11 @@ fn file_derived_object_node(host: &VerterHost, canonical: &str) -> SemanticNodeI
             crate::semantic_query::ProjectionMode::Expanded,
         ),
     };
-    match dispatch.execute(key) {
-        crate::semantic_query::QueryResult::Value(node) => node,
+    match dispatch.execute_type_node(key) {
+        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+            value: node,
+            ..
+        }) => node,
         other => panic!("Instantiate of a non-generic type must yield a Value, got {other:?}"),
     }
 }
@@ -883,7 +886,7 @@ fn key_of_same_canonical_edit_rejects_warm_entry() {
             crate::semantic_query::ProjectionMode::Expanded,
         ),
     };
-    let primed = dispatch.execute(key.clone());
+    let primed = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(primed, crate::semantic_query::QueryResult::Value(_)),
         "KeyOf over a file-derived Object base must resolve before the edit"
@@ -948,7 +951,7 @@ fn project_path_same_canonical_edit_rejects_warm_entry() {
             crate::semantic_query::ProjectionMode::Navigate,
         ),
     };
-    let primed = dispatch.execute(key.clone());
+    let primed = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(primed, crate::semantic_query::QueryResult::Value(_)),
         "ProjectPath `.a` over a file-derived Object base must resolve before the edit"
@@ -1031,7 +1034,7 @@ fn cold_owner_bubbles_carrier_into_outer_tracer() {
     // into this outer tracer.
     let ((), cold_finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
         let dispatch = host.semantic_dispatch();
-        let r = dispatch.execute(key.clone());
+        let r = dispatch.execute_type_node(key.clone());
         assert!(
             matches!(r, crate::semantic_query::QueryResult::Value(_)),
             "the cold ResolveDecl dispatch must resolve to a Value"
@@ -1064,7 +1067,7 @@ fn cold_owner_bubbles_carrier_into_outer_tracer() {
     // child was cold or warm.
     let ((), warm_finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
         let dispatch = host.semantic_dispatch();
-        let _ = dispatch.execute(key.clone());
+        let _ = dispatch.execute_type_node(key.clone());
     });
     let warm_facts = match warm_finalise {
         FactReadSetFinalise::Ok(sig) => sig,
@@ -1128,7 +1131,7 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
         ),
     };
 
-    let primed = dispatch.execute(key.clone());
+    let primed = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(primed, crate::semantic_query::QueryResult::Value(_)),
         "the Pick<Foo, 'a'> built-in utility instantiation must resolve before the edit"
@@ -1240,7 +1243,7 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
         ),
     };
 
-    let primed = dispatch.execute(key.clone());
+    let primed = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(primed, crate::semantic_query::QueryResult::Value(_)),
         "the Box<Foo> non-builtin instantiation must resolve before the edit"
@@ -1357,7 +1360,7 @@ fn resolve_macro_payload_roots_on_type_argument_file() {
         mode: crate::semantic_query::ProjectionMode::Expanded,
     };
 
-    let primed = dispatch.execute(key.clone());
+    let primed = dispatch.execute_type_node(key.clone());
     assert!(
         matches!(primed, crate::semantic_query::QueryResult::Value(_)),
         "the ResolveMacroPayload over a file-derived type argument must resolve before the edit"

@@ -31,7 +31,7 @@ use std::sync::Arc;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticQueryApi,
-    SemanticQueryKey,
+    SemanticQueryKey, SemanticQueryOutput,
 };
 use crate::typeinfo::surface::TypeInfoSurface;
 use crate::typeinfo::types::TypeInfoQueryLevel;
@@ -107,7 +107,7 @@ impl VerterHost {
         // `structural_transit(Navigate)` so member values stay shallow
         // (shallow-by-default). The empty-path `Shallow` terminal below
         // synthesises the one-level surface under publication demand.
-        let base = match dispatch.execute(SemanticQueryKey::Instantiate {
+        let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
             base: crate::semantic_query::DeclKey {
                 canonical_id: Arc::from(canonical_id),
                 decl_name: Arc::from("default"),
@@ -117,7 +117,8 @@ impl VerterHost {
                 ProjectionMode::Navigate,
             ),
         }) {
-            QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+            QueryResult::Recursive(node) => node,
             QueryResult::Error(_) => return None,
         };
 

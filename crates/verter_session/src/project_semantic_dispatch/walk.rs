@@ -8,7 +8,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use crate::semantic_query::{DeclIdentity, QueryError, SemanticQueryApi, SurfaceMember};
+use crate::semantic_query::{
+    DeclIdentity, QueryError, SemanticQueryApi, SemanticQueryOutput, SurfaceMember,
+};
 
 /// Per-walk maximum frame-stack depth observed by
 /// [`expand_empty_path_shallow_terminal_surface`]. Used by
@@ -36,7 +38,7 @@ pub fn probe_max_walker_frame_depth(
     key: &SemanticQueryKey,
 ) -> usize {
     LAST_SHALLOW_WALKER_MAX_FRAMES.store(0, Ordering::Relaxed);
-    let _ = dispatch.execute(key.clone());
+    let _ = dispatch.execute_type_node(key.clone());
     LAST_SHALLOW_WALKER_MAX_FRAMES.load(Ordering::Relaxed)
 }
 
@@ -789,26 +791,32 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let distributive = *distributive;
                     let rest_path: Arc<[PathSegment]> =
                         Arc::from(path[index..].to_vec().into_boxed_slice());
-                    let true_projection = self.dispatch.execute(SemanticQueryKey::ProjectPath {
-                        base: true_branch,
-                        path: Arc::clone(&rest_path),
-                        context: crate::semantic_query::ProjectionReductionContext::published(
-                            self.mode(),
-                        ),
-                    });
-                    let false_projection = self.dispatch.execute(SemanticQueryKey::ProjectPath {
-                        base: false_branch,
-                        path: rest_path,
-                        context: crate::semantic_query::ProjectionReductionContext::published(
-                            self.mode(),
-                        ),
-                    });
+                    let true_projection =
+                        self.dispatch
+                            .execute_type_node(SemanticQueryKey::ProjectPath {
+                                base: true_branch,
+                                path: Arc::clone(&rest_path),
+                                context:
+                                    crate::semantic_query::ProjectionReductionContext::published(
+                                        self.mode(),
+                                    ),
+                            });
+                    let false_projection =
+                        self.dispatch
+                            .execute_type_node(SemanticQueryKey::ProjectPath {
+                                base: false_branch,
+                                path: rest_path,
+                                context:
+                                    crate::semantic_query::ProjectionReductionContext::published(
+                                        self.mode(),
+                                    ),
+                            });
                     let true_id = match true_projection {
-                        QueryResult::Value(id) => id,
+                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => self.opaque_miss(),
                     };
                     let false_id = match false_projection {
-                        QueryResult::Value(id) => id,
+                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => self.opaque_miss(),
                     };
                     let wrapper = self.graph().intern_node(SemanticNodeData::Conditional {
@@ -836,13 +844,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     return;
                 }
                 SemanticNodeData::KeyOf { base } => {
-                    let resolved = match self.dispatch.execute(SemanticQueryKey::KeyOf {
+                    let resolved = match self.dispatch.execute_type_node(SemanticQueryKey::KeyOf {
                         base: *base,
                         context: crate::semantic_query::ProjectionReductionContext::published(
                             self.mode(),
                         ),
                     }) {
-                        QueryResult::Value(id) => id,
+                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => {
                             results.push(self.opaque_miss());
                             return;
@@ -867,17 +875,20 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // TERMINAL segment runs in the caller's mode — that is
                     // handled after the loop by
                     // `resolve_expanded_terminal_carrier`.
-                    let resolved = match self.dispatch.execute(SemanticQueryKey::IndexedAccess {
-                        base: *object,
-                        index: ix.clone(),
-                        mode: ProjectionMode::Navigate,
-                    }) {
-                        QueryResult::Value(id) => id,
-                        _ => {
-                            results.push(self.opaque_miss());
-                            return;
-                        }
-                    };
+                    let resolved =
+                        match self
+                            .dispatch
+                            .execute_type_node(SemanticQueryKey::IndexedAccess {
+                                base: *object,
+                                index: ix.clone(),
+                                mode: ProjectionMode::Navigate,
+                            }) {
+                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                            _ => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        };
                     if resolved == current {
                         results.push(current);
                         return;
@@ -1223,19 +1234,23 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     //   would forge a value type for a non-existent
                     //   member; the coarse path produces the correct
                     //   Object miss instead).
-                    let resolved = match self.dispatch.execute(SemanticQueryKey::MappedType {
-                        source: *source,
-                        mapper: mapper.clone(),
-                        context: crate::semantic_query::ProjectionReductionContext::published(
-                            self.mode(),
-                        ),
-                    }) {
-                        QueryResult::Value(id) => id,
-                        _ => {
-                            results.push(self.opaque_miss());
-                            return;
-                        }
-                    };
+                    let resolved =
+                        match self
+                            .dispatch
+                            .execute_type_node(SemanticQueryKey::MappedType {
+                                source: *source,
+                                mapper: mapper.clone(),
+                                context:
+                                    crate::semantic_query::ProjectionReductionContext::published(
+                                        self.mode(),
+                                    ),
+                            }) {
+                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                            _ => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        };
                     if resolved == current {
                         results.push(current);
                         return;
@@ -1246,15 +1261,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     value_root,
                     path: typeof_path,
                 } => {
-                    let mut resolved = match self.dispatch.execute(SemanticQueryKey::TypeOf {
-                        value_root: value_root.clone(),
-                    }) {
-                        QueryResult::Value(id) => id,
-                        _ => {
-                            results.push(self.opaque_miss());
-                            return;
-                        }
-                    };
+                    let mut resolved =
+                        match self.dispatch.execute_type_node(SemanticQueryKey::TypeOf {
+                            value_root: value_root.clone(),
+                        }) {
+                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                            _ => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        };
                     if !typeof_path.is_empty() {
                         let projection_path: Arc<[PathSegment]> = Arc::from(
                             typeof_path
@@ -1263,14 +1279,17 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 .collect::<Vec<_>>()
                                 .into_boxed_slice(),
                         );
-                        resolved = match self.dispatch.execute(SemanticQueryKey::ProjectPath {
-                            base: resolved,
-                            path: projection_path,
-                            context: crate::semantic_query::ProjectionReductionContext::published(
-                                self.mode(),
-                            ),
-                        }) {
-                            QueryResult::Value(id) => id,
+                        resolved = match self.dispatch.execute_type_node(
+                            SemanticQueryKey::ProjectPath {
+                                base: resolved,
+                                path: projection_path,
+                                context:
+                                    crate::semantic_query::ProjectionReductionContext::published(
+                                        self.mode(),
+                                    ),
+                            },
+                        ) {
+                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                             _ => {
                                 results.push(self.opaque_miss());
                                 return;
@@ -1352,13 +1371,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         decl_name: Arc::clone(name),
                     };
                     drop(data);
-                    let expanded = match self.dispatch.execute(SemanticQueryKey::Instantiate {
+                    let expanded = match self
+                        .dispatch
+                        .execute_type_node(SemanticQueryKey::Instantiate {
                         base,
                         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         context:
                             crate::semantic_query::ProjectionReductionContext::structural_transit(),
                     }) {
-                        QueryResult::Value(id) => id,
+                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         QueryResult::Recursive(id) => {
                             results.push(id);
                             return;
@@ -1388,11 +1409,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let resolved =
                         match self
                             .dispatch
-                            .execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                            .execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                                 scope,
                                 name,
                             })) {
-                            QueryResult::Value(id) => id,
+                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                             QueryResult::Recursive(id) => {
                                 results.push(id);
                                 return;
@@ -1468,21 +1489,24 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     } else {
                         crate::semantic_query::ProjectionReductionContext::published(self.mode())
                     };
-                    let resolved = match self.dispatch.execute(SemanticQueryKey::Instantiate {
-                        base: identity,
-                        args: args_clone,
-                        context: unwrap_context,
-                    }) {
-                        QueryResult::Value(id) => id,
-                        QueryResult::Recursive(id) => {
-                            results.push(id);
-                            return;
-                        }
-                        QueryResult::Error(_) => {
-                            results.push(self.opaque_miss());
-                            return;
-                        }
-                    };
+                    let resolved =
+                        match self
+                            .dispatch
+                            .execute_type_node(SemanticQueryKey::Instantiate {
+                                base: identity,
+                                args: args_clone,
+                                context: unwrap_context,
+                            }) {
+                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                            QueryResult::Recursive(id) => {
+                                results.push(id);
+                                return;
+                            }
+                            QueryResult::Error(_) => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        };
                     if resolved == current {
                         results.push(current);
                         return;
@@ -1578,11 +1602,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 drop(data);
                 match self
                     .dispatch
-                    .execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                    .execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope,
                         name,
                     })) {
-                    QueryResult::Value(id) => id,
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     // A recursive / errored terminal carrier keeps the
                     // carrier (no expansion) — the published surface stays
                     // the bare `DeclRef` per the shallow-by-default rule
@@ -1594,14 +1618,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 let identity = base.clone();
                 let args_clone = Arc::clone(args);
                 drop(data);
-                match self.dispatch.execute(SemanticQueryKey::Instantiate {
-                    base: identity.to_decl_key(),
-                    args: args_clone,
-                    context: crate::semantic_query::ProjectionReductionContext::published(
-                        self.mode(),
-                    ),
-                }) {
-                    QueryResult::Value(id) => id,
+                match self
+                    .dispatch
+                    .execute_type_node(SemanticQueryKey::Instantiate {
+                        base: identity.to_decl_key(),
+                        args: args_clone,
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            self.mode(),
+                        ),
+                    }) {
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     QueryResult::Recursive(_) | QueryResult::Error(_) => node,
                 }
             }
@@ -1760,24 +1786,27 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // `published(self.mode())` here would drop the provenance
                 // and the macro-T-root own-body members would all report
                 // `false`.
-                let expanded = match self.dispatch.execute(SemanticQueryKey::Instantiate {
-                    base: identity,
-                    args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    context: crate::semantic_query::ProjectionReductionContext::published(
-                        self.mode(),
-                    )
-                    .with_provenance(self.provenance()),
-                }) {
-                    QueryResult::Value(id) => id,
-                    QueryResult::Recursive(id) => {
-                        results.push(id);
-                        return;
-                    }
-                    QueryResult::Error(_) => {
-                        results.push(node);
-                        return;
-                    }
-                };
+                let expanded =
+                    match self
+                        .dispatch
+                        .execute_type_node(SemanticQueryKey::Instantiate {
+                            base: identity,
+                            args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                            context: crate::semantic_query::ProjectionReductionContext::published(
+                                self.mode(),
+                            )
+                            .with_provenance(self.provenance()),
+                        }) {
+                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                        QueryResult::Recursive(id) => {
+                            results.push(id);
+                            return;
+                        }
+                        QueryResult::Error(_) => {
+                            results.push(node);
+                            return;
+                        }
+                    };
                 if expanded == node {
                     results.push(node);
                     return;
@@ -1802,23 +1831,26 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 let source = *source;
                 let mapper = mapper.clone();
                 drop(data);
-                let materialised = match self.dispatch.execute(SemanticQueryKey::MappedType {
-                    source,
-                    mapper,
-                    context: crate::semantic_query::ProjectionReductionContext::published(
-                        self.mode(),
-                    ),
-                }) {
-                    QueryResult::Value(id) => id,
-                    QueryResult::Recursive(id) => {
-                        results.push(id);
-                        return;
-                    }
-                    QueryResult::Error(_) => {
-                        results.push(node);
-                        return;
-                    }
-                };
+                let materialised =
+                    match self
+                        .dispatch
+                        .execute_type_node(SemanticQueryKey::MappedType {
+                            source,
+                            mapper,
+                            context: crate::semantic_query::ProjectionReductionContext::published(
+                                self.mode(),
+                            ),
+                        }) {
+                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                        QueryResult::Recursive(id) => {
+                            results.push(id);
+                            return;
+                        }
+                        QueryResult::Error(_) => {
+                            results.push(node);
+                            return;
+                        }
+                    };
                 if materialised == node {
                     results.push(node);
                     return;
@@ -2366,7 +2398,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // argument substituted INTO `Foo`'s body and is lowered
                 // structurally at the `Ref` arm, so only `Foo`'s own
                 // members carry the bit.
-                match self.dispatch.execute(SemanticQueryKey::Instantiate {
+                match self.dispatch.execute_type_node(SemanticQueryKey::Instantiate {
                     base: identity.to_decl_key(),
                     args: args_clone,
                     context: crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
@@ -2374,7 +2406,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     )
                     .with_provenance(self.effective_provenance(provenance_override)),
                 }) {
-                    QueryResult::Value(body) => {
+                    QueryResult::Value(SemanticQueryOutput { value: body, .. }) => {
                         // Continue the walk into the materialised body. If the
                         // instantiated declaration is an interface/class, its
                         // body is an `extends`/`implements` heritage overlay —
@@ -2454,7 +2486,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // `Some(Structural)` and `effective_provenance` downgrades the
                 // unwrap so `Base`'s own-body members are NOT mis-stamped as
                 // the macro type argument's own body.
-                match self.dispatch.execute(SemanticQueryKey::Instantiate {
+                match self.dispatch.execute_type_node(SemanticQueryKey::Instantiate {
                     base: identity.to_decl_key(),
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     context: crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
@@ -2462,7 +2494,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     )
                     .with_provenance(self.effective_provenance(provenance_override)),
                 }) {
-                    QueryResult::Value(body) => {
+                    QueryResult::Value(SemanticQueryOutput { value: body, .. }) => {
                         // Interface/class declaration body → heritage overlay
                         // (its reference arms are `extends`/`implements`). The
                         // own `Object` arm keeps its lowered `OwnBody` role.
@@ -2677,11 +2709,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 drop(data);
                 match self
                     .dispatch
-                    .execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                    .execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope,
                         name,
                     })) {
-                    QueryResult::Value(resolved) => {
+                    QueryResult::Value(SemanticQueryOutput {
+                        value: resolved, ..
+                    }) => {
                         if resolved == cur {
                             self.contribute_surface(
                                 target,

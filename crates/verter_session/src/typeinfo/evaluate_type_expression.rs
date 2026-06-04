@@ -37,7 +37,7 @@ use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::semantic_query::{
     ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId,
-    SemanticQueryApi, SemanticQueryKey,
+    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
 };
 use crate::types::{FileKind, UpsertRequest};
 use crate::VerterHost;
@@ -89,7 +89,8 @@ impl VerterHost {
     ///   node.
     /// - `Err(fault)` — a genuine dispatch fault (`BudgetExceeded` /
     ///   `UnstableState` / `AliasCycle` / `UnsupportedIntrinsic` /
-    ///   `Other`).
+    ///   `Other` / `ValueDomainMismatch`). `ValueDomainMismatch` rides
+    ///   the text-bearing `Other` carrier.
     ///
     /// The carrier's `audit` field is always populated:
     /// [`verter_audit::AuditCaptureState::ActiveStored`] on the
@@ -368,8 +369,9 @@ fn evaluate_inner(
         args: Arc::from(Vec::new().into_boxed_slice()),
         context: crate::semantic_query::ProjectionReductionContext::published(req.mode),
     };
-    let resolved_alias_node = match dispatch.execute(instantiate_key) {
-        QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+    let resolved_alias_node = match dispatch.execute_type_node(instantiate_key) {
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+        QueryResult::Recursive(node) => node,
         QueryResult::Error(err) => {
             // A genuine dispatch fault is a request fault — surface it.
             // A non-fault miss falls back to the bare-decl path so the
@@ -387,8 +389,9 @@ fn evaluate_inner(
                 },
                 name: Arc::from(SCRATCH_ALIAS_NAME),
             });
-            match dispatch.execute(resolve_decl_key) {
-                QueryResult::Value(n) | QueryResult::Recursive(n) => n,
+            match dispatch.execute_type_node(resolve_decl_key) {
+                QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
+                QueryResult::Recursive(n) => n,
                 QueryResult::Error(err) => {
                     cleanup_scratch(host, scratch_uri, req.cacheable);
                     // A genuine dispatch fault rides `Err`; a non-fault
@@ -485,8 +488,15 @@ fn materialize_through_aliases(
                     args: Arc::from(Vec::new().into_boxed_slice()),
                     context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 };
+                let step_result = match dispatch.execute_type_node(key) {
+                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                        QueryResult::Value(node)
+                    }
+                    QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                    QueryResult::Error(err) => QueryResult::Error(err),
+                };
                 match super::resolve_named_symbol::classify_materialization_step(
-                    dispatch.execute(key),
+                    step_result,
                     current,
                 )? {
                     super::resolve_named_symbol::MaterializationStep::Continue(next) => {

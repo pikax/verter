@@ -21,7 +21,8 @@ use crate::semantic_query::{
     BranchSelection, DepSignature, HostResolvedNamedTypeKey, IndexSignature, LiteralValue,
     NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
     QueryError, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeData, SemanticNodeId,
-    SemanticQueryApi, SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
+    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceMember, SurfaceView,
+    ValueRootKey,
 };
 
 /// Encode a [`ProjectionReductionContext`] as a compact u32 bit
@@ -673,7 +674,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // structural-transit keeps the instance members shallow (the consumer
         // drives any deeper projection), matching `resolve_vue_public_type`'s
         // own intermediate-hop demand.
-        let instance_return = match self.execute(SemanticQueryKey::Instantiate {
+        let instance_return = match self.execute_type_node(SemanticQueryKey::Instantiate {
             base: crate::semantic_query::DeclKey {
                 canonical_id: Arc::clone(resolved_default_canonical),
                 decl_name: Arc::from("default"),
@@ -684,7 +685,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ProjectionMode::Navigate,
                 ),
         }) {
-            QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+            QueryResult::Recursive(node) => node,
             // A `.vue` whose synthesized instance shape could not be produced
             // (e.g. mid-flight recursion supersession) yields the opaque miss as
             // the construct return — the value type stays a well-formed
@@ -1749,11 +1751,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `Partial<Record<keyof T, undefined>>` reached through a
             // relation-engine `infer`-binding pass) does NOT reify
             // `keyof source` into a literal-anchor union.
-            let key_space = match self.execute(SemanticQueryKey::KeyOf {
+            let key_space = match self.execute_type_node(SemanticQueryKey::KeyOf {
                 base: source,
                 context,
             }) {
-                QueryResult::Value(id) => id,
+                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                 _ => self.opaque(QueryError::Miss),
             };
             // Value placeholder: the shell does not eagerly lower per-key
@@ -1819,12 +1821,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             "Partial" if args.len() == 1 => {
                 let source = args[0];
                 let mapper = mapper_for(OptionalityMod::Add, ReadonlyMod::Keep, source);
-                let result = match self.execute(SemanticQueryKey::MappedType {
+                let result = match self.execute_type_node(SemanticQueryKey::MappedType {
                     source,
                     mapper,
                     context,
                 }) {
-                    QueryResult::Value(id) => id,
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => self.opaque(QueryError::Miss),
                 };
                 record_utility_edges(result);
@@ -1833,12 +1835,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             "Required" if args.len() == 1 => {
                 let source = args[0];
                 let mapper = mapper_for(OptionalityMod::Remove, ReadonlyMod::Keep, source);
-                let result = match self.execute(SemanticQueryKey::MappedType {
+                let result = match self.execute_type_node(SemanticQueryKey::MappedType {
                     source,
                     mapper,
                     context,
                 }) {
-                    QueryResult::Value(id) => id,
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => self.opaque(QueryError::Miss),
                 };
                 record_utility_edges(result);
@@ -1847,12 +1849,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             "Readonly" if args.len() == 1 => {
                 let source = args[0];
                 let mapper = mapper_for(OptionalityMod::Keep, ReadonlyMod::Add, source);
-                let result = match self.execute(SemanticQueryKey::MappedType {
+                let result = match self.execute_type_node(SemanticQueryKey::MappedType {
                     source,
                     mapper,
                     context,
                 }) {
-                    QueryResult::Value(id) => id,
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => self.opaque(QueryError::Miss),
                 };
                 record_utility_edges(result);
@@ -1900,12 +1902,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
                 // Source is K; `build_mapped_type` reads names from K's
                 // keyspace branch when the source isn't an Object.
-                let result = match self.execute(SemanticQueryKey::MappedType {
+                let result = match self.execute_type_node(SemanticQueryKey::MappedType {
                     source: key_arg,
                     mapper,
                     context,
                 }) {
-                    QueryResult::Value(id) => id,
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => self.opaque(QueryError::Miss),
                 };
                 record_utility_edges(result);
@@ -2874,12 +2876,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(SemanticNodeData::InstantiationRef { base, args }) => {
                     let base = base.to_decl_key();
                     let args = Arc::clone(args);
-                    match self.execute(SemanticQueryKey::Instantiate {
+                    match self.execute_type_node(SemanticQueryKey::Instantiate {
                         base,
                         args,
                         context,
                     }) {
-                        QueryResult::Value(id) => id,
+                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => evaluated,
                     }
                 }
@@ -3105,12 +3107,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
                 let base = base.to_decl_key();
                 let args = Arc::clone(args);
-                match self.execute(SemanticQueryKey::Instantiate {
+                match self.execute_type_node(SemanticQueryKey::Instantiate {
                     base,
                     args,
                     context,
                 }) {
-                    QueryResult::Value(id) => id,
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => evaluated,
                 }
             }
@@ -3238,12 +3240,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
                 let base = base.to_decl_key();
                 let args = Arc::clone(args);
-                match self.execute(SemanticQueryKey::Instantiate {
+                match self.execute_type_node(SemanticQueryKey::Instantiate {
                     base,
                     args,
                     context,
                 }) {
-                    QueryResult::Value(id) => id,
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => evaluated,
                 }
             }
@@ -3311,12 +3313,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
                 let base = base.to_decl_key();
                 let args = Arc::clone(args);
-                match self.execute(SemanticQueryKey::Instantiate {
+                match self.execute_type_node(SemanticQueryKey::Instantiate {
                     base,
                     args,
                     context,
                 }) {
-                    QueryResult::Value(id) => id,
+                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => evaluated,
                 }
             }
@@ -3526,14 +3528,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let mut per_member: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
                 let mut distribution_ok = true;
                 for &member in members.iter() {
-                    match self.execute(SemanticQueryKey::Conditional {
+                    match self.execute_type_node(SemanticQueryKey::Conditional {
                         check: member,
                         extends,
                         true_branch,
                         false_branch,
                         distributive: false,
                     }) {
-                        QueryResult::Value(id) => per_member.push(id),
+                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => {
+                            per_member.push(id)
+                        }
                         _ => {
                             distribution_ok = false;
                             break;
@@ -3541,11 +3545,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 if distribution_ok {
-                    if let QueryResult::Value(normalised) =
-                        self.execute(SemanticQueryKey::NormalizeUnion {
-                            members: Arc::from(per_member.into_boxed_slice()),
-                        })
-                    {
+                    if let QueryResult::Value(SemanticQueryOutput {
+                        value: normalised, ..
+                    }) = self.execute_type_node(SemanticQueryKey::NormalizeUnion {
+                        members: Arc::from(per_member.into_boxed_slice()),
+                    }) {
                         return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                             QueryResult::Value(normalised),
                             fence,

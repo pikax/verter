@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey, ScopeId,
-    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
 };
 use crate::typeinfo::surface::TypeInfoSurface;
 use crate::typeinfo::types::{ShallowSurfaceRequest, TypeInfoQueryLevel};
@@ -81,14 +81,15 @@ impl VerterHost {
         // pre-instantiated body. The empty-path Shallow synthesiser's decl-root
         // unwrap re-establishes the consuming declaration's KIND (interface /
         // class vs alias) and classifies its heritage arms.
-        let base = match dispatch.execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        let base = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
                 canonical_id: Arc::clone(&request.canonical_id),
                 local_scope: None,
             },
             name: Arc::clone(&request.name),
         })) {
-            QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+            QueryResult::Recursive(node) => node,
             QueryResult::Error(_) => return None,
         };
 
@@ -147,12 +148,13 @@ impl VerterHost {
         // synthesises the LEAF's surface. This path PRESERVES call / construct
         // signatures, so an emit interface's call signatures survive here (the
         // emit normalizer reads them).
-        let terminal = match dispatch.execute(SemanticQueryKey::ProjectPath {
+        let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base,
             path,
             context,
         }) {
-            QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+            QueryResult::Recursive(node) => node,
             QueryResult::Error(_) => return None,
         };
 

@@ -137,16 +137,18 @@ fn walk_path_terminates_on_deeply_nested_acyclic_union() {
         let literal = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(i as f64)));
         let next_nodes: std::sync::Arc<[crate::semantic_query::SemanticNodeId]> =
             std::sync::Arc::from(vec![current, literal].into_boxed_slice());
-        match dispatch.execute(crate::semantic_query::SemanticQueryKey::NormalizeUnion {
+        match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::NormalizeUnion {
             members: next_nodes,
         }) {
-            crate::semantic_query::QueryResult::Value(id) => current = id,
+            crate::semantic_query::QueryResult::Value(
+                crate::semantic_query::SemanticQueryOutput { value: id, .. },
+            ) => current = id,
             other => panic!("NormalizeUnion iteration {i} failed: {other:?}"),
         }
     }
     let empty_path: std::sync::Arc<[crate::semantic_query::PathSegment]> =
         std::sync::Arc::from(Vec::new().into_boxed_slice());
-    let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::ProjectPath {
+    let result = dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
         base: current,
         path: empty_path,
         context: crate::semantic_query::ProjectionReductionContext::published(
@@ -212,7 +214,7 @@ fn walk_path_terminates_on_self_referential_alias_chain() {
         ))]
         .into_boxed_slice(),
     );
-    let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::ProjectPath {
+    let result = dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
         base: current,
         path,
         context: crate::semantic_query::ProjectionReductionContext::published(
@@ -311,7 +313,7 @@ fn relation_guard_returns_unknown_on_cyclic_reentry() {
 fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() {
     use crate::semantic_query::{
         LiteralValue, MapperKey, OptionalityMod, QueryResult, ReadonlyMod, SemanticNodeData,
-        SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -359,7 +361,7 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
         kind: crate::semantic_query::MapperKind::Computed,
     };
 
-    let (result, _) = match dispatch.execute(SemanticQueryKey::MappedType {
+    let (result, _) = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper,
         context: crate::semantic_query::ProjectionReductionContext::published(
@@ -371,7 +373,7 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
         }
     };
     let id = match result {
-        QueryResult::Value(id) => id,
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected mapped-type Value, got {other:?}"),
     };
     let data = graph.node_data(id).expect("result interned");
@@ -417,7 +419,7 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
 fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaque() {
     use crate::semantic_query::{
         IndexKey, LiteralValue, MapperKey, OptionalityMod, QueryResult, ReadonlyMod,
-        SemanticNodeData, SemanticQueryApi, SemanticQueryKey,
+        SemanticNodeData, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -466,7 +468,7 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
         kind: crate::semantic_query::MapperKind::Identity,
     };
 
-    let result = dispatch.execute(SemanticQueryKey::MappedType {
+    let result = dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper,
         context: crate::semantic_query::ProjectionReductionContext::published(
@@ -474,7 +476,7 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
         ),
     });
     let id = match result {
-        QueryResult::Value(id) => id,
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected mapped-type Value, got {other:?}"),
     };
     let data = graph.node_data(id).expect("result interned");
@@ -535,7 +537,7 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
 fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration() {
     use crate::semantic_query::{
         MapperKey, OptionalityMod, QueryResult, ReadonlyMod, SemanticNodeData, SemanticQueryApi,
-        SemanticQueryKey,
+        SemanticQueryKey, SemanticQueryOutput,
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -582,7 +584,7 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
         kind: crate::semantic_query::MapperKind::Computed,
     };
 
-    let result = dispatch.execute(SemanticQueryKey::MappedType {
+    let result = dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper: mapper.clone(),
         context: crate::semantic_query::ProjectionReductionContext::published(
@@ -590,7 +592,7 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
         ),
     });
     let id = match result {
-        QueryResult::Value(id) => id,
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected mapped-type Value, got {other:?}"),
     };
     let data = graph.node_data(id).expect("result interned");
@@ -658,14 +660,17 @@ fn build_key_of_over_intersection_returns_distributed_union() {
         vec![a, b].into_boxed_slice(),
     )));
 
-    let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::KeyOf {
+    let result = dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::KeyOf {
         base: intersection,
         context: crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Expanded,
         ),
     });
     let id = match result {
-        crate::semantic_query::QueryResult::Value(id) => id,
+        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+            value: id,
+            ..
+        }) => id,
         other => panic!("expected KeyOf Value, got {other:?}"),
     };
     // The result should be decidable (not a deferred `KeyOf` shell
@@ -703,14 +708,17 @@ fn build_key_of_over_union_returns_intersection_of_keys() {
         vec![a, b].into_boxed_slice(),
     )));
 
-    let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::KeyOf {
+    let result = dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::KeyOf {
         base: union,
         context: crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Expanded,
         ),
     });
     let id = match result {
-        crate::semantic_query::QueryResult::Value(id) => id,
+        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+            value: id,
+            ..
+        }) => id,
         other => panic!("expected KeyOf Value, got {other:?}"),
     };
     // Discriminating: the result must not be a deferred
@@ -756,14 +764,17 @@ fn build_key_of_over_conditional_distributes_into_branches() {
         distributive: false,
     });
 
-    let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::KeyOf {
+    let result = dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::KeyOf {
         base: conditional,
         context: crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Expanded,
         ),
     });
     let id = match result {
-        crate::semantic_query::QueryResult::Value(id) => id,
+        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+            value: id,
+            ..
+        }) => id,
         other => panic!("expected KeyOf Value, got {other:?}"),
     };
     // Either the engine distributes (produces a Union of the two
@@ -798,7 +809,7 @@ fn build_key_of_over_conditional_distributes_into_branches() {
 fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_name_remap() {
     use crate::semantic_query::{
         MapperKey, OptionalityMod, QueryResult, ReadonlyMod, SemanticNodeData, SemanticQueryApi,
-        SemanticQueryKey,
+        SemanticQueryKey, SemanticQueryOutput,
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -847,7 +858,7 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
         kind: crate::semantic_query::MapperKind::Computed,
     };
 
-    let result = dispatch.execute(SemanticQueryKey::MappedType {
+    let result = dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper: mapper.clone(),
         context: crate::semantic_query::ProjectionReductionContext::published(
@@ -855,7 +866,7 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
         ),
     });
     let id = match result {
-        QueryResult::Value(id) => id,
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected mapped-type Value, got {other:?}"),
     };
     let data = graph.node_data(id).expect("result interned");
@@ -2701,7 +2712,7 @@ fn type_query_engine_removal_migrates_vue_macro_parsing_to_host_named_type_cache
 
 /// Evaluation-entry-point invariant: the entry point for type
 /// evaluation is
-/// `dispatch.execute(ProjectPath { ..., mode: Expanded })`. The
+/// `dispatch.execute_type_node(ProjectPath { ..., mode: Expanded })`. The
 /// path must exist and run end-to-end on a simple identity case.
 #[test]
 fn type_eval_evaluate_removal_preserves_semantic_output() {
@@ -2711,7 +2722,7 @@ fn type_eval_evaluate_removal_preserves_semantic_output() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let empty_path: std::sync::Arc<[crate::semantic_query::PathSegment]> =
         std::sync::Arc::from(Vec::new().into_boxed_slice());
-    let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::ProjectPath {
+    let result = dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
         base: string,
         path: empty_path,
         context: crate::semantic_query::ProjectionReductionContext::published(
@@ -2719,7 +2730,10 @@ fn type_eval_evaluate_removal_preserves_semantic_output() {
         ),
     });
     match result {
-        crate::semantic_query::QueryResult::Value(id) => {
+        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+            value: id,
+            ..
+        }) => {
             assert_eq!(
                 id, string,
                 "empty-path Expanded projection of a primitive returns the same node"
@@ -2765,7 +2779,7 @@ fn type_expand_expand_object_shape_removal_preserves_shape_output() {
     ])));
     let empty_path: std::sync::Arc<[crate::semantic_query::PathSegment]> =
         std::sync::Arc::from(Vec::new().into_boxed_slice());
-    let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::ProjectPath {
+    let result = dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
         base: object,
         path: empty_path,
         context: crate::semantic_query::ProjectionReductionContext::published(
@@ -2773,7 +2787,10 @@ fn type_expand_expand_object_shape_removal_preserves_shape_output() {
         ),
     });
     match result {
-        crate::semantic_query::QueryResult::Value(id) => {
+        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+            value: id,
+            ..
+        }) => {
             let data = graph.node_data(id).expect("projection result interned");
             if let SemanticNodeData::Object(surf) = &*data {
                 assert_eq!(
@@ -2802,11 +2819,15 @@ fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
     // A single-element "union" should fold to the element itself.
     let members: std::sync::Arc<[crate::semantic_query::SemanticNodeId]> =
         std::sync::Arc::from(vec![a].into_boxed_slice());
-    let result = dispatch.execute(crate::semantic_query::SemanticQueryKey::NormalizeUnion {
-        members: members.clone(),
-    });
+    let result =
+        dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::NormalizeUnion {
+            members: members.clone(),
+        });
     match result {
-        crate::semantic_query::QueryResult::Value(id) => {
+        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+            value: id,
+            ..
+        }) => {
             assert_eq!(
                 id, a,
                 "single-element union normalization folds to the only member"
@@ -2817,10 +2838,13 @@ fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
     // A multi-element union should produce a distinct interned Union node.
     let ab: std::sync::Arc<[crate::semantic_query::SemanticNodeId]> =
         std::sync::Arc::from(vec![a, b].into_boxed_slice());
-    let ab_result =
-        dispatch.execute(crate::semantic_query::SemanticQueryKey::NormalizeUnion { members: ab });
+    let ab_result = dispatch
+        .execute_type_node(crate::semantic_query::SemanticQueryKey::NormalizeUnion { members: ab });
     match ab_result {
-        crate::semantic_query::QueryResult::Value(id) => {
+        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+            value: id,
+            ..
+        }) => {
             assert_ne!(
                 id, a,
                 "multi-member union normalization produces a new node"
@@ -2895,7 +2919,7 @@ fn route_loop_callers_route_through_dispatch() {
 
 /// Engine-method-absence invariant: `instantiate_local_generic_ref`
 /// is not a callsite of the meta-resolve family. Callers route
-/// through `dispatch.execute(SemanticQueryKey::Instantiate { .. })`.
+/// through `dispatch.execute_type_node(SemanticQueryKey::Instantiate { .. })`.
 /// The check is a static-grep gate over the meta-resolve module
 /// family: NO `engine.instantiate_local_generic_ref(...)` callsite
 /// may appear.
@@ -2953,7 +2977,7 @@ fn instantiate_local_generic_ref_callers_route_through_dispatch() {
 fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
     use crate::semantic_query::{
         ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
-        SemanticQueryApi, SemanticQueryKey, SurfaceMember,
+        SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceMember,
     };
 
     let host = host_for_relation_tests();
@@ -2993,11 +3017,11 @@ fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
     // Dispatch under `StructuralTransit` — must return a deferred
     // `KeyOf { base }` carrier (no keyspace enumeration).
     let transit_ctx = ProjectionReductionContext::structural_transit();
-    let transit_id = match dispatch.execute(SemanticQueryKey::KeyOf {
+    let transit_id = match dispatch.execute_type_node(SemanticQueryKey::KeyOf {
         base: object,
         context: transit_ctx,
     }) {
-        QueryResult::Value(id) => id,
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("KeyOf under StructuralTransit returned {other:?}"),
     };
     let transit_data = graph
@@ -3015,11 +3039,11 @@ fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
 
     // Dispatch under `Published + Expanded` — must reify the keyspace.
     let publish_ctx = ProjectionReductionContext::published(ProjectionMode::Expanded);
-    let publish_id = match dispatch.execute(SemanticQueryKey::KeyOf {
+    let publish_id = match dispatch.execute_type_node(SemanticQueryKey::KeyOf {
         base: object,
         context: publish_ctx,
     }) {
-        QueryResult::Value(id) => id,
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("KeyOf under Published+Expanded returned {other:?}"),
     };
     assert_ne!(
@@ -3045,7 +3069,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
     use crate::semantic_query::{
         IndexKey, MapperKey, OptionalityMod, ProjectionMode, ProjectionReductionContext,
         QueryResult, ReadonlyMod, SemanticNodeData, SemanticQueryApi, SemanticQueryKey,
-        SurfaceMember,
+        SemanticQueryOutput, SurfaceMember,
     };
 
     let host = host_for_relation_tests();
@@ -3108,12 +3132,12 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
 
     // StructuralTransit dispatch.
     let transit_ctx = ProjectionReductionContext::structural_transit();
-    let transit_id = match dispatch.execute(SemanticQueryKey::MappedType {
+    let transit_id = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper: mapper.clone(),
         context: transit_ctx,
     }) {
-        QueryResult::Value(id) => id,
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("MappedType under StructuralTransit returned {other:?}"),
     };
     let transit_data = graph
@@ -3135,12 +3159,12 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
 
     // Published+Expanded dispatch.
     let publish_ctx = ProjectionReductionContext::published(ProjectionMode::Expanded);
-    let publish_id = match dispatch.execute(SemanticQueryKey::MappedType {
+    let publish_id = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper: mapper.clone(),
         context: publish_ctx,
     }) {
-        QueryResult::Value(id) => id,
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("MappedType under Published+Expanded returned {other:?}"),
     };
     assert_ne!(
@@ -3173,7 +3197,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
     use crate::semantic_query::{
         IndexKey, MapperKey, OptionalityMod, ProjectionMode, ProjectionReductionContext,
         QueryResult, ReadonlyMod, SemanticNodeData, SemanticQueryApi, SemanticQueryKey,
-        SurfaceMember,
+        SemanticQueryOutput, SurfaceMember,
     };
 
     let host = host_for_relation_tests();
@@ -3220,12 +3244,12 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
         kind: crate::semantic_query::MapperKind::Identity,
     };
 
-    let transit_id = match dispatch.execute(SemanticQueryKey::MappedType {
+    let transit_id = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper: mapper.clone(),
         context: ProjectionReductionContext::structural_transit(),
     }) {
-        QueryResult::Value(id) => id,
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("transit dispatch returned {other:?}"),
     };
     assert!(
@@ -3236,12 +3260,12 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
         "AX-hybrid: userland mapped MUST carrier-stop under transit (structural rule, not nominal)"
     );
 
-    let publish_id = match dispatch.execute(SemanticQueryKey::MappedType {
+    let publish_id = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper,
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     }) {
-        QueryResult::Value(id) => id,
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("publish dispatch returned {other:?}"),
     };
     assert!(
