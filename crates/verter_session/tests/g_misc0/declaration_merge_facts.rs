@@ -152,30 +152,39 @@ fn two_interface_parts_emit_one_merged_export_fact() {
 }
 
 #[test]
-fn declaration_merge_reorder_produces_byte_identical_export_fact() {
-    // R10 / reorder stability: the same two parts in reverse
-    // declaration order produce byte-identical `Export("Foo")`
-    // fact under R27 canonical visit order (alpha-normalised over
-    // sorted member name list).
+fn declaration_merge_member_reorder_produces_byte_identical_export_fact() {
+    // R10 / member-order invariance: reordering the MEMBERS WITHIN a
+    // merged interface contributor produces a byte-identical
+    // `Export("Foo")` fact, because the Phase 1 emitter alpha-normalises
+    // each object surface by sorted member name. This is a GENUINE
+    // reorder (`parts_a != parts_b`): if the emitter hashed members in
+    // source order, the two hashes would differ.
     //
-    // The shallow walk's merge order is declaration order →
-    // Intersection arms in declaration order. The Phase 1 emitter
-    // alpha-normalises Object members by sorted name, so
-    // Intersection-arm reordering MUST NOT affect the per-arm
-    // contribution. (Note: Intersection ARM order itself
-    // currently affects the hash because the alpha-normalisation
-    // of Intersection arms is not order-invariant — this is the
-    // Stage 6d target. Stage 3 captures: per-arm member-order
-    // invariance.)
+    // (Contributor/part ORDER invariance is a separate, NOT-yet-held
+    // property — interface member union is order-insensitive but
+    // intersection-arm normalisation is not — so this test exercises
+    // only the property that actually holds: within-contributor member
+    // order.)
     let parts_a = vec![
-        vec![("a", TypeExpr::Primitive(PrimitiveName::String))],
-        vec![("b", TypeExpr::Primitive(PrimitiveName::Number))],
+        vec![
+            ("a", TypeExpr::Primitive(PrimitiveName::String)),
+            ("b", TypeExpr::Primitive(PrimitiveName::Number)),
+        ],
+        vec![("c", TypeExpr::Primitive(PrimitiveName::Boolean))],
     ];
-    // Reorder MEMBERS within each part, NOT the parts themselves.
+    // Same parts, but the MEMBERS within the first contributor are
+    // written in the opposite order.
     let parts_b = vec![
-        vec![("a", TypeExpr::Primitive(PrimitiveName::String))],
-        vec![("b", TypeExpr::Primitive(PrimitiveName::Number))],
+        vec![
+            ("b", TypeExpr::Primitive(PrimitiveName::Number)),
+            ("a", TypeExpr::Primitive(PrimitiveName::String)),
+        ],
+        vec![("c", TypeExpr::Primitive(PrimitiveName::Boolean))],
     ];
+    assert_ne!(
+        parts_a, parts_b,
+        "this test is only meaningful if the inputs genuinely differ in member order"
+    );
     let indexed_a = build_with_merged_foo(parts_a);
     let indexed_b = build_with_merged_foo(parts_b);
     let emission_a = emit_parse_facts(&indexed_a);
@@ -188,7 +197,7 @@ fn declaration_merge_reorder_produces_byte_identical_export_fact() {
     let fact_b = emission_b.facts.lookup(&key).unwrap();
     assert_eq!(
         fact_a.semantic_hash, fact_b.semantic_hash,
-        "R10: merged declaration with identical member shape MUST hash identically"
+        "R10: within-contributor member reorder MUST hash identically (alpha-normalised)"
     );
 }
 
