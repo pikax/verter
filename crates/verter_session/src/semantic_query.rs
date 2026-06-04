@@ -48,6 +48,13 @@ pub use crate::resolver_core::shallow_file_state::BudgetExceededFailure;
 /// §3.4 materialised-record carrier types live here.
 pub mod demand;
 
+/// Canonical display policy: [`display`](display::display) projects an
+/// already-computed [`SemanticQueryValue`] under a display-only
+/// [`DisplayNeeds`](demand::DisplayNeeds) bitset. Display is NEVER a stored or
+/// re-parsed string and never re-resolves
+/// (`docs/arch/u2-query-value-domain-design.md` §14).
+pub mod display;
+
 /// The `SemanticQueryKeySpec` table: one authoritative, hand-encoded row per
 /// live [`SemanticQueryKey`] variant, plus the deterministic text renderer the
 /// generator binary writes and the diff-test re-checks. See the module for the

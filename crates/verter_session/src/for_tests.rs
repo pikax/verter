@@ -30,6 +30,13 @@ pub use crate::capture_token::{
 /// `crate::semantic_query_memo::SemanticGraphStore` directly.
 pub use crate::semantic_query_memo::{BatchExpandError, SemanticGraphStore};
 
+/// Re-export the canonical display projection so the `g_block` integration
+/// guards can call it. `display` is `pub` (forced by E0364: it lives in a
+/// `pub mod display`, so it cannot be more private than its enclosing module);
+/// the integration suite reaches it through this surface, mirroring the
+/// `SemanticGraphStore` re-export above.
+pub use crate::semantic_query::display::{display, DisplayString};
+
 /// Re-export the validate-running probe surface so the
 /// `family_warm_read_releases_mutex_before_validate.rs`
 /// concurrency-fitness discriminator can arm + assert the post-fix
