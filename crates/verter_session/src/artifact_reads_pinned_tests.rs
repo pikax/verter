@@ -665,6 +665,7 @@ fn host_store_view_suppresses_lingering_route_owned_hash_when_current_indexed_la
             import_locals: FxHashSet::default(),
             import_targets: FxHashMap::default(),
             augmentation_scopes: Default::default(),
+            augmentation_value_scopes: Default::default(),
             analysis: Arc::clone(&real_probe_indexed.shallow_state.analysis),
         }
     };

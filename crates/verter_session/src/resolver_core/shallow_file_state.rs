@@ -70,6 +70,19 @@ pub struct ShallowFileState {
         ShallowTypeSymbol,
     >,
 
+    /// Value-space counterpart to [`augmentation_scopes`](Self::augmentation_scopes):
+    /// the retained VALUE declarations (`const`/`let`/`var`, `function`,
+    /// `class`) nested in `declare module "X" { ... }` / `declare global { ... }`
+    /// blocks. The typed source for value-space module-augmentation facts;
+    /// never enters file-scope [`value_symbols`](Self::value_symbols).
+    pub augmentation_value_scopes: FxHashMap<
+        (
+            verter_semantic::analysis::type_eval::AugmentationScopeKind,
+            String,
+        ),
+        ShallowValueSymbol,
+    >,
+
     /// Import-local names (names that come from `import` declarations).
     /// Used to classify dependencies as local vs external during closure.
     pub import_locals: FxHashSet<String>,
@@ -420,6 +433,13 @@ impl ShallowFileState {
             ),
             ShallowTypeSymbol,
         > = FxHashMap::default();
+        let mut augmentation_value_scopes: FxHashMap<
+            (
+                verter_semantic::analysis::type_eval::AugmentationScopeKind,
+                String,
+            ),
+            ShallowValueSymbol,
+        > = FxHashMap::default();
 
         // Populate exports from the extracted bindings
         // Direct reexports
@@ -608,6 +628,25 @@ impl ShallowFileState {
                     },
                 );
             }
+
+            // Value-space augmentation inventory — mirror each scoped value
+            // group as a `ShallowValueSymbol` keyed by `(scope, name)`. The
+            // typed source for value-space module-augmentation facts; never
+            // enters file-scope `value_symbols`.
+            for ((scope, name), group) in &env.augmentation_value_scopes {
+                let decl = group.primary();
+                augmentation_value_scopes.insert(
+                    (scope.clone(), name.clone()),
+                    ShallowValueSymbol {
+                        kind: decl.kind,
+                        type_annotation: decl.type_annotation.clone(),
+                        signatures: group.merged_signatures(),
+                        object_shape: decl.object_shape.clone(),
+                        enum_members: None,
+                        is_synthesised_vue_default: false,
+                    },
+                );
+            }
         }
         // Without an eval env or source fallback, the shallow state can still
         // expose export/import routing but cannot populate declaration bodies.
@@ -622,6 +661,7 @@ impl ShallowFileState {
             symbols,
             value_symbols,
             augmentation_scopes,
+            augmentation_value_scopes,
             import_locals,
             import_targets,
             analysis,

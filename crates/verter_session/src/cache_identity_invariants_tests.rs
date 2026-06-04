@@ -773,6 +773,7 @@ fn route_owned_shallow_tiered_gate_invalidates_on_workspace_generation_bump() {
             import_locals: rustc_hash::FxHashSet::default(),
             import_targets: rustc_hash::FxHashMap::default(),
             augmentation_scopes: Default::default(),
+            augmentation_value_scopes: Default::default(),
             analysis: Arc::new(
                 verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
                 ),
@@ -809,6 +810,7 @@ fn route_owned_shallow_tiered_gate_invalidates_on_workspace_generation_bump() {
             import_locals: rustc_hash::FxHashSet::default(),
             import_targets: rustc_hash::FxHashMap::default(),
             augmentation_scopes: Default::default(),
+            augmentation_value_scopes: Default::default(),
             analysis: Arc::new(
                 verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(
                 ),

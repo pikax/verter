@@ -21,7 +21,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use verter_semantic::facts::{FactKey, SymbolSpace};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::InternedSpecifier;
@@ -54,17 +54,11 @@ fn fixture(name: &str) -> String {
 }
 
 fn build_indexed_with_source(raw: &str) -> Arc<IndexedReady> {
-    let shallow = ShallowFileState {
-        whole_hash: [0u8; 16],
-        exports: FxHashMap::default(),
-        wildcard_reexports: Vec::new(),
-        symbols: FxHashMap::default(),
-        value_symbols: FxHashMap::default(),
-        import_locals: FxHashSet::default(),
-        import_targets: FxHashMap::default(),
-        augmentation_scopes: Default::default(),
-        analysis: empty_external(),
-    };
+    // Build the shallow inventory through the REAL binder so the typed
+    // augmentation inventory (the single source of truth for augmentation
+    // facts) is populated, exactly as production does.
+    let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(raw);
+    let shallow = ShallowFileState::from_analysis([0u8; 16], empty_external(), Some(&env));
     Arc::new(IndexedReady {
         whole_hash: [0u8; 16],
         shallow_state: Arc::new(shallow),

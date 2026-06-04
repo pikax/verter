@@ -382,6 +382,13 @@ pub struct EvalEnv {
     /// `type_symbols` — these inner declarations never enter the file's
     /// top-level surface.
     pub augmentation_scopes: FxHashMap<(AugmentationScopeKind, String), TypeDeclGroup>,
+    /// Value-space counterpart to [`augmentation_scopes`](Self::augmentation_scopes):
+    /// the RETAINED bodies of VALUE declarations (`const`/`let`/`var`,
+    /// `function`, `class`, `enum`) nested in `declare module "X" { ... }` /
+    /// `declare global { ... }` blocks. Kept separate from `value_symbols`
+    /// (file scope) — these augment another module's value surface and are the
+    /// typed source for value-space module-augmentation facts.
+    pub augmentation_value_scopes: FxHashMap<(AugmentationScopeKind, String), ValueDeclGroup>,
     /// Stable ids assigned to type declarations inserted into this environment.
     type_decl_ids: FxHashMap<String, DeclarationId>,
     /// Stable ids assigned to value declarations inserted into this environment.
@@ -433,6 +440,7 @@ impl EvalEnv {
             type_symbols: FxHashMap::default(),
             value_symbols: FxHashMap::default(),
             augmentation_scopes: FxHashMap::default(),
+            augmentation_value_scopes: FxHashMap::default(),
             type_decl_ids: FxHashMap::default(),
             value_decl_ids: FxHashMap::default(),
             type_bindings: FxHashMap::default(),
@@ -498,15 +506,33 @@ impl EvalEnv {
         }
     }
 
+    /// Register a VALUE declaration nested in an ambient augmentation block,
+    /// appending it to the named group inside the augmentation value scope
+    /// (creating the group if absent). Retained for value-space cross-file
+    /// augmentation facts; never enters file-scope `value_symbols`.
+    pub fn add_augmentation_value(&mut self, scope: AugmentationScopeKind, decl: ValueDeclInfo) {
+        match self
+            .augmentation_value_scopes
+            .get_mut(&(scope.clone(), decl.name.clone()))
+        {
+            Some(group) => group.contributors.push(decl),
+            None => {
+                let name = decl.name.clone();
+                self.augmentation_value_scopes
+                    .insert((scope, name), ValueDeclGroup::new(decl));
+            }
+        }
+    }
+
     /// Look up the ordered contributor group for an augmentation-scoped type
-    /// declaration, if any.
+    /// declaration, if any. The lookup key is `(scope, name)`; the temporary
+    /// owned key it composes is unavoidable while the map keys on owned
+    /// `(AugmentationScopeKind, String)` tuples.
     pub fn augmentation_symbol(
         &self,
         scope: &AugmentationScopeKind,
         name: &str,
     ) -> Option<&TypeDeclGroup> {
-        // The map key is `(scope, name)`; probe without allocating a fresh key
-        // when possible.
         self.augmentation_scopes
             .get(&(scope.clone(), name.to_string()))
     }

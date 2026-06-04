@@ -1,11 +1,13 @@
-//! R28 arch-guard: the Phase 1 parse-phase fact emitter MUST NOT
-//! call into cross-decl AST traversal.
+//! R28 arch-guard: the parse-phase fact emitter MUST NOT call into
+//! cross-decl AST traversal AND MUST NOT rescan raw source.
 //!
-//! Verify-bullet 14: the emitter walks `IndexedReady.shallow_state`
-//! (which the shallow walk has already populated) and consumes raw
-//! source ONLY for module-augmentation extraction (a single-decl
-//! walk per `declare module … {}` block, NOT a cross-decl
-//! traversal — see fact_emission.rs::collect_augmentations).
+//! The emitter walks `IndexedReady.shallow_state` ONLY (which the
+//! shallow walk has already populated). Module-augmentation facts are
+//! derived from the typed augmentation inventory
+//! (`ShallowFileState.augmentation_scopes` /
+//! `augmentation_value_scopes`) — there is NO raw-source byte-scan
+//! (Build Philosophy: no stage rescans raw source to rediscover what
+//! shallow processing captured).
 //!
 //! This test verifies the architectural boundary by source-text
 //! grepping the production fact-emission module for banned API
@@ -59,25 +61,24 @@ fn fact_emission_does_not_invoke_cross_decl_oxc_walks() {
 }
 
 #[test]
-fn fact_emission_only_reads_shallow_state_or_raw_source() {
-    // The legal Phase 1 inputs are:
-    //   - `IndexedReady.shallow_state` (pre-extracted by the
-    //     shallow walk).
-    //   - `IndexedReady.raw_source` (for the single-decl
-    //     `declare module …` extractor only — covered separately
-    //     in `extract_module_augmentations_from_source`).
+fn fact_emission_reads_only_shallow_state_never_raw_source() {
+    // The SOLE legal Phase 1 input is `IndexedReady.shallow_state`
+    // (pre-extracted by the shallow walk). Module-augmentation facts
+    // are derived from the typed augmentation inventory on the shallow
+    // state — there is NO raw-source byte-scan.
     //
-    // The emitter source MUST reference `shallow_state` and
-    // `raw_source` directly, and MUST NOT pull in cross-file
-    // resolver state.
+    // The emitter source MUST reference `shallow_state`, MUST NOT
+    // reference `raw_source` (the retired byte-scanner's input), and
+    // MUST NOT pull in cross-file resolver state.
     let src = fact_emission_source();
     assert!(
         src.contains("shallow_state"),
         "fact_emission MUST consume IndexedReady.shallow_state"
     );
     assert!(
-        src.contains("raw_source"),
-        "fact_emission MUST consume IndexedReady.raw_source (for module-augmentation extraction)"
+        !src.contains("raw_source"),
+        "fact_emission MUST NOT rescan IndexedReady.raw_source — augmentation facts are derived \
+         from the typed augmentation inventory (no second source of truth, Build Philosophy)"
     );
     // Forbidden: cross-file resolver-state pulls.
     let banned_state_refs: &[&str] = &[

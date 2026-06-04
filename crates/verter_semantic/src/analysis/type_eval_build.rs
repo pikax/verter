@@ -400,25 +400,96 @@ fn extract_augmentation_block(
                 );
             }
             Statement::ExportNamedDeclaration(export) => {
-                if let Some(Declaration::TSInterfaceDeclaration(iface)) =
-                    export.declaration.as_ref()
-                {
-                    let name = iface.id.name.to_string();
-                    env.add_augmentation_type(
-                        scope.clone(),
-                        build_named_interface_decl(iface, source, name),
-                    );
-                } else if let Some(Declaration::TSTypeAliasDeclaration(alias)) =
-                    export.declaration.as_ref()
-                {
-                    let name = alias.id.name.to_string();
-                    env.add_augmentation_type(
-                        scope.clone(),
-                        build_named_type_alias_decl(alias, source, name),
-                    );
+                if let Some(decl) = export.declaration.as_ref() {
+                    extract_augmentation_declaration(decl, source, env, &scope);
                 }
             }
+            // Value-space declarations (`const`/`let`/`var`, `function`,
+            // `class`) augment the target module's VALUE surface. Reuse the
+            // file-scope extractors into a throwaway env so the full retained
+            // body is built exactly as for a top-level declaration, then move
+            // the produced value declarations into the augmentation value
+            // scope (never file-scope `value_symbols`).
+            Statement::VariableDeclaration(_)
+            | Statement::FunctionDeclaration(_)
+            | Statement::ClassDeclaration(_) => {
+                retain_value_statement_into_augmentation(stmt, source, env, &scope);
+            }
             _ => {}
+        }
+    }
+}
+
+/// Route a `Declaration` inside an ambient augmentation block to the correct
+/// augmentation inventory: interfaces / type-aliases to the type scope, value
+/// declarations to the value scope (via a throwaway env).
+fn extract_augmentation_declaration(
+    decl: &Declaration<'_>,
+    source: &str,
+    env: &mut EvalEnv,
+    scope: &AugmentationScopeKind,
+) {
+    match decl {
+        Declaration::TSInterfaceDeclaration(iface) => {
+            let name = iface.id.name.to_string();
+            env.add_augmentation_type(
+                scope.clone(),
+                build_named_interface_decl(iface, source, name),
+            );
+        }
+        Declaration::TSTypeAliasDeclaration(alias) => {
+            let name = alias.id.name.to_string();
+            env.add_augmentation_type(
+                scope.clone(),
+                build_named_type_alias_decl(alias, source, name),
+            );
+        }
+        Declaration::VariableDeclaration(_)
+        | Declaration::FunctionDeclaration(_)
+        | Declaration::ClassDeclaration(_) => {
+            let mut tmp = EvalEnv::new();
+            extract_from_declaration(decl, source, &mut tmp);
+            move_value_symbols_into_augmentation(tmp, env, scope);
+        }
+        _ => {}
+    }
+}
+
+/// Reuse the file-scope extractors (via a throwaway env) to build the full
+/// retained value declaration(s) for a value-space statement, then move them
+/// into the augmentation value scope.
+fn retain_value_statement_into_augmentation(
+    stmt: &Statement<'_>,
+    source: &str,
+    env: &mut EvalEnv,
+    scope: &AugmentationScopeKind,
+) {
+    let mut tmp = EvalEnv::new();
+    match stmt {
+        Statement::ClassDeclaration(decl) => extract_class(decl, source, &mut tmp),
+        Statement::FunctionDeclaration(func) => extract_function(func, source, &mut tmp),
+        Statement::VariableDeclaration(var_decl) => {
+            for decl in &var_decl.declarations {
+                extract_variable(decl, var_decl.kind, source, &mut tmp);
+            }
+        }
+        _ => {}
+    }
+    move_value_symbols_into_augmentation(tmp, env, scope);
+}
+
+/// Drain the value declarations a throwaway env collected and append them to
+/// the augmentation value scope (the type side a `class` also produces is
+/// intentionally dropped — an ambient `declare module` class augments the
+/// value surface; its instance type is not stitched cross-file today).
+fn move_value_symbols_into_augmentation(
+    tmp: EvalEnv,
+    env: &mut EvalEnv,
+    scope: &AugmentationScopeKind,
+) {
+    for (_name, group) in tmp.value_symbols {
+        for decl in group.contributors {
+            env.add_augmentation_value(scope.clone(), decl);
         }
     }
 }

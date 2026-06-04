@@ -95,6 +95,7 @@ fn build_indexed(
         import_locals: FxHashSet::default(),
         import_targets: FxHashMap::default(),
         augmentation_scopes: Default::default(),
+        augmentation_value_scopes: Default::default(),
         analysis: empty_external(),
     };
     Arc::new(IndexedReady {

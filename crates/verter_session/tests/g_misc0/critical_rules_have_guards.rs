@@ -473,8 +473,10 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             //     is a lib test (not scanner-visible); these `tests/` guards
             //     pin the same rule.
             "session_overlay_augmenter_isolated_from_base_index",
-            // (iii) the session view is accepted (the base-only assert is gone).
-            "effective_export_set_accepts_session_view_after_base_only_assert_retired",
+            // (iii) the session view is accepted AND stitches its own overlay
+            //       augmenter (the base-only assert is gone, and the session
+            //       branch is overlay-correct, not base-presented-as-session).
+            "effective_export_set_session_view_stitches_overlay_augmenter",
             // (iv) static guard: NO `compat_token().session.is_none()` base-only
             //      assert on the augmentation-index / EffectiveExportSet surface.
             "no_effective_export_set_base_only_session_assert",
