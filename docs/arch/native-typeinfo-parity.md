@@ -864,22 +864,27 @@ discipline as the oracle rows, the proof registry, and the row-test wrapper).
 | `ResolvedNamedType` | live (read-dominant macro artifact; `execute` returns `Miss` until written) | `HostResolvedNamedTypeKey` (own env/identity) | `TypeNode` | `resolved_named_type_key_identity_is_env_scoped` | read-only memo; writes via `NamedTypeCache` adapter |
 | `Relate` | live (existing-key UPGRADE — `{source,target}` → full identity) | `RelationContext` + `InferenceContextKey` (binding-producing) | `Relation(RelationPayload)` | `relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit` + `relate_same_nodes_different_inference_context_do_not_warm_hit` | `RelationBudget`; coinductive-SCC discharge; `ReturnOnly` on `Unknown`/cancel/`BudgetExceeded` |
 | `ResolveMacroPayload` | live (Vue-macro payload key, distinct from the typeinfo macro story) | `MacroPayloadContext` (content-free `DeclKey` owner; split env + `mode`) | `TypeNode` | `resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on overflow/cancel |
-| `ResolveMergedDeclaration` | live (added — U2) | `MergedDeclarationContext` | `TypeNode` | `resolve_merged_declaration_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on budget/cycle |
-| `ResolveDeclarationAugmentation` | live (added — U2; generalizes `ResolveModuleAugmentation`) | `DeclarationAnalysisContext` (incl. `parse_env_hash`) | `DeclarationAnalysis(DeclarationAnalysisValue)` | `declaration_augmentation_key_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on overflow/cancel |
-| `ResolveAmbientNamespace` | live (added — U2) | `AmbientNamespaceContext` | `TypeNode` | `resolve_ambient_namespace_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on budget/cycle |
-| `ResolveOverloadSet` | live (added — U2) | `OverloadSetContext` | `OverloadSet(Arc<[SignatureRef]>)` | `resolve_overload_set_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on overflow |
-| `ResolveEnum` | live (added — U2) | `EnumContext` | `TypeNode` | `resolve_enum_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on overflow |
-| `FlowNarrowingAt` | live (added — U2) | `ProgramAnalysisContext` (env + flow + contextual + substitution) | `ProgramAnalysis(ProgramAnalysisValue)` | `flow_narrowing_at_same_point_different_env_flow_or_substitution_do_not_warm_hit` | `FlowSliceBudget`; `ReturnOnly` on budget/cycle |
-| `ContextualTypeAt` | live (added — U2) | `ProgramAnalysisContext` | `ProgramAnalysis(ProgramAnalysisValue)` | `contextual_type_at_same_point_different_env_contextual_or_substitution_do_not_warm_hit` | `FlowSliceBudget`; `ReturnOnly` on budget/cycle |
-| `FlowReturn` | live (added — U6) | `FlowReturnContext` + `demand`(`ReturnProjectionDemand`) + `input`(`FlowInputContext`) | `FlowReturn(Arc<FlowReturnResult>)` | `flow_return_key_covers_input_context_and_projection_demand` | `FlowSliceBudget`; flow-cycle sentinel `ReturnOnly` |
-| `ResolveClassSurface` | live (added — U2) | `ClassSurfaceContext` (incl. `parse_env_hash`) | `TypeNode` | `resolve_class_surface_key_covers_side_demand_type_args_and_context` | singleflight; `ReturnOnly` on budget |
-| `ApparentType` | live (added — U2) | `ApparentTypeContext` | `TypeNode` | `apparent_type_key_covers_lib_env_demand_and_context` | apparent-type member-demand budget; whole-lib materialization is `BudgetExceeded`/`ReturnOnly` |
-| `TemplateLiteralReduce` | live (added — U2) | `TemplateLiteralReduceContext` | `TypeNode` | `template_literal_reduce_key_covers_context` | `KeyspaceBudget`; `ReturnOnly` on overflow |
-| `ResolveCall` | live (added — U6) | `CallResolutionContext` (+ `ContextSensitiveExprKey` per arg) | `ResolvedCall(Arc<ResolvedCallResult>)` | `resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit` | `CallResolutionBudget`; `ReturnOnly` on `BudgetExceeded` |
+| `ResolveMergedDeclaration` | planned (U2-MODULE) | `MergedDeclarationContext` | `TypeNode` | `resolve_merged_declaration_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on budget/cycle |
+| `ResolveDeclarationAugmentation` | planned (U2-MODULE; generalizes `ResolveModuleAugmentation`) | `DeclarationAnalysisContext` (incl. `parse_env_hash`) | `DeclarationAnalysis(DeclarationAnalysisValue)` | `declaration_augmentation_key_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on overflow/cancel |
+| `ResolveAmbientNamespace` | planned (U2B.5) | `AmbientNamespaceContext` | `TypeNode` | `resolve_ambient_namespace_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on budget/cycle |
+| `ResolveOverloadSet` | planned (U2B.5) | `OverloadSetContext` | `OverloadSet(Arc<[SignatureRef]>)` | `resolve_overload_set_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on overflow |
+| `ResolveEnum` | planned (U2B.5) | `EnumContext` | `TypeNode` | `resolve_enum_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on overflow |
+| `FlowNarrowingAt` | planned (U2B.7) | `ProgramAnalysisContext` (env + flow + contextual + substitution) | `ProgramAnalysis(ProgramAnalysisValue)` | `flow_narrowing_at_same_point_different_env_flow_or_substitution_do_not_warm_hit` | `FlowSliceBudget`; `ReturnOnly` on budget/cycle |
+| `ContextualTypeAt` | planned (U2B.7) | `ProgramAnalysisContext` | `ProgramAnalysis(ProgramAnalysisValue)` | `contextual_type_at_same_point_different_env_contextual_or_substitution_do_not_warm_hit` | `FlowSliceBudget`; `ReturnOnly` on budget/cycle |
+| `FlowReturn` | planned (U6) | `FlowReturnContext` + `demand`(`ReturnProjectionDemand`) + `input`(`FlowInputContext`) | `FlowReturn(Arc<FlowReturnResult>)` | `flow_return_key_covers_input_context_and_projection_demand` | `FlowSliceBudget`; flow-cycle sentinel `ReturnOnly` |
+| `ResolveClassSurface` | planned (U2B.5) | `ClassSurfaceContext` (incl. `parse_env_hash`) | `TypeNode` | `resolve_class_surface_key_covers_side_demand_type_args_and_context` | singleflight; `ReturnOnly` on budget |
+| `ApparentType` | planned (U2B.6) | `ApparentTypeContext` | `TypeNode` | `apparent_type_key_covers_lib_env_demand_and_context` | apparent-type member-demand budget; whole-lib materialization is `BudgetExceeded`/`ReturnOnly` |
+| `TemplateLiteralReduce` | planned (U2B.6) | `TemplateLiteralReduceContext` | `TypeNode` | `template_literal_reduce_key_covers_context` | `KeyspaceBudget`; `ReturnOnly` on overflow |
+| `ResolveCall` | planned (U6) | `CallResolutionContext` (+ `ContextSensitiveExprKey` per arg) | `ResolvedCall(Arc<ResolvedCallResult>)` | `resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit` | `CallResolutionBudget`; `ReturnOnly` on `BudgetExceeded` |
 
-No current variant is omitted: every live variant appears with `live` + spec; any
-variant intended to retire/rename carries `retired` (+ `reserved` on its wire
-surface) or `renamed` instead — there is no fourth state.
+In the generated `SemanticQueryKeySpec` table on any committed tree, no live variant
+is omitted: every live variant appears with `live` + spec; any variant intended to
+retire/rename carries `retired` (+ `reserved` on its wire surface) or `renamed` —
+there is no fourth state in the generated table. The table reproduced ABOVE is the
+END-STATE view (every block landed); rows for variants not yet present in the live
+`SemanticQueryKey` enum are annotated `planned (<owning-block>)` here to show which
+block lands each. A `planned` row is NOT present in the generated table — it enters
+only when its owning block adds the enum variant (see below).
 
 The class is closed by one meta-guard asserting enum/table EQUALITY:
 
@@ -902,11 +907,15 @@ The class is closed by one meta-guard asserting enum/table EQUALITY:
 
   The table above is the END-STATE view. Because enum/table EQUALITY is the
   assertion, the guard is a STANDING per-block invariant: a variant's spec row may
-  appear ONLY in the same block that adds its enum variant. The `(added — U2)` rows
-  land at `U2.QUERY_VALUE_DOMAIN`; the `(added — U6)` rows (`FlowReturn`,
-  `ResolveCall`) land their enum variant AND this spec row AND their dispatch
-  behavior together at U6 — never a row ahead of its variant. The guard is green
-  after EVERY block, never red in the gap between U2 and U6.
+  appear ONLY in the same block that adds its enum variant. Each `planned` row's
+  lifecycle names its owning block (per the Stage-B sequence):
+  `ResolveMergedDeclaration` / `ResolveDeclarationAugmentation` at `U2-MODULE`;
+  `ResolveClassSurface` / `ResolveAmbientNamespace` / `ResolveEnum` /
+  `ResolveOverloadSet` at `U2B.5`; `ApparentType` / `TemplateLiteralReduce` at
+  `U2B.6`; `FlowNarrowingAt` / `ContextualTypeAt` at `U2B.7`; `FlowReturn` /
+  `ResolveCall` (enum variant + spec row + dispatch behavior together) at `U6` —
+  never a row ahead of its variant. The guard is green after EVERY block, never red
+  between them.
 
 ### 2.10 Query modes are presets over the `ProjectionDemand` / `EvalPolicy` lattice
 
