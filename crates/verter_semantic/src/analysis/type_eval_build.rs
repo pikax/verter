@@ -16,9 +16,10 @@ use oxc_ast::ast::{
     Argument, ArrowFunctionExpression, BindingPattern, CallExpression, Class, ClassElement,
     Declaration, ExportDefaultDeclarationKind, Expression, FormalParameters, Function,
     MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, Program, Statement,
-    TSAccessibility, TSInterfaceDeclaration, TSModuleDeclaration, TSModuleDeclarationBody,
-    TSModuleDeclarationName, TSSignature, TSTypeAliasDeclaration, TSTypeParameterDeclaration,
-    VariableDeclarationKind, VariableDeclarator,
+    TSAccessibility, TSGlobalDeclaration, TSInterfaceDeclaration, TSModuleBlock,
+    TSModuleDeclaration, TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature,
+    TSTypeAliasDeclaration, TSTypeParameterDeclaration, VariableDeclarationKind,
+    VariableDeclarator,
 };
 use oxc_span::GetSpan;
 use verter_type_expr::{
@@ -123,6 +124,9 @@ pub fn build_eval_env(program: &Program<'_>, source: &str) -> EvalEnv {
             Statement::TSModuleDeclaration(module) => {
                 extract_module_declaration(module, source, &mut env, None);
             }
+            Statement::TSGlobalDeclaration(global) => {
+                extract_global_declaration(global, source, &mut env);
+            }
             Statement::ClassDeclaration(decl) => {
                 extract_class(decl, source, &mut env);
             }
@@ -216,6 +220,9 @@ fn extract_from_declaration(decl: &Declaration<'_>, source: &str, env: &mut Eval
         Declaration::TSModuleDeclaration(module) => {
             extract_module_declaration(module, source, env, None);
         }
+        Declaration::TSGlobalDeclaration(global) => {
+            extract_global_declaration(global, source, env);
+        }
         Declaration::ClassDeclaration(cls) => {
             extract_class(cls, source, env);
         }
@@ -237,15 +244,14 @@ fn extract_from_declaration(decl: &Declaration<'_>, source: &str, env: &mut Eval
 
 fn extract_type_alias(decl: &TSTypeAliasDeclaration<'_>, source: &str, env: &mut EvalEnv) {
     let name = decl.id.name.to_string();
-    extract_named_type_alias(decl, source, env, name);
+    env.add_type(build_named_type_alias_decl(decl, source, name));
 }
 
-fn extract_named_type_alias(
+fn build_named_type_alias_decl(
     decl: &TSTypeAliasDeclaration<'_>,
     source: &str,
-    env: &mut EvalEnv,
     name: String,
-) {
+) -> TypeDeclInfo {
     let type_parameters = decl
         .type_parameters
         .as_ref()
@@ -253,26 +259,25 @@ fn extract_named_type_alias(
         .unwrap_or_default();
     let body = lower_ts_type(&decl.type_annotation, source);
 
-    env.add_type(TypeDeclInfo {
+    TypeDeclInfo {
         name,
         declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters,
         body,
-    });
+    }
 }
 
 fn extract_interface(decl: &TSInterfaceDeclaration<'_>, source: &str, env: &mut EvalEnv) {
     let name = decl.id.name.to_string();
-    extract_named_interface(decl, source, env, name);
+    env.add_type(build_named_interface_decl(decl, source, name));
 }
 
-fn extract_named_interface(
+fn build_named_interface_decl(
     decl: &TSInterfaceDeclaration<'_>,
     source: &str,
-    env: &mut EvalEnv,
     name: String,
-) {
+) -> TypeDeclInfo {
     let type_parameters = decl
         .type_parameters
         .as_ref()
@@ -314,13 +319,13 @@ fn extract_named_interface(
         body = TypeExpr::intersection(parts);
     }
 
-    env.add_type(TypeDeclInfo {
+    TypeDeclInfo {
         name,
         declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters,
         body,
-    });
+    }
 }
 
 fn extract_module_declaration(
@@ -329,6 +334,25 @@ fn extract_module_declaration(
     env: &mut EvalEnv,
     prefix: Option<&str>,
 ) {
+    // `declare module "<specifier>" { ... }` — an AMBIENT MODULE AUGMENTATION,
+    // NOT a file-scope namespace. Its inner declarations augment the surface of
+    // the module reached by `<specifier>` (the canonical Vue/Vite `declare
+    // module "vue"` pattern, or a relative `declare module "./base"`), so they
+    // are retained in the augmentation-scope inventory keyed by the raw
+    // specifier — never the file's top-level `type_symbols`. (A string-literal
+    // name only ever wraps a single `TSModuleBlock`, never a nested module.)
+    if let TSModuleDeclarationName::StringLiteral(spec) = &decl.id {
+        if let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = decl.body.as_ref() {
+            extract_augmentation_block(
+                block,
+                source,
+                env,
+                AugmentationScopeKind::Module(spec.value.to_string()),
+            );
+        }
+        return;
+    }
+
     let Some(module_name) = qualified_module_name(prefix, &decl.id) else {
         return;
     };
@@ -348,6 +372,62 @@ fn extract_module_declaration(
     }
 }
 
+/// Retain the inner declarations of an ambient augmentation block
+/// (`declare module "X" { ... }` or `declare global { ... }`) into the scoped
+/// augmentation inventory under `scope`. Inner interfaces/type-aliases keep
+/// their UNQUALIFIED names (an augmenter contributes `interface Config`, not
+/// `external-spec.Config`) and never enter file-scope `type_symbols`.
+fn extract_augmentation_block(
+    block: &TSModuleBlock<'_>,
+    source: &str,
+    env: &mut EvalEnv,
+    scope: AugmentationScopeKind,
+) {
+    for stmt in &block.body {
+        match stmt {
+            Statement::TSInterfaceDeclaration(iface) => {
+                let name = iface.id.name.to_string();
+                env.add_augmentation_type(
+                    scope.clone(),
+                    build_named_interface_decl(iface, source, name),
+                );
+            }
+            Statement::TSTypeAliasDeclaration(alias) => {
+                let name = alias.id.name.to_string();
+                env.add_augmentation_type(
+                    scope.clone(),
+                    build_named_type_alias_decl(alias, source, name),
+                );
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::TSInterfaceDeclaration(iface)) = export.declaration.as_ref()
+                {
+                    let name = iface.id.name.to_string();
+                    env.add_augmentation_type(
+                        scope.clone(),
+                        build_named_interface_decl(iface, source, name),
+                    );
+                } else if let Some(Declaration::TSTypeAliasDeclaration(alias)) =
+                    export.declaration.as_ref()
+                {
+                    let name = alias.id.name.to_string();
+                    env.add_augmentation_type(
+                        scope.clone(),
+                        build_named_type_alias_decl(alias, source, name),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Retain a `declare global { ... }` block's inner declarations under the
+/// global augmentation scope.
+fn extract_global_declaration(decl: &TSGlobalDeclaration<'_>, source: &str, env: &mut EvalEnv) {
+    extract_augmentation_block(&decl.body, source, env, AugmentationScopeKind::Global);
+}
+
 fn extract_namespaced_statement(
     stmt: &Statement<'_>,
     source: &str,
@@ -356,20 +436,18 @@ fn extract_namespaced_statement(
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
-            extract_named_type_alias(
+            env.add_type(build_named_type_alias_decl(
                 alias,
                 source,
-                env,
                 qualified_name(namespace, &alias.id.name),
-            );
+            ));
         }
         Statement::TSInterfaceDeclaration(iface) => {
-            extract_named_interface(
+            env.add_type(build_named_interface_decl(
                 iface,
                 source,
-                env,
                 qualified_name(namespace, &iface.id.name),
-            );
+            ));
         }
         Statement::TSModuleDeclaration(module) => {
             extract_module_declaration(module, source, env, Some(namespace));
@@ -391,20 +469,18 @@ fn extract_namespaced_declaration(
 ) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
-            extract_named_type_alias(
+            env.add_type(build_named_type_alias_decl(
                 alias,
                 source,
-                env,
                 qualified_name(namespace, &alias.id.name),
-            );
+            ));
         }
         Declaration::TSInterfaceDeclaration(iface) => {
-            extract_named_interface(
+            env.add_type(build_named_interface_decl(
                 iface,
                 source,
-                env,
                 qualified_name(namespace, &iface.id.name),
-            );
+            ));
         }
         Declaration::TSModuleDeclaration(module) => {
             extract_module_declaration(module, source, env, Some(namespace));

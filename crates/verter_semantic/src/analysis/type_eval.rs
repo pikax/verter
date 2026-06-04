@@ -314,6 +314,27 @@ pub struct FunctionSignature {
 // Evaluation environment
 // ---------------------------------------------------------------------------
 
+/// The ambient declaration-augmentation scope an inner declaration belongs to.
+///
+/// Ambient augmentation blocks (`declare module "X" { ... }` and
+/// `declare global { ... }`) do NOT contribute to the file's top-level symbol
+/// table — their inner declarations augment a DIFFERENT module's surface (the
+/// canonical Vue/Vite `declare module "vue"` pattern) or the global scope.
+/// They are retained in a SEPARATE scoped inventory so cross-file augmentation
+/// can stitch them onto the augmented declaration on demand, without polluting
+/// file-scope `type_symbols`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AugmentationScopeKind {
+    /// `declare global { ... }` — augments the global scope.
+    Global,
+    /// `declare module "<specifier>" { ... }` — augments the module reached by
+    /// the RAW specifier as written in the source. The owner crate keeps the
+    /// specifier verbatim; the session layer resolves it to a canonical id (for
+    /// relative specifiers) when it stitches augmenters through the
+    /// augmentation index.
+    Module(String),
+}
+
 /// Evaluation environment holding symbol tables and evaluation state.
 #[derive(Debug, Clone)]
 pub struct EvalEnv {
@@ -323,6 +344,13 @@ pub struct EvalEnv {
     /// Value declarations: functions, constants, classes. Each name maps to
     /// an ordered group of contributors (append-only, source/binder order).
     pub value_symbols: FxHashMap<String, ValueDeclGroup>,
+    /// Ambient declaration-augmentation inventory: `(scope, name)` → ordered
+    /// contributor group. Holds the RETAINED bodies of declarations nested in
+    /// `declare module "X" { ... }` / `declare global { ... }` blocks so a
+    /// scoped declaration lookup can address them. Kept separate from
+    /// `type_symbols` — these inner declarations never enter the file's
+    /// top-level surface.
+    pub augmentation_scopes: FxHashMap<(AugmentationScopeKind, String), TypeDeclGroup>,
     /// Stable ids assigned to type declarations inserted into this environment.
     type_decl_ids: FxHashMap<String, DeclarationId>,
     /// Stable ids assigned to value declarations inserted into this environment.
@@ -373,6 +401,7 @@ impl EvalEnv {
         Self {
             type_symbols: FxHashMap::default(),
             value_symbols: FxHashMap::default(),
+            augmentation_scopes: FxHashMap::default(),
             type_decl_ids: FxHashMap::default(),
             value_decl_ids: FxHashMap::default(),
             type_bindings: FxHashMap::default(),
@@ -417,6 +446,38 @@ impl EvalEnv {
                 self.value_symbols.insert(name, ValueDeclGroup::new(decl));
             }
         }
+    }
+
+    /// Register a type declaration nested in an ambient augmentation block
+    /// (`declare module "X"` / `declare global`), appending it to the named
+    /// group inside the augmentation scope (creating the group if absent).
+    /// These declarations are retained for cross-file augmentation stitching
+    /// and never enter the file-scope `type_symbols`.
+    pub fn add_augmentation_type(&mut self, scope: AugmentationScopeKind, decl: TypeDeclInfo) {
+        match self
+            .augmentation_scopes
+            .get_mut(&(scope.clone(), decl.name.clone()))
+        {
+            Some(group) => group.contributors.push(decl),
+            None => {
+                let name = decl.name.clone();
+                self.augmentation_scopes
+                    .insert((scope, name), TypeDeclGroup::new(decl));
+            }
+        }
+    }
+
+    /// Look up the ordered contributor group for an augmentation-scoped type
+    /// declaration, if any.
+    pub fn augmentation_symbol(
+        &self,
+        scope: &AugmentationScopeKind,
+        name: &str,
+    ) -> Option<&TypeDeclGroup> {
+        // The map key is `(scope, name)`; probe without allocating a fresh key
+        // when possible.
+        self.augmentation_scopes
+            .get(&(scope.clone(), name.to_string()))
     }
 
     /// Returns the total number of evaluation steps consumed so far.

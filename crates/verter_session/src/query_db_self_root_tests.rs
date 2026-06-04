@@ -4210,6 +4210,7 @@ fn route_owned_entry_with_whole_hash(
             wildcard_reexports: Vec::new(),
             symbols: FxHashMap::default(),
             value_symbols: FxHashMap::default(),
+            augmentation_scopes: FxHashMap::default(),
             import_locals: FxHashSet::default(),
             import_targets: FxHashMap::default(),
             analysis,

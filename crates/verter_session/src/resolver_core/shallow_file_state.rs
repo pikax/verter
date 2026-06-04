@@ -54,6 +54,17 @@ pub struct ShallowFileState {
     /// queries or value-driven type expansion.
     pub value_symbols: FxHashMap<String, ShallowValueSymbol>,
 
+    /// Ambient declaration-augmentation inventory: `(scope, name)` → retained
+    /// declaration. Holds the bodies of declarations nested in
+    /// `declare module "X" { ... }` / `declare global { ... }` blocks. These
+    /// NEVER appear in [`symbols`](Self::symbols) (file-scope) — they augment
+    /// another module's surface or the global scope and are stitched onto the
+    /// augmented declaration on demand. Same-file multiple-block contributors
+    /// already merge here (the group's [`TypeDeclBody::Merged`] carrier);
+    /// cross-file augmenters are appended by the augmentation stitch.
+    pub augmentation_scopes:
+        FxHashMap<(verter_semantic::analysis::type_eval::AugmentationScopeKind, String), ShallowTypeSymbol>,
+
     /// Import-local names (names that come from `import` declarations).
     /// Used to classify dependencies as local vs external during closure.
     pub import_locals: FxHashSet<String>,
@@ -397,6 +408,13 @@ impl ShallowFileState {
         let mut import_targets: FxHashMap<String, ImportTarget> = FxHashMap::default();
         let mut symbols: FxHashMap<String, ShallowTypeSymbol> = FxHashMap::default();
         let mut value_symbols: FxHashMap<String, ShallowValueSymbol> = FxHashMap::default();
+        let mut augmentation_scopes: FxHashMap<
+            (
+                verter_semantic::analysis::type_eval::AugmentationScopeKind,
+                String,
+            ),
+            ShallowTypeSymbol,
+        > = FxHashMap::default();
 
         // Populate exports from the extracted bindings
         // Direct reexports
@@ -552,6 +570,39 @@ impl ShallowFileState {
                     },
                 );
             }
+
+            // Ambient augmentation inventory (`declare module "X"` /
+            // `declare global`). Mirror each scoped group as a
+            // `ShallowTypeSymbol` keyed by `(scope, name)`. Same-file multiple
+            // contributors already fold through the group's `merged_body()`
+            // carrier here; cross-file augmenters are stitched on at resolve
+            // time. These never enter `symbols` (file scope).
+            for ((scope, name), group) in &env.augmentation_scopes {
+                let primary = group.primary();
+                let body = group.merged_body();
+                let lookup = body.lookup_object();
+                let mut type_parameters: Vec<TypeParam> = Vec::new();
+                for decl in group.contributors() {
+                    for param in &decl.type_parameters {
+                        if !type_parameters.iter().any(|p| p.name == param.name) {
+                            type_parameters.push(param.clone());
+                        }
+                    }
+                }
+                let member_deps = extract_member_deps(lookup.as_ref());
+                drop(lookup);
+                augmentation_scopes.insert(
+                    (scope.clone(), name.clone()),
+                    ShallowTypeSymbol {
+                        kind: primary.kind,
+                        body,
+                        type_parameters,
+                        local_deps: Vec::new(),
+                        external_deps: Vec::new(),
+                        member_deps,
+                    },
+                );
+            }
         }
         // Without an eval env or source fallback, the shallow state can still
         // expose export/import routing but cannot populate declaration bodies.
@@ -565,6 +616,7 @@ impl ShallowFileState {
             wildcard_reexports,
             symbols,
             value_symbols,
+            augmentation_scopes,
             import_locals,
             import_targets,
             analysis,
@@ -628,6 +680,27 @@ impl ShallowFileState {
     /// Look up a local value symbol by name.
     pub fn value_symbol(&self, name: &str) -> Option<&ShallowValueSymbol> {
         self.value_symbols.get(name)
+    }
+
+    /// Look up an ambient-augmentation-scoped type symbol (a declaration nested
+    /// in a `declare module "X"` / `declare global` block) by scope + name.
+    pub fn augmentation_symbol(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        name: &str,
+    ) -> Option<&ShallowTypeSymbol> {
+        self.augmentation_scopes
+            .get(&(scope.clone(), name.to_string()))
+    }
+
+    /// Whether this file declares any global (`declare global`) augmentation
+    /// contributors for `name`.
+    pub fn has_global_augmentation(&self, name: &str) -> bool {
+        self.augmentation_symbol(
+            &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
+            name,
+        )
+        .is_some()
     }
 
     /// Inject a synthesised value symbol that the file's eval-env

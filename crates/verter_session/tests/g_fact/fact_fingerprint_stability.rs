@@ -128,6 +128,7 @@ fn build_indexed(
         value_symbols: value_syms,
         import_locals: FxHashSet::default(),
         import_targets: FxHashMap::default(),
+        augmentation_scopes: Default::default(),
         analysis: empty_external(),
     };
     Arc::new(IndexedReady {

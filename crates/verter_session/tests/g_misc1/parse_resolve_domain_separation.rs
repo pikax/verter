@@ -49,6 +49,7 @@ fn build_with_import(
         value_symbols: FxHashMap::default(),
         import_locals,
         import_targets,
+        augmentation_scopes: Default::default(),
         analysis: empty_external(),
     };
     Arc::new(IndexedReady {

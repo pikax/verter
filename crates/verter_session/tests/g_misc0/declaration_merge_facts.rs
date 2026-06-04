@@ -94,6 +94,7 @@ fn build_with_merged_foo(parts: Vec<Vec<(&str, TypeExpr)>>) -> Arc<IndexedReady>
         value_symbols: FxHashMap::default(),
         import_locals: FxHashSet::default(),
         import_targets: FxHashMap::default(),
+        augmentation_scopes: Default::default(),
         analysis: empty_external(),
     };
     Arc::new(IndexedReady {

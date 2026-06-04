@@ -2762,6 +2762,7 @@ fn step8_route_hash_pure_content_derived() {
         wildcard_reexports: Vec::new(),
         symbols: FxHashMap::default(),
         value_symbols: FxHashMap::default(),
+        augmentation_scopes: FxHashMap::default(),
         import_locals: FxHashSet::default(),
         import_targets: FxHashMap::default(),
         analysis,
