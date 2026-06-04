@@ -820,41 +820,36 @@ impl RouteDb {
                     // `content_hash_for_canonical` scan) and read with
                     // that. Refreshed keys are written back into the
                     // cached `AugmenterSet` after the loop so subsequent
-                    // reads hit the fast exact-key path.
+                    // reads hit the fast exact-key path. This routes
+                    // through the SHARED
+                    // `FileArtifactStore::augmenter_artifacts_self_healing`
+                    // helper — the SAME healing path the `MergedDecl` body
+                    // stitch uses, so the two cannot diverge.
                     let mut stitched: Vec<EffectiveExportEntry> = Vec::new();
                     let mut refreshed_keys: Vec<(usize, FileArtifactKey)> = Vec::new();
                     for (idx, augmenter) in augmenter_set.entries.iter().enumerate() {
                         let augmenter_canonical = augmenter.canonical();
-                        let art = match artifact_store.get_artifacts(&augmenter.artifact_key) {
-                            Some(art) => Some(art),
-                            None => {
-                                // Refresh: re-derive the current exact
-                                // key from scheduler authority and read
-                                // pinned to it.
-                                contributor_whole_hash(augmenter_canonical.as_ref())
-                                    .map(|current_hash| {
-                                        FileArtifactKey::legacy(
-                                            Arc::clone(augmenter_canonical),
-                                            current_hash,
-                                        )
-                                    })
-                                    .and_then(|current_key| {
-                                        let refreshed = artifact_store.get_artifacts(&current_key);
-                                        if refreshed.is_some() {
-                                            refreshed_keys.push((idx, current_key));
-                                        }
-                                        refreshed
-                                    })
-                            }
-                        };
                         // A genuine miss after the current-key re-fetch
                         // (the augmenter's `IndexedReady` is not
                         // materialised under its current content hash)
                         // is a principled skip — never a content-agnostic
-                        // fallback scan.
-                        let Some(art) = art else {
+                        // fallback scan. When the scheduler oracle has no
+                        // current hash, only the captured key is tried.
+                        let art = match contributor_whole_hash(augmenter_canonical.as_ref()) {
+                            Some(current_hash) => artifact_store.augmenter_artifacts_self_healing(
+                                &augmenter.artifact_key,
+                                current_hash,
+                            ),
+                            None => artifact_store
+                                .get_artifacts(&augmenter.artifact_key)
+                                .map(|art| (art, None)),
+                        };
+                        let Some((art, refreshed_key)) = art else {
                             continue;
                         };
+                        if let Some(refreshed_key) = refreshed_key {
+                            refreshed_keys.push((idx, refreshed_key));
+                        }
                         for fact in art.augmentations.iter() {
                             if !crate::file_artifact_store::augmenter_matches_target(
                                 fact,

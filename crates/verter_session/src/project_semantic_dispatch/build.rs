@@ -1443,7 +1443,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `ModuleAugmentationFact` that targets THIS decl gives the raw
             // `declare module "<spec>"` specifier under which the typed inner
             // body is retained in `augmentation_scopes`.
-            let Some(art) = artifact_store.get_artifacts(&augmenter.artifact_key) else {
+            //
+            // Self-heal a STALE captured `artifact_key`: a cosmetic /
+            // member-body re-key of the augmenter advances its content hash
+            // (draining the captured key) without moving its decl skeleton,
+            // so the cached `AugmenterSet` keeps the pre-edit key. Skipping
+            // the augmenter on that miss would silently drop a real
+            // augmentation. `ensure_indexed_ready` above already materialised
+            // the augmenter's CURRENT version, so `indexed.whole_hash` is the
+            // scheduler-authoritative current content hash — the SAME healing
+            // path the names stitch
+            // (`RouteDb::get_or_compute_effective_export_set`) uses.
+            let Some((art, _refreshed_key)) = artifact_store
+                .augmenter_artifacts_self_healing(&augmenter.artifact_key, indexed.whole_hash)
+            else {
                 continue;
             };
             let mut matched_specs: Vec<String> = Vec::new();

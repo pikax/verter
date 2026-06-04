@@ -1088,6 +1088,63 @@ impl FileArtifactStore {
         v
     }
 
+    /// Fetch an augmenter's `FileArtifacts` by its captured exact
+    /// `FileArtifactKey`, self-healing a STALE captured key after a
+    /// same-canonical re-key whose decl skeleton (hence `parse_stable_hash`,
+    /// hence the augmenter-set fingerprint) is unchanged.
+    ///
+    /// The augmentation index captures each augmenter's exact
+    /// content-addressed `FileArtifactKey` at index-population time, and
+    /// the augmenter-set fingerprint folds over `parse_stable_hash`, NOT
+    /// `content_hash`. So a member-body / cosmetic edit to an augmenter —
+    /// content hash advances, decl skeleton unchanged — does NOT
+    /// invalidate the cached `AugmenterSet`: its
+    /// [`AugmenterEntry::artifact_key`] keeps pointing at the PRE-edit
+    /// content hash, which a same-canonical re-key has drained from the
+    /// store. A bare [`Self::get_artifacts`] then misses, and a caller
+    /// that silently skips the augmenter would shrink the stitched
+    /// surface while keeping the (now wrong) fingerprint / count.
+    ///
+    /// On a miss this re-derives the augmenter's CURRENT exact key by
+    /// advancing ONLY the `content_hash` dimension to
+    /// `current_content_hash` (the scheduler-authoritative current content
+    /// hash — for the names stitch the `contributor_whole_hash` oracle, for
+    /// the body stitch `IndexedReady::whole_hash`) while preserving the
+    /// captured key's `parse_env_hash` / `parser_version` shape (so base
+    /// and overlay augmenters both heal correctly), and reads pinned to
+    /// it — never a content-agnostic `get_artifacts_any` scan.
+    ///
+    /// Returns `(artifacts, refreshed_key)`. `refreshed_key` is `Some`
+    /// ONLY when the heal fired (the captured key missed but the
+    /// re-derived current key hit) so the caller can write the refreshed
+    /// key back into the cached `AugmenterSet`. A genuine miss after the
+    /// current-key re-fetch (the augmenter's artifact is not materialised
+    /// under its current content hash) returns `None` — a principled
+    /// skip, never a content-agnostic fallback.
+    #[must_use]
+    pub fn augmenter_artifacts_self_healing(
+        &self,
+        captured_key: &FileArtifactKey,
+        current_content_hash: Hash16,
+    ) -> Option<(Arc<FileArtifacts>, Option<FileArtifactKey>)> {
+        if let Some(art) = self.get_artifacts(captured_key) {
+            return Some((art, None));
+        }
+        // The captured key already carries the current content hash, so
+        // the miss is a genuine absence, not a stale-key miss — no heal.
+        if current_content_hash == captured_key.content_hash {
+            return None;
+        }
+        let current_key = FileArtifactKey {
+            canonical: Arc::clone(&captured_key.canonical),
+            content_hash: current_content_hash,
+            parse_env_hash: captured_key.parse_env_hash,
+            parser_version: captured_key.parser_version,
+        };
+        self.get_artifacts(&current_key)
+            .map(|art| (art, Some(current_key)))
+    }
+
     /// Look up a `FileArtifacts` payload for `canonical` whose key's
     /// `content_hash` equals `content_hash`, **regardless of the
     /// `parse_env_hash` / `parser_version` dimensions**.
