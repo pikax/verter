@@ -40,6 +40,7 @@
     "package": "cd extensions/vscode && npm install --omit=dev && npx shx mkdir -p node_modules/@verter && npx shx cp -r ../typescript-plugin node_modules/@verter/typescript-plugin && npx shx rm -r node_modules/@oxc-parser && npx vsce package",
     "copy-plugin": "npx shx mkdir -p extensions/vue-vscode/node_modules/@verter && npx shx cp -r extensions/typescript-plugin extensions/vue-vscode/node_modules/@verter/typescript-plugin",
     "clean": "pnpm -r exec npx shx rm -rf .turbo dist tsconfig.tsbuildinfo && npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
+    "gen:query-key-spec": "cargo run -p verter_session --bin gen-query-key-spec",
     "gen:typeinfo-manifest": "python3 scripts/gen-typeinfo-ignore-manifest.py",
     "integration-test": "node scripts/integration-test/run.mjs",
     "integration-test:discover": "node scripts/integration-test/run.mjs --discover-local --discover-only",

@@ -158,6 +158,13 @@ tracing-test = "0.2.6"
 syn = { version = "2.0", features = ["full", "extra-traits", "visit", "parsing"] }
 quote = "1.0.45"
 
+# Generator for the SemanticQueryKeySpec table artifact (sole writer of
+# `src/semantic_query/query_key_spec_table.txt`). Run via the pnpm script
+# `gen:query-key-spec`; the diff-test only re-renders + compares.
+[[bin]]
+name = "gen-query-key-spec"
+path = "src/bin/gen_query_key_spec.rs"
+
 [[bench]]
 name = "host_bench"
 harness = false

@@ -47,6 +47,12 @@ pub use crate::resolver_core::shallow_file_state::BudgetExceededFailure;
 /// presets are points in this lattice; `meet`/`join`, satisfaction, and the
 /// §3.4 materialised-record carrier types live here.
 pub mod demand;
+
+/// The `SemanticQueryKeySpec` table: one authoritative, hand-encoded row per
+/// live [`SemanticQueryKey`] variant, plus the deterministic text renderer the
+/// generator binary writes and the diff-test re-checks. See the module for the
+/// generator-is-sole-writer contract.
+pub mod query_key_spec;
 pub use demand::{
     apply_mask, backfill_points, cached_satisfies, demand_at_hop, relevant_demand_axes,
     AliasPreservation, AxisMask, CarrierStopPolicy, Demand, DemandAxis, DisplayFacet, DisplayNeeds,
@@ -1981,6 +1987,139 @@ pub enum SemanticQueryKey {
         type_args: Arc<[SemanticNodeId]>,
         mode: ProjectionMode,
     },
+}
+
+/// Content-free discriminant for [`SemanticQueryKey`] — the variant identity
+/// with no payload.
+///
+/// This is the row identity of the `SemanticQueryKeySpec` table (see
+/// [`crate::semantic_query::query_key_spec`]). What the compiler forces:
+/// [`SemanticQueryKey::tag`] is an exhaustive `match`, so adding a
+/// `SemanticQueryKey` variant cannot compile without a new `tag()` arm. That
+/// is the only compile-time guarantee. Adding the matching
+/// `SemanticQueryKeyTag` variant, its membership in [`ALL`](Self::ALL), and its
+/// `SemanticQueryKeySpec` row are NOT compiler-forced — the `syn`-based
+/// `semantic_query_key_spec_table_equals_enum` diff-test is what forces
+/// spec/tag/table alignment and catches a forgotten tag, `ALL` entry, or spec
+/// row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SemanticQueryKeyTag {
+    ResolveDecl,
+    Instantiate,
+    ProjectMember,
+    IndexedAccess,
+    KeyOf,
+    MappedType,
+    Conditional,
+    TypeOf,
+    NormalizeUnion,
+    NormalizeIntersection,
+    ProjectPath,
+    ResolvedNamedType,
+    Relate,
+    ResolveMacroPayload,
+}
+
+impl SemanticQueryKeyTag {
+    /// Every live tag, in canonical (enum-declaration) order. The
+    /// `SemanticQueryKeySpec` table is ordered by this slice so the rendered
+    /// artifact is deterministic.
+    pub const ALL: &'static [SemanticQueryKeyTag] = &[
+        SemanticQueryKeyTag::ResolveDecl,
+        SemanticQueryKeyTag::Instantiate,
+        SemanticQueryKeyTag::ProjectMember,
+        SemanticQueryKeyTag::IndexedAccess,
+        SemanticQueryKeyTag::KeyOf,
+        SemanticQueryKeyTag::MappedType,
+        SemanticQueryKeyTag::Conditional,
+        SemanticQueryKeyTag::TypeOf,
+        SemanticQueryKeyTag::NormalizeUnion,
+        SemanticQueryKeyTag::NormalizeIntersection,
+        SemanticQueryKeyTag::ProjectPath,
+        SemanticQueryKeyTag::ResolvedNamedType,
+        SemanticQueryKeyTag::Relate,
+        SemanticQueryKeyTag::ResolveMacroPayload,
+    ];
+
+    /// The EXACT `SemanticQueryKey` variant identifier this tag names. The
+    /// diff-test compares these strings against the variant identifiers
+    /// scanned from the live `pub enum SemanticQueryKey { … }` source, so the
+    /// string must equal the variant name character-for-character.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            SemanticQueryKeyTag::ResolveDecl => "ResolveDecl",
+            SemanticQueryKeyTag::Instantiate => "Instantiate",
+            SemanticQueryKeyTag::ProjectMember => "ProjectMember",
+            SemanticQueryKeyTag::IndexedAccess => "IndexedAccess",
+            SemanticQueryKeyTag::KeyOf => "KeyOf",
+            SemanticQueryKeyTag::MappedType => "MappedType",
+            SemanticQueryKeyTag::Conditional => "Conditional",
+            SemanticQueryKeyTag::TypeOf => "TypeOf",
+            SemanticQueryKeyTag::NormalizeUnion => "NormalizeUnion",
+            SemanticQueryKeyTag::NormalizeIntersection => "NormalizeIntersection",
+            SemanticQueryKeyTag::ProjectPath => "ProjectPath",
+            SemanticQueryKeyTag::ResolvedNamedType => "ResolvedNamedType",
+            SemanticQueryKeyTag::Relate => "Relate",
+            SemanticQueryKeyTag::ResolveMacroPayload => "ResolveMacroPayload",
+        }
+    }
+}
+
+impl SemanticQueryKey {
+    /// The content-free discriminant tag for this key. EXHAUSTIVE by
+    /// construction — a new enum variant cannot compile until it gains a tag
+    /// arm here, which is the mechanism that keeps the spec table honest.
+    #[must_use]
+    pub fn tag(&self) -> SemanticQueryKeyTag {
+        match self {
+            SemanticQueryKey::ResolveDecl(_) => SemanticQueryKeyTag::ResolveDecl,
+            SemanticQueryKey::Instantiate { .. } => SemanticQueryKeyTag::Instantiate,
+            SemanticQueryKey::ProjectMember { .. } => SemanticQueryKeyTag::ProjectMember,
+            SemanticQueryKey::IndexedAccess { .. } => SemanticQueryKeyTag::IndexedAccess,
+            SemanticQueryKey::KeyOf { .. } => SemanticQueryKeyTag::KeyOf,
+            SemanticQueryKey::MappedType { .. } => SemanticQueryKeyTag::MappedType,
+            SemanticQueryKey::Conditional { .. } => SemanticQueryKeyTag::Conditional,
+            SemanticQueryKey::TypeOf { .. } => SemanticQueryKeyTag::TypeOf,
+            SemanticQueryKey::NormalizeUnion { .. } => SemanticQueryKeyTag::NormalizeUnion,
+            SemanticQueryKey::NormalizeIntersection { .. } => {
+                SemanticQueryKeyTag::NormalizeIntersection
+            }
+            SemanticQueryKey::ProjectPath { .. } => SemanticQueryKeyTag::ProjectPath,
+            SemanticQueryKey::ResolvedNamedType { .. } => SemanticQueryKeyTag::ResolvedNamedType,
+            SemanticQueryKey::Relate { .. } => SemanticQueryKeyTag::Relate,
+            SemanticQueryKey::ResolveMacroPayload { .. } => {
+                SemanticQueryKeyTag::ResolveMacroPayload
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod query_key_tag_tests {
+    use super::SemanticQueryKeyTag;
+    use std::collections::BTreeSet;
+
+    /// Every `ALL` entry has a non-empty, distinct `name()` — a cheap guard
+    /// that `ALL` and `name()` stay in lockstep (a copy-paste duplicate or an
+    /// empty name fails here).
+    #[test]
+    fn semantic_query_key_tag_roundtrips_every_variant() {
+        let names: Vec<&'static str> = SemanticQueryKeyTag::ALL.iter().map(|t| t.name()).collect();
+        for name in &names {
+            assert!(
+                !name.is_empty(),
+                "SemanticQueryKeyTag::name() returned an empty string for a tag in ALL"
+            );
+        }
+        let distinct: BTreeSet<&'static str> = names.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            names.len(),
+            "SemanticQueryKeyTag::name() produced a duplicate name; ALL and \
+             name() have drifted out of sync"
+        );
+    }
 }
 
 /// One inference binding produced by a successful `Relate` judgement (plan

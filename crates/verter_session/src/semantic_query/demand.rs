@@ -806,7 +806,74 @@ impl DemandAxis {
     }
 
     const ALL: u32 = (1 << 14) - 1;
+
+    /// Every axis in canonical declaration (bit) order. The single ordered
+    /// enumeration any renderer iterates.
+    ///
+    /// What is enforced: [`bit`](Self::bit) and [`name`](Self::name) are
+    /// exhaustive `match`es (each gains a compiler-forced arm per variant), and
+    /// the `_ORDERED_COVERS_ALL` assertion below pins this slice's combined
+    /// bit-union to the manually-maintained [`DemandAxis::ALL`]. The assertion
+    /// catches an ORDERED/ALL mismatch (a variant appended to one but not the
+    /// other). It does NOT prove enum cardinality: a variant added with `bit()`
+    /// and `name()` updated but BOTH `ORDERED` and `ALL` forgotten still
+    /// compiles.
+    pub const ORDERED: &'static [DemandAxis] = &[
+        DemandAxis::Path,
+        DemandAxis::Facets,
+        DemandAxis::MemberBody,
+        DemandAxis::CallSignatures,
+        DemandAxis::ConstructSignatures,
+        DemandAxis::IndexSignatures,
+        DemandAxis::AliasPreservation,
+        DemandAxis::NormalizationDepth,
+        DemandAxis::GenericOpen,
+        DemandAxis::OperatorReduction,
+        DemandAxis::CarrierStop,
+        DemandAxis::SurfaceRole,
+        DemandAxis::Provenance,
+        DemandAxis::MergeRole,
+    ];
+
+    /// The canonical render token / name for this axis. Exhaustive `match`:
+    /// adding a variant is a compile error until an arm is added here.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            DemandAxis::Path => "Path",
+            DemandAxis::Facets => "Facets",
+            DemandAxis::MemberBody => "MemberBody",
+            DemandAxis::CallSignatures => "CallSignatures",
+            DemandAxis::ConstructSignatures => "ConstructSignatures",
+            DemandAxis::IndexSignatures => "IndexSignatures",
+            DemandAxis::AliasPreservation => "AliasPreservation",
+            DemandAxis::NormalizationDepth => "NormalizationDepth",
+            DemandAxis::GenericOpen => "GenericOpen",
+            DemandAxis::OperatorReduction => "OperatorReduction",
+            DemandAxis::CarrierStop => "CarrierStop",
+            DemandAxis::SurfaceRole => "SurfaceRole",
+            DemandAxis::Provenance => "Provenance",
+            DemandAxis::MergeRole => "MergeRole",
+        }
+    }
 }
+
+/// Compile-time gate: [`DemandAxis::ORDERED`] must list every axis whose bit
+/// is in [`DemandAxis::ALL`]. A new variant added to the full-mask without
+/// being appended to `ORDERED` (or vice versa) fails to compile here.
+const _ORDERED_COVERS_ALL: () = {
+    let mut union: u32 = 0;
+    let mut i = 0;
+    while i < DemandAxis::ORDERED.len() {
+        union |= DemandAxis::ORDERED[i].bit();
+        i += 1;
+    }
+    assert!(
+        union == DemandAxis::ALL,
+        "DemandAxis::ORDERED must list exactly the axes whose bits compose \
+         DemandAxis::ALL"
+    );
+};
 
 /// The set of demand axes a family branches on (§3.6). Axes NOT in the mask
 /// are zeroed to their `⊥` before a demand enters that family's key.
