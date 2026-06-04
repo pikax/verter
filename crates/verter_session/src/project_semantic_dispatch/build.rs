@@ -401,24 +401,48 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &mut substitutions,
                 crate::semantic_query::ProjectionMode::Expanded,
             )
-        } else if let Some(sig) = prepared.signatures.first() {
-            // `FunctionSignature` carries per-parameter spans (preserved by the
-            // clone) but no whole-signature span, so the signature span stays
-            // `None` here.
-            let function_expr = FunctionExpr::synthetic(
-                sig.parameters.clone(),
-                sig.return_type.clone().map(Arc::new),
-                sig.type_parameters.clone(),
-            );
-            let object_expr = ObjectExpr {
-                properties: vec![if prepared.kind
-                    == verter_semantic::analysis::type_eval::ValueDeclKind::Class
-                {
-                    ObjectMember::ConstructSignature(function_expr)
+        } else if !prepared.signatures.is_empty() {
+            // Overload visibility (projection-time rule): a lone signature is
+            // always visible (even if bodied); a multi-signature overload group
+            // surfaces every bodiless overload in source order and HIDES the
+            // trailing implementation signature. `FunctionSignature` carries
+            // per-parameter spans (preserved by the clone) but no
+            // whole-signature span, so the signature span stays `None` here.
+            let is_class =
+                prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Class;
+            let visible: Vec<&verter_semantic::analysis::type_eval::FunctionSignature> =
+                if prepared.signatures.len() == 1 {
+                    prepared.signatures.iter().collect()
                 } else {
-                    ObjectMember::CallSignature(function_expr)
-                }],
-            };
+                    let bodiless: Vec<_> = prepared
+                        .signatures
+                        .iter()
+                        .filter(|sig| !sig.has_implementation_body)
+                        .collect();
+                    // Defensive: an overload set with no bodiless members is
+                    // ill-formed TS; surface every signature rather than none.
+                    if bodiless.is_empty() {
+                        prepared.signatures.iter().collect()
+                    } else {
+                        bodiless
+                    }
+                };
+            let properties = visible
+                .into_iter()
+                .map(|sig| {
+                    let function_expr = FunctionExpr::synthetic(
+                        sig.parameters.clone(),
+                        sig.return_type.clone().map(Arc::new),
+                        sig.type_parameters.clone(),
+                    );
+                    if is_class {
+                        ObjectMember::ConstructSignature(function_expr)
+                    } else {
+                        ObjectMember::CallSignature(function_expr)
+                    }
+                })
+                .collect();
+            let object_expr = ObjectExpr { properties };
             self.shallow_lower_type_expr(
                 &TypeExpr::Object(Arc::new(object_expr)),
                 &empty_env,
@@ -1304,6 +1328,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
             TypeDeclKind::Interface | TypeDeclKind::Class => MemberMergeRole::Heritage,
             TypeDeclKind::Alias => MemberMergeRole::Authored,
         };
+
+        // Same-name merged interface (TS same-file declaration merging): lower
+        // each contributor body as its own OWN-body surface and intern a
+        // distinct `MergedDecl` carrier. The peer-merge reducer (raise/expand)
+        // unions members and accumulates same-name methods into ordered overload
+        // groups — it must NOT collapse to a bare `Intersection`, whose reducer
+        // applies heritage-shadow precedence.
+        if !prepared.merged_contributors.is_empty() {
+            let contributor_ids: Vec<SemanticNodeId> = prepared
+                .merged_contributors
+                .iter()
+                .map(|contributor| {
+                    self.shallow_lower_type_expr_with_context(
+                        contributor,
+                        env,
+                        scope,
+                        &prepared.name_resolution,
+                        scope_payload,
+                        shadowing,
+                        substitutions,
+                        context.with_merge_role(MemberMergeRole::OwnBody),
+                    )
+                })
+                .collect();
+            return self.graph().intern_node_with_scope(
+                SemanticNodeData::MergedDecl {
+                    contributors: Arc::from(contributor_ids.into_boxed_slice()),
+                },
+                scope.clone(),
+            );
+        }
 
         match &prepared.body {
             TypeExpr::Intersection(arms) => {

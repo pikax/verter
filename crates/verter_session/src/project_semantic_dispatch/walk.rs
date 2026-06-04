@@ -472,6 +472,70 @@ pub(super) struct PathWalker<'a, 'b> {
     original_path_non_empty: bool,
 }
 
+impl<'a> super::ProjectSemanticDispatch<'a> {
+    /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
+    /// `Object` node. Each contributor's surface is extracted (an interface
+    /// body is an `Object`; an interface-with-`extends` body is an
+    /// `Intersection` whose own/heritage arms reduce via the intersection
+    /// merge first), then all contributors peer-merge via
+    /// [`merge_declaration_surfaces`]. This is the single declaration-merge
+    /// reducer every MergedDecl consumer (raise / expand / keyof / relation)
+    /// routes through.
+    pub(crate) fn reduce_merged_decl(&self, contributors: &[SemanticNodeId]) -> SemanticNodeId {
+        reduce_merged_decl_with_graph(self.graph(), contributors)
+    }
+}
+
+/// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
+/// `Object` node (graph-only entry point; the dispatch method delegates here).
+/// Each contributor's surface is extracted (an interface body is an `Object`;
+/// an interface-with-`extends` body is an `Intersection` whose own/heritage
+/// arms reduce via the intersection merge first), then all contributors
+/// peer-merge via [`merge_declaration_surfaces`]. This is the single
+/// declaration-merge reducer every MergedDecl consumer routes through.
+pub(crate) fn reduce_merged_decl_with_graph(
+    graph: &SemanticGraphStore,
+    contributors: &[SemanticNodeId],
+) -> SemanticNodeId {
+    let mut surfaces: Vec<ShallowSurface> = Vec::with_capacity(contributors.len());
+    for contributor in contributors {
+        if let Some(surface) = shallow_surface_of_node(graph, *contributor) {
+            surfaces.push(surface);
+        }
+    }
+    let merged = merge_declaration_surfaces(graph, &surfaces);
+    graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)))
+}
+
+/// Extract a single contributor's [`ShallowSurface`]. `Object` nodes map
+/// directly; `Intersection` nodes (an interface body carrying `extends`
+/// heritage) reduce via the intersection heritage-shadow merge first. Other
+/// shapes yield no surface (skipped by the caller).
+fn shallow_surface_of_node(
+    graph: &SemanticGraphStore,
+    node: SemanticNodeId,
+) -> Option<ShallowSurface> {
+    let data = graph.node_data(node)?;
+    match data.as_ref() {
+        SemanticNodeData::Object(view) => Some(ShallowSurface::from_object(view)),
+        SemanticNodeData::Intersection(arms) => {
+            let arms = Arc::clone(arms);
+            drop(data);
+            let arm_surfaces: Vec<Option<ShallowSurface>> = arms
+                .iter()
+                .map(|arm| {
+                    graph.node_data(*arm).and_then(|d| match d.as_ref() {
+                        SemanticNodeData::Object(view) => Some(ShallowSurface::from_object(view)),
+                        _ => None,
+                    })
+                })
+                .collect();
+            merge_intersection_surfaces_with_graph(graph, &arm_surfaces)
+        }
+        _ => None,
+    }
+}
+
 impl<'a, 'b> PathWalker<'a, 'b> {
     pub(super) fn new(
         dispatch: &'a ProjectSemanticDispatch<'b>,
@@ -663,6 +727,14 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
             };
             match &*data {
+                SemanticNodeData::MergedDecl { contributors } => {
+                    // Reduce the peer-merged surface and re-process the current
+                    // segment against the merged object.
+                    let contributors = contributors.clone();
+                    drop(data);
+                    current = self.dispatch.reduce_merged_decl(&contributors);
+                    continue;
+                }
                 SemanticNodeData::Object(surface) => {
                     let needle = match segment {
                         PathSegment::Member(name) => name.as_ref().to_string(),
@@ -1940,6 +2012,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     work.push(ExpandFrame::Expand(*arm));
                 }
             }
+            SemanticNodeData::MergedDecl { contributors } => {
+                // Reduce the peer-merged surface, then expand the merged object.
+                let contributors = contributors.clone();
+                drop(data);
+                let merged = self.dispatch.reduce_merged_decl(&contributors);
+                work.push(ExpandFrame::Expand(merged));
+            }
             _ => {
                 drop(data);
                 results.push(node);
@@ -2307,6 +2386,34 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             }
         };
         match &*data {
+            SemanticNodeData::MergedDecl { contributors } => {
+                // Peer-merge the same-name interface contributors into one
+                // object surface and contribute it (same path as a plain
+                // Object). The reducer applies declaration-merge member rules,
+                // not heritage-shadow.
+                let contributors = contributors.clone();
+                drop(data);
+                let merged = self.dispatch.reduce_merged_decl(&contributors);
+                let mut surface = match self.graph().node_data(merged) {
+                    Some(merged_data) => match merged_data.as_ref() {
+                        SemanticNodeData::Object(view) => ShallowSurface::from_object(view),
+                        _ => ShallowSurface::empty(),
+                    },
+                    None => ShallowSurface::empty(),
+                };
+                if let Some(role) = member_role_override {
+                    for member in &mut surface.members {
+                        member.merge_role = role;
+                    }
+                }
+                self.contribute_surface(
+                    target,
+                    root_contribution,
+                    intersection_buffers,
+                    union_buffers,
+                    Some(surface),
+                );
+            }
             SemanticNodeData::Object(view) => {
                 let mut surface = ShallowSurface::from_object(view);
                 drop(data);
@@ -3252,6 +3359,109 @@ fn arm_is_object_surface(graph: &SemanticGraphStore, arm: SemanticNodeId) -> boo
 /// Empty-arm surfaces are dropped (intersection contributor rule).
 /// Returns `None` only when ALL arms are None — caller then treats
 /// the result as a deferred / non-Object input.
+/// PEER-MERGE the surfaces of same-name merged declaration contributors
+/// (TS same-file declaration merging). This is the declaration-merge reducer —
+/// distinct from [`merge_intersection_surfaces_with_graph`]'s heritage-shadow
+/// member precedence:
+///
+/// - Same-name **methods** ACCUMULATE into an ordered overload group across
+///   contributors in source order. The member value becomes an ordered
+///   `Intersection` of the per-contributor function nodes (the canonical
+///   structural encoding of an overload set) — never a single shadowed
+///   signature.
+/// - Same-name non-method **properties** take FIRST-contributor precedence
+///   (deterministic; a TS conflict modelled without collapsing to `never`).
+/// - **Distinct** members union.
+/// - Call / construct / index signatures concatenate across contributors in
+///   source order; the keyspace is the first contributor's keyspace.
+fn merge_declaration_surfaces(
+    graph: &SemanticGraphStore,
+    contributor_surfaces: &[ShallowSurface],
+) -> ShallowSurface {
+    struct Accum {
+        first: ShallowSurfaceMember,
+        /// Ordered overload values when accumulating same-name methods.
+        method_values: Vec<SemanticNodeId>,
+    }
+    let mut by_name: indexmap::IndexMap<Arc<str>, Accum> = indexmap::IndexMap::new();
+    for surface in contributor_surfaces {
+        for member in &surface.members {
+            match by_name.get_mut(&member.name) {
+                None => {
+                    by_name.insert(
+                        Arc::clone(&member.name),
+                        Accum {
+                            first: member.clone(),
+                            method_values: vec![member.value],
+                        },
+                    );
+                }
+                Some(accum) => {
+                    // Same-name method in a later contributor → accumulate the
+                    // overload signature in source order (dedup identical). A
+                    // non-method (or method-over-property conflict) keeps the
+                    // first contributor deterministically.
+                    if member.is_method
+                        && accum.first.is_method
+                        && !accum.method_values.contains(&member.value)
+                    {
+                        accum.method_values.push(member.value);
+                    }
+                }
+            }
+        }
+    }
+    let members: Vec<ShallowSurfaceMember> = by_name
+        .into_values()
+        .map(|accum| {
+            if accum.first.is_method && accum.method_values.len() > 1 {
+                let group = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+                    accum.method_values.into_boxed_slice(),
+                )));
+                ShallowSurfaceMember {
+                    value: group,
+                    ..accum.first
+                }
+            } else {
+                accum.first
+            }
+        })
+        .collect();
+
+    let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
+    let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
+    let mut index_signatures: Vec<crate::semantic_query::IndexSignature> = Vec::new();
+    let mut keyspace: Option<SemanticNodeId> = None;
+    for surface in contributor_surfaces {
+        for sig in &surface.call_signatures {
+            if !call_signatures.contains(sig) {
+                call_signatures.push(*sig);
+            }
+        }
+        for sig in &surface.construct_signatures {
+            if !construct_signatures.contains(sig) {
+                construct_signatures.push(*sig);
+            }
+        }
+        for sig in &surface.index_signatures {
+            if !index_signatures.contains(sig) {
+                index_signatures.push(sig.clone());
+            }
+        }
+        if keyspace.is_none() {
+            keyspace = surface.keyspace;
+        }
+    }
+
+    ShallowSurface {
+        members,
+        call_signatures,
+        construct_signatures,
+        index_signatures,
+        keyspace,
+    }
+}
+
 fn merge_intersection_surfaces_with_graph(
     graph: &SemanticGraphStore,
     arm_surfaces: &[Option<ShallowSurface>],

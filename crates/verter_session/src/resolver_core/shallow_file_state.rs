@@ -18,7 +18,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::route_demand::RouteDemand;
 use verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource;
-use verter_semantic::analysis::type_eval::{FunctionSignature, TypeDeclKind, ValueDeclKind};
+use verter_semantic::analysis::type_eval::{
+    FunctionSignature, TypeDeclBody, TypeDeclKind, ValueDeclKind,
+};
 use verter_semantic::analysis::Hash16;
 use verter_type_expr::{ObjectExpr, TypeExpr, TypeParam};
 
@@ -117,8 +119,11 @@ pub enum ExportTarget {
 pub struct ShallowTypeSymbol {
     /// Declaration kind.
     pub kind: TypeDeclKind,
-    /// The raw symbolic body (pre-evaluation TypeExpr).
-    pub raw_body: TypeExpr,
+    /// The declaration body. [`TypeDeclBody::Single`] for one declaration;
+    /// [`TypeDeclBody::Merged`] when multiple same-name `interface`
+    /// declarations in this file merge (each contributor's body retained in
+    /// source order for the project-semantic peer-merge reducer).
+    pub body: TypeDeclBody,
     /// Generic type parameters.
     pub type_parameters: Vec<TypeParam>,
     /// Names of same-file symbols this type directly depends on.
@@ -463,7 +468,17 @@ impl ShallowFileState {
         // Locally-declared symbols from eval env (if available)
         if let Some(env) = eval_env {
             for (name, group) in &env.type_symbols {
-                let decl = group.primary();
+                // Same-name interface contributors merge into one declaration
+                // body (TS same-file declaration merging). The merge SEMANTICS
+                // live in the project-semantic peer-merge reducer over the
+                // `MergedDecl` carrier — here we only retain the ordered
+                // contributors and index their union of members/deps. The
+                // `lookup_object` projection is a shallow member index, never an
+                // intersection, so it cannot route through heritage-shadow.
+                let primary = group.primary();
+                let body = group.merged_body();
+                let lookup = body.lookup_object();
+
                 let local_type_sym = analysis.local_type_symbol(name);
                 let (local_deps, mut external_deps) = if let Some(sym) = local_type_sym {
                     classify_deps(
@@ -476,61 +491,32 @@ impl ShallowFileState {
                 } else {
                     (Vec::new(), Vec::new())
                 };
-                augment_with_typeof_import_deps(&decl.body, &import_targets, &mut external_deps);
+                augment_with_typeof_import_deps(
+                    lookup.as_ref(),
+                    &import_targets,
+                    &mut external_deps,
+                );
 
-                // Declaration merging — multiple interfaces with the
-                // same name merge their members (TS declaration merging).
-                if let Some(existing) = symbols.get_mut(name) {
-                    if existing.kind == TypeDeclKind::Interface
-                        && decl.kind == TypeDeclKind::Interface
-                    {
-                        let merged_member_deps = extract_member_deps(&decl.body);
-                        // Merge bodies: combine members via Intersection
-                        existing.raw_body = TypeExpr::intersection(vec![
-                            existing.raw_body.clone(),
-                            decl.body.clone(),
-                        ]);
-                        // Merge type parameters (keep first decl's params,
-                        // add any new params from subsequent declarations)
-                        for param in &decl.type_parameters {
-                            if !existing
-                                .type_parameters
-                                .iter()
-                                .any(|p| p.name == param.name)
-                            {
-                                existing.type_parameters.push(param.clone());
-                            }
+                // Union generic type parameters across every contributor in
+                // source order (a merged generic interface keeps each part's
+                // parameters).
+                let mut type_parameters: Vec<TypeParam> = Vec::new();
+                for decl in group.contributors() {
+                    for param in &decl.type_parameters {
+                        if !type_parameters.iter().any(|p| p.name == param.name) {
+                            type_parameters.push(param.clone());
                         }
-                        // Merge local deps
-                        for dep in &local_deps {
-                            if !existing.local_deps.contains(dep) {
-                                existing.local_deps.push(dep.clone());
-                            }
-                        }
-                        // Merge external deps
-                        for dep in &external_deps {
-                            if !existing.external_deps.contains(dep) {
-                                existing.external_deps.push(dep.clone());
-                            }
-                        }
-                        for (member, deps) in merged_member_deps {
-                            let entry = existing.member_deps.entry(member).or_default();
-                            for dep in deps {
-                                if !entry.contains(&dep) {
-                                    entry.push(dep);
-                                }
-                            }
-                        }
-                        continue;
                     }
                 }
-                let member_deps = extract_member_deps(&decl.body);
+
+                let member_deps = extract_member_deps(lookup.as_ref());
+                drop(lookup);
                 symbols.insert(
                     name.clone(),
                     ShallowTypeSymbol {
-                        kind: decl.kind,
-                        raw_body: decl.body.clone(),
-                        type_parameters: decl.type_parameters.clone(),
+                        kind: primary.kind,
+                        body,
+                        type_parameters,
                         local_deps,
                         external_deps,
                         member_deps,
@@ -555,7 +541,7 @@ impl ShallowFileState {
                     ShallowValueSymbol {
                         kind: decl.kind,
                         type_annotation: decl.type_annotation.clone(),
-                        signatures: decl.signatures.clone(),
+                        signatures: group.merged_signatures(),
                         object_shape: decl.object_shape.clone(),
                         enum_members,
                         // Userland value symbols from the eval env are NEVER the
@@ -794,7 +780,8 @@ impl ShallowFileState {
                 let Some(sym) = self.symbols.get(symbol_name) else {
                     return self.local_closure(symbol_name, budget);
                 };
-                let Some(members) = direct_object_member_names(&sym.raw_body) else {
+                let Some(members) = direct_object_member_names(sym.body.lookup_object().as_ref())
+                else {
                     return self.local_closure(symbol_name, budget);
                 };
                 let omitted: FxHashSet<&str> = omitted.iter().map(|name| name.as_str()).collect();
@@ -835,7 +822,7 @@ impl ShallowFileState {
         let mut seen_symbols = FxHashSet::default();
         let found_path = collect_member_path_seed_names(
             self,
-            &sym.raw_body,
+            sym.body.lookup_object().as_ref(),
             path,
             &mut seed_names,
             &mut seed_external,
@@ -949,7 +936,7 @@ impl ShallowFileState {
                 }
                 continue;
             }
-            if let Some(prop) = direct_object_property(&sym.raw_body, member) {
+            if let Some(prop) = direct_object_property(sym.body.lookup_object().as_ref(), member) {
                 saw_known_member = true;
                 let mut refs = Vec::new();
                 collect_type_refs(&prop.ty, &mut refs);
@@ -1049,7 +1036,7 @@ impl ShallowFileState {
         let mut steps = 1u64;
 
         if !self.collect_whole_route_refs(
-            &sym.raw_body,
+            sym.body.lookup_object().as_ref(),
             WholeRouteContext::Root,
             &mut visited,
             &mut local_used,
@@ -1478,7 +1465,7 @@ impl ShallowFileState {
         };
         local_used.push(symbol_name.to_string());
         self.collect_whole_route_refs(
-            &sym.raw_body,
+            sym.body.lookup_object().as_ref(),
             context,
             visited,
             local_used,
@@ -1543,7 +1530,7 @@ impl ShallowFileState {
                             let mut seen_symbols = FxHashSet::default();
                             let found_path = collect_member_path_seed_names(
                                 self,
-                                &sym.raw_body,
+                                sym.body.lookup_object().as_ref(),
                                 path,
                                 &mut seed_names,
                                 &mut seed_external,
@@ -1663,7 +1650,7 @@ impl ShallowFileState {
                     .get(name.as_ref())
                     .map(|symbol| {
                         self.extract_string_literal_keys_from_type_expr(
-                            &symbol.raw_body,
+                            symbol.body.lookup_object().as_ref(),
                             seen_locals,
                         )
                     })
@@ -1759,7 +1746,7 @@ fn collect_member_path_seed_names(
                 .is_some_and(|symbol| {
                     collect_member_path_seed_names(
                         state,
-                        &symbol.raw_body,
+                        symbol.body.lookup_object().as_ref(),
                         path,
                         seed_names,
                         seed_external,
@@ -2539,11 +2526,11 @@ export const defaults: Props = { label: 'ok' }
     }
 
     #[test]
-    fn duplicate_interface_names_handled_without_panic() {
-        // The eval env deduplicates interface declarations (HashMap last-wins).
-        // The merging code in from_analysis is a safety net for future env
-        // changes that might preserve duplicates. This test verifies that
-        // duplicate names don't cause panics or data loss.
+    fn duplicate_interface_declarations_merge_members() {
+        // Two same-name `interface Props` declarations in one file merge their
+        // members (TS same-file declaration merging). The shallow symbol must
+        // carry BOTH contributors' members — last-wins (dropping `x`) is the
+        // bug this discriminates against.
         let source = r#"
 export interface Props { x: string }
 export interface Props { y: number }
@@ -2558,12 +2545,19 @@ export interface Props { y: number }
             TypeDeclKind::Interface,
             "symbol should keep Interface kind"
         );
-        // EvalEnv does last-wins for same-name symbols, so only the second
-        // interface's body is present. The merging code in from_analysis
-        // would merge if the env produced duplicates.
+
         assert!(
-            !matches!(symbol.raw_body, TypeExpr::Unknown { .. }),
-            "body should not be Unknown"
+            symbol.body.is_merged(),
+            "two `interface Props` declarations must produce a Merged body"
+        );
+        let members = symbol.body.merged_member_names();
+        assert!(
+            members.contains(&"x".to_string()),
+            "merged Props must expose `x`; got {members:?}"
+        );
+        assert!(
+            members.contains(&"y".to_string()),
+            "merged Props must expose `y`; got {members:?}"
         );
     }
 

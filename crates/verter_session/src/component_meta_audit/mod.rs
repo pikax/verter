@@ -1086,6 +1086,9 @@ pub fn audit_key_for_node(
             base.decl_name,
             args.len()
         ),
+        SemanticNodeData::MergedDecl { contributors } => {
+            format!("MergedDecl[{}]", contributors.len())
+        }
     };
     Arc::from(label)
 }

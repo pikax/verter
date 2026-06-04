@@ -287,6 +287,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
+            SemanticNodeData::MergedDecl { contributors } => {
+                // Substitute into each merged contributor, preserving the
+                // distinct carrier so the peer-merge reducer still applies to
+                // the instantiated declaration.
+                let mut new_contributors = Vec::with_capacity(contributors.len());
+                let mut any_changed = false;
+                for contributor in contributors.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*contributor, parameter_node, arg);
+                    any_changed |= c;
+                    new_contributors.push(sub);
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::MergedDecl {
+                            contributors: Arc::from(new_contributors.into_boxed_slice()),
+                        },
+                    ),
+                    true,
+                )
+            }
             SemanticNodeData::Array { element, readonly } => {
                 let (sub_element, changed) =
                     self.substitute_with_change_tracking(*element, parameter_node, arg);

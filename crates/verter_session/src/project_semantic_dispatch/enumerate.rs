@@ -175,6 +175,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     work.push(KeyNamesFrame::Expand(*arm));
                 }
             }
+            SemanticNodeData::MergedDecl { contributors } => {
+                // `keyof` over a merged interface is the UNION of every
+                // contributor's keys — the same accumulation the intersection
+                // combine performs.
+                let contributors = Arc::clone(contributors);
+                drop(data);
+                let n = contributors.len();
+                if n == 0 {
+                    results.push(Some(Vec::new()));
+                    return;
+                }
+                work.push(KeyNamesFrame::CombineIntersection { arm_count: n });
+                for contributor in contributors.iter().rev() {
+                    work.push(KeyNamesFrame::Expand(*contributor));
+                }
+            }
             SemanticNodeData::Primitive(PrimitiveKind::Never) => {
                 results.push(Some(Vec::new()));
             }
@@ -639,6 +655,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     None
                 } else {
                     Some(true)
+                }
+            }
+            SemanticNodeData::MergedDecl { contributors } => {
+                // A merged interface's keyset is the UNION of every
+                // contributor's members — the needle admits iff ANY contributor
+                // admits (same accumulation as the intersection arm).
+                let contributors = Arc::clone(contributors);
+                drop(data);
+                let mut any_admits = false;
+                let mut any_inconclusive = false;
+                for contributor in contributors.iter() {
+                    match self.base_member_admission_non_emitting(*contributor, needle) {
+                        Some(true) => {
+                            any_admits = true;
+                            break;
+                        }
+                        Some(false) => {}
+                        None => {
+                            any_inconclusive = true;
+                        }
+                    }
+                }
+                if any_admits {
+                    Some(true)
+                } else if any_inconclusive {
+                    None
+                } else {
+                    Some(false)
                 }
             }
             SemanticNodeData::Primitive(PrimitiveKind::Never) => {

@@ -533,6 +533,26 @@ Historical pipeline (retained for TypeExpr → arena lowering only): `TypeExpr -
 - `TypeDeclInfo` -- declaration metadata (body, type params, span).
 - `evaluate()` -- convenience wrapper that delegates to `solve_type()` via `EvalEnvSolverHost`. No longer contains evaluation logic itself.
 
+## Declaration Merging (CRITICAL)
+
+Same-name TypeScript declaration merging is owned end-to-end by the shared layer; there is exactly ONE merge path.
+
+**Carrier chain (owner → reducer):**
+
+- `EvalEnv.type_symbols`/`value_symbols` are `FxHashMap<String, TypeDeclGroup>`/`ValueDeclGroup` — ordered contributor groups. `add_type`/`add_value` APPEND (`group.contributors.push`), never last-wins `insert`. `TypeDeclGroup::merged_body()` returns `TypeDeclBody::Single` for one declaration (or any non-interface / mixed-kind group — classes/aliases do not merge) and `TypeDeclBody::Merged { contributors, kinds }` for ≥2 same-name `interface` contributors. `ValueDeclGroup::merged_signatures()` concatenates every contributor's signatures in source order.
+- `ShallowTypeSymbol.body: TypeDeclBody`. Shallow same-file member readers consult `body.lookup_object()` (a member-union `Object` projection — an index view, NEVER an `Intersection`). `PreparedTypeDecl` carries `merged_contributors: Vec<TypeExpr>` (empty = single).
+- Body lowering (`lower_decl_body_with_provenance`) interns a merged interface as a distinct `SemanticNodeData::MergedDecl { contributors: Arc<[SemanticNodeId]> }` carrier; a single declaration lowers exactly as before.
+
+**The load-bearing rule:** a merged declaration MUST reach the reducer as `MergedDecl`. A bare `TypeExpr::Intersection`/`SemanticNodeData::Intersection` is FORBIDDEN as the merged-decl representation — the intersection reducer applies own-body-shadows-heritage member precedence and cannot accumulate method overload groups (a same-named method in a later arm SHADOWS the earlier). `verter_session` must not synthesise `raw_body = TypeExpr::intersection(...)`.
+
+**Peer-merge reducer** (`reduce_merged_decl_with_graph` + `merge_declaration_surfaces`, in `project_semantic_dispatch::walk`; routed through raise / expand / keyof / relation / substitute): (a) same-name methods/call-signatures ACCUMULATE into one ordered overload group (member value = ordered `Intersection` of the per-contributor function nodes); (b) conflicting non-method properties take deterministic first-contributor precedence (never `never`); (c) distinct members union; call/construct/index signatures concatenate.
+
+**Overload visibility** is a projection-time rule (`build_typeof`): a lone signature is visible (even if bodied); a multi-signature group surfaces every bodiless overload in source order and HIDES the trailing implementation (`has_implementation_body == true`).
+
+**Versioning:** same-file merged values root on the owner's single `FileWholeHash` self-root under a content-free `DeclKey` (R6) — no dedicated contributor-sequence fact. Cross-file ambient augmentation (`declare module`/`declare global`) is a separate concern (Phase B), not declaration merging.
+
+**Guards** (registered in `critical_rules_have_guards.rs::CRITICAL_RULE_GUARDS`): `eval_env_type_symbols_are_grouped_not_last_wins_map`, `eval_env_add_decl_appends_not_overwrites`, `no_intersection_merge_synthesis_in_verter_session`, `merged_decl_lowers_to_distinct_carrier_not_intersection`, plus the discriminating `declaration_merge_facts` regression and the `declaration_merge` typeinfo oracles.
+
 ## Cross-File Type Resolution (Compiler Integration)
 
 External types for macros like `defineProps<ExternalType>()` are pre-resolved by the host:

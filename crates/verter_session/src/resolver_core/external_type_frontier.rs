@@ -423,7 +423,7 @@ impl ExternalTypeFrontier {
                         .symbol(symbol_name)
                         .map(|symbol| {
                             (
-                                Some(symbol.raw_body.clone()),
+                                Some(symbol.body.lookup_object().into_owned()),
                                 symbol.type_parameters.clone(),
                             )
                         })
@@ -449,7 +449,7 @@ impl ExternalTypeFrontier {
                     .symbol(symbol_name)
                     .map(|symbol| {
                         (
-                            Some(symbol.raw_body.clone()),
+                            Some(symbol.body.lookup_object().into_owned()),
                             symbol.type_parameters.clone(),
                         )
                     })

@@ -182,10 +182,13 @@ fn emit_type_symbols(registry: &mut FactRegistry, shallow: &ShallowFileState, le
         let exporter = InternedName::from(name.as_str());
         let space = SymbolSpace::Type;
 
-        // Body fingerprint over the type-alias / interface body.
-        let outcome = compute_semantic_hash(&symbol.raw_body, space, lens);
+        // Body fingerprint over the type-alias / interface body. For a merged
+        // interface this hashes the union of every contributor's members, so a
+        // change in any same-name contributor invalidates downstream importers.
+        let body = symbol.body.lookup_object();
+        let outcome = compute_semantic_hash(body.as_ref(), space, lens);
         let body_hash = outcome.hash;
-        let display_hash = compute_display_hash(&symbol.raw_body, &body_hash);
+        let display_hash = compute_display_hash(body.as_ref(), &body_hash);
 
         // `Export` if exported; `LocalDecl` otherwise.
         let is_exported = shallow.exports.contains_key(name);

@@ -469,6 +469,9 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
         SemanticNodeData::InstantiationRef { .. } => SemanticNodeKind::Other {
             name: Arc::from("InstantiationRef"),
         },
+        SemanticNodeData::MergedDecl { .. } => SemanticNodeKind::Other {
+            name: Arc::from("MergedDecl"),
+        },
     }
 }
 
@@ -521,6 +524,9 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
             base.decl_name,
             args.len()
         )),
+        SemanticNodeData::MergedDecl { contributors } => {
+            Arc::from(format!("MergedDecl[{}]", contributors.len()))
+        }
     }
 }
 

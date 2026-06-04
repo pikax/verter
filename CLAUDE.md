@@ -132,6 +132,16 @@ A macro/import that resolves its surface through anything other than the shared 
 
 See `/type-resolution` skill for the full traversal rules and resolver mode details.
 
+### Declaration Merging (CRITICAL)
+
+Same-name declaration merge is produced ONLY by `verter_semantic::type_eval` ordered declaration groups. `EvalEnv` appends contributors in source/binder order (`add_type`/`add_value` push onto an ordered `TypeDeclGroup`/`ValueDeclGroup` — no last-wins `FxHashMap<String, TypeDeclInfo>`/`…ValueDeclInfo>` map, no overwrite `insert` for mergeable kinds). A group of multiple same-name `interface` declarations lowers to an explicit `TypeDeclBody::Merged` carrier (on `ShallowTypeSymbol.body` → `PreparedTypeDecl.merged_contributors`) which body-lowering interns as a distinct `SemanticNodeData::MergedDecl { contributors }` node.
+
+A merged declaration MUST reach the project-semantic reducer as that distinct carrier — a bare `TypeExpr::Intersection` / `SemanticNodeData::Intersection` is FORBIDDEN as the merged-decl representation, because the intersection reducer applies **heritage-shadow** member precedence (a later same-named member SHADOWS the earlier) and cannot accumulate method overload groups. The `MergedDecl` peer-merge reducer (`reduce_merged_decl_with_graph` + `merge_declaration_surfaces`, routed through raise / expand / keyof / relation / substitute) instead: (a) same-name methods/call-signatures ACCUMULATE into one ordered overload group across contributors in source order; (b) conflicting non-method properties take deterministic first-contributor precedence (never `never`); (c) distinct members union.
+
+Functions accumulate into an ordered `Vec<FunctionSignature>` (`ValueDeclGroup::merged_signatures`); each `FunctionSignature` carries `has_implementation_body`. Overload visibility is a PROJECTION-time rule (`build_typeof`): a lone signature is visible (even if bodied); a multi-signature overload group surfaces every bodiless overload in source order and hides the trailing implementation. Same-file merged values are version-rooted by the owner's single `FileWholeHash` self-root under a content-free `DeclKey` (R6) — no dedicated contributor-sequence fact. `verter_session` may route/consume contributors but MUST NOT synthesise the merge as `raw_body = TypeExpr::intersection(...)`. Cross-file ambient augmentation (`declare module`/`declare global`) is a separate concern (Phase B).
+
+See `/type-resolution` skill for the carrier chain, the peer-merge reducer, and the architecture guards.
+
 ### Two Template Codegen Paths (CRITICAL)
 
 The Rust compiler has two separate template codegen paths. Modifying one does NOT affect the other: **VDOM/Vapor** (`template/code_gen/vdom/`) for runtime render functions, and **IDE** (`ide/template/`) for valid JSX/TSX used by LSP/TSGO type checking. The LSP uses the IDE path via `CompileTarget::IDE`.

@@ -328,6 +328,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .unwrap_or(TypeExpr::Unknown {
                 raw: SEMANTIC_OBJECT_SURFACE.to_string(),
             }),
+            SemanticNodeData::MergedDecl { contributors } => {
+                // Peer-merge the same-name interface contributors into one
+                // surface (member union + ordered method overload groups) and
+                // raise the merged object.
+                let merged = self.reduce_merged_decl(contributors);
+                return self.raise_node_to_type_expr_inner(merged, active);
+            }
             // C16: DeclPlaceholder → TypeExpr::Ref (replaces DeclAnchor).
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder { name, .. }) => TypeExpr::Ref {
                 name: std::sync::Arc::clone(name),
@@ -1007,6 +1014,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     stack.push(ReduceFrame::descend(*arg, parent_context));
                 }
             }
+            SemanticNodeData::MergedDecl { contributors } => {
+                // Same-name merged contributors descend like intersection arms
+                // under whole-surface publication.
+                if is_whole_surface_published(parent_context) {
+                    for contributor in contributors.iter() {
+                        stack.push(ReduceFrame::descend(*contributor, parent_context));
+                    }
+                }
+            }
         }
     }
 
@@ -1400,6 +1416,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 context,
             )
             .unwrap_or(node),
+            SemanticNodeData::MergedDecl { contributors } => {
+                // Reduce the peer-merged surface, then drive it through the
+                // reducer so its demanded children reduce under `context`.
+                let merged = self.reduce_merged_decl(contributors);
+                if let Some(&already) = state.mapping.get(&(merged, context)) {
+                    already
+                } else {
+                    self.reduce_subtree(merged, context, state)
+                }
+            }
         }
     }
 

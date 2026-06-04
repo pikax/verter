@@ -656,6 +656,26 @@ fn expand_pair(
         return;
     }
 
+    // ── MergedDecl: reduce to its peer-merged object surface on either side,
+    //    then relate the merged surface (a merged interface relates exactly as
+    //    its unified surface) ─────────────────────────────────────────────
+    if let SemanticNodeData::MergedDecl { contributors } = &*source_data {
+        let contributors = contributors.clone();
+        drop(source_data);
+        drop(target_data);
+        let merged = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
+        work.push(RelateWork::Eval(merged, target));
+        return;
+    }
+    if let SemanticNodeData::MergedDecl { contributors } = &*target_data {
+        let contributors = contributors.clone();
+        drop(source_data);
+        drop(target_data);
+        let merged = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
+        work.push(RelateWork::Eval(source, merged));
+        return;
+    }
+
     // ── Top / bottom ────────────────────────────────────────────────────
     match (&*source_data, &*target_data) {
         (SemanticNodeData::Primitive(PrimitiveKind::Never), _) => {

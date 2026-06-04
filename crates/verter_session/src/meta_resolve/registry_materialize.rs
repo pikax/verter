@@ -71,6 +71,9 @@ pub(crate) fn component_meta_registry_prefers_structural_materialization_node(
         | SemanticNodeData::TypeOf { .. }
         | SemanticNodeData::TypeParam { .. }
         | SemanticNodeData::Infer { .. }
+        // A merged declaration is a concrete peer-merged object surface — like
+        // `Object`, it does not prefer structural materialization.
+        | SemanticNodeData::MergedDecl { .. }
         | SemanticNodeData::VueMacroElements(_) => false,
     }
 }

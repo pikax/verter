@@ -2402,6 +2402,18 @@ pub enum SemanticNodeData {
         base: DeclIdentity,
         args: Arc<[SemanticNodeId]>,
     },
+
+    /// A same-name merged declaration carrier (TS same-file declaration
+    /// merging). `contributors` holds the lowered body of each same-name
+    /// `interface` part, in source order. The peer-merge reducer unions their
+    /// members and accumulates same-name methods into ordered overload
+    /// groups — distinct from [`Intersection`](Self::Intersection), whose
+    /// reducer applies heritage-shadow member precedence. Never produced for a
+    /// single declaration.
+    MergedDecl {
+        /// Lowered contributor bodies, in source order.
+        contributors: Arc<[SemanticNodeId]>,
+    },
 }
 
 impl SemanticNodeData {
@@ -2432,6 +2444,7 @@ impl SemanticNodeData {
             Self::TypeOf { .. } => 13,
             Self::TypeParam { .. } => 14,
             Self::Infer { .. } => 15,
+            Self::MergedDecl { .. } => 16,
             Self::Conditional { .. } => 17,
             Self::VueMacroElements(_) => 18,
             Self::Function { .. } => 19,
@@ -2598,6 +2611,7 @@ impl PartialEq for SemanticNodeData {
                 Self::InstantiationRef { base: ab, args: aa },
                 Self::InstantiationRef { base: bb, args: ba },
             ) => ab == bb && aa == ba,
+            (Self::MergedDecl { contributors: a }, Self::MergedDecl { contributors: b }) => a == b,
             _ => false,
         }
     }
@@ -2717,6 +2731,9 @@ impl std::hash::Hash for SemanticNodeData {
             Self::InstantiationRef { base, args } => {
                 base.hash(state);
                 args.hash(state);
+            }
+            Self::MergedDecl { contributors } => {
+                contributors.hash(state);
             }
         }
     }

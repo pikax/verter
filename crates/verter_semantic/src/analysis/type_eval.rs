@@ -13,6 +13,7 @@
 //!
 //! Evaluation is demand-driven with cycle detection and configurable limits.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -74,6 +75,132 @@ impl TypeDeclGroup {
     /// All contributors in source/binder order.
     pub fn contributors(&self) -> &[TypeDeclInfo] {
         &self.contributors
+    }
+
+    /// Produce the merge-aware declaration body for this group.
+    ///
+    /// Multiple same-name `interface` declarations in one scope are merged by
+    /// TypeScript: their members union and same-name methods accumulate into an
+    /// ordered overload group. Such a group lowers to a [`TypeDeclBody::Merged`]
+    /// carrier so the project-semantic reducer can peer-merge it (NOT a bare
+    /// intersection, which would heritage-shadow). Classes and type aliases do
+    /// NOT merge (a duplicate-identifier error in TS), so any non-interface or
+    /// mixed-kind group keeps today's last-wins [`TypeDeclBody::Single`].
+    pub fn merged_body(&self) -> TypeDeclBody {
+        if self.contributors.len() > 1
+            && self
+                .contributors
+                .iter()
+                .all(|decl| decl.kind == TypeDeclKind::Interface)
+        {
+            TypeDeclBody::Merged(MergedTypeBody {
+                contributors: self.contributors.iter().map(|d| d.body.clone()).collect(),
+                kinds: self.contributors.iter().map(|d| d.kind).collect(),
+            })
+        } else {
+            TypeDeclBody::Single(self.primary().body.clone())
+        }
+    }
+}
+
+/// The body of a type declaration, carrying same-file declaration-merge
+/// provenance.
+///
+/// [`Single`](Self::Single) is the non-merged path — one declaration, lowered
+/// exactly as before. [`Merged`](Self::Merged) carries every same-name
+/// `interface` contributor's body in source order so the project-semantic
+/// reducer can peer-merge them into one surface (member union + ordered method
+/// overload groups). A merged declaration MUST reach the reducer as this
+/// distinct carrier; collapsing it to a bare `TypeExpr::Intersection` would
+/// route it through heritage-shadow member semantics — the wrong rule.
+#[derive(Debug, Clone)]
+pub enum TypeDeclBody {
+    /// A single declaration's body.
+    Single(TypeExpr),
+    /// Multiple same-name interface contributors, in source order.
+    Merged(MergedTypeBody),
+}
+
+/// The ordered contributor bodies + kinds of a merged declaration.
+#[derive(Debug, Clone)]
+pub struct MergedTypeBody {
+    /// Contributor bodies in source/binder order.
+    pub contributors: Vec<TypeExpr>,
+    /// Contributor kinds, parallel to [`contributors`](Self::contributors).
+    pub kinds: Vec<TypeDeclKind>,
+}
+
+impl TypeDeclBody {
+    /// Construct a non-merged single body.
+    pub fn single(body: TypeExpr) -> Self {
+        Self::Single(body)
+    }
+
+    /// Whether this body carries more than one merged contributor.
+    pub fn is_merged(&self) -> bool {
+        matches!(self, Self::Merged(_))
+    }
+
+    /// Every contributor body in source order (one element for `Single`).
+    pub fn contributors(&self) -> &[TypeExpr] {
+        match self {
+            Self::Single(body) => std::slice::from_ref(body),
+            Self::Merged(merged) => &merged.contributors,
+        }
+    }
+
+    /// The last-wins representative contributor body (the final declaration).
+    pub fn primary(&self) -> &TypeExpr {
+        self.contributors()
+            .last()
+            .expect("TypeDeclBody always has at least one contributor")
+    }
+
+    /// A single object surface unioning every contributor's direct members.
+    ///
+    /// This is a SHALLOW index projection for same-file member enumeration,
+    /// dependency tracking, and member-index construction ONLY — it is never
+    /// the semantic merge. The semantic declaration merge (member precedence,
+    /// method overload accumulation) is performed exclusively by the
+    /// project-semantic reducer over the `MergedDecl` carrier. The projection
+    /// is an `Object` (never an `Intersection`), so it cannot accidentally
+    /// route through the intersection heritage-shadow reducer.
+    pub fn lookup_object(&self) -> Cow<'_, TypeExpr> {
+        match self {
+            Self::Single(body) => Cow::Borrowed(body),
+            Self::Merged(merged) => {
+                let mut properties = Vec::new();
+                for contributor in &merged.contributors {
+                    if let TypeExpr::Object(object) = contributor {
+                        properties.extend(object.properties.iter().cloned());
+                    }
+                }
+                Cow::Owned(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
+            }
+        }
+    }
+
+    /// The union of direct member names across every contributor, in first-seen
+    /// order (shallow index view; not the semantic surface).
+    pub fn merged_member_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for contributor in self.contributors() {
+            if let TypeExpr::Object(object) = contributor {
+                for member in &object.properties {
+                    let name = match member {
+                        ObjectMember::Property(prop) => Some(prop.name.clone()),
+                        ObjectMember::Method(method) => Some(method.name.clone()),
+                        _ => None,
+                    };
+                    if let Some(name) = name {
+                        if !names.contains(&name) {
+                            names.push(name);
+                        }
+                    }
+                }
+            }
+        }
+        names
     }
 }
 
@@ -138,6 +265,22 @@ impl ValueDeclGroup {
     /// All contributors in source/binder order.
     pub fn contributors(&self) -> &[ValueDeclInfo] {
         &self.contributors
+    }
+
+    /// The merged overload signature set: every contributor's signatures
+    /// concatenated in source order. A function declared with bodiless
+    /// overloads followed by an implementation contributes one signature per
+    /// declaration, so the returned vector is the full ordered overload group
+    /// (the trailing implementation entry carries `has_implementation_body`).
+    /// For a single contributor this is exactly its own signatures.
+    pub fn merged_signatures(&self) -> Vec<FunctionSignature> {
+        if self.contributors.len() == 1 {
+            return self.contributors[0].signatures.clone();
+        }
+        self.contributors
+            .iter()
+            .flat_map(|decl| decl.signatures.iter().cloned())
+            .collect()
     }
 }
 

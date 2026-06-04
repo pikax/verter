@@ -109,8 +109,14 @@ pub fn prepare_local_type_decl(
     let mut prepared = PreparedTypeDecl::new(
         ResolvedRootIdentity::new(canonical_id, symbol_name),
         symbol.kind,
-        symbol.raw_body.clone(),
+        symbol.body.lookup_object().into_owned(),
     );
+    // A merged interface carries its ordered contributor bodies so body
+    // lowering interns a `MergedDecl` peer-merge carrier rather than collapsing
+    // to a bare intersection.
+    if symbol.body.is_merged() {
+        prepared.merged_contributors = symbol.body.contributors().to_vec();
+    }
     prepared.type_parameters = symbol.type_parameters.clone();
     prepared.local_deps = symbol.local_deps.clone();
     prepared.external_deps = symbol

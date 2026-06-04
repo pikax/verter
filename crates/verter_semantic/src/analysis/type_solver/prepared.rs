@@ -45,8 +45,19 @@ pub struct PreparedTypeDecl {
     /// Generic type parameters.
     pub type_parameters: Vec<TypeParam>,
 
-    /// The symbolic body — NOT eagerly evaluated.
+    /// The symbolic body — NOT eagerly evaluated. For a merged interface this
+    /// is the shallow union projection (an `Object`); the authoritative ordered
+    /// contributor bodies live in [`merged_contributors`](Self::merged_contributors)
+    /// and drive the project-semantic peer-merge reducer.
     pub body: TypeExpr,
+
+    /// Ordered contributor bodies when this declaration is a same-name merged
+    /// interface (TS same-file declaration merging). Empty for the common
+    /// single-declaration case. When non-empty, body lowering interns a
+    /// `MergedDecl` carrier over these contributors instead of lowering `body`
+    /// directly — preserving overload accumulation and member union under the
+    /// peer-merge reducer (NOT the intersection heritage-shadow rule).
+    pub merged_contributors: Vec<TypeExpr>,
 
     /// Member index for direct property/method lookup without walking the body.
     /// Populated for interfaces and object-like aliases. Default: empty.
@@ -429,6 +440,7 @@ impl PreparedTypeDecl {
             kind,
             type_parameters: Vec::new(),
             body,
+            merged_contributors: Vec::new(),
             member_index: FxHashMap::default(),
             local_deps: Vec::new(),
             external_deps: Vec::new(),
