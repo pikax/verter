@@ -67,7 +67,6 @@
 //! shared-cache admission — when the observed version's parse-fact
 //! registry cannot be recovered.
 
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, SymbolSpace};
@@ -80,19 +79,14 @@ use crate::resolver_core::{
 use crate::semantic_query::{DepSignature, DepVersion};
 use crate::types::Hash16;
 
-/// Counter for `FactReadSetFinalise::Overflow` hits at the
-/// `install_fact_tracer` boundary. Monotonically increasing;
-/// reset only across process restart. Readable from tests via
-/// [`read_signature_overflow_at_install`].
-pub(crate) static SIGNATURE_OVERFLOW_AT_INSTALL: AtomicU64 = AtomicU64::new(0);
-
 /// Bracket one cold-compute closure with a push-style fact tracer.
 ///
 /// Installs a fresh [`crate::resolver_core::FactReadSetCell`] onto the
 /// TLS tracer stack, runs `f`, pops the tracer, and finalises the
 /// observation set. On [`FactReadSetFinalise::Overflow`] emits a
 /// [`crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow`]
-/// and increments [`SIGNATURE_OVERFLOW_AT_INSTALL`].
+/// and increments the host's per-host
+/// [`crate::VerterHost::signature_overflow_at_install`] counter.
 ///
 /// Returns `(return_value, finalise_result)` so callers decide whether
 /// to admit the result to cache or treat it as non-cacheable.
@@ -109,7 +103,8 @@ where
                 cap: FACT_SIGNATURE_CAP as u32,
             },
         );
-        SIGNATURE_OVERFLOW_AT_INSTALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        host.signature_overflow_at_install
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     (value, finalise)
 }
@@ -156,18 +151,20 @@ pub(crate) fn dep_signature_to_fact_signature(sig: &DepSignature) -> Vec<FactVer
         .collect()
 }
 
-/// Read the current value of [`SIGNATURE_OVERFLOW_AT_INSTALL`].
+/// Read the current value of `host`'s per-host
+/// [`crate::VerterHost::signature_overflow_at_install`] counter.
 ///
 /// Exposed for integration tests that verify overflow telemetry —
 /// reached through the `for_tests::read_signature_overflow_at_install`
 /// re-export in `lib.rs` (see
-/// `tests/fact_read_set_finalise_overflow.rs`). The `for_tests` shim is
-/// gated `cfg(any(test, debug_assertions))`; this accessor matches so it
-/// is not a dead symbol in release.
+/// `tests/g_fact/fact_read_set_finalise_overflow.rs`). The `for_tests`
+/// shim is gated `cfg(any(test, debug_assertions))`; this accessor
+/// matches so it is not a dead symbol in release.
 #[cfg(any(test, debug_assertions))]
 #[inline]
-pub(crate) fn read_signature_overflow_at_install() -> u64 {
-    SIGNATURE_OVERFLOW_AT_INSTALL.load(std::sync::atomic::Ordering::Relaxed)
+pub(crate) fn read_signature_overflow_at_install(host: &crate::VerterHost) -> u64 {
+    host.signature_overflow_at_install
+        .load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Walk every `FactVersionRef` in `signature` against the current

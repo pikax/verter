@@ -106,12 +106,14 @@ pub fn dep_signature_to_fact_signature_for_tests(
     crate::fact_signature_helpers::dep_signature_to_fact_signature(sig)
 }
 
-/// Read the current overflow-at-install counter value.
+/// Read `host`'s per-host overflow-at-install counter value.
 ///
 /// Integration tests use this to verify that `FactSignatureOverflow`
-/// telemetry fires and the counter increments on overflow.
-pub fn read_signature_overflow_at_install() -> u64 {
-    crate::fact_signature_helpers::read_signature_overflow_at_install()
+/// telemetry fires and the counter increments on overflow. Per-host so
+/// an overflow forced on one host never bumps the counter another host's
+/// delta assertion reads.
+pub fn read_signature_overflow_at_install(host: &crate::VerterHost) -> u64 {
+    crate::fact_signature_helpers::read_signature_overflow_at_install(host)
 }
 
 /// Arm the materialiser's test-only fact-injection knob with `n`
@@ -123,47 +125,92 @@ pub fn read_signature_overflow_at_install() -> u64 {
 /// thousands of facts. The returned guard zeroes the knob on drop.
 ///
 /// Integration tests in
-/// `crates/verter_session/tests/family_bcd_*_overflow*.rs` use this
-/// to discriminate the
-/// `MaterializeOutcome::Value` vs `Tainted` distinction on
-/// admission refusal.
+/// `crates/verter_session/tests/g_family/family_bcd_*overflow*.rs` use
+/// this to discriminate the `MaterializeOutcome::Value` vs `Tainted`
+/// distinction on admission refusal. Per-host so the forced state never
+/// leaks into a concurrent materialise on a different host.
 pub fn materialize_force_overflow_observations_for_tests(
+    host: &crate::VerterHost,
     n: usize,
-) -> crate::component_meta_materialize::MaterializeForceOverflowGuard {
-    crate::component_meta_materialize::MaterializeForceOverflowGuard::arm(n)
+) -> MaterializeForceOverflowGuard<'_> {
+    MaterializeForceOverflowGuard::arm(host, n)
 }
 
-/// Arm the compile-tier's test-only fact-injection knob with `n`
+/// Host-scoped RAII guard that arms and clears the per-host materialiser
+/// fact-injection knob
+/// [`crate::VerterHost::materialize_force_overflow_observations`].
+///
+/// When the knob is set to `N > 0`, the materialiser's cold-compute
+/// closure observes `N` synthetic `FileWholeHash` facts via
+/// `observe_fan_out` BEFORE returning, deterministically forcing the
+/// installed fact tracer to either overflow (when `N > FACT_SIGNATURE_CAP`)
+/// or accumulate a large signature. Drives the discriminating
+/// Overflow-returns-valid-result test without a pathological workspace
+/// fixture.
+///
+/// The guard lives here (not in the seal-scoped
+/// `component_meta_materialize.rs`) so the resolver-tier seal — which
+/// forbids naming the concrete `VerterHost` type — is preserved. The
+/// production cold path reads the knob through
+/// `ctx.host_for_fact_tracer_install()`; only this test-only guard needs
+/// to name the host directly to arm/clear the field.
+pub struct MaterializeForceOverflowGuard<'h> {
+    host: &'h crate::VerterHost,
+}
+
+impl<'h> MaterializeForceOverflowGuard<'h> {
+    /// Set `host`'s forced observation count to `n` and return the guard.
+    fn arm(host: &'h crate::VerterHost, n: usize) -> Self {
+        host.materialize_force_overflow_observations
+            .store(n, std::sync::atomic::Ordering::Relaxed);
+        Self { host }
+    }
+}
+
+impl Drop for MaterializeForceOverflowGuard<'_> {
+    fn drop(&mut self) {
+        self.host
+            .materialize_force_overflow_observations
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Arm `host`'s compile-tier test-only fact-injection knob with `n`
 /// synthetic `FileWholeHash` observations per cold-compute call. When
 /// `n > FACT_SIGNATURE_CAP` (1024), the cold compute's installed fact
 /// tracer finalises with `Overflow`, exercising the
 /// refuse-publish-on-overflow contract on `CompileSlot` without
 /// requiring a workspace fixture that organically emits thousands of
-/// facts. The returned guard zeroes the knob on drop.
-pub fn compile_force_overflow_observations_for_tests(n: usize) -> CompileForceOverflowGuard {
-    CompileForceOverflowGuard::arm(n)
+/// facts. The returned guard zeroes the knob on drop. Per-host so the
+/// forced state never leaks into a concurrent compile on a different
+/// host.
+pub fn compile_force_overflow_observations_for_tests(
+    host: &crate::VerterHost,
+    n: usize,
+) -> CompileForceOverflowGuard<'_> {
+    CompileForceOverflowGuard::arm(host, n)
 }
 
 #[doc(hidden)]
 pub use crate::host_resolve::CompileForceOverflowGuard;
 
-/// Reset the compile-tier prefetch invocation counter to zero. Call
+/// Reset `host`'s compile-tier prefetch invocation counter to zero. Call
 /// immediately before a cold compute so the post-compute read counts
 /// only that compute. The cold-compute path installs the prefetch ONLY
 /// for `Session` cache mode (it pre-populates the compile-tier fact
 /// tracer, which is itself `Session`-only), so a routing test arms this,
 /// runs one cold compute per requested mode, and asserts the counter
 /// stays `0` for `Content` / `Stateless` and increments for `Session`.
-pub fn reset_compile_tier_prefetch_invocations_for_tests() {
-    crate::host_resolve::reset_compile_tier_prefetch_invocations();
+pub fn reset_compile_tier_prefetch_invocations_for_tests(host: &crate::VerterHost) {
+    crate::host_resolve::reset_compile_tier_prefetch_invocations(host);
 }
 
-/// Read the compile-tier prefetch invocation counter. Pair with
+/// Read `host`'s compile-tier prefetch invocation counter. Pair with
 /// [`reset_compile_tier_prefetch_invocations_for_tests`] around a single
 /// cold compute for a deterministic observation of the Session-only
 /// prefetch gate.
-pub fn compile_tier_prefetch_invocations_for_tests() -> usize {
-    crate::host_resolve::compile_tier_prefetch_invocations()
+pub fn compile_tier_prefetch_invocations_for_tests(host: &crate::VerterHost) -> usize {
+    crate::host_resolve::compile_tier_prefetch_invocations(host)
 }
 
 /// Read the materialiser's `materialize_structure_overflow_refusals`

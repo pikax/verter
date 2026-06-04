@@ -233,6 +233,10 @@ impl VerterHost {
                 crate::typeinfo::adapters::vue::store::VueShallowMetadataStore::new(),
             #[cfg(not(target_arch = "wasm32"))]
             host_cpu_pool,
+            compile_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
+            materialize_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
+            compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize::new(0),
+            signature_overflow_at_install: std::sync::atomic::AtomicU64::new(0),
         }
     }
 

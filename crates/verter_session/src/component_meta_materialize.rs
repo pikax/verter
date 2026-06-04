@@ -298,47 +298,6 @@ use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{PathSegment, SemanticQueryKey};
 
-/// Test-only fact-injection knob. When set to `N > 0`, the materialiser's
-/// cold-compute closure observes `N` synthetic `FileWholeHash` facts via
-/// `observe_fan_out` BEFORE returning, deterministically forcing the
-/// installed fact tracer to either overflow (when `N >
-/// FACT_SIGNATURE_CAP`) or accumulate a large signature. Drives the
-/// discriminating Overflow-returns-valid-result test without requiring a
-/// pathological workspace fixture that organically produces > 1024 facts.
-///
-/// The flag is reset to 0 by the RAII guard [`MaterializeForceOverflowGuard`]
-/// after the test completes so concurrent tests are not affected.
-/// Production reads it once per cold compute as a relaxed atomic load
-/// (~1 ns); the load path lives on the cooperative-admission cold-build
-/// path which already takes locks, so the cost is in the noise.
-#[doc(hidden)]
-pub(crate) static MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-/// RAII guard that clears [`MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS`]
-/// on drop. Test setup loads the desired observation count; the guard
-/// drops at scope exit and restores the baseline so a panic / early
-/// return does not leak the forced state into concurrent tests.
-#[doc(hidden)]
-#[cfg(any(test, debug_assertions))]
-pub struct MaterializeForceOverflowGuard;
-
-#[cfg(any(test, debug_assertions))]
-impl MaterializeForceOverflowGuard {
-    /// Set the forced observation count to `n` and return the guard.
-    pub(crate) fn arm(n: usize) -> Self {
-        MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS.store(n, std::sync::atomic::Ordering::Relaxed);
-        Self
-    }
-}
-
-#[cfg(any(test, debug_assertions))]
-impl Drop for MaterializeForceOverflowGuard {
-    fn drop(&mut self) {
-        MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 thread_local! {
     /// Per-thread stack of in-flight materialiser keys.
     /// Used for same-key recursion detection. Push on entry, pop on
@@ -437,11 +396,14 @@ impl Drop for MaterializeInFlightGuard {
 /// Single-exit helper for the materialiser compute
 /// closure. Seeds `local_fence` with the root scope's whole_hash if
 /// available, then either:
-/// - For non-cacheable outcomes (Recursive / Tainted / Error), stashes
-///   `(outcome, fence)` in `non_cacheable_slot` and returns `None` so
-///   the cooperative-admission fallback can return the correct outcome
-///   without re-dispatching.
-/// - For cacheable outcomes (Value / Miss), returns `Some(MaterializeStructureEntry)`
+/// - For non-cacheable outcomes (Recursive / Tainted / Error), returns
+///   [`ComputeAdmission::ReturnOnly`] carrying the valid outcome: no
+///   entry is published and `post_publish` is skipped. `ReturnOnly` is
+///   non-shareable — the winning flight alone receives the value;
+///   cooperative joiners observe the non-cacheable-winner flag and
+///   fork + cold-recompute for their own view.
+/// - For cacheable outcomes (Value / Miss), returns
+///   [`ComputeAdmission::Cacheable`] with a `MaterializeStructureEntry`
 ///   so cooperative-admission publishes it.
 ///
 /// The single admission boundary for a materialiser compute closure.
@@ -455,9 +417,10 @@ impl Drop for MaterializeInFlightGuard {
 /// - valid `Value` / `Miss` outcome whose signature CANNOT be built
 ///   strictly (the fence carries an unsound `RouteGeneration`
 ///   dependency, or a fence `WholeHash` conflicts with an observed
-///   base self-root) → `ReturnOnly`. The value is still returned to
-///   every joiner; the shared cache stays empty so the next cold-miss
-///   recomputes.
+///   base self-root) → `ReturnOnly`. The value is returned to the
+///   winner only; `ReturnOnly` is non-shareable, so cooperative joiners
+///   fork + cold-recompute for their own view. The shared cache stays
+///   empty so the next cold-miss recomputes.
 ///
 /// `base_origin_self_root` is the `base` node's declaration-origin
 /// file (`NodeScopeId::File`) when it is file-derived — the entry's
@@ -488,10 +451,12 @@ fn finish_materialize_admission(
     if !outcome.is_cacheable() {
         // Valid result but cannot be admitted to the cache (the
         // materialised outcome is intrinsically non-cacheable, e.g.
-        // Tainted). Broadcast via ComputeAdmission::ReturnOnly so
-        // joiners observe the same valid outcome. The CacheRead's
-        // dep_signature is empty: non-cacheable results MUST NOT
-        // propagate as cache deps (R20).
+        // Tainted). Route via ComputeAdmission::ReturnOnly: the winner
+        // alone receives the valid outcome. ReturnOnly is non-shareable
+        // — cooperative joiners fork + cold-recompute for their own
+        // view; no entry is published. The CacheRead's dep_signature is
+        // empty: non-cacheable results MUST NOT propagate as cache deps
+        // (R20).
         let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
             crate::cache_runtime::NonAdmissionReason::IntrinsicNonCacheable,
         );
@@ -524,9 +489,11 @@ fn finish_materialize_admission(
             // conflicts with the observed base self-root yields
             // `SelfRootConflict`; a fence `RouteGeneration` entry
             // yields `RouteGenerationDependency`. The materialised
-            // outcome is valid; route it through `ReturnOnly` so
-            // joiners observe it without admitting an entry the
-            // warm-read validator could not soundly check.
+            // outcome is valid; route it through `ReturnOnly` so the
+            // winner receives it without admitting an entry the warm-read
+            // validator could not soundly check. `ReturnOnly` is
+            // non-shareable — cooperative joiners fork + cold-recompute
+            // for their own view.
             let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(reason);
             crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
                 crate::semantic_query::CacheRead {
@@ -871,9 +838,10 @@ pub(crate) fn materialize_component_meta_structure(
     // materialisations that admit to the cache, `ReturnOnly(outcome)`
     // for valid-but-non-cacheable materialisations (intrinsically
     // non-cacheable outcomes like Tainted, OR tracer-overflow
-    // refusals). The in-flight slot broadcasts the `ReturnOnly`
-    // outcome to cooperative joiners through the typed return-only
-    // channel.
+    // refusals). `ReturnOnly` is non-shareable: the winning flight
+    // alone receives the outcome and no entry is published, so
+    // cooperative joiners observe the non-cacheable-winner flag and
+    // fork + cold-recompute for their own view.
     let key_for_compute = key.clone();
     let compute = move || -> crate::cache_runtime::singleflight::ComputeAdmission<
         crate::semantic_query::CacheRead<MaterializeOutcome>,
@@ -903,8 +871,8 @@ pub(crate) fn materialize_component_meta_structure(
         // dependency fact through the normal tracer path.
         let base_origin_self_root = base_node_origin_self_root(ctx, key_for_compute.base);
 
-        // Test-only fact-injection hook. When the
-        // `MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS` knob is non-zero,
+        // Test-only fact-injection hook. When the host's per-host
+        // `materialize_force_overflow_observations` knob is non-zero,
         // emit that many synthetic `FileWholeHash` observations onto
         // the active fact tracer. Forces the discriminating
         // Overflow-returns-valid-result scenario without a pathological
@@ -912,8 +880,10 @@ pub(crate) fn materialize_component_meta_structure(
         // outer `install_fact_tracer` wrapper installed via TLS; the
         // inner cell's `finalise()` reports `Overflow` once the per-
         // signature cap is exceeded.
-        let force_n =
-            MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS.load(std::sync::atomic::Ordering::Relaxed);
+        let force_n = ctx
+            .host_for_fact_tracer_install()
+            .materialize_force_overflow_observations
+            .load(std::sync::atomic::Ordering::Relaxed);
         if force_n > 0 {
             for n in 0..force_n {
                 crate::resolver_core::resolver_context::observe_fan_out(
@@ -1245,10 +1215,10 @@ pub(crate) fn materialize_component_meta_structure(
     // observation set (the producer's authoritative R28 signature).
     // On `FactReadSetFinalise::Overflow`, the materialised outcome is
     // still valid — only the path-precise signature is too large to
-    // admit safely. Route the value through `ComputeAdmission::ReturnOnly`
-    // so cooperative joiners observe the same valid outcome via the
-    // slot's typed return-only channel; the cache stays empty and the
-    // next request cold-recomputes.
+    // admit safely. Route the value through `ComputeAdmission::ReturnOnly`:
+    // the winner receives the valid outcome, but it is non-shareable —
+    // cooperative joiners fork + cold-recompute for their own view. The
+    // cache stays empty so the next request cold-recomputes.
     let host = ctx.host_for_fact_tracer_install();
     let compute = {
         let provenance = Arc::clone(&host.provenance);
@@ -1325,9 +1295,11 @@ pub(crate) fn materialize_component_meta_structure(
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     // Tracer overflowed — the materialised outcome is
                     // valid but cannot be admitted safely. Convert a
-                    // Cacheable outcome to ReturnOnly so cooperative
-                    // joiners observe the value without admitting the
-                    // entry. Pre-existing ReturnOnly (intrinsically
+                    // Cacheable outcome to ReturnOnly: the winner
+                    // receives the value without admitting the entry.
+                    // ReturnOnly is non-shareable — cooperative joiners
+                    // fork + cold-recompute for their own view.
+                    // Pre-existing ReturnOnly (intrinsically
                     // non-cacheable) passes through unchanged.
                     match admission {
                         crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
@@ -2989,8 +2961,9 @@ export type C<T> = A<T>
     // valid materialisation outcome (NOT Tainted) and refuses cache
     // admission. Discriminates the bug fix by:
     //  1. Cold compute observes > FACT_SIGNATURE_CAP facts (forced via
-    //     `MATERIALIZE_TEST_FORCE_OVERFLOW_OBSERVATIONS`); the installed
-    //     fact tracer's `finalise()` reports `Overflow`.
+    //     the per-host `materialize_force_overflow_observations` knob,
+    //     armed through `for_tests::materialize_force_overflow_observations_for_tests`);
+    //     the installed fact tracer's `finalise()` reports `Overflow`.
     //  2. Pre-fix the materialiser returned `None` from the
     //     cooperative-admission compute closure, causing the caller to
     //     interpret the cooperative result as a non-cacheable miss → the
@@ -2998,22 +2971,16 @@ export type C<T> = A<T>
     //     (the legacy fallback at the bottom of
     //     `materialize_component_meta_structure` had no stash from the
     //     Overflow path).
-    //  3. Post-fix the Overflow arm stashes the computed entry's outcome
-    //     into `non_cacheable_outcome` BEFORE returning `None`, so the
-    //     fallback surfaces `MaterializeOutcome::Value(...)` and the
-    //     cache stays empty so the next request cold-recomputes.
+    //  3. Post-fix the Overflow arm converts the computed `Cacheable`
+    //     admission into `ComputeAdmission::ReturnOnly`, carrying the
+    //     entry's outcome, so `MaterializeOutcome::Value(...)` surfaces
+    //     to the caller while no entry is published — the cache stays
+    //     empty so the next request cold-recomputes.
     //
-    // Test serialisation: the forced observation knob is process-global,
-    // so a serialisation mutex prevents concurrent overflow-driving
-    // tests from racing on the shared atomic.
-    static MATERIALIZE_OVERFLOW_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    // The forced observation knob is a per-host field, so each test uses
+    // its own host and needs no cross-test serialisation.
     #[test]
     fn overflow_returns_valid_outcome_and_refuses_cache_admission() {
-        let _serial = MATERIALIZE_OVERFLOW_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-
         let project = a0_make_project();
         project
             .upsert_base("/types.ts", "export type Foo = { x: number };")
@@ -3057,15 +3024,16 @@ export type C<T> = A<T>
         // Arm the forced-observation hook. 1100 > FACT_SIGNATURE_CAP
         // (1024) — guarantees the cold compute's installed tracer
         // overflows.
-        let _force_guard = MaterializeForceOverflowGuard::arm(1100);
+        let _force_guard =
+            crate::for_tests::materialize_force_overflow_observations_for_tests(host, 1100);
 
         let read = materialize_component_meta_structure(host, key.clone());
 
         // Discrimination #1: the returned outcome MUST NOT be Tainted.
         // Pre-fix the bug surfaced `MaterializeOutcome::Tainted(key.base)`
-        // because the cooperative-admission fallback ran without a
-        // stashed outcome. Post-fix the Overflow arm stashes the
-        // computed entry's outcome into the side channel.
+        // because the cooperative-admission fallback ran without the
+        // computed outcome. Post-fix the Overflow arm routes the
+        // computed entry's outcome through `ComputeAdmission::ReturnOnly`.
         match read.value {
             MaterializeOutcome::Value(_) | MaterializeOutcome::Miss(_) => {
                 // expected — Overflow refused admission but the
@@ -3076,11 +3044,10 @@ export type C<T> = A<T>
                 panic!(
                     "P1.B regression: Overflow path returned Tainted instead of the \
                      computed Value/Miss outcome. The cooperative-admission compute \
-                     closure must stash the entry's outcome onto the \
-                     non_cacheable_outcome side channel BEFORE returning None, so \
-                     the fallback path at the bottom of \
+                     closure must route the entry's outcome through \
+                     ComputeAdmission::ReturnOnly (publishing no entry), so \
                      materialize_component_meta_structure surfaces the valid \
-                     materialisation."
+                     materialisation while the cache stays empty."
                 );
             }
             other => panic!("unexpected outcome on Overflow path: {other:?}"),

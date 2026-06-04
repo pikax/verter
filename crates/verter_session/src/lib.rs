@@ -681,6 +681,50 @@ pub struct VerterHost {
     /// is gated alongside it.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) host_cpu_pool: Arc<verter_scheduler::HostCpuPool>,
+    /// Per-host test-injection knob for the compile-tier cold-build
+    /// path. When set to `N > 0`, the `Session` cold-compute closure
+    /// observes `N` synthetic `FileWholeHash` facts via `observe_fan_out`
+    /// after the normal compile-tier observation step, deterministically
+    /// forcing the installed fact tracer to either overflow (when `N >
+    /// FACT_SIGNATURE_CAP`) or accumulate a large signature. Drives the
+    /// refuse-publish-on-overflow tests without a pathological workspace
+    /// fixture.
+    ///
+    /// Armed/cleared by the host-scoped RAII guard
+    /// [`crate::host_resolve::CompileForceOverflowGuard`]. Per-host
+    /// (not process-global) so a test arming it on one host never
+    /// poisons concurrent compiles on a different host running on
+    /// another test thread. Production reads it once per `Session` cold
+    /// compute as a relaxed atomic load (~1 ns) on a path that already
+    /// takes locks, so the cost is in the noise.
+    pub(crate) compile_force_overflow_observations: std::sync::atomic::AtomicUsize,
+    /// Per-host test-injection knob for the materialiser's cold-compute
+    /// path — the structural-materialise analogue of
+    /// [`Self::compile_force_overflow_observations`]. When set to `N >
+    /// 0`, the cold-compute closure observes `N` synthetic
+    /// `FileWholeHash` facts onto the active tracer, forcing the
+    /// `materialize_structure_overflow_refusals` admission-refusal path.
+    /// Armed/cleared by
+    /// [`crate::for_tests::MaterializeForceOverflowGuard`].
+    pub(crate) materialize_force_overflow_observations: std::sync::atomic::AtomicUsize,
+    /// Per-host invocation counter for
+    /// [`VerterHost::prefetch_compile_tier_observation_targets`].
+    /// Incremented once per actual call to the prefetch. The cold-compute
+    /// path installs the prefetch ONLY for the `Session` cache mode, so a
+    /// routing test resets this, runs one cold compute per requested
+    /// mode, and asserts the counter stays `0` for `Content` /
+    /// `Stateless` and increments for `Session`. Per-host so a `Session`
+    /// compute on one host never increments the counter another host's
+    /// routing test reads.
+    pub(crate) compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize,
+    /// Per-host counter for `FactReadSetFinalise::Overflow` hits at the
+    /// `install_fact_tracer` boundary. Monotonically increasing for the
+    /// host's lifetime; reset only when the host is dropped. Readable
+    /// from tests via
+    /// [`crate::fact_signature_helpers::read_signature_overflow_at_install`].
+    /// Per-host so an overflow forced on one host's tracer never bumps
+    /// the counter a different host's delta assertion reads.
+    pub(crate) signature_overflow_at_install: std::sync::atomic::AtomicU64,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.

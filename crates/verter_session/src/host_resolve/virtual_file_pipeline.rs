@@ -26,84 +26,60 @@ use verter_compiler::compile::{
     compile as compile_sfc, compile_from_parsed, format_import_specifier, VerterCompileOptions,
 };
 
-/// Test-only fact-injection knob for the compile-tier cold-build
-/// path. When set to `N > 0`, the cold-compute closure observes `N`
-/// synthetic `FileWholeHash` facts via `observe_fan_out` after the
-/// normal compile-tier observation step, deterministically forcing
-/// the installed fact tracer to either overflow (when `N >
-/// FACT_SIGNATURE_CAP`) or accumulate a large signature. Drives
-/// discriminating tests of the refuse-publish-on-overflow contract
-/// without requiring a pathological workspace fixture that organically
-/// produces > 1024 facts.
+/// Host-scoped RAII guard that arms and clears the per-host compile-tier
+/// fact-injection knob [`VerterHost::compile_force_overflow_observations`].
 ///
-/// The flag is reset to 0 by the RAII guard
-/// [`CompileForceOverflowGuard`] after the test completes so
-/// concurrent tests are not affected. Production reads it once per
-/// cold compute as a relaxed atomic load (~1 ns); the load path lives
-/// on the cold-build path which already takes locks, so the cost is
-/// in the noise.
-#[doc(hidden)]
-pub(crate) static COMPILE_TEST_FORCE_OVERFLOW_OBSERVATIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-/// RAII guard that clears [`COMPILE_TEST_FORCE_OVERFLOW_OBSERVATIONS`]
-/// on drop. Test setup arms the desired observation count; the guard
-/// drops at scope exit and restores the baseline so a panic / early
-/// return does not leak the forced state into concurrent tests.
+/// Test setup calls [`CompileForceOverflowGuard::arm`] with the desired
+/// observation count; the guard borrows the host and clears the host's
+/// field on drop so a panic / early return does not leak the forced
+/// state. The knob is per-host, so arming it on one host never poisons a
+/// concurrent compile on a different host running on another test thread.
 #[doc(hidden)]
 #[cfg(any(test, debug_assertions))]
-pub struct CompileForceOverflowGuard;
+pub struct CompileForceOverflowGuard<'h> {
+    host: &'h VerterHost,
+}
 
 #[cfg(any(test, debug_assertions))]
-impl CompileForceOverflowGuard {
-    /// Set the forced observation count to `n` and return the guard.
-    pub(crate) fn arm(n: usize) -> Self {
-        COMPILE_TEST_FORCE_OVERFLOW_OBSERVATIONS.store(n, std::sync::atomic::Ordering::Relaxed);
-        Self
+impl<'h> CompileForceOverflowGuard<'h> {
+    /// Set `host`'s forced observation count to `n` and return the guard.
+    pub(crate) fn arm(host: &'h VerterHost, n: usize) -> Self {
+        host.compile_force_overflow_observations
+            .store(n, std::sync::atomic::Ordering::Relaxed);
+        Self { host }
     }
 }
 
 #[cfg(any(test, debug_assertions))]
-impl Drop for CompileForceOverflowGuard {
+impl Drop for CompileForceOverflowGuard<'_> {
     fn drop(&mut self) {
-        COMPILE_TEST_FORCE_OVERFLOW_OBSERVATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.host
+            .compile_force_overflow_observations
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
-/// Test/debug-only invocation counter for
-/// [`VerterHost::prefetch_compile_tier_observation_targets`]. Incremented
-/// once per actual call to the prefetch. The cold-compute path installs
-/// the prefetch ONLY for the `Session` cache mode (it pre-populates the
-/// compile-tier fact tracer, which is itself installed only for
-/// `Session`); `Content` / `Stateless` compile with no fact rail and
-/// therefore never invoke it. This counter lets a routing test assert
-/// exactly that gate — it stays `0` across a `Content` / `Stateless`
-/// cold compute and increments on a `Session` cold compute.
-///
-/// Gated to `cfg(any(test, debug_assertions))` so release builds carry
-/// neither the atomic nor the increment.
-#[doc(hidden)]
-#[cfg(any(test, debug_assertions))]
-pub(crate) static COMPILE_TIER_PREFETCH_INVOCATIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-/// Reset [`COMPILE_TIER_PREFETCH_INVOCATIONS`] to zero. Test setup calls
-/// this immediately before a cold compute so the post-compute read
+/// Reset `host`'s compile-tier prefetch invocation counter
+/// [`VerterHost::compile_tier_prefetch_invocations`] to zero. Test setup
+/// calls this immediately before a cold compute so the post-compute read
 /// reflects only that compute's prefetch invocations, independent of any
-/// earlier compile in the same process.
+/// earlier compile on the same host.
 #[doc(hidden)]
 #[cfg(any(test, debug_assertions))]
-pub fn reset_compile_tier_prefetch_invocations() {
-    COMPILE_TIER_PREFETCH_INVOCATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
+pub fn reset_compile_tier_prefetch_invocations(host: &VerterHost) {
+    host.compile_tier_prefetch_invocations
+        .store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Current value of [`COMPILE_TIER_PREFETCH_INVOCATIONS`]. Reads the
-/// relaxed atomic; pair with [`reset_compile_tier_prefetch_invocations`]
-/// around a single cold compute for a deterministic observation.
+/// Current value of `host`'s
+/// [`VerterHost::compile_tier_prefetch_invocations`]. Reads the relaxed
+/// atomic; pair with [`reset_compile_tier_prefetch_invocations`] around a
+/// single cold compute for a deterministic observation.
 #[doc(hidden)]
 #[cfg(any(test, debug_assertions))]
-pub fn compile_tier_prefetch_invocations() -> usize {
-    COMPILE_TIER_PREFETCH_INVOCATIONS.load(std::sync::atomic::Ordering::Relaxed)
+pub fn compile_tier_prefetch_invocations(host: &VerterHost) -> usize {
+    host.compile_tier_prefetch_invocations
+        .load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Compile-mode discriminator for the content-addressed cache key:
@@ -313,10 +289,11 @@ impl VerterHost {
         external_requests: &[ExternalSourceRequest],
     ) {
         // Test/debug-only invocation count. The cold-compute path gates
-        // this prefetch to `Session`; the counter lets a routing test
-        // observe that gate without a fact-rail side channel.
+        // this prefetch to `Session`; the per-host counter lets a routing
+        // test observe that gate without a fact-rail side channel.
         #[cfg(any(test, debug_assertions))]
-        COMPILE_TIER_PREFETCH_INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.compile_tier_prefetch_invocations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Owner's indexed-ready must be present so the tracer can
         // resolve owner-relative import surfaces; the owner's own
@@ -1094,7 +1071,8 @@ impl VerterHost {
                 // tracer to `Overflow` deterministically, exercising the
                 // refuse-publish-on-overflow path without a pathological
                 // workspace fixture.
-                let force_n = COMPILE_TEST_FORCE_OVERFLOW_OBSERVATIONS
+                let force_n = self
+                    .compile_force_overflow_observations
                     .load(std::sync::atomic::Ordering::Relaxed);
                 if force_n > 0 {
                     for n in 0..force_n {
