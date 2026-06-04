@@ -438,6 +438,26 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "compile_fact_signature_overflow_does_not_publish_compile_slot",
         ],
     ),
+    // ───────────────── U2 query-value-domain design gate ─────────────────
+    // Two NEW CRITICAL rules landed by the U2 design
+    // (`docs/arch/u2-query-value-domain-design.md`). The design-gate
+    // guards below are discriminating TODAY; the STAGE-B behavioural
+    // guards are named in the owning skill sections (gap tracked per
+    // the architecture-guard rule).
+    (
+        "U2 Value-Domain Key Identity",
+        &[
+            "no_envless_semantic_query_env_key_envelope",
+            "u2_value_domain_design_doc_locks_invariants",
+        ],
+    ),
+    (
+        "Typed Value Domain + Demand-Lattice Resolution",
+        &[
+            "error_rides_opaque_no_new_error_type_wire_arm",
+            "u2_value_domain_design_doc_locks_invariants",
+        ],
+    ),
 ];
 
 fn workspace_root() -> PathBuf {

@@ -1258,6 +1258,43 @@ Durable architectural insights belong here in
 `.claude/skills/type-cache-architecture/SKILL.md` or in
 `docs/arch/` — not in source comments referencing plan blocks.
 
+### U2 Value-Domain Key Identity (CRITICAL)
+
+The U2 query-value-domain design (`docs/arch/u2-query-value-domain-design.md`) locks how env
+dimensions attach to semantic-query keys. The cache-key composition is two-tier, env stays on the
+key, and no env-less uniform envelope is permitted.
+
+- **Two-tier env model.** `ResolvedDeclSlotIdentity` bakes its three intrinsic decl-site dimensions
+  (`type_env_hash`, `lib_env_hash`, `project_identity`) as DECLARATION IDENTITY. Each per-key
+  `*Context` then adds ONLY the extra QUERY dimensions that key depends on — chiefly
+  `resolve_env_hash` for import-resolving keys and `parse_env_hash` for body-reading keys. This keeps
+  R21 per-layer honest (each layer carries exactly the dims it depends on) and stays R6-clean: NO
+  content/version hash and NO `fact_dep_signature` on any query-identity key.
+- **No env-LESS envelope.** The superseded env-less uniform-envelope design — `SemanticQueryEnvKey`,
+  `TypeLibEnvKey`, the `GraphDeclSlotRef` env-less query-identity wire slot, the `schema_version`-v2
+  bump, and the "U2a/U2b" split — is FORBIDDEN. Env stays ON the key via per-key `*Context`; it is
+  never lifted into a separate uniform env envelope. The env-less KEY types (`SemanticQueryEnvKey`,
+  `TypeLibEnvKey`) must appear NOWHERE in production source; the `GraphDeclSlotRef` wire slot still
+  exists as a pre-existing DTO and is banned from the `verter_session` query-identity surface now —
+  its full wire-DTO retirement (replaced by the env-bearing `GraphResolvedDeclSlotIdentity`) is
+  FORK-A / STAGE-B work, after which the guard tightens to ban it across all production source.
+- **Module-resolution keys on SPLIT env.** A module-resolution result keys on `resolve_env_hash`
+  (moduleResolution / paths / baseUrl / conditions) + `lib_env_hash` (typeRoots / types corpus) +
+  `project_identity`, plus the transitive `parse_env` carried by the parsed import-specifier list.
+  Lib dimensions are NEVER folded into `resolve_env`.
+- **FORK-A locked (MIGRATE).** `SemanticQueryKey::Instantiate` / `ResolveMacroPayload` migrate their
+  `base` / `owner` from the content-free `DeclKey` to env-bearing `ResolvedDeclSlotIdentity`. The
+  existing `provenance` + `merge_role` discriminators STAY at FAMILY-IDENTITY level on `FamilyKey` —
+  they are NOT demoted into a `*Context`.
+- **Planned STAGE-B guards (gap tracked here per the architecture-guard rule).** The discriminating
+  behavioural guards land with the STAGE-B implementation:
+  `every_semantic_query_key_maps_to_exactly_one_value_domain`,
+  `module_resolution_keys_on_resolve_env_not_type_or_lib`, the per-key
+  `*_same_site_different_env_or_context_do_not_warm_hit` set, and
+  `semantic_query_key_spec_table_equals_enum`. The design-gate guards landed NOW are
+  `no_envless_semantic_query_env_key_envelope` and `u2_value_domain_design_doc_locks_invariants`
+  (both in `crates/verter_session/tests/g_block/u2_value_domain_design_guards.rs`).
+
 ## Related skills
 
 - `/architecture` — high-level module map
