@@ -782,6 +782,11 @@ phase that happens to need it last.
   - **#21 — Module-resolution matrix implementation.** Conditional `exports`, `node16`,
     `paths`, and symlink resolution, proven against the resolver / import-graph layer.
     Foundation-level: it is a resolver / import-graph deliverable that may rescope U0.
+  - **DESIGN-GATE LOCK (`docs/arch/u2-query-value-domain-design.md`):** the
+    `U2.QUERY_VALUE_DOMAIN` gate LOCKED **FORK-B** and **FORK-C** — the #18 broken-input
+    taint PRODUCERS and the #21 module-resolution matrix IMPLEMENTATION are U0-owned; this
+    gate keeps only the value-domain SHAPE / `admit_decision` (#18) and the
+    module-resolution KEYING contract (#21).
   - **#22 — Error-type / `any` / `never` propagation lattice (worth-checking).** How the
     error type, `any`, and `never` propagate and absorb through reducers — ties the **#3**
     lattice.
