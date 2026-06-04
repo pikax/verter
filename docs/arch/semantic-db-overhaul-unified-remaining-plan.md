@@ -160,42 +160,114 @@ merged-type-VALUE surface and the navigation projection (resolves the binder-own
 The "Binder/index owns names and locations" surface decomposes into THREE layers, sequenced by the
 demand-dependency graph, not a temporal phase:
 
-1. **Binder IDENTITY** — scopes, symbol tables, declaration-merge ORDER, and ambient / global /
-   module-augmentation CONTRIBUTION-ORDER facts. These are SYNTACTIC/structural: the scope+symbol
-   inventory is the **pre-`U2` `IndexedReady` shallow inventory** (the landed Shallow-File-Processing
-   invariant), and the **per-file contributor provenance** (declaration source-order + overload-group
-   membership) is **recorded at shallow-analysis time** in `verter_semantic::analysis` (the
-   `U2.MODULE_AUGMENTATION` change lowers merged/ambient/augmentation surfaces "once during shallow
-   analysis" and records that contributor provenance). The **cross-file merged contributor SEQUENCE**
-   (TS binder order over the recorded provenance) is then assembled and `ReadSetSignature`-validated by
-   the `U2.MODULE_AUGMENTATION` reducer — child `native-typeinfo-parity-u2-reducers.md`, guard
-   `declaration_merge_records_binder_overload_augmentation_order_as_facts`. The ordering INPUTS
-   (provenance) are thus shallow facts available before `U2.RELATION_INFER`, and the merged-VALUE
-   assembly (which relates-through-`Relate`) is layer 2 below — binder IDENTITY does not depend on
-   relation; the merged-VALUE surface does.
+1. **Binder IDENTITY — the named `BinderIdentityFacts` substrate (first-class, pre-`U2`, NOT `N0`-owned).**
+   The layer-1 facts are NOT "somewhere inside `IndexedReady`" and they are NOT produced by `N0`: they
+   are a **first-class, named substrate — `BinderIdentityFacts`** — **produced FROM `IndexedReady`** by
+   `verter_semantic::analysis` and **CONSUMED BY the `U2` reducers BEFORE those reducers run** (it is a
+   `U2`-tier *prerequisite* substrate, not a `U2` reducer output and not an `N0` projection). It is
+   **demand-produced per canonical file, keyed off `IndexedReady`'s content identity — NOT an eager
+   whole-program binder pass** (the demand-driven core invariant and the one-engine rule forbid a second
+   eager symbol authority). `BinderIdentityFacts` is the typed carrier of every SYNTACTIC/structural
+   identity fact U2 and `N0` later read:
+   - **lexical-scope identity** — the per-file scope tree + each scope's stable scope id (the
+     `binder_scope_id` that enters context-sensitive query identity, layer-2/checker below);
+   - **declaration slots** — `ResolvedDeclSlotIdentity` slots that are **stable, symbol-space-scoped
+     facts** (a slot is identified within its declaration-space — value / type / namespace — so a
+     value and a type sharing a name occupy DISTINCT slots; the slot is NOT a raw name);
+   - **per-file declaration-merge + augmentation CONTRIBUTOR-ORDER provenance** — declaration
+     source-order, overload-group membership, and the per-file module / global / ambient
+     contribution-order facts, recorded at shallow-analysis time;
+   - **ambient / global / lib-corpus COMPLETENESS facts** — whether the ambient/global/`lib` corpus a
+     name could bind to has been fully enumerated, so a NEGATIVE (name-not-found) answer is backed by a
+     recorded completeness fact rather than an un-rooted guess.
+
+   Every `BinderIdentityFacts` entry is `ReadSetSignature`-validated (the sole cache-validity rail) and
+   carries no content/version hash in its key (R6). The **cross-file merged contributor SEQUENCE** (TS
+   binder order assembled OVER this recorded per-file provenance) is then computed and
+   `ReadSetSignature`-validated by the `U2.MODULE_AUGMENTATION` reducer — child
+   `native-typeinfo-parity-u2-reducers.md`, guard
+   `declaration_merge_records_binder_overload_augmentation_order_as_facts` — which **reads
+   `BinderIdentityFacts`, never re-derives the order from raw `IndexedReady`**. The ordering INPUTS
+   (provenance + completeness) are thus available before `U2.RELATION_INFER`; the merged-VALUE assembly
+   (which relates-through-`Relate`) is layer 2 below — binder IDENTITY does not depend on relation; the
+   merged-VALUE surface does.
 2. **Merged / ambient type-VALUE surfaces** — the queryable merged object surface
    (`ResolveMergedDeclaration` / `ResolveAmbientNamespace`). Producing a merged VALUE relates members
    through `Relate`, so the `U2.MODULE_AUGMENTATION` reducer legitimately lists `U2.RELATION_INFER` as
    a prerequisite. This relation edge is on the merged-VALUE surface, NOT on the binder-IDENTITY order
    facts of layer 1 — the two must not be conflated.
-3. **Navigation / location PROJECTION** — `N0` is the location renderer over layer-1 binder-identity
-   facts (def/refs/rename/symbols/highlights). It is correctly POST-`U2` because it reuses the
-   already-recorded ordering facts ("does NOT fork a second ordering computation", §0.5.4 N0) — it is
-   a projection, not a second binder.
+3. **Navigation / location PROJECTION** — `N0` is a **pure projection** that RENDERS location /
+   navigation answers (def/refs/rename/symbols/highlights) **FROM `BinderIdentityFacts`** (layer 1). It
+   is correctly POST-`U2` because it reuses the already-recorded ordering + slot facts ("does NOT fork a
+   second ordering computation", §0.5.4 N0). `N0` is **NOT the producer of declaration identity, merge
+   identity, declaration-slot identity, lexical-scope identity, augmentation identity, or route
+   identity** — every one of those is a pre-`U2` `BinderIdentityFacts` (or resolver/route) fact that
+   `N0` only reads; `N0` never WRITES a `SemanticQueryKey` query-identity fact or a route fact. It is a
+   projection, not a second binder.
 
-A separate pre-`U2` eager binder phase (a "`B.3a` before `U2`") is REJECTED: it would re-introduce an
-eager binder, violating the demand-driven core invariant ("collecting/indexing symbols, not eagerly
-evaluating") and the one-ordering-computation rule, and would re-sequence already-landed slot-identity /
-reducer code. The binder-before-relation ordering is enforced by the demand-dependency graph (layer-1
-facts exist before `RELATION_INFER` reads them through `ProjectSemanticDispatch::execute`), not by a
-temporal pre-`U2` block. The `N0.BINDER_NAV_INDEX` name reads as if the binder lands post-`U2`; it is
-the navigation projection (layer 3), not the binder-identity producer (layer 1).
+A separate pre-`U2` eager binder phase (a "`B.3a` before `U2`") is REJECTED: `BinderIdentityFacts` is
+**demand-produced, not an eager pass** — re-introducing an eager whole-program binder would violate the
+demand-driven core invariant ("collecting/indexing symbols, not eagerly evaluating"), add a second
+symbol authority, broaden invalidation, fight the fact-cache, and re-sequence already-landed
+slot-identity / reducer code. The binder-before-relation ordering is enforced by the demand-dependency
+graph (`BinderIdentityFacts` entries are computed on demand before `RELATION_INFER` reads them through
+`ProjectSemanticDispatch::execute`), not by a temporal pre-`U2` block. The block id `N0` denotes the
+navigation projection (layer 3) — NOT the binder-identity producer (layer 1); for that reason its block
+heading is named `N0.NAV_LOCATION_INDEX` (navigation / location), deliberately dropping "Binder" so the
+name cannot be misread as the binder-identity owner.
 
 **Planned guard (named as a deliverable, NOT added to `CLAUDE.md`/skills here):**
 `ownership_boundaries_no_typescript_side_path` — registered with its `CRITICAL_RULE_GUARDS`
 entry at the gate→implementation boundary of the foundation section's first implementing block
 (per §3.2(e)), asserting no surface imports another surface's private resolver/expander/cache
 authority.
+
+**Planned binder-contract guards (named deliverables; per §0.5.7 each is committed with its
+`CRITICAL_RULE_GUARDS` entry at its owning block's gate→implementation boundary, NOT added to
+`CLAUDE.md`/skills now).** The binder substrate is not yet implemented, so each is a **named
+future-acceptance guard** where it gates a not-yet-landed block, and a **fail-today discriminating
+fixture** the moment its substrate lands (per §3.2(e) — the guard appears the moment the rule does, so
+`every_critical_rule_in_docs_has_registered_guard` stays green). The eight guards pin the
+`BinderIdentityFacts` ↔ `U2` ↔ `N0` contract above:
+
+1. `binder_identity_facts_are_pre_u2_and_not_n0_owned` — `BinderIdentityFacts` is produced from
+   `IndexedReady` and consumed by `U2` reducers; `N0` does not produce it (gate: `BinderIdentityFacts`
+   substrate, `U2`-tier).
+2. `u2_queries_do_not_read_n0_navigation_indexes` — the dependency edge runs `BinderIdentityFacts → U2`,
+   never `N0 → U2`; no `U2` reducer reads an `N0` navigation/location index (gate: `U2`).
+3. `n0_does_not_write_semantic_query_identity_or_route_facts` — `N0` is read-only over
+   `BinderIdentityFacts` / resolver / route facts; it never WRITES a `SemanticQueryKey` query-identity
+   fact or a route fact (gate: `N0`).
+4. `declaration_slots_are_stable_symbol_space_scoped_facts` — declaration slots are stable identities
+   scoped to their declaration-space (value / type / namespace), not raw names (gate:
+   `BinderIdentityFacts` / `U2` slot-identity finalization).
+5. `merge_order_and_augmentation_contributor_order_are_fact_validated` — merged-declaration order +
+   module/global/ambient augmentation contributor order are `ReadSetSignature`-validated facts assembled
+   over recorded provenance, never re-derived from raw `IndexedReady` (gate: `U2.MODULE_AUGMENTATION`;
+   composes with `declaration_merge_records_binder_overload_augmentation_order_as_facts`).
+6. `ambient_global_and_lib_corpus_have_completeness_facts` — the ambient / global / `lib` corpus carries
+   recorded completeness facts (gate: `B.4` stdlib/intrinsics authority + `BinderIdentityFacts`).
+7. `negative_name_lookup_requires_recorded_completeness_or_returnonly` — a negative (name-not-found)
+   binder answer must be backed by a recorded completeness fact, else it routes through `ReturnOnly`
+   (never warms a cache as a falsely-authoritative miss) (gate: `BinderIdentityFacts` / `N0`).
+8. `binder_scope_id_enters_context_sensitive_query_identity` — a query whose result depends on the
+   lexical scope it is resolved from carries the `binder_scope_id` in its `SemanticQueryKey` identity
+   (a semantic discriminator like generic substitutions, NOT a content/version hash — R6-consistent)
+   (gate: the context-sensitive `SemanticQueryKey` finalization, `U2`).
+
+**Session / overlay augmentation FAIL-CLOSED (registered STOP / degradation gate).** A base-only
+`augmentation_index` (the landed `FileArtifactStore::augmentation_index` keyed by
+`AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, target }`) is acceptable
+ONLY as an INTERMEDIATE. It is NOT the final full-replacement architecture: session / overlay-aware
+augmentation facts (an unsaved-buffer or overlay edit that adds/removes a `declare module` / `declare
+global` contributor) must EITHER be implemented OR EXPLICITLY FAIL CLOSED until they are — a session
+augmentation query against a base-only index returns a typed degraded/`ReturnOnly` result, never a
+silently-stale base-only answer presented as authoritative (a silent base-only answer is a correctness
+compromise, not a degradation). Guard deliverable (per §0.5.7, gate: `U2.MODULE_AUGMENTATION`):
+`session_overlay_augmentation_fails_closed_until_implemented` — asserts a session/overlay augmentation
+query over a base-only index degrades typed / `ReturnOnly` and never publishes a base-only result as a
+session-authoritative warm entry. This composes with the broken-code recovery contract (§0.5.3) and the
+overlay-results-do-not-populate-base-caches Cache-Architecture rule.
 
 ### 0.5.2 The Native Emit Boundary (B.9 — DECIDED, codex + claude converged)
 
@@ -414,19 +486,28 @@ each pair is stated ONCE here.
 - **Required deletions:** none (formalizes the live `IntrinsicRegistry` + `lib_env_hash` semantics).
 - **Guard:** `lib_authority_pinned_ts_version_single_owner` (reuses the existing SDK audit guard).
 
-#### N0.BINDER_NAV_INDEX — Binder / Name-and-Location Index  (A.10 ≡ B.3)
+#### N0.NAV_LOCATION_INDEX — Navigation / Location Index  (A.10 ≡ B.3)
 
-- **Scope:** the unified identity/location index substrate — **identity and location ONLY, ZERO
+- **Scope:** the navigation/location PROJECTION surface — **identity and location ONLY, ZERO
   type expansion, ZERO typed-IR dispatch** (location ≠ type expansion: producing a definition /
   references / rename LOCATION is an identity-and-location answer, NOT a type walk, so `N0` owns it
-  without becoming an expander). Reads the `IndexedReady` shallow inventory and reuses the
-  U2-reducers' merged-declaration ordering facts (does NOT fork a second ordering computation); adds
-  document/workspace symbols (as a substrate query), rename ranges, and validation tokens. `N0` is the
-  **navigation/location PROJECTION (layer 3 of the §0.5.1 binder decomposition)** over the binder-IDENTITY
-  facts produced earlier — the `IndexedReady` scope/symbol inventory (pre-`U2`) plus the merge /
-  contribution-ORDER facts recorded at shallow-analysis time (before `U2.RELATION_INFER`). It is NOT the
-  binder-identity producer and NOT the merged-type-VALUE surface; it never re-derives ordering. **`N0` is
-  the native PRODUCER of definition / references / rename LOCATION answers** — it succeeds the
+  without becoming an expander). `N0` is a **pure projection over the pre-`U2` `BinderIdentityFacts`
+  substrate (§0.5.1 layer 1)** — it READS the `BinderIdentityFacts` lexical-scope / declaration-slot /
+  contributor-order / completeness facts (themselves produced from the `IndexedReady` shallow inventory)
+  and reuses the `U2`-reducers' merged-declaration ordering facts (does NOT fork a second ordering
+  computation); adds document/workspace symbols (as a substrate query), rename ranges, and validation
+  tokens. **`N0` is NOT the producer of declaration identity, merge identity, declaration-slot identity,
+  lexical-scope identity, augmentation identity, or route identity** — every one of those is a pre-`U2`
+  `BinderIdentityFacts` (or resolver/route) fact that `N0` only reads; `N0` never WRITES a
+  `SemanticQueryKey` query-identity fact or a route fact (guards
+  `n0_does_not_write_semantic_query_identity_or_route_facts`,
+  `u2_queries_do_not_read_n0_navigation_indexes` — the edge is `BinderIdentityFacts → U2`, never
+  `N0 → U2`). It is NOT the merged-type-VALUE surface; it never re-derives ordering. A negative
+  (name-not-found) location answer is backed by a recorded `BinderIdentityFacts` completeness fact, else
+  it degrades / routes through `ReturnOnly` (guard
+  `negative_name_lookup_requires_recorded_completeness_or_returnonly`) — it never escalates to the type
+  engine to "recover" (§0.5.3 nav zero-dispatch). **`N0` is the native PRODUCER of definition /
+  references / rename LOCATION answers** — it succeeds the
   **def/refs/rename LOCATION methods** of the tsgo-backed `verter_lsp::tsgo::TsgoNavigationBackend`
   (`getDefinitionAtPosition` / `getReferences` / `getRenameLocations`,
   `docs/arch/goto-definition-overhaul-plan.md` §Phase 5) that produce those locations TODAY, rather
@@ -434,7 +515,9 @@ each pair is stated ONCE here.
   does NOT own that backend's `getCodeActions` method** — code-actions are a B.8 surface (they need
   checker diagnostics + `CodeTransform`, not identity/location), so the code-action path of the
   struct is succeeded + deleted by `B.8`, not `N0` (see B.8).
-- **Deps:** `U2` (reuses its merged-decl ordering facts + `IndexedReady` finalized shape).
+- **Deps:** the pre-`U2` `BinderIdentityFacts` substrate (§0.5.1 layer 1) + `U2` (reuses its
+  merged-decl ordering facts + `IndexedReady` finalized shape). `N0` consumes `BinderIdentityFacts`;
+  it does not depend on the type-VALUE surface.
 - **Sequence:** post-`U2`, ~alongside `G.P3`; before `N1`. Its `TsgoNavigationBackend`
   **def/refs/rename** deletion is gated BEFORE `§10` (a named deletion `§10` (1)+(7) depend on for
   navigation).
@@ -455,15 +538,20 @@ each pair is stated ONCE here.
   is no tsgo call-hierarchy path to delete) — `N0` owns it as an identity/location surface and the
   guard asserts it STAYS native. These are identity/location surfaces (§0.5.2), NOT type walks —
   `N0` stays zero-dispatch.
-- **Guards:** `binder_nav_index_runs_zero_typed_ir_dispatch` + the NET-NEW
+- **Guards:** `nav_location_index_runs_zero_typed_ir_dispatch` + the projection-contract guards
+  registered at the `N0` gate per §0.5.7 (named in §0.5.1):
+  `n0_does_not_write_semantic_query_identity_or_route_facts`,
+  `u2_queries_do_not_read_n0_navigation_indexes`, and
+  `negative_name_lookup_requires_recorded_completeness_or_returnonly` — these pin `N0` as a pure
+  read-only projection over `BinderIdentityFacts`. Plus the NET-NEW
   `native_navigation_replaces_ts_navigation_backend` (asserts def/refs/rename locations come from
-  `N0` / binder facts and no tsgo **def/refs/rename** path survives — scoped to def/refs/rename, NOT
-  the whole struct, since the code-action path is B.8's; registered with its `CRITICAL_RULE_GUARDS`
+  `N0` / `BinderIdentityFacts` and no tsgo **def/refs/rename** path survives — scoped to def/refs/rename,
+  NOT the whole struct, since the code-action path is B.8's; registered with its `CRITICAL_RULE_GUARDS`
   entry at the `N0` gate per §0.5.7) + the NET-NEW
   `native_binder_surfaces_replace_ts_aux_nav_paths` (asserts semantic tokens / document highlights
-  come from `N0` binder facts and no tsgo `get_semantic_tokens` / `get_document_highlights`
-  `TypeProvider` path survives, and that call hierarchy stays native with no tsgo path introduced;
-  registered at the `N0` gate per §0.5.7).
+  come from `N0`'s projection over `BinderIdentityFacts` and no tsgo `get_semantic_tokens` /
+  `get_document_highlights` `TypeProvider` path survives, and that call hierarchy stays native with no
+  tsgo path introduced; registered at the `N0` gate per §0.5.7).
 
 #### N1.NATIVE_LANGUAGE_SERVICE_LAYER — Native Language Service Layer  (A.11 ≡ B.6)
 
@@ -637,7 +725,7 @@ retired with zero residual runtime-TS path.
 **Navigation (def / refs / rename) + code-action succession.** The tsgo-backed
 `verter_lsp::tsgo::TsgoNavigationBackend` today serves FOUR methods across TWO native owners:
 `getDefinitionAtPosition` / `getReferences` / `getRenameLocations` (def/refs/rename LOCATION
-answers) → `N0.BINDER_NAV_INDEX`, which PRODUCES those locations from binder/identity facts
+answers) → `N0.NAV_LOCATION_INDEX`, which PRODUCES those locations from binder/identity facts
 (location ≠ type expansion, so `N0` owns this without becoming an expander); and `getCodeActions`
 (code-actions) → `B.8`, which produces native code-actions from checker diagnostics + `CodeTransform`
 (`N0` cannot produce code-actions). The struct's deletion is therefore SPLIT into two
@@ -671,8 +759,10 @@ FOUNDATION (pre-U0 / U0-tier, before U2):
   A.1 rescope-rejection rubric (§3.2 meta)
 
 → U0 → U1 → U2 (CONVERGENCE GATE) → [existing U3..U15 / S5.B* / G.P*]
+       │  BinderIdentityFacts (§0.5.1 layer 1) — demand-produced FROM IndexedReady,
+       │  CONSUMED BY the U2 reducers BEFORE they run (NOT eager, NOT N0-owned)
 
-AFTER U2:            N0.BINDER_NAV_INDEX (~G.P3)
+AFTER U2:            N0.NAV_LOCATION_INDEX (~G.P3) — pure projection over BinderIdentityFacts
   A.3/#20 strict matrix + B.12 config matrix  → produced AT the U2.RELATION_INFER gate
   A.2/A.7/A.8/A.9 → folded into the U2.RELATION_INFER #1/#2/#5 cache-admission algebra
   A.4/#7 warm-hit validity → BLOCKING the U3 + U10 gates
@@ -1130,6 +1220,8 @@ parallel-safe early:   G.P1 → G.P2   ∥   S5.B1   ∥   U0   ∥   U1
        │
        ▼
 U2  = CONVERGENCE GATE  (finalizes ResolveMacroPayload identity + the slot-identity shape)
+       │   (BinderIdentityFacts §0.5.1 layer 1 — demand-produced FROM IndexedReady, CONSUMED BY
+       │    the U2 reducers BEFORE they run; pre-U2 prerequisite, NOT eager, NOT N0-owned)
        │   (A.3/#20 strict matrix + B.12 config matrix produced AT the U2.RELATION_INFER gate)
        ├──────────────────────────── after U2 ────────────────────────────┐
        │                                                                    │
@@ -1138,7 +1230,7 @@ U2  = CONVERGENCE GATE  (finalizes ResolveMacroPayload identity + the slot-ident
          → S5.B6 / S5.B7 / S5.B8 → S5.B9 → S5.B10 → S5.B11 → S5.B12         │
                                                                             │
   parallel after U2:                                                        │
-       U4 → U6        U5        scheduler U7 → U9        G.P3 ∥ N0.BINDER_NAV_INDEX │
+       U4 → U6        U5        scheduler U7 → U9        G.P3 ∥ N0.NAV_LOCATION_INDEX │
                                                                             │
   U8  ONLY after  U6 + S5.B12   ◄── HARD GATE (no U8+ around the sidecar)   │
        │   (#7 warm-hit-validity BLOCKS U3 + U10; #9 degradation taxonomy   │
@@ -1186,7 +1278,14 @@ unchanged:
   `B.1 → U0.RESOLVER_CORE → B.4`). The ownership statement
   (`B.15`), `B.13` (broken-code/recovery producers, `U0`-owned), and the `B.9` emit
   boundary are foundation statements that gate `U0` and carry no incoming edge.
-- **`N0.BINDER_NAV_INDEX ← U2`** (reuses the U2 merged-decl ordering facts + finalized
+- **`BinderIdentityFacts → U2`** (§0.5.1 layer 1): the named pre-`U2` binder-identity substrate is
+  demand-produced FROM `IndexedReady` and CONSUMED BY the `U2` reducers before they run — a `U2`-tier
+  prerequisite, NOT a `U2` output and NOT `N0`-owned. The edge runs `BinderIdentityFacts → U2`, never
+  `N0 → U2` (guards `binder_identity_facts_are_pre_u2_and_not_n0_owned`,
+  `u2_queries_do_not_read_n0_navigation_indexes`). It is demand-produced, not an eager pass, so it adds
+  no second symbol authority and no eager-binder edge.
+- **`N0.NAV_LOCATION_INDEX ← {BinderIdentityFacts, U2}`** (a pure projection over `BinderIdentityFacts`;
+  reuses the U2 merged-decl ordering facts + finalized
   `IndexedReady`); runs ~alongside `G.P3`. `N0` PRODUCES def/refs/rename locations natively and its
   `TsgoNavigationBackend` **def/refs/rename** deletion is gated `N0 → before B.14/§10` (a later→earlier
   edge: the deletion sweep `§10` (7) consumes `N0`). The same backend's **`getCodeActions`** deletion
@@ -1983,7 +2082,23 @@ guards**. Sequence is faithful to §A; do not reorder.
   `fact_dep_signature`; a guard that every `SemanticQueryKey` variant dispatches
   through `ProjectSemanticDispatch::execute`; `shape_cache_db_replaces_split_caches`
   stays green; a cross-file merged-interfaces 5-property test (§9.5); per-variant
-  producer discriminators.
+  producer discriminators. **Plus the §0.5.1 binder-contract guards owned at this
+  gate** (named there, registered here per §0.5.7):
+  `binder_identity_facts_are_pre_u2_and_not_n0_owned` +
+  `u2_queries_do_not_read_n0_navigation_indexes` (the dependency edge is
+  `BinderIdentityFacts → U2`, never `N0 → U2`);
+  `declaration_slots_are_stable_symbol_space_scoped_facts` (slot identity is scoped
+  to its declaration-space, finalized with the slot-identity SHAPE above);
+  `merge_order_and_augmentation_contributor_order_are_fact_validated` (composes with
+  the existing `declaration_merge_records_binder_overload_augmentation_order_as_facts`
+  — order is `ReadSetSignature`-validated over recorded provenance, never re-derived
+  from raw `IndexedReady`); `binder_scope_id_enters_context_sensitive_query_identity`
+  (a scope-dependent query carries `binder_scope_id` in its `SemanticQueryKey` identity
+  — a semantic discriminator, NOT a content/version hash, R6-consistent); and
+  `session_overlay_augmentation_fails_closed_until_implemented` (a session/overlay
+  augmentation query over the base-only `augmentation_index` degrades typed /
+  `ReturnOnly` and never publishes a base-only result as a session-authoritative warm
+  entry — §0.5.1 fail-closed gate).
 
 ---
 
@@ -2790,7 +2905,7 @@ intentional, tracked deliverable, not an oversight.
 | **B.1** (program model) | `/host-session` (project/program model authority, watch-driven revalidation); `/type-cache-architecture` (`project_identity` keying, no bundled program-hash); `/type-resolution` (program as resolver input). |
 | **U0.RESOLVER_CORE** (A.5/B.2, #21) | `/type-resolution` (the full moduleResolution-mode matrix — classic / node10 / node16 / nodenext / bundler — over conditional-exports / imports / paths / baseUrl / typesVersions / rootDirs / typeRoots / types / moduleSuffixes / customConditions / resolveJsonModule / allowImportingTsExtensions / allowArbitraryExtensions, PLUS symlink/`preserveSymlinks` realpath + pnpm/hoisted layouts + workspace-linked package resolution and `package.json`-edit / in-place package-source-edit invalidation); `/type-cache-architecture` (`resolve_env` vs `lib_env` split, R21). |
 | **B.4** (stdlib/intrinsics) | `/type-resolution` (lib.d.ts selection pinned to a TS version, JSX-namespace defaults); `/type-cache-architecture` (`lib_env_hash` invalidation contract); `/architecture` (`IntrinsicRegistry` authority). |
-| **N0.BINDER_NAV_INDEX** (A.10/B.3) | `/host-session` (the identity/location index substrate, zero typed-IR dispatch; native def/refs/rename location production + the `TsgoNavigationBackend` **def/refs/rename** deletion gated before §10 — its `getCodeActions` deletion is `B.8`'s — + the aux `TypeProvider` `get_semantic_tokens`/`get_document_highlights` deletions gated before §10 (call hierarchy already native) + the `native_navigation_replaces_ts_navigation_backend` & `native_binder_surfaces_replace_ts_aux_nav_paths` guards); `/architecture` (doc/workspace symbols, rename ranges, document highlights, semantic tokens, call hierarchy); `docs/arch/goto-definition-overhaul-plan.md` (nav-surface integration + `TsgoNavigationBackend` retirement). |
+| **N0.NAV_LOCATION_INDEX** (A.10/B.3) | `/host-session` (the navigation/location PROJECTION over the pre-`U2` `BinderIdentityFacts` substrate — read-only, zero typed-IR dispatch, writes no query-identity/route fact; native def/refs/rename location production + the `TsgoNavigationBackend` **def/refs/rename** deletion gated before §10 — its `getCodeActions` deletion is `B.8`'s — + the aux `TypeProvider` `get_semantic_tokens`/`get_document_highlights` deletions gated before §10 (call hierarchy already native) + the `nav_location_index_runs_zero_typed_ir_dispatch`, `n0_does_not_write_semantic_query_identity_or_route_facts`, `native_navigation_replaces_ts_navigation_backend` & `native_binder_surfaces_replace_ts_aux_nav_paths` guards); `/architecture` (doc/workspace symbols, rename ranges, document highlights, semantic tokens, call hierarchy); `docs/arch/goto-definition-overhaul-plan.md` (nav-surface integration + `TsgoNavigationBackend` retirement). |
 | **N1.NATIVE_LANGUAGE_SERVICE_LAYER** (A.11/B.6) | `/host-session` (request snapshot/cancellation/degradation orchestration; the `textDocument/typeDefinition` nav-by-type compose + its `TypeProvider::get_type_definition` deletion gated before §10 + the `native_type_definition_replaces_ts_type_definition_path` guard); `/architecture` (LS layering); `docs/arch/goto-definition-overhaul-plan.md`. |
 | **B.7** (completion/hover/sig-help) | `/host-session` (the native LS semantics; the U15 tsgo→native succession; inlay hints as a type-display surface + its `TypeProvider::get_inlay_hints` deletion gated before §10 + the `native_inlay_hints_replace_ts_inlay_hint_path` guard); `/architecture`; `docs/arch/goto-definition-overhaul-plan.md`. |
 | **B.8** (code actions/refactors/organize) | `/host-session` (action routing; the `TsgoNavigationBackend` `getCodeActions` deletion gated before §10 + the `native_code_actions_replace_ts_navigation_backend_code_action_path` guard); `/architecture`; `/compiler-codegen` (CodeTransform-only edit generation). |
