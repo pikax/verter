@@ -111,6 +111,10 @@ harness = false
 name = "repo_first_pass_loop"
 harness = false
 
+[[bench]]
+name = "list_file_symbols_bench"
+harness = false
+
 
 [[example]]
 name = "expression_validator"

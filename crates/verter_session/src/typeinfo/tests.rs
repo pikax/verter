@@ -205,40 +205,101 @@ fn list_file_symbols_returns_empty_for_unloaded_file() {
     );
 }
 
-#[test]
-fn list_file_symbols_5kloc_under_50ms() {
-    let host = make_host_with_audit();
+/// Number of top-level `export type T{i}` declarations emitted by the
+/// 5 KLOC fixture below. Every other line is a `// filler` comment, so
+/// this is the EXACT count of listed symbols.
+const BIG_TS_SYMBOL_COUNT: usize = 250;
 
-    // Synthesise a ~5 KLOC TS file with 250 type aliases. Average
-    // line length ≈ 20 chars × 250 ≈ 5 KB — line count is what
-    // matters for the parser-walk cost, not byte count.
+/// Build the ~5 KLOC fixture: `BIG_TS_SYMBOL_COUNT` top-level type
+/// aliases, each padded with 19 comment lines (≈ 5_000 lines total).
+/// Only the `export type` lines declare symbols; the filler is comments.
+fn big_ts_fixture() -> String {
     let mut source = String::with_capacity(5_000);
-    for i in 0..250 {
+    for i in 0..BIG_TS_SYMBOL_COUNT {
         source.push_str("export type T");
         source.push_str(&i.to_string());
         source.push_str(" = { value: number };\n");
-        // Pad to ~20 lines per type to reach 5_000 lines.
+        // Pad to ~20 lines per type to reach ~5_000 lines.
         for _ in 0..19 {
             source.push_str("// filler line\n");
         }
     }
-    upsert_ts(&host, "/big.ts", &source);
+    source
+}
 
-    // Warm pass — first call drives the shallow analyser.
-    let _ = host.list_file_symbols("/big.ts");
+/// The 5 KLOC inventory must be COMPLETE (all 250 declared symbols
+/// surface) and WARM (a second `list_file_symbols` call performs zero
+/// cold materialisation work — it serves the cached `IndexedReady`
+/// snapshot rather than rebuilding it).
+///
+/// Asserts deterministic completeness + a warm-no-rebuild invariant via
+/// provenance counters rather than a wall-clock ceiling, which flakes
+/// under nextest process-per-test CPU oversubscription. The wall-clock
+/// budget for the 5 KLOC path lives in a `verter_bench` criterion bench.
+#[test]
+fn list_file_symbols_5kloc_is_complete_and_warm() {
+    let host = make_host_with_audit();
+    upsert_ts(&host, "/big.ts", &big_ts_fixture());
 
-    let start = std::time::Instant::now();
-    let symbols = host.list_file_symbols("/big.ts");
-    let elapsed = start.elapsed();
+    // --- Cold pass: first call drives the shared materialisation
+    //     pipeline (parse → shallow analysis → IndexedReady). ---
+    let before_cold = host.provenance_snapshot();
+    let cold = host.list_file_symbols("/big.ts");
+    let after_cold = host.provenance_snapshot();
 
-    assert!(
-        !symbols.is_empty(),
-        "synthesised 5KLOC file must produce non-empty inventory"
+    // Completeness: EXACTLY 250 top-level symbols (the filler lines are
+    // comments and contribute nothing). The former `!is_empty()` check
+    // passed even if a single symbol surfaced — this pins the full set.
+    assert_eq!(
+        cold.len(),
+        BIG_TS_SYMBOL_COUNT,
+        "synthesised 5KLOC file must surface exactly {BIG_TS_SYMBOL_COUNT} top-level symbols",
     );
-    assert!(
-        elapsed.as_millis() < 50,
-        "list_file_symbols(5KLOC) took {} ms — must be < 50 ms (perf contract)",
-        elapsed.as_millis()
+
+    // The cold pass must have built the `IndexedReady` snapshot exactly
+    // once. `indexed_ready_scheduler_snapshot_reuse` is the cold-work
+    // signal `list_file_symbols` actually drives: `ensure_loaded` and the
+    // scheduler submission were already paid by `upsert_ts` (the only way
+    // a file enters the host), so they stay flat across the read and are
+    // NOT discriminating here; the IndexedReady build is. Rooting the
+    // warm-delta==0 assertion on this cold delta proves the warm path
+    // SKIPS work the cold path provably did — not that the counter is
+    // simply never touched.
+    let cold_snapshot_builds = after_cold.indexed_ready_scheduler_snapshot_reuse
+        - before_cold.indexed_ready_scheduler_snapshot_reuse;
+    assert_eq!(
+        cold_snapshot_builds, 1,
+        "cold list_file_symbols must build the IndexedReady snapshot exactly once \
+         (got {cold_snapshot_builds})",
+    );
+
+    // --- Warm pass: a second call on the unchanged file must serve the
+    //     cached IndexedReady with ZERO cold materialisation work. ---
+    let before_warm = host.provenance_snapshot();
+    let warm = host.list_file_symbols("/big.ts");
+    let after_warm = host.provenance_snapshot();
+
+    // Warm result is still complete.
+    assert_eq!(
+        warm.len(),
+        BIG_TS_SYMBOL_COUNT,
+        "warm re-list must still surface exactly {BIG_TS_SYMBOL_COUNT} symbols",
+    );
+    assert_eq!(
+        warm, cold,
+        "warm inventory must be identical to the cold inventory",
+    );
+
+    // Decisive no-cold-work invariant: the warm call must NOT rebuild the
+    // IndexedReady snapshot — it serves the cached artifact through the
+    // `ensure_indexed_ready` fast path. A warm path that re-parsed or
+    // re-materialised would bump this counter.
+    let warm_snapshot_builds = after_warm.indexed_ready_scheduler_snapshot_reuse
+        - before_warm.indexed_ready_scheduler_snapshot_reuse;
+    assert_eq!(
+        warm_snapshot_builds, 0,
+        "warm list_file_symbols must NOT rebuild the IndexedReady snapshot \
+         (got {warm_snapshot_builds}) — it must reuse the cached artifact",
     );
 }
 
