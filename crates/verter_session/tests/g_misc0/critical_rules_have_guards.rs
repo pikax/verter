@@ -459,6 +459,9 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "query_modes_are_presets_over_projection_demand_eval_policy",
             "skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode",
             "cache_key_axes_are_minimal_and_normalized",
+            "canonical_display_is_projection_not_stored_string",
+            "display_needs_is_display_only_never_drives_resolution",
+            "display_needs_masked_out_of_typed_value_family_key",
         ],
     ),
 ];

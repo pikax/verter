@@ -95,6 +95,8 @@ mod typeinfo_request_contract_guards;
 mod typeinfo_wire_surface_guards;
 #[path = "g_block/u2_demand_lattice_guards.rs"]
 mod u2_demand_lattice_guards;
+#[path = "g_block/u2_display_projection_guards.rs"]
+mod u2_display_projection_guards;
 #[path = "g_block/u2_spec_table_guards.rs"]
 mod u2_spec_table_guards;
 #[path = "g_block/u2_value_domain_design_guards.rs"]
