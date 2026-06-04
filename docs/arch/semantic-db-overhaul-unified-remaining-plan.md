@@ -181,9 +181,18 @@ demand-dependency graph, not a temporal phase:
      - **lexical-scope identity** — the per-file scope tree + each scope's **stable structural scope id**
        (cosmetic-edit invariant, the analogue of `parse_stable_hash`; NOT a positional ordinal that
        renumbers when a scope is inserted above);
-     - **declaration slots** — `ResolvedDeclSlotIdentity` slots that are **stable, symbol-space-scoped
-       facts** (a slot is identified within its declaration-space — value / type / namespace — so a
-       value and a type sharing a name occupy DISTINCT slots; the slot is NOT a raw name);
+     - **declaration-slot SEEDS** — env-free `DeclarationSlotSeed` facts (the `BinderDeclSlotFact`
+       payload) that are **stable, symbol-space-scoped** (a seed is identified within its
+       declaration-space — value / type / namespace — so a value and a type sharing a name occupy
+       DISTINCT seeds; the seed is NOT a raw name). The seed carries ONLY content-stable, env-free
+       dimensions — `defining_canonical` + the stable local slot / `merged_symbol_name` + `symbol_space`
+       + scope/provenance — and **deliberately omits every env dimension** (`project_identity`,
+       `type_env_hash`, `lib_env_hash`). Storing the fully-resolved env-bearing `ResolvedDeclSlotIdentity`
+       in this parse-stable artifact would over-key it (an env-invariant artifact carrying an env-bearing
+       payload) and be unsound; instead **`U2` DERIVES the env-bearing identity at query-key
+       construction** — `ResolvedDeclSlotIdentity = DeclarationSlotSeed + project_identity +
+       type_env_hash + lib_env_hash` — so the env dimensions enter ONLY the (content-free, R21-scoped)
+       `SemanticQueryKey`, never family A;
      - **per-file declaration-merge + augmentation CONTRIBUTOR-ORDER provenance** — declaration
        source-order, overload-group membership, and the per-file module / global / ambient
        contribution-order facts, recorded at shallow-analysis time.
@@ -257,9 +266,13 @@ fixture** the moment its substrate lands (per §3.2(e) — the guard appears the
 3. `n0_does_not_write_semantic_query_identity_or_route_facts` — `N0` is read-only over
    `BinderIdentityFacts` / resolver / route facts; it never WRITES a `SemanticQueryKey` query-identity
    fact or a route fact (gate: `N0`).
-4. `declaration_slots_are_stable_symbol_space_scoped_facts` — declaration slots are stable identities
-   scoped to their declaration-space (value / type / namespace), not raw names (gate:
-   `BinderIdentityFacts` / `U2` slot-identity finalization).
+4. `declaration_slots_are_stable_symbol_space_scoped_facts` — family A stores env-free
+   `DeclarationSlotSeed` facts: stable identities scoped to their declaration-space (value / type /
+   namespace), not raw names, carrying NO env dimension (`project_identity` / `type_env_hash` /
+   `lib_env_hash`). The guard asserts the seed is env-free AND that the env-bearing
+   `ResolvedDeclSlotIdentity` is DERIVED by `U2` at query-key construction (seed + the three env
+   dims), never stored in the parse-stable family-A artifact (gate: `BinderIdentityFacts` / `U2`
+   slot-identity finalization).
 5. `merge_order_and_augmentation_contributor_order_are_fact_validated` — merged-declaration order +
    module/global/ambient augmentation contributor order are `ReadSetSignature`-validated facts assembled
    over recorded provenance, never re-derived from raw `IndexedReady` (gate: `U2.MODULE_AUGMENTATION`;
@@ -2120,8 +2133,10 @@ guards**. Sequence is faithful to §A; do not reorder.
   `binder_identity_facts_are_pre_u2_and_not_n0_owned` +
   `u2_queries_do_not_read_n0_navigation_indexes` (the dependency edge is
   `BinderIdentityFacts → U2`, never `N0 → U2`);
-  `declaration_slots_are_stable_symbol_space_scoped_facts` (slot identity is scoped
-  to its declaration-space, finalized with the slot-identity SHAPE above);
+  `declaration_slots_are_stable_symbol_space_scoped_facts` (family A stores env-free
+  `DeclarationSlotSeed` facts scoped to their declaration-space; the env-bearing
+  `ResolvedDeclSlotIdentity` is U2-derived at query-key construction, NOT stored in
+  family A, finalized with the slot-identity SHAPE above);
   `merge_order_and_augmentation_contributor_order_are_fact_validated` (composes with
   the existing `declaration_merge_records_binder_overload_augmentation_order_as_facts`
   — order is `ReadSetSignature`-validated over recorded provenance, never re-derived
