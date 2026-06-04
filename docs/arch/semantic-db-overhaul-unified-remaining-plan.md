@@ -184,15 +184,18 @@ demand-dependency graph, not a temporal phase:
      - **declaration-slot SEEDS** — env-free `DeclarationSlotSeed` facts (the `BinderDeclSlotFact`
        payload) that are **stable, symbol-space-scoped** (a seed is identified within its
        declaration-space — value / type / namespace — so a value and a type sharing a name occupy
-       DISTINCT seeds; the seed is NOT a raw name). The seed carries ONLY content-stable, env-free
-       dimensions — `defining_canonical` + the stable local slot / `merged_symbol_name` + `symbol_space`
-       + scope/provenance — and **deliberately omits every env dimension** (`project_identity`,
-       `type_env_hash`, `lib_env_hash`). Storing the fully-resolved env-bearing `ResolvedDeclSlotIdentity`
-       in this parse-stable artifact would over-key it (an env-invariant artifact carrying an env-bearing
-       payload) and be unsound; instead **`U2` DERIVES the env-bearing identity at query-key
-       construction** — `ResolvedDeclSlotIdentity = DeclarationSlotSeed + project_identity +
-       type_env_hash + lib_env_hash` — so the env dimensions enter ONLY the (content-free, R21-scoped)
-       `SemanticQueryKey`, never family A;
+       DISTINCT seeds; the seed is NOT a raw name). The seed is **exactly the three env-free identity
+       fields** of the landed `ResolvedDeclSlotIdentity` — `defining_canonical` + `merged_symbol_name`
+       + `symbol_space` — and **deliberately omits every env dimension** (`project_identity`,
+       `type_env_hash`, `lib_env_hash`). (Lexical-scope identity and contributor-order provenance are
+       recorded by the OTHER family-A bullets, NOT folded into the seed — the seed feeds slot identity
+       only.) Storing the fully-resolved env-bearing `ResolvedDeclSlotIdentity` in this parse-stable
+       artifact would over-key it (an env-invariant artifact carrying an env-bearing payload) and be
+       unsound; instead **`U2` DERIVES the env-bearing identity at query-key construction** — exactly
+       `ResolvedDeclSlotIdentity = DeclarationSlotSeed + project_identity + type_env_hash + lib_env_hash`
+       (the seed's 3 env-free fields + the 3 env dims = the landed six-field, R7 struct — ZERO ripple to
+       landed code) — so the env dimensions enter ONLY the (content-free, R21-scoped) `SemanticQueryKey`,
+       never family A;
      - **per-file declaration-merge + augmentation CONTRIBUTOR-ORDER provenance** — declaration
        source-order, overload-group membership, and the per-file module / global / ambient
        contribution-order facts, recorded at shallow-analysis time.
@@ -202,15 +205,23 @@ demand-dependency graph, not a temporal phase:
      whole-corpus completeness answer by `lib_env_hash` + contributor-set ALONE is too weak — two
      projects, or two resolution modes within one project, could then share a negative/global answer they
      must not. So the family **SPLITS its key by completeness scope** (R21 split-don't-bundle):
-     - **global / `lib` completeness:** `project_identity + lib_env_hash + contributor_set_fingerprint`;
+     - **global / `lib` completeness:** `project_identity + lib_env_hash + contributor_set_fingerprint`
+       (NO `resolve_env_hash` — global/`lib` enumeration performs no module-specifier resolution, and the
+       fact-rooted fingerprint already roots contributor identity, so adding `resolve_env_hash` would
+       over-key per R21);
      - **ambient / module-augmentation-target completeness:** `project_identity + resolve_env_hash +
        lib_env_hash + target + contributor_set_fingerprint` (mirroring the live
-       `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, target }` isolation).
+       `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, target }` isolation —
+       ambient/augmentation completeness IS specifier-resolution-sensitive, so it carries
+       `resolve_env_hash`).
 
-     The `contributor_set_fingerprint` is **FACT-ROOTED and schema/versioned** — derived from the
-     recorded contributor FACTS (not an opaque parser/emitter side product) under an explicit schema
-     version, so hidden parser/emitter drift cannot silently change the fingerprint without a version
-     bump. Each split entry is `ReadSetSignature`-validated over its cross-file contributor facts. The
+     Neither split key carries `type_env_hash`: name-enumeration completeness is a binder-level
+     (pre-type-check) fact, independent of strict/target compiler options (R21 — a key includes only the
+     dimensions its value depends on). The `contributor_set_fingerprint` is **FACT-ROOTED and
+     schema/versioned** — derived from the recorded contributor FACTS (not an opaque parser/emitter side
+     product) under an explicit schema version, so hidden parser/emitter drift cannot silently change the
+     fingerprint without a version bump. Each split entry is `ReadSetSignature`-validated over its
+     cross-file contributor facts. The
      store records whether the corpus a name could bind to has been fully enumerated, so a NEGATIVE
      (name-not-found) answer is backed by a recorded completeness fact rather than an un-rooted guess.
      This is the `B.4`-fed family (guard `ambient_global_and_lib_corpus_have_completeness_facts`, owned
