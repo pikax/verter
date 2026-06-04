@@ -43,7 +43,7 @@
 //! `every_ignore_reason_meets_minimum_quality_bar`) plus the new
 //! two-table ledger guards:
 //!
-//! - `ignored_test_row_table_holds_exactly_363_rows` (binding total +
+//! - `ignored_test_row_table_holds_exactly_362_rows` (binding total +
 //!   disjointness vs `AdditionalProofRow`),
 //! - `additional_proof_row_table_holds_exactly_7_rows` (closed set),
 //! - `typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_prereqs`
@@ -1148,23 +1148,26 @@ fn dag_row_consistency_failures(
 /// `AdditionalProofRow` in the ignored set, or a `(file, function)` in
 /// both, FAILS.
 #[test]
-fn ignored_test_row_table_holds_exactly_363_rows() {
+fn ignored_test_row_table_holds_exactly_362_rows() {
     assert_eq!(
         EXPECTED_IGNORE_MANIFEST.len(),
-        363,
-        "the `IgnoredTestRow` table must hold EXACTLY 363 binding rows \
-         (got {}). The 363 is the source-`#[ignore]` bijective total \
+        362,
+        "the `IgnoredTestRow` table must hold EXACTLY 362 binding rows \
+         (got {}). The total is the source-`#[ignore]` bijective count \
          (§10.5) — U2 Phase B2 lifted `module_features_module_\
          augmentation_merges_plugin_surface` (cross-file relative \
-         `declare module` stitch now real).",
+         `declare module` stitch), and Phase B3 lifted \
+         `module_features_external_module_augmentation_merges_config` \
+         (cross-file EXTERNAL string-literal `declare module` stitch now \
+         real).",
         EXPECTED_IGNORE_MANIFEST.len(),
     );
 
-    // The derived count equals 363 (every current row is `Ignored`).
+    // The derived count equals 362 (every current row is `Ignored`).
     assert_eq!(
-        EXPECTED_TOTAL_IGNORED_COUNT, 363,
+        EXPECTED_TOTAL_IGNORED_COUNT, 362,
         "EXPECTED_TOTAL_IGNORED_COUNT is DERIVED as count(status == \
-         Ignored); it must equal 363. Got {}.",
+         Ignored); it must equal 362. Got {}.",
         EXPECTED_TOTAL_IGNORED_COUNT,
     );
 

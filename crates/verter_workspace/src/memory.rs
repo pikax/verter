@@ -384,6 +384,10 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
         self.engine.forward_deps_for(canonical_id)
     }
 
+    fn known_canonicals(&self) -> Vec<String> {
+        self.engine.known_canonicals()
+    }
+
     fn dependency_snapshot(
         &self,
         canonical_id: &str,

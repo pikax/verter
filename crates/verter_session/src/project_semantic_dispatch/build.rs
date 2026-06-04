@@ -34,6 +34,15 @@ struct AugmentationStitch {
     augmenter_self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)>,
 }
 
+/// Shared return shape of the augmenter-fold path
+/// ([`ProjectSemanticDispatch::collect_augmentation_contributions`]): the
+/// ordered augmenter contributor nodes paired with their per-augmenter
+/// `(canonical, FileWholeHash)` self-roots.
+type AugmentationContributions = (
+    Vec<SemanticNodeId>,
+    Vec<(Arc<str>, crate::semantic_query::HashValue)>,
+);
+
 /// Encode a [`ProjectionReductionContext`] as a compact u32 bit
 /// pattern used in the Phase G mapped-member-materialization
 /// identity tuple. Layout: bits 0–1 (demand tag) and 2+ (mode tag).
@@ -1304,6 +1313,81 @@ impl<'a> ProjectSemanticDispatch<'a> {
         base_scope: &NodeScopeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<AugmentationStitch> {
+        use crate::file_artifact_store::AugmentationTargetKind;
+
+        // Candidate-augmenter discovery (program completeness for relative
+        // augmentation): an augmenter `declare module "./base"` block lives in a
+        // file that depends on the base — so the base's reverse-dependency set
+        // is exactly the candidate-augmenter set. Ensure each is indexed BEFORE
+        // the augmentation-index scan (which only sees loaded artifacts), so a
+        // sibling augmenter pulled in via a side-effect `import "./base"` is
+        // discovered rather than silently dropped. Loads are idempotent /
+        // content-hash cached; the augmentation index is then built once.
+        let host = self.ctx.host_for_fact_tracer_install();
+        for rdep in host.workspace().reverse_deps_for(decl_canonical.as_ref()) {
+            let _ = self.ctx.ensure_indexed_ready(&rdep);
+        }
+
+        let target = AugmentationTargetKind::ResolvedRelativeCanonical(Arc::clone(decl_canonical));
+        let (contributor_nodes, self_roots) =
+            self.collect_augmentation_contributions(target, decl_name.as_ref(), context)?;
+
+        // Build the single peer-merge carrier: base contributors ∪ augmenter
+        // contributions. If the base body is itself a `MergedDecl` (same-file
+        // merge), flatten its contributors so the augmenter peers merge AT THE
+        // SAME LEVEL — a nested `MergedDecl` contributor would be dropped by the
+        // surface extractor (`shallow_surface_of_node` only reads Object /
+        // Intersection).
+        let mut all_contributors: Vec<SemanticNodeId> = match self.graph().node_data(base_result) {
+            Some(data) => match data.as_ref() {
+                SemanticNodeData::MergedDecl { contributors } => contributors.to_vec(),
+                _ => vec![base_result],
+            },
+            None => vec![base_result],
+        };
+        all_contributors.extend(contributor_nodes);
+        let merged = self.graph().intern_node_with_scope(
+            SemanticNodeData::MergedDecl {
+                contributors: Arc::from(all_contributors.into_boxed_slice()),
+            },
+            base_scope.clone(),
+        );
+        Some(AugmentationStitch {
+            merged,
+            augmenter_self_roots: self_roots,
+        })
+    }
+
+    /// Shared augmenter-contribution folder — the ONE cross-file
+    /// declaration-merge augmenter path, used by BOTH the relative-canonical
+    /// stitch ([`Self::stitch_module_augmentations`]) and the external
+    /// string-literal resolution ([`Self::resolve_external_module_augmentation`]).
+    ///
+    /// Scans the overlay-aware augmentation index for `target`, lowers each
+    /// contributing augmenter's RETAINED `decl_name` body in the augmenter's own
+    /// file context (typed-IR `augmentation_scopes` inventory — never a source
+    /// scan), and returns the ordered contributor nodes plus their per-augmenter
+    /// `FileWholeHash` self-roots. Augmenter order is the stable
+    /// `(canonical, parse_stable_hash)` key (`AugmenterSet.entries` is pre-sorted
+    /// that way — deterministic, discovery-order-independent).
+    ///
+    /// Observes the augmenter-set fingerprint (`ModuleAugmentationIndexShape`)
+    /// plus each augmenter's `FileWholeHash` onto the active fact tracer
+    /// (SCOPE-LOCK 12) so the cached value invalidates on an augmenter
+    /// add/remove/reorder OR an augmenter content edit — the same fact rail as
+    /// [`crate::resolver_core::route_db::RouteDb::get_or_compute_effective_export_set`].
+    /// These two facts are the sole cache-validity rail for the merged value:
+    /// a member-body edit that leaves the augmenter skeleton (hence the
+    /// set fingerprint) intact still moves the augmenter's `FileWholeHash`, so
+    /// the per-augmenter whole-hash fact is what catches it.
+    ///
+    /// Returns `None` when no augmenter contributes.
+    fn collect_augmentation_contributions(
+        &self,
+        target: crate::file_artifact_store::AugmentationTargetKind,
+        decl_name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<AugmentationContributions> {
         use crate::file_artifact_store::{
             AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
         };
@@ -1331,7 +1415,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             _ => (AugmentationPopulation::Base, None),
         };
 
-        let target = AugmentationTargetKind::ResolvedRelativeCanonical(Arc::clone(decl_canonical));
         let key = AugmentationTargetKey {
             project_identity,
             resolve_env_hash: env_hashes.resolve_env_hash,
@@ -1339,18 +1422,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             population,
             target: target.clone(),
         };
-
-        // Candidate-augmenter discovery (program completeness for relative
-        // augmentation): an augmenter `declare module "./base"` block lives in a
-        // file that depends on the base — so the base's reverse-dependency set
-        // is exactly the candidate-augmenter set. Ensure each is indexed BEFORE
-        // the augmentation-index scan (which only sees loaded artifacts), so a
-        // sibling augmenter pulled in via a side-effect `import "./base"` is
-        // discovered rather than silently dropped. Loads are idempotent /
-        // content-hash cached; the augmentation index is then built once.
-        for rdep in host.workspace().reverse_deps_for(decl_canonical.as_ref()) {
-            let _ = self.ctx.ensure_indexed_ready(&rdep);
-        }
 
         let artifact_store = self.ctx.project_type_store().indexed();
         let resolve_rel = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
@@ -1367,10 +1438,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return None;
         }
 
-        // Lower each augmenter's contributed body in the augmenter's own
-        // context, in stable (canonical, parse_stable_hash) order
-        // (`AugmenterSet.entries` is pre-sorted that way — deterministic,
-        // discovery-order-independent).
         let mut contributor_nodes: Vec<SemanticNodeId> = Vec::new();
         let mut self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)> = Vec::new();
         for augmenter in augmenter_set.entries.iter() {
@@ -1389,7 +1456,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
             let mut matched_specs: Vec<String> = Vec::new();
             for fact in art.augmentations.iter() {
-                if fact.augmented_name.as_ref() != decl_name.as_ref() {
+                if fact.augmented_name.as_ref() != decl_name {
                     continue;
                 }
                 if !crate::file_artifact_store::augmenter_matches_target(
@@ -1433,7 +1500,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     augmenter_canonical.as_ref(),
                     state,
                     &AugmentationScopeKind::Module(spec.clone()),
-                    decl_name.as_ref(),
+                    decl_name,
                     dep_edges.as_deref(),
                 ) else {
                     continue;
@@ -1468,11 +1535,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Fact rail (SCOPE-LOCK 12): the augmenter-set shape fact (invalidates
         // on augmenter add/remove/reorder) + each augmenter's whole-hash
         // (invalidates on augmenter content edit). Observed onto the active
-        // tracer so they enter this build's `ReadSetSignature.facts`.
+        // tracer so they enter this build's `ReadSetSignature.facts`. The shape
+        // fact's `canonical_id` is attribution only — `ModuleAugmentationIndexShape`
+        // validation keys entirely on the typed `FactKey` (target kind +
+        // specifier/canonical) and `expected_hash`, never on this field.
+        let shape_attribution = match &target {
+            AugmentationTargetKind::ResolvedRelativeCanonical(canon) => canon.as_ref().to_owned(),
+            AugmentationTargetKind::ExternalSpecifier(spec) => spec.as_ref().to_owned(),
+            AugmentationTargetKind::WildcardAmbient(pat) => pat.as_ref().to_owned(),
+            AugmentationTargetKind::GlobalAugmentation => String::new(),
+        };
         crate::resolver_core::resolver_context::observe_fan_out(
             crate::resolver_core::FactVersionRef::RouteSurface(
                 crate::resolver_core::RouteSurfaceFactRef {
-                    canonical_id: decl_canonical.as_ref().to_owned(),
+                    canonical_id: shape_attribution,
                     key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
                         &target,
                     ),
@@ -1490,30 +1566,83 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
         }
 
-        // Build the single peer-merge carrier: base contributors ∪ augmenter
-        // contributions. If the base body is itself a `MergedDecl` (same-file
-        // merge), flatten its contributors so the augmenter peers merge AT THE
-        // SAME LEVEL — a nested `MergedDecl` contributor would be dropped by the
-        // surface extractor (`shallow_surface_of_node` only reads Object /
-        // Intersection).
-        let mut all_contributors: Vec<SemanticNodeId> = match self.graph().node_data(base_result) {
-            Some(data) => match data.as_ref() {
-                SemanticNodeData::MergedDecl { contributors } => contributors.to_vec(),
-                _ => vec![base_result],
-            },
-            None => vec![base_result],
-        };
-        all_contributors.extend(contributor_nodes);
+        Some((contributor_nodes, self_roots))
+    }
+
+    /// Resolve a bare type name imported from a NON-FILE (external / ambient)
+    /// module specifier through `declare module "<spec>" { ... }` augmentation.
+    ///
+    /// This is the canonical Vue/Vite `vite/client` pattern: a virtual module
+    /// `"<spec>"` is declared and/or augmented across one or more files, none of
+    /// which is a workspace FILE the specifier resolves to. The imported name
+    /// therefore has no file-scope declaration and `resolve_bare_name_in_scope`
+    /// returns `None`. Every contributing `declare module "<spec>"` block is a
+    /// PEER (TS merges them with no base-vs-augmenter distinction), so the merged
+    /// surface is built PURELY from the `ExternalSpecifier(spec)` augmentation
+    /// index — there is NO base body. Folding routes through the SAME
+    /// [`Self::collect_augmentation_contributions`] augmenter path + `MergedDecl`
+    /// peer-merge carrier the relative stitch uses (one merge engine, no source
+    /// scan).
+    ///
+    /// Returns `None` when `name` is not imported from a non-file specifier or
+    /// no `declare module` block contributes it (caller falls through to the
+    /// `Opaque(Miss)` sentinel). A relative / wildcard / global specifier is
+    /// excluded by `augmenter_matches_target`'s `ExternalSpecifier` arm, so the
+    /// index scan returns empty and this yields `None`.
+    pub(super) fn resolve_external_module_augmentation(
+        &self,
+        scope_canonical: &str,
+        name: &str,
+        scope: &NodeScopeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        use crate::file_artifact_store::{AugmentationTargetKind, InternedSpecifier};
+
+        // The imported specifier for `name` in the importing file. Only a
+        // NON-FILE specifier reaches here: a specifier resolving to a workspace
+        // file would have resolved `name` through the normal import path before
+        // the miss.
+        let indexed = self.ctx.ensure_indexed_ready(scope_canonical)?;
+        let specifier = indexed
+            .shallow_state
+            .import_target(name)
+            .map(|t| t.source_specifier.clone())?;
+
+        // Program-completeness discovery for ambient external modules. Unlike a
+        // relative `declare module "./base"` augmenter (discovered via the
+        // base's reverse-dependency set), an ambient `declare module "<bare>"`
+        // DECLARER may be a program-root `.d.ts` that NOTHING imports (the
+        // canonical `vite/client` shape — referenced through tsconfig `types`/
+        // `include`, not the import graph). It is reachable only via program
+        // membership, so ensure every known program member is indexed BEFORE
+        // the `ExternalSpecifier` index scan — the augmentation index only sees
+        // loaded artifacts (R29). Loads are idempotent / content-hash cached;
+        // this mirrors the relative stitch's "index the candidate set, then scan
+        // once" shape, widened to program membership because an ambient module
+        // has no base-file anchor.
+        let host = self.ctx.host_for_fact_tracer_install();
+        for canonical in host.workspace().known_canonicals() {
+            let _ = self.ctx.ensure_indexed_ready(&canonical);
+        }
+
+        let target =
+            AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(specifier.as_str()));
+        let (contributor_nodes, _self_roots) =
+            self.collect_augmentation_contributions(target, name, context)?;
+
+        // Peer-merge carrier from the augmenter contributions ONLY (no base
+        // body): every `declare module "<spec>"` block is a peer. The carrier is
+        // interned in the importing file's scope so its surface projects in the
+        // caller's context; the per-augmenter `FileWholeHash` facts the folder
+        // observed onto the active tracer are the cache-validity rail (each
+        // contributor's `MergedDecl` reduction validates on those facts).
         let merged = self.graph().intern_node_with_scope(
             SemanticNodeData::MergedDecl {
-                contributors: Arc::from(all_contributors.into_boxed_slice()),
+                contributors: Arc::from(contributor_nodes.into_boxed_slice()),
             },
-            base_scope.clone(),
+            scope.clone(),
         );
-        Some(AugmentationStitch {
-            merged,
-            augmenter_self_roots: self_roots,
-        })
+        Some(merged)
     }
 
     /// Resolve the typed declaration kind of a prepared declaration rooted at

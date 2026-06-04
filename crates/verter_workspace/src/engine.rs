@@ -771,6 +771,19 @@ impl Engine {
         self.edges.read().forward_deps(canonical_id)
     }
 
+    /// Enumerate every canonical the workspace currently holds content for:
+    /// open/upserted overlay buffers UNIONED with injected/published snapshot
+    /// content. These are the program members an ambient `declare module`
+    /// declarer can live in (program-completeness for external module
+    /// augmentation, where the declarer may be a root `.d.ts` that nothing
+    /// imports). Deduplicated; order is unspecified.
+    pub(crate) fn known_canonicals(&self) -> Vec<String> {
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        seen.extend(self.overlay.read().ids().map(str::to_owned));
+        seen.extend(self.snapshot.read().ids().map(str::to_owned));
+        seen.into_iter().collect()
+    }
+
     // ── Ambient lib registration ──
 
     /// Register an ambient lib via the CAS loop (`ambient_lib::cas_register`).

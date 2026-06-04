@@ -69,6 +69,11 @@ impl OverlayStore {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Iterate over the canonical IDs that currently have an overlay set.
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.entries.keys().map(|s| s.as_str())
+    }
 }
 
 #[cfg(test)]

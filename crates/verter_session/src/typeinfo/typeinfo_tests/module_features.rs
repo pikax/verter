@@ -444,7 +444,6 @@ fn module_features_namespace_interface_merge_namespace_value_resolves_to_literal
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "typeinfo currently does not merge `declare module \"external-spec\" { interface Config { ... } }` blocks across files (the canonical Vite/Vue `vite/client` augmentation pattern); keep as the future string-literal module-augmentation contract"]
 fn module_features_external_module_augmentation_merges_config() {
     // TS7 contract: `module_features_external.d.ts` declares
     //   `declare module "external-spec" { interface Config { base: string } }`

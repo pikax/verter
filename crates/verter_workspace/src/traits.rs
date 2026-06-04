@@ -212,6 +212,19 @@ pub trait WorkspaceRead: Send + Sync {
     /// semantic_transitive). Stems are NOT included.
     fn forward_deps_for(&self, canonical_id: &str) -> Vec<String>;
 
+    /// Enumerate every canonical the workspace currently knows about — the
+    /// program-member set (open/upserted overlay buffers + injected/published
+    /// snapshot content + configured root files). Used for ambient-module
+    /// program-completeness: an ambient `declare module "<bare>"` declarer may
+    /// be a program-root `.d.ts` that NOTHING imports, reachable only through
+    /// program membership rather than the import graph. The default returns
+    /// empty — a workspace with no membership notion contributes nothing (and
+    /// external string-literal augmentation falls back to import-graph-reachable
+    /// declarers only).
+    fn known_canonicals(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// R22 contract: transitive importers of `edited`. The reverse
     /// import graph serves reachability GC + LSP affected-files
     /// reporting + diagnostics; it is **never** wired to cache

@@ -459,6 +459,14 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         self.engine.forward_deps_for(canonical_id)
     }
 
+    fn known_canonicals(&self) -> Vec<String> {
+        // Overlay (open buffers) + snapshot (injected/loaded) content. Disk
+        // files that have never been read are NOT enumerated — they are not yet
+        // program members and an ambient declarer among them is reached via the
+        // normal config-driven load, not this membership probe.
+        self.engine.known_canonicals()
+    }
+
     fn dependency_snapshot(
         &self,
         canonical_id: &str,

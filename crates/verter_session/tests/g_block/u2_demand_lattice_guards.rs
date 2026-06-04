@@ -910,6 +910,10 @@ fn demand_at_hop_is_monotone_in_the_terminal() {
     // Intermediate hops carry the EXACT recorded prefix path — the prefix
     // walked so far — NOT the empty path. (FAILS against an empty-path impl.)
     let expected_prefixes = [path(&["c"]), path(&["c", "full"])];
+    // `i` is a hop counter passed to `demand_at_hop(i, n, …)` and compared
+    // against `n`, not merely an index into `expected_prefixes`, so the
+    // range loop is the clear form here.
+    #[allow(clippy::needless_range_loop)]
     for i in 0..n {
         let h1 = demand_at_hop(i, n, &t1);
         let h2 = demand_at_hop(i, n, &t2);

@@ -456,6 +456,43 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // reachable from the requested type's declaration
                 // graph; never treat plain imports as implicit exports
                 // or synthesise external roots for absent specifiers.
+                // Cross-file EXTERNAL string-literal module augmentation (the
+                // canonical Vue/Vite `vite/client` pattern): `name` is imported
+                // from a bare specifier that resolves to NO workspace file —
+                // either `resolve_bare_name_in_scope` returned `None`, or the
+                // pre-resolved `name_resolution` map / bare-name walk resolved it
+                // to the empty non-file canonical. In both cases there is no
+                // file-scope declaration, but `declare module "<spec>"` blocks
+                // across files form an ambient module whose peers merge. Build
+                // the peer-merged `MergedDecl` PURELY from the
+                // `ExternalSpecifier(spec)` augmentation index (the SAME
+                // augmenter-fold path + carrier as the relative stitch). Falls
+                // through to the existing behaviour when no `declare module`
+                // block contributes.
+                // A resolution "reaches a real declaration" only when its
+                // canonical names a LOADABLE workspace file. An unresolved bare
+                // specifier resolves to the empty non-file canonical OR to the
+                // specifier string itself (e.g. `"external-spec"`), neither of
+                // which `ensure_indexed_ready` can load — that is the external
+                // ambient-module case the augmentation hook below handles.
+                let resolves_to_file = match resolved_root.as_ref() {
+                    Some((canonical, _)) if !canonical.is_empty() => {
+                        self.ctx.ensure_indexed_ready(canonical.as_ref()).is_some()
+                    }
+                    _ => false,
+                };
+                if !resolves_to_file {
+                    if let NodeScopeId::File { canonical_id, .. } = scope {
+                        if let Some(merged) = self.resolve_external_module_augmentation(
+                            canonical_id.as_ref(),
+                            name.as_ref(),
+                            scope,
+                            reduction_context,
+                        ) {
+                            return merged;
+                        }
+                    }
+                }
                 let Some((resolved_canonical, resolved_name)) = resolved_root else {
                     return self.opaque(QueryError::Miss);
                 };
