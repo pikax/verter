@@ -22,7 +22,7 @@
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_eval::TypeDeclKind;
+use verter_semantic::analysis::type_eval::{TypeDeclBody, TypeDeclKind};
 use verter_semantic::facts::{
     compute_member_presence_hash, compute_semantic_hash, FactKey, MemberKind, SymbolSpace,
     UnresolvedLens,
@@ -64,7 +64,7 @@ fn build_foo(members: Vec<(&str, TypeExpr)>) -> Arc<IndexedReady> {
         "Foo".to_string(),
         ShallowTypeSymbol {
             kind: TypeDeclKind::Interface,
-            raw_body: body,
+            body: TypeDeclBody::Single(body),
             type_parameters: Vec::new(),
             local_deps: Vec::new(),
             external_deps: Vec::new(),

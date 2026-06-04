@@ -16,6 +16,7 @@ mod conditional_infer;
 mod const_type_param;
 mod contextual_typing;
 mod cross_file;
+mod declaration_merge;
 mod decorators;
 mod deep_path;
 mod demand_boundary;

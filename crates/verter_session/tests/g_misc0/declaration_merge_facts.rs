@@ -1,27 +1,18 @@
-//! R10 / Stage 3 declaration-merge fact emission.
+//! Declaration-merge fact emission.
 //!
-//! Verify-bullet 13: `declaration_merge.ts` — two `interface Foo`
-//! parts emit one merged `Export("Foo", Type)` with two
-//! `merged_parts` entries; reorder stability holds.
-//!
-//! The existing shallow walk already merges multiple `interface
-//! Foo` declarations into a single `ShallowTypeSymbol` (via
-//! `Intersection` of bodies — see
-//! `crates/verter_session/src/resolver_core/shallow_file_state.rs`
-//! lines ~470-500 documenting the declaration-merging path). The
-//! Phase 1 emitter therefore observes ONE merged type symbol, emits
-//! ONE `Export` fact, and computes one merged-body fingerprint.
-//!
-//! `VersionedDeclIdentity.merged_parts` (used at Stage 5) will
-//! enumerate the parts for overload surfacing — but at Stage 3
-//! the per-merge identity is captured by the single merged fact.
+//! Two same-name `interface Foo` declarations merge into a single
+//! `ShallowTypeSymbol` whose `body` is a [`TypeDeclBody::Merged`] carrier
+//! retaining each contributor. The fact emitter observes ONE merged type
+//! symbol, hashes the union of the contributors' members via
+//! `body.lookup_object()`, and emits ONE `Export("Foo", Type)` fact whose
+//! fingerprint is stable under contributor reordering.
 //!
 //! Architectural rules bound: R10.
 
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_eval::TypeDeclKind;
+use verter_semantic::analysis::type_eval::{MergedTypeBody, TypeDeclBody, TypeDeclKind};
 use verter_semantic::facts::{FactKey, SymbolSpace};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::InternedName;
@@ -37,9 +28,10 @@ fn empty_external(
 }
 
 /// Build an `IndexedReady` simulating two-part declaration merging
-/// of `interface Foo`. The shallow walk merges parts into a
-/// single `ShallowTypeSymbol` via `Intersection` — we replicate
-/// that pre-merged shape here.
+/// of `interface Foo`. Multiple same-name interface parts retain their ordered
+/// contributor bodies on a [`TypeDeclBody::Merged`] carrier; a single part is
+/// a [`TypeDeclBody::Single`]. The fact emitter observes the merged member
+/// union via `body.lookup_object()`.
 fn build_with_merged_foo(parts: Vec<Vec<(&str, TypeExpr)>>) -> Arc<IndexedReady> {
     // Combined member list: union the parts' member name sets.
     let mut combined_members: FxHashMap<String, Vec<String>> = FxHashMap::default();
@@ -48,8 +40,6 @@ fn build_with_merged_foo(parts: Vec<Vec<(&str, TypeExpr)>>) -> Arc<IndexedReady>
             combined_members.insert((*n).to_string(), Vec::new());
         }
     }
-    // Body: Intersection of per-part Object bodies, matching the
-    // current shallow-walk declaration-merging logic.
     let part_bodies: Vec<TypeExpr> = parts
         .iter()
         .map(|p| {
@@ -68,17 +58,21 @@ fn build_with_merged_foo(parts: Vec<Vec<(&str, TypeExpr)>>) -> Arc<IndexedReady>
             }))
         })
         .collect();
-    let merged_body = if part_bodies.len() == 1 {
-        part_bodies.into_iter().next().unwrap()
+    let body = if part_bodies.len() == 1 {
+        TypeDeclBody::Single(part_bodies.into_iter().next().unwrap())
     } else {
-        TypeExpr::Intersection(Arc::from(part_bodies))
+        let kinds = vec![TypeDeclKind::Interface; part_bodies.len()];
+        TypeDeclBody::Merged(MergedTypeBody {
+            contributors: part_bodies,
+            kinds,
+        })
     };
     let mut symbols = FxHashMap::default();
     symbols.insert(
         "Foo".to_string(),
         ShallowTypeSymbol {
             kind: TypeDeclKind::Interface,
-            raw_body: merged_body,
+            body,
             type_parameters: Vec::new(),
             local_deps: Vec::new(),
             external_deps: Vec::new(),

@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
+use verter_semantic::analysis::type_eval::{TypeDeclBody, TypeDeclKind, ValueDeclKind};
 use verter_semantic::facts::{FactKey, FactRegistry, SymbolSpace};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::InternedName;
@@ -94,7 +94,7 @@ fn build_indexed(
             decl.name.to_string(),
             ShallowTypeSymbol {
                 kind: decl.kind,
-                raw_body: decl.body,
+                body: TypeDeclBody::Single(decl.body),
                 type_parameters: Vec::new(),
                 local_deps: Vec::new(),
                 external_deps: Vec::new(),

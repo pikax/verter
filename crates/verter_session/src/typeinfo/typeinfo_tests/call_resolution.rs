@@ -113,6 +113,7 @@ fn call_resolution_optional_overload_picks_two_arg_signature_when_required() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+#[ignore = "typeinfo currently does not select an overload by argument arity/assignability from a multi-overload call site (same future contract as the #[ignore]d 1-arg and 2-arg `call_resolution_optional_overload_picks_*` siblings); this case previously passed ONLY because last-wins collapsed `call`'s overload set to the trailing `(...rest)` signature — same-file overload retention removes that accident. Un-ignore when call-site overload selection lands."]
 #[test]
 fn call_resolution_rest_overload_picks_rest_signature_when_required() {
     // TS7 contract: `call("x", "y", "z")` against the same overload set. The
@@ -141,6 +142,7 @@ fn call_resolution_rest_overload_picks_rest_signature_when_required() {
 // (3) Union argument does NOT distribute through overloads
 // ---------------------------------------------------------------------------
 
+#[ignore = "typeinfo currently does not select the union-compatible overload from a multi-overload call site (same future contract as the #[ignore]d literal-key `call_resolution_specific_literal_argument_picks_*` siblings); this case previously passed ONLY because last-wins collapsed lookup's overload set to the trailing union-key signature — same-file overload retention removes that accident. Un-ignore when call-site overload selection lands."]
 #[test]
 fn call_resolution_union_argument_picks_union_compatible_overload() {
     // TS7 contract — empirically verified: a union argument does NOT

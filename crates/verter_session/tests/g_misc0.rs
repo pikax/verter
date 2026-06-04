@@ -28,6 +28,8 @@ mod cross_owner_materialise_reuse_production;
 mod cycle_safety;
 #[path = "g_misc0/declaration_merge_facts.rs"]
 mod declaration_merge_facts;
+#[path = "g_misc0/declaration_merge_guards.rs"]
+mod declaration_merge_guards;
 #[path = "g_misc0/dep_signature_to_fact_signature.rs"]
 mod dep_signature_to_fact_signature;
 #[path = "g_misc0/derived_raw_state_cached_fallthrough_matrix_member_presence.rs"]

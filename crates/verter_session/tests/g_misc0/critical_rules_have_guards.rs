@@ -445,6 +445,25 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
     // guards are named in the owning skill sections (gap tracked per
     // the architecture-guard rule).
     (
+        "Declaration Merging",
+        &[
+            // (i) EvalEnv exposes ordered contributor groups, not a last-wins
+            //     FxHashMap<String, TypeDeclInfo>/ValueDeclInfo map.
+            "eval_env_type_symbols_are_grouped_not_last_wins_map",
+            // (ii) add_type/add_value append contributors (no overwrite insert).
+            "eval_env_add_decl_appends_not_overwrites",
+            // (iii) no `raw_body = TypeExpr::intersection(...)` merge synthesis
+            //       in verter_session.
+            "no_intersection_merge_synthesis_in_verter_session",
+            // (iv) the load-bearing decision: a merged interface lowers to a
+            //      distinct `SemanticNodeData::MergedDecl` carrier.
+            "merged_decl_lowers_to_distinct_carrier_not_intersection",
+            // Discriminating regression: two interface parts emit ONE merged
+            // Export fact over the contributor union (reorder-stable).
+            "declaration_merge_facts",
+        ],
+    ),
+    (
         "U2 Value-Domain Key Identity",
         &[
             "no_envless_semantic_query_env_key_envelope",

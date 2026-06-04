@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_eval::TypeDeclKind;
+use verter_semantic::analysis::type_eval::{TypeDeclBody, TypeDeclKind};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::parse_stable_hash::compute_parse_stable_hash;
 use verter_session::project_type_store::IndexedReady;
@@ -64,7 +64,7 @@ fn build_large_indexed(decl_count: usize) -> Arc<IndexedReady> {
             name.clone(),
             ShallowTypeSymbol {
                 kind: TypeDeclKind::Interface,
-                raw_body: body,
+                body: TypeDeclBody::Single(body),
                 type_parameters: Vec::new(),
                 local_deps: Vec::new(),
                 external_deps: Vec::new(),

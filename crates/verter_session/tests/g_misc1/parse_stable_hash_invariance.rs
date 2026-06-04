@@ -52,7 +52,9 @@ fn build_indexed(
             name.to_string(),
             verter_session::resolver_core::shallow_file_state::ShallowTypeSymbol {
                 kind,
-                raw_body: verter_type_expr::TypeExpr::Unknown { raw: String::new() },
+                body: verter_semantic::analysis::type_eval::TypeDeclBody::Single(
+                    verter_type_expr::TypeExpr::Unknown { raw: String::new() },
+                ),
                 type_parameters: Vec::new(),
                 local_deps: Vec::new(),
                 external_deps: Vec::new(),

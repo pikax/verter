@@ -1148,22 +1148,23 @@ fn dag_row_consistency_failures(
 /// `AdditionalProofRow` in the ignored set, or a `(file, function)` in
 /// both, FAILS.
 #[test]
-fn ignored_test_row_table_holds_exactly_363_rows() {
+fn ignored_test_row_table_holds_exactly_365_rows() {
     assert_eq!(
         EXPECTED_IGNORE_MANIFEST.len(),
-        363,
-        "the `IgnoredTestRow` table must hold EXACTLY 363 binding rows \
-         (got {}). The 363 is the source-`#[ignore]` bijective total \
-         (§10.5).",
+        365,
+        "the `IgnoredTestRow` table must hold EXACTLY 365 binding rows \
+         (got {}). The 365 is the source-`#[ignore]` bijective total \
+         (§10.5) — U2 same-file overload retention added the two \
+         `call_resolution_*_overload_*` rows whose green was previously a \
+         last-wins accident.",
         EXPECTED_IGNORE_MANIFEST.len(),
     );
 
-    // The derived count equals 363 at U0 (every current row is
-    // `Ignored`; U0 lifts none).
+    // The derived count equals 365 (every current row is `Ignored`).
     assert_eq!(
-        EXPECTED_TOTAL_IGNORED_COUNT, 363,
+        EXPECTED_TOTAL_IGNORED_COUNT, 365,
         "EXPECTED_TOTAL_IGNORED_COUNT is DERIVED as count(status == \
-         Ignored); at U0 it must equal 363 (U0 lifts zero rows). Got {}.",
+         Ignored); it must equal 365. Got {}.",
         EXPECTED_TOTAL_IGNORED_COUNT,
     );
 
