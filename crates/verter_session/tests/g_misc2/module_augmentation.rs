@@ -2,18 +2,22 @@
 //! four archetypes (external specifier, resolved relative
 //! canonical, wildcard ambient, global augmentation).
 //!
-//! Verify-bullet 12: each R29 archetype emits the correct
-//! parse-domain `ModuleAugmentation` fact into
-//! `FileArtifacts.augmentations`. The cross-project
-//! `augmentation_index` remains empty at Stage 3 (populated lazily
-//! by Stage 6c when resolve-domain dimensions become available).
+//! Each R29 archetype emits the correct parse-domain
+//! `ModuleAugmentation` fact into `FileArtifacts.augmentations`. The
+//! facts are DERIVED from the typed `augmentation_scopes` inventory the
+//! binder retains on `ShallowFileState` (`fact_emission::collect_augmentations`)
+//! — NOT a raw-source byte-scan. The cross-project `augmentation_index`
+//! is populated lazily by the augmentation stitch once resolve-domain
+//! dimensions are available; this file only exercises the per-file
+//! emission, so that index stays empty here.
 //!
-//! Tests load the Stage 0 path-precise fixtures under
-//! `tests/fixtures/path_precise/module_augmentation_*.ts` and
-//! invoke the Phase 1 emitter over a synthetic `IndexedReady`
-//! that carries the fixture's raw_source. The discrimination
-//! contract: every archetype must produce at least one
-//! `ModuleAugmentationFact` with the right `specifier` slot.
+//! Tests load the path-precise fixtures under
+//! `tests/fixtures/path_precise/module_augmentation_*.ts`, build an
+//! `IndexedReady` through the REAL binder (so the typed augmentation
+//! inventory is populated exactly as production does), and run
+//! `emit_parse_facts` over it. The discrimination contract: every
+//! archetype must produce at least one `ModuleAugmentationFact` with the
+//! right `specifier` slot.
 //!
 //! Architectural rules bound: R29.
 
