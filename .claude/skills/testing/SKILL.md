@@ -116,12 +116,15 @@ The extracted file contains the module contents directly — `use super::*;`, he
 
 After the TDD loop, run the full verification pass:
 
-1. `cargo test --workspace --tests --verbose` (default workspace-wide Rust verification; skips doctests/examples)
-2. `cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings`
-3. `cargo fmt --all`
-4. `pnpm test` for TypeScript changes
+1. `cargo nextest run --workspace` — CANONICAL completeness gate; runs every workspace test target INCLUDING the ~25 verter_session integration binaries
+2. `cargo test -p verter_session --tests` — shared-process surface for the verter_session integration suite
+3. `cargo clippy --workspace -- -D warnings`
+4. `cargo fmt --all --check`
+5. `pnpm test` for TypeScript changes
 
-Do not run bare `cargo test --workspace` by default in this repo. It also runs doctests and example builds, which are substantially slower than the normal verification loop. Run doctests only when rustdoc examples changed or the user explicitly asks for them.
+Bare `cargo test --workspace --tests` silently SKIPS the verter_session integration suite (~4404 tests): `session_metrics` feature unification drops those binaries from the workspace test set, so the run reports green while never compiling them. It must NOT be used as the sole Rust gate — always run the `cargo nextest run --workspace` + `cargo test -p verter_session --tests` pair above.
+
+Do not run bare `cargo test --workspace` (no `--tests`) by default in this repo either. It also runs doctests and example builds, which are substantially slower than the normal verification loop. Run doctests (`cargo test --workspace --doc`) only when rustdoc examples changed or the user explicitly asks for them.
 
 ### Enum-variant ripple (silent catch-all absorption)
 
@@ -155,7 +158,7 @@ When the correct guard cannot be automated immediately, the owning skill/doc mus
 
 ### Test Hermeticity (MANDATORY)
 
-Default-run tests must depend only on locally-vendored fixtures. The `cargo test --workspace --tests --verbose` invocation must compile and pass on a fresh checkout without any `.integration-tests/repos/<third-party>/...` clones, sibling repositories, or other external corpora present alongside the workspace.
+Default-run tests must depend only on locally-vendored fixtures. The canonical run (`cargo nextest run --workspace` + `cargo test -p verter_session --tests`) must compile and pass on a fresh checkout without any `.integration-tests/repos/<third-party>/...` clones, sibling repositories, or other external corpora present alongside the workspace.
 
 When you need fixtures sourced from a third-party project (e.g., the nuxt-ui Vue corpus), vendor a snapshot of the upstream files into the consuming crate's `tests/<feature>/fixtures/` directory and refer to them with `include_str!("./fixtures/...")` or path-based loaders. Preserve upstream license attribution in a sibling `LICENSE.md` and `README.md` for provenance.
 

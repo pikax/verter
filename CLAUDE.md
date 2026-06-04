@@ -256,10 +256,12 @@ pnpm test                                    # All JS/TS tests
 pnpm vitest --run                            # All tests (non-watch)
 pnpm vitest --run path/to/test.spec.ts       # Specific file
 
-# Rust
-cargo test --workspace --tests --verbose     # Default Rust verification for agents (workspace test targets only; skips doctests/examples)
+# Rust — CANONICAL agent gate (completeness): nextest + the shared-process verter_session surface
+cargo nextest run --workspace                # Authoritative completeness gate — runs every workspace test target INCLUDING the ~25 verter_session integration binaries
+cargo test -p verter_session --tests         # Shared-process surface for the verter_session integration suite
 cargo test --workspace --doc                 # Rust doctests only; run when rustdoc examples changed or explicitly requested
 cargo test --package verter_compiler test_name   # Specific Rust test
+# NOTE: bare `cargo test --workspace --tests` SILENTLY SKIPS the verter_session integration suite (~4404 tests) because `session_metrics` feature unification drops those binaries from the workspace test set — it MUST NOT be used as the sole Rust gate; use the nextest + `-p verter_session` pair above.
 cargo test --package verter_compiler 2>&1 | tail -60  # Full suite with truncated output
 ```
 
@@ -268,18 +270,21 @@ cargo test --package verter_compiler 2>&1 | tail -60  # Full suite with truncate
 Run these after **every** change. Verter's crates are highly interconnected — a change in one crate frequently breaks tests in dependent crates. Always run the full workspace suite:
 
 ```bash
-cargo test --workspace --tests --verbose 2>&1 | tee /tmp/test-output.txt
-cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
-cargo fmt --all
+cargo nextest run --workspace 2>&1 | tee /tmp/test-output.txt   # CANONICAL completeness gate — runs the verter_session integration suite
+cargo test -p verter_session --tests 2>&1 | tee -a /tmp/test-output.txt   # shared-process surface
+cargo clippy --workspace -- -D warnings
+cargo fmt --all --check
 pnpm install --frozen-lockfile   # Verify lockfile is in sync (CI uses this)
 ```
+
+Bare `cargo test --workspace --tests` silently skips the verter_session integration suite (feature unification drops those ~25 binaries) and must NOT be used as the sole Rust gate — always run the `cargo nextest run --workspace` + `cargo test -p verter_session --tests` pair above.
 
 - Corpus audit-test regenerator (run after audit-record schema or fixture changes; idempotent):
   `node scripts/gen-corpus-audit-tests.mjs`
 
 For TypeScript changes, also run `pnpm test`. Do not skip workspace-wide testing even for "small" changes.
 
-**Agent test policy:** Do not run bare `cargo test --workspace` by default. In this repository it pulls in doctests and example builds, which adds substantial runtime without improving the normal agent verification loop. Run doctests only when rustdoc examples changed or the user explicitly asks for them.
+**Agent test policy:** Run the canonical pair — `cargo nextest run --workspace` (completeness) plus `cargo test -p verter_session --tests` (shared-process surface) — as the default Rust gate. Do not run bare `cargo test --workspace` (no `--tests`) by default: it pulls in doctests and example builds, which adds substantial runtime without improving the normal agent verification loop. Do not rely on `cargo test --workspace --tests` alone either — it silently skips the verter_session integration suite. Run doctests (`cargo test --workspace --doc`) only when rustdoc examples changed or the user explicitly asks for them.
 
 ### Documentation Updates
 
@@ -312,7 +317,7 @@ Coverage: new features need tests, bug fixes need regression tests, refactors mu
 
 ### Testing-Hermeticity (MANDATORY)
 
-Unit tests must only depend on locally-vendored fixtures. They must compile and run without any third-party repository (e.g., `nuxt-ui`, `element-plus`) checked out alongside this repository. Tests that need external corpora must be feature-gated (e.g., `#[cfg(feature = "external-corpus")]`) and excluded from the default `cargo test --workspace --tests --verbose` run.
+Unit tests must only depend on locally-vendored fixtures. They must compile and run without any third-party repository (e.g., `nuxt-ui`, `element-plus`) checked out alongside this repository. Tests that need external corpora must be feature-gated (e.g., `#[cfg(feature = "external-corpus")]`) and excluded from the default canonical run (`cargo nextest run --workspace` + `cargo test -p verter_session --tests`).
 
 A test that references `.integration-tests/repos/<third-party>/...` from a non-gated test file is a violation. The architecture guard `external_corpus_paths_not_present_outside_gated_tests` enforces this.
 
