@@ -155,6 +155,42 @@ semantic decision reads typed values, never display text), and the navigation ze
 guard (location surfaces never resolve types). It is written EARLY because it frames `U0` and
 every foundation block, not deferred to the block that happens to need it last.
 
+**Binder identity is produced BEFORE relation/checker consume it — and is DISTINCT from both the
+merged-type-VALUE surface and the navigation projection (resolves the binder-ownership concern).**
+The "Binder/index owns names and locations" surface decomposes into THREE layers, sequenced by the
+demand-dependency graph, not a temporal phase:
+
+1. **Binder IDENTITY** — scopes, symbol tables, declaration-merge ORDER, and ambient / global /
+   module-augmentation CONTRIBUTION-ORDER facts. These are SYNTACTIC/structural: the scope+symbol
+   inventory is the **pre-`U2` `IndexedReady` shallow inventory** (the landed Shallow-File-Processing
+   invariant), and the **per-file contributor provenance** (declaration source-order + overload-group
+   membership) is **recorded at shallow-analysis time** in `verter_semantic::analysis` (the
+   `U2.MODULE_AUGMENTATION` change lowers merged/ambient/augmentation surfaces "once during shallow
+   analysis" and records that contributor provenance). The **cross-file merged contributor SEQUENCE**
+   (TS binder order over the recorded provenance) is then assembled and `ReadSetSignature`-validated by
+   the `U2.MODULE_AUGMENTATION` reducer — child `native-typeinfo-parity-u2-reducers.md`, guard
+   `declaration_merge_records_binder_overload_augmentation_order_as_facts`. The ordering INPUTS
+   (provenance) are thus shallow facts available before `U2.RELATION_INFER`, and the merged-VALUE
+   assembly (which relates-through-`Relate`) is layer 2 below — binder IDENTITY does not depend on
+   relation; the merged-VALUE surface does.
+2. **Merged / ambient type-VALUE surfaces** — the queryable merged object surface
+   (`ResolveMergedDeclaration` / `ResolveAmbientNamespace`). Producing a merged VALUE relates members
+   through `Relate`, so the `U2.MODULE_AUGMENTATION` reducer legitimately lists `U2.RELATION_INFER` as
+   a prerequisite. This relation edge is on the merged-VALUE surface, NOT on the binder-IDENTITY order
+   facts of layer 1 — the two must not be conflated.
+3. **Navigation / location PROJECTION** — `N0` is the location renderer over layer-1 binder-identity
+   facts (def/refs/rename/symbols/highlights). It is correctly POST-`U2` because it reuses the
+   already-recorded ordering facts ("does NOT fork a second ordering computation", §0.5.4 N0) — it is
+   a projection, not a second binder.
+
+A separate pre-`U2` eager binder phase (a "`B.3a` before `U2`") is REJECTED: it would re-introduce an
+eager binder, violating the demand-driven core invariant ("collecting/indexing symbols, not eagerly
+evaluating") and the one-ordering-computation rule, and would re-sequence already-landed slot-identity /
+reducer code. The binder-before-relation ordering is enforced by the demand-dependency graph (layer-1
+facts exist before `RELATION_INFER` reads them through `ProjectSemanticDispatch::execute`), not by a
+temporal pre-`U2` block. The `N0.BINDER_NAV_INDEX` name reads as if the binder lands post-`U2`; it is
+the navigation projection (layer 3), not the binder-identity producer (layer 1).
+
 **Planned guard (named as a deliverable, NOT added to `CLAUDE.md`/skills here):**
 `ownership_boundaries_no_typescript_side_path` — registered with its `CRITICAL_RULE_GUARDS`
 entry at the gate→implementation boundary of the foundation section's first implementing block
@@ -202,14 +238,38 @@ the one resolver = every type query):
 - **diagnostics** → `B.5` (native checker).
 - **edits / quick-fixes / refactors / organize-imports** → `B.8` (CodeTransform producers off
   checker diagnostics + `N0` shape).
+- **semantic / declaration EMIT** (`getEmitOutput` with `emitOnlyDtsFiles` — `.d.ts` / `.d.ts.map`
+  declaration emit, incl. `.vue` component declaration output) → `B.10` (a `CodeTransform` producer
+  over typed semantic values, §0.5.2 above). This is the emit that PROJECTS over the one resolver, so
+  it is a role-owner, not a non-goal — distinct from the commodity-syntactic arm below.
 - **request orchestration** (snapshot / cancellation / degradation) → `N1`.
-- **commodity SYNTACTIC, type-independent** (source formatting; transpile emit) → named non-goal
-  (deferred to the editor formatter / `tsc`/swc/esbuild), per the boundary above.
+- **commodity SYNTACTIC, type-independent** (source formatting; transpile emit — the
+  commodity JS-emit facet of `getEmitOutput`) → named non-goal (deferred to the editor formatter /
+  `tsc`/swc/esbuild), per the boundary above.
 
 The role test is the catch-all: any not-yet-named LS surface maps to exactly one role-owner by this
 partition (identity/location → N0; type-query → B.7; value+location compose → N1 goto; diagnostic →
-B.5; edit → B.8; orchestration → N1; type-independent syntactic → non-goal), so no surface is
-delegated-by-omission and the §0.5.1 enumeration is complete by construction, not by list length.
+B.5; edit → B.8; semantic/declaration emit → B.10; orchestration → N1; type-independent syntactic →
+non-goal), so no surface is delegated-by-omission and the §0.5.1 enumeration is complete by
+construction, not by list length. The role-partition owner-set therefore EQUALS the
+`language_service_api_manifest` owner-set (`N0`/`N1`/`B.7`/`B.8`/`B.5`/`B.10` + non-goal) — the manifest
+is the mechanized form of this same partition.
+
+**The role partition is the PRINCIPLE; a generated manifest MECHANIZES the coverage claim.** "Complete
+by construction" is a reasoning argument, not an enforced gate — a concrete public surface
+(`linkedEditingRange` / `prepareRename` / folding-range / selection-range / `implementation`) could be
+silently omitted while the prose still "reads complete". The plan applies bijective-manifest rigor
+everywhere else (the 363-row manifest, `checker_diagnostic_manifest_bijection`, the typeinfo wire
+taxonomy-parity tests); LS surfaces get the SAME machinery: a **generated `language_service_api_manifest`**
+that ENUMERATES every public `ts.LanguageService` method (pinned to the §3.4 / `B.4` TS version) and maps
+each to its role-owner (`N0` / `N1` / `B.7` / `B.8` / `B.5` — the diagnostic methods
+`getSemanticDiagnostics` / `getSyntacticDiagnostics` / `getSuggestionDiagnostics` are checker-owned —
+or `B.10` for the emit facet: `getEmitOutput` SPLITS by facet — its `emitOnlyDtsFiles` declaration-emit
+output is `B.10`-owned, while its commodity JS-emit facet is the §0.5.2 transpile NON-GOAL, §0.5.2)
+or a named non-goal, gated by the NET-NEW
+`language_service_api_manifest_covers_full_surface` coverage/bijection guard (a named deliverable at the
+`N1` gate per §0.5.7). The manifest is GENERATED + diff-tested (like the typeinfo bindings), not a
+hand-list — it ENFORCES the role partition rather than replacing it; an unmapped surface fails the gate.
 
 **Deletion-ownership is per-surface, not deferred to the terminal sweep.** Each LS surface assigned
 to an owner block above carries THAT block's Required-deletion of the corresponding runtime tsgo
@@ -270,6 +330,23 @@ each pair is stated ONCE here.
   tsconfig_path / references / paths / baseUrl / Membership) substrate and the landed multi-project
   membership. `B.1` is the SOLE owner of discovery/inheritance/normalization — no other block
   re-derives configs.
+- **Incremental builder-program state maps onto the existing demand-driven rails — NOT a second
+  invalidation authority.** A full replacement needs the four `BuilderProgram`-equivalent
+  responsibilities, but they are realized by the landed mechanisms, NOT by importing `tsc`'s eager
+  `BuilderProgram`: **graph versioning** = `project_identity` + the workspace content generation;
+  **affected-file calculation** = the fact-based **lazy revalidation** rail (`ReadSetSignature` +
+  recorded facts revalidated against the live `StoreView`) — demand-driven, the inverse of `tsc`'s
+  eager affected-set walk; **project-reference invalidation** = the canonical-dependency cache rule
+  over the composite / `tsbuildinfo` build-graph (`tsbuildinfo` read/write semantics owned here);
+  **emitted-artifact freshness** = `B.10`'s fact-VALIDATED declaration artifacts (content-addressed
+  key; the value records the validated `ReadSetSignature` facts, revalidated on warm hit — the signature
+  is never in the key; cross-project `.d.ts` freshness falls out of the same file-keyed fact mechanism,
+  no affected-project graph needed).
+  `B.1` NAMES these responsibilities and routes each through its existing rail; it introduces **no
+  second invalidation authority** — VFS stays the file-change authority and lazy fact revalidation
+  stays the staleness rail (reverse dependency graphs are NOT invalidation authority, per the Cache
+  Architecture rules). A batch `verter --build` `tsbuildinfo` skip-without-full-load is a permitted
+  later PERF optimization over this same rail, not an architectural second builder.
 - **Deps:** none new (extends landed substrate). Feeds `U0.RESOLVER_CORE` (#21) + `B.4` (stdlib);
   emits the normalized-option set that `A.3`/`B.12` config semantics branch on.
 - **Sequence:** PRE-`U0` / `U0`-tier; gates `U0.RESOLVER_CORE` and `B.4`.
@@ -309,6 +386,15 @@ each pair is stated ONCE here.
   rejects any scope case that lacks its discriminating fixture.
 - **Required deletions:** none (extends the live resolver; no second resolution authority — CJS
   interop folds into this one matrix, per `B.11`).
+- **`typeRoots` / `types` ownership — three concerns, split by env dimension (not a folding bug).**
+  Listing `typeRoots`/`types` in this block's scope+fixtures is the resolution MECHANICS, not an
+  env-hash ownership claim. The three concerns are allocated explicitly: **(a) module-specifier
+  resolution** — `resolve_env` / this block; the module-specifier `resolve_env` NEVER includes
+  `types`/`typeRoots`. **(b) ambient package inclusion / global type-acquisition corpus** — `lib_env`
+  / `B.4` (the ambient inclusion-set / global corpus). **(c) `@types` package discovery + `typeRoots`
+  walk** — this block owns the resolution MECHANICS (path-finding; the line-302 fixture tests it), but
+  the cached RESULT is keyed by `lib_env` (it selects WHICH corpus, not WHERE a specifier points),
+  feeding `B.4`. This is the `resolve_env` = WHERE / `lib_env` = WHICH split working as designed.
 - **Guards (already in the #21 design):** `module_resolution_keys_on_resolve_env_not_type_or_lib`
   + `resolve_env_does_not_fold_lib_dims` (`lib_env` — `typeRoots`/`types` — is NEVER folded into
   `resolve_env`); registered in `CRITICAL_RULE_GUARDS` at the `U0` gate.
@@ -335,7 +421,11 @@ each pair is stated ONCE here.
   references / rename LOCATION is an identity-and-location answer, NOT a type walk, so `N0` owns it
   without becoming an expander). Reads the `IndexedReady` shallow inventory and reuses the
   U2-reducers' merged-declaration ordering facts (does NOT fork a second ordering computation); adds
-  document/workspace symbols (as a substrate query), rename ranges, and validation tokens. **`N0` is
+  document/workspace symbols (as a substrate query), rename ranges, and validation tokens. `N0` is the
+  **navigation/location PROJECTION (layer 3 of the §0.5.1 binder decomposition)** over the binder-IDENTITY
+  facts produced earlier — the `IndexedReady` scope/symbol inventory (pre-`U2`) plus the merge /
+  contribution-ORDER facts recorded at shallow-analysis time (before `U2.RELATION_INFER`). It is NOT the
+  binder-identity producer and NOT the merged-type-VALUE surface; it never re-derives ordering. **`N0` is
   the native PRODUCER of definition / references / rename LOCATION answers** — it succeeds the
   **def/refs/rename LOCATION methods** of the tsgo-backed `verter_lsp::tsgo::TsgoNavigationBackend`
   (`getDefinitionAtPosition` / `getReferences` / `getRenameLocations`,
@@ -396,7 +486,17 @@ each pair is stated ONCE here.
 - **Guards:** `language_service_layer_does_not_write_caches_or_import_private_reducers` + the NET-NEW
   `native_type_definition_replaces_ts_type_definition_path` (asserts type-definition composes the one
   engine's type value + an `N0` location and no tsgo `get_type_definition` `TypeProvider` path
-  survives; registered at the `N1` gate per §0.5.7).
+  survives; registered at the `N1` gate per §0.5.7) + the NET-NEW
+  `language_service_api_manifest_covers_full_surface` (asserts the generated
+  `language_service_api_manifest` enumerates every public `ts.LanguageService` method, pinned to the
+  §3.4 / `B.4` TS version, each mapped to its role-owner `N0`/`N1`/`B.7`/`B.8`/`B.5` (the diagnostic
+  methods are checker-owned) / `B.10` (the `getEmitOutput` `emitOnlyDtsFiles` declaration-emit facet;
+  its commodity JS-emit facet is the §0.5.2 transpile non-goal) or a named non-goal, with NO unmapped
+  surface — this gate asserts
+  owner-bijection COVERAGE only, NOT runtime-TS retirement: at the `N1` gate B.7/B.8 surfaces have not
+  yet progressively cut over (§0.5.5), so "no residual runtime-TS path" is the §10(3) terminal bar +
+  the per-owner deletion guards, not this coverage gate — §0.5.2; registered at the `N1` gate per
+  §0.5.7).
 
 #### B.7 — Completion / Hover / Signature-Help Semantics  (FUTURE Verter-engine successor to U15's tsserver/tsgo path)
 
@@ -480,11 +580,27 @@ each pair is stated ONCE here.
   user spans; render-fn maps, IDE-TSX maps, and declaration maps stay SEPARATE products; declarations
   cache as artifacts keyed by canonical file + parse/compiler/profile identity + the five split env
   hashes (incl. `lib_env_hash`, since decl emit depends on lib data) + decl policy + source-map
-  policy + validated `ReadSetSignature` facts.
-- **Deps:** `B.9` decision (in scope) + typeinfo VALUES stable + `N0` + (for SFC) `U14`.
-- **Sequence:** one of the LAST blocks — after typeinfo values + `N0` + `U14`.
+  policy; the cached VALUE records the validated `ReadSetSignature.facts` (revalidated against the live
+  `StoreView` on every warm hit) — the fact signature is NEVER part of the key (R6 / Cache-Architecture:
+  content-addressed artifact keys never carry a fact signature). **Declaration-conformance diagnostics are
+  CHECKER-owned, not re-derived in emit:** faithful `.d.ts` parity couples the emit DECISION to
+  declaration-conformance diagnostics (TS2742 unnameable-inferred-type, private-name leakage,
+  visibility / exportability, `isolatedDeclarations` errors) which in `tsc` are checker-produced
+  (`getDeclarationDiagnostics`) and consumed by the emitter. Per the ownership statement ("Checker
+  owns diagnostics. Emit owns declarations"), `B.10` CONSUMES these from `B.5`'s `CheckDeclaration`
+  declaration-conformance subset (`docs/arch/native-checker.md` §2 — the checker query layer, the
+  `CheckDeclaration` key) and never spawns a second diagnostic producer in emit.
+- **Deps:** `B.9` decision (in scope) + typeinfo VALUES stable + `N0` + (for SFC) `U14` + **`B.5`
+  (the `CheckDeclaration` declaration-conformance diagnostic subset)** — the emitter reads
+  checker-produced conformance facts; `B.5` already sequences before `B.10` (§0.5.6), so this is a
+  dep edge, not a re-sequence.
+- **Sequence:** one of the LAST blocks — after typeinfo values + `N0` + `U14` + `B.5`.
 - **Required deletions:** none net-new; transpile emit is the permanent non-goal (§0.5.2).
-- **Guard:** `declaration_emit_derives_from_typed_facts_via_codetransform`.
+- **Guards:** `declaration_emit_derives_from_typed_facts_via_codetransform` + the NET-NEW
+  `declaration_emit_non_goals_are_registered_stop_gates` (every declaration-emit non-goal is a
+  registered `decl_emit_*_stop_gate.rs` row with owner + public degradation + reason + exclusion from
+  the replacement-acceptance set, mirroring the §9 Svelte/React stop-gate discipline; registered with
+  its `CRITICAL_RULE_GUARDS` entry at the `B.10` gate per §0.5.7).
 
 #### B.11 — JSDoc / JavaScript Mode  (EXPLICIT multi-slice umbrella — NOT one atomic block)
 
@@ -567,7 +683,7 @@ AFTER typeinfo parity (U15):
   B.11 JSDoc-type-system (near U2) / checkJs JS-mode (after B.5) / CJS (#21 at U0)
   N1.NATIVE_LANGUAGE_SERVICE_LAYER
   B.7 Completion/Hover/SigHelp semantics (after N1 + U2.RELATION_INFER + U6; U15 tsgo STAYS)
-  B.10 Native Declaration Emit
+  B.10 Native Declaration Emit (after typeinfo values + N0 + U14 + B.5 CheckDeclaration)
   B.8 Code Actions / Refactors / Organize Imports (LAST LS block)
 
 TERMINAL:
@@ -1087,7 +1203,9 @@ unchanged:
   ready BEFORE `U12`/`U9`/`U11`** (consume-before-rely, §3.2.1).
 - **After typeinfo parity (`U15`):** `B.5 ← {U2, U6, U8, U10}` (its own rescope gate);
   `N1 ← {U15, N0}`; `B.7 ← {N1, U2.RELATION_INFER, U6}`; `B.8 ← {N0, N1, B.5}`;
-  `B.10 ← {B.9, U14, N0}` (typeinfo values + SFC); `B.11` JSDoc-type ← near `U2`,
+  `B.10 ← {B.9, U14, N0, B.5}` (typeinfo values + SFC + `B.5` `CheckDeclaration`
+  declaration-conformance diagnostics — acyclic: `B.5 ← {U2, U6, U8, U10}` predates
+  `B.10`, no cycle); `B.11` JSDoc-type ← near `U2`,
   `B.11` checkJs ← `B.5`, `B.11` CJS ← `U0.RESOLVER_CORE` (#21).
 - **`B.14 ← all blocks`** (terminal, §10).
 
@@ -2771,7 +2889,11 @@ The full-replacement effort is "done" when ALL of the following hold:
 
 - [ ] **(1) No runtime TypeScript at query time** — there are NO runtime calls into a
   TypeScript service / compiler (tsserver / tsgo / `tsc`) on any query path; every type,
-  location, diagnostic, completion, and emit answer comes from native Verter surfaces.
+  location, diagnostic, completion, and **Verter-OWNED** emit answer comes from native Verter
+  surfaces. (Commodity, type-independent transpile emit — `.ts`→`.js` lowering, helpers, import
+  elision, JSX modes — is the permanent non-goal deferred to `tsc`/swc/esbuild per §0.5.2, and is
+  explicitly OUTSIDE this bar; "Verter-OWNED emit" = the checker + LS + `.vue` compilation + `.d.ts`
+  declaration emit that project over the one resolver.)
   Guard `no_runtime_typescript_calls`. **(tsgo stays the OFFLINE parity oracle (§3.4) — §10
   forbids RUNTIME TS, NOT the oracle harness, which runs out-of-band at the rescope gates.)**
 - [ ] **(2) Native checker manifest green + tsgo diagnostics path retired** — `B.5`'s
@@ -2793,11 +2915,26 @@ The full-replacement effort is "done" when ALL of the following hold:
   retired; any
   residual runtime-TS path on ANY of these surfaces means §10 fails (consistent with the absolute
   item (1) bar + the item (7) deletion sweep). The PROGRESSIVE surface-by-surface cutover that gets
-  there lives in §0.5.5, not in this terminal bar.
-- [ ] **(4) Declaration-emit parity OR explicit non-goal** — `B.10` `.d.ts` / `.d.ts.map`
-  output matches the `tsgo`-oracle baseline for in-scope inputs (incl. `.vue` components),
-  OR the specific construct is recorded as an explicit non-goal; general transpile emit is
-  the permanent non-goal (§0.5.2). Guard `declaration_emit_derives_from_typed_facts_via_codetransform`.
+  there lives in §0.5.5, not in this terminal bar. **The "native manifest" here is the generated
+  `language_service_api_manifest` (§0.5.2)** — every public `ts.LanguageService` method (pinned to the
+  §3.4 / `B.4` TS version) enumerated and mapped to its role-owner (`N0`/`N1`/`B.7`/`B.8`/`B.5` — the
+  diagnostic methods are checker-owned — or `B.10` for the `getEmitOutput` `emitOnlyDtsFiles`
+  declaration-emit facet; the commodity JS-emit facet is the §0.5.2 transpile non-goal) or a named
+  non-goal, gated by
+  `language_service_api_manifest_covers_full_surface`; an unmapped or runtime-TS-backed surface fails
+  §10 (the coverage claim is mechanized, not prose).
+- [ ] **(4) Declaration-emit parity OR REGISTERED STOP-GATE non-goal** — `B.10` `.d.ts` /
+  `.d.ts.map` output matches the `tsgo`-oracle baseline for in-scope inputs (incl. `.vue`
+  components), OR the specific construct is a **registered declaration-emit STOP-gate** — NOT a free
+  "explicit non-goal" escape hatch. Mirroring the §9 Svelte/React stop-gate discipline
+  (`svelte_adapter_stop_gate.rs`, guard `*_is_registered_out_of_scope`), every declaration non-goal
+  is a `decl_emit_<construct>_stop_gate.rs` row carrying: an OWNER, the PUBLIC degradation behavior
+  (what the consumer sees for that construct), the reason, and an `*_is_registered_out_of_scope`
+  guard, and is EXPLICITLY EXCLUDED from the replacement-acceptance set — so "full replacement"
+  cannot pass §10 with a silent declaration hole. General transpile emit is the permanent non-goal
+  (§0.5.2). Guards `declaration_emit_derives_from_typed_facts_via_codetransform` +
+  `declaration_emit_non_goals_are_registered_stop_gates` (NET-NEW, named deliverable at the `B.10`
+  gate per §0.5.7).
 - [ ] **(5) Resolver / config parity green** — the `#21` module-resolution matrix
   (`U0.RESOLVER_CORE`) + the tsconfig semantics matrix (`A.3`/#20 strict + `B.12` config)
   pass their `tsgo`-oracle baselines; `module_resolution_keys_on_resolve_env_not_type_or_lib`
@@ -2833,6 +2970,8 @@ The full-replacement effort is "done" when ALL of the following hold:
   `native_checker_replaces_ts_diagnostics_path`,
   `language_service_layer_does_not_write_caches_or_import_private_reducers`,
   `completion_semantics_route_types_through_one_resolver`,
+  `declaration_emit_non_goals_are_registered_stop_gates`,
+  `language_service_api_manifest_covers_full_surface`,
   `jsdoc_and_js_mode_resolve_through_one_engine_jsdoc_payload_only_text` all green; the
   one-engine / typed-IR-only / shallow-by-default / R21 / wire-purity / CodeTransform
   invariants intact.
