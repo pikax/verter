@@ -173,9 +173,11 @@ demand-dependency graph, not a temporal phase:
    TWO explicitly-keyed fact families plus the query-identity discriminator each feeds, never asserting
    both content-addressed and content-free keying of one entry:
    - **(family A) per-file binder facts — a content-addressed ARTIFACT cache**, keyed
-     `(canonical, parse_stable_hash, parse_env_hash)` exactly like `IndexedReady` / `FileArtifactStore`
-     (R6 does NOT govern artifact keys — it governs query-identity keys; an artifact key legitimately
-     carries `parse_stable_hash`). It carries:
+     `(canonical, parse_stable_hash, parse_env_hash)` — a parse-stable content-addressed artifact in the
+     `MemberSemanticFactStore` style (NOT the raw-`content_hash` form: `FileArtifactStore` itself is keyed
+     `(canonical, content_hash, parse_env_hash, parser_version)`; family A rides `parse_stable_hash` so it
+     is invariant under cosmetic edits). R6 does NOT govern artifact keys — it governs query-identity
+     keys; an artifact key legitimately carries `parse_stable_hash`. It carries:
      - **lexical-scope identity** — the per-file scope tree + each scope's **stable structural scope id**
        (cosmetic-edit invariant, the analogue of `parse_stable_hash`; NOT a positional ordinal that
        renumbers when a scope is inserted above);
@@ -1336,9 +1338,12 @@ unchanged:
   `B.11` checkJs ← `B.5`, `B.11` CJS ← `U0.RESOLVER_CORE` (#21).
 - **`B.14 ← all blocks`** (terminal, §10).
 
-Because every new edge points from a later block to an earlier one in the order above
-(foundation → `U0`/`U2`; `BinderIdentityFacts` → `U2`; `N0` → `{BinderIdentityFacts, U2}`; the LS/emit
-tail → `U15`; `B.14` terminal), no cycle is introduced; the combined graph remains a DAG.
+The new edges all run consistently with the order above: the feeds-edges
+`foundation → `U0`/`U2`` and `IndexedReady → BinderIdentityFacts → U2` point earlier→later (a
+prerequisite feeding its consumer), and the dependency-edges `N0 ← {BinderIdentityFacts, U2}`, the
+LS/emit tail `← U15`, and `B.14` terminal point later→earlier (a consumer naming its prerequisite).
+Both senses describe the SAME partial order (`IndexedReady → BinderIdentityFacts → U2 → N0`), so no
+cycle is introduced; the combined graph remains a DAG.
 
 Because `S5.B5 ← U2`, `U8 ← S5.B12`, `G.P3 ← U2`, and `G.P4 ← U3` all point from a
 later block to an earlier one in the order above, no cycle is introduced; the combined
@@ -3104,7 +3109,16 @@ The full-replacement effort is "done" when ALL of the following hold:
   `broken_code_recovery_contract_global_every_surface_degrades`,
   `program_model_is_single_project_authority_keys_through_project_identity`,
   `lib_authority_pinned_ts_version_single_owner`,
-  `binder_nav_index_runs_zero_typed_ir_dispatch`,
+  `binder_identity_facts_are_pre_u2_and_not_n0_owned`,
+  `u2_queries_do_not_read_n0_navigation_indexes`,
+  `n0_does_not_write_semantic_query_identity_or_route_facts`,
+  `declaration_slots_are_stable_symbol_space_scoped_facts`,
+  `merge_order_and_augmentation_contributor_order_are_fact_validated`,
+  `ambient_global_and_lib_corpus_have_completeness_facts`,
+  `negative_name_lookup_requires_recorded_completeness_or_returnonly`,
+  `binder_scope_id_enters_context_sensitive_query_identity`,
+  `session_overlay_augmentation_fails_closed_until_implemented`,
+  `nav_location_index_runs_zero_typed_ir_dispatch`,
   `native_navigation_replaces_ts_navigation_backend`,
   `native_binder_surfaces_replace_ts_aux_nav_paths`,
   `native_code_actions_replace_ts_navigation_backend_code_action_path`,
