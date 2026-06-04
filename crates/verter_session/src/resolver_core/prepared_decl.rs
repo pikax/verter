@@ -96,7 +96,18 @@ pub fn prepare_local_type_decl(
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
 ) -> Option<PreparedTypeDecl> {
-    let symbol = state.symbol(symbol_name)?;
+    // A name absent from the file surface but present in the file's own
+    // `declare global { ... }` inventory resolves to the merged global
+    // declaration. Global augmentations are visible from any scope, so a bare
+    // reference (`type Alias = GlobalContract`) reaches the merged surface
+    // through the same prepared-decl → `MergedDecl` machinery as a file symbol.
+    let symbol = match state.symbol(symbol_name) {
+        Some(symbol) => symbol,
+        None => state.augmentation_symbol(
+            &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
+            symbol_name,
+        )?,
+    };
     if state.is_import_local(symbol_name) {
         return None;
     }
@@ -459,12 +470,27 @@ pub fn build_prepared_type_decl_cache(
     state: Arc<ShallowFileState>,
     dep_edges: Arc<FxHashMap<String, String>>,
 ) -> PreparedTypeDeclCache {
-    let slots = state
+    let mut slots: FxHashMap<String, Arc<OnceLock<Option<Arc<PreparedTypeDecl>>>>> = state
         .symbols
         .keys()
         .filter(|symbol_name| !state.is_import_local(symbol_name))
         .map(|symbol_name| (symbol_name.clone(), Arc::new(OnceLock::new())))
         .collect();
+    // Global-augmentation declarations (`declare global { interface N {} }`)
+    // are resolvable by bare name through `prepare_local_type_decl`'s global
+    // fallback, so they need a prepared-decl slot even though they never enter
+    // the file surface. (A name that IS a file symbol already has a slot and
+    // takes precedence.)
+    for (scope, name) in state.augmentation_scopes.keys() {
+        if matches!(
+            scope,
+            verter_semantic::analysis::type_eval::AugmentationScopeKind::Global
+        ) && !slots.contains_key(name)
+            && !state.is_import_local(name)
+        {
+            slots.insert(name.clone(), Arc::new(OnceLock::new()));
+        }
+    }
 
     PreparedTypeDeclCache {
         canonical_id: Arc::from(canonical_id),

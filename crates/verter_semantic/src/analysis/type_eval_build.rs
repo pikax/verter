@@ -400,7 +400,8 @@ fn extract_augmentation_block(
                 );
             }
             Statement::ExportNamedDeclaration(export) => {
-                if let Some(Declaration::TSInterfaceDeclaration(iface)) = export.declaration.as_ref()
+                if let Some(Declaration::TSInterfaceDeclaration(iface)) =
+                    export.declaration.as_ref()
                 {
                     let name = iface.id.name.to_string();
                     env.add_augmentation_type(

@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use verter_audit::ProjectionModeTag;
 use verter_session::semantic_query::{
-    PathSegment, ProjectionMode, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryKey,
+    PathSegment, ProjectionMode, QueryError, QueryResult, ResolveDeclKey, ScopeId, ScopeKind,
+    SemanticQueryKey,
 };
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
@@ -55,6 +56,7 @@ fn type_resolution_audit_intermediate_hops_navigate_terminal_uses_caller_mode() 
         scope: ScopeId {
             canonical_id: Arc::from("/types.ts"),
             local_scope: None,
+            kind: ScopeKind::File,
         },
         name: Arc::from("A"),
     });

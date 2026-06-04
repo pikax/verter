@@ -150,7 +150,6 @@ fn module_features_nested_namespace_leaf_resolves_to_shape() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "typeinfo currently does not merge multiple `declare global { interface ... }` blocks into a single resolved global interface surface; keep as the future declare-global merge contract"]
 fn module_features_declare_global_merges_two_blocks() {
     // TS7 contract: `GlobalContractAlias = GlobalContract` (resolved through
     //   the global scope) must include the union of every property declared

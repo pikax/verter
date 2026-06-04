@@ -150,8 +150,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let has_value_symbol = shallow.value_symbol(key.name.as_ref()).is_some();
         let has_export = shallow.exports.contains_key(key.name.as_ref());
         let has_import_local = shallow.import_targets.contains_key(key.name.as_ref());
+        // A `declare global { ... }` declaration is not on the file surface but
+        // IS resolvable as the merged global declaration (the prepared-decl
+        // builder falls back to the global augmentation inventory).
+        let has_global_augmentation = shallow.has_global_augmentation(key.name.as_ref());
 
-        if !(has_type_symbol || has_value_symbol || has_export || has_import_local) {
+        if !(has_type_symbol
+            || has_value_symbol
+            || has_export
+            || has_import_local
+            || has_global_augmentation)
+        {
             // Wildcard re-export fall-through. A `export * from './base'`
             // barrel carries no direct symbol / named export for `BaseW` —
             // it is reachable only THROUGH the wildcard chain. When the
@@ -180,6 +189,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             scope: crate::semantic_query::ScopeId {
                                 canonical_id: Arc::from(target_canonical.as_str()),
                                 local_scope: None,
+                                kind: crate::semantic_query::ScopeKind::File,
                             },
                             name: Arc::from(target_name.as_str()),
                         };

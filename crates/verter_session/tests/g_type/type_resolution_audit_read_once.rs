@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use verter_audit::store::CacheLayerBreakdown;
-use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
+use verter_session::semantic_query::{ResolveDeclKey, ScopeId, ScopeKind, SemanticQueryKey};
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
 /// Sum cache misses across every layer in the breakdown — keeps the
@@ -65,6 +65,7 @@ fn type_resolution_audit_repeated_query_uses_warm_cache() {
         scope: ScopeId {
             canonical_id: Arc::from("/types.ts"),
             local_scope: None,
+            kind: ScopeKind::File,
         },
         name: Arc::from("Outer"),
     });

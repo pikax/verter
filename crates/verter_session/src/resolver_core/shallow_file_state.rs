@@ -62,8 +62,13 @@ pub struct ShallowFileState {
     /// augmented declaration on demand. Same-file multiple-block contributors
     /// already merge here (the group's [`TypeDeclBody::Merged`] carrier);
     /// cross-file augmenters are appended by the augmentation stitch.
-    pub augmentation_scopes:
-        FxHashMap<(verter_semantic::analysis::type_eval::AugmentationScopeKind, String), ShallowTypeSymbol>,
+    pub augmentation_scopes: FxHashMap<
+        (
+            verter_semantic::analysis::type_eval::AugmentationScopeKind,
+            String,
+        ),
+        ShallowTypeSymbol,
+    >,
 
     /// Import-local names (names that come from `import` declarations).
     /// Used to classify dependencies as local vs external during closure.

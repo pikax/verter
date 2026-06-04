@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
+use verter_session::semantic_query::{ResolveDeclKey, ScopeId, ScopeKind, SemanticQueryKey};
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
 const SFC: &str = r#"<script setup lang="ts">
@@ -71,6 +71,7 @@ fn type_resolution_audit_shared_graph_reused_across_entry_points() {
         scope: ScopeId {
             canonical_id: Arc::from("/Probe.vue"),
             local_scope: None,
+            kind: ScopeKind::File,
         },
         name: Arc::from("Outer"),
     });

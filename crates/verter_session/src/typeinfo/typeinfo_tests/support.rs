@@ -160,7 +160,8 @@ pub(super) fn resolve_expr(
 pub(super) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: &str) -> TypeExpr {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{
-        ProjectionReductionContext, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
+        ProjectionReductionContext, ResolveDeclKey, ScopeId, ScopeKind, SemanticQueryApi,
+        SemanticQueryKey,
     };
 
     let store_view = host.resolver_store_view();
@@ -179,6 +180,7 @@ pub(super) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: 
         scope: ScopeId {
             canonical_id: Arc::from(canonical_id),
             local_scope: None,
+            kind: ScopeKind::File,
         },
         name: Arc::from(name),
     })) {

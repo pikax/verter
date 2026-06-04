@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::semantic_query::{
-    DeclIdentity, QueryError, SemanticQueryApi, SemanticQueryOutput, SurfaceMember,
+    DeclIdentity, QueryError, ScopeKind, SemanticQueryApi, SemanticQueryOutput, SurfaceMember,
 };
 
 /// Per-walk maximum frame-stack depth observed by
@@ -1475,6 +1475,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let scope = ScopeId {
                         canonical_id: Arc::clone(&identity.canonical_id),
                         local_scope: None,
+                        kind: ScopeKind::File,
                     };
                     let name = Arc::clone(&identity.decl_name);
                     drop(data);
@@ -1669,6 +1670,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 let scope = ScopeId {
                     canonical_id: Arc::clone(&identity.canonical_id),
                     local_scope: None,
+                    kind: ScopeKind::File,
                 };
                 let name = Arc::clone(&identity.decl_name);
                 drop(data);
@@ -2811,6 +2813,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 let scope = ScopeId {
                     canonical_id: Arc::clone(&identity.canonical_id),
                     local_scope: None,
+                    kind: ScopeKind::File,
                 };
                 let name = Arc::clone(&identity.decl_name);
                 drop(data);

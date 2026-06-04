@@ -36,8 +36,8 @@ use crate::instant::Instant;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::semantic_query::{
-    ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId,
-    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, ScopeKind, SemanticNodeData,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
 };
 use crate::types::{FileKind, UpsertRequest};
 use crate::VerterHost;
@@ -386,6 +386,7 @@ fn evaluate_inner(
                 scope: ScopeId {
                     canonical_id: Arc::clone(&scratch_canonical),
                     local_scope: None,
+                    kind: ScopeKind::File,
                 },
                 name: Arc::from(SCRATCH_ALIAS_NAME),
             });

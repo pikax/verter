@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use verter_session::semantic_query::{
-    PathSegment, ProjectionMode, ResolveDeclKey, ScopeId, SemanticQueryKey,
+    PathSegment, ProjectionMode, ResolveDeclKey, ScopeId, ScopeKind, SemanticQueryKey,
 };
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
@@ -48,6 +48,7 @@ fn type_resolution_audit_diamond_intra_request_interning() {
         scope: ScopeId {
             canonical_id: Arc::from("/diamond.ts"),
             local_scope: None,
+            kind: ScopeKind::File,
         },
         name: Arc::from("AB"),
     });

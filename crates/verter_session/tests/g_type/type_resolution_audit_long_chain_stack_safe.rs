@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
+use verter_session::semantic_query::{ResolveDeclKey, ScopeId, ScopeKind, SemanticQueryKey};
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
 const CHAIN_LENGTH: usize = 200;
@@ -53,6 +53,7 @@ fn type_resolution_audit_long_chain_terminates_without_stack_overflow() {
         scope: ScopeId {
             canonical_id: Arc::from("/chain.ts"),
             local_scope: None,
+            kind: ScopeKind::File,
         },
         name: Arc::from("T0"),
     });

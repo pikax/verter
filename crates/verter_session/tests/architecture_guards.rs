@@ -8024,7 +8024,7 @@ fn tier_2_split_preserves_semantic_query_key_hashes() {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;
-    use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
+    use verter_session::semantic_query::{ResolveDeclKey, ScopeId, ScopeKind, SemanticQueryKey};
 
     fn hash_of(key: &SemanticQueryKey) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -8035,10 +8035,12 @@ fn tier_2_split_preserves_semantic_query_key_hashes() {
     let scope_a = ScopeId {
         canonical_id: Arc::from("/test/scope-a.vue"),
         local_scope: None,
+        kind: ScopeKind::File,
     };
     let scope_b = ScopeId {
         canonical_id: Arc::from("/test/scope-b.vue"),
         local_scope: None,
+        kind: ScopeKind::File,
     };
 
     let key_a1 = SemanticQueryKey::ResolveDecl(ResolveDeclKey {

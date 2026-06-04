@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use verter_audit::RequestKind;
-use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
+use verter_session::semantic_query::{ResolveDeclKey, ScopeId, ScopeKind, SemanticQueryKey};
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
 const A_TS: &str = r#"
@@ -60,6 +60,7 @@ fn type_resolution_audit_does_not_visit_unreferenced_imports() {
         scope: ScopeId {
             canonical_id: Arc::from("/a.ts"),
             local_scope: None,
+            kind: ScopeKind::File,
         },
         name: Arc::from("UseB"),
     });
@@ -119,6 +120,7 @@ fn type_resolution_audit_does_not_visit_unreferenced_imports() {
         scope: ScopeId {
             canonical_id: Arc::from("/c.ts"),
             local_scope: None,
+            kind: ScopeKind::File,
         },
         name: Arc::from("C"),
     });

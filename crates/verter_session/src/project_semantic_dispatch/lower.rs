@@ -25,8 +25,8 @@ use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
     DeclIdentity, HashValue, IndexSignature, NodeScopeId, PathSegment, PrimitiveKind,
     ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ResolveDeclKey, ScopeId,
-    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
-    SurfaceMember, SurfaceView, TupleElement, ValueRootKey,
+    ScopeKind, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+    SemanticQueryOutput, SurfaceMember, SurfaceView, TupleElement, ValueRootKey,
 };
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -553,6 +553,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope: ScopeId {
                             canonical_id: resolved_canonical,
                             local_scope: None,
+                            kind: ScopeKind::File,
                         },
                         name: resolved_name,
                     })) {
@@ -1603,6 +1604,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope: ScopeId {
                             canonical_id: Arc::clone(&scope_canonical_id),
                             local_scope: None,
+                            kind: ScopeKind::File,
                         },
                         name: Arc::clone(&single_root),
                     },
@@ -1624,6 +1626,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope: ScopeId {
                                     canonical_id: scope_canonical_id,
                                     local_scope: None,
+                                    kind: ScopeKind::File,
                                 },
                                 name: joined,
                             },

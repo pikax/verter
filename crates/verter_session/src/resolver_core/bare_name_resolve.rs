@@ -119,6 +119,14 @@ pub(crate) fn resolve_bare_name_in_scope(
         ) {
             return Some(ResolvedRootIdentity::new(scope_canonical_id, name));
         }
+        // A `declare global { interface Name { ... } }` declaration in this
+        // file is not a file-surface symbol, but the name resolves to the
+        // merged global declaration. The prepared-decl builder + `ResolveDecl`
+        // both fall back to the global augmentation inventory under the same
+        // `(canonical, name)` identity.
+        if entry.shallow_state.has_global_augmentation(name) {
+            return Some(ResolvedRootIdentity::new(scope_canonical_id, name));
+        }
     }
 
     // 3. Import-target walk (shallow state + prepared-bundle bindings).

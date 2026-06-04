@@ -92,6 +92,43 @@ pub struct ScopeId {
     /// scope, block scope). `None` means the file top-level scope. Only valid
     /// inside the lowered version of the owning canonical.
     pub local_scope: Option<u32>,
+    /// Which declaration scope of `canonical_id` the lookup addresses.
+    /// [`ScopeKind::File`] is the file's top-level surface (the common case);
+    /// the augmentation variants address an ambient `declare module "X"` /
+    /// `declare global` inventory so a declaration nested in an augmentation
+    /// block is resolvable without polluting the file surface.
+    pub kind: ScopeKind,
+}
+
+/// The declaration scope a [`ScopeId`] addresses.
+///
+/// Ambient augmentation blocks contribute to a DIFFERENT module's surface (the
+/// canonical Vue/Vite `declare module "vue"` pattern) or the global scope, so
+/// their inner declarations live in a separate addressable inventory. A
+/// `ResolveDecl` whose scope kind is one of the augmentation variants resolves
+/// the merged (base ⊕ all-augmenter) declaration surface for that target.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ScopeKind {
+    /// The file's top-level declaration surface.
+    File,
+    /// An ambient `declare module "<specifier>" { ... }` augmentation reached
+    /// by the RAW specifier as written. The session resolves the specifier to
+    /// a canonical (for relative specifiers) or treats it as a bare external
+    /// specifier when stitching augmenters through the augmentation index.
+    ModuleAugmentation { specifier: Arc<str> },
+    /// A `declare global { ... }` augmentation of the global scope.
+    GlobalAugmentation,
+}
+
+impl ScopeId {
+    /// A file top-level scope rooted in `canonical_id`.
+    pub fn file(canonical_id: Arc<str>) -> Self {
+        Self {
+            canonical_id,
+            local_scope: None,
+            kind: ScopeKind::File,
+        }
+    }
 }
 
 /// Source-scope sidecar tag for a [`SemanticNodeId`].
@@ -2932,6 +2969,7 @@ mod tests {
         let scope = ScopeId {
             canonical_id: Arc::from("/w/src/types.ts"),
             local_scope: None,
+            kind: ScopeKind::File,
         };
         let a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope.clone(),
@@ -2952,6 +2990,7 @@ mod tests {
             scope: ScopeId {
                 canonical_id: Arc::from("/w/a.ts"),
                 local_scope: None,
+                kind: ScopeKind::File,
             },
             name: Arc::from("Foo"),
         });
@@ -2959,6 +2998,7 @@ mod tests {
             scope: ScopeId {
                 canonical_id: Arc::from("/w/b.ts"),
                 local_scope: None,
+                kind: ScopeKind::File,
             },
             name: Arc::from("Foo"),
         });
