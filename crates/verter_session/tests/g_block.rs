@@ -93,5 +93,7 @@ mod typeinfo_graph_taxonomy;
 mod typeinfo_request_contract_guards;
 #[path = "g_block/typeinfo_wire_surface_guards.rs"]
 mod typeinfo_wire_surface_guards;
+#[path = "g_block/u2_demand_lattice_guards.rs"]
+mod u2_demand_lattice_guards;
 #[path = "g_block/u2_value_domain_design_guards.rs"]
 mod u2_value_domain_design_guards;

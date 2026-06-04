@@ -42,6 +42,19 @@ pub use verter_type_expr::LiteralValue;
 // second failure-domain type in this rewrite.
 pub use crate::resolver_core::shallow_file_state::BudgetExceededFailure;
 
+/// The `ProjectionDemand × EvalPolicy` lattice algebra (Deliverable #3 of
+/// `docs/arch/u2-query-value-domain-design.md`). The five [`ProjectionMode`]
+/// presets are points in this lattice; `meet`/`join`, satisfaction, and the
+/// §3.4 materialised-record carrier types live here.
+pub mod demand;
+pub use demand::{
+    apply_mask, backfill_points, cached_satisfies, demand_at_hop, relevant_demand_axes,
+    AliasPreservation, AxisMask, CarrierStopPolicy, Demand, DemandAxis, DisplayFacet, DisplayNeeds,
+    EvalPolicy, GenericOpenPolicy, MaterializedPoint, MaterializedSet, MemberBodyDemand, MergeRole,
+    NormalizationDepth, OperatorReduction, ProjectionDemand, ProjectionPath, ProvenanceNeed,
+    Regime, SurfaceFacet, SurfaceFacetSet, SurfaceRole,
+};
+
 /// Canonical content-hash type used everywhere this subsystem talks about
 /// file-version identity. Mirrors the workspace-wide [`Hash16`].
 pub type HashValue = Hash16;
