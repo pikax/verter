@@ -170,15 +170,21 @@ impl TypeDeclBody {
     /// project-semantic reducer over the `MergedDecl` carrier. The projection
     /// is an `Object` (never an `Intersection`), so it cannot accidentally
     /// route through the intersection heritage-shadow reducer.
+    ///
+    /// A contributor carrying `extends`/`implements` heritage lowers to an
+    /// `Intersection([<heritage Ref…>, <own Object>])`; this projection descends
+    /// such intersection arms and collects the OWN object members (the heritage
+    /// `Ref` arms carry no direct members and are not flattened — inherited
+    /// members surface only through the semantic reducer, exactly as for a single
+    /// `interface extends Base` body). Without this descent a heritage-carrying
+    /// merged contributor would drop even its own members from the shallow index.
     pub fn lookup_object(&self) -> Cow<'_, TypeExpr> {
         match self {
             Self::Single(body) => Cow::Borrowed(body),
             Self::Merged(merged) => {
                 let mut properties = Vec::new();
                 for contributor in &merged.contributors {
-                    if let TypeExpr::Object(object) = contributor {
-                        properties.extend(object.properties.iter().cloned());
-                    }
+                    collect_direct_object_members(contributor, &mut properties);
                 }
                 Cow::Owned(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
             }
@@ -188,24 +194,44 @@ impl TypeDeclBody {
     /// The union of direct member names across every contributor, in first-seen
     /// order (shallow index view; not the semantic surface).
     pub fn merged_member_names(&self) -> Vec<String> {
-        let mut names = Vec::new();
+        let mut members = Vec::new();
         for contributor in self.contributors() {
-            if let TypeExpr::Object(object) = contributor {
-                for member in &object.properties {
-                    let name = match member {
-                        ObjectMember::Property(prop) => Some(prop.name.clone()),
-                        ObjectMember::Method(method) => Some(method.name.clone()),
-                        _ => None,
-                    };
-                    if let Some(name) = name {
-                        if !names.contains(&name) {
-                            names.push(name);
-                        }
-                    }
+            collect_direct_object_members(contributor, &mut members);
+        }
+        let mut names = Vec::new();
+        for member in &members {
+            let name = match member {
+                ObjectMember::Property(prop) => Some(prop.name.clone()),
+                ObjectMember::Method(method) => Some(method.name.clone()),
+                _ => None,
+            };
+            if let Some(name) = name {
+                if !names.contains(&name) {
+                    names.push(name);
                 }
             }
         }
         names
+    }
+}
+
+/// Collect the DIRECT object members of `body` into `out`, descending
+/// `Intersection`/`Parenthesized` arms. Object arms contribute their members;
+/// every other arm (notably a heritage `Ref` from `extends`/`implements`)
+/// carries no direct member and is skipped — inherited members surface only
+/// through the semantic reducer, never this shallow index. Mirrors the
+/// session-side `collect_direct_object_properties` descent so the merged and
+/// single shallow-index views stay consistent.
+fn collect_direct_object_members(body: &TypeExpr, out: &mut Vec<ObjectMember>) {
+    match body {
+        TypeExpr::Object(object) => out.extend(object.properties.iter().cloned()),
+        TypeExpr::Intersection(parts) => {
+            for part in parts.iter() {
+                collect_direct_object_members(part, out);
+            }
+        }
+        TypeExpr::Parenthesized(inner) => collect_direct_object_members(inner, out),
+        _ => {}
     }
 }
 
@@ -604,5 +630,79 @@ impl EvalEnv {
 impl Default for EvalEnv {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod shallow_index_tests {
+    use super::*;
+
+    fn prop(name: &str, ty: TypeExpr) -> ObjectMember {
+        ObjectMember::Property(ObjectProperty::synthetic_public(
+            name.to_string(),
+            ty,
+            false,
+            false,
+        ))
+    }
+
+    fn object(members: Vec<ObjectMember>) -> TypeExpr {
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: members,
+        }))
+    }
+
+    /// A merged contributor carrying `extends` heritage lowers to
+    /// `Intersection([Ref(Base), Object({ own })])`. The shallow index
+    /// projection must still surface the contributor's OWN members (the
+    /// pre-fix Object-only match dropped the entire intersection contributor,
+    /// losing even `a`). Heritage members behind `Ref(Base)` stay out of the
+    /// shallow index (they are not direct members) — same as a single
+    /// `interface extends Base` body.
+    #[test]
+    fn lookup_object_recovers_own_members_from_heritage_contributor() {
+        // interface X extends Base { a: number }  +  interface X { b: boolean }
+        let heritage_contributor = TypeExpr::intersection(vec![
+            TypeExpr::named("Base"),
+            object(vec![prop("a", TypeExpr::primitive(PrimitiveName::Number))]),
+        ]);
+        let plain_contributor = object(vec![prop("b", TypeExpr::primitive(PrimitiveName::Boolean))]);
+        let body = TypeDeclBody::Merged(MergedTypeBody {
+            contributors: vec![heritage_contributor, plain_contributor],
+            kinds: vec![TypeDeclKind::Interface, TypeDeclKind::Interface],
+        });
+
+        let names = body.merged_member_names();
+        assert!(
+            names.contains(&"a".to_string()),
+            "own member `a` from the heritage-carrying contributor must survive the shallow index; got {names:?}"
+        );
+        assert!(
+            names.contains(&"b".to_string()),
+            "own member `b` must survive; got {names:?}"
+        );
+        // Heritage members behind `Ref(Base)` are NOT direct members and stay
+        // out of the shallow index (resolved later by the semantic reducer).
+        assert!(
+            !names.contains(&"Base".to_string()),
+            "the heritage Ref name must not appear as a member; got {names:?}"
+        );
+
+        // The projection is an `Object` (never an `Intersection`) so it cannot
+        // route through the heritage-shadow reducer.
+        let projected = body.lookup_object();
+        let TypeExpr::Object(obj) = projected.as_ref() else {
+            panic!("lookup_object must project to an Object; got {projected:?}");
+        };
+        let projected_names: Vec<&str> = obj
+            .properties
+            .iter()
+            .filter_map(|m| match m {
+                ObjectMember::Property(p) => Some(p.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(projected_names.contains(&"a"), "got {projected_names:?}");
+        assert!(projected_names.contains(&"b"), "got {projected_names:?}");
     }
 }

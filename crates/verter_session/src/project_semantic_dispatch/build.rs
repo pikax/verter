@@ -1336,8 +1336,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // contributions. If the base body is itself a `MergedDecl` (same-file
         // merge), flatten its contributors so the augmenter peers merge AT THE
         // SAME LEVEL — a nested `MergedDecl` contributor would be dropped by the
-        // surface extractor (`shallow_surface_of_node` only reads Object /
-        // Intersection).
+        // contributor splitter (`collect_merged_contributor_arms` only reads
+        // Object / Intersection / Alias bodies).
         let mut all_contributors: Vec<SemanticNodeId> = match self.graph().node_data(base_result) {
             Some(data) => match data.as_ref() {
                 SemanticNodeData::MergedDecl { contributors } => contributors.to_vec(),

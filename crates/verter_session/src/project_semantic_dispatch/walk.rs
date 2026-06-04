@@ -487,50 +487,97 @@ impl<'a> super::ProjectSemanticDispatch<'a> {
 }
 
 /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
-/// `Object` node (graph-only entry point; the dispatch method delegates here).
-/// Each contributor's surface is extracted (an interface body is an `Object`;
-/// an interface-with-`extends` body is an `Intersection` whose own/heritage
-/// arms reduce via the intersection merge first), then all contributors
-/// peer-merge via [`merge_declaration_surfaces`]. This is the single
-/// declaration-merge reducer every MergedDecl consumer routes through.
+/// node (graph-only entry point; the dispatch method delegates here).
+///
+/// Each contributor body is split into its OWN-body surface(s) and its
+/// `extends`/`implements` HERITAGE arms:
+/// * an interface body with no heritage is a bare `Object` — its members are
+///   own-body;
+/// * an interface-with-`extends` body is an `Intersection` whose `Object`
+///   arm(s) are own-body and whose remaining (reference) arms are heritage.
+///
+/// All contributors' own-body surfaces peer-merge via
+/// [`merge_declaration_surfaces`] (member union + ordered method overload
+/// accumulation). Heritage arms are PRESERVED, not flattened here: the reducer
+/// emits `Intersection([heritage…, peer_merged_own_Object])` so the existing
+/// consumer paths (raise / expand / walk-segment / relation) resolve the
+/// heritage references lazily and apply own-body-shadows-heritage precedence
+/// (the own `Object` arm is last). When a contributor has no heritage the
+/// result is the peer-merged `Object` directly. This keeps a single
+/// declaration-merge engine and a single heritage-resolution path — the reducer
+/// never eagerly expands a heritage `Ref`.
 pub(crate) fn reduce_merged_decl_with_graph(
     graph: &SemanticGraphStore,
     contributors: &[SemanticNodeId],
 ) -> SemanticNodeId {
-    let mut surfaces: Vec<ShallowSurface> = Vec::with_capacity(contributors.len());
+    let mut own_surfaces: Vec<ShallowSurface> = Vec::with_capacity(contributors.len());
+    let mut heritage_arms: Vec<SemanticNodeId> = Vec::new();
     for contributor in contributors {
-        if let Some(surface) = shallow_surface_of_node(graph, *contributor) {
-            surfaces.push(surface);
-        }
+        collect_merged_contributor_arms(graph, *contributor, &mut own_surfaces, &mut heritage_arms);
     }
-    let merged = merge_declaration_surfaces(graph, &surfaces);
-    graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)))
+    let merged = merge_declaration_surfaces(graph, &own_surfaces);
+    let own_object = graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
+    if heritage_arms.is_empty() {
+        return own_object;
+    }
+    // Preserve heritage: own-body object LAST so the intersection heritage-shadow
+    // reducer lets the merged own members shadow inherited same-name members.
+    let mut arms = heritage_arms;
+    arms.push(own_object);
+    graph.intern_node(SemanticNodeData::Intersection(Arc::from(arms.into_boxed_slice())))
 }
 
-/// Extract a single contributor's [`ShallowSurface`]. `Object` nodes map
-/// directly; `Intersection` nodes (an interface body carrying `extends`
-/// heritage) reduce via the intersection heritage-shadow merge first. Other
-/// shapes yield no surface (skipped by the caller).
-fn shallow_surface_of_node(
+/// Split one merged-declaration contributor into its OWN-body surface(s) and
+/// its `extends`/`implements` HERITAGE reference arms.
+///
+/// `Object` (and `Alias`-to-`Object`) bodies are pure own-body surfaces.
+/// `Intersection` bodies (interface/class with heritage) contribute their
+/// object-surface arms as own-body and their remaining reference arms as
+/// heritage (de-duplicated). Any other shape yields nothing.
+fn collect_merged_contributor_arms(
     graph: &SemanticGraphStore,
     node: SemanticNodeId,
-) -> Option<ShallowSurface> {
-    let data = graph.node_data(node)?;
+    own_surfaces: &mut Vec<ShallowSurface>,
+    heritage_arms: &mut Vec<SemanticNodeId>,
+) {
+    let Some(data) = graph.node_data(node) else {
+        return;
+    };
     match data.as_ref() {
-        SemanticNodeData::Object(view) => Some(ShallowSurface::from_object(view)),
+        SemanticNodeData::Object(view) => own_surfaces.push(ShallowSurface::from_object(view)),
         SemanticNodeData::Intersection(arms) => {
             let arms = Arc::clone(arms);
             drop(data);
-            let arm_surfaces: Vec<Option<ShallowSurface>> = arms
-                .iter()
-                .map(|arm| {
-                    graph.node_data(*arm).and_then(|d| match d.as_ref() {
-                        SemanticNodeData::Object(view) => Some(ShallowSurface::from_object(view)),
-                        _ => None,
-                    })
-                })
-                .collect();
-            merge_intersection_surfaces_with_graph(graph, &arm_surfaces)
+            for arm in arms.iter() {
+                if arm_is_object_surface(graph, *arm) {
+                    if let Some(view) = object_surface_view(graph, *arm) {
+                        own_surfaces.push(ShallowSurface::from_object(&view));
+                    }
+                } else if !heritage_arms.contains(arm) {
+                    heritage_arms.push(*arm);
+                }
+            }
+        }
+        SemanticNodeData::Alias(target) => {
+            let target = *target;
+            drop(data);
+            collect_merged_contributor_arms(graph, target, own_surfaces, heritage_arms);
+        }
+        _ => {}
+    }
+}
+
+/// The `SurfaceView` of an object-surface node, following a single `Alias` hop
+/// (an identity-alias wrapper of an own-body object). `None` for non-object
+/// shapes.
+fn object_surface_view(graph: &SemanticGraphStore, node: SemanticNodeId) -> Option<SurfaceView> {
+    let data = graph.node_data(node)?;
+    match data.as_ref() {
+        SemanticNodeData::Object(view) => Some(view.clone()),
+        SemanticNodeData::Alias(target) => {
+            let target = *target;
+            drop(data);
+            object_surface_view(graph, target)
         }
         _ => None,
     }
@@ -2389,32 +2436,24 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         };
         match &*data {
             SemanticNodeData::MergedDecl { contributors } => {
-                // Peer-merge the same-name interface contributors into one
-                // object surface and contribute it (same path as a plain
-                // Object). The reducer applies declaration-merge member rules,
-                // not heritage-shadow.
+                // Peer-merge the same-name interface contributors, then RE-VISIT
+                // the reduced node. The reducer applies declaration-merge member
+                // rules (union + overload accumulation) over the own bodies and
+                // emits either a bare `Object` (no heritage) or an
+                // `Intersection([heritage…, own_Object])`. Re-visiting routes the
+                // Intersection through the heritage-overlay path so inherited
+                // members surface and own members shadow them — exactly the same
+                // resolution a single `interface extends Base` body receives.
                 let contributors = contributors.clone();
                 drop(data);
                 let merged = self.dispatch.reduce_merged_decl(&contributors);
-                let mut surface = match self.graph().node_data(merged) {
-                    Some(merged_data) => match merged_data.as_ref() {
-                        SemanticNodeData::Object(view) => ShallowSurface::from_object(view),
-                        _ => ShallowSurface::empty(),
-                    },
-                    None => ShallowSurface::empty(),
-                };
-                if let Some(role) = member_role_override {
-                    for member in &mut surface.members {
-                        member.merge_role = role;
-                    }
-                }
-                self.contribute_surface(
+                work.push(Frame::Visit {
+                    node: merged,
                     target,
-                    root_contribution,
-                    intersection_buffers,
-                    union_buffers,
-                    Some(surface),
-                );
+                    member_role_override,
+                    heritage_overlay_body: true,
+                    provenance_override,
+                });
             }
             SemanticNodeData::Object(view) => {
                 let mut surface = ShallowSurface::from_object(view);

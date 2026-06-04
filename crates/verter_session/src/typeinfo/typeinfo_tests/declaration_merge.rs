@@ -255,6 +255,87 @@ fn same_file_interface_class_merge_unions_instance_members() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// ---------------------------------------------------------------------------
+// 7. A merged interface whose contributor carries `extends` heritage MUST
+//    surface the inherited members alongside every contributor's own members.
+//    `interface X extends Base { a }` + `interface X { b }` ⇒ {base, a, b}.
+//    The pre-fix reducer dropped the heritage `Ref(Base)` arm (it kept only
+//    direct `Object` arms), so `base` went missing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn merged_interface_preserves_extends_heritage_members() {
+    let host = make_host_with_footprint();
+    upsert_ts(
+        &host,
+        PATH,
+        "export interface Base { base: string }\n\
+         export interface X extends Base { a: number }\n\
+         export interface X { b: boolean }\n",
+    );
+
+    // The merged surface (heritage ∪ own) is delivered by the empty-path
+    // Shallow terminal synthesiser (the shallow-surface walker), which is the
+    // path that resolves `extends` heritage references into a flat member
+    // surface. A bare `resolve_named_symbol` + raise keeps `extends Base` as an
+    // un-inlined `Ref(Base)` arm (true for a single interface too).
+    let expr = shallow_surface_expr(&host, PATH, "X");
+    let props = object_props(&expr);
+    let names = prop_names(&props);
+
+    // Inherited member from `extends Base` survives the merge (pre-fix the
+    // merged-decl reducer dropped the heritage `Ref(Base)` arm → `base` gone).
+    assert!(
+        names.contains(&"base"),
+        "merged X must inherit `base` from `extends Base`; got {names:?}"
+    );
+    // Own members of both contributors survive.
+    assert!(
+        names.contains(&"a"),
+        "merged X must expose own member `a`; got {names:?}"
+    );
+    assert!(
+        names.contains(&"b"),
+        "merged X must expose own member `b`; got {names:?}"
+    );
+    assert_primitive(&props["base"].ty, PrimitiveName::String);
+    assert_primitive(&props["a"].ty, PrimitiveName::Number);
+    assert_primitive(&props["b"].ty, PrimitiveName::Boolean);
+}
+
+// ---------------------------------------------------------------------------
+// 7b. Own members SHADOW inherited members of the same name (TS heritage
+//     precedence), and overload accumulation across merged contributors is
+//     unaffected by the heritage-preservation fix.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn merged_interface_own_member_shadows_heritage() {
+    let host = make_host_with_footprint();
+    upsert_ts(
+        &host,
+        PATH,
+        "export interface Base { shared: string }\n\
+         export interface X extends Base { shared: number }\n\
+         export interface X { extra: boolean }\n",
+    );
+
+    let expr = shallow_surface_expr(&host, PATH, "X");
+    let props = object_props(&expr);
+    let names = prop_names(&props);
+
+    assert!(
+        names.contains(&"extra"),
+        "own `extra` must survive; got {names:?}"
+    );
+    assert!(
+        names.contains(&"shared"),
+        "merged `shared` must be present; got {names:?}"
+    );
+    // Own `shared: number` shadows the inherited `shared: string`.
+    assert_primitive(&props["shared"].ty, PrimitiveName::Number);
+}
+
 #[test]
 fn distinct_interface_names_stay_distinct() {
     let host = make_host_with_footprint();
