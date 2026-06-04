@@ -10,8 +10,14 @@
 //!   the EditorToolbar fixture.
 //! - `dispatch_lowering_concurrent_does_not_regress`: 4-thread
 //!   contention test — concurrent p95 < +10% of sequential baseline.
-//! - `dispatch_lowering_thundering_herd_does_not_collapse`:
-//!   100 threads on the same key — multiplier ≤ 1.2× sequential.
+//! - `concurrent_demand_for_same_meta_key_collapses_to_one_compute`:
+//!   32 threads on the same cold key — a deterministic
+//!   singleflight-collapse rendezvous (NOT a wall-clock proxy). One
+//!   request leads the cold compute; the other 31 Follower-join the
+//!   in-flight lane. The invariant is structural: exactly one cold
+//!   recompute, one Leader + 31 Followers, no `Cache`/`Fallback`/
+//!   forked lane, all 32 results structurally identical, and the
+//!   singleflight lane drains to zero after the burst.
 //!
 //! ## Memo footprint audit
 //!
@@ -24,10 +30,17 @@
 //! relative-to-baseline bounds the host-DB read-through pattern
 //! must not regress.
 
-use std::sync::Arc;
+use std::sync::atomic::Ordering::Relaxed;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
+use crate::host_manage::component_meta_request_impl::ViewBoundRequestHost;
 use crate::meta::MetaProject;
+use crate::resolver_core::{
+    run_component_meta_request, CanonicalCompletionOverlay, ComponentMetaRequestHost,
+    RequestRunResult, RequestSource, ResolutionNodeKey, SingleflightRole, StoreView,
+};
+use crate::session_view::HostViewRef;
 use crate::types::HostConfig;
 use crate::VerterHost;
 
@@ -197,49 +210,427 @@ fn dispatch_lowering_concurrent_does_not_regress() {
     );
 }
 
+/// Test-owned compute gate: the elected Leader parks here mid-`compute`
+/// so the test can deterministically observe the in-flight singleflight
+/// lane before any cold work completes. Mirrors the `LeaderGate` idiom
+/// in `resolver_core::mod` tests (`entered` proves the Leader is inside
+/// `compute`; `open` releases it).
+struct LeaderGate {
+    entered: Mutex<bool>,
+    entered_cv: Condvar,
+    open: Mutex<bool>,
+    open_cv: Condvar,
+}
+
+impl LeaderGate {
+    fn new() -> Self {
+        Self {
+            entered: Mutex::new(false),
+            entered_cv: Condvar::new(),
+            open: Mutex::new(false),
+            open_cv: Condvar::new(),
+        }
+    }
+
+    fn signal_entered(&self) {
+        let mut entered = self.entered.lock().unwrap();
+        *entered = true;
+        self.entered_cv.notify_all();
+    }
+
+    fn wait_entered(&self) {
+        let mut entered = self.entered.lock().unwrap();
+        while !*entered {
+            entered = self.entered_cv.wait(entered).unwrap();
+        }
+    }
+
+    fn wait_open(&self) {
+        let mut open = self.open.lock().unwrap();
+        while !*open {
+            open = self.open_cv.wait(open).unwrap();
+        }
+    }
+
+    fn release(&self) {
+        let mut open = self.open.lock().unwrap();
+        *open = true;
+        self.open_cv.notify_all();
+    }
+}
+
+/// Delegating [`ComponentMetaRequestHost`] that wraps the REAL
+/// [`ViewBoundRequestHost`] and forwards every trait method untouched
+/// EXCEPT `compute_component_meta`, which signals "Leader entered" and
+/// parks on a test-owned [`LeaderGate`] before delegating to the real
+/// cold compute. This adds ZERO production change: the rendezvous is
+/// expressed entirely at the request layer, and the only signal the
+/// test reads from the singleflight primitive is the existing
+/// `test_flight_strong_count` lane probe.
+struct GatingRequestHost<'a> {
+    inner: ViewBoundRequestHost<'a>,
+    gate: Arc<LeaderGate>,
+}
+
+impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
+    type View = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::View;
+    type Mode = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::Mode;
+    type Resolution = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::Resolution;
+    type CapturedInputs = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::CapturedInputs;
+
+    fn cache_key(&self, canonical: &str, mode: Self::Mode) -> ResolutionNodeKey {
+        self.inner.cache_key(canonical, mode)
+    }
+
+    fn snapshot_store_view(&self) -> Self::View {
+        self.inner.snapshot_store_view()
+    }
+
+    fn view_mutation_epoch(&self, store_view: &Self::View) -> u64 {
+        self.inner.view_mutation_epoch(store_view)
+    }
+
+    fn current_store_view_epoch(&self) -> u64 {
+        self.inner.current_store_view_epoch()
+    }
+
+    fn capture_component_meta_inputs(
+        &self,
+        canonical: &str,
+        store_view: &Self::View,
+    ) -> Option<Self::CapturedInputs> {
+        self.inner
+            .capture_component_meta_inputs(canonical, store_view)
+    }
+
+    fn try_get_cached_component_meta(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+        store_view: &Self::View,
+    ) -> Option<Self::Resolution> {
+        self.inner
+            .try_get_cached_component_meta(canonical, mode, store_view)
+    }
+
+    fn compute_component_meta(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+        captured: Option<&Self::CapturedInputs>,
+        store_view: Option<&Self::View>,
+    ) -> Option<Self::Resolution> {
+        // Only the elected Leader reaches `compute`; Followers join the
+        // in-flight lane and never call this. Signal entry, then park
+        // until the test releases the gate, THEN run the real compute.
+        self.gate.signal_entered();
+        self.gate.wait_open();
+        self.inner
+            .compute_component_meta(canonical, mode, captured, store_view)
+    }
+
+    fn store_component_meta_result(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+        result: &Self::Resolution,
+    ) {
+        self.inner
+            .store_component_meta_result(canonical, mode, result)
+    }
+}
+
+/// Build a [`GatingRequestHost`] over a fresh, overlay-free
+/// [`ViewBoundRequestHost`] for `host`, sharing `gate`. The returned
+/// host borrows `view`, which the caller must keep alive for the
+/// request's lifetime (exactly how production constructs the adapter at
+/// `component_meta_methods.rs`).
+fn gating_request_host<'a>(
+    host: &'a VerterHost,
+    view: &'a HostViewRef<'a>,
+    gate: Arc<LeaderGate>,
+) -> GatingRequestHost<'a> {
+    GatingRequestHost {
+        inner: ViewBoundRequestHost {
+            host,
+            view,
+            overlay: Arc::new(CanonicalCompletionOverlay::new()),
+        },
+        gate,
+    }
+}
+
+/// Structural fingerprint of a resolved component-meta state — the
+/// discriminating shape every coalesced caller must agree on. Avoids a
+/// full `PartialEq` (the resolved state does not derive it) while still
+/// proving the 32 callers observed the SAME computed result.
+fn resolved_state_fingerprint(
+    state: &crate::meta_resolve::ResolvedComponentMetaState,
+) -> (String, String, usize, usize, (usize, usize, usize, usize)) {
+    let evaluated = state
+        .evaluated_types
+        .as_ref()
+        .map(|e| {
+            (
+                e.props.len(),
+                e.emits.len(),
+                e.slot_bindings.len(),
+                e.bindings.len(),
+            )
+        })
+        .unwrap_or((0, 0, 0, 0));
+    (
+        format!("{:?}", state.mode),
+        format!("{:?}", state.whole_hash),
+        state.resolved_macros.len(),
+        state.resolved_type_registry.len(),
+        evaluated,
+    )
+}
+
+/// Concurrent demand for the same cold component-meta key must collapse
+/// onto exactly ONE cold compute via the request-layer singleflight,
+/// not fan out into N independent cold builds.
+///
+/// Asserts the singleflight-collapse invariant deterministically through
+/// counters and per-caller `RequestSource`, not a wall-clock ratio
+/// (wall-clock bounds flake under nextest process-per-test CPU
+/// oversubscription).
+///
+/// Mechanism (mirrors `resolver_core::mod`'s LeaderGate + strong-count
+/// straggler-gate idiom): the Leader request is spawned alone and parks
+/// inside `compute` via a test-owned [`LeaderGate`]; once it is provably
+/// in-flight (`baseline` strong count == 3), the 31 Followers are
+/// spawned and deterministically polled onto the SAME lane (no sleep, no
+/// barrier) before the gate is released.
 #[test]
-fn dispatch_lowering_thundering_herd_does_not_collapse() {
+fn concurrent_demand_for_same_meta_key_collapses_to_one_compute() {
+    const FOLLOWERS: usize = 31;
+    // Leader strong-count baseline: leader's `run_retaining` local
+    // `state` binding + the `flights` map entry + the leader's own
+    // `participate` guard clone. Mirrors `resolver_core::mod`'s
+    // documented invariant (the 2-thread reference asserts the same 3).
+    const LEADER_BASELINE: usize = 3;
+    // Each committed Follower pins TWO refs on the leader's lane: its
+    // `participate` guard clone, then its `run_retaining` join clone.
+    const FULL_OCCUPANCY: usize = LEADER_BASELINE + 2 * FOLLOWERS;
+
     let project = make_project();
     upsert_editor_toolbar_fixture(&project);
+    // Open the session batch but DO NOT query the (canonical, mode) meta
+    // key beforehand — the burst must hit a COLD singleflight lane.
     let session = project.open_session_batch().unwrap();
-
-    // 32 threads (CI-friendly; the plan's 100-thread variant is too
-    // heavy for the tighter unit-test harness) racing the same query
-    // on a cold cache. Cooperative admission must collapse them onto
-    // one cold compute, not 32.
     let host = session.host();
-    let host_ptr: usize = host as *const VerterHost as usize;
-    let elapsed_ns = time_ns(|| {
-        std::thread::scope(|scope| {
-            for _ in 0..32 {
-                scope.spawn(move || {
-                    let host_ref: &VerterHost = unsafe { &*(host_ptr as *const VerterHost) };
-                    let _ = host_ref.get_component_meta("/EditorToolbar.vue");
-                });
-            }
-        });
+
+    let mode = crate::types::ProjectionMode::Expanded;
+    let canonical = host.resolve_alias_or_canonical("/EditorToolbar.vue");
+
+    // Derive the lane identity (key + compat token) exactly as the
+    // request executor does: cache_key folds the overlay-free view
+    // fingerprint (0); the lane token is the snapshotted store view's
+    // compat token. A probe adapter constructs both the same way the
+    // burst threads will, so the test's `test_flight_strong_count`
+    // probe targets the IDENTICAL lane the threads pin.
+    let probe_view = HostViewRef::new(host);
+    let probe_host = ViewBoundRequestHost {
+        host,
+        view: &probe_view,
+        overlay: Arc::new(CanonicalCompletionOverlay::new()),
+    };
+    let key = probe_host.cache_key(&canonical, mode);
+    let token = probe_host.snapshot_store_view().compat_token();
+
+    let sf = host.resolver_runtime().component_meta.singleflight();
+    let gate = Arc::new(LeaderGate::new());
+
+    let recomputes_before = host
+        .provenance()
+        .component_meta_resolved_state_recomputes
+        .load(Relaxed);
+
+    let run_one = |gate: Arc<LeaderGate>| -> RequestRunResult<
+        Option<crate::meta_resolve::ResolvedComponentMetaState>,
+    > {
+        let view = HostViewRef::new(host);
+        let gating = gating_request_host(host, &view, gate);
+        run_component_meta_request(
+            &gating,
+            sf,
+            &canonical,
+            mode,
+            None,
+            crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
+        )
+    };
+
+    let (leader_result, follower_results) = std::thread::scope(|scope| {
+        // Spawn the Leader ALONE and wait until it is provably parked
+        // inside `compute` (it has already claimed the flight, so it is
+        // deterministically the Leader — no other thread exists yet).
+        let leader_handle = {
+            let gate = Arc::clone(&gate);
+            scope.spawn(move || run_one(gate))
+        };
+        gate.wait_entered();
+
+        // The parked-Leader-only baseline: exactly LEADER_BASELINE refs.
+        let baseline = sf.test_flight_strong_count(&key, token);
+        assert_eq!(
+            baseline, LEADER_BASELINE,
+            "parked-leader strong-count baseline must be {LEADER_BASELINE} (run_retaining local \
+             `state` + `flights` map entry + leader `participate` guard); a different value means \
+             the leader ref bookkeeping drifted and the follower gate below must be re-derived",
+        );
+
+        // Now spawn the 31 Followers. They coalesce onto the Leader's
+        // in-flight lane.
+        let follower_handles: Vec<_> = (0..FOLLOWERS)
+            .map(|_| {
+                let gate = Arc::clone(&gate);
+                scope.spawn(move || run_one(gate))
+            })
+            .collect();
+
+        // Deterministically wait until every Follower has committed onto
+        // the Leader's run lane (each adds 2 refs). NO sleep, NO barrier
+        // — poll the existing lane strong count with yield.
+        let mut spins = 0u64;
+        while sf.test_flight_strong_count(&key, token) < FULL_OCCUPANCY {
+            spins += 1;
+            assert!(
+                spins < 10_000_000,
+                "liveness: a follower never committed onto the leader's run lane (count stuck \
+                 below {FULL_OCCUPANCY}). A follower pinned a DIFFERENT lane than the leader's run \
+                 lane (pin/run lane drift).",
+            );
+            std::thread::yield_now();
+        }
+        // Full occupancy is the deterministic ceiling: Leader(3) + 31×2.
+        // No caller holds more, and every Follower is blocked on the
+        // still-closed gate, so the count is stable at exactly this value.
+        assert_eq!(
+            sf.test_flight_strong_count(&key, token),
+            FULL_OCCUPANCY,
+            "all {FOLLOWERS} followers must hold exactly 2 refs each on the leader's lane",
+        );
+
+        // Release the Leader; everyone completes.
+        gate.release();
+
+        let leader_result = leader_handle.join().unwrap();
+        let follower_results: Vec<_> = follower_handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect();
+        (leader_result, follower_results)
     });
 
-    // Warm sequential baseline for comparison.
-    let baseline_ns = time_ns(|| {
-        let _ = session.evaluate_types("/EditorToolbar.vue").unwrap();
-    });
-
-    eprintln!(
-        "step3 thundering-herd: 32 cold-thread races took {elapsed_ns} ns; \
-         baseline warm-single {baseline_ns} ns"
+    // --- Role attribution: exactly 1 Leader + 31 Followers, cold-built
+    //     once, no cache / fallback / forked lanes. ---
+    assert_eq!(
+        leader_result.source,
+        RequestSource::Flight {
+            role: SingleflightRole::Leader,
+            forked_lane: false,
+        },
+        "the request that ran `compute` is the single cold Leader winner",
     );
 
-    // The contract: 32 threads on the same key should NOT take 32×
-    // baseline. Cooperative admission collapses to ~1× cold + many
-    // warm joins. We assert the elapsed is < 10× a single warm query
-    // (loose bound to avoid flakiness; tightens the more we trust the
-    // primitive).
-    let limit = baseline_ns.saturating_mul(10).max(HARD_CAP_NS);
-    assert!(
-        elapsed_ns < limit,
-        "32-thread thundering herd took {elapsed_ns} ns vs limit {limit} ns — \
-         cooperative admission is not collapsing concurrent cold builds"
+    let mut leaders = 0usize;
+    let mut followers = 0usize;
+    let mut caches = 0usize;
+    let mut fallbacks = 0usize;
+    let mut forked = 0usize;
+    for r in std::iter::once(&leader_result).chain(follower_results.iter()) {
+        match r.source {
+            RequestSource::Flight {
+                role: SingleflightRole::Leader,
+                forked_lane,
+            } => {
+                leaders += 1;
+                if forked_lane {
+                    forked += 1;
+                }
+            }
+            RequestSource::Flight {
+                role: SingleflightRole::Follower,
+                forked_lane,
+            } => {
+                followers += 1;
+                if forked_lane {
+                    forked += 1;
+                }
+            }
+            RequestSource::Cache => caches += 1,
+            RequestSource::Fallback => fallbacks += 1,
+        }
+    }
+    assert_eq!(leaders, 1, "exactly one Leader across the 32-caller burst");
+    assert_eq!(
+        followers, FOLLOWERS,
+        "the other {FOLLOWERS} callers must Follower-join the in-flight lane",
+    );
+    assert_eq!(
+        caches, 0,
+        "no caller may pre-flight cache-hit on a cold key"
+    );
+    assert_eq!(
+        fallbacks, 0,
+        "no caller may fall back to an unstable recompute"
+    );
+    assert_eq!(forked, 0, "no caller may fork a separate singleflight lane");
+
+    // --- Exactly ONE cold recompute across the whole burst. ---
+    let recomputes_after = host
+        .provenance()
+        .component_meta_resolved_state_recomputes
+        .load(Relaxed);
+    assert_eq!(
+        recomputes_after - recomputes_before,
+        1,
+        "32 concurrent callers on the same cold key must drive exactly ONE \
+         `ResolvedComponentMetaState` recompute (got {})",
+        recomputes_after - recomputes_before,
+    );
+
+    // --- Exactly ONE published candidate for the key in the
+    //     resolver-runtime result cache the request layer writes to. ---
+    let candidates = host
+        .resolver_runtime()
+        .component_meta
+        .candidate_signatures_for_key(&key);
+    assert_eq!(
+        candidates.len(),
+        1,
+        "the cold compute must publish exactly one candidate for the key (got {})",
+        candidates.len(),
+    );
+
+    // --- All 32 results are Some and structurally identical to the
+    //     Leader's single computed result. ---
+    let leader_value = leader_result
+        .value
+        .as_ref()
+        .expect("leader produced a resolved component-meta state");
+    let leader_fp = resolved_state_fingerprint(leader_value);
+    for (i, r) in follower_results.iter().enumerate() {
+        let value = r.value.as_ref().unwrap_or_else(|| {
+            panic!("follower {i} returned None instead of the coalesced result")
+        });
+        assert_eq!(
+            resolved_state_fingerprint(value),
+            leader_fp,
+            "follower {i} observed a different resolved state than the leader — coalescing \
+             handed back a torn or independently-computed value",
+        );
+    }
+
+    // --- The per-burst rendezvous lane drains fully once every pin
+    //     releases (it is a rendezvous, not a cache). ---
+    assert_eq!(
+        sf.test_flight_strong_count(&key, token),
+        0,
+        "the singleflight lane must be reaped after the last caller's pin releases",
     );
 }
 

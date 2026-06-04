@@ -137,7 +137,7 @@ impl DeclarationLookupDb {
 }
 ```
 
-**Sub-task 3.0 perf probes** (sequential + concurrent + thundering-herd):
+**Sub-task 3.0 perf probes** (sequential + concurrent + singleflight-collapse):
 deferred until at least one DB migration provides a meaningful warm/cold
 boundary to measure.
 
@@ -230,8 +230,11 @@ doesn't have.
   500ms hard cap. **PASS.**
 - `dispatch_lowering_concurrent_does_not_regress`: 4-thread
   concurrent vs sequential, ≤ 20× sequential bound. **PASS.**
-- `dispatch_lowering_thundering_herd_does_not_collapse`: 32-thread
-  cold race < 10× warm-single. **PASS.**
+- `concurrent_demand_for_same_meta_key_collapses_to_one_compute`: 32
+  concurrent callers on one cold key collapse to exactly ONE cold
+  compute (1 Leader + 31 Follower-joins, no Cache/Fallback/forked
+  lane), asserted deterministically via the request-layer singleflight
+  strong-count rendezvous — not a wall-clock bound. **PASS.**
 
 **Sub-task 3.3 — memo footprint audit.**
 `instantiate_memo_node_count_within_budget` asserts the project-
