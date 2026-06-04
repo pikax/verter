@@ -70,7 +70,7 @@ fn build_indexed(
             verter_session::resolver_core::shallow_file_state::ShallowValueSymbol {
                 kind,
                 type_annotation: None,
-                function_signature: None,
+                signatures: Vec::new(),
                 object_shape: None,
                 enum_members: None,
                 is_synthesised_vue_default: false,

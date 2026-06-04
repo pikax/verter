@@ -20,7 +20,7 @@ use verter_type_expr::*;
 fn extracts_type_alias() {
     let env = parse_and_build_env("type Color = \"red\" | \"blue\" | \"green\"");
     assert!(env.type_symbols.contains_key("Color"));
-    let decl = &env.type_symbols["Color"];
+    let decl = env.type_symbols["Color"].primary();
     assert_eq!(decl.kind, TypeDeclKind::Alias);
     assert!(decl.type_parameters.is_empty());
     match &decl.body {
@@ -35,7 +35,7 @@ fn extracts_type_alias() {
 #[test]
 fn extracts_generic_type_alias() {
     let env = parse_and_build_env("type Box<T> = { value: T }");
-    let decl = &env.type_symbols["Box"];
+    let decl = env.type_symbols["Box"].primary();
     assert_eq!(decl.type_parameters.len(), 1);
     assert_eq!(decl.type_parameters[0].name, "T");
 }
@@ -74,15 +74,15 @@ fn parse_and_build_env_assigns_stable_type_declaration_ids_for_unchanged_source(
         env_b.type_declaration_id("User")
     );
     assert_eq!(
-        env_a.type_symbols["Box"].declaration_id,
-        env_b.type_symbols["Box"].declaration_id
+        env_a.type_symbols["Box"].primary().declaration_id,
+        env_b.type_symbols["Box"].primary().declaration_id
     );
     assert_eq!(
-        env_a.type_symbols["User"].declaration_id,
-        env_b.type_symbols["User"].declaration_id
+        env_a.type_symbols["User"].primary().declaration_id,
+        env_b.type_symbols["User"].primary().declaration_id
     );
-    assert_ne!(env_a.type_symbols["Box"].declaration_id, 0);
-    assert_ne!(env_a.type_symbols["User"].declaration_id, 0);
+    assert_ne!(env_a.type_symbols["Box"].primary().declaration_id, 0);
+    assert_ne!(env_a.type_symbols["User"].primary().declaration_id, 0);
 }
 
 #[test]
@@ -101,15 +101,15 @@ fn parse_and_build_env_assigns_stable_value_declaration_ids_for_unchanged_source
         env_b.value_declaration_id("greet")
     );
     assert_eq!(
-        env_a.value_symbols["count"].declaration_id,
-        env_b.value_symbols["count"].declaration_id
+        env_a.value_symbols["count"].primary().declaration_id,
+        env_b.value_symbols["count"].primary().declaration_id
     );
     assert_eq!(
-        env_a.value_symbols["greet"].declaration_id,
-        env_b.value_symbols["greet"].declaration_id
+        env_a.value_symbols["greet"].primary().declaration_id,
+        env_b.value_symbols["greet"].primary().declaration_id
     );
-    assert_ne!(env_a.value_symbols["count"].declaration_id, 0);
-    assert_ne!(env_a.value_symbols["greet"].declaration_id, 0);
+    assert_ne!(env_a.value_symbols["count"].primary().declaration_id, 0);
+    assert_ne!(env_a.value_symbols["greet"].primary().declaration_id, 0);
 }
 
 // =============================================================================
@@ -120,7 +120,7 @@ fn parse_and_build_env_assigns_stable_value_declaration_ids_for_unchanged_source
 fn extracts_interface() {
     let env = parse_and_build_env("interface User { id: number; name: string; email?: string }");
     assert!(env.type_symbols.contains_key("User"));
-    let decl = &env.type_symbols["User"];
+    let decl = env.type_symbols["User"].primary();
     assert_eq!(decl.kind, TypeDeclKind::Interface);
 
     match &decl.body {
@@ -149,7 +149,7 @@ fn extracts_interface_with_extends() {
     assert!(env.type_symbols.contains_key("Base"));
     assert!(env.type_symbols.contains_key("User"));
 
-    let user = &env.type_symbols["User"];
+    let user = env.type_symbols["User"].primary();
     // Should be intersection of Base & { name: string }
     match &user.body {
         TypeExpr::Intersection(parts) => {
@@ -165,7 +165,7 @@ fn extracts_interface_with_extends() {
 fn extracts_interface_with_methods() {
     let env =
         parse_and_build_env("interface Logger { log(msg: string): void; warn(msg: string): void }");
-    let decl = &env.type_symbols["Logger"];
+    let decl = env.type_symbols["Logger"].primary();
     match &decl.body {
         TypeExpr::Object(obj) => {
             assert_eq!(obj.properties.len(), 2);
@@ -223,7 +223,7 @@ fn extract_class_records_non_public_members_with_visibility() {
         }
         "#,
     );
-    let decl = &env.type_symbols["C"];
+    let decl = env.type_symbols["C"].primary();
     let body = &decl.body;
 
     let a = class_property(body, "a").expect("public field `a` must be recorded");
@@ -253,7 +253,7 @@ fn extract_class_default_accessibility_is_public() {
     // A field with no accessibility modifier is Public (mirrors
     // `None | Some(Public) => Public`).
     let env = parse_and_build_env(r#"class C { a: string = ""; }"#);
-    let body = &env.type_symbols["C"].body;
+    let body = &env.type_symbols["C"].primary().body;
     let a = class_property(body, "a").expect("field `a` must be recorded");
     assert_eq!(a.visibility, MemberVisibility::Public);
 }
@@ -270,7 +270,7 @@ fn extract_class_records_non_public_methods_with_visibility() {
         }
         "#,
     );
-    let body = &env.type_symbols["C"].body;
+    let body = &env.type_symbols["C"].primary().body;
 
     assert_eq!(
         class_method(body, "pub")
@@ -300,7 +300,7 @@ fn extract_class_records_non_public_methods_with_visibility() {
 fn extract_class_interface_members_stay_public() {
     // Interface members have no accessibility — always Public.
     let env = parse_and_build_env("interface I { a: string; m(): void }");
-    let body = &env.type_symbols["I"].body;
+    let body = &env.type_symbols["I"].primary().body;
     assert_eq!(
         class_property(body, "a")
             .expect("interface field")
@@ -328,7 +328,7 @@ fn extract_class_with_heritage_records_non_public_own_members() {
         }
         "#,
     );
-    let body = &env.type_symbols["C"].body;
+    let body = &env.type_symbols["C"].primary().body;
     let TypeExpr::Intersection(parts) = body else {
         panic!("expected intersection (heritage fold), got {body:?}");
     };
@@ -375,7 +375,7 @@ fn extracts_namespace_qualified_interfaces() {
         "nested namespace members should remain addressable from the eval env"
     );
 
-    let decl = &env.type_symbols["JSX.IntrinsicElements"];
+    let decl = env.type_symbols["JSX.IntrinsicElements"].primary();
     match &decl.body {
         TypeExpr::Intersection(parts) => {
             assert_eq!(
@@ -401,11 +401,11 @@ fn extracts_function_declaration() {
     let env =
         parse_and_build_env("function greet(name: string, age?: number): string { return name }");
     assert!(env.value_symbols.contains_key("greet"));
-    let decl = &env.value_symbols["greet"];
+    let decl = env.value_symbols["greet"].primary();
     assert_eq!(decl.kind, ValueDeclKind::Function);
-    assert!(decl.function_signature.is_some());
+    assert!(decl.signatures.first().is_some());
 
-    let sig = decl.function_signature.as_ref().unwrap();
+    let sig = decl.signatures.first().unwrap();
     assert_eq!(sig.parameters.len(), 2);
     assert_eq!(sig.parameters[0].name.as_deref(), Some("name"));
     assert_eq!(
@@ -423,7 +423,7 @@ fn extracts_function_declaration() {
 #[test]
 fn extracts_async_function() {
     let env = parse_and_build_env("async function fetchData(): Promise<string> { return '' }");
-    let decl = &env.value_symbols["fetchData"];
+    let decl = env.value_symbols["fetchData"].primary();
     assert_eq!(decl.kind, ValueDeclKind::AsyncFunction);
 }
 
@@ -435,7 +435,7 @@ fn extracts_async_function() {
 fn extracts_const_with_type_annotation() {
     let env = parse_and_build_env("const MAX_SIZE: number = 100");
     assert!(env.value_symbols.contains_key("MAX_SIZE"));
-    let decl = &env.value_symbols["MAX_SIZE"];
+    let decl = env.value_symbols["MAX_SIZE"].primary();
     assert_eq!(decl.kind, ValueDeclKind::Const);
     assert_eq!(
         decl.type_annotation,
@@ -446,9 +446,9 @@ fn extracts_const_with_type_annotation() {
 #[test]
 fn extracts_const_arrow_function() {
     let env = parse_and_build_env("const add = (a: number, b: number): number => a + b");
-    let decl = &env.value_symbols["add"];
-    assert!(decl.function_signature.is_some());
-    let sig = decl.function_signature.as_ref().unwrap();
+    let decl = env.value_symbols["add"].primary();
+    assert!(decl.signatures.first().is_some());
+    let sig = decl.signatures.first().unwrap();
     assert_eq!(sig.parameters.len(), 2);
     assert_eq!(
         sig.return_type,
@@ -459,7 +459,7 @@ fn extracts_const_arrow_function() {
 #[test]
 fn extracts_const_object_literal() {
     let env = parse_and_build_env(r#"const defaults = { theme: "dark", debug: false }"#);
-    let decl = &env.value_symbols["defaults"];
+    let decl = env.value_symbols["defaults"].primary();
     assert!(decl.object_shape.is_some());
     let shape = decl.object_shape.as_ref().unwrap();
     assert_eq!(shape.properties.len(), 2);
@@ -468,7 +468,7 @@ fn extracts_const_object_literal() {
 #[test]
 fn extracts_const_asserted_object_literal_without_degrading_to_unknown_const() {
     let env = parse_and_build_env(r#"const theme = { color: { primary: "" } } as const"#);
-    let decl = &env.value_symbols["theme"];
+    let decl = env.value_symbols["theme"].primary();
 
     assert!(
         decl.object_shape.is_some(),
@@ -484,14 +484,14 @@ fn extracts_const_asserted_object_literal_without_degrading_to_unknown_const() {
 #[test]
 fn extracts_let_variable() {
     let env = parse_and_build_env("let count: number = 0");
-    let decl = &env.value_symbols["count"];
+    let decl = env.value_symbols["count"].primary();
     assert_eq!(decl.kind, ValueDeclKind::Let);
 }
 
 #[test]
 fn infers_non_empty_array_element_types() {
     let env = parse_and_build_env("const items = [1, 2, 3]");
-    let decl = &env.value_symbols["items"];
+    let decl = env.value_symbols["items"].primary();
     let Some(TypeExpr::Array { element, .. }) = decl.type_annotation.as_ref() else {
         panic!(
             "expected inferred array type, got {:?}",
@@ -523,7 +523,7 @@ fn infers_non_empty_array_element_types() {
 #[test]
 fn infers_mixed_array_element_union() {
     let env = parse_and_build_env(r#"const mixed = [1, "hello", true]"#);
-    let decl = &env.value_symbols["mixed"];
+    let decl = env.value_symbols["mixed"].primary();
     let Some(TypeExpr::Array { element, .. }) = decl.type_annotation.as_ref() else {
         panic!(
             "expected inferred array type, got {:?}",
@@ -570,7 +570,7 @@ fn infers_mixed_array_element_union() {
 #[test]
 fn infers_array_spread_literal_element_types() {
     let env = parse_and_build_env(r#"const mixed = [...[1, 2], "hello"]"#);
-    let decl = &env.value_symbols["mixed"];
+    let decl = env.value_symbols["mixed"].primary();
     let Some(TypeExpr::Array { element, .. }) = decl.type_annotation.as_ref() else {
         panic!(
             "expected inferred array type, got {:?}",
@@ -603,7 +603,7 @@ fn infers_array_spread_literal_element_types() {
 #[test]
 fn empty_array_stays_any_array() {
     let env = parse_and_build_env("const empty = []");
-    let decl = &env.value_symbols["empty"];
+    let decl = env.value_symbols["empty"].primary();
 
     assert_eq!(
         decl.type_annotation,
@@ -617,7 +617,7 @@ fn empty_array_stays_any_array() {
 #[test]
 fn infers_template_literal_with_expressions_as_string() {
     let env = parse_and_build_env(r#"const name = "world"; const label = `hello ${name}`"#);
-    let decl = &env.value_symbols["label"];
+    let decl = env.value_symbols["label"].primary();
 
     assert_eq!(
         decl.type_annotation,
@@ -633,7 +633,7 @@ fn infers_template_literal_with_expressions_as_string() {
 #[test]
 fn const_preserves_literal_initializer_type() {
     let env = parse_and_build_env(r#"const greeting = "hello""#);
-    let decl = &env.value_symbols["greeting"];
+    let decl = env.value_symbols["greeting"].primary();
 
     assert_eq!(
         decl.type_annotation,
@@ -649,7 +649,7 @@ fn const_preserves_literal_initializer_type() {
 #[test]
 fn let_widens_string_literal_initializer() {
     let env = parse_and_build_env(r#"let greeting = "hello""#);
-    let decl = &env.value_symbols["greeting"];
+    let decl = env.value_symbols["greeting"].primary();
 
     assert_eq!(
         decl.type_annotation,
@@ -665,7 +665,7 @@ fn let_widens_string_literal_initializer() {
 #[test]
 fn let_widens_number_literal_initializer() {
     let env = parse_and_build_env("let count = 42");
-    let decl = &env.value_symbols["count"];
+    let decl = env.value_symbols["count"].primary();
 
     assert_eq!(
         decl.type_annotation,
@@ -681,7 +681,7 @@ fn let_widens_number_literal_initializer() {
 #[test]
 fn let_widens_boolean_literal_initializer() {
     let env = parse_and_build_env("let enabled = true");
-    let decl = &env.value_symbols["enabled"];
+    let decl = env.value_symbols["enabled"].primary();
 
     assert_eq!(
         decl.type_annotation,
@@ -697,7 +697,7 @@ fn let_widens_boolean_literal_initializer() {
 #[test]
 fn var_widens_string_literal_initializer() {
     let env = parse_and_build_env(r#"var greeting = "hello""#);
-    let decl = &env.value_symbols["greeting"];
+    let decl = env.value_symbols["greeting"].primary();
 
     assert_eq!(
         decl.type_annotation,
@@ -727,7 +727,7 @@ fn var_widens_string_literal_initializer() {
 #[test]
 fn let_widens_constructor_type_return_literal_members() {
     let env = parse_and_build_env(r#"let C = value as new () => { kind: "x" }"#);
-    let decl = &env.value_symbols["C"];
+    let decl = env.value_symbols["C"].primary();
 
     let Some(TypeExpr::ConstructorType(function)) = decl.type_annotation.as_ref() else {
         panic!(
@@ -769,7 +769,7 @@ fn let_widens_constructor_type_return_literal_members() {
 #[test]
 fn let_widens_function_type_return_literal_members_parity() {
     let env = parse_and_build_env(r#"let F = value as () => { kind: "x" }"#);
-    let decl = &env.value_symbols["F"];
+    let decl = env.value_symbols["F"].primary();
 
     let Some(TypeExpr::Function(function)) = decl.type_annotation.as_ref() else {
         panic!(
@@ -795,7 +795,7 @@ fn let_widens_function_type_return_literal_members_parity() {
 #[test]
 fn let_widens_nested_object_literal_properties() {
     let env = parse_and_build_env(r#"let settings = { mode: "dark", nested: { count: 1 } }"#);
-    let decl = &env.value_symbols["settings"];
+    let decl = env.value_symbols["settings"].primary();
     let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
         panic!(
             "expected object type for let object initializer, got {:?}",
@@ -826,7 +826,7 @@ fn let_widens_nested_object_literal_properties() {
 #[test]
 fn let_widens_array_element_literals() {
     let env = parse_and_build_env("let flags = [true, false]");
-    let decl = &env.value_symbols["flags"];
+    let decl = env.value_symbols["flags"].primary();
     let Some(TypeExpr::Array { element, .. }) = decl.type_annotation.as_ref() else {
         panic!(
             "expected array type for let array initializer, got {:?}",
@@ -849,7 +849,7 @@ fn satisfies_preserves_underlying_value_type() {
     let env = parse_and_build_env(
         r#"const config = { x: 1, y: "hello" } satisfies { x: number; y: string }"#,
     );
-    let decl = &env.value_symbols["config"];
+    let decl = env.value_symbols["config"].primary();
     let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
         panic!(
             "satisfies should infer the underlying object literal type, got {:?}",
@@ -880,7 +880,7 @@ fn satisfies_preserves_underlying_value_type() {
 fn satisfies_does_not_use_annotation_type() {
     // When using satisfies, the expression type should win, not the annotation
     let env = parse_and_build_env(r#"const label = "hello" satisfies string"#);
-    let decl = &env.value_symbols["label"];
+    let decl = env.value_symbols["label"].primary();
 
     // Should be the literal "hello", not widened string
     assert_eq!(
@@ -902,7 +902,7 @@ fn satisfies_does_not_use_annotation_type() {
 #[test]
 fn object_spread_identifier_produces_intersection() {
     let env = parse_and_build_env(r#"const extended = { ...base, extra: true }"#);
-    let decl = &env.value_symbols["extended"];
+    let decl = env.value_symbols["extended"].primary();
 
     // Should not lose the spread source — at minimum, the explicit props must be present
     // AND the spread source should be represented (as typeof base in an intersection)
@@ -937,7 +937,7 @@ fn object_spread_identifier_produces_intersection() {
 #[test]
 fn object_spread_object_literal_merges_properties() {
     let env = parse_and_build_env(r#"const merged = { ...{ a: 1, b: 2 }, c: 3 }"#);
-    let decl = &env.value_symbols["merged"];
+    let decl = env.value_symbols["merged"].primary();
 
     let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
         panic!(
@@ -977,7 +977,7 @@ fn object_spread_object_literal_merges_properties() {
 #[test]
 fn object_spread_later_property_overrides_spread_property() {
     let env = parse_and_build_env(r#"const merged = { ...{ a: 1 }, a: "override" }"#);
-    let decl = &env.value_symbols["merged"];
+    let decl = env.value_symbols["merged"].primary();
 
     let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
         panic!(
@@ -1006,7 +1006,7 @@ fn object_spread_later_property_overrides_spread_property() {
 #[test]
 fn object_spread_later_spread_overrides_earlier_property() {
     let env = parse_and_build_env(r#"const merged = { a: 1, ...{ a: "override" } }"#);
-    let decl = &env.value_symbols["merged"];
+    let decl = env.value_symbols["merged"].primary();
 
     let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
         panic!(
@@ -1039,7 +1039,7 @@ fn object_spread_later_spread_overrides_earlier_property() {
 #[test]
 fn static_member_expression_infers_typeof_path() {
     let env = parse_and_build_env(r#"const value = obj.foo"#);
-    let decl = &env.value_symbols["value"];
+    let decl = env.value_symbols["value"].primary();
 
     match decl.type_annotation.as_ref() {
         Some(TypeExpr::TypeOf(vr)) => {
@@ -1061,7 +1061,7 @@ fn static_member_expression_infers_typeof_path() {
 #[test]
 fn nested_member_expression_infers_deep_typeof_path() {
     let env = parse_and_build_env(r#"const value = a.b.c"#);
-    let decl = &env.value_symbols["value"];
+    let decl = env.value_symbols["value"].primary();
 
     match decl.type_annotation.as_ref() {
         Some(TypeExpr::TypeOf(vr)) => {
@@ -1079,7 +1079,7 @@ fn nested_member_expression_infers_deep_typeof_path() {
 fn member_on_call_expression_degrades_to_any() {
     // fn().prop — the root is a CallExpression, not an Identifier, so we can't build a simple path
     let env = parse_and_build_env(r#"const value = getObj().prop"#);
-    let decl = &env.value_symbols["value"];
+    let decl = env.value_symbols["value"].primary();
 
     // Should not produce a broken partial path like ["prop"] without the root
     // Any or None is acceptable — the key assertion is no broken partial path.
@@ -1098,7 +1098,7 @@ fn member_on_call_expression_degrades_to_any() {
 #[test]
 fn simple_call_expression_does_not_degrade_to_any() {
     let env = parse_and_build_env(r#"const result = someFunction()"#);
-    let decl = &env.value_symbols["result"];
+    let decl = env.value_symbols["result"].primary();
 
     // For unknown function calls, should produce ReturnType<typeof someFunction>
     // rather than degrading to Any
@@ -1117,7 +1117,7 @@ fn simple_call_expression_does_not_degrade_to_any() {
 #[test]
 fn method_call_expression_does_not_degrade_to_any() {
     let env = parse_and_build_env(r#"const result = obj.create()"#);
-    let decl = &env.value_symbols["result"];
+    let decl = env.value_symbols["result"].primary();
 
     assert!(
         decl.type_annotation.is_some(),
@@ -1150,7 +1150,7 @@ fn extracts_class_as_type_and_value() {
     assert!(env.type_symbols.contains_key("Widget"));
     assert!(env.value_symbols.contains_key("Widget"));
 
-    let type_decl = &env.type_symbols["Widget"];
+    let type_decl = env.type_symbols["Widget"].primary();
     assert_eq!(type_decl.kind, TypeDeclKind::Class);
     match &type_decl.body {
         TypeExpr::Object(obj) => {
@@ -1165,9 +1165,9 @@ fn extracts_class_as_type_and_value() {
         _ => panic!("expected object, got {:?}", type_decl.body),
     }
 
-    let value_decl = &env.value_symbols["Widget"];
+    let value_decl = env.value_symbols["Widget"].primary();
     assert_eq!(value_decl.kind, ValueDeclKind::Class);
-    assert!(value_decl.function_signature.is_some()); // constructor
+    assert!(value_decl.signatures.first().is_some()); // constructor
 }
 
 // =============================================================================
@@ -1206,7 +1206,8 @@ fn extracts_export_default_object_expression_as_default_value() {
     let decl = env
         .value_symbols
         .get("default")
-        .expect("export default object should register a synthetic default value");
+        .expect("export default object should register a synthetic default value")
+        .primary();
 
     let ty = decl
         .type_annotation
@@ -1260,7 +1261,8 @@ export { RouteLocationRaw as Lt, St, vt }
     let route = env
         .type_symbols
         .get("RouteLocationRaw")
-        .expect("RouteLocationRaw alias should be registered");
+        .expect("RouteLocationRaw alias should be registered")
+        .primary();
     let TypeExpr::Union(types) = &route.body else {
         panic!(
             "RouteLocationRaw should stay a union before evaluation, got {:?}",

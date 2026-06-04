@@ -204,7 +204,7 @@ pub fn prepare_local_value_decl(
         symbol.kind,
     );
     prepared.type_annotation = symbol.type_annotation.clone();
-    prepared.function_signature = symbol.function_signature.clone();
+    prepared.signatures = symbol.signatures.clone();
     prepared.object_shape = symbol.object_shape.clone();
     prepared.enum_members = symbol.enum_members.clone();
 

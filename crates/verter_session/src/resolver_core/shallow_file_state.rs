@@ -141,8 +141,10 @@ pub struct ShallowValueSymbol {
     pub kind: ValueDeclKind,
     /// Explicit type annotation, if present.
     pub type_annotation: Option<TypeExpr>,
-    /// Function signature, if this value is callable.
-    pub function_signature: Option<FunctionSignature>,
+    /// Function signatures, if this value is callable. Empty = non-callable;
+    /// length 1 = the common single-declaration case; length > 1 = an overload
+    /// group (source order; trailing entry may be the implementation).
+    pub signatures: Vec<FunctionSignature>,
     /// Object literal shape, if the declaration is a literal object.
     pub object_shape: Option<ObjectExpr>,
     /// Enum member values — populated for `ValueDeclKind::Enum`.
@@ -460,7 +462,8 @@ impl ShallowFileState {
 
         // Locally-declared symbols from eval env (if available)
         if let Some(env) = eval_env {
-            for (name, decl) in &env.type_symbols {
+            for (name, group) in &env.type_symbols {
+                let decl = group.primary();
                 let local_type_sym = analysis.local_type_symbol(name);
                 let (local_deps, mut external_deps) = if let Some(sym) = local_type_sym {
                     classify_deps(
@@ -535,14 +538,15 @@ impl ShallowFileState {
                 );
             }
 
-            for (name, decl) in &env.value_symbols {
+            for (name, group) in &env.value_symbols {
+                let decl = group.primary();
                 // For enum values, extract member names from the corresponding
                 // type symbol's union body (TypeScript enums are dual-space:
                 // type = union, value = object with member lookup).
                 let enum_members = if decl.kind == ValueDeclKind::Enum {
                     env.type_symbols
                         .get(name)
-                        .and_then(|type_decl| extract_enum_members_from_type_body(&type_decl.body))
+                        .and_then(|g| extract_enum_members_from_type_body(&g.primary().body))
                 } else {
                     None
                 };
@@ -551,7 +555,7 @@ impl ShallowFileState {
                     ShallowValueSymbol {
                         kind: decl.kind,
                         type_annotation: decl.type_annotation.clone(),
-                        function_signature: decl.function_signature.clone(),
+                        signatures: decl.signatures.clone(),
                         object_shape: decl.object_shape.clone(),
                         enum_members,
                         // Userland value symbols from the eval env are NEVER the
@@ -2495,7 +2499,7 @@ export function makeProps(): Props { return defaults }
             .value_symbol("makeProps")
             .expect("makeProps value symbol should be present");
         assert_eq!(make_props.kind, ValueDeclKind::Function);
-        assert!(make_props.function_signature.is_some());
+        assert!(!make_props.signatures.is_empty());
     }
 
     #[test]

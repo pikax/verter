@@ -354,7 +354,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // symbol carries the `is_synthesised_vue_default` provenance flag — the
         // construct-signature RETURN must be produced by the keyed
         // `Instantiate(.vue default)` query, not by re-lowering the synthesized
-        // default's `function_signature.return_type` here. This keeps `typeof
+        // default's first signature `return_type` here. This keeps `typeof
         // Foo` / `InstanceType<typeof Foo>` (Foo a `.vue`) on the SAME semantic
         // identity + recursion guard the bare-`Ref` `.vue` route uses. NOTHING
         // else changes: non-`.vue` `typeof`, userland `.vue` defaults, ordinary
@@ -401,7 +401,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &mut substitutions,
                 crate::semantic_query::ProjectionMode::Expanded,
             )
-        } else if let Some(sig) = prepared.function_signature.as_ref() {
+        } else if let Some(sig) = prepared.signatures.first() {
             // `FunctionSignature` carries per-parameter spans (preserved by the
             // clone) but no whole-signature span, so the signature span stays
             // `None` here.
@@ -535,8 +535,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return None;
         }
         let instance_shape: TypeExpr = default_symbol
-            .function_signature
-            .as_ref()?
+            .signatures
+            .first()?
             .return_type
             .as_ref()?
             .clone();
@@ -641,8 +641,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `default`: build the constructor-like value type (an Object carrying a
     /// single construct signature) whose construct-signature RETURN node is
     /// produced by the keyed `Instantiate{ .vue, "default", [] }` query — NOT by
-    /// directly re-lowering the synthesized default's
-    /// `function_signature.return_type`.
+    /// directly re-lowering the synthesized default's first signature
+    /// `return_type`.
     ///
     /// `typeof Foo` (Foo a synthesized `.vue` default) and `InstanceType<typeof
     /// Foo>` therefore share ONE semantic identity for the instance shape: the

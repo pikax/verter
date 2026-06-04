@@ -56,11 +56,11 @@ pub const VUE_INSTANCE_SLOTS_MEMBER: &str = "$slots";
 /// - `kind = ValueDeclKind::Class` — `build_typeof` lowers the
 ///   declaration as an Object surface carrying a single
 ///   ConstructSignature whose return type is the instance shape.
-/// - `function_signature.return_type` is the instance shape
+/// - `signatures[0].return_type` is the instance shape
 ///   (`{ $props: ..., $emit: ..., $slots: ... }`). `InstanceType<T>`
 ///   then projects the construct signature's return type to this
 ///   surface.
-/// - `function_signature.parameters` is empty — SFC components do not
+/// - `signatures[0].parameters` is empty — SFC components do not
 ///   expose constructor parameters at the typeinfo boundary.
 ///
 /// The synthesis only walks `parsed_type_argument` from each macro
@@ -128,11 +128,12 @@ pub fn synthesise_vue_default_value_symbol(macros: &[AnalyzedMacro]) -> Option<S
     Some(ShallowValueSymbol {
         kind: ValueDeclKind::Class,
         type_annotation: None,
-        function_signature: Some(FunctionSignature {
+        signatures: vec![FunctionSignature {
             parameters: Vec::new(),
             return_type: Some(instance_shape),
             type_parameters: Vec::new(),
-        }),
+            has_implementation_body: true,
+        }],
         object_shape: None,
         enum_members: None,
         // PROVENANCE: this is the SOLE construction site of the synthesized
@@ -248,8 +249,8 @@ mod tests {
 
     fn instance_members(symbol: &ShallowValueSymbol) -> Vec<String> {
         let sig = symbol
-            .function_signature
-            .as_ref()
+            .signatures
+            .first()
             .expect("synthesised default must carry a construct signature");
         let return_type = sig
             .return_type

@@ -273,10 +273,10 @@ fn emit_value_symbols(registry: &mut FactRegistry, shallow: &ShallowFileState, l
         // back to a synthesised type-expression that captures the
         // declaration kind. The structural representation MUST be
         // distinct across edits.
-        let body = match (&symbol.type_annotation, &symbol.function_signature) {
+        let body = match (&symbol.type_annotation, symbol.signatures.first()) {
             (Some(ty), _) => ty.clone(),
             (None, Some(_)) => TypeExpr::Unknown {
-                raw: format!("{:?}", symbol.function_signature),
+                raw: format!("{:?}", symbol.signatures),
             },
             _ => TypeExpr::Unknown {
                 raw: format!("{:?}::{:?}", symbol.kind, symbol.object_shape),

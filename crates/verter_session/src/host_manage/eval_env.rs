@@ -177,9 +177,10 @@ impl VerterHost {
             let Some(env) = self.base_eval_env_arc(current.canonical_id.as_str()) else {
                 break;
             };
-            let Some(decl) = env.value_symbols.get(current.name.as_str()) else {
+            let Some(group) = env.value_symbols.get(current.name.as_str()) else {
                 break;
             };
+            let decl = group.primary();
             let Some(verter_type_expr::TypeExpr::TypeOf(value_ref)) = decl.type_annotation.as_ref()
             else {
                 break;

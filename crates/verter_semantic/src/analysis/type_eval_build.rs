@@ -447,9 +447,10 @@ fn alias_default_export_type_symbol(env: &mut EvalEnv, declared_name: &str) {
     if env.type_symbols.contains_key("default") {
         return;
     }
-    let Some(decl) = env.type_symbols.get(declared_name) else {
+    let Some(group) = env.type_symbols.get(declared_name) else {
         return;
     };
+    let decl = group.primary();
     let aliased = TypeDeclInfo {
         name: "default".to_string(),
         declaration_id: 0,
@@ -632,6 +633,7 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
         parameters: Vec::new(),
         return_type: Some(TypeExpr::named(name.clone())),
         type_parameters: Vec::new(),
+        has_implementation_body: true,
     });
     let constructor_shape = ObjectExpr {
         properties: vec![ObjectMember::ConstructSignature(FunctionExpr::with_spans(
@@ -647,7 +649,7 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
         declaration_id: 0,
         kind: ValueDeclKind::Class,
         type_annotation: None,
-        function_signature: Some(constructor_signature),
+        signatures: vec![constructor_signature],
         object_shape: Some(constructor_shape),
     });
 }
@@ -681,7 +683,7 @@ fn extract_function(func: &Function<'_>, source: &str, env: &mut EvalEnv) {
         declaration_id: 0,
         kind,
         type_annotation: None,
-        function_signature: Some(sig),
+        signatures: vec![sig],
         object_shape: None,
     });
 }
@@ -865,7 +867,7 @@ fn extract_variable(
         declaration_id: 0,
         kind: var_kind,
         type_annotation,
-        function_signature,
+        signatures: function_signature.into_iter().collect(),
         object_shape,
     });
 }
@@ -880,7 +882,7 @@ fn extract_default_expression(expr: &Expression<'_>, source: &str, env: &mut Eva
         declaration_id: 0,
         kind: ValueDeclKind::Const,
         type_annotation,
-        function_signature,
+        signatures: function_signature.into_iter().collect(),
         object_shape,
     });
 }
@@ -969,6 +971,7 @@ fn extract_function_signature(func: &Function<'_>, source: &str) -> FunctionSign
         parameters,
         return_type,
         type_parameters,
+        has_implementation_body: func.body.is_some(),
     }
 }
 
@@ -996,10 +999,13 @@ fn extract_arrow_signature(arrow: &ArrowFunctionExpression<'_>, source: &str) ->
         .map(|tp| lower_type_param_decls(tp, source))
         .unwrap_or_default();
 
+    // An arrow function always carries an implementation body (expression or
+    // block form).
     FunctionSignature {
         parameters,
         return_type,
         type_parameters,
+        has_implementation_body: true,
     }
 }
 

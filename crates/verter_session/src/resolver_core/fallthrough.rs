@@ -895,7 +895,7 @@ pub fn inject_prop_type_overrides(
             declaration_id: 0,
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: Some(ty.clone()),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
     }
@@ -919,7 +919,7 @@ pub fn structural_substitute_typeof_refs(
         TypeExpr::TypeOf(value_ref) if value_ref.path.len() == 1 => env
             .value_symbols
             .get(value_ref.path[0].as_str())
-            .and_then(|decl| decl.type_annotation.clone())
+            .and_then(|group| group.primary().type_annotation.clone())
             .unwrap_or_else(|| expr.clone()),
         TypeExpr::Union(parts) => TypeExpr::union(
             parts
@@ -1822,7 +1822,7 @@ mod tests {
         assert_eq!(
             env.value_symbols
                 .get("size")
-                .and_then(|value| value.type_annotation.clone()),
+                .and_then(|value| value.primary().type_annotation.clone()),
             Some(TypeExpr::primitive(PrimitiveName::Number))
         );
     }
@@ -1870,7 +1870,7 @@ mod tests {
             declaration_id: 0,
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: Some(TypeExpr::string_literal("input")),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
 
@@ -1906,7 +1906,7 @@ mod tests {
             declaration_id: 0,
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: Some(TypeExpr::string_literal("A")),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
         env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
@@ -1914,7 +1914,7 @@ mod tests {
             declaration_id: 0,
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: Some(TypeExpr::string_literal("B")),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
 
@@ -1944,7 +1944,7 @@ mod tests {
             declaration_id: 0,
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: Some(TypeExpr::string_literal("ignored")),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
 

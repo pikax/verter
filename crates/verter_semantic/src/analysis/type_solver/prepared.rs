@@ -321,8 +321,10 @@ pub struct PreparedValueDecl {
     /// Type annotation on the value declaration (e.g. `const x: T`).
     pub type_annotation: Option<TypeExpr>,
 
-    /// Function signature if the value is a function.
-    pub function_signature: Option<FunctionSignature>,
+    /// Function signatures if the value is a function. Empty = non-callable;
+    /// length 1 = the common single-declaration case; length > 1 = an overload
+    /// group (source order; trailing entry may be the implementation).
+    pub signatures: Vec<FunctionSignature>,
 
     /// Object shape if the value is a const object / namespace.
     pub object_shape: Option<ObjectExpr>,
@@ -857,7 +859,7 @@ impl PreparedValueDecl {
             exported_name: None,
             kind,
             type_annotation: None,
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
             member_index: FxHashMap::default(),
             enum_members: None,

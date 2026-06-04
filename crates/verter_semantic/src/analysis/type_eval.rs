@@ -35,6 +35,48 @@ pub struct TypeDeclInfo {
     pub body: TypeExpr,
 }
 
+/// An ordered group of same-name type declaration contributors, in
+/// source/binder order (append-only).
+///
+/// Today's observable behaviour is last-wins: [`primary`](Self::primary)
+/// returns the LAST contributor. Earlier contributors are retained so a
+/// later phase can compose real TypeScript declaration merging without
+/// changing current behaviour.
+#[derive(Debug, Clone)]
+pub struct TypeDeclGroup {
+    /// Contributors in source/binder order. Always non-empty once created.
+    pub contributors: Vec<TypeDeclInfo>,
+}
+
+impl TypeDeclGroup {
+    /// Create a group seeded with a single contributor.
+    pub fn new(decl: TypeDeclInfo) -> Self {
+        Self {
+            contributors: vec![decl],
+        }
+    }
+
+    /// The authoritative contributor under today's last-wins semantics: the
+    /// LAST one appended.
+    pub fn primary(&self) -> &TypeDeclInfo {
+        self.contributors
+            .last()
+            .expect("TypeDeclGroup is never empty")
+    }
+
+    /// Mutable access to the last (authoritative) contributor.
+    pub fn primary_mut(&mut self) -> &mut TypeDeclInfo {
+        self.contributors
+            .last_mut()
+            .expect("TypeDeclGroup is never empty")
+    }
+
+    /// All contributors in source/binder order.
+    pub fn contributors(&self) -> &[TypeDeclInfo] {
+        &self.contributors
+    }
+}
+
 /// What kind of type declaration this is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeDeclKind {
@@ -51,10 +93,52 @@ pub struct ValueDeclInfo {
     pub kind: ValueDeclKind,
     /// Explicit type annotation, if present.
     pub type_annotation: Option<TypeExpr>,
-    /// Function/method signature, if this is a function or method.
-    pub function_signature: Option<FunctionSignature>,
+    /// Function/method signatures. Empty = non-callable; length 1 = the
+    /// common single-declaration case; length > 1 = an overload group
+    /// (source order; the trailing entry may be the implementation).
+    pub signatures: Vec<FunctionSignature>,
     /// Object literal shape, if this is a const initialized with an object.
     pub object_shape: Option<ObjectExpr>,
+}
+
+/// An ordered group of same-name value declaration contributors, in
+/// source/binder order (append-only).
+///
+/// Today's observable behaviour is last-wins: [`primary`](Self::primary)
+/// returns the LAST contributor.
+#[derive(Debug, Clone)]
+pub struct ValueDeclGroup {
+    /// Contributors in source/binder order. Always non-empty once created.
+    pub contributors: Vec<ValueDeclInfo>,
+}
+
+impl ValueDeclGroup {
+    /// Create a group seeded with a single contributor.
+    pub fn new(decl: ValueDeclInfo) -> Self {
+        Self {
+            contributors: vec![decl],
+        }
+    }
+
+    /// The authoritative contributor under today's last-wins semantics: the
+    /// LAST one appended.
+    pub fn primary(&self) -> &ValueDeclInfo {
+        self.contributors
+            .last()
+            .expect("ValueDeclGroup is never empty")
+    }
+
+    /// Mutable access to the last (authoritative) contributor.
+    pub fn primary_mut(&mut self) -> &mut ValueDeclInfo {
+        self.contributors
+            .last_mut()
+            .expect("ValueDeclGroup is never empty")
+    }
+
+    /// All contributors in source/binder order.
+    pub fn contributors(&self) -> &[ValueDeclInfo] {
+        &self.contributors
+    }
 }
 
 /// What kind of value declaration this is.
@@ -77,6 +161,10 @@ pub struct FunctionSignature {
     pub parameters: Vec<FunctionParam>,
     pub return_type: Option<TypeExpr>,
     pub type_parameters: Vec<TypeParam>,
+    /// Whether this signature is backed by an implementation body (vs. a
+    /// bodiless overload / ambient declaration). Used by a later phase to
+    /// hide the implementation signature behind preceding overloads.
+    pub has_implementation_body: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,10 +174,12 @@ pub struct FunctionSignature {
 /// Evaluation environment holding symbol tables and evaluation state.
 #[derive(Debug, Clone)]
 pub struct EvalEnv {
-    /// Type declarations: interfaces, type aliases.
-    pub type_symbols: FxHashMap<String, TypeDeclInfo>,
-    /// Value declarations: functions, constants, classes.
-    pub value_symbols: FxHashMap<String, ValueDeclInfo>,
+    /// Type declarations: interfaces, type aliases. Each name maps to an
+    /// ordered group of contributors (append-only, source/binder order).
+    pub type_symbols: FxHashMap<String, TypeDeclGroup>,
+    /// Value declarations: functions, constants, classes. Each name maps to
+    /// an ordered group of contributors (append-only, source/binder order).
+    pub value_symbols: FxHashMap<String, ValueDeclGroup>,
     /// Stable ids assigned to type declarations inserted into this environment.
     type_decl_ids: FxHashMap<String, DeclarationId>,
     /// Stable ids assigned to value declarations inserted into this environment.
@@ -158,20 +248,32 @@ impl EvalEnv {
         }
     }
 
-    /// Register a type declaration.
+    /// Register a type declaration, appending it to the named group in
+    /// source/binder order (creating the group if absent).
     pub fn add_type(&mut self, mut decl: TypeDeclInfo) {
         let name = decl.name.clone();
         let decl_id = self.stabilize_type_declaration_id(&name, decl.declaration_id);
         decl.declaration_id = decl_id;
-        self.type_symbols.insert(name.clone(), decl);
+        match self.type_symbols.get_mut(&name) {
+            Some(group) => group.contributors.push(decl),
+            None => {
+                self.type_symbols.insert(name, TypeDeclGroup::new(decl));
+            }
+        }
     }
 
-    /// Register a value declaration.
+    /// Register a value declaration, appending it to the named group in
+    /// source/binder order (creating the group if absent).
     pub fn add_value(&mut self, mut decl: ValueDeclInfo) {
         let name = decl.name.clone();
         let decl_id = self.stabilize_value_declaration_id(&name, decl.declaration_id);
         decl.declaration_id = decl_id;
-        self.value_symbols.insert(name.clone(), decl);
+        match self.value_symbols.get_mut(&name) {
+            Some(group) => group.contributors.push(decl),
+            None => {
+                self.value_symbols.insert(name, ValueDeclGroup::new(decl));
+            }
+        }
     }
 
     /// Returns the total number of evaluation steps consumed so far.
@@ -193,14 +295,18 @@ impl EvalEnv {
     /// Merge declarations from another environment by reference without
     /// cloning the full environment up front.
     pub fn extend_missing_from_ref(&mut self, other: &EvalEnv) {
-        for (name, decl) in &other.type_symbols {
+        for (name, group) in &other.type_symbols {
             if !self.type_symbols.contains_key(name) {
-                self.add_type(decl.clone());
+                for decl in group.contributors() {
+                    self.add_type(decl.clone());
+                }
             }
         }
-        for (name, decl) in &other.value_symbols {
+        for (name, group) in &other.value_symbols {
             if !self.value_symbols.contains_key(name) {
-                self.add_value(decl.clone());
+                for decl in group.contributors() {
+                    self.add_value(decl.clone());
+                }
             }
         }
         for (name, decl_id) in &other.type_decl_ids {
@@ -208,7 +314,8 @@ impl EvalEnv {
                 continue;
             }
             let stable_id = self.stabilize_type_declaration_id(name, *decl_id);
-            if let Some(decl) = self.type_symbols.get_mut(name) {
+            if let Some(group) = self.type_symbols.get_mut(name) {
+                let decl = group.primary_mut();
                 if decl.declaration_id == 0 {
                     decl.declaration_id = stable_id;
                 }
@@ -219,7 +326,8 @@ impl EvalEnv {
                 continue;
             }
             let stable_id = self.stabilize_value_declaration_id(name, *decl_id);
-            if let Some(decl) = self.value_symbols.get_mut(name) {
+            if let Some(group) = self.value_symbols.get_mut(name) {
+                let decl = group.primary_mut();
                 if decl.declaration_id == 0 {
                     decl.declaration_id = stable_id;
                 }

@@ -91,11 +91,11 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
                     None => continue,
                 }
             };
-            let Some(dep_value) = source_env.value_symbols.get(&source_name).cloned() else {
+            let Some(dep_group) = source_env.value_symbols.get(&source_name) else {
                 continue;
             };
 
-            let mut alias = dep_value;
+            let mut alias = dep_group.primary().clone();
             alias.name = binding.name.clone();
             env.add_value(alias);
         }
@@ -110,7 +110,7 @@ fn prepared_value_decl_to_value_decl_info(
         declaration_id: 0,
         kind: prepared.kind,
         type_annotation: prepared.type_annotation.clone(),
-        function_signature: prepared.function_signature.clone(),
+        signatures: prepared.signatures.clone(),
         object_shape: prepared.object_shape.clone(),
     }
 }
@@ -191,7 +191,7 @@ mod tests {
             declaration_id: 1,
             kind: ValueDeclKind::Const,
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
 
@@ -283,7 +283,7 @@ mod tests {
             declaration_id: 2,
             kind: ValueDeclKind::Const,
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
 
@@ -298,7 +298,7 @@ mod tests {
             declaration_id: 3,
             kind: ValueDeclKind::Const,
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("local")),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
         materialize_imported_runtime_values_into_env(
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(
             env.value_symbols
                 .get("theme")
-                .and_then(|value| value.type_annotation.clone()),
+                .and_then(|value| value.primary().type_annotation.clone()),
             Some(verter_type_expr::TypeExpr::string_literal("local"))
         );
     }
@@ -349,7 +349,7 @@ mod tests {
             declaration_id: 1,
             kind: ValueDeclKind::Const,
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
         dep_env.add_value(ValueDeclInfo {
@@ -357,7 +357,7 @@ mod tests {
             declaration_id: 2,
             kind: ValueDeclKind::Const,
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("helper")),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
 
@@ -418,7 +418,7 @@ mod tests {
             declaration_id: 1,
             kind: ValueDeclKind::Const,
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
         let mut unused_env = EvalEnv::new();
@@ -427,7 +427,7 @@ mod tests {
             declaration_id: 2,
             kind: ValueDeclKind::Const,
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("helper")),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
 
@@ -495,7 +495,7 @@ mod tests {
             declaration_id: 1,
             kind: ValueDeclKind::Const,
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("primary")),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
         dep_env.add_value(ValueDeclInfo {
@@ -507,7 +507,7 @@ mod tests {
                     path: vec!["theme".to_string()],
                 },
             )),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
 
@@ -532,7 +532,7 @@ mod tests {
         assert_eq!(
             env.value_symbols
                 .get("theme")
-                .and_then(|value| value.type_annotation.clone()),
+                .and_then(|value| value.primary().type_annotation.clone()),
             Some(verter_type_expr::TypeExpr::string_literal("primary")),
             "default imports should hydrate the underlying exported value, not the synthetic default wrapper",
         );
@@ -561,7 +561,7 @@ mod tests {
             declaration_id: 1,
             kind: ValueDeclKind::Const,
             type_annotation: Some(verter_type_expr::TypeExpr::string_literal("primary")),
-            function_signature: None,
+            signatures: Vec::new(),
             object_shape: None,
         });
 
@@ -590,14 +590,14 @@ mod tests {
         let mut dep_env = EvalEnv::new();
         dep_env.value_symbols.insert(
             "defaults".to_string(),
-            ValueDeclInfo {
+            verter_semantic::analysis::type_eval::ValueDeclGroup::new(ValueDeclInfo {
                 name: "defaults".to_string(),
                 declaration_id: 0,
                 kind: ValueDeclKind::Const,
                 type_annotation: Some(verter_type_expr::TypeExpr::string_literal("cached")),
-                function_signature: None,
+                signatures: Vec::new(),
                 object_shape: None,
-            },
+            }),
         );
 
         let imports = vec![AnalyzedImport {
@@ -633,7 +633,7 @@ mod tests {
         assert_eq!(
             env.value_symbols
                 .get("defaults")
-                .and_then(|v| v.type_annotation.clone()),
+                .and_then(|v| v.primary().type_annotation.clone()),
             Some(verter_type_expr::TypeExpr::string_literal("cached")),
             "runtime value materialization should use import.resolved_canonical_id directly"
         );
