@@ -1672,8 +1672,13 @@ pub enum SemanticQueryValue {
     /// Narrowed / contextual type produced by flow or contextual program
     /// analysis. No live producer.
     ProgramAnalysis(ProgramAnalysisValue),
-    /// Merged declaration / module-augmentation surface produced by
-    /// declaration analysis. No live producer.
+    /// Non-live SHELL variant. **NOT the merge/augmentation carrier.** The LIVE
+    /// merged-declaration / module-augmentation carrier is the graph node
+    /// [`SemanticNodeData::MergedDecl`] (interned by the peer-merge reducer and
+    /// the same-file / cross-file augmentation stitch), surfaced on the wire as
+    /// a `GraphTypeNode` (`GraphMergedDeclaration`, kinds 21–25, with anchors as
+    /// nested `GraphDeclarationPart`). This value variant has no live producer
+    /// and never crosses the wire — do not read it as the merge wire source.
     DeclarationAnalysis(DeclarationAnalysisValue),
     /// An ordered set of call/construct signatures (an overload set).
     /// No live producer.
@@ -1729,8 +1734,11 @@ pub struct ProgramAnalysisValue {
     pub node: SemanticNodeId,
 }
 
-/// The merged surface of a declaration plus its module augmentations, named
-/// by the contributing declaration nodes. No live producer.
+/// Non-live SHELL payload for [`SemanticQueryValue::DeclarationAnalysis`]. It is
+/// NOT the live merge carrier: the live merged-declaration / augmentation carrier
+/// is the graph node [`SemanticNodeData::MergedDecl { contributors }`], reduced
+/// to an `Object` / overload surface and emitted on the wire as a `GraphTypeNode`
+/// (`GraphMergedDeclaration`). This shell has no live producer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclarationAnalysisValue {
     pub contributors: Arc<[SemanticNodeId]>,
