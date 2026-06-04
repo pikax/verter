@@ -1522,9 +1522,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 any_contribution = true;
             }
             if any_contribution {
-                if let Some(hash) = self.ctx.get_whole_hash(augmenter_canonical.as_ref()) {
-                    self_roots.push((Arc::clone(augmenter_canonical), hash));
-                }
+                // Root on the OVERLAY-AWARE content version the body was
+                // actually lowered from (`indexed.whole_hash` == `aug_scope`'s
+                // hash), NOT `get_whole_hash` (which can report the BASE hash
+                // under a session view). A session-overlay augmenter rooted on
+                // the base hash would tear: the value reflects overlay content
+                // but the fact pins base content, so a BASE re-query validates
+                // the session candidate and is poisoned. Rooting on the
+                // overlay hash makes the base re-query miss and recompute.
+                self_roots.push((Arc::clone(augmenter_canonical), indexed.whole_hash));
             }
         }
 

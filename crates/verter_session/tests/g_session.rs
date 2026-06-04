@@ -4,6 +4,8 @@
 mod inline_execute_clears_all_install_tls_slots;
 #[path = "g_session/session_meta_store_view_regression.rs"]
 mod session_meta_store_view_regression;
+#[path = "g_session/session_overlay_augmentation_isolation.rs"]
+mod session_overlay_augmentation_isolation;
 #[path = "g_session/session_view_dep_overlay_invalidates_warm.rs"]
 mod session_view_dep_overlay_invalidates_warm;
 #[path = "g_session/session_view_isolation.rs"]
