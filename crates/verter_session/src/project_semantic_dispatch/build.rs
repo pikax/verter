@@ -1267,7 +1267,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         // Cross-file augmentation self-roots: each augmenter file's whole-hash
-        // (SCOPE-LOCK 12 — `self_root_canonicals = {base} ∪ {augmenters}`), so a
+        // (`self_root_canonicals = {base} ∪ {augmenters}`), so a
         // content edit to ANY augmenter misses the warm read.
         for aug_root in augmenter_self_roots {
             if !observed_self_roots
@@ -1301,8 +1301,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the per-augmenter `FileWholeHash` self-roots, and observes the
     /// `ModuleAugmentationIndexShape` (augmenter-set) fact plus each augmenter's
     /// `FileWholeHash` onto the active fact tracer so the cached value
-    /// invalidates on an augmenter add/remove OR an augmenter content edit
-    /// (SCOPE-LOCK 12). It reuses the same fact rail as
+    /// invalidates on an augmenter add/remove OR an augmenter content edit.
+    /// It reuses the same fact rail as
     /// [`crate::resolver_core::route_db::RouteDb::get_or_compute_effective_export_set`].
     fn stitch_module_augmentations(
         &self,
@@ -1372,7 +1372,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// Observes the augmenter-set fingerprint (`ModuleAugmentationIndexShape`)
     /// plus each augmenter's `FileWholeHash` onto the active fact tracer
-    /// (SCOPE-LOCK 12) so the cached value invalidates on an augmenter
+    /// so the cached value invalidates on an augmenter
     /// add/remove/reorder OR an augmenter content edit — the same fact rail as
     /// [`crate::resolver_core::route_db::RouteDb::get_or_compute_effective_export_set`].
     /// These two facts are the sole cache-validity rail for the merged value:
@@ -1530,7 +1530,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return None;
         }
 
-        // Fact rail (SCOPE-LOCK 12): the augmenter-set shape fact (invalidates
+        // Fact rail: the augmenter-set shape fact (invalidates
         // on augmenter add/remove/reorder) + each augmenter's whole-hash
         // (invalidates on augmenter content edit). Observed onto the active
         // tracer so they enter this build's `ReadSetSignature.facts`. The shape

@@ -2066,7 +2066,7 @@ fn materialize_memo_db_artifact_only_scope_lowers_under_shallow_whole_hash() {
 
     // Publish that `IndexedReady` into `FileArtifactStore` under a
     // SEPARATE canonical the scheduler never tracked — a genuinely
-    // artifact-only scope (codex P2's "foreign source or test-seeded
+    // artifact-only scope (a "foreign source or test-seeded
     // file with no scheduler DerivedRawState").
     let scope = "/self_root_race/memo_artifact_only_scope.ts";
     host.project_type_store()

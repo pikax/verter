@@ -1603,7 +1603,7 @@ fn session_overlay_warm_validation_matrix() {
              Pre-fix `SessionResolverContext::resolver_store_view` delegates to the base \
              host, whose store view records the BASE hash for the canonical — the strict \
              self-root validator then rejects the overlay-rooted entry and the cold build \
-             re-runs. This is the exact codex P1 defect: every session-overlay warm read \
+             re-runs. This is the exact defect: every session-overlay warm read \
              cold-recomputes.",
         );
         match value {
@@ -1982,7 +1982,7 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
 /// `execute_cooperative`'s warm-hit fast path rejects a warm entry
 /// rooted on a canonical the session has DELETED (overlay-Deleted).
 ///
-/// Codex P2 #1: `HostStoreView::with_session_overlay` re-roots /
+/// `HostStoreView::with_session_overlay` re-roots /
 /// removes per-canonical snapshots by iterating `overlay_canonicals()`
 /// — overlay-*source* keys only. A canonical the session tombstoned
 /// (deleted) but never re-upserted is absent from that set, so the
@@ -2289,7 +2289,7 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
 /// (non-self-root) `FileWholeHash` dependency on a child canonical
 /// MISSES when the session has TOMBSTONED (deleted) that child.
 ///
-/// Codex P2 #2: `HostStoreView::with_session_overlay` removes a
+/// `HostStoreView::with_session_overlay` removes a
 /// tombstoned canonical from `whole_hashes`. The strict self-root
 /// validator (`validates_self_root_whole_hash`) then rejects an entry
 /// *self-rooted* on the deleted file — correct. But a plain cross-file

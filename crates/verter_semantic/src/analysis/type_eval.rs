@@ -39,10 +39,12 @@ pub struct TypeDeclInfo {
 /// An ordered group of same-name type declaration contributors, in
 /// source/binder order (append-only).
 ///
-/// Today's observable behaviour is last-wins: [`primary`](Self::primary)
-/// returns the LAST contributor. Earlier contributors are retained so a
-/// later phase can compose real TypeScript declaration merging without
-/// changing current behaviour.
+/// Every contributor is retained so [`merged_body`](Self::merged_body) can
+/// compose real TypeScript declaration merging (interface+interface and
+/// interface+class fold into a [`TypeDeclBody::Merged`] carrier).
+/// [`primary`](Self::primary) returns the LAST contributor — the
+/// last-wins representative used where a single body is required (alias
+/// groups, single-contributor groups).
 #[derive(Debug, Clone)]
 pub struct TypeDeclGroup {
     /// Contributors in source/binder order. Always non-empty once created.
@@ -93,6 +95,12 @@ impl TypeDeclGroup {
     /// group containing an alias — or any single-contributor group — keeps
     /// today's last-wins [`TypeDeclBody::Single`].
     pub fn merged_body(&self) -> TypeDeclBody {
+        // `interface`+`interface` and `interface`+`class` are the two valid
+        // same-name type merges. Two same-name `class` declarations are a
+        // duplicate-identifier ERROR in TypeScript; folding such a (malformed)
+        // group into a `Merged` carrier is benign — it produces a union of the
+        // two class instance bodies for invalid input rather than special-casing
+        // it, which keeps the predicate simple and never affects well-formed code.
         let all_mergeable = self
             .contributors
             .iter()
@@ -262,8 +270,10 @@ pub struct ValueDeclInfo {
 /// An ordered group of same-name value declaration contributors, in
 /// source/binder order (append-only).
 ///
-/// Today's observable behaviour is last-wins: [`primary`](Self::primary)
-/// returns the LAST contributor.
+/// [`merged_signatures`](Self::merged_signatures) concatenates every
+/// contributor's signatures in source order (the function-overload group);
+/// [`primary`](Self::primary) returns the LAST contributor, the last-wins
+/// representative used where a single declaration is required.
 #[derive(Debug, Clone)]
 pub struct ValueDeclGroup {
     /// Contributors in source/binder order. Always non-empty once created.

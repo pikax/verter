@@ -626,7 +626,7 @@ fn route_owned_shallow_invalidated_by_content_hash_only() {
 
 // ─── T5 — concurrent cold callers collapse via singleflight ──────────────
 //
-// Two assertions per §6b.0.2 row T5 (Codex P1 #3 seventh-pass):
+// Two assertions per §6b.0.2 row T5:
 // (a) `Arc::ptr_eq` proves shared publication (singleflight collapse);
 // (b) `read_count == 1` proves only the leader paid the I/O cost.
 #[test]
@@ -832,8 +832,7 @@ fn route_owned_shallow_tiered_gate_invalidates_on_workspace_generation_bump() {
 // call `host.set_exact_resolutions(canonical, resolutions)`; assert entry
 // is gone. Pre-migration the wrapper doesn't exist (compile failure → red).
 // Post-migration: wrapper cascade includes `bump_project_generation_and_evict`
-// + `route_owned_shallow.clear_all` (per §6b.D2b step 5 + eleventh-pass
-// Codex P0).
+// + `route_owned_shallow.clear_all` (per §6b.D2b step 5).
 #[test]
 fn route_owned_shallow_evicts_via_host_set_exact_resolutions_wrapper() {
     use crate::project_type_store::RouteOwnedShallowEntry;
@@ -868,7 +867,7 @@ fn route_owned_shallow_evicts_via_host_set_exact_resolutions_wrapper() {
 
     // Project generation must have advanced (proves
     // bump_project_generation_and_evict is in the cascade per §6b.2.F6.bypass
-    // step 7 / eleventh-pass Codex P0).
+    // step 7).
     let post_gen = store.current_project_generation();
     assert!(
         post_gen > pre_gen,
@@ -987,7 +986,7 @@ fn upsert_invalidation_matrix_evicts_route_owned_shallow() {
 
 // ─── T13 — REGRESSION: tier-3 project-generation gate rejects stale ──────
 //
-// Per §6b.0.2 row T13 (tenth-pass Codex P0): tier-3 covers route-resolution
+// Per §6b.0.2 row T13: tier-3 covers route-resolution
 // mutations (`configure_projects`, `set_exact_resolutions`) that DO NOT
 // bump `content_generation`. Setup: populate an entry under project
 // generation P0; bump project generation via `configure_projects`; manually

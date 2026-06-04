@@ -416,7 +416,7 @@ fn replace_exact_resolutions_replaces_canonical_axis_symmetrically() {
 // ── Test #12 ──
 #[test]
 fn add_lazy_resolved_dep_records_lazy_class_even_when_dep_exists_elsewhere() {
-    // R5 (Codex P1): idempotency is per-class, not cross-class.
+    // R5: idempotency is per-class, not cross-class.
     let mut store = EdgeStore::new();
     store.replace_parsed_edges("/src/Comp.vue", btree(&["/lib/x.ts"]), vec![], vec![]);
     // Even though /lib/x.ts is in parsed_resolved, lazy_resolved still inserts.

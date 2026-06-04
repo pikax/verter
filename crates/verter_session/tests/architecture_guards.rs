@@ -5001,6 +5001,11 @@ mod foundations_guards {
             // and hyphen variants all trip — see the
             // `case_insensitive_codex_vocabulary` block.
             "AX-WIP",
+            // Scope-lock plan vocabulary — `SCOPE-LOCK <n>` markers from the
+            // orchestrator's block plan. Project-management nouns that never
+            // appear in legitimate final-state prose.
+            "SCOPE-LOCK",
+            "scope-lock",
         ];
         for needle in FIXED_NEEDLES {
             if line.contains(needle) {
@@ -5028,6 +5033,16 @@ mod foundations_guards {
             const CODEX_VOCAB: &[&str] = &["codex audit", "codex finding", "codex observed"];
             for needle in CODEX_VOCAB {
                 if normalised.contains(needle) {
+                    return true;
+                }
+            }
+            // `Codex P0.1` / `Codex-P2.2` review-finding markers — `codex p`
+            // immediately followed by a digit (after hyphen→space
+            // normalisation). The substantive description belongs in the
+            // comment without the review-verdict label.
+            if let Some(pos) = normalised.find("codex p") {
+                let after = normalised[pos + "codex p".len()..].as_bytes();
+                if after.first().is_some_and(u8::is_ascii_digit) {
                     return true;
                 }
             }
@@ -5812,6 +5827,16 @@ mod foundations_guards {
             // observed/audit/finding triple in the case-insensitive
             // scan.
             "// codex observed divergence from tsgo",
+            // SCOPE-LOCK plan markers — the orchestrator's block-plan
+            // scope-lock vocabulary.
+            "// (SCOPE-LOCK 12 — self_root_canonicals = base ∪ augmenters)",
+            "/// interface + class merge (SCOPE-LOCK 4): instance-member fold",
+            "// scope-lock 15e overlay-aware index population",
+            // `Codex P<n>` / `Codex-P<n>` review-finding markers — the
+            // verdict label that must not survive into final-state prose.
+            "/// Project isolation prevents cross-project poisoning (Codex P0.1).",
+            "// known_miss_generation (Codex P2.2): read the owner's tag",
+            "// the Codex-P2.2 fix lives alongside it",
         ];
         for line in cases {
             assert!(
@@ -5913,6 +5938,12 @@ mod foundations_guards {
             // not flag this.
             "// the request loop blocks once per flight",
             "// `block_until_idle` blocks the worker until drained.",
+            // SCOPE-LOCK / Codex-P negatives — benign prose where the
+            // banned token does not appear in its marker form.
+            "// scope-limited to the owning file's surface.", // `scope-l` but not `scope-lock`
+            "// the lookup is scoped to the canonical id.",
+            "// codex provides a second opinion on the design.", // `codex p` + non-digit
+            "// Codex passes the diff to the reviewer.",
         ];
         for line in allowed {
             assert!(

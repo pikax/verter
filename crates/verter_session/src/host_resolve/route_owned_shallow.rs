@@ -341,8 +341,8 @@ impl VerterHost {
 
     /// tiered staleness gate for route-only entries.
     /// Mirrors pre-migration `cached_route_owned_shallow_state_entry` body
-    /// (host_resolve.rs:2128–2147) extended with tier-3 `project_generation`
-    /// per tenth-pass Codex P0:
+    /// (host_resolve.rs:2128–2147) extended with a tier-3 `project_generation`
+    /// check:
     ///
     /// - **Tier 3** — `entry.project_generation` must match
     ///   [`ProjectTypeStore::current_project_generation`]. Covers

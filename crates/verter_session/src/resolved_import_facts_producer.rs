@@ -132,7 +132,7 @@ impl VerterHost {
         //    is the scheduler-cached `parse.whole_hash` captured
         //    above.
         //
-        //    `known_miss_generation` (Codex P2.2 fix)
+        //    `known_miss_generation`
         //    is a stable tag over the owner's
         //    `DerivedRawState::import_routes_known_miss_recorded_at_generation`
         //    sidecar. `set_import_dependencies` updates the sidecar

@@ -221,7 +221,7 @@ fn unrelated_consts_do_not_merge() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. interface + class merge (SCOPE-LOCK 4): the interface members augment the
+// 6. interface + class merge: the interface members augment the
 //    class INSTANCE type. The merged type-side surface unions both — the class
 //    value / static / ctor side is a separate value declaration and is
 //    unaffected.

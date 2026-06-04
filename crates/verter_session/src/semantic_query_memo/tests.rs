@@ -2461,7 +2461,7 @@ fn carrier_naming(canonical: &str, hash: u8) -> crate::fact_signature_helpers::R
     ]))
 }
 
-/// FINDING A — codex P2-A: FENCE THE REVERSE-INDEX CLEAR AGAINST NEW
+/// FINDING A — FENCE THE REVERSE-INDEX CLEAR AGAINST NEW
 /// PUBLISHES. `invalidate_all` MUST clear the `canonical_to_entries`
 /// reverse index UNDER the `entries` lock that performed
 /// `entries.clear()` + `memo_budget.clear()`, so all three members of
@@ -2574,7 +2574,7 @@ fn invalidate_all_clears_reverse_index_under_entries_lock() {
     );
 }
 
-/// FINDING B — codex P2-B: SCOPE BUDGET REVERSE-INDEX CLEANUP TO EVICTED
+/// FINDING B — SCOPE BUDGET REVERSE-INDEX CLEANUP TO EVICTED
 /// ENTRIES. The FIFO budget-eviction MUST prune the evicted victim's
 /// `canonical_to_entries` reverse-index registration UNDER the `entries`
 /// lock that performed the victim's `entries` removal, so a concurrent
@@ -5277,7 +5277,7 @@ fn prefix_backfill_carries_traced_facts() {
          (got facts = {facts:?}). If this fails, the prefix-backfill \
          publish call site is still passing only the legacy \
          `dep_signature` to `warm_publish_one_if_absent`, dropping \
-         the parent's path-precise facts. Codex P2.C.",
+         the parent's path-precise facts.",
         facts = prefix_carrier.facts.as_ref()
     );
 }
@@ -5874,7 +5874,7 @@ fn execute_cooperative_batch_one_batch_entry_n_keys_k_admissions() {
 /// in-flight build run under a DIFFERENT view does NOT receive the
 /// winner's node — it forks and cold-recomputes for its own view.
 ///
-/// Codex P2 #1: the in-flight singleflight coalesces concurrent
+/// The in-flight singleflight coalesces concurrent
 /// requests for the same [`SemanticQueryKey`]. But two requests can
 /// carry the same key while executing under different overlays — a
 /// base context and a session/overlay context. Their results are NOT
@@ -6078,7 +6078,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
          view — the follower MUST fork and cold-recompute for its own \
          view. Pre-fix the joiner branch bubbled + returned the winner's \
          carrier without validating it against the follower's `ctx`, so \
-         the follower's build closure never ran (codex P2 #1).",
+         the follower's build closure never ran.",
     );
 
     match follower_value {
@@ -6105,7 +6105,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
 ///
 /// This is the companion to
 /// [`cross_view_joiner_forks_when_winner_carrier_fails_follower_validation`]:
-/// it proves the join-path view validation added for codex P2 #1 does
+/// it proves the join-path view validation does
 /// NOT force a fork on the common case where the winner and follower
 /// run under the same content identity. The winner's carrier
 /// self-roots on the keyed canonical; the follower runs the SAME key
@@ -7067,7 +7067,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
 /// outer `DashMap` for every distinct evicted canonical. Under churn
 /// across many distinct canonicals that secondary structure grows
 /// unbounded until a project-generation clear, defeating the bound the
-/// budget exists to enforce (codex P2).
+/// budget exists to enforce.
 ///
 /// DISCRIMINATES: each entry is published under a DISTINCT canonical,
 /// so every entry owns its own outer shard. A small `memo_budget`
@@ -7109,7 +7109,7 @@ fn budget_eviction_prunes_empty_canonical_to_entries_shards() {
         "budget eviction left {outer_shards} outer canonical_to_entries \
          shards resident — an empty `Mutex<map>` + canonical `Arc<str>` \
          lingers for every evicted canonical. Eviction must drop the \
-         outer shard when its inner map becomes empty (codex P2); the \
+         outer shard when its inner map becomes empty; the \
          count must collapse to the surviving families' canonicals \
          (≤ budget cap 2), not stay at {families}.",
     );
@@ -7183,6 +7183,6 @@ fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
         0,
         "`invalidate_canonical` must drop the cross-canonical shard it \
          empties — an empty `Mutex<map>` for `/w/b.ts` must not linger \
-         after its last registration is stripped (codex P2)",
+         after its last registration is stripped",
     );
 }

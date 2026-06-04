@@ -85,7 +85,7 @@ pub use verter_semantic::facts::registry::{
 ///
 /// Used as a key dimension on [`AugmentationTargetKey`] to keep
 /// augmentation entries from one project from poisoning a sibling
-/// project under the same syntactic specifier (Codex P0.1).
+/// project under the same syntactic specifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProjectIdentity(pub Hash16);
 
@@ -369,7 +369,7 @@ pub enum AugmentationTargetKind {
 /// Carries the resolve-domain dimensions (`project_identity`,
 /// `resolve_env_hash`, `lib_env_hash`) so the same syntactic specifier
 /// `"vue"` in two projects under different envs produces two distinct
-/// keys. Project isolation prevents cross-project poisoning (Codex P0.1).
+/// keys. Project isolation prevents cross-project poisoning.
 ///
 /// R21 scoping rule: this key carries `lib_env_hash` because module
 /// augmentations live inside libs / ambient corpora — a lib update CAN
@@ -380,7 +380,7 @@ pub enum AugmentationTargetKind {
 /// the overlay's augmenters unioned with base under [`AugmentationPopulation::Session`],
 /// while base reads stay on [`AugmentationPopulation::Base`] — overlay
 /// augmenters never poison the base index, and project + env isolation prevents
-/// cross-project poisoning (Codex P0.1).
+/// cross-project poisoning.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AugmentationTargetKey {
     pub project_identity: ProjectIdentity,

@@ -125,7 +125,7 @@ fn current_content_pinned_indexed_rejects_stale_artifact() {
     );
 }
 
-/// Codex P1.A discriminator — a content-pinned read MUST NOT resolve a
+/// Discriminator — a content-pinned read MUST NOT resolve a
 /// stale artifact via a `get_any`-derived hash.
 ///
 /// When a file is evicted (`VerterHost::evict` sets the
@@ -201,7 +201,7 @@ fn current_content_pinned_indexed_returns_none_after_eviction() {
         "current_content_pinned_indexed MUST return None after eviction: a \
          non-None result means the pin was derived from the lingering \
          artifact's own `get_any` hash, which re-resolves the stale artifact \
-         and confirms it as current — the exact codex P1.A defect.",
+         and confirms it as current — exactly that defect.",
     );
 }
 
@@ -313,7 +313,7 @@ fn import_route_derived_fact_hash_ignores_stale_artifact_hash() {
     );
 }
 
-/// Codex P1.B discriminator — a content-pinned read through
+/// Discriminator — a content-pinned read through
 /// `SessionResolverContext` MUST pin against the overlay content hash,
 /// not the base host's hash.
 ///
@@ -423,7 +423,7 @@ fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
         "indexed_for_current_content through SessionResolverContext MUST \
          return the OVERLAY artifact (whole_hash == overlay_hash). A result \
          keyed by base_hash means the pin was derived from the base host's \
-         hash rather than the session view — the exact codex P1.B defect.",
+         hash rather than the session view — exactly that defect.",
     );
     assert_ne!(
         pinned.whole_hash, base_hash,

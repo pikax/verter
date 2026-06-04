@@ -240,8 +240,7 @@ fn cached_resolved_state(
     // overlay-bearing slot (view_fingerprint != 0) if present and
     // falls back to the base slot (view_fingerprint == 0) so the
     // historical "give me the latest cached state for this mode"
-    // semantics are preserved across the view-aware migration
-    // (Codex P1.3, fix-agent P0.1).
+    // semantics are preserved across the view-aware migration.
     fn pick<'a>(
         entries: impl Iterator<
             Item = (

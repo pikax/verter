@@ -326,7 +326,7 @@ impl EdgeStore {
     }
 
     /// Add a single lazy-resolved bare-import dep. Returns `true` if newly
-    /// inserted into `lazy_resolved`. R5 (closes Codex P1): idempotency is
+    /// inserted into `lazy_resolved`. R5: idempotency is
     /// checked ONLY against `lazy_resolved`, not other classes. The
     /// reverse-axis canonical bucket is updated via `canonical_dep_union`
     /// diff — if the dep is also present in another class, the union is

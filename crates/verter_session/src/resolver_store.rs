@@ -175,7 +175,7 @@ pub struct HostStoreView {
     /// (`admit_resolved_import_facts_for_owner`) admitted under.
     /// Absent entries fall back to `[0u8; 16]` (owners with no
     /// recorded known-misses or canonicals whose route resolution
-    /// never ran). Codex P2.2 fix.
+    /// never ran).
     resolved_import_facts_known_miss_tags: FxHashMap<String, Hash16>,
     /// Route-surface-domain handle (R26): `Arc` clone of the
     /// project store's `RouteDb`. The validator for
@@ -594,8 +594,8 @@ impl HostStoreView {
                 }
 
                 // import_routes lives on DerivedRawState (D48 split).
-                // The known-miss generation sidecar (Codex P2.2 /
-                // Codex-P2.2 fix) lives alongside it; capture both
+                // The known-miss generation sidecar lives alongside
+                // it; capture both
                 // under the same `derived_raw_cache().get(...)` so
                 // the validator can compose
                 // `ResolvedImportFactsKey.known_miss_generation`
@@ -985,7 +985,7 @@ impl HostStoreView {
             None => return false,
         };
 
-        // `known_miss_generation` (Codex P2.2 fix):
+        // `known_miss_generation`:
         // captured at view-build time from
         // `DerivedRawState::import_routes_known_miss_recorded_at_generation`.
         // Absent entries → `[0u8; 16]` so an owner that never had

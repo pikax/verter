@@ -835,8 +835,8 @@ impl VerterHost {
     /// Build the set of `ParsedEdge` records from a file's parse analysis.
     ///
     /// Sub- (R5 dedupe contract): dedupe by
-    /// `(specifier, ResolveRequestKind)`, NOT by specifier alone. This
-    /// closes Codex P2 / F14: a file with `import { foo } from './x'` AND
+    /// `(specifier, ResolveRequestKind)`, NOT by specifier alone, so that
+    /// a file with `import { foo } from './x'` AND
     /// `import type { Bar } from './x'` must produce TWO `ParsedEdge::Relative`
     /// entries — one per kind — because the workspace's
     /// `parsed_unresolved_relatives` is keyed by `(specifier, kind)` and

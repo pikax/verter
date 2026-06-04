@@ -2021,7 +2021,7 @@ pub struct DerivedRawState {
     /// is the base-only slot; non-zero fingerprints identify per-
     /// overlay-set slots so two sessions with conflicting overlays
     /// cannot observe each other's cached state through the legacy
-    /// fallback path (Codex P1.3, fix-agent P0.1).
+    /// fallback path.
     pub(crate) cached_resolved_meta:
         FxHashMap<(ProjectionMode, u64), ResolvedComponentMetaCacheEntry>,
     /// Cached encoded protobuf payload for the canonical component-meta query.

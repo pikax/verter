@@ -634,7 +634,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Operates GRAPH-NATIVE: walks [`SemanticNodeData`] via the
     /// graph's `node_data`, dispatches per shape, interns reduced
     /// shells via [`crate::semantic_query_memo::SemanticGraphStore::intern_preserving_scope`].
-    /// No re-lowering of raised TypeExpr subtrees (Codex P0 #1).
+    /// No re-lowering of raised TypeExpr subtrees.
     ///
     /// `mode` is threaded into nested dispatches and determines whether
     /// `DeclRef` / `InstantiationRef` reduce eagerly (Expanded) or stay

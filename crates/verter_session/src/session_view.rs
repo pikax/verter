@@ -601,7 +601,7 @@ impl SessionView for OverlaidView {
         } else {
             current_content_hash_from_scheduler(self.base.as_ref(), canonical)?
         };
-        // `known_miss_generation` (Codex P2.2): read the owner's
+        // `known_miss_generation`: read the owner's
         // sidecar so the lookup composes the same tag value as the
         // producer; lets a later route snapshot that re-resolves a
         // previously-missing specifier reach a fresh cache slot
@@ -858,7 +858,7 @@ impl SessionView for OverlaidViewRef<'_> {
         } else {
             current_content_hash_from_scheduler(self.base, canonical)?
         };
-        // `known_miss_generation` (Codex P2.2): read the owner's
+        // `known_miss_generation`: read the owner's
         // sidecar to match the producer's key.
         let known_miss_generation = known_miss_generation_tag_for_owner(self.base, canonical);
         let key = crate::resolved_import_facts::ResolvedImportFactsKey {

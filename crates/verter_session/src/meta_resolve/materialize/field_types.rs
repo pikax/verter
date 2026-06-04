@@ -529,7 +529,7 @@ pub(crate) fn type_expr_has_package_backed_object_like_root(
 ///     validity depends on this gate verdict: rooting an admit on a
 ///     stand-in hash (the pre-H2 `shallow_file_state.whole_hash`
 ///     `unwrap_or_default()` was a `WholeHash(0)` sentinel that does
-///     not validate the actual file state — see codex P1) would
+///     not validate the actual file state) would
 ///     produce a future warm hit that returns the gate's stale verdict
 ///     against a fresh whole-hash with no invalidation rail.
 ///

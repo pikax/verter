@@ -925,7 +925,7 @@ mod tests {
     ///
     /// ## Why this is the discriminating form for the snapshot→delta fix
     ///
-    /// The pre-fix bug (codex P3) is an unsynchronised `store(live_count())`
+    /// The pre-fix bug is an unsynchronised `store(live_count())`
     /// that loses a concurrent update. A *deterministic* reproduction
     /// would need to pin one writer between its `live_count()` read and
     /// its `store` — and the only place that read-then-write window
