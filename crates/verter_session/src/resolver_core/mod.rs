@@ -1882,13 +1882,22 @@ where
     /// [`FlightState`] `Arc` for `(key, token)`, or `0` if no flight is
     /// currently registered for that lane.
     ///
-    /// While only the leader is mid-`compute` the count is the
-    /// leader-only baseline (the leader's local `state` binding plus the
-    /// `flights` map entry = 2). Each follower that has cloned the entry
-    /// in [`Self::run`] and is committed to the condvar wait raises the
-    /// count by one. Polling this is a deterministic alternative to a
-    /// wall-clock `sleep` for observing follower admission onto the
-    /// singleflight — it does not race the follower under parallel load.
+    /// While only the leader is mid-`compute`, a leader using BARE
+    /// [`Self::run`] / [`Self::run_retaining`] (no participation pin) has
+    /// the leader-only baseline of 2: the leader's local `state` binding
+    /// plus the `flights` map entry. A caller that also holds a
+    /// [`Self::participate`] guard on the same lane contributes ONE
+    /// additional strong ref, so a parked leader reached through
+    /// [`run_stable_request`] — where every caller pins via `participate`
+    /// at the top, BEFORE its pre-flight cache peek — has a baseline of 3
+    /// (local `state` + `flights` map entry + `participate` guard clone).
+    /// Each additional `participate`+`run_retaining` follower then adds up
+    /// to two: first its `participate` guard clone, then (once past its
+    /// peek and committed to the condvar wait as a Follower) its
+    /// `run_retaining`/join clone. Polling this is a deterministic
+    /// alternative to a wall-clock `sleep` for observing follower
+    /// admission onto the singleflight — it does not race the follower
+    /// under parallel load.
     ///
     /// Exposed under `cfg(any(test, debug_assertions))` so integration
     /// tests in `tests/` (which compile without `cfg(test)`) can reach it
@@ -2630,6 +2639,33 @@ mod tests {
             }
         }
 
+        // Measure the parked-leader strong-count baseline on the
+        // `session: Some(id)` run lane BEFORE the straggler exists, so the
+        // straggler-progress gate below is derived from the real baseline
+        // rather than a hardcoded literal that can silently drift if the
+        // leader's ref bookkeeping changes.
+        //
+        // While the leader is parked mid-`compute` the lane's `FlightState`
+        // `Arc` has exactly THREE strong refs:
+        //   1 the leader's `run_retaining` local `state` binding
+        // + 1 the `flights` map entry
+        // + 1 the leader's own `participate` guard clone (every caller pins
+        //     via `participate` at the top of `run_stable_request` BEFORE its
+        //     pre-flight peek)
+        // = 3 (asserted as the baseline invariant).
+        let run_lane = StoreViewCompatToken {
+            epoch: 1,
+            session: Some(SESSION_ID),
+        };
+        let leader_baseline = singleflight.test_flight_strong_count(&"node".to_string(), run_lane);
+        assert_eq!(
+            leader_baseline, 3,
+            "parked-leader strong-count baseline on the `session: Some(id)` lane must be 3 \
+             (leader `run_retaining` local + `flights` map entry + leader `participate` guard); \
+             a different value means the leader ref bookkeeping changed and the straggler gate \
+             below must be re-derived",
+        );
+
         // Straggler: now reaches `run_stable_request` while the leader is
         // still mid-flight. It must Follower-join the leader's flight.
         let straggler = {
@@ -2652,36 +2688,37 @@ mod tests {
         // to publish. Poll the run-lane strong count deterministically
         // instead of sleeping a fixed wall-clock duration.
         //
-        // Strong-count bookkeeping on the `session: Some(id)` lane while the
-        // leader is parked mid-flight:
-        //   1 leader's local `state` binding
-        // + 1 the `flights` map entry
-        // + 1 the straggler's `participate` guard clone (taken BEFORE its
-        //     `try_get_cached` peek)
-        // + 1 the straggler's `run_retaining` clone (taken AFTER the peek,
-        //     as it joins the Running lane and parks on the condvar)
-        // = 4. Requiring >= 4 therefore guarantees the straggler is past its
-        // cache peek and committed as a Follower-in-waiting; releasing the
-        // gate only then means the leader's `store_stable` cannot turn the
-        // straggler into a pre-flight `Cache` hit. (A count that never
-        // reaches 4 would mean the straggler pinned/joined a DIFFERENT lane
-        // than the leader's run lane — the P1a drift.)
-        let run_lane = StoreViewCompatToken {
-            epoch: 1,
-            session: Some(SESSION_ID),
-        };
+        // The straggler adds its refs in TWO distinct steps, and only the
+        // SECOND proves it is past its cache peek:
+        //   +1 its `participate` guard clone — taken at the top of
+        //      `run_stable_request`, BEFORE the line-619 `try_get_cached`
+        //      peek (`leader_baseline + 1`). This alone does NOT prove the
+        //      straggler has missed the cache.
+        //   +1 its `run_retaining` clone — taken AFTER the peek, as it joins
+        //      the Running lane and parks on the condvar as a
+        //      Follower-in-waiting (`leader_baseline + 2`).
+        // Gating on `leader_baseline + 2` is therefore the off-by-one-free
+        // condition: it fires ONLY once the straggler holds BOTH refs, i.e.
+        // it has provably passed its peek and committed as a Follower, so the
+        // leader's `store_stable` publish below cannot turn the straggler
+        // into a pre-flight `Cache` hit. (The previous gate fired at the
+        // straggler's `participate` step — `leader_baseline + 1` == 4 — which
+        // let the leader publish while the straggler was still BEFORE its
+        // peek, producing the intermittent `Cache`-instead-of-`Follower`
+        // flake under CPU contention.)
         let mut spins = 0;
         loop {
             let count = singleflight.test_flight_strong_count(&"node".to_string(), run_lane);
-            if count >= 4 {
+            if count >= leader_baseline + 2 {
                 break;
             }
             spins += 1;
             assert!(
                 spins < 10_000_000,
-                "straggler never committed onto the `session: Some(id)` run lane (count stuck \
-                 below 4). This means the straggler pinned/joined a DIFFERENT lane than the \
-                 leader's run lane (P1a: pin lane drifted off the run lane).",
+                "straggler never committed into `run_retaining` on the `session: Some(id)` run \
+                 lane (count stuck below leader_baseline + 2). This means the straggler \
+                 pinned/joined a DIFFERENT lane than the leader's run lane (P1a: pin lane \
+                 drifted off the run lane).",
             );
             std::thread::yield_now();
         }
