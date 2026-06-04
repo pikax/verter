@@ -872,8 +872,14 @@ fn merged_decl_renders_peer_merged_member_union() {
     // first-contributor-only arm drops `y`.
     let r = render(&store, merged);
     assert_eq!(r, "{ x: number; y: string }");
-    assert!(r.contains("x: number"), "first contributor member missing: {r}");
-    assert!(r.contains("y: string"), "second contributor member missing: {r}");
+    assert!(
+        r.contains("x: number"),
+        "first contributor member missing: {r}"
+    );
+    assert!(
+        r.contains("y: string"),
+        "second contributor member missing: {r}"
+    );
     assert_ne!(r, "{ x: number }", "must not be first-contributor-only");
 
     // NEGATIVE: a `MergedDecl` is atomic (`{…}`) — as an array element it must
@@ -884,7 +890,10 @@ fn merged_decl_renders_peer_merged_member_union() {
     });
     let ra = render(&store, arr);
     assert_eq!(ra, "{ x: number; y: string }[]");
-    assert!(!ra.contains("({"), "merged decl is atomic — must not parenthesise: {ra}");
+    assert!(
+        !ra.contains("({"),
+        "merged decl is atomic — must not parenthesise: {ra}"
+    );
 }
 
 // ----------------------------------------------------------------------

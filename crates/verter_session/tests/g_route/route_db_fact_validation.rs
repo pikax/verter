@@ -434,6 +434,7 @@ fn effective_export_set_carries_fact_dep_signature() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
         target: target.clone(),
     };
     artifact_store.populate_augmenter_set(
@@ -510,6 +511,7 @@ fn effective_export_set_invalidates_when_augmenter_set_fingerprint_changes() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
         target: target.clone(),
     };
     let initial_fp = [99u8; 16];

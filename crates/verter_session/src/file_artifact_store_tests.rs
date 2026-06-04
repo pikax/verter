@@ -128,6 +128,7 @@ fn augmentation_index_starts_empty() {
         project_identity: ProjectIdentity([0u8; 16]),
         resolve_env_hash: [0u8; 16],
         lib_env_hash: [0u8; 16],
+        population: crate::file_artifact_store::AugmentationPopulation::Base,
         target: AugmentationTargetKind::GlobalAugmentation,
     };
     assert!(store.get_augmenter_set(&key).is_none());
@@ -144,6 +145,7 @@ fn augmentation_index_round_trip() {
         project_identity: ProjectIdentity([42u8; 16]),
         resolve_env_hash: [1u8; 16],
         lib_env_hash: [2u8; 16],
+        population: crate::file_artifact_store::AugmentationPopulation::Base,
         target: AugmentationTargetKind::ExternalSpecifier(super::InternedSpecifier::from("vue")),
     };
     let set = Arc::new(AugmenterSet {

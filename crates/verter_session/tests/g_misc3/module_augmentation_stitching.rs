@@ -418,23 +418,25 @@ fn cross_project_augmenter_isolation() {
         project_identity: project_identity_1,
         resolve_env_hash: resolve_env_1,
         lib_env_hash: [0u8; 16],
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
         target: target.clone(),
     };
     let target_key_p2 = AugmentationTargetKey {
         project_identity: project_identity_2,
         resolve_env_hash: resolve_env_2,
         lib_env_hash: [0u8; 16],
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
         target: target.clone(),
     };
 
     // Populate project 1's index with augmenter A.
-    let set_p1 = store.ensure_augmentation_index_populated(&target_key_p1, |_, _| None);
+    let set_p1 = store.ensure_augmentation_index_populated(&target_key_p1, |_, _| None, None);
     // Populate project 2's index — augmenter A is the same file in
     // FileArtifactStore, but the project-isolation contract says: the
     // index entry is keyed by `AugmentationTargetKey { project,
     // resolve_env, lib_env, target }`, so two distinct project keys
     // produce TWO distinct entries.
-    let set_p2 = store.ensure_augmentation_index_populated(&target_key_p2, |_, _| None);
+    let set_p2 = store.ensure_augmentation_index_populated(&target_key_p2, |_, _| None, None);
 
     // Distinct index entries.
     assert_eq!(
@@ -546,6 +548,7 @@ fn augmenter_set_refresh_invalidates_downstream() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
         target: target.clone(),
     };
     let new_set = store
@@ -986,6 +989,7 @@ fn rekeyed_augmenter_with_unchanged_skeleton_is_not_dropped() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
         target: target.clone(),
     };
     let healed_set = store
@@ -1057,20 +1061,22 @@ impl StoreView for SessionScopedView {
     }
 }
 
-/// Discriminator: a session view passed to
-/// `get_or_compute_effective_export_set` panics with the base-only
-/// invariant message.
+/// Discriminator (SCOPE-LOCK 11 / guard 16-iv): the base-only
+/// `assert!(view.compat_token().session.is_none(), …)` is RETIRED — a session
+/// view passed to `get_or_compute_effective_export_set` is now ACCEPTED and
+/// keyed under [`AugmentationPopulation::Session`], NOT rejected with a panic.
 ///
-/// - **Against the guard-less tree** (`362eeb0b5`): the session view
-///   flows straight into the cold compute, which returns an
-///   `Arc<EffectiveExportSetEntry>` — no panic — so this `#[should_panic]`
-///   test FAILS ("test did not panic").
-/// - **Post-fix tree**: the entry guard rejects `session.is_some()`
-///   before any compute, so the call panics with the documented
-///   invariant — this test PASSES.
+/// - **Against the pre-deletion tree**: the entry guard panics with
+///   `"EffectiveExportSet is base-only"`, so the call never returns and this
+///   test FAILS (panic, not a returned entry).
+/// - **Post-deletion tree**: the session view flows through to the cold compute
+///   and returns an `Arc<EffectiveExportSetEntry>` — this test PASSES.
+///
+/// The guard `no_effective_export_set_base_only_session_assert`
+/// (`g_misc0/critical_rules_have_guards.rs`) statically pins the deletion so the
+/// assert cannot be re-introduced.
 #[test]
-#[should_panic(expected = "EffectiveExportSet is base-only")]
-fn effective_export_set_rejects_session_view() {
+fn effective_export_set_accepts_session_view_after_base_only_assert_retired() {
     let store = FileArtifactStore::new();
     let _key = insert_artifact_from_fixture(
         &store,
@@ -1079,7 +1085,7 @@ fn effective_export_set_rejects_session_view() {
         [11u8; 16],
     );
     let route_db = RouteDb::new();
-    // A session-scoped view — this is the rejected input.
+    // A session-scoped view — previously rejected, now accepted.
     let session_view = SessionScopedView::new(1, 42);
 
     let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
@@ -1090,16 +1096,129 @@ fn effective_export_set_rejects_session_view() {
         lib_env_hash: [3u8; 16],
     };
 
-    // MUST panic — augmentation stitching / `EffectiveExportSet` is
-    // base-only; a session call is observably an error, never a
-    // silently-wrong base-only result.
-    let _ = route_db.get_or_compute_effective_export_set(
+    // Returns a real entry — no panic. The session view keys its augmenter set
+    // under `Session(42)` population (isolated from the base index).
+    let effective = route_db.get_or_compute_effective_export_set(
         key,
         target,
         &session_view,
         &store,
         |_| Some([11u8; 16]),
         |_, _| None,
+    );
+    // The names-stitcher scans base artifacts (the live overlay-aware augmenter
+    // scan is the body stitch); the call completing without panic is the
+    // discriminating assertion.
+    assert!(
+        effective.augmenter_count <= 1,
+        "session-view call must return a real entry, not panic"
+    );
+}
+
+/// Discriminator (SCOPE-LOCK 11 / 15e — overlay-aware augmentation index): a
+/// `Session(id)` population augmenter set UNIONS the session's own overlay
+/// augmenters (matched by the overlay discriminator) with base, while the
+/// `Base` population set sees ONLY base augmenters. A session overlay's
+/// `declare module` augmenter NEVER appears in the base index.
+///
+/// - **Against the pre-deletion tree** (no `population` dimension, scan filters
+///   `is_legacy()` only): the overlay (non-legacy) augmenter is invisible to
+///   BOTH calls, so the session set never contains it — this test FAILS.
+/// - **Post-change tree**: the session scan (`Some(discriminator)`) includes
+///   the overlay augmenter; the base scan (`None`) excludes it — PASSES.
+#[test]
+fn session_overlay_augmenter_isolated_from_base_index() {
+    use verter_session::file_artifact_store::AugmentationPopulation;
+
+    let store = FileArtifactStore::new();
+
+    // Base augmenter (legacy key) that `declare module "vue" {}` augments.
+    let _base_key = insert_artifact_from_fixture(
+        &store,
+        "/aug-base.ts",
+        "module_augmentation_external.ts",
+        [11u8; 16],
+    );
+
+    // Session-overlay augmenter: a DIFFERENT file, keyed under a non-legacy
+    // overlay discriminator `D` (the `parse_env_hash` dimension). It augments
+    // the same `"vue"` target but exists ONLY in this session's overlay.
+    let overlay_discriminator: [u8; 16] = *b"vovl-art\x07\0\0\0\0\0\0\0";
+    let raw = fixture("module_augmentation_external.ts");
+    let indexed = build_indexed_with_source(&raw, [99u8; 16]);
+    let emission = emit_parse_facts(&indexed);
+    let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
+    let overlay_key = FileArtifactKey {
+        canonical: Arc::from("/aug-overlay.ts"),
+        content_hash: [99u8; 16],
+        parse_env_hash: overlay_discriminator,
+        parser_version: LEGACY_PARSER_VERSION,
+    };
+    store.insert_artifacts(
+        overlay_key,
+        Arc::new(FileArtifacts {
+            indexed,
+            facts: Arc::new(emission.facts),
+            parsed_edges: Arc::new(verter_session::file_artifact_store::ParsedEdges::empty()),
+            parse_stable_hash,
+            augmentations: Arc::new(emission.augmentations),
+        }),
+    );
+
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let base_key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
+        target: target.clone(),
+    };
+    let session_key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Session(42),
+        target,
+    };
+
+    let base_set = store.ensure_augmentation_index_populated(&base_key, |_, _| None, None);
+    let session_set = store.ensure_augmentation_index_populated(
+        &session_key,
+        |_, _| None,
+        Some(overlay_discriminator),
+    );
+
+    let base_canonicals: Vec<&str> = base_set
+        .entries
+        .iter()
+        .map(|e| e.canonical().as_ref())
+        .collect();
+    let session_canonicals: Vec<&str> = session_set
+        .entries
+        .iter()
+        .map(|e| e.canonical().as_ref())
+        .collect();
+
+    // BASE sees only the base augmenter — the overlay augmenter is invisible.
+    assert_eq!(base_canonicals, vec!["/aug-base.ts"]);
+    assert!(
+        !base_canonicals.contains(&"/aug-overlay.ts"),
+        "base index MUST NOT see the session-overlay augmenter"
+    );
+
+    // SESSION sees base UNIONED with the overlay augmenter.
+    assert!(
+        session_canonicals.contains(&"/aug-base.ts"),
+        "session index must include the base augmenter (union with base)"
+    );
+    assert!(
+        session_canonicals.contains(&"/aug-overlay.ts"),
+        "session index MUST include the session-overlay augmenter"
+    );
+    // The two populations are distinct entries (fingerprints differ).
+    assert_ne!(
+        base_set.fingerprint, session_set.fingerprint,
+        "base and session augmenter sets must be distinct (overlay isolation)"
     );
 }
 
@@ -1171,6 +1290,7 @@ fn relative_augmenter_resolver_runs_off_artifacts_guard() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
         target,
     };
 
@@ -1218,7 +1338,7 @@ fn relative_augmenter_resolver_runs_off_artifacts_guard() {
 
     // The discriminator: this call RETURNS (no hang, no re-entrant-write
     // panic) because the snapshot makes the resolver run off the guard.
-    let set = store.ensure_augmentation_index_populated(&target_key, &resolver);
+    let set = store.ensure_augmentation_index_populated(&target_key, &resolver, None);
 
     assert!(
         resolver_invoked.load(Ordering::SeqCst),
@@ -1251,9 +1371,10 @@ fn relative_augmenter_resolver_runs_off_artifacts_guard() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
         target: non_matching_target,
     };
-    let empty_set = store.ensure_augmentation_index_populated(&non_matching_key, &resolver);
+    let empty_set = store.ensure_augmentation_index_populated(&non_matching_key, &resolver, None);
     assert!(
         empty_set.entries.is_empty(),
         "a ResolvedRelativeCanonical target whose canonical does NOT \

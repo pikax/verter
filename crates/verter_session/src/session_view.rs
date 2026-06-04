@@ -904,6 +904,24 @@ impl SessionView for OverlaidViewRef<'_> {
 /// == 0` case, and keeps the value clear of any real env hash; the
 /// fingerprint occupies the low 8 bytes so distinct overlay sets map to
 /// distinct discriminators.
+/// The session-wide overlay artifact discriminator: the `Hash16` every overlay
+/// artifact in this session carries in its `FileArtifactKey::parse_env_hash`
+/// dimension. The overlay-aware augmentation-index scan
+/// ([`crate::file_artifact_store::FileArtifactStore::collect_augmenter_candidates`])
+/// matches non-legacy artifacts against this value to union the session's own
+/// overlay augmenters with base while excluding other sessions' overlays.
+///
+/// Returns `None` when the view carries no overlays (`fingerprint() == 0`): no
+/// overlay artifacts exist, so the scan stays base-only.
+#[must_use]
+pub fn session_overlay_discriminator(view: &dyn SessionView) -> Option<Hash16> {
+    let fingerprint = view.fingerprint();
+    if fingerprint == 0 {
+        return None;
+    }
+    Some(overlay_artifact_discriminator_from_fingerprint(fingerprint))
+}
+
 fn overlay_artifact_discriminator_from_fingerprint(fingerprint: u64) -> Hash16 {
     // Arbitrary fixed namespace tag — distinguishes an overlay-scoped
     // key from any zeroed / real `parse_env_hash` value.

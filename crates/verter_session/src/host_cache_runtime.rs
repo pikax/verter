@@ -106,16 +106,21 @@ impl VerterHost {
     #[must_use]
     pub(crate) fn owner_has_module_augmentation_dependency(&self, canonical: &str) -> bool {
         use crate::fact_emission::GLOBAL_AUGMENTATION_TAG;
-        use crate::file_artifact_store::{AugmentationTargetKey, AugmentationTargetKind};
+        use crate::file_artifact_store::{
+            AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
+        };
         use verter_semantic::facts::registry::{InternedGlobPattern, InternedSpecifier};
 
         let store = self.project_type_store.indexed();
         let env = self.host_view_env_hashes_for(canonical);
         let project_identity = self.host_view_project_identity_for(canonical);
+        // Cache-mode classification is a base resolve-domain probe (no session
+        // overlay), so it keys under `Base` and scans base artifacts only.
         let make_key = |target: AugmentationTargetKind| AugmentationTargetKey {
             project_identity,
             resolve_env_hash: env.resolve_env_hash,
             lib_env_hash: env.lib_env_hash,
+            population: AugmentationPopulation::Base,
             target,
         };
         // The augmenter's relative `declare module "./x"` specifiers
@@ -158,7 +163,7 @@ impl VerterHost {
         let resolver = &memoised_resolve;
         let any_non_empty = |target: AugmentationTargetKind| {
             !store
-                .ensure_augmentation_index_populated(&make_key(target), resolver)
+                .ensure_augmentation_index_populated(&make_key(target), resolver, None)
                 .entries
                 .is_empty()
         };

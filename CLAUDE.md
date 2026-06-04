@@ -142,6 +142,18 @@ Functions accumulate into an ordered `Vec<FunctionSignature>` (`ValueDeclGroup::
 
 See `/type-resolution` skill for the carrier chain, the peer-merge reducer, and the architecture guards.
 
+### Declaration Augmentation (CRITICAL)
+
+Ambient declaration augmentation (`declare module "X" { ... }` / `declare global { ... }`) is a RETAINED, addressable scoped inventory — never fingerprint-only facts and never file-scope pollution. `EvalEnv.augmentation_scopes` keys `(AugmentationScopeKind {Global, Module(specifier)}, name)` → ordered `TypeDeclGroup`, mirrored on `ShallowFileState.augmentation_scopes`; inner decls NEVER enter file-scope `type_symbols`. `ScopeId.kind: ScopeKind {File, ModuleAugmentation{specifier}, GlobalAugmentation}` makes a scoped declaration addressable.
+
+Cross-file augmentation merge is the SAME `MergedDecl` peer-merge path as same-file merging — NOT a second merge engine. When a declaration `(canonical, name)` is instantiated, `stitch_module_augmentations` (in `project_semantic_dispatch::build`) finds every augmenter file via `FileArtifactStore::ensure_augmentation_index_populated`, fetches each augmenter's RETAINED inner body from the typed `augmentation_symbol(Module(spec), name)` inventory (typed-IR only — never a source/byte scan in the resolver), lowers it in the augmenter's own file context through `prepare_augmentation_type_decl` + `lower_decl_body_with_provenance`, and folds the base body ∪ augmenter contributions into ONE `SemanticNodeData::MergedDecl` carrier (the base body is flattened if it is already a `MergedDecl`). Augmenter order is the stable `(canonical, parse_stable_hash)` key — discovery-order-independent. Relative-augmenter discovery loads the base's `reverse_deps_for` (the candidate-augmenter set) before the index scan, since augmenters depend on their base.
+
+Cross-file FACTS reuse `get_or_compute_effective_export_set`'s rail: the cold stitch observes one `FactKey::ModuleAugmentationIndexShape` (the augmenter-set fingerprint) plus one `FileWholeHash` per contributing file (base ∪ augmenters), and records `self_root_canonicals = {base} ∪ {augmenters}` — a content edit to ANY contributor misses the warm read; torn/partial routes through `ReturnOnly`, never warmed. Query keys stay content-free `DeclKey` (R6).
+
+The augmentation index is OVERLAY-AWARE: `AugmentationTargetKey.population: AugmentationPopulation {Base, Session(id)}`. A `Base` scan reads `is_legacy()` artifacts only; a `Session(id)` scan reads the session's overlay (non-legacy) artifacts — matched by the session overlay discriminator — UNIONED with base, keyed under the session id. Overlay augmenters NEVER poison the base index and NEVER cross sessions. There is NO base-only `assert!(view.compat_token().session.is_none(), …)` on the augmentation-index / `EffectiveExportSet` surface — a session view is accepted under `Session` population.
+
+See `/type-resolution` skill for the stitch chain, the overlay-aware index, and the architecture guards (`session_overlay_augmenter_isolated_from_base_index`, `no_effective_export_set_base_only_session_assert`).
+
 ### Two Template Codegen Paths (CRITICAL)
 
 The Rust compiler has two separate template codegen paths. Modifying one does NOT affect the other: **VDOM/Vapor** (`template/code_gen/vdom/`) for runtime render functions, and **IDE** (`ide/template/`) for valid JSX/TSX used by LSP/TSGO type checking. The LSP uses the IDE path via `CompileTarget::IDE`.

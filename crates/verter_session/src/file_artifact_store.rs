@@ -374,12 +374,37 @@ pub enum AugmentationTargetKind {
 /// R21 scoping rule: this key carries `lib_env_hash` because module
 /// augmentations live inside libs / ambient corpora — a lib update CAN
 /// change which augmenters are visible.
+///
+/// The `population` dimension keeps a session-overlay augmenter set isolated
+/// from the base set: a session that overlays a `declare module` block sees
+/// the overlay's augmenters unioned with base under [`AugmentationPopulation::Session`],
+/// while base reads stay on [`AugmentationPopulation::Base`] — overlay
+/// augmenters never poison the base index, and project + env isolation prevents
+/// cross-project poisoning (Codex P0.1).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AugmentationTargetKey {
     pub project_identity: ProjectIdentity,
     pub resolve_env_hash: Hash16,
     pub lib_env_hash: Hash16,
+    pub population: AugmentationPopulation,
     pub target: AugmentationTargetKind,
+}
+
+/// Population identity for an [`AugmentationTargetKey`]: which artifact set the
+/// augmentation index was scanned over.
+///
+/// A `Base` index scans only base ([`FileArtifactKey::is_legacy`]) artifacts; a
+/// `Session(id)` index scans the session's overlay (non-legacy) artifacts
+/// UNIONED with base, keyed under the session id so two sessions (and the base)
+/// never share an augmenter set. Overlay results are NEVER written into a
+/// `Base`-keyed entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AugmentationPopulation {
+    /// Base resolve-domain population — base artifacts only.
+    Base,
+    /// Session-overlay population, keyed by the session id
+    /// ([`crate::resolver_core::StoreViewCompatToken::session`]).
+    Session(u64),
 }
 
 // ── AugmenterEntry / AugmenterSet ──
@@ -1303,10 +1328,25 @@ impl FileArtifactStore {
     /// least one augmentation fact are collected: the augmentation index
     /// is a base resolve-domain structure, so session-overlay artifacts
     /// must not contribute (see `ensure_augmentation_index_populated`).
-    fn collect_base_augmenter_candidates(&self) -> Vec<AugmenterCandidate> {
+    fn collect_augmenter_candidates(
+        &self,
+        overlay_discriminator: Option<Hash16>,
+    ) -> Vec<AugmenterCandidate> {
         self.artifacts
             .iter()
-            .filter(|entry| entry.key().is_legacy())
+            .filter(|entry| {
+                let key = entry.key();
+                // Base population: legacy (base) artifacts only. Session
+                // population: base artifacts UNIONED with the session's own
+                // overlay artifacts (the non-legacy key whose `parse_env_hash`
+                // discriminator matches this session). A DIFFERENT session's
+                // overlay artifact carries a different discriminator and is
+                // excluded — overlay augmenters never cross sessions or poison
+                // the base index.
+                key.is_legacy()
+                    || overlay_discriminator
+                        .is_some_and(|d| !key.is_legacy() && key.parse_env_hash == d)
+            })
             .filter(|entry| !entry.value().augmentations.is_empty())
             .map(|entry| AugmenterCandidate {
                 artifact_key: entry.key().clone(),
@@ -1346,6 +1386,7 @@ impl FileArtifactStore {
         &self,
         key: &AugmentationTargetKey,
         resolve_relative_canonical: R,
+        overlay_discriminator: Option<Hash16>,
     ) -> Arc<AugmenterSet>
     where
         R: Fn(&str, &str) -> Option<Arc<str>>,
@@ -1371,8 +1412,8 @@ impl FileArtifactStore {
         // by `augmenter_matches_target` for a relative target re-enters
         // the store and inserts into `self.artifacts`, which cannot run
         // while a `self.artifacts.iter()` shard guard is held (see
-        // `collect_base_augmenter_candidates`).
-        let candidates = self.collect_base_augmenter_candidates();
+        // `collect_augmenter_candidates`).
+        let candidates = self.collect_augmenter_candidates(overlay_discriminator);
         let mut matched: Vec<AugmenterEntry> = Vec::new();
         let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
         for candidate in &candidates {
@@ -1474,12 +1515,22 @@ impl FileArtifactStore {
         // resolver `augmenter_matches_target` invokes for a relative
         // target re-enters the store and inserts into `self.artifacts`,
         // which must not run under a shard guard (see
-        // `collect_base_augmenter_candidates`). The artifact set is not
+        // `collect_augmenter_candidates`). The artifact set is not
         // mutated during the refresh — only `augmentation_index` is — so
-        // one snapshot serves every key.
-        let candidates = self.collect_base_augmenter_candidates();
+        // one snapshot serves every key. Refresh maintains BASE-population
+        // entries only (`None` → base artifacts); session-overlay entries are
+        // session-scoped and rebuilt fresh through their own ensure path under
+        // the session view, never via this base-maintenance scan.
+        let candidates = self.collect_augmenter_candidates(None);
 
         for key in existing_keys {
+            // Session-population entries are not maintained by the base
+            // refresh scan (their candidate set includes session-overlay
+            // artifacts this base path cannot enumerate without the session
+            // discriminator). Skip them.
+            if !matches!(key.population, AugmentationPopulation::Base) {
+                continue;
+            }
             // Does the new artifact contribute to this key? If not,
             // skip — the cached entry is still valid (no augmenter
             // set change for this target).

@@ -709,28 +709,25 @@ impl RouteDb {
         FH: Fn(&str) -> Option<Hash16>,
         RR: Fn(&str, &str) -> Option<Arc<str>>,
     {
-        // Fail-closed base-only guard. The augmentation index
-        // (`ModuleAugmentationIndex` on `FileArtifactStore`) is keyed by
-        // a base resolve-domain identity with no base/session
-        // discriminator — its cold scan and refresh path filter to base
-        // (`FileArtifactKey::is_legacy`) artifacts. A session that
-        // overlays a `declare module` block would observe the BASE
-        // augmenter set, not its own, so an `EffectiveExportSet`
-        // computed under a session view is base content presented as
-        // session-correct. Until the augmentation index gains
-        // artifact-population identity (the future block that wires the
-        // live session `EffectiveExportSet` consumer), this surface is
-        // base-only: a session call must be observably an error rather
-        // than silent wrong data.
-        assert!(
-            view.compat_token().session.is_none(),
-            "EffectiveExportSet is base-only: get_or_compute_effective_export_set \
-             rejects a session view (compat_token().session.is_some()). The \
-             augmentation index has no base/session population identity, so a \
-             session call would observe the base augmenter set, not the \
-             session's overlay. Augmentation stitching gains session support in \
-             the block that adds the overlay-aware augmentation-index schema."
-        );
+        // Population identity (overlay-aware augmentation index): a session
+        // view keys its augmenter set under `Session(id)`; a base view keys
+        // under `Base`. The base-only `session.is_none()` assert is RETIRED —
+        // a session call is now correct rather than a hard error.
+        //
+        // NOTE: this names-stitcher (not on the live resolution path — see
+        // `/type-resolution`) scans base artifacts only (`None` discriminator
+        // below); the live overlay-correct augmenter scan is the body stitch in
+        // `project_semantic_dispatch::build::stitch_module_augmentations`, which
+        // threads the session overlay discriminator from the active
+        // `SessionView`. Wiring the discriminator here is deferred to the live
+        // `EffectiveExportSet` consumer's arrival (it has no caller today).
+        let population = match view.compat_token().session {
+            Some(session_id) => {
+                crate::file_artifact_store::AugmentationPopulation::Session(session_id)
+            }
+            None => crate::file_artifact_store::AugmentationPopulation::Base,
+        };
+        let overlay_discriminator: Option<Hash16> = None;
 
         if let Some(existing) = self.effective_export_sets.get_if_valid(&key, view) {
             return existing;
@@ -747,11 +744,13 @@ impl RouteDb {
                         project_identity: key.project_identity,
                         resolve_env_hash: key.resolve_env_hash,
                         lib_env_hash: key.lib_env_hash,
+                        population,
                         target: target.clone(),
                     };
                     let augmenter_set = artifact_store.ensure_augmentation_index_populated(
                         &augmentation_target_key,
                         &resolve_relative_canonical,
+                        overlay_discriminator,
                     );
 
                     // Stitch each augmenter's contributions for the

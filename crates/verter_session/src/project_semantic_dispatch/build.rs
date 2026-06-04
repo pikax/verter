@@ -1304,18 +1304,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
         base_scope: &NodeScopeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<AugmentationStitch> {
-        use crate::file_artifact_store::{AugmentationTargetKey, AugmentationTargetKind};
+        use crate::file_artifact_store::{
+            AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
+        };
         use verter_semantic::analysis::type_eval::AugmentationScopeKind;
 
         let host = self.ctx.host_for_fact_tracer_install();
         let env_hashes = host.host_view_env_hashes();
         let project_identity = host.host_view_project_identity();
 
+        // Population identity (overlay-aware augmentation index, SCOPE-LOCK
+        // 11/15e): under an active session view the augmenter set is keyed
+        // under `Session(id)` and the cold scan unions the session's overlay
+        // artifacts (matched by the session overlay discriminator) with base;
+        // otherwise base-only. A session overlay's `declare module` augmenters
+        // stay isolated from the base index.
+        let (population, overlay_discriminator) = match self.ctx.active_session_view() {
+            // The overlay-set fingerprint is the stable per-session-overlay-set
+            // id: it keys the population slot AND derives the artifact
+            // discriminator, so the build and read agree. A session with no
+            // overlays (fingerprint 0) collapses to base.
+            Some(sv) if sv.fingerprint() != 0 => (
+                AugmentationPopulation::Session(sv.fingerprint()),
+                crate::session_view::session_overlay_discriminator(sv),
+            ),
+            _ => (AugmentationPopulation::Base, None),
+        };
+
         let target = AugmentationTargetKind::ResolvedRelativeCanonical(Arc::clone(decl_canonical));
         let key = AugmentationTargetKey {
             project_identity,
             resolve_env_hash: env_hashes.resolve_env_hash,
             lib_env_hash: env_hashes.lib_env_hash,
+            population,
             target: target.clone(),
         };
 
@@ -1337,7 +1358,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .resolve_type_dependency_canonical(augmenter, spec)
                 .map(Arc::from)
         };
-        let augmenter_set = artifact_store.ensure_augmentation_index_populated(&key, resolve_rel);
+        let augmenter_set = artifact_store.ensure_augmentation_index_populated(
+            &key,
+            resolve_rel,
+            overlay_discriminator,
+        );
         if augmenter_set.entries.is_empty() {
             return None;
         }
@@ -1392,7 +1417,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 local_scope: None,
             };
             let aug_scope_payload = bundle.as_ref().map(|bundle| {
-                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(bundle)
+                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                    bundle,
+                )
             });
             let aug_shadowing =
                 crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(

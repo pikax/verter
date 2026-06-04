@@ -122,12 +122,14 @@ fn lib_env_change_does_change_augmentation_target_key() {
         project_identity: identity,
         resolve_env_hash,
         lib_env_hash: lib_a,
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
         target: AugmentationTargetKind::GlobalAugmentation,
     };
     let key_b = AugmentationTargetKey {
         project_identity: identity,
         resolve_env_hash,
         lib_env_hash: lib_b,
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
         target: AugmentationTargetKind::GlobalAugmentation,
     };
     assert_ne!(
@@ -183,12 +185,14 @@ fn paths_edit_changes_augmentation_target_key_but_not_file_artifact_key() {
         project_identity: identity,
         resolve_env_hash: resolve_a,
         lib_env_hash: lib_hash,
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
         target: AugmentationTargetKind::GlobalAugmentation,
     };
     let aug_key_b = AugmentationTargetKey {
         project_identity: identity,
         resolve_env_hash: resolve_b,
         lib_env_hash: lib_hash,
+        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
         target: AugmentationTargetKind::GlobalAugmentation,
     };
     assert_ne!(

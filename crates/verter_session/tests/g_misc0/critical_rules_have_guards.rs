@@ -464,6 +464,23 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "Declaration Augmentation",
+        &[
+            // (i) overlay-aware augmentation index: a session-overlay augmenter
+            //     is isolated from the base index (base/session population).
+            //     The cross-file relative-merge consumer oracle
+            //     `module_features_module_augmentation_merges_plugin_surface`
+            //     is a lib test (not scanner-visible); these `tests/` guards
+            //     pin the same rule.
+            "session_overlay_augmenter_isolated_from_base_index",
+            // (iii) the session view is accepted (the base-only assert is gone).
+            "effective_export_set_accepts_session_view_after_base_only_assert_retired",
+            // (iv) static guard: NO `compat_token().session.is_none()` base-only
+            //      assert on the augmentation-index / EffectiveExportSet surface.
+            "no_effective_export_set_base_only_session_assert",
+        ],
+    ),
+    (
         "U2 Value-Domain Key Identity",
         &[
             "no_envless_semantic_query_env_key_envelope",
@@ -968,4 +985,50 @@ fn every_registry_guard_name_validity_scanner_discriminates_against_fake() {
              strict (false positive)."
         );
     }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// "Declaration Augmentation" (CRITICAL) guard 16-iv.
+//
+// The overlay-aware augmentation index retired the fail-closed base-only
+// `assert!(view.compat_token().session.is_none(), …)` that previously rejected
+// a session view in `RouteDb::get_or_compute_effective_export_set`. A session
+// call now keys its augmenter set under `AugmentationPopulation::Session` and
+// scans the session's overlay artifacts unioned with base. Re-introducing the
+// base-only assert would silently make every session augmentation query a hard
+// error again.
+//
+// DISCRIMINATING: against the pre-deletion tree this scanner finds the assert
+// string and FAILS; against the post-deletion tree the surface is clean and it
+// PASSES.
+// ────────────────────────────────────────────────────────────────────
+#[test]
+fn no_effective_export_set_base_only_session_assert() {
+    let src = read_doc("crates/verter_session/src/resolver_core/route_db.rs");
+
+    // The retired assert pinned `session.is_none()` with the "base-only"
+    // invariant message. Neither the predicate nor the message may reappear on
+    // this surface.
+    assert!(
+        !src.contains("EffectiveExportSet is base-only"),
+        "guard 16-iv: the base-only EffectiveExportSet invariant message must \
+         not reappear in route_db.rs — the overlay-aware augmentation index \
+         accepts session views (population identity), so the fail-closed \
+         base-only assert is RETIRED."
+    );
+    assert!(
+        !src.contains("compat_token().session.is_none()"),
+        "guard 16-iv: a `compat_token().session.is_none()` base-only assert \
+         must not gate the augmentation-index / EffectiveExportSet surface in \
+         route_db.rs — session views are accepted under \
+         `AugmentationPopulation::Session`."
+    );
+
+    // Self-discrimination: the assert pattern is genuinely a substring test, so
+    // the scanner would catch a re-introduction (e.g. inside an `assert!`).
+    let reintroduced = "assert!(view.compat_token().session.is_none()";
+    assert!(
+        !src.contains(reintroduced),
+        "guard 16-iv: the literal base-only session assert is forbidden."
+    );
 }
