@@ -705,6 +705,7 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
         &carrier,
         &dep_sig,
         &Arc::from([]),
+        &crate::semantic_query::demand::MaterializedSet::single(super::family::requested_point_for_key(&key)),
         &inflight,
     );
 
@@ -1134,15 +1135,16 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
             )
         },
     );
-    // Shallow backfills Navigate + Identity — both carry the same
-    // dep-sig (§7.11 conservative rule). So three slots are populated,
-    // and all three must evict on /w/subtree.ts invalidation.
-    assert_eq!(store.memo_entry_count(), 3);
+    // §3.4: Shallow backfills Identity ONLY (`Shallow ⊒ Identity`, but
+    // `Shallow ⊅ Navigate`), both carrying the same dep-sig (§7.11
+    // conservative rule). So TWO slots are populated, and both must evict
+    // on /w/subtree.ts invalidation.
+    assert_eq!(store.memo_entry_count(), 2);
 
     let removed = store.invalidate_canonical("/w/subtree.ts");
     assert_eq!(
-        removed, 3,
-        "Shallow plus its two backfilled narrower slots all reference the touched subtree",
+        removed, 2,
+        "Shallow plus its one backfilled (Identity) slot both reference the touched subtree",
     );
     assert!(
         store.get_unvalidated(&key).is_none(),
@@ -1158,6 +1160,165 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
     assert!(
         store.get_unvalidated(&narrower_key).is_none(),
         "backfilled Identity slot inherits the dep-sig and must evict too",
+    );
+}
+
+/// §3.4 GUARD — satisfaction is decided by the RECORDED materialised
+/// point, NOT by nominal slot presence. A candidate published into the
+/// `Expanded` slot whose compute ACTUALLY materialised only a `Navigate`
+/// point (`{Navigate@[foo]}`) must NOT serve an `Expanded` request at that
+/// path (`Navigate ⊅ Expanded`), but MUST serve a `Navigate` request at
+/// that path (`Navigate ⊒ Navigate`).
+///
+/// DISCRIMINATING: FAILS against the pre-cutover memo (slot presence +
+/// `validate` alone with no `cached_satisfies` gate ⇒ the Expanded request
+/// HITS the slot-present entry); PASSES against the §3.4 two-gate warm hit
+/// (the recorded `Navigate` point fails `cached_satisfies` for the
+/// `Expanded` request). If `cached_satisfies` were keyed on the candidate's
+/// NOMINAL demand (its slot mode = Expanded) instead of its RECORDED set,
+/// the Expanded request would wrongly HIT — this guard catches exactly
+/// that silent-soundness collapse.
+#[test]
+fn cache_satisfaction_is_materialized_point_not_nominal_demand() {
+    use crate::semantic_query::demand::{Demand, MaterializedPoint, MaterializedSet, ProjectionPath};
+
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let path: Arc<[PathSegment]> =
+        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let proj_path = ProjectionPath::from_segments([PathSegment::Member(Arc::from("foo"))]);
+
+    let key_expanded = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::clone(&path),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    };
+    let key_navigate = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::clone(&path),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
+    };
+
+    // Publish into the EXPANDED slot, but record ONLY a `Navigate` point —
+    // the honest record of a compute that only navigated through `foo`,
+    // never expanded it (the nominal slot is Expanded; the materialised set
+    // is Navigate).
+    let value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let recorded =
+        MaterializedSet::single(MaterializedPoint::new(Demand::navigate(proj_path.clone())));
+    let populated = store.publish_with_materialized_set_for_tests(
+        key_expanded.clone(),
+        QueryResult::Value(value),
+        crate::fact_signature_helpers::ReadSetSignature::new(
+            crate::fact_signature_helpers::empty_fact_signature(),
+        ),
+        Arc::from([]),
+        empty_signature(),
+        0,
+        recorded,
+    );
+    assert!(populated >= 1, "the Expanded-slot publish must populate ≥1 slot");
+
+    // GATE: an Expanded request MISSES — the recorded `Navigate` point does
+    // NOT dominate the `Expanded` request (`Navigate ⊅ Expanded`).
+    assert!(
+        store.get_validated(&key_expanded, &host).is_none(),
+        "recorded Navigate point must NOT satisfy an Expanded request \
+         (materialised-point satisfaction, not nominal slot presence)",
+    );
+
+    // POSITIVE CONTROL: a Navigate request HITS — the SAME recorded
+    // Navigate point dominates the `Navigate` request at that path. Proves
+    // the MISS above is recorded-point discrimination, not a blanket
+    // reject of the published entry.
+    assert!(
+        store.get_validated(&key_navigate, &host).is_some(),
+        "recorded Navigate point MUST satisfy a Navigate request at the same path",
+    );
+}
+
+/// §3.4 GUARD — same-family backfill writes ONLY the RECORDED materialised
+/// points (verbatim), and ONLY into a sibling slot a recorded point
+/// dominates — never by enum rank, never a synthesised/meet point.
+///
+/// A `Shallow` primary records `{Shallow@[foo]}`. Under the demand lattice
+/// `Shallow ⊒ Identity` but `Shallow ⊅ Navigate`
+/// (`normalization_depth: None < NavigateOnly`). So the backfill fills the
+/// `Identity` slot (carrying the recorded `{Shallow@[foo]}` VERBATIM) and
+/// leaves the `Navigate` slot EMPTY.
+///
+/// DISCRIMINATING: FAILS against the legacy `backfill_targets` enum-rank
+/// hierarchy (`Shallow → [Navigate, Identity]` cloned the entry into the
+/// Navigate slot ⇒ Navigate slot populated); PASSES against the §3.4
+/// recorded-point backfill (Navigate slot stays empty because
+/// `Shallow ⊅ Navigate`).
+#[test]
+fn backfill_writes_only_recorded_materialized_points() {
+    use crate::semantic_query::demand::{Demand, MaterializedSet, ProjectionPath};
+
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let path: Arc<[PathSegment]> =
+        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let proj_path = ProjectionPath::from_segments([PathSegment::Member(Arc::from("foo"))]);
+
+    let mk = |mode| SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::clone(&path),
+        context: crate::semantic_query::ProjectionReductionContext::published(mode),
+    };
+    let key_shallow = mk(ProjectionMode::Shallow);
+    let key_navigate = mk(ProjectionMode::Navigate);
+    let key_identity = mk(ProjectionMode::Identity);
+
+    // Publish a Shallow primary; the default record set is `{Shallow@[foo]}`.
+    let value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let _ = store.execute_cooperative(
+        &host,
+        key_shallow.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || (QueryResult::Value(value), empty_signature()),
+    );
+
+    // Navigate slot stays EMPTY — `Shallow ⊅ Navigate`, so no backfill.
+    assert_eq!(
+        store.slot_candidate_count_for_tests(&key_navigate),
+        0,
+        "Shallow must NOT backfill the Navigate slot (Shallow ⊅ Navigate in the lattice)",
+    );
+    assert!(
+        store.get_validated(&key_navigate, &host).is_none(),
+        "a Navigate request must MISS — the Shallow compute never materialised a Navigate point",
+    );
+
+    // Identity slot IS backfilled (`Shallow ⊒ Identity`), and carries the
+    // RECORDED `{Shallow@[foo]}` set VERBATIM — NOT a synthesised
+    // `Identity@[foo]` point.
+    assert_eq!(
+        store.slot_candidate_count_for_tests(&key_identity),
+        1,
+        "Shallow must backfill the Identity slot (Shallow ⊒ Identity)",
+    );
+    let mut shallow_point = Demand::shallow();
+    shallow_point.projection.path = proj_path;
+    let expected = MaterializedSet::single(crate::semantic_query::demand::MaterializedPoint::new(
+        shallow_point,
+    ));
+    assert_eq!(
+        store.entry_satisfied_projection_for_tests(&key_identity),
+        Some(expected),
+        "the backfilled Identity entry must carry the RECORDED Shallow point verbatim, \
+         never a synthesised Identity/meet point",
+    );
+    assert!(
+        store.get_validated(&key_identity, &host).is_some(),
+        "an Identity request HITS the backfilled entry (Shallow ⊒ Identity)",
     );
 }
 
@@ -1351,8 +1512,9 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
             )
         },
     );
-    // Navigate backfills Identity with the narrow-only dep-sig.
-    assert_eq!(store.memo_entry_count(), 2);
+    // §3.4: Navigate backfills Shallow + Identity (`Navigate ⊒ {Shallow,
+    // Identity}`) with the narrow-only dep-sig — three slots.
+    assert_eq!(store.memo_entry_count(), 3);
 
     let removed = store.invalidate_canonical("/w/wide.ts");
     assert_eq!(
@@ -2149,6 +2311,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
         crate::fact_signature_helpers::ReadSetSignature::empty(),
         Arc::from(Vec::new()),
         Arc::from([]),
+        crate::semantic_query::demand::MaterializedSet::single(super::family::requested_point_for_key(&aborted_key)),
         &aborted_parent,
     );
     assert!(
@@ -2175,6 +2338,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
         crate::fact_signature_helpers::ReadSetSignature::empty(),
         Arc::from(Vec::new()),
         Arc::from([]),
+        crate::semantic_query::demand::MaterializedSet::single(super::family::requested_point_for_key(&healthy_key)),
         &healthy_parent,
     );
     assert!(
@@ -2257,9 +2421,14 @@ fn prefix_backfill_loop_skips_all_backfills_when_winner_aborted_mid_loop() {
                     graph_carrier: None,
                     self_root_canonicals: Arc::from([]),
                     pending_prefix_backfills: vec![PrefixBackfill {
+                        satisfied_projection: crate::semantic_query::demand::MaterializedSet::single(
+                            super::family::requested_point_for_key(&backfill_w),
+                        ),
                         key: backfill_w,
                         node: child_node,
                     }],
+                    satisfied_projection:
+                        crate::semantic_query::demand::MaterializedSet::empty(),
                 }
             },
         )
@@ -3247,37 +3416,46 @@ fn family_expanded_backfills_shallow_navigate_identity_share_dep_signature() {
     assert_eq!(store.memo_entry_count(), 4, "all 4 slots populated");
 }
 
-// 2. Shallow backfills Navigate + Identity (×3).
+// 2. Shallow backfills Identity ONLY (×2) — §3.4 lattice, NOT enum rank.
+//    `Shallow ⊒ Identity` but `Shallow ⊅ Navigate`
+//    (`normalization_depth: None < NavigateOnly`), so the Navigate slot
+//    stays cold. (Legacy enum rank wrongly backfilled Navigate here.)
 
 #[test]
-fn family_shallow_backfills_navigate_and_identity() {
+fn family_shallow_backfills_identity_only_not_navigate() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let id = warm_family_slot(&host, &store, base, ProjectionMode::Shallow);
 
     assert_warm_at(&store, base, ProjectionMode::Shallow, id);
-    assert_warm_at(&store, base, ProjectionMode::Navigate, id);
     assert_warm_at(&store, base, ProjectionMode::Identity, id);
+    // Navigate MUST stay cold — `Shallow ⊅ Navigate` in the demand lattice.
+    assert_cold_at(&store, base, ProjectionMode::Navigate);
     // Expanded MUST stay cold — narrower never satisfies broader.
     assert_cold_at(&store, base, ProjectionMode::Expanded);
-    assert_eq!(store.memo_entry_count(), 3);
+    assert_eq!(store.memo_entry_count(), 2);
 }
 
-// 3. Navigate backfills Identity only (×2).
+// 3. Navigate backfills Shallow + Identity (×3) — §3.4 lattice, NOT enum
+//    rank. `Navigate ⊒ Shallow` AND `Navigate ⊒ Identity` (Navigate's
+//    NavigateOnly normalization/operator rungs dominate Shallow's). So the
+//    Shallow slot IS backfilled. (Legacy enum rank wrongly omitted Shallow.)
 
 #[test]
-fn family_navigate_backfills_identity_only() {
+fn family_navigate_backfills_shallow_and_identity() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let id = warm_family_slot(&host, &store, base, ProjectionMode::Navigate);
 
     assert_warm_at(&store, base, ProjectionMode::Navigate, id);
+    assert_warm_at(&store, base, ProjectionMode::Shallow, id);
     assert_warm_at(&store, base, ProjectionMode::Identity, id);
-    assert_cold_at(&store, base, ProjectionMode::Shallow);
+    // Expanded MUST stay cold — `Navigate ⊅ Expanded` (member SetOnly <
+    // SetPlusBody).
     assert_cold_at(&store, base, ProjectionMode::Expanded);
-    assert_eq!(store.memo_entry_count(), 2);
+    assert_eq!(store.memo_entry_count(), 3);
 }
 
 // 4. Identity backfills NOTHING (single test, the negative case for it).
@@ -3298,13 +3476,17 @@ fn family_identity_does_not_backfill_anything() {
 
 // 5. Six negative cases: narrower never satisfies broader.
 
+// §3.4 lattice: `Navigate ⊒ Shallow` (so Navigate DOES satisfy/backfill
+// Shallow — the enum-rank intuition that Navigate is "narrower" than
+// Shallow is WRONG), but `Navigate ⊅ Expanded` (member SetOnly <
+// SetPlusBody), so Expanded stays cold.
 #[test]
-fn family_navigate_does_not_satisfy_shallow_or_expanded() {
+fn family_navigate_satisfies_shallow_but_not_expanded() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let _ = warm_family_slot(&host, &store, base, ProjectionMode::Navigate);
-    assert_cold_at(&store, base, ProjectionMode::Shallow);
+    let id = warm_family_slot(&host, &store, base, ProjectionMode::Navigate);
+    assert_warm_at(&store, base, ProjectionMode::Shallow, id);
     assert_cold_at(&store, base, ProjectionMode::Expanded);
 }
 
@@ -3404,7 +3586,7 @@ fn family_wider_backfill_noop_when_narrower_slot_already_filled() {
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
     // Narrow build first — Navigate completes and fills Navigate +
-    // Identity slots.
+    // Shallow + Identity slots (§3.4: `Navigate ⊒ {Shallow, Identity}`).
     let nav_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let _ = store.execute_cooperative(
         &host,
@@ -3413,11 +3595,13 @@ fn family_wider_backfill_noop_when_narrower_slot_already_filled() {
         || (QueryResult::Value(nav_id), family_test_dep_signature()),
     );
     assert_warm_at(&store, base, ProjectionMode::Navigate, nav_id);
+    assert_warm_at(&store, base, ProjectionMode::Shallow, nav_id);
     assert_warm_at(&store, base, ProjectionMode::Identity, nav_id);
 
     // Now an Expanded build with a DIFFERENT result. Backfill writes
-    // only into empty slots, so Navigate + Identity must keep their
-    // narrower-build result; only Shallow + Expanded get the new id.
+    // only into EMPTY slots, so Navigate + Shallow + Identity keep their
+    // narrower-build result; only the (previously empty) Expanded slot
+    // gets the new id.
     let exp_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let _ = store.execute_cooperative(
         &host,
@@ -3426,9 +3610,9 @@ fn family_wider_backfill_noop_when_narrower_slot_already_filled() {
         || (QueryResult::Value(exp_id), family_test_dep_signature()),
     );
     assert_warm_at(&store, base, ProjectionMode::Expanded, exp_id);
-    assert_warm_at(&store, base, ProjectionMode::Shallow, exp_id);
     // Critical: the populated narrower slots survive — backfill is a
-    // no-op against them.
+    // no-op against them (Shallow keeps the Navigate-build result).
+    assert_warm_at(&store, base, ProjectionMode::Shallow, nav_id);
     assert_warm_at(&store, base, ProjectionMode::Navigate, nav_id);
     assert_warm_at(&store, base, ProjectionMode::Identity, nav_id);
 }
@@ -5261,7 +5445,11 @@ fn prefix_backfill_carries_traced_facts() {
             pending_prefix_backfills: vec![PrefixBackfill {
                 key: prefix_key.clone(),
                 node: prefix_node,
+                satisfied_projection: crate::semantic_query::demand::MaterializedSet::single(
+                    super::family::requested_point_for_key(&prefix_key),
+                ),
             }],
+            satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
         },
     );
 
@@ -5564,6 +5752,8 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                     graph_carrier: Some(Box::new(carrier)),
                     self_root_canonicals: Arc::from([]),
                     pending_prefix_backfills: Vec::new(),
+                    satisfied_projection:
+                        crate::semantic_query::demand::MaterializedSet::empty(),
                 }
             },
         )
@@ -5758,6 +5948,8 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                     graph_carrier: Some(Box::new(carrier)),
                     self_root_canonicals: Arc::from([Arc::<str>::from(keyed_canonical)]),
                     pending_prefix_backfills: Vec::new(),
+                    satisfied_projection:
+                        crate::semantic_query::demand::MaterializedSet::empty(),
                 }
             },
         )
@@ -5992,6 +6184,8 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
                     graph_carrier: Some(Box::new(carrier)),
                     self_root_canonicals: Arc::from([Arc::<str>::from(keyed_canonical)]),
                     pending_prefix_backfills: Vec::new(),
+                    satisfied_projection:
+                        crate::semantic_query::demand::MaterializedSet::empty(),
                 }
             },
         )
@@ -6196,6 +6390,8 @@ fn same_view_joiner_still_coalesces_onto_winner() {
                     graph_carrier: Some(Box::new(carrier)),
                     self_root_canonicals: Arc::from([Arc::<str>::from(keyed_canonical)]),
                     pending_prefix_backfills: Vec::new(),
+                    satisfied_projection:
+                        crate::semantic_query::demand::MaterializedSet::empty(),
                 }
             },
         )
@@ -6375,6 +6571,8 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
                     graph_carrier: None,
                     self_root_canonicals: Arc::from([]),
                     pending_prefix_backfills: Vec::new(),
+                    satisfied_projection:
+                        crate::semantic_query::demand::MaterializedSet::empty(),
                 }
             },
         )
@@ -6634,6 +6832,8 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
                     graph_carrier: Some(Box::new(carrier)),
                     self_root_canonicals: Arc::from([]),
                     pending_prefix_backfills: Vec::new(),
+                    satisfied_projection:
+                        crate::semantic_query::demand::MaterializedSet::empty(),
                 }
             },
         )
@@ -6914,6 +7114,8 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
                     graph_carrier: Some(Box::new(carrier)),
                     self_root_canonicals: Arc::from([]),
                     pending_prefix_backfills: Vec::new(),
+                    satisfied_projection:
+                        crate::semantic_query::demand::MaterializedSet::empty(),
                 }
             },
         )

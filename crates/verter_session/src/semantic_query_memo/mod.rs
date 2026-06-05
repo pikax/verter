@@ -3533,6 +3533,25 @@ impl SemanticGraphStore {
             .map(|entry| entry.read_set_signature)
     }
 
+    /// Test-only probe: the §3.4 `satisfied_projection` (materialised
+    /// record set) of the FIRST candidate in `key`'s `(family, slot)`.
+    /// Lets a guard assert backfill writes the RECORDED points verbatim
+    /// (never a synthesised target-slot / meet point). `None` when the
+    /// slot is empty.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn entry_satisfied_projection_for_tests(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Option<MaterializedSet> {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .get(&family)
+            .and_then(|slots| slots.slot_peek_any(slot).cloned())
+            .map(|entry| entry.satisfied_projection)
+    }
+
     /// Test-only direct publish. Delegates to
     /// [`Self::publish_with_carrier_dispatch_and_generation_for_tests`]
     /// with an empty dispatch-dep signature and generation `0`.
