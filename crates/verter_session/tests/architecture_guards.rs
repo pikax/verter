@@ -5041,7 +5041,7 @@ mod foundations_guards {
             // normalisation). The substantive description belongs in the
             // comment without the review-verdict label.
             if let Some(pos) = normalised.find("codex p") {
-                let after = normalised[pos + "codex p".len()..].as_bytes();
+                let after = &normalised.as_bytes()[pos + "codex p".len()..];
                 if after.first().is_some_and(u8::is_ascii_digit) {
                     return true;
                 }
