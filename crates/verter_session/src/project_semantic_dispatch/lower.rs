@@ -522,14 +522,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let resolved_canonical_clone = Arc::clone(&resolved_canonical);
                 let resolved_name_clone = Arc::clone(&resolved_name);
 
-                // D26+D27 lazy carriers: in `Navigate` mode, intern a
+                // Lazy carriers: in `Navigate` mode, intern a
                 // `DeclRef` / `InstantiationRef` carrier rather than
-                // executing `ResolveDecl` / `Instantiate` eagerly. Cache
-                // identity is the `DeclIdentity` (canonical_id +
-                // whole_hash + decl_name) — same as the eager path
-                // would have produced internally, so the lazy form's
-                // hash collapses to the same memo entry. The walker
-                // (D28) treats `DeclRef` as transparent through alias
+                // executing `ResolveDecl` / `Instantiate` eagerly. The
+                // interned carrier node carries the versioned `DeclIdentity`
+                // (canonical_id + whole_hash + decl_name) as its value-side
+                // payload — this is the node identity, not a query-identity
+                // key. (The eager `Instantiate` path keys instead on the
+                // env-bearing, content-free `ResolvedDeclSlotIdentity` slot
+                // derived via `type_slot_for` + `InstantiateContext`.) The
+                // walker treats `DeclRef` as transparent through alias
                 // chains and `InstantiationRef` as terminal.
                 let whole_hash = self
                     .ctx

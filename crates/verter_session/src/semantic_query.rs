@@ -3200,8 +3200,8 @@ pub enum SemanticQueryKey {
     /// per `macro_kind` is the semantic-level
     /// [`AnalyzedMacroKind`], NOT [`verter_semantic::analysis::template::MacroKind`].
     /// `type_args` carries the macro's type arguments (already lowered to
-    /// `SemanticNodeId`s by the caller). `mode` selects the projection
-    /// mode for downstream type lowering inside the macro body.
+    /// `SemanticNodeId`s by the caller). `context.mode` selects the
+    /// projection mode for downstream type lowering inside the macro body.
     ///
     /// The body reads the sidecar's `AnalyzedMacro` (no AST re-walk per
     /// §A14) only to confirm the macro exists and anchor the fence, then
@@ -3787,9 +3787,9 @@ pub enum SemanticNodeData {
     Infer {
         name: Arc<str>,
     },
-    // Declaration identity is carried as `DeclIdentity` in
-    // `SemanticQueryKey::Instantiate.base` instead of being interned as
-    // a node in the arena.
+    // Declaration identity is carried as the env-bearing, content-free
+    // `ResolvedDeclSlotIdentity` slot in `SemanticQueryKey::Instantiate.base`
+    // instead of being interned as a node in the arena.
     /// Conditional shell node.
     ///
     /// Carries the `check extends extends ? true_branch_ref : false_branch_ref`
