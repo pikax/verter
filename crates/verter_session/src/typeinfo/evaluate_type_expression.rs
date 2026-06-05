@@ -360,7 +360,10 @@ fn evaluate_inner(
         local_scope: None,
     };
     let _ = &scope_node;
-    let base = dispatch.type_slot_for(Arc::clone(&scratch_canonical), Arc::from(SCRATCH_ALIAS_NAME));
+    let base = dispatch.type_slot_for(
+        Arc::clone(&scratch_canonical),
+        Arc::from(SCRATCH_ALIAS_NAME),
+    );
     let instantiate_key = SemanticQueryKey::Instantiate {
         context: dispatch.instantiate_context_for(
             &scratch_canonical,

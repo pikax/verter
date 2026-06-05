@@ -208,10 +208,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// [`MacroPayloadContext`](crate::semantic_query::MacroPayloadContext)
     /// beyond the slot's `T` / `L` / `J`.
     #[must_use]
-    pub(crate) fn resolve_env_hash_for(
-        &self,
-        canonical: &str,
-    ) -> crate::semantic_query::HashValue {
+    pub(crate) fn resolve_env_hash_for(&self, canonical: &str) -> crate::semantic_query::HashValue {
         self.ctx
             .host_for_fact_tracer_install()
             .host_view_env_hashes_for(canonical)

@@ -65,11 +65,15 @@ fn read_file(rel: &str) -> String {
 #[test]
 fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
     use verter_session::semantic_query::{InstantiateContext, ResolvedDeclSlotIdentity};
-    let base = ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/r6_check.ts"), Arc::from("Foo"));
+    let base =
+        ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/r6_check.ts"), Arc::from("Foo"));
     let key = SemanticQueryKey::Instantiate {
         base: base.clone(),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Expanded), Default::default()),
+        context: InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+        ),
     };
     match key {
         SemanticQueryKey::Instantiate {
@@ -86,7 +90,11 @@ fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
             // `InstantiateContext` carries the embedded projection-reduction
             // identity + the `resolve_env_hash` ENV dim — no content/version
             // hash. Destructuring proves the field set is exactly these two.
-            context: InstantiateContext { projection_reduction: _, resolve_env_hash: _ },
+            context:
+                InstantiateContext {
+                    projection_reduction: _,
+                    resolve_env_hash: _,
+                },
         } => {
             // The slot exposes a fixed field set with NO `whole_hash` /
             // `content_hash` / `fact_dep_signature`. Any future addition
@@ -105,7 +113,10 @@ fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
 #[test]
 fn r6_semantic_query_key_resolve_macro_payload_owner_is_content_free_decl_key() {
     use verter_session::semantic_query::{MacroPayloadContext, ResolvedDeclSlotIdentity};
-    let owner = ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/r6_check.vue"), Arc::from("<sfc-script-setup>"));
+    let owner = ResolvedDeclSlotIdentity::type_slot_unscoped(
+        Arc::from("/r6_check.vue"),
+        Arc::from("<sfc-script-setup>"),
+    );
     let key = SemanticQueryKey::ResolveMacroPayload {
         owner: owner.clone(),
         macro_index: 0,
@@ -127,7 +138,11 @@ fn r6_semantic_query_key_resolve_macro_payload_owner_is_content_free_decl_key() 
             macro_index: _,
             macro_kind: _,
             type_args: _,
-            context: MacroPayloadContext { resolve_env_hash: _, mode: _ },
+            context:
+                MacroPayloadContext {
+                    resolve_env_hash: _,
+                    mode: _,
+                },
         } => {
             assert_eq!(defining_canonical.as_ref(), "/r6_check.vue");
             assert_eq!(merged_symbol_name.as_ref(), "<sfc-script-setup>");

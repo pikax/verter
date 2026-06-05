@@ -1015,9 +1015,12 @@ fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body
     let key = SemanticQueryKey::Instantiate {
         base,
         args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
-        ), Default::default()),
+        context: crate::semantic_query::InstantiateContext::new(
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Expanded,
+            ),
+            Default::default(),
+        ),
     };
 
     // Dep-sig references /w/body.ts — the declaration file the
@@ -1062,9 +1065,12 @@ fn invalidate_canonical_keeps_instantiate_entries_whose_bases_are_unrelated() {
     let key = SemanticQueryKey::Instantiate {
         base,
         args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
-        ), Default::default()),
+        context: crate::semantic_query::InstantiateContext::new(
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Expanded,
+            ),
+            Default::default(),
+        ),
     };
 
     let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
@@ -7372,7 +7378,11 @@ mod u2b9_fork_a_key_migration_guards {
             [1u8; 16],
             [9u8; 16],
         );
-        assert_ne!(baseline, fam(&macro_key(l, [0u8; 16])), "lib_env must distinguish");
+        assert_ne!(
+            baseline,
+            fam(&macro_key(l, [0u8; 16])),
+            "lib_env must distinguish"
+        );
 
         assert_ne!(
             baseline,
@@ -7418,10 +7428,26 @@ mod u2b9_fork_a_key_migration_guards {
 
         let base = mk([0u8; 16], [1u8; 16], [0u8; 16], 0);
         // Each env dim independently forks the key identity.
-        assert_ne!(base, mk([7u8; 16], [1u8; 16], [0u8; 16], 0), "resolve_env scopes the key");
-        assert_ne!(base, mk([0u8; 16], [2u8; 16], [0u8; 16], 0), "type_env scopes the key");
-        assert_ne!(base, mk([0u8; 16], [1u8; 16], [9u8; 16], 0), "lib_env scopes the key");
-        assert_ne!(base, mk([0u8; 16], [1u8; 16], [0u8; 16], 5), "project_identity scopes the key");
+        assert_ne!(
+            base,
+            mk([7u8; 16], [1u8; 16], [0u8; 16], 0),
+            "resolve_env scopes the key"
+        );
+        assert_ne!(
+            base,
+            mk([0u8; 16], [2u8; 16], [0u8; 16], 0),
+            "type_env scopes the key"
+        );
+        assert_ne!(
+            base,
+            mk([0u8; 16], [1u8; 16], [9u8; 16], 0),
+            "lib_env scopes the key"
+        );
+        assert_ne!(
+            base,
+            mk([0u8; 16], [1u8; 16], [0u8; 16], 5),
+            "project_identity scopes the key"
+        );
 
         // The store serves env-distinct entries distinctly: an insert under
         // `base` must NOT be served to a different-type_env lookup.

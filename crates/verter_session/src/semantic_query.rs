@@ -407,7 +407,13 @@ impl ResolvedDeclSlotIdentity {
     /// [`Self::type_slot`].
     #[must_use]
     pub fn type_slot_unscoped(canonical: Arc<str>, name: Arc<str>) -> Self {
-        Self::type_slot(canonical, name, 0, HashValue::default(), HashValue::default())
+        Self::type_slot(
+            canonical,
+            name,
+            0,
+            HashValue::default(),
+            HashValue::default(),
+        )
     }
 
     /// Env-agnostic test-fixture constructor for a built-in utility
@@ -4451,12 +4457,18 @@ mod tests {
         let a = SemanticQueryKey::Instantiate {
             base: base.clone(),
             args: Arc::from(vec![string_id].into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Expanded), Default::default()),
+            context: crate::semantic_query::InstantiateContext::new(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+            ),
         };
         let b = SemanticQueryKey::Instantiate {
             base,
             args: Arc::from(vec![number_id].into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Expanded), Default::default()),
+            context: crate::semantic_query::InstantiateContext::new(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+            ),
         };
         assert_ne!(a, b);
     }
@@ -4619,14 +4631,20 @@ mod tests {
         let key = SemanticQueryKey::Instantiate {
             base: base.clone(),
             args: Arc::clone(&args),
-            context: crate::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Expanded), Default::default()),
+            context: crate::semantic_query::InstantiateContext::new(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+            ),
         };
         let mut map = std::collections::HashMap::new();
         map.insert(key.clone(), 1);
         let key2 = SemanticQueryKey::Instantiate {
             base,
             args,
-            context: crate::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Expanded), Default::default()),
+            context: crate::semantic_query::InstantiateContext::new(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+            ),
         };
         assert_eq!(map.get(&key2), Some(&1), "same args dedup to one entry");
     }

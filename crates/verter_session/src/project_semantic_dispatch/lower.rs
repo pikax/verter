@@ -646,8 +646,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             Arc::clone(&decl_identity.decl_name),
                         ),
                         args: Arc::from(arg_ids.into_boxed_slice()),
-                        context: self
-                            .instantiate_context_for(&decl_identity.canonical_id, reduction_context),
+                        context: self.instantiate_context_for(
+                            &decl_identity.canonical_id,
+                            reduction_context,
+                        ),
                     }) {
                         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => self.opaque(QueryError::Miss),

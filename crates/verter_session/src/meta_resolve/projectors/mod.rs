@@ -564,7 +564,10 @@ pub(crate) fn resolve_macro_payload(
     };
 
     let payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
-        owner: dispatch.type_slot_for(Arc::clone(&owner.canonical_id), Arc::clone(&owner.decl_name)),
+        owner: dispatch.type_slot_for(
+            Arc::clone(&owner.canonical_id),
+            Arc::clone(&owner.decl_name),
+        ),
         macro_index,
         macro_kind,
         type_args,

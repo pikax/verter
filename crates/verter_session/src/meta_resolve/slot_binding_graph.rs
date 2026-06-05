@@ -775,12 +775,15 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             break 'macro_loop;
         }
         let macro_payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
-            owner: dispatch
-                .type_slot_for(Arc::clone(&owner.canonical_id), Arc::clone(&owner.decl_name)),
+            owner: dispatch.type_slot_for(
+                Arc::clone(&owner.canonical_id),
+                Arc::clone(&owner.decl_name),
+            ),
             macro_index,
             macro_kind: AnalyzedMacroKind::DefineSlots,
             type_args: type_args.clone(),
-            context: dispatch.macro_payload_context_for(&owner.canonical_id, ProjectionMode::Navigate),
+            context: dispatch
+                .macro_payload_context_for(&owner.canonical_id, ProjectionMode::Navigate),
         });
         // Dual-emit: legacy accumulator + fact-tracer fan-out.
         emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &macro_payload_read.dep_signature);

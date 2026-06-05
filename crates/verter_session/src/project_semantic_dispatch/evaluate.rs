@@ -378,8 +378,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     match self.execute_type_node(SemanticQueryKey::Instantiate {
                         base,
                         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                        context: self
-                            .instantiate_context_for(&owner_canonical, reduction_context),
+                        context: self.instantiate_context_for(&owner_canonical, reduction_context),
                     }) {
                         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => break self.opaque(QueryError::Miss),

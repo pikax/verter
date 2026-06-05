@@ -577,8 +577,10 @@ pub(crate) fn bfs_compute_inner(
         let current_decl_name_for_test = Arc::clone(&current.decl_name);
 
         let key = SemanticQueryKey::Instantiate {
-            base: dispatch
-                .type_slot_for(Arc::clone(&current.canonical_id), Arc::clone(&current.decl_name)),
+            base: dispatch.type_slot_for(
+                Arc::clone(&current.canonical_id),
+                Arc::clone(&current.decl_name),
+            ),
             args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             // Skeleton mode preserves open generics so body lowering
             // produces TypeParam graph nodes for T-refs (not

@@ -833,8 +833,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // type-space slot; canonicalize its symbol space to `Type`
                 // for the `Instantiate` base (the dual-space selector is
                 // `side`, not the slot's space).
-                let base = decl_slot
-                    .with_symbol_space(crate::semantic_query::SemanticSymbolSpace::Type);
+                let base =
+                    decl_slot.with_symbol_space(crate::semantic_query::SemanticSymbolSpace::Type);
                 let inst_ctx = self.instantiate_context_for(
                     &decl_slot.defining_canonical,
                     ProjectionReductionContext::published(ProjectionMode::Shallow),
@@ -4647,7 +4647,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // DefineSlots / DefineModel) re-check below and refuse
         // admission with `cache_suppress = true` when the snapshot
         // is missing.
-        let owner_indexed = self.ctx.ensure_indexed_ready(owner.defining_canonical.as_ref());
+        let owner_indexed = self
+            .ctx
+            .ensure_indexed_ready(owner.defining_canonical.as_ref());
         let owner_whole_hash: crate::semantic_query::HashValue = owner_indexed
             .as_ref()
             .map(|indexed| indexed.whole_hash)
@@ -4778,7 +4780,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // SFC OR to any type argument's originating file misses the warm
         // read. Structural type args (`Global`-scoped primitives) and an
         // empty `type_args` set contribute nothing.
-        let mut observed_self_roots = vec![(Arc::clone(&owner.defining_canonical), owner_whole_hash)];
+        let mut observed_self_roots =
+            vec![(Arc::clone(&owner.defining_canonical), owner_whole_hash)];
         for arg_root in self.observed_self_roots_from_nodes(type_args.iter().copied()) {
             if !observed_self_roots
                 .iter()

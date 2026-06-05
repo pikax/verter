@@ -2162,9 +2162,12 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
         let skeleton_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
             base: dotpathkeys_id.to_type_slot_unscoped(),
             args: StdArc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
-                ProjectionMode::Skeleton,
-            ), Default::default()),
+            context: crate::semantic_query::InstantiateContext::new(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Skeleton,
+                ),
+                Default::default(),
+            ),
         });
         let body_skeleton = match skeleton_read.value {
             QueryResult::Value(id) => id,
@@ -2215,9 +2218,12 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
         let navigate_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
             base: id.to_type_slot_unscoped(),
             args: StdArc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
-                ProjectionMode::Navigate,
-            ), Default::default()),
+            context: crate::semantic_query::InstantiateContext::new(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Navigate,
+                ),
+                Default::default(),
+            ),
         });
         let _ = navigate_read; // confirms execution
 
@@ -2225,9 +2231,12 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
         let expanded_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
             base: id.to_type_slot_unscoped(),
             args: StdArc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
-                ProjectionMode::Expanded,
-            ), Default::default()),
+            context: crate::semantic_query::InstantiateContext::new(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+            ),
         });
         let _ = expanded_read; // confirms execution
     }
@@ -2305,9 +2314,12 @@ export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
         let skeleton_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
             base: dotpathkeys_id.to_type_slot_unscoped(),
             args: StdArc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
-                ProjectionMode::Skeleton,
-            ), Default::default()),
+            context: crate::semantic_query::InstantiateContext::new(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Skeleton,
+                ),
+                Default::default(),
+            ),
         });
         let body_skeleton = match skeleton_read.value {
             QueryResult::Value(id) => id,

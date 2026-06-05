@@ -84,7 +84,10 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
 /// `DefineProps`, which is exactly the path we want to exercise to
 /// prove the dispatch arm produced no record.
 fn synthetic_macro_owner(canonical: &str) -> crate::semantic_query::ResolvedDeclSlotIdentity {
-    crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical), Arc::from("<sfc-script-setup>"))
+    crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        Arc::from(canonical),
+        Arc::from("<sfc-script-setup>"),
+    )
 }
 
 /// Regression: raw `ProjectSemanticDispatch::execute_read` calls,
@@ -181,7 +184,10 @@ fn raw_dispatch_execute_emits_no_audit_records() {
             macro_index: 0,
             macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
             type_args: Arc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
+            context: crate::semantic_query::MacroPayloadContext::new(
+                Default::default(),
+                ProjectionMode::Expanded,
+            ),
         };
         let macro_read = dispatch.execute_read(macro_key);
         // Discriminating side-check: prove `execute_read` actually

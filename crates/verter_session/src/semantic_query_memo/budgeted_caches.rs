@@ -1071,10 +1071,10 @@ mod tests {
         super::HostResolvedNamedTypeKey {
             canonical_id: StdArc::from(canonical),
             whole_hash: [0u8; 16],
-        resolve_env_hash: Default::default(),
-        type_env_hash: Default::default(),
-        lib_env_hash: Default::default(),
-        project_identity: 0,
+            resolve_env_hash: Default::default(),
+            type_env_hash: Default::default(),
+            lib_env_hash: Default::default(),
+            project_identity: 0,
             inner: ResolvedNamedTypeCacheKey {
                 name: name.as_bytes().to_vec().into_boxed_slice(),
                 surface: None,

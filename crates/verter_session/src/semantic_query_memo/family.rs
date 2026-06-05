@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use crate::fact_signature_helpers::ReadSetSignature;
 use crate::semantic_query::{
-    DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, PathSegment,
-    ProjectionMode, ProjectionReductionContext, QueryResult, ReductionDemand, ResolveDeclKey,
-    SemanticNodeId, SemanticQueryKey, ValueRootKey,
+    DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, PathSegment, ProjectionMode,
+    ProjectionReductionContext, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeId,
+    SemanticQueryKey, ValueRootKey,
 };
 
 #[derive(Clone)]

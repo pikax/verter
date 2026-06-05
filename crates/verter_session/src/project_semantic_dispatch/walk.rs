@@ -1496,23 +1496,24 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         crate::semantic_query::ProjectionReductionContext::structural_transit(),
                     );
                     drop(data);
-                    let expanded = match self
-                        .dispatch
-                        .execute_type_node(SemanticQueryKey::Instantiate {
-                        base,
-                        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                        context: inst_ctx,
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                        QueryResult::Recursive(id) => {
-                            results.push(id);
-                            return;
-                        }
-                        QueryResult::Error(_) => {
-                            results.push(self.opaque_miss());
-                            return;
-                        }
-                    };
+                    let expanded =
+                        match self
+                            .dispatch
+                            .execute_type_node(SemanticQueryKey::Instantiate {
+                                base,
+                                args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                                context: inst_ctx,
+                            }) {
+                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                            QueryResult::Recursive(id) => {
+                                results.push(id);
+                                return;
+                            }
+                            QueryResult::Error(_) => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        };
                     if expanded == current {
                         results.push(self.opaque_miss());
                         return;
@@ -1619,9 +1620,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         match self
                             .dispatch
                             .execute_type_node(SemanticQueryKey::Instantiate {
-                                context: self
-                                    .dispatch
-                                    .instantiate_context_for(&identity.defining_canonical, unwrap_context),
+                                context: self.dispatch.instantiate_context_for(
+                                    &identity.defining_canonical,
+                                    unwrap_context,
+                                ),
                                 base: identity,
                                 args: args_clone,
                             }) {

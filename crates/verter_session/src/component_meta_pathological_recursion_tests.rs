@@ -147,7 +147,10 @@ fn pathological_self_shadowing_userland_pick() {
             let _ = host_for_thread
                 .shallow_file_state("/A.vue")
                 .expect("/A.vue must have shallow file state");
-            let pick_identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/A.vue"), Arc::from("Pick"));
+            let pick_identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("/A.vue"),
+                Arc::from("Pick"),
+            );
             // Use synthetic placeholder args (interned `Primitive`
             // nodes) — the recursion fires irrespective of the
             // arg shapes because `build_instantiate` looks up the
@@ -162,9 +165,12 @@ fn pathological_self_shadowing_userland_pick() {
             let key = SemanticQueryKey::Instantiate {
                 base: pick_identity,
                 args: Arc::from(vec![arg_t, arg_k].into_boxed_slice()),
-                context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Expanded,
-                ), Default::default()),
+                context: crate::semantic_query::InstantiateContext::new(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Expanded,
+                    ),
+                    Default::default(),
+                ),
             };
             dispatch.execute_type_node(key)
         })
@@ -270,15 +276,21 @@ fn pathological_exclude_self_recursive() {
             let _ = host_for_thread
                 .shallow_file_state("/A.vue")
                 .expect("/A.vue must have shallow file state");
-            let r_identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/A.vue"), Arc::from("R"));
+            let r_identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("/A.vue"),
+                Arc::from("R"),
+            );
             let key = SemanticQueryKey::Instantiate {
                 base: r_identity,
                 args: Arc::from(
                     Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
                 ),
-                context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Expanded,
-                ), Default::default()),
+                context: crate::semantic_query::InstantiateContext::new(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Expanded,
+                    ),
+                    Default::default(),
+                ),
             };
             dispatch.execute_type_node(key)
         })
@@ -464,15 +476,21 @@ fn pathological_template_literal_key_recursion() {
             let _ = host_for_thread
                 .shallow_file_state("/A.vue")
                 .expect("/A.vue must have shallow file state");
-            let r_identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/A.vue"), Arc::from("R"));
+            let r_identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("/A.vue"),
+                Arc::from("R"),
+            );
             let key = SemanticQueryKey::Instantiate {
                 base: r_identity,
                 args: Arc::from(
                     Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
                 ),
-                context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Expanded,
-                ), Default::default()),
+                context: crate::semantic_query::InstantiateContext::new(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Expanded,
+                    ),
+                    Default::default(),
+                ),
             };
             dispatch.execute_type_node(key)
         })
