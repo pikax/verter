@@ -4081,9 +4081,10 @@ fn mapped_type_uses_source_member_names_when_object_source() {
 // dispatch call (typically `SemanticQueryKey::MappedType`) and emits
 // the same origin edges the userland-equivalent alias would emit.
 
-/// Helper: build a content-free `DeclKey` carrying a utility name so
-/// `build_instantiate` sees it as a "utility" through `utility_source`.
-/// Returns `DeclKey` for use as `SemanticQueryKey::Instantiate.base`.
+/// Helper: build a content-free `ResolvedDeclSlotIdentity` slot carrying a
+/// utility name so `build_instantiate` sees it as a "utility" through
+/// `utility_source`. Returns the slot for use as
+/// `SemanticQueryKey::Instantiate.base`.
 fn utility_identity(
     _graph: &Arc<SemanticGraphStore>,
     name: &str,
@@ -6705,11 +6706,11 @@ fn define_emits_macro_index(host: &VerterHost, canonical: &str) -> usize {
 
 /// **Macro resolution must not depend on `IndexedReady` cache
 /// residency.** A `ResolveMacroPayload` for `DefineEmits` resolves the
-/// macro sidecar from the owner artifact pinned to `owner.whole_hash`.
-/// When that artifact is EVICTED from `FileArtifactStore` but the owner
-/// file is UNCHANGED (`owner.whole_hash` is still the current content
-/// hash), the macro must still resolve — the evicted artifact is
-/// rematerialized via `ensure_indexed_ready`.
+/// macro sidecar from the owner artifact at the owner file's re-sourced
+/// live whole_hash. When that artifact is EVICTED from
+/// `FileArtifactStore` but the owner file is UNCHANGED (its whole_hash is
+/// still the current content hash), the macro must still resolve — the
+/// evicted artifact is rematerialized via `ensure_indexed_ready`.
 ///
 /// Discrimination property: with the rematerialize-on-eviction branch
 /// reverted (i.e. the pinned-lookup miss returns `Error(Miss)`
@@ -6758,14 +6759,14 @@ fn resolve_macro_payload_rematerializes_evicted_but_current_owner_artifact() {
     // Evict the owner `IndexedReady` WITHOUT touching the file content,
     // and drop the warm memo entry so the next `execute` is a genuine
     // cold rebuild. The scheduler still owns the (unchanged) source, so
-    // `owner.whole_hash` stays the current content hash.
+    // the owner file's whole_hash stays the current content hash.
     host.project_type_store().indexed().remove(c);
     let _ = graph.invalidate_canonical(c);
 
     // Cold rebuild against the evicted-but-current owner artifact: the
     // content-pinned lookup misses, the rematerialize branch observes
-    // `owner.whole_hash` is still current, rematerializes, and resolves
-    // the macro. A reverted branch would return `Error(Miss)` here.
+    // the owner file's whole_hash is still current, rematerializes, and
+    // resolves the macro. A reverted branch would return `Error(Miss)` here.
     let after_evict = dispatch.execute_type_node(key.clone());
     match after_evict {
         QueryResult::Value(SemanticQueryOutput { value: n, .. }) => assert_eq!(
@@ -6775,7 +6776,7 @@ fn resolve_macro_payload_rematerializes_evicted_but_current_owner_artifact() {
         ),
         QueryResult::Error(QueryError::Miss) => panic!(
             "DefineEmits over an evicted-but-current owner artifact MUST NOT return Miss — \
-             the artifact was merely evicted; `owner.whole_hash` is still the current \
+             the artifact was merely evicted; the owner file's whole_hash is still the current \
              content hash and the macro must rematerialize"
         ),
         other => panic!("expected Value after eviction, got {other:?}"),
@@ -6813,8 +6814,9 @@ fn resolve_macro_payload_resolves_against_current_owner_content_via_content_free
         })
         .unwrap();
 
-    // Capture the v1 owner identity. Under R6 the `DeclKey` is
-    // content-free, so this key remains valid against v2 too.
+    // Capture the v1 owner identity. Under R6 the owner slot
+    // (`ResolvedDeclSlotIdentity`) is content-free, so this key remains
+    // valid against v2 too.
     let owner_key_v1 = synthetic_macro_owner(&host, c);
     let macro_index = define_emits_macro_index(&host, c);
 
@@ -6839,7 +6841,7 @@ fn resolve_macro_payload_resolves_against_current_owner_content_via_content_free
         "v1 macro resolution must succeed; got {v1_result:?}"
     );
 
-    // Change the SFC content. Under R6 the SAME content-free `DeclKey`
+    // Change the SFC content. Under R6 the SAME content-free owner slot
     // re-applies: the warm entry's self-root `FileWholeHash` is
     // rejected by strict validation, and the cold rebuild reads v2.
     let _ = host
@@ -6868,7 +6870,7 @@ fn resolve_macro_payload_resolves_against_current_owner_content_via_content_free
     assert!(
         matches!(v2_result, QueryResult::Value(_)),
         "v2 macro resolution must succeed against the new content via the \
-         content-free DeclKey; got {v2_result:?}"
+         content-free owner slot; got {v2_result:?}"
     );
 }
 

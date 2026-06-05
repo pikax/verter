@@ -784,7 +784,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   (`execute(TypeOf { value_root: value_root_of(value_slot) })`).
     ///
     /// The `side` selects the half; the slot's `symbol_space` does not feed
-    /// the composed sub-query, because both `DeclKey` and
+    /// the composed sub-query, because both the env-bearing
+    /// [`ResolvedDeclSlotIdentity`](crate::semantic_query::ResolvedDeclSlotIdentity)
+    /// base and
     /// [`value_root_of`](crate::semantic_query::value_root_of) are
     /// symbol-space-agnostic (they read only `(defining_canonical,
     /// merged_symbol_name)`).
@@ -823,7 +825,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
 
         // Dual-space — both sides route through `execute` (the ONE shared
-        // engine). No query-time OXC. `DeclKey` / `value_root_of` read only
+        // engine). No query-time OXC. The env-bearing `ResolvedDeclSlotIdentity`
+        // base / `value_root_of` read only
         // `(defining_canonical, merged_symbol_name)`, so the slot's
         // `symbol_space` is not re-tagged here — `side` is the selector.
         let composed = match side {
@@ -2972,8 +2975,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     // Declaration identity is carried directly by
-    // `SemanticQueryKey::Instantiate.base` (`DeclKey`), so there is
-    // no arena node to unwrap.
+    // `SemanticQueryKey::Instantiate.base` (the env-bearing content-free
+    // `ResolvedDeclSlotIdentity` slot), so there is no arena node to unwrap.
 
     /// Path-precise projection. Walks each [`PathSegment`]
     /// from `base` via a fresh [`PathWalker`] that dispatches per-hop on
@@ -4588,11 +4591,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// The `DefineEmits` / `DefineSlots` / `DefineModel` arms read the
     /// owner SFC's `AnalyzedMacro` sidecar (`macros.get(macro_index)`
     /// off the owner artifact's `script_analysis`) rather than
-    /// re-walking the AST: the content-pinned `IndexedReady` lookup is
-    /// tried first, and on a cache miss the artifact is rematerialized
-    /// via `ensure_indexed_ready` only when `owner.whole_hash` is still
-    /// the owner's current content (see the arm body for the stale-key
-    /// guard).
+    /// re-walking the AST. The `owner` slot is the env-bearing,
+    /// content-free `ResolvedDeclSlotIdentity` (R6) — its whole_hash is
+    /// NOT in the key. At value-build time the owner's current content
+    /// version is re-sourced live via
+    /// `ensure_indexed_ready(owner.defining_canonical)`; a real-file
+    /// owner unknown to the live view is a stale key and the build is
+    /// marked non-cacheable (`cache_suppress`) (see the arm body for
+    /// the stale-key guard).
     ///
     /// Per-arm logic mirrors §3.2 body sketch:
     /// - `DefineProps` / `WithDefaults`: 0 args → `Opaque(Miss)`;
@@ -4614,9 +4620,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// - `DefineExpose` / `DefineOptions`: 0 args → `Opaque(Miss)`;
     ///   else `type_args[0]` unchanged.
     ///
-    /// All arms record `(owner.defining_canonical, WholeHash(owner.whole_hash))`
-    /// in the local fence so warm-hit revalidation against the live
-    /// `StoreView` observes the macro's owning file generation.
+    /// A real-file owner records `(owner.defining_canonical,
+    /// WholeHash(<re-sourced live whole_hash>))` in the local fence so
+    /// warm-hit revalidation against the live `StoreView` observes the
+    /// macro's owning file generation. A non-file owner (the global /
+    /// structural sentinel, a `__builtin__` carrier, or a `<synthetic>`
+    /// test identity) records NO file whole_hash and roots its version
+    /// entirely through its `type_args` nodes. Every arm additionally
+    /// pins the project generation in the fence.
     ///
     /// **Recursion safety:** A self-reference like
     /// `type R = { next: R }; defineEmits<{ recurse: [R] }>()` reaches

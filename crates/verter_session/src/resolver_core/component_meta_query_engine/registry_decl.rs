@@ -937,7 +937,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
             _ => return None,
         };
-        // R6: Instantiate.base is content-free `DeclKey`; the
+        // R6: Instantiate.base is the env-bearing content-free
+        // `ResolvedDeclSlotIdentity` slot (built via `type_slot_for`); the
         // cold build re-sources the live whole_hash from
         // `ensure_indexed_ready`.
         let root_canonical: std::sync::Arc<str> = std::sync::Arc::from(resolved_root.0.as_str());

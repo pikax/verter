@@ -1330,8 +1330,8 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
 /// warm `ResolveMacroPayload` memo entry.
 ///
 /// Discriminating property: `build_resolve_macro_payload` rooted its
-/// `observed_self_roots` ONLY on the macro owner (`owner.canonical_id` +
-/// `owner.whole_hash`). The `DefineProps` 1-arg arm returns the
+/// `observed_self_roots` ONLY on the macro owner (the owner file's
+/// canonical + its re-sourced whole_hash). The `DefineProps` 1-arg arm returns the
 /// `type_args[0]` node directly, so the macro payload's identity IS the
 /// type argument — when that argument is file-derived from another
 /// canonical the result transitively depends on that file's content.
