@@ -5707,9 +5707,8 @@ mod foundations_guards {
         // followed by a digit followed by `B`.
         {
             let bytes = src.as_bytes();
-            (0..bytes.len().saturating_sub(2)).any(|i| {
-                bytes[i] == b'U' && bytes[i + 1].is_ascii_digit() && bytes[i + 2] == b'B'
-            })
+            (0..bytes.len().saturating_sub(2))
+                .any(|i| bytes[i] == b'U' && bytes[i + 1].is_ascii_digit() && bytes[i + 2] == b'B')
         }
     }
 
