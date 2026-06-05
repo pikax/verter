@@ -497,7 +497,7 @@ pub(super) struct FamilyPublishOutcome {
 /// [`CandidateList`]. Each candidate carries its own
 /// `read_set_signature` + `self_root_canonicals`, so two file-content
 /// versions of the SAME content-free `SemanticQueryKey` (e.g.
-/// `Instantiate { base: DeclKey { canonical, name }, .. }` under a
+/// `Instantiate { base: ResolvedDeclSlotIdentity { .. }, .. }` under a
 /// base view and an overlay view) coexist as distinct candidates
 /// inside the same slot — R20 overlay isolation.
 ///

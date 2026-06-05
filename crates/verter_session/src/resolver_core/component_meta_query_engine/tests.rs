@@ -723,7 +723,7 @@ fn project_route_surface_expr_pick_over_class_excludes_non_public_keys() {
     // `filtered_projected_surface(.., name-only)` over the FULL projected
     // surface (which carries non-public members) — `secret` / `guarded` match
     // the name filter and leak. PASSES once the arms delegate to the shared
-    // builtin engine (`DeclKey::builtin("Pick"/"Omit")` on `[body, keys]`),
+    // builtin engine (`dispatch.builtin_type_slot("Pick"/"Omit")` on `[body, keys]`),
     // which public-filters source members before the name predicate.
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
