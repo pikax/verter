@@ -93,6 +93,7 @@ pub(crate) mod evaluate;
 pub(crate) mod lower;
 pub(crate) mod raise;
 pub(crate) mod relation;
+pub(crate) mod relation_predicates;
 pub(crate) mod substitute;
 pub(crate) mod walk;
 
