@@ -130,12 +130,36 @@ fn excluded_ranges(source: &str) -> Vec<(usize, usize)> {
             }
         }
     }
+    let bytes = source.as_bytes();
     for marker_idx in find_all(source, "#[cfg(test)]") {
-        if let Some(open_rel) = source[marker_idx..].find('{') {
-            let open = marker_idx + open_rel;
-            if let Some(close) = find_matching_close_brace(source, open) {
-                ranges.push((marker_idx, close + 1));
+        // The `#[cfg(test)]` attribute may gate EITHER a braced item
+        // (`#[cfg(test)] mod tests { … }`) OR a brace-less item
+        // (`#[cfg(test)] use crate::fixtures::*;` / `#[cfg(test)] type X = …;`).
+        // For a braced item we exclude the whole `{ … }` body; for a
+        // brace-less item the first `{` in the file may belong to a LATER,
+        // UNRELATED production block — brace-matching onto it would
+        // over-exclude. Decide by which delimiter the attribute reaches
+        // FIRST after itself: a top-level `;` before any `{` means the
+        // attribute gates a brace-less statement, so exclude only marker →
+        // `;`; a `{` first means a braced item, brace-matched as before.
+        let after_marker = marker_idx + "#[cfg(test)]".len();
+        let scan_start = skip_ws_and_comments(bytes, after_marker);
+        let next_open = source[scan_start..].find('{').map(|r| scan_start + r);
+        let next_semi = source[scan_start..].find(';').map(|r| scan_start + r);
+        match (next_open, next_semi) {
+            (Some(open), Some(semi)) if semi < open => {
+                // Brace-less item — exclude only its statement.
+                ranges.push((marker_idx, semi + 1));
             }
+            (Some(open), _) => {
+                if let Some(close) = find_matching_close_brace(source, open) {
+                    ranges.push((marker_idx, close + 1));
+                }
+            }
+            (None, Some(semi)) => {
+                ranges.push((marker_idx, semi + 1));
+            }
+            (None, None) => {}
         }
     }
 
@@ -471,5 +495,58 @@ mod tests {
         tw_hits.is_empty(),
         "a `#[cfg(test)]`-window caller (even with whitespace before the \
          paren) must be skipped; got: {tw_hits:?}",
+    );
+}
+
+/// Brace-less `#[cfg(test)]` item robustness: a `#[cfg(test)]` attribute on
+/// a brace-less item (`use …;` / `type … = …;`) must exclude ONLY that
+/// statement, NOT brace-match onto a LATER, unrelated production block. The
+/// old "first `{` after the marker" rule would have latched the brace-less
+/// attribute onto the next production `mod`/`fn` body and masked a real
+/// production caller inside it. This control plants exactly that shape and
+/// asserts the production caller after the brace-less test item is STILL
+/// flagged, while the same construct gating a braced item stays excluded.
+#[test]
+fn braceless_cfg_test_item_does_not_overexclude_later_production_block() {
+    // A brace-less `#[cfg(test)] use …;` precedes a production `fn` whose
+    // body calls a zero-env constructor. The brace-less attribute must NOT
+    // swallow the later `fn { … }` block.
+    let braceless_fixture = r#"
+#[cfg(test)]
+use crate::fixtures::sample_slot;
+
+fn production_caller() {
+    let base = some_id.to_type_slot_unscoped();
+    let _ = base;
+}
+"#;
+    let hits = zero_env_callers(braceless_fixture);
+    assert!(
+        hits.iter().any(|(_, t, _)| t.contains("some_id")),
+        "a brace-less `#[cfg(test)] use …;` must NOT exclude the LATER \
+         production `fn` body — the `some_id` production caller MUST still be \
+         flagged; got: {hits:?}",
+    );
+
+    // Control: the SAME constructor call, now genuinely inside a braced
+    // `#[cfg(test)] mod tests { … }`, stays excluded.
+    let braced_fixture = r#"
+#[cfg(test)]
+use crate::fixtures::sample_slot;
+
+#[cfg(test)]
+mod tests {
+    fn t() {
+        let owner = other_id.to_type_slot_unscoped();
+        let _ = owner;
+    }
+}
+"#;
+    let braced_hits = zero_env_callers(braced_fixture);
+    assert!(
+        braced_hits.is_empty(),
+        "a caller inside a braced `#[cfg(test)] mod tests {{ … }}` must be \
+         excluded even when a sibling brace-less `#[cfg(test)] use …;` \
+         precedes it; got: {braced_hits:?}",
     );
 }
