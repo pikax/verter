@@ -430,6 +430,72 @@ fn walk_rs_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Strip `//` line comments and `/* … */` block comments from `source`,
+/// then collapse every run of ASCII whitespace to a single space. The
+/// result is a token-normalized view of the source: any whitespace
+/// formatting (`struct  DeclKey`, `struct\nDeclKey`) and any interior
+/// comment (`struct/*x*/DeclKey`) is erased, so a substring/boundary scan
+/// over the normalized text is robust to all three formatting evasions.
+///
+/// Block comments are replaced by a single space (so `struct/*x*/DeclKey`
+/// becomes `struct DeclKey` — the keyword and the name stay separated by a
+/// boundary). Line comments are dropped entirely up to the newline (the
+/// newline itself then collapses with surrounding whitespace). String and
+/// char literals are NOT specially handled: this is a coarse architecture
+/// guard over Rust source, and a `struct DeclKey {` declaration never
+/// occurs inside a literal in practice — the goal is to defeat formatting
+/// evasions, not to be a full lexer.
+fn strip_comments_and_normalize_ws(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // Line comment: `// … \n`
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            // Leave the newline (if any) for the whitespace pass; emit a
+            // space so adjacent tokens stay separated.
+            out.push(' ');
+            continue;
+        }
+        // Block comment: `/* … */` (non-nesting is sufficient for this
+        // coarse guard — Rust block comments do nest, but a nested
+        // `struct DeclKey {` inside a comment is not a real declaration
+        // either way; emitting a space keeps the boundary scan sound).
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            out.push(' ');
+            continue;
+        }
+        // Non-comment byte: copy through, treating any ASCII whitespace as
+        // a single space (collapsed in the second pass below).
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    // Collapse runs of ASCII whitespace to a single space.
+    let mut normalized = String::with_capacity(out.len());
+    let mut prev_ws = false;
+    for ch in out.chars() {
+        if ch.is_ascii_whitespace() {
+            if !prev_ws {
+                normalized.push(' ');
+            }
+            prev_ws = true;
+        } else {
+            normalized.push(ch);
+            prev_ws = false;
+        }
+    }
+    normalized
+}
+
 /// True iff `source` reintroduces the retired query-identity struct
 /// `struct DeclKey` in ANY declaration form AND under ANY visibility:
 /// `pub struct DeclKey`, `pub(crate) struct DeclKey`,
@@ -438,56 +504,124 @@ fn walk_rs_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
 /// tuple (`struct DeclKey(...)`), generic (`struct DeclKey<...>`), or with
 /// arbitrary whitespace before the delimiter (`struct DeclKey\n{`).
 ///
-/// The scanner anchors on the literal `struct DeclKey` token (the `pub`
-/// /`pub(crate)`/`pub(...)` visibility prefix is OPTIONAL, so anchoring on
-/// `struct DeclKey` rather than `pub struct DeclKey` catches the
-/// visibility-evasion forms `pub(crate) struct DeclKey {` and bare
-/// `struct DeclKey {`). For each `struct DeclKey` occurrence it then
-/// applies BOTH word boundaries:
+/// TOKEN-ROBUST: the source is first run through
+/// [`strip_comments_and_normalize_ws`], so the scan is immune to the three
+/// formatting evasions that defeat a naive `source.contains("struct
+/// DeclKey")` substring check: extra whitespace (`struct  DeclKey`), a
+/// newline between keyword and name (`struct\nDeclKey`), and a block
+/// comment between them (`struct/*x*/DeclKey`). After normalization each of
+/// those collapses to the canonical `struct DeclKey` token sequence (a
+/// single space between `struct` and `DeclKey`).
+///
+/// On the normalized text the scanner anchors on `struct ` (the keyword
+/// plus exactly one normalized space — the `pub`/`pub(crate)`/`pub(...)`
+/// visibility prefix is OPTIONAL, so anchoring on `struct ` rather than
+/// `pub struct ` catches the visibility-evasion forms) and for each
+/// occurrence applies BOTH word boundaries:
 ///
 /// - LEADING boundary: the char immediately before `struct` must be a
-///   non-identifier char (whitespace / start-of-source). This keeps the
-///   scan from matching `notstruct DeclKey` style identifiers; the
-///   literal `struct ` keyword also means `ResolveDeclKey` cannot match
-///   (its declaration is `struct ResolveDeclKey`, never `struct DeclKey`).
-/// - TRAILING boundary: after `struct DeclKey` the scanner skips any run
-///   of whitespace, then requires the next non-whitespace char to be a
-///   struct-declaration delimiter (`{` / `;` / `(` / `<`). That rejects
-///   any longer identifier (`DeclKeyV2`) AND prose mentions
-///   (`struct DeclKey was retired`) while still catching every decl form.
+///   non-identifier char (space / start-of-source). This keeps the scan
+///   from matching `notstruct DeclKey` style identifiers; the literal
+///   `struct ` keyword also means `ResolveDeclKey` cannot match (its
+///   declaration normalizes to `struct ResolveDeclKey`, never `struct
+///   DeclKey`).
+/// - NAME match + TRAILING boundary: after `struct ` the next token must be
+///   exactly `DeclKey` followed by a struct-declaration delimiter (`{` /
+///   `;` / `(` / `<`) — with at most one normalized space before the
+///   delimiter. That rejects any longer identifier (`DeclKeyV2`, where the
+///   char after `DeclKey` is `V`, not a delimiter or space) AND prose
+///   mentions (`struct DeclKey was retired`, where the token after a space
+///   is `was`, not a delimiter) while still catching every decl form.
 fn source_reintroduces_decl_key_struct(source: &str) -> bool {
-    const ANCHOR: &str = "struct DeclKey";
+    let normalized = strip_comments_and_normalize_ws(source);
+    const KEYWORD: &str = "struct ";
+    const NAME: &str = "DeclKey";
     let mut search_from = 0usize;
-    while let Some(rel) = source[search_from..].find(ANCHOR) {
-        let idx = search_from + rel;
+    while let Some(rel) = normalized[search_from..].find(KEYWORD) {
+        let kw_idx = search_from + rel;
+        // Advance past this `struct ` for the next iteration regardless of
+        // match outcome.
+        let after_kw = kw_idx + KEYWORD.len();
+        search_from = after_kw;
+
         // LEADING word boundary: the char before `struct` must not be an
         // identifier char (so `notstruct DeclKey` is not a match). A match
         // at the start of source has no preceding char and is accepted.
-        let leading_ok = idx == 0
-            || !source[..idx]
+        let leading_ok = kw_idx == 0
+            || !normalized[..kw_idx]
                 .chars()
                 .next_back()
                 .is_some_and(|c| c.is_alphanumeric() || c == '_');
-        if leading_ok {
-            let after = &source[idx + ANCHOR.len()..];
-            // TRAILING word boundary: skip whitespace between `DeclKey` and
-            // the decl delimiter so `struct DeclKey\n{` is caught, but
-            // require the first non-whitespace char after `DeclKey` to
-            // itself be a decl delimiter — otherwise `DeclKeyV2` / prose
-            // does not match. If `after` continues with an identifier char
-            // (`DeclKeyV2`), `next == after` and the delimiter check fails
-            // on `V`.
-            let next = after.trim_start_matches(|c: char| c.is_whitespace());
-            if matches!(
-                next.chars().next(),
-                Some('{') | Some(';') | Some('(') | Some('<')
-            ) {
-                return true;
-            }
+        if !leading_ok {
+            continue;
         }
-        search_from = idx + ANCHOR.len();
+
+        // The token immediately following `struct ` must be exactly
+        // `DeclKey`.
+        let rest = &normalized[after_kw..];
+        if !rest.starts_with(NAME) {
+            continue;
+        }
+        // After `DeclKey` skip at most the single normalized space, then
+        // require a struct-declaration delimiter. If the next char is an
+        // identifier char (`DeclKeyV2` → `V`) the delimiter check fails; if
+        // it is a space followed by prose (`DeclKey was`) the char after the
+        // space is `w`, also failing the delimiter check.
+        let after_name = &rest[NAME.len()..];
+        let next = after_name.strip_prefix(' ').unwrap_or(after_name);
+        if matches!(
+            next.chars().next(),
+            Some('{') | Some(';') | Some('(') | Some('<')
+        ) {
+            return true;
+        }
     }
     false
+}
+
+/// Discrimination harness for [`source_reintroduces_decl_key_struct`]:
+/// every formatting evasion named in the U2B.9 review MUST be detected, and
+/// the near-miss identifiers / prose MUST be rejected. This is the
+/// characterizing test that proves the token-robust detector defeats the
+/// exact evasions a naive substring scan would miss.
+#[test]
+fn decl_key_struct_detector_discriminates_formatting_evasions() {
+    // MUST DETECT — every legal declaration form + the three formatting
+    // evasions (extra whitespace, newline, interior block comment).
+    let must_detect = [
+        "pub struct  DeclKey {}",          // two spaces
+        "pub struct\nDeclKey {}",          // newline between keyword and name
+        "pub struct/*x*/DeclKey {}",       // block comment between
+        "struct DeclKey;",                 // unit
+        "pub(crate) struct DeclKey(u32);", // tuple, restricted visibility
+        "struct DeclKey<T>{}",             // generic
+        "struct DeclKey {\n  a: u32,\n}",  // braced
+        "    struct DeclKey {}",           // leading indentation
+    ];
+    for src in must_detect {
+        assert!(
+            source_reintroduces_decl_key_struct(src),
+            "detector MUST flag reintroduced `struct DeclKey`: {src:?}",
+        );
+    }
+
+    // MUST REJECT — longer identifiers, the distinct live `ResolveDeclKey`
+    // query key, prose mentions, and a non-keyword `notstruct`.
+    let must_reject = [
+        "struct ResolveDeclKey {}",              // distinct live type
+        "pub struct DeclKeyV2 {}",               // longer identifier
+        "// struct DeclKey was deleted",         // line-comment prose
+        "/* struct DeclKey was deleted */",      // block-comment prose
+        "struct ResolvedDeclSlotIdentity {}",    // the replacement slot
+        "let notstruct DeclKey = 1;",            // not the `struct` keyword
+        "// the retired struct DeclKey is gone", // prose mid-line comment
+    ];
+    for src in must_reject {
+        assert!(
+            !source_reintroduces_decl_key_struct(src),
+            "detector MUST NOT flag non-declaration / near-miss: {src:?}",
+        );
+    }
 }
 
 /// Locate the first `{ ... }` brace block following a textual
