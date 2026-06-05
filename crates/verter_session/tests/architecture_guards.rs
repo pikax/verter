@@ -5953,6 +5953,213 @@ mod foundations_guards {
         }
     }
 
+    // ── Relation-surface plan-archaeology guard ──
+    //
+    // The workspace-wide `no_phase_archaeology_in_production_code`
+    // (Guard 7) has token-coverage gaps — its needle set does not
+    // catch every codename / cluster / `Pre-Cn` / `the plan` form. This
+    // narrow guard closes those gaps for the relation surface: it scans
+    // ONLY `relation.rs` + `relation_predicates.rs` and fails if the
+    // relation reducer source reintroduces phase / project / codename /
+    // deletion vocabulary. Scoping to two files keeps it discriminating
+    // without surfacing out-of-scope workspace violations. Legitimate
+    // design-doc section refs (`§4.1`) are NOT in the forbidden set and
+    // pass unflagged.
+
+    const RELATION_SOURCE_FILES: [&str; 2] = [
+        "crates/verter_session/src/project_semantic_dispatch/relation.rs",
+        "crates/verter_session/src/project_semantic_dispatch/relation_predicates.rs",
+    ];
+
+    fn is_word_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+
+    /// Any occurrence of `needle` in `hay` whose following byte (index
+    /// just past the match) satisfies `next`.
+    fn any_occurrence_followed_by<F: Fn(Option<u8>) -> bool>(
+        hay: &[u8],
+        needle: &[u8],
+        next: F,
+    ) -> bool {
+        if needle.is_empty() || hay.len() < needle.len() {
+            return false;
+        }
+        for start in 0..=hay.len() - needle.len() {
+            if &hay[start..start + needle.len()] == needle
+                && next(hay.get(start + needle.len()).copied())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Word-boundary match of a lowercase `needle` in a lowercased `hay`.
+    fn word_bounded(hay: &[u8], needle: &[u8]) -> bool {
+        if needle.is_empty() || hay.len() < needle.len() {
+            return false;
+        }
+        for start in 0..=hay.len() - needle.len() {
+            if &hay[start..start + needle.len()] != needle {
+                continue;
+            }
+            let before_ok = start == 0 || !is_word_byte(hay[start - 1]);
+            let after_idx = start + needle.len();
+            let after_ok = after_idx >= hay.len() || !is_word_byte(hay[after_idx]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Predicate: returns `true` when `line` carries plan / project /
+    /// codename / deletion vocabulary the relation surface must not
+    /// reintroduce. Case-insensitive for the codename / `cutover` /
+    /// `the plan` / `hybrid` / `retired in` / `deleted in` /
+    /// `cluster-<letter>` / `pre[-_]c<digit>` / `post[-_]c<digit>` /
+    /// `phase` / `WIP` family; case-sensitive for `change <UPPER>` and
+    /// the `B<digit><lower>` block marker.
+    fn relation_source_line_has_plan_archaeology(line: &str) -> bool {
+        let lower = line.to_ascii_lowercase();
+        let lb = lower.as_bytes();
+
+        if lower.contains("codex")
+            || lower.contains("cutover")
+            || lower.contains("the plan")
+            || lower.contains("hybrid")
+            || lower.contains("retired in")
+            || lower.contains("deleted in")
+        {
+            return true;
+        }
+        if word_bounded(lb, b"phase") || word_bounded(lb, b"wip") {
+            return true;
+        }
+        // `cluster-<letter>`
+        if any_occurrence_followed_by(lb, b"cluster-", |c| {
+            c.is_some_and(|c| c.is_ascii_alphabetic())
+        }) {
+            return true;
+        }
+        // `pre[-_]?c<digit>` / `post[-_]?c<digit>`
+        let digit = |c: Option<u8>| c.is_some_and(|c| c.is_ascii_digit());
+        for needle in [&b"prec"[..], &b"pre-c"[..], &b"pre_c"[..]] {
+            if any_occurrence_followed_by(lb, needle, digit) {
+                return true;
+            }
+        }
+        for needle in [&b"postc"[..], &b"post-c"[..], &b"post_c"[..]] {
+            if any_occurrence_followed_by(lb, needle, digit) {
+                return true;
+            }
+        }
+
+        // Case-sensitive forms on the original line.
+        let ob = line.as_bytes();
+        // `change <UPPER>` with a word boundary after the single letter.
+        if ob.len() >= 7 {
+            for start in 0..=ob.len() - 7 {
+                if &ob[start..start + 7] != b"change " {
+                    continue;
+                }
+                let li = start + 7;
+                if ob.get(li).is_some_and(|c| c.is_ascii_uppercase()) {
+                    let after = li + 1;
+                    if after >= ob.len() || !is_word_byte(ob[after]) {
+                        return true;
+                    }
+                }
+            }
+        }
+        // `\bB<digit><lower>\b` block marker (e.g. `B6a`).
+        for start in 0..ob.len() {
+            if ob[start] != b'B' {
+                continue;
+            }
+            let before_ok = start == 0 || !is_word_byte(ob[start - 1]);
+            let digit_ok = ob.get(start + 1).is_some_and(|c| c.is_ascii_digit());
+            let lower_ok = ob.get(start + 2).is_some_and(|c| c.is_ascii_lowercase());
+            if before_ok && digit_ok && lower_ok {
+                let after = start + 3;
+                if after >= ob.len() || !is_word_byte(ob[after]) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn relation_source_is_free_of_plan_archaeology() {
+        let root = workspace_root();
+        let mut violations: Vec<String> = Vec::new();
+        for rel in RELATION_SOURCE_FILES {
+            let src = fs::read_to_string(root.join(rel))
+                .unwrap_or_else(|e| panic!("relation source `{rel}` must be readable: {e}"));
+            for (idx, line) in src.lines().enumerate() {
+                if relation_source_line_has_plan_archaeology(line) {
+                    violations.push(format!("{rel}:{}: {}", idx + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "`relation_source_is_free_of_plan_archaeology`: the relation reducer source\n\
+             reintroduced plan / project / codename / deletion vocabulary. The relation\n\
+             surface must read as final-state — durable design insights belong in\n\
+             `.claude/skills/*` or `docs/arch/`, not in source comments. (Design-doc\n\
+             section refs like `§4.1` are permitted.)\n\n\
+             Violations:\n  {}",
+            violations.join("\n  "),
+        );
+    }
+
+    #[test]
+    fn relation_archaeology_predicate_is_discriminating() {
+        // Must FAIL on each reintroduced label (the exact forms scrubbed
+        // from the relation surface, plus the wider banned family).
+        let banned = [
+            "// Codex-hybrid spec: the relation engine's identity-carrier unwrap.",
+            "// The Cluster-C Object-vs-Record arm needs the target.",
+            "// Pre-C8 the linear 500-deep descent exceeded the 192-frame cap.",
+            "// post-C8 the iterative worklist walks to the leaf mismatch.",
+            "// The plan describes the retirement.",
+            "// Phase 4 — graph-native projection.",
+            "// the d-cutover routed this through dispatch.",
+            "// WIP scaffold, real body deferred.",
+            "// change C wires the relation memo.",
+            "// block B6a substrate cutover.",
+            "// the hybrid spec merges both arms.",
+            "// retired in 11d once the dispatch resolver took over.",
+            "// deleted in 5g per call-graph closure.",
+        ];
+        for line in banned {
+            assert!(
+                relation_source_line_has_plan_archaeology(line),
+                "relation archaeology predicate must FLAG reintroduced label: {line:?}",
+            );
+        }
+        // Must NOT flag legitimate final-state prose or design-doc refs.
+        let allowed = [
+            "// The relation engine's identity-carrier unwrap is a STRUCTURAL TRANSIT.",
+            "// The Object-vs-Record arm needs the target normalised to an Object.",
+            "// The iterative worklist driver bounds itself on a graph-size work budget.",
+            "// See §4.1 for the coinductive-cycle discharge rule.",
+            "// the per-member relation re-enters the worklist (§2.7).",
+            "// Record-target recognition for `A extends Record<U, K>` conditionals.",
+            "// no change in the published surface for this arm.",
+            "// Distribute the remaining path into both conditional branches.",
+        ];
+        for line in allowed {
+            assert!(
+                !relation_source_line_has_plan_archaeology(line),
+                "relation archaeology predicate must NOT flag legitimate prose: {line:?}",
+            );
+        }
+    }
+
     // ── Member-visibility constructor guard ──
     //
     // B4.5 makes silent-Public member construction IMPOSSIBLE in production:
