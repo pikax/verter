@@ -61,6 +61,25 @@ fn prop_names(
     names
 }
 
+/// The `artifact_key.content_hash` the cached augmentation index holds for
+/// `augmenter_canonical`, scanned across every populated `AugmenterSet` (no
+/// need to reconstruct the exact target key). `None` if no populated set lists
+/// the augmenter. Lets the test observe whether the body stitch wrote the
+/// healed (post-rekey) exact key back into the cached set.
+fn cached_augmenter_content_hash(host: &VerterHost, augmenter_canonical: &str) -> Option<[u8; 16]> {
+    let store = host.project_type_store().indexed();
+    for (key, _fingerprint) in store.snapshot_augmentation_index_fingerprints() {
+        if let Some(set) = store.get_augmenter_set(&key) {
+            for entry in set.entries.iter() {
+                if entry.canonical().as_ref() == augmenter_canonical {
+                    return Some(entry.artifact_key.content_hash);
+                }
+            }
+        }
+    }
+    None
+}
+
 const AUG_PRE: &str = "import './types'\n\
      declare module './types' {\n\
      \x20 interface Cfg { fromAug: string }\n\
@@ -115,6 +134,12 @@ fn merged_decl_body_stitch_self_heals_rekeyed_augmenter() {
         "control: base augmenter member `fromAug` present pre-edit: {pre:?}"
     );
 
+    // Capture the augmenter's cached exact-key content hash BEFORE the edit.
+    // The cold body stitch populated the augmentation index with `aug.ts`'s
+    // pre-edit `FileArtifactKey`, so this is the PRE-edit content hash.
+    let pre_key_hash = cached_augmenter_content_hash(project.host(), "/workspace/src/aug.ts")
+        .expect("augmenter must be in the augmentation index after the cold pass");
+
     // Cosmetic re-key of the augmenter: re-inject the new bytes into the
     // workspace and force the host to re-read via `upsert`. The content hash
     // advances (the pre-edit `FileArtifactKey` is drained), but the decl
@@ -150,5 +175,22 @@ fn merged_decl_body_stitch_self_heals_rekeyed_augmenter() {
          surface — the `MergedDecl` body stitch must self-heal the stale \
          captured `artifact_key` via the scheduler-authoritative current \
          content hash, NOT silently drop the augmenter: {post:?}"
+    );
+
+    // The re-key ACTUALLY occurred AND the healed key was written back: the
+    // cached augmentation-index entry for `aug.ts` now carries a DIFFERENT
+    // content hash than the pre-edit one. This proves (a) the cosmetic edit
+    // genuinely drained the pre-edit `FileArtifactKey` (so the heal path was
+    // exercised, not bypassed), and (b) the body stitch persisted the healed
+    // exact key back into the cached `AugmenterSet` instead of re-healing on
+    // every call. Without the write-back the cached entry would still hold the
+    // stale pre-edit hash and this assertion would FAIL.
+    let post_key_hash = cached_augmenter_content_hash(project.host(), "/workspace/src/aug.ts")
+        .expect("augmenter must still be in the augmentation index after the warm pass");
+    assert_ne!(
+        pre_key_hash, post_key_hash,
+        "the cosmetic re-key must advance the augmenter's content hash AND the \
+         body stitch must write the healed exact key back into the cached \
+         AugmenterSet (pre={pre_key_hash:?} post={post_key_hash:?})"
     );
 }

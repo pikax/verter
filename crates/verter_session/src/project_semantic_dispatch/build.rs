@@ -1432,7 +1432,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         let mut contributor_nodes: Vec<SemanticNodeId> = Vec::new();
         let mut self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)> = Vec::new();
-        for augmenter in augmenter_set.entries.iter() {
+        // Stale-key self-heals discovered below are written back into the
+        // cached `AugmenterSet` after the loop so the NEXT stitch hits the
+        // fast exact-key path instead of re-healing every call — the SAME
+        // write-back the names stitch
+        // (`RouteDb::get_or_compute_effective_export_set`) performs.
+        let mut refreshed_keys: Vec<(usize, crate::file_artifact_store::FileArtifactKey)> =
+            Vec::new();
+        for (augmenter_idx, augmenter) in augmenter_set.entries.iter().enumerate() {
             let augmenter_canonical = augmenter.canonical();
             let Some(indexed) = self.ctx.ensure_indexed_ready(augmenter_canonical.as_ref()) else {
                 continue;
@@ -1454,11 +1461,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // scheduler-authoritative current content hash — the SAME healing
             // path the names stitch
             // (`RouteDb::get_or_compute_effective_export_set`) uses.
-            let Some((art, _refreshed_key)) = artifact_store
+            let Some((art, refreshed_key)) = artifact_store
                 .augmenter_artifacts_self_healing(&augmenter.artifact_key, indexed.whole_hash)
             else {
                 continue;
             };
+            if let Some(refreshed_key) = refreshed_key {
+                refreshed_keys.push((augmenter_idx, refreshed_key));
+            }
             let mut matched_specs: Vec<String> = Vec::new();
             for fact in art.augmentations.iter() {
                 if fact.augmented_name.as_ref() != decl_name {
@@ -1537,6 +1547,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // overlay hash makes the base re-query miss and recompute.
                 self_roots.push((Arc::clone(augmenter_canonical), indexed.whole_hash));
             }
+        }
+
+        // Persist any healed exact keys back into the cached `AugmenterSet`.
+        // The augmenter-set fingerprint folds `parse_stable_hash` (NOT
+        // `content_hash`), and a stale key is healed only when the augmenter's
+        // `parse_stable_hash` is unchanged — so the rebuilt set carries the
+        // SAME fingerprint and the same per-entry `parse_stable_hash`; only the
+        // `artifact_key` content-hash dimension advances. Re-publishing under
+        // the identical fingerprint keeps every recorded
+        // `ModuleAugmentationIndexShape` signature valid while making the next
+        // stitch hit the fast exact-key path (mirrors the names stitch).
+        if !refreshed_keys.is_empty() {
+            use crate::file_artifact_store::{AugmenterEntry, AugmenterSet};
+            let mut entries = augmenter_set.entries.clone();
+            for (idx, current_key) in refreshed_keys {
+                entries[idx] = AugmenterEntry {
+                    artifact_key: current_key,
+                    parse_stable_hash: entries[idx].parse_stable_hash,
+                };
+            }
+            artifact_store.populate_augmenter_set(
+                key.clone(),
+                Arc::new(AugmenterSet {
+                    entries,
+                    fingerprint: augmenter_set.fingerprint,
+                }),
+            );
         }
 
         if contributor_nodes.is_empty() {
