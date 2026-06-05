@@ -909,8 +909,10 @@ The class is closed by one meta-guard asserting enum/table EQUALITY:
   variant set EXACTLY EQUALS the closed `SemanticQueryKey` enum's variant set (no
   omissions, no extras — every enum variant has exactly one row, every row names a
   real enum variant or is explicitly `retired`/`renamed`). For every `live` row it
-  asserts (1) an explicit named R21/R6-clean context shape (split env hashes +
-  applicable substitution / flow / contextual axes; none of the forbidden fields),
+  asserts (1) an explicit named R21/R6-clean key identity (each `*Context` carries
+  split env hashes + where applicable `substitution`; the flow / contextual
+  set-identity axes ride as per-variant key fields, not on the shared context; none
+  of the forbidden fields),
   (2) exactly one value domain (cross-checked with
   `every_semantic_query_key_maps_to_exactly_one_value_domain`), (3) a registered
   no-cross-context-warm-hit guard, and (4) a declared admission/budget behavior;
