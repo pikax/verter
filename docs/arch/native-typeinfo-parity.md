@@ -418,9 +418,12 @@ recorded facts; owned at `U2.MODULE_AUGMENTATION`).
 
 ## 2. Query Keys
 
-> **State note:** the query keys below are the **end state** to be built. Current
-> `SemanticQueryKey` lacks the proposed U2 / future keys; this architecture does not
-> imply they already exist.
+> **State note:** the query keys below are the **end state**. The U2B.5/6/7 spine keys
+> (`ResolveClassSurface`, `ResolveAmbientNamespace`, `ResolveEnum`, `ResolveOverloadSet`,
+> `FlowNarrowingAt`, `ContextualTypeAt`) are LANDED in `SemanticQueryKey`; the remaining
+> forward-planned U2 keys (`ResolveMergedDeclaration`, `ResolveDeclarationAugmentation`)
+> and later/future keys are NOT yet in the enum — this architecture does not imply those
+> already exist.
 
 ### 2.1 U2 keeps seven variants
 
@@ -837,16 +840,19 @@ re-entry on the mutual-recursion cycle records the in-flight re-entry assumption
 rather than self-awaiting; and contextual-callback inference at such a point runs
 inside the active `InferenceSession` (§4.2), not a private callback-inference loop.
 
-Per-key no-cross-context-warm-hit guards (one per remaining key, same discipline as
-the call/relate guards):
-**`resolve_merged_declaration_same_site_different_env_or_context_do_not_warm_hit`**,
-**`resolve_ambient_namespace_same_site_different_env_or_context_do_not_warm_hit`**,
-**`resolve_overload_set_same_site_different_env_or_context_do_not_warm_hit`**,
-**`resolve_enum_same_site_different_env_or_context_do_not_warm_hit`**,
-**`flow_narrowing_at_same_point_different_env_flow_or_substitution_do_not_warm_hit`**,
-**`contextual_type_at_same_point_different_env_contextual_or_substitution_do_not_warm_hit`**,
+Per-key no-cross-context-warm-hit guards. For the LANDED U2B.5/6/7 keys the live guard
+names are the shorter `*_do_not_warm_hit` forms:
+**`resolve_ambient_namespace_do_not_warm_hit`**,
+**`resolve_overload_set_do_not_warm_hit`**,
+**`resolve_enum_do_not_warm_hit`**,
+**`flow_narrowing_at_do_not_warm_hit`**,
+**`contextual_type_at_do_not_warm_hit`**
+(plus the per-axis discriminators, e.g. `resolve_ambient_namespace_identity_covers_parse_env_axis`).
+The FORWARD-PLANNED U2 keys carry their planned guard names:
+**`resolve_merged_declaration_same_site_different_env_or_context_do_not_warm_hit`**
 and **`declaration_augmentation_key_same_site_different_env_or_context_do_not_warm_hit`**
-(the named proof that `DeclarationAnalysisContext` includes `parse_env_hash`).
+(whose exact env-axis coverage — including whether it asserts `parse_env_hash` on
+`DeclarationAnalysisContext` — is the open U2 reconciliation noted in §413/§21.2).
 
 ### 2.9 Generated `SemanticQueryKeySpec` table over the whole closed enum
 
@@ -3884,12 +3890,18 @@ introduces lands with at least one named guard here.
 
 ## Query keys — per-key cross-context closure + meta-guard
 
+LANDED U2B.5/6/7 keys (live guard names are the shorter `*_do_not_warm_hit` forms):
+
+- `resolve_ambient_namespace_do_not_warm_hit`
+- `resolve_overload_set_do_not_warm_hit`
+- `resolve_enum_do_not_warm_hit`
+- `flow_narrowing_at_do_not_warm_hit`
+- `contextual_type_at_do_not_warm_hit`
+- `resolve_class_surface_do_not_warm_hit`
+
+FORWARD-PLANNED U2 keys (planned guard names, not yet in the test tree):
+
 - `resolve_merged_declaration_same_site_different_env_or_context_do_not_warm_hit`
-- `resolve_ambient_namespace_same_site_different_env_or_context_do_not_warm_hit`
-- `resolve_overload_set_same_site_different_env_or_context_do_not_warm_hit`
-- `resolve_enum_same_site_different_env_or_context_do_not_warm_hit`
-- `flow_narrowing_at_same_point_different_env_flow_or_substitution_do_not_warm_hit`
-- `contextual_type_at_same_point_different_env_contextual_or_substitution_do_not_warm_hit`
 - `declaration_augmentation_key_same_site_different_env_or_context_do_not_warm_hit`
 - `resolve_decl_same_site_different_env_or_context_do_not_warm_hit`
 - `instantiate_same_base_different_env_or_context_do_not_warm_hit`

@@ -700,7 +700,7 @@ Exact test rows lifted (capability `EnumResolution`, `enums.rs`):
 - enums.rs::enum_const_enum_member_resolves_to_inlined_string_literal
 - enums.rs::enum_discriminant_extract_projects_matching_arm_payload
 
-Required new guards: none beyond the shared per-key cross-context guard `resolve_enum_same_site_different_env_or_context_do_not_warm_hit` (landed in U2.QUERY_VALUE_DOMAIN). No NEW `(CRITICAL)` engine rule.
+Required new guards: none beyond the shared per-key cross-context guard `resolve_enum_do_not_warm_hit` (landed in U2.QUERY_VALUE_DOMAIN). No NEW `(CRITICAL)` engine rule.
 
 Critical-rule guards: none new — implements the existing value/type-duality coverage via `ResolveEnum`. Stated explicitly per the template.
 
