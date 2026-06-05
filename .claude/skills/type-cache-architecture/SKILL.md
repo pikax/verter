@@ -897,14 +897,18 @@ struct AugmentationTargetKey {
     project_identity: ProjectId,
     resolve_env_hash: Hash16,
     lib_env_hash: Hash16,
+    population: AugmentationPopulation, // {Base, Session(overlay-set fingerprint)}
     target: AugmentationTargetKind,
 }
 ```
 
 A `ModuleAugmentationIndex { entries: DashMap<AugmentationTargetKey,
 Arc<AugmenterSet>> }` lives on `FileArtifactStore`, providing the
-inverse lookup "which augmenters target X under env E?".
-Project / env isolation prevents cross-project poisoning.
+inverse lookup "which augmenters target X under env E and population
+P?". Project / env isolation prevents cross-project poisoning, and the
+`population` dimension keeps a session overlay's augmenters in a
+`Session` slot distinct from the `Base` slot (see the **Overlay-aware
+contract** below).
 
 **Index population semantics.** The augmentation index is populated
 **incrementally** as files enter `FileArtifactStore`. There is NO
@@ -1058,7 +1062,7 @@ key composition table. Summary:
 | Layer | Family | Key dimensions |
 |---|---|---|
 | `FileArtifactStore` | Content-addressed | `canonical, content_hash, parse_env_hash, parser_version` |
-| `ModuleAugmentationIndex` (on `FileArtifactStore`) | Content-addressed | `project_identity, resolve_env_hash, lib_env_hash, target` |
+| `ModuleAugmentationIndex` (on `FileArtifactStore`) | Content-addressed | `project_identity, resolve_env_hash, lib_env_hash, population, target` (`population: AugmentationPopulation {Base, Session(overlay-set fingerprint)}`) |
 | `ResolvedImportFacts` | Content-addressed | `canonical, content_hash, parse_env_hash, resolve_env_hash, resolver_version` (**no `lib_env_hash`** — R21) |
 | Typed-IR resolve | Content-addressed | `canonical, content_hash, parse_env_hash, type_env_hash, lib_env_hash, parser_version` |
 | `MemberSemanticFactStore` | Content-addressed | `canonical, parse_stable_hash, parse_env_hash, exporter, member_name, symbol_space` |
