@@ -64,9 +64,9 @@ pub(super) struct MemoEntry {
     /// Empty for non-walker queries.
     pub(super) walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
     /// The §3.4 **materialised-record set** — the concrete `(path, point)`
-    /// records this candidate's compute ACTUALLY produced (terminal point
-    /// + one `Navigate` hop per walked intermediate for a path walk; the
-    /// single terminal point for a non-path build). This is NOT the
+    /// records this candidate's compute ACTUALLY produced (the terminal
+    /// point plus one `Navigate` hop per walked intermediate for a path
+    /// walk; the single terminal point for a non-path build). This is NOT the
     /// candidate's nominal request demand: a deep terminal that only
     /// `Navigate`-walked an intermediate records a `Navigate` point there,
     /// never the terminal mode it never expanded. The warm-hit gate is
