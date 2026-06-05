@@ -179,11 +179,21 @@ fn stage_6c_augmentation_paths_do_not_emit_custom() {
 
     // Files whose production-emission sites are governed by Stage
     // 6c's R23 scope fence — these are exactly the augmentation +
-    // route-db files.
-    let stage_6c_files = vec![
-        session_src.join("resolver_core").join("route_db.rs"),
-        session_src.join("file_artifact_store.rs"),
-    ];
+    // route-db files. The route-db surface spans `route_db.rs` plus
+    // every `*.rs` under the sibling `route_db/` module directory.
+    let mut stage_6c_files: Vec<std::path::PathBuf> =
+        vec![session_src.join("file_artifact_store.rs")];
+    let resolver_core = session_src.join("resolver_core");
+    stage_6c_files.push(resolver_core.join("route_db.rs"));
+    let route_db_dir = resolver_core.join("route_db");
+    if route_db_dir.is_dir() {
+        for entry in fs::read_dir(&route_db_dir).expect("read route_db/") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().is_some_and(|x| x == "rs") {
+                stage_6c_files.push(path);
+            }
+        }
+    }
 
     for file in &stage_6c_files {
         if !file.exists() {
@@ -227,6 +237,34 @@ fn stage_6c_augmentation_paths_do_not_emit_custom() {
     }
 }
 
+/// Collect the source of the entire `route_db` module — the
+/// `route_db.rs` file plus every `*.rs` under the sibling `route_db/`
+/// directory (where the `EffectiveExportSet` stitch + its audit emission
+/// now live). Returns the concatenated text so the Stage 6c guards stay
+/// correct under module splits.
+fn route_db_module_text(session_src: &std::path::Path) -> String {
+    let resolver_core = session_src.join("resolver_core");
+    let mut text = fs::read_to_string(resolver_core.join("route_db.rs")).expect("route_db.rs");
+    let route_db_dir = resolver_core.join("route_db");
+    if route_db_dir.is_dir() {
+        let mut children: Vec<_> = fs::read_dir(&route_db_dir)
+            .expect("read route_db/")
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+            .collect();
+        children.sort();
+        for child in children {
+            text.push('\n');
+            text.push_str(
+                &fs::read_to_string(&child)
+                    .unwrap_or_else(|e| panic!("read {}: {}", child.display(), e)),
+            );
+        }
+    }
+    text
+}
+
 /// Both new audit-event variants are referenced from the Stage 6c
 /// production emission sites. Sanity check that the emission helpers
 /// exist + reference the typed variants.
@@ -235,15 +273,14 @@ fn stage_6c_emission_sites_reference_typed_variants() {
     let crates = crates_dir();
     let session_src = crates.join("verter_session").join("src");
 
-    let route_db = session_src.join("resolver_core").join("route_db.rs");
     let file_artifact_store = session_src.join("file_artifact_store.rs");
 
-    let route_db_text = fs::read_to_string(&route_db).expect("route_db.rs");
+    let route_db_text = route_db_module_text(&session_src);
     let fas_text = fs::read_to_string(&file_artifact_store).expect("file_artifact_store.rs");
 
     assert!(
         route_db_text.contains("ModuleAugmentationStitched"),
-        "route_db.rs MUST reference `ModuleAugmentationStitched` audit event"
+        "the `route_db` module MUST reference `ModuleAugmentationStitched` audit event"
     );
     assert!(
         fas_text.contains("ModuleAugmentationIndexShape"),
