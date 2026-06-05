@@ -116,12 +116,17 @@ fn semantic_query_key_spec_table_equals_enum() {
     );
 
     // (3) PER-ROW SANITY + triangulation against SemanticQueryKeyTag::ALL.
-    // Every row is `Live`. The value domain is `TypeNode` for every variant
-    // EXCEPT `Relate`, which carries `Relation`: its family `execute` arm is
-    // non-producing (`Opaque(Miss)`) and the authoritative tri-state judgement
-    // is produced + cached by `relate_nodes` in the dedicated `relation_memo`.
-    // This split assertion is discriminating: it FAILS if `Relate` is mislabeled
-    // back to `TypeNode`, OR if any other row drifts off `TypeNode`.
+    // Every row is `Live`. The value-domain mapping is:
+    //   - `Relate`            → `Relation` (execute arm non-producing; the
+    //                            tri-state judgement lives in `relation_memo`).
+    //   - `ResolveOverloadSet`→ `OverloadSet` (its non-producing execute arm
+    //                            returns `Miss`; the value domain is the
+    //                            ordered signature set, NEVER a fake empty set).
+    //   - everything else     → `TypeNode`.
+    // This three-way assertion is discriminating: it FAILS if `Relate` is
+    // mislabeled back to `TypeNode`, if `ResolveOverloadSet` is mislabeled
+    // `TypeNode` (or anything other than `OverloadSet`), OR if any other row
+    // drifts off `TypeNode`.
     use verter_session::semantic_query::query_key_spec::KeyLifecycle;
     use verter_session::semantic_query::SemanticQueryValueTag;
     for spec in &specs {
@@ -131,17 +136,17 @@ fn semantic_query_key_spec_table_equals_enum() {
             "every current spec row must be `Live`; `{}` is not",
             spec.variant.name()
         );
-        let expected_domain = if spec.variant == SemanticQueryKeyTag::Relate {
-            SemanticQueryValueTag::Relation
-        } else {
-            SemanticQueryValueTag::TypeNode
+        let expected_domain = match spec.variant {
+            SemanticQueryKeyTag::Relate => SemanticQueryValueTag::Relation,
+            SemanticQueryKeyTag::ResolveOverloadSet => SemanticQueryValueTag::OverloadSet,
+            _ => SemanticQueryValueTag::TypeNode,
         };
         assert_eq!(
             spec.value_domain,
             expected_domain,
-            "value-domain mismatch for `{}`: `Relate` must be `Relation` (its \
-             execute arm is non-producing; the judgement lives in the dedicated \
-             relation_memo) and every other live key must be `TypeNode`",
+            "value-domain mismatch for `{}`: `Relate` must be `Relation`, \
+             `ResolveOverloadSet` must be `OverloadSet`, and every other live \
+             key must be `TypeNode`",
             spec.variant.name()
         );
     }

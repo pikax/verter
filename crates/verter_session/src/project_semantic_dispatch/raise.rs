@@ -219,6 +219,10 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::ResolvedNamedType { .. } => "ResolvedNamedType",
         SemanticQueryKey::Relate { .. } => "Relate",
         SemanticQueryKey::ResolveMacroPayload { .. } => "ResolveMacroPayload",
+        SemanticQueryKey::ResolveClassSurface { .. } => "ResolveClassSurface",
+        SemanticQueryKey::ResolveAmbientNamespace { .. } => "ResolveAmbientNamespace",
+        SemanticQueryKey::ResolveEnum { .. } => "ResolveEnum",
+        SemanticQueryKey::ResolveOverloadSet { .. } => "ResolveOverloadSet",
     }
 }
 

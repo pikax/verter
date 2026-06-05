@@ -773,6 +773,97 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
     }
 
+    /// Class instance / static surface (design §2.3 dual-space).
+    ///
+    /// Realises the class dual-space algorithm through the ONE shared
+    /// typed-IR dispatch — there is NO query-time OXC, NO per-surface
+    /// walker, NO re-parse:
+    ///
+    /// - `Instance` → instantiate the TYPE-space slot under `Shallow`
+    ///   (`execute(Instantiate { base: type_slot, args, published(Shallow) })`).
+    /// - `Static` → `TypeOf` the VALUE-space slot's constructor value
+    ///   (`execute(TypeOf { value_root: value_root_of(value_slot) })`).
+    ///
+    /// The post-query projection is THIN / non-owning: this block returns
+    /// the composed sub-query node directly (identity projection). The
+    /// deep instance/static surface projection
+    /// (`project_instance_surface` / `project_static_surface`) — heritage
+    /// descent, member-demand materialisation — is the LATER
+    /// `U2ClassSurfaces` block. This builder does NOT walk heritage and
+    /// does NOT eagerly materialise members.
+    ///
+    /// Self-rooting: the composed surface roots on the class
+    /// declaration's own file-content version (re-sourced live from the
+    /// indexed view, R6/R20), so a same-canonical edit misses the warm
+    /// read. The cross-file dependency facts of the composed sub-query
+    /// fan out to this build's fact tracer automatically. When the decl's
+    /// live content version cannot be observed (the file is unknown to
+    /// the live view) the build is marked non-cacheable (`cache_suppress`)
+    /// — the value still flows to the caller, the memo refuses admission.
+    pub(super) fn build_class_surface(
+        &self,
+        decl_slot: &crate::semantic_query::ResolvedDeclSlotIdentity,
+        type_args: &Arc<[SemanticNodeId]>,
+        side: crate::semantic_query::ClassSurfaceSide,
+        _context: crate::semantic_query::ClassSurfaceContext,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        use crate::semantic_query::{
+            ClassSurfaceSide, DeclKey, ProjectionReductionContext, SemanticSymbolSpace,
+        };
+
+        // Self-root the composed surface on the class declaration's own
+        // live content version (R6/R20 — the key is content-free).
+        let defining_canonical = &decl_slot.defining_canonical;
+        let observed = self.ctx.ensure_indexed_ready(defining_canonical.as_ref());
+        let observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
+            match &observed {
+                Some(indexed) => vec![(Arc::clone(defining_canonical), indexed.whole_hash)],
+                None => Vec::new(),
+            };
+
+        // §2.3 dual-space — both sides route through `execute` (the ONE
+        // shared engine). No query-time OXC.
+        let composed = match side {
+            ClassSurfaceSide::Instance => {
+                // Instance side = the TYPE-space half: instantiate the
+                // type slot under Shallow.
+                let type_slot = decl_slot.with_symbol_space(SemanticSymbolSpace::Type);
+                let base = DeclKey {
+                    canonical_id: Arc::clone(&type_slot.defining_canonical),
+                    decl_name: Arc::clone(&type_slot.merged_symbol_name),
+                };
+                self.execute_type_node(SemanticQueryKey::Instantiate {
+                    base,
+                    args: Arc::clone(type_args),
+                    context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+                })
+            }
+            ClassSurfaceSide::Static => {
+                // Static side = the VALUE-space half: TypeOf the value
+                // root (the constructor value).
+                let value_slot = decl_slot.with_symbol_space(SemanticSymbolSpace::Value);
+                let value_root = crate::semantic_query::value_root_of(&value_slot);
+                self.execute_type_node(SemanticQueryKey::TypeOf { value_root })
+            }
+        };
+
+        // Identity projection: return the composed sub-query node
+        // directly (the deep surface projection is the later block).
+        let result = match composed {
+            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => QueryResult::Value(node),
+            QueryResult::Recursive(node) => QueryResult::Recursive(node),
+            QueryResult::Error(err) => QueryResult::Error(err),
+        };
+        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+            (result, self.project_generation_signature()).into();
+        if observed.is_none() {
+            // Could not self-root on the decl's live content version —
+            // refuse warm admission; the value still flows to the caller.
+            output.cache_suppress = true;
+        }
+        output.with_observed_self_roots(observed_self_roots)
+    }
+
     /// Generic instantiation.
     ///
     /// Receives `DeclIdentity` directly from the `Instantiate` key —

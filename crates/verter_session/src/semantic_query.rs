@@ -311,6 +311,16 @@ pub enum SemanticSymbolSpace {
     /// Value-space declaration (function, const, let, var, enum's
     /// value half, class's value half).
     Value,
+    /// Namespace-space declaration (`namespace N {}` / `module N {}`
+    /// with no value/type half). A namespace-only declaration keys on
+    /// a slot with `symbol_space = Namespace`.
+    ///
+    /// There is deliberately NO `BothTypeValue` arm: a class or enum
+    /// that occupies BOTH type and value space is TWO slots (one
+    /// `Type`, one `Value`), resolved by the class dual-space
+    /// algorithm ([`ProjectSemanticDispatch::build_class_surface`]),
+    /// never one fused arm.
+    Namespace,
 }
 
 /// Per-declaration-part identifier. Inside a merged declaration
@@ -433,6 +443,45 @@ impl ResolvedDeclSlotIdentity {
             type_env_hash,
             lib_env_hash,
         }
+    }
+
+    /// Return a clone of this slot with its [`symbol_space`] replaced.
+    ///
+    /// The class dual-space algorithm
+    /// ([`ProjectSemanticDispatch::build_class_surface`](crate::project_semantic_dispatch::ProjectSemanticDispatch))
+    /// addresses the same `(defining_canonical, merged_symbol_name)`
+    /// declaration in BOTH symbol spaces: the instance side reads the
+    /// `Type`-space half, the static side reads the `Value`-space half.
+    /// Every other field of the slot identity is preserved verbatim.
+    ///
+    /// [`symbol_space`]: Self::symbol_space
+    #[must_use]
+    pub fn with_symbol_space(&self, symbol_space: SemanticSymbolSpace) -> Self {
+        Self {
+            defining_canonical: Arc::clone(&self.defining_canonical),
+            merged_symbol_name: Arc::clone(&self.merged_symbol_name),
+            symbol_space,
+            project_identity: self.project_identity,
+            type_env_hash: self.type_env_hash,
+            lib_env_hash: self.lib_env_hash,
+        }
+    }
+}
+
+/// Project a value-space [`ResolvedDeclSlotIdentity`] onto the
+/// [`ValueRootKey`] that names its constructor value at the file
+/// top-level scope.
+///
+/// Used by the class dual-space algorithm's static side: the static
+/// surface of a class is the type of its constructor VALUE, reached via
+/// `TypeOf(value_root_of(value_slot))`. The value root is the slot's
+/// `merged_symbol_name` resolved in the declaring file's top-level
+/// scope.
+#[must_use]
+pub fn value_root_of(value_slot: &ResolvedDeclSlotIdentity) -> ValueRootKey {
+    ValueRootKey {
+        scope: ScopeId::file(Arc::clone(&value_slot.defining_canonical)),
+        name: Arc::clone(&value_slot.merged_symbol_name),
     }
 }
 
@@ -1839,6 +1888,108 @@ pub(crate) fn strip_output_provenance<T>(
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Class / namespace / enum / overload key context shapes (U2 §2.2 / §2.3)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Which symbol-space half of a class declaration a
+/// [`SemanticQueryKey::ResolveClassSurface`] query addresses.
+///
+/// A class occupies BOTH symbol spaces (design §2.3 dual-space). The
+/// `side` is a MANDATORY identity discriminator: two `ResolveClassSurface`
+/// keys that differ only in `side` are NON-equal and occupy DISTINCT memo
+/// slots (`FamilyKey::ResolveClassSurface` carries `side`).
+///
+/// - [`Instance`](Self::Instance) → the TYPE-space half. The instance
+///   surface is `Instantiate(type_slot, Shallow)`.
+/// - [`Static`](Self::Static) → the VALUE-space half. The static surface
+///   is `TypeOf(value_root)` (the constructor value).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ClassSurfaceSide {
+    /// Instance side — the TYPE-space half of the class.
+    Instance,
+    /// Static side — the VALUE-space half (constructor value) of the class.
+    Static,
+}
+
+/// Extra env (beyond the slot's intrinsic `T,L,J`) plus the projection
+/// axis a [`SemanticQueryKey::ResolveClassSurface`] value depends on
+/// (design §2.2: env dims `P R T L J`).
+///
+/// Per R21 this carries ONLY the dimensions the class-surface value
+/// genuinely depends on beyond the [`ResolvedDeclSlotIdentity`]:
+///
+/// - `parse_env_hash` (`P`) — the class-surface lowering reads the parsed
+///   body skeleton (decorators / member modifiers).
+/// - `resolve_env_hash` (`R`) — the surface resolves imported heritage /
+///   member-type references.
+/// - `mode` — the projection rung the composed surface is produced under
+///   (mirrors how [`ProjectionReductionContext`] carries `mode`).
+///
+/// The substitution axis is carried by the key's `type_args` field, not
+/// duplicated here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClassSurfaceContext {
+    /// Parser flags + SFC compiler flags dimension (`P`).
+    pub parse_env_hash: HashValue,
+    /// Import / name-resolution dimension (`R`).
+    pub resolve_env_hash: HashValue,
+    /// Projection rung the composed surface is produced under.
+    pub mode: ProjectionMode,
+}
+
+/// Extra env (beyond the slot's intrinsic `T,L,J`) plus the projection
+/// axis a [`SemanticQueryKey::ResolveAmbientNamespace`] value depends on
+/// (design §2.2: env dims `P R T L J`).
+///
+/// Per R21 this carries ONLY:
+///
+/// - `parse_env_hash` (`P`) — namespace-member analysis reads the parsed
+///   body skeleton.
+/// - `resolve_env_hash` (`R`) — namespace members resolve imported
+///   references.
+/// - `mode` — the projection rung the namespace surface is produced under.
+///
+/// The substitution axis is carried by the key's `type_args` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AmbientNamespaceContext {
+    /// Parser flags + SFC compiler flags dimension (`P`).
+    pub parse_env_hash: HashValue,
+    /// Import / name-resolution dimension (`R`).
+    pub resolve_env_hash: HashValue,
+    /// Projection rung the namespace surface is produced under.
+    pub mode: ProjectionMode,
+}
+
+/// Extra env (beyond the slot's intrinsic `T,L,J`) a
+/// [`SemanticQueryKey::ResolveEnum`] value depends on (design §2.2: env
+/// dims `R T L J`).
+///
+/// Per R21 this carries ONLY `resolve_env_hash` (`R`): an enum
+/// declaration is not generic (NO substitution axis) and enum-member
+/// analysis does not read the parsed body skeleton at query time (NO
+/// `parse_env`), so the only extra dimension beyond the slot is the
+/// import / name-resolution env.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EnumContext {
+    /// Import / name-resolution dimension (`R`).
+    pub resolve_env_hash: HashValue,
+}
+
+/// Extra env (beyond the slot's intrinsic `T,L,J`) a
+/// [`SemanticQueryKey::ResolveOverloadSet`] value depends on (design
+/// §2.2: env dims `R T L J`).
+///
+/// Per R21 this carries ONLY `resolve_env_hash` (`R`) — signature
+/// lowering resolves imported parameter / return references. The
+/// substitution axis is carried by the key's `type_args` field. NO
+/// `parse_env`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OverloadSetContext {
+    /// Import / name-resolution dimension (`R`).
+    pub resolve_env_hash: HashValue,
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Canonical semantic key surface
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -2018,6 +2169,99 @@ pub enum SemanticQueryKey {
         type_args: Arc<[SemanticNodeId]>,
         mode: ProjectionMode,
     },
+    /// Resolve the instance OR static surface of a class declaration
+    /// (design §2.2 / §2.3 dual-space).
+    ///
+    /// `decl_slot` is the content-free [`ResolvedDeclSlotIdentity`] of the
+    /// class declaration; `type_args` are its already-lowered generic
+    /// arguments (part of semantic identity); `side` selects the instance
+    /// (TYPE-space) or static (VALUE-space) half and is a MANDATORY
+    /// identity discriminator — two keys differing only in `side` are
+    /// non-equal and occupy distinct memo slots; `context` carries the
+    /// extra env (`P,R`) plus the projection rung the value depends on
+    /// (R21).
+    ///
+    /// **LIVE producer** ([`AdmissionSpec::Singleflight`]). The build
+    /// realises the dual-space algorithm through the ONE shared engine —
+    /// NO query-time OXC:
+    /// - `Instance` → `execute(Instantiate { base: type_slot, args,
+    ///   context: published(Shallow) })`.
+    /// - `Static` → `execute(TypeOf { value_root: value_root_of(value_slot) })`.
+    ///
+    /// The post-query projection is THIN / non-owning (identity
+    /// projection): the deep instance/static surface projection
+    /// (`project_instance_surface` / `project_static_surface`) is the
+    /// LATER `U2ClassSurfaces` block — this block returns the composed
+    /// sub-query node directly and does NOT walk heritage or eagerly
+    /// materialise members. Value domain: [`SemanticQueryValueTag::TypeNode`].
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
+    ResolveClassSurface {
+        decl_slot: ResolvedDeclSlotIdentity,
+        type_args: Arc<[SemanticNodeId]>,
+        side: ClassSurfaceSide,
+        context: ClassSurfaceContext,
+    },
+    /// Resolve an ambient namespace (`namespace N {}` / `module N {}`)
+    /// surface (design §2.2).
+    ///
+    /// `namespace_slot` is the content-free [`ResolvedDeclSlotIdentity`]
+    /// with `symbol_space = `[`SemanticSymbolSpace::Namespace`]; `type_args`
+    /// are its already-lowered generic arguments; `context` carries the
+    /// extra env (`P,R`) plus the projection rung (R21).
+    ///
+    /// **NON-PRODUCING in this block** — the namespace-analysis reducer
+    /// lands in the later `U2Namespaces` block. The `execute` build arm
+    /// returns [`QueryError::Miss`] (`Opaque(Miss)`) and never admits or
+    /// caches a value (admission
+    /// [`AdmissionSpec::NonProducingPendingReducer`]). Value domain:
+    /// [`SemanticQueryValueTag::TypeNode`].
+    ///
+    /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
+    ResolveAmbientNamespace {
+        namespace_slot: ResolvedDeclSlotIdentity,
+        type_args: Arc<[SemanticNodeId]>,
+        context: AmbientNamespaceContext,
+    },
+    /// Resolve an enum declaration's surface (design §2.2).
+    ///
+    /// `enum_slot` is the content-free [`ResolvedDeclSlotIdentity`] of the
+    /// enum (an enum is not generic — NO `type_args`); `context` carries
+    /// only `resolve_env_hash` (`R`).
+    ///
+    /// **NON-PRODUCING in this block** — the enum value/type-duality
+    /// reducer lands in the later `U2Enums` block. The `execute` build arm
+    /// returns [`QueryError::Miss`] and never admits or caches
+    /// (admission [`AdmissionSpec::NonProducingPendingReducer`]). Value
+    /// domain: [`SemanticQueryValueTag::TypeNode`].
+    ///
+    /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
+    ResolveEnum {
+        enum_slot: ResolvedDeclSlotIdentity,
+        context: EnumContext,
+    },
+    /// Resolve a callee's overload set (design §2.2).
+    ///
+    /// `callee` is the already-resolved [`SemanticNodeId`] of the callee;
+    /// `type_args` are its call-site type arguments (part of semantic
+    /// identity); `context` carries only `resolve_env_hash` (`R`).
+    ///
+    /// **NON-PRODUCING in this block** — the signature-lowering reducer
+    /// lands in the later signature-lowering block. The `execute` build
+    /// arm returns [`QueryError::Miss`] and never admits or caches
+    /// (admission [`AdmissionSpec::NonProducingPendingReducer`]).
+    ///
+    /// Value domain: [`SemanticQueryValueTag::OverloadSet`]
+    /// (`SemanticQueryValue::OverloadSet(Arc<[SignatureRef]>)`). Returning
+    /// an empty `OverloadSet(Arc::from([]))` would be a STUB — the build
+    /// returns `Miss`, never a fake empty set.
+    ///
+    /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
+    ResolveOverloadSet {
+        callee: SemanticNodeId,
+        type_args: Arc<[SemanticNodeId]>,
+        context: OverloadSetContext,
+    },
 }
 
 /// Content-free discriminant for [`SemanticQueryKey`] — the variant identity
@@ -2049,6 +2293,10 @@ pub enum SemanticQueryKeyTag {
     ResolvedNamedType,
     Relate,
     ResolveMacroPayload,
+    ResolveClassSurface,
+    ResolveAmbientNamespace,
+    ResolveEnum,
+    ResolveOverloadSet,
 }
 
 impl SemanticQueryKeyTag {
@@ -2070,6 +2318,10 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::ResolvedNamedType,
         SemanticQueryKeyTag::Relate,
         SemanticQueryKeyTag::ResolveMacroPayload,
+        SemanticQueryKeyTag::ResolveClassSurface,
+        SemanticQueryKeyTag::ResolveAmbientNamespace,
+        SemanticQueryKeyTag::ResolveEnum,
+        SemanticQueryKeyTag::ResolveOverloadSet,
     ];
 
     /// The EXACT `SemanticQueryKey` variant identifier this tag names. The
@@ -2093,6 +2345,10 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::ResolvedNamedType => "ResolvedNamedType",
             SemanticQueryKeyTag::Relate => "Relate",
             SemanticQueryKeyTag::ResolveMacroPayload => "ResolveMacroPayload",
+            SemanticQueryKeyTag::ResolveClassSurface => "ResolveClassSurface",
+            SemanticQueryKeyTag::ResolveAmbientNamespace => "ResolveAmbientNamespace",
+            SemanticQueryKeyTag::ResolveEnum => "ResolveEnum",
+            SemanticQueryKeyTag::ResolveOverloadSet => "ResolveOverloadSet",
         }
     }
 }
@@ -2122,6 +2378,14 @@ impl SemanticQueryKey {
             SemanticQueryKey::ResolveMacroPayload { .. } => {
                 SemanticQueryKeyTag::ResolveMacroPayload
             }
+            SemanticQueryKey::ResolveClassSurface { .. } => {
+                SemanticQueryKeyTag::ResolveClassSurface
+            }
+            SemanticQueryKey::ResolveAmbientNamespace { .. } => {
+                SemanticQueryKeyTag::ResolveAmbientNamespace
+            }
+            SemanticQueryKey::ResolveEnum { .. } => SemanticQueryKeyTag::ResolveEnum,
+            SemanticQueryKey::ResolveOverloadSet { .. } => SemanticQueryKeyTag::ResolveOverloadSet,
         }
     }
 }

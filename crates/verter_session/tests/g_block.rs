@@ -101,3 +101,5 @@ mod u2_display_projection_guards;
 mod u2_spec_table_guards;
 #[path = "g_block/u2_value_domain_design_guards.rs"]
 mod u2_value_domain_design_guards;
+#[path = "g_block/u2b5_class_ns_enum_overload_guards.rs"]
+mod u2b5_class_ns_enum_overload_guards;

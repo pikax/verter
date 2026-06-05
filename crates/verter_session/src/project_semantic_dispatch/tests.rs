@@ -7138,23 +7138,21 @@ fn materialize_surface_mirrors_materialize_component_meta_structure() {
     );
 }
 
-/// **Binding-shape invariant:** the macro-payload resolver surfaces
-/// EXACTLY ONE `SemanticQueryKey` variant: `ResolveMacroPayload`. The
-/// dispatch helpers (`materialize_surface`, `execute_pick`,
-/// `execute_omit`, `execute_to_type_expr`) are NON-variant — methods
-/// on `ProjectSemanticDispatch`, not enum arms.
-///
-/// This test enforces the invariant by walking the
-/// `SemanticQueryKey` enum's variant count via match-exhaustiveness.
-/// Any new variant added without updating this test breaks
-/// compilation, surfacing the invariant violation immediately.
+/// **Variant-set invariant:** the `SemanticQueryKey` enum is structurally
+/// pinned via an exhaustive match. Any new variant added without updating
+/// this test breaks compilation, surfacing the addition for review (the
+/// dispatch helpers such as `materialize_surface` / `execute_pick` /
+/// `execute_omit` stay NON-variant — methods on `ProjectSemanticDispatch`,
+/// never enum arms). The U2 class/namespace/enum/overload key surface
+/// (`ResolveClassSurface` / `ResolveAmbientNamespace` / `ResolveEnum` /
+/// `ResolveOverloadSet`) is part of the pinned set.
 #[test]
-fn no_new_semantic_query_key_variants_beyond_resolve_macro_payload() {
+fn semantic_query_key_variant_set_is_structurally_pinned() {
     use SemanticQueryKey::*;
     // The variant set is structurally pinned via this match. If a
     // new variant is added without updating this test, the match
     // becomes non-exhaustive and the test fails to compile —
-    // surfacing any §0 amendment violation.
+    // surfacing the addition for review.
     fn variant_label(k: &SemanticQueryKey) -> &'static str {
         match k {
             ResolveDecl(_) => "ResolveDecl",
@@ -7171,6 +7169,10 @@ fn no_new_semantic_query_key_variants_beyond_resolve_macro_payload() {
             ResolvedNamedType { .. } => "ResolvedNamedType",
             Relate { .. } => "Relate",
             ResolveMacroPayload { .. } => "ResolveMacroPayload",
+            ResolveClassSurface { .. } => "ResolveClassSurface",
+            ResolveAmbientNamespace { .. } => "ResolveAmbientNamespace",
+            ResolveEnum { .. } => "ResolveEnum",
+            ResolveOverloadSet { .. } => "ResolveOverloadSet",
         }
     }
     // Sanity probe: each variant carries a distinct label and the

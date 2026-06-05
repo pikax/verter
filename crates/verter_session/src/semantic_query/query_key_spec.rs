@@ -286,6 +286,22 @@ pub enum AdmissionSpec {
     /// (`Opaque(Miss)`) — so this key never flows through the `Singleflight`
     /// family materialiser. Used by `Relate`.
     RelationMemo,
+    /// Honest non-producing arm: this key has NO `execute`-side producer
+    /// in THIS block. The `execute` build arm returns
+    /// `QueryResult::Error(QueryError::Miss)` (`Opaque(Miss)`) verbatim —
+    /// it NEVER admits, caches, backfills, or fabricates an empty/unknown
+    /// value as if it were semantic. The reducer that produces this key's
+    /// value lands in a NAMED later U2 block:
+    /// - `ResolveAmbientNamespace` → the later `U2Namespaces` reducer.
+    /// - `ResolveEnum` → the later `U2Enums` enum value/type-duality reducer.
+    /// - `ResolveOverloadSet` → the later signature-lowering reducer.
+    ///
+    /// Distinct from [`RelationMemo`](Self::RelationMemo) (implies a
+    /// dedicated relation-memo producer), [`Singleflight`](Self::Singleflight)
+    /// (implies a real materialiser), and
+    /// [`ReadDominantNoExecute`](Self::ReadDominantNoExecute) (implies an
+    /// adapter writer). This variant implies NO writer at all.
+    NonProducingPendingReducer,
 }
 
 impl AdmissionSpec {
@@ -294,6 +310,7 @@ impl AdmissionSpec {
             AdmissionSpec::Singleflight => "Singleflight",
             AdmissionSpec::ReadDominantNoExecute => "ReadDominantNoExecute",
             AdmissionSpec::RelationMemo => "RelationMemo",
+            AdmissionSpec::NonProducingPendingReducer => "NonProducingPendingReducer",
         }
     }
 }
@@ -339,6 +356,21 @@ fn env_resolve() -> EnvDimMask {
 /// `resolve_env`).
 fn env_structural() -> EnvDimMask {
     EnvDimMask::from_dims(&[EnvDim::Type, EnvDim::Lib, EnvDim::Project])
+}
+
+/// The full five-hash env set `{P, R, T, L, J}` — for keys whose value
+/// reads the parsed body skeleton at query time (design §2.1 tier-2: `P`
+/// enters only for a genuine parsed-body-skeleton read). `ResolveClassSurface`
+/// (decorator / member-modifier lowering) and `ResolveAmbientNamespace`
+/// (namespace-member body analysis) carry `P`.
+fn env_full() -> EnvDimMask {
+    EnvDimMask::from_dims(&[
+        EnvDim::Parse,
+        EnvDim::Resolve,
+        EnvDim::Type,
+        EnvDim::Lib,
+        EnvDim::Project,
+    ])
 }
 
 /// The demand axes a [`ProjectionMode`](crate::semantic_query::ProjectionMode)
@@ -634,6 +666,76 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             allowed_demand: mode_axes,
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
+        },
+        // ResolveClassSurface { decl_slot, type_args, side, context } —
+        // resolves the instance (TYPE-space) or static (VALUE-space) half
+        // of a class via the shared dual-space algorithm. Reads the parsed
+        // body skeleton (decorators / member modifiers) so it carries `P`
+        // → `P R T L J`. LIVE producer (composes `execute(Instantiate)` /
+        // `execute(TypeOf)`); branches on the axes the `mode` spans
+        // (`side` is a FAMILY-IDENTITY discriminator on `FamilyKey`, not a
+        // DemandAxis).
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ResolveClassSurface,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "ClassSurfaceContext",
+            value_domain: SemanticQueryValueTag::TypeNode,
+            env_dims: env_full(),
+            allowed_demand: mode_axes,
+            cross_context_guard: "resolve_class_surface_do_not_warm_hit",
+            admission: AdmissionSpec::Singleflight,
+        },
+        // ResolveAmbientNamespace { namespace_slot, type_args, context } —
+        // resolves an ambient namespace surface. Reads the parsed body
+        // skeleton (namespace-member analysis) so it carries `P` →
+        // `P R T L J`. NON-PRODUCING in this block (the reducer lands in
+        // the later U2Namespaces block): the execute arm returns Miss and
+        // never admits/caches. Carries a projection `mode`, so the family
+        // branches on the axes the `mode` spans.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ResolveAmbientNamespace,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "AmbientNamespaceContext",
+            value_domain: SemanticQueryValueTag::TypeNode,
+            env_dims: env_full(),
+            allowed_demand: mode_axes,
+            cross_context_guard: "resolve_ambient_namespace_do_not_warm_hit",
+            admission: AdmissionSpec::NonProducingPendingReducer,
+        },
+        // ResolveEnum { enum_slot, context } — resolves an enum surface.
+        // An enum is not generic (no substitution axis) and enum-member
+        // analysis does not read the parsed body skeleton at query time,
+        // so `R T L J` (no `P`). NON-PRODUCING in this block (the reducer
+        // lands in the later U2Enums block): the execute arm returns Miss
+        // and never admits/caches. Carries no `mode` → no demand axes.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ResolveEnum,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "EnumContext",
+            value_domain: SemanticQueryValueTag::TypeNode,
+            env_dims: env_resolve(),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "resolve_enum_do_not_warm_hit",
+            admission: AdmissionSpec::NonProducingPendingReducer,
+        },
+        // ResolveOverloadSet { callee, type_args, context } — resolves a
+        // callee's overload set. Signature lowering resolves imported
+        // references but reads no parsed body skeleton at query time, so
+        // `R T L J` (no `P`). NON-PRODUCING in this block (the reducer
+        // lands in the later signature-lowering block): the execute arm
+        // returns Miss and never admits/caches (returning an empty
+        // OverloadSet would be a stub). Value domain is `OverloadSet`, NOT
+        // `TypeNode`. Carries no `mode` → no demand axes (substitution is
+        // carried by `type_args` on the key).
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ResolveOverloadSet,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "OverloadSetContext",
+            value_domain: SemanticQueryValueTag::OverloadSet,
+            env_dims: env_resolve(),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "resolve_overload_set_do_not_warm_hit",
+            admission: AdmissionSpec::NonProducingPendingReducer,
         },
     ]
 }

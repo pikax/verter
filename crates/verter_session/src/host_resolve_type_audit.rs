@@ -409,6 +409,8 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         | SemanticQueryKey::IndexedAccess { mode, .. }
         | SemanticQueryKey::ResolveMacroPayload { mode, .. } => *mode,
         SemanticQueryKey::Instantiate { context, .. } => context.mode,
+        SemanticQueryKey::ResolveClassSurface { context, .. } => context.mode,
+        SemanticQueryKey::ResolveAmbientNamespace { context, .. } => context.mode,
         SemanticQueryKey::ResolveDecl(_)
         | SemanticQueryKey::KeyOf { .. }
         | SemanticQueryKey::MappedType { .. }
@@ -417,7 +419,9 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         | SemanticQueryKey::NormalizeUnion { .. }
         | SemanticQueryKey::NormalizeIntersection { .. }
         | SemanticQueryKey::ResolvedNamedType { .. }
-        | SemanticQueryKey::Relate { .. } => ProjectionMode::Identity,
+        | SemanticQueryKey::Relate { .. }
+        | SemanticQueryKey::ResolveEnum { .. }
+        | SemanticQueryKey::ResolveOverloadSet { .. } => ProjectionMode::Identity,
     }
 }
 

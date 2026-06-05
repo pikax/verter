@@ -207,6 +207,53 @@ pub(super) enum FamilyKey {
         macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
         type_args: Arc<[SemanticNodeId]>,
     },
+    /// Mode-erased `ResolveClassSurface` identity. `decl_slot` is the
+    /// content-free [`crate::semantic_query::ResolvedDeclSlotIdentity`]
+    /// (env-bearing but content-free, R6 — it carries the slot's
+    /// intrinsic `T`/`L`/`J` env). `side` is a MANDATORY identity
+    /// discriminator — instance and static halves of the same class
+    /// occupy DISTINCT family slots and never collide. The context's
+    /// EXTRA env dims (`parse_env_hash` = `P`, `resolve_env_hash` = `R`;
+    /// §2.1 "env stays ON the key") are carried here so two queries
+    /// differing only in a context env-hash do NOT collide. These are
+    /// ENV hashes, NOT content/version hashes (R6-clean). The projection
+    /// mode is stripped into the [`ModeSlot`].
+    ResolveClassSurface {
+        decl_slot: crate::semantic_query::ResolvedDeclSlotIdentity,
+        type_args: Arc<[SemanticNodeId]>,
+        side: crate::semantic_query::ClassSurfaceSide,
+        parse_env_hash: crate::semantic_query::HashValue,
+        resolve_env_hash: crate::semantic_query::HashValue,
+    },
+    /// Mode-erased `ResolveAmbientNamespace` identity. Carries the
+    /// namespace slot (`symbol_space = Namespace`) + type args + the
+    /// context's extra env dims (`P`, `R`). The execute path is
+    /// NON-PRODUCING in this block (returns `Opaque(Miss)`); like
+    /// `Relate`, nothing is ever admitted under this family — the
+    /// variant exists so `family_and_slot` stays total and honest (a
+    /// real distinct identity, never a placeholder reusing another
+    /// family's shape).
+    ResolveAmbientNamespace {
+        namespace_slot: crate::semantic_query::ResolvedDeclSlotIdentity,
+        type_args: Arc<[SemanticNodeId]>,
+        parse_env_hash: crate::semantic_query::HashValue,
+        resolve_env_hash: crate::semantic_query::HashValue,
+    },
+    /// Mode-erased `ResolveEnum` identity. Carries the context's extra
+    /// env dim (`resolve_env_hash` = `R`). NON-PRODUCING in this block
+    /// (see [`Self::ResolveAmbientNamespace`]).
+    ResolveEnum {
+        enum_slot: crate::semantic_query::ResolvedDeclSlotIdentity,
+        resolve_env_hash: crate::semantic_query::HashValue,
+    },
+    /// Mode-erased `ResolveOverloadSet` identity. Carries the context's
+    /// extra env dim (`resolve_env_hash` = `R`). NON-PRODUCING in this
+    /// block (see [`Self::ResolveAmbientNamespace`]).
+    ResolveOverloadSet {
+        callee: SemanticNodeId,
+        type_args: Arc<[SemanticNodeId]>,
+        resolve_env_hash: crate::semantic_query::HashValue,
+    },
 }
 
 /// Per-family slot selector. For non-mode variants only `Single` is used;
@@ -868,6 +915,67 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 type_args: Arc::clone(type_args),
             },
             mode_to_slot(*mode),
+        ),
+        // ResolveClassSurface — `side` is real family identity (instance
+        // vs static halves never collide); the projection mode strips
+        // into the slot. LIVE producer (build composes
+        // `execute(Instantiate)` / `execute(TypeOf)`).
+        SemanticQueryKey::ResolveClassSurface {
+            decl_slot,
+            type_args,
+            side,
+            context,
+        } => (
+            FamilyKey::ResolveClassSurface {
+                decl_slot: decl_slot.clone(),
+                type_args: Arc::clone(type_args),
+                side: *side,
+                parse_env_hash: context.parse_env_hash,
+                resolve_env_hash: context.resolve_env_hash,
+            },
+            mode_to_slot(context.mode),
+        ),
+        // ResolveAmbientNamespace — NON-PRODUCING in this block. Like
+        // `Relate`, the execute build returns `Opaque(Miss)` (never
+        // admitted), but the variant is REAL (not a placeholder reusing
+        // another family's shape) so `family_and_slot` is total and
+        // honest. The namespace surface carries a projection mode, so
+        // the mode strips into the slot.
+        SemanticQueryKey::ResolveAmbientNamespace {
+            namespace_slot,
+            type_args,
+            context,
+        } => (
+            FamilyKey::ResolveAmbientNamespace {
+                namespace_slot: namespace_slot.clone(),
+                type_args: Arc::clone(type_args),
+                parse_env_hash: context.parse_env_hash,
+                resolve_env_hash: context.resolve_env_hash,
+            },
+            mode_to_slot(context.mode),
+        ),
+        // ResolveEnum — NON-PRODUCING in this block. No projection mode →
+        // the `Single` slot.
+        SemanticQueryKey::ResolveEnum { enum_slot, context } => (
+            FamilyKey::ResolveEnum {
+                enum_slot: enum_slot.clone(),
+                resolve_env_hash: context.resolve_env_hash,
+            },
+            ModeSlot::Single,
+        ),
+        // ResolveOverloadSet — NON-PRODUCING in this block. No projection
+        // mode → the `Single` slot.
+        SemanticQueryKey::ResolveOverloadSet {
+            callee,
+            type_args,
+            context,
+        } => (
+            FamilyKey::ResolveOverloadSet {
+                callee: *callee,
+                type_args: Arc::clone(type_args),
+                resolve_env_hash: context.resolve_env_hash,
+            },
+            ModeSlot::Single,
         ),
     }
 }

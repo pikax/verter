@@ -271,7 +271,11 @@ pub fn record_outer_call_type_expr(expr: &verter_type_expr::TypeExpr) {
 ///  11 = ResolvedNamedType
 ///  12 = Relate
 ///  13 = ResolveMacroPayload
-pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 14;
+///  14 = ResolveClassSurface
+///  15 = ResolveAmbientNamespace
+///  16 = ResolveEnum
+///  17 = ResolveOverloadSet
+pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 18;
 
 /// Human-readable labels for each operator-kind index. Kept in sync
 /// with the comment on `DISPATCH_OPERATOR_KIND_COUNT` and with the
@@ -291,12 +295,20 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
     "ResolvedNamedType",
     "Relate",
     "ResolveMacroPayload",
+    "ResolveClassSurface",
+    "ResolveAmbientNamespace",
+    "ResolveEnum",
+    "ResolveOverloadSet",
 ];
 
 /// Per-kind call counts. `dispatch_operator_with_recurse` increments
 /// the matching index on entry. Sum across all indices equals
 /// `DISPATCH_OPERATOR_WITH_RECURSE_CALLS`.
 pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -319,6 +331,10 @@ pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUN
 /// function entry / exit. Sum across all indices is approximately
 /// `DISPATCH_OPERATOR_TOTAL_NS`.
 pub static DISPATCH_OPERATOR_KIND_NS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -478,6 +494,10 @@ pub fn kind_index_for_key(key: &crate::semantic_query::SemanticQueryKey) -> usiz
         SemanticQueryKey::ResolvedNamedType { .. } => 11,
         SemanticQueryKey::Relate { .. } => 12,
         SemanticQueryKey::ResolveMacroPayload { .. } => 13,
+        SemanticQueryKey::ResolveClassSurface { .. } => 14,
+        SemanticQueryKey::ResolveAmbientNamespace { .. } => 15,
+        SemanticQueryKey::ResolveEnum { .. } => 16,
+        SemanticQueryKey::ResolveOverloadSet { .. } => 17,
     }
 }
 
@@ -974,6 +994,46 @@ mod tests {
             source: dummy_node,
             target: dummy_node,
         };
+        let slot = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
+            Arc::clone(&dummy_id),
+            Arc::from("X"),
+            0,
+            Default::default(),
+            Default::default(),
+        );
+        let class_surface = SemanticQueryKey::ResolveClassSurface {
+            decl_slot: slot.clone(),
+            type_args: Arc::from(Vec::new().into_boxed_slice()),
+            side: crate::semantic_query::ClassSurfaceSide::Instance,
+            context: crate::semantic_query::ClassSurfaceContext {
+                parse_env_hash: Default::default(),
+                resolve_env_hash: Default::default(),
+                mode: ProjectionMode::Shallow,
+            },
+        };
+        let ambient_namespace = SemanticQueryKey::ResolveAmbientNamespace {
+            namespace_slot: slot
+                .with_symbol_space(crate::semantic_query::SemanticSymbolSpace::Namespace),
+            type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: crate::semantic_query::AmbientNamespaceContext {
+                parse_env_hash: Default::default(),
+                resolve_env_hash: Default::default(),
+                mode: ProjectionMode::Shallow,
+            },
+        };
+        let resolve_enum = SemanticQueryKey::ResolveEnum {
+            enum_slot: slot.clone(),
+            context: crate::semantic_query::EnumContext {
+                resolve_env_hash: Default::default(),
+            },
+        };
+        let overload_set = SemanticQueryKey::ResolveOverloadSet {
+            callee: dummy_node,
+            type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: crate::semantic_query::OverloadSetContext {
+                resolve_env_hash: Default::default(),
+            },
+        };
 
         // Discriminating: each of these MUST hit a distinct index in
         // the kind table; if any two collide the test fails.
@@ -988,8 +1048,12 @@ mod tests {
             kind_index_for_key(&normalize_intersection),
             kind_index_for_key(&project_path),
             kind_index_for_key(&relate),
+            kind_index_for_key(&class_surface),
+            kind_index_for_key(&ambient_namespace),
+            kind_index_for_key(&resolve_enum),
+            kind_index_for_key(&overload_set),
         ];
-        let expected = [0usize, 1, 2, 3, 4, 6, 8, 9, 10, 12];
+        let expected = [0usize, 1, 2, 3, 4, 6, 8, 9, 10, 12, 14, 15, 16, 17];
         assert_eq!(observed, expected);
         // No off-by-one in the static label table:
         assert_eq!(
