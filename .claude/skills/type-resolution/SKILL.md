@@ -437,7 +437,7 @@ The reusable semantic layer lives in `crates/verter_session/src/project_semantic
 `SemanticGraphStore` (crate `verter_session::semantic_query_memo`) owns all reusable semantic identity via two parallel memos:
 
 - **Node memo** — mode-erased `FamilyKey` → `FamilySlots` map for single-node queries (`ResolveDecl`, `Instantiate`, `KeyOf`, `MappedType`, `Conditional`, `ProjectPath`, `TypeOf`, `NormalizeUnion`, `NormalizeIntersection`, `ResolvedNamedType`).
-- **Relation memo** — `DashMap<(SemanticNodeId, SemanticNodeId), (DepSignature, RelationResult)>` for pairwise `Relate` judgements (plan §2). Added in Phase D §5.4. `RelationResult` is `{ Assignable { bindings }, NotAssignable, Unknown }`; all three cache-with-fence.
+- **Relation memo** — keyed by the full-identity `RelateMemoKey` (source / target / relation kind / policy / source freshness / inference context / env+substitution+projection-reduction context) for `Relate` judgements (plan §2). `RelationResult` is `{ Assignable { bindings }, NotAssignable, Unknown }`; all three cache-with-fence.
 
 **Canonical deferred forms** (plan §2 — only these variants cross any cache boundary):
 

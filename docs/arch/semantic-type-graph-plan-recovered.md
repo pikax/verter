@@ -213,7 +213,7 @@ A type's role is determined by which framework macro consumed it (Vue: `definePr
 
 ### 2.14 Relation Engine Is Public
 
-`relate(source, target) -> RelationResult` is a public typeinfo query. Every consumer that needs "is X assignable to Y?" calls `relate`; no projection re-implements assignability, narrowing, or subtyping locally. The relation engine lives on `SemanticGraphStore` (the existing `Relate { source, target }` `SemanticQueryKey` variant), is memoised with `ReadSetSignature.facts` fencing, and is exposed through the public typeinfo session API. Guard: `typeinfo_exposes_relate_query`.
+`relate(source, target) -> RelationResult` is a public typeinfo query. Every consumer that needs "is X assignable to Y?" calls `relate`; no projection re-implements assignability, narrowing, or subtyping locally. The relation engine lives on `SemanticGraphStore` (the full-identity `Relate` `SemanticQueryKey` variant — source / target / relation kind / policy / source freshness / inference context / env+substitution+projection-reduction context, memoised under the matching `RelateMemoKey`), is memoised with `ReadSetSignature.facts` fencing, and is exposed through the public typeinfo session API. Guard: `typeinfo_exposes_relate_query`.
 
 ### 2.15 Origin-Edge Taxonomy Is Normative
 
