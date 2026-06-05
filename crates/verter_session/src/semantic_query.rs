@@ -1790,7 +1790,13 @@ pub struct DeclarationAnalysisValue {
 /// [`InferBinding`]s a binding-producing relation deposited, and an opaque
 /// [`RelationProofId`] indexing the payload-side [`RelationProofTable`]: the
 /// derivation / failure / cycle witness rides that table BY ID — it is never
-/// embedded on the value and never crosses the typeinfo wire. The budget regime
+/// embedded on the value itself. This Rust value-domain payload rides OFF the
+/// value / type-values surface: the proof witness is not a `GraphTypeNode` /
+/// structured-type value. Relation-proof WIRE exposure is a separate concern —
+/// the current proto `GraphTypeNode.relation_proof = 28` arm is pre-existing
+/// RI-2 debt, and the RI-2 end-state exposes proof detail via the payload-side
+/// `relation_proofs` table rather than embedding it in the value payload. The
+/// budget regime
 /// is FOLDED into the outcome as [`RelationOutcome::BudgetExceeded`] rather than
 /// carried as a separate field, so there is a single source of truth and an
 /// `Assignable`-with-exceeded-budget contradiction is unrepresentable. There is
@@ -1815,8 +1821,10 @@ pub struct RelationPayload {
     /// outcome.
     pub bindings: Arc<[InferBinding]>,
     /// Opaque id into the payload-side [`RelationProofTable`]. The proof witness
-    /// lives OFF this value (and off the typeinfo wire); a consumer that wants
-    /// the derivation / failure / cycle detail dereferences the table by id.
+    /// lives OFF this value (off the value / type-values surface — not a
+    /// `GraphTypeNode`); a consumer that wants the derivation / failure / cycle
+    /// detail dereferences the table by id. (Wire exposure of proof detail is a
+    /// separate concern — see the type doc above.)
     pub relation_proof: RelationProofId,
 }
 

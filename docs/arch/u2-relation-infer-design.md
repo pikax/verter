@@ -914,8 +914,11 @@ guard author should read the guard against the folded outcome, not a literal `bu
 the guard is owned by **U2.QUERY_VALUE_DOMAIN** (the value-domain block that ships the `Relate` value-domain
 SHAPE + the content-free `InferenceSession` projection shape, both qvd §2.2 — it may land there per the parent
 and native-typeinfo-parity-cache-export-session.md:402);
-**RI-2 (this block) exercises and satisfies it** when it upgrades the landed tri-state placeholder to the rich
-`RelationPayload` carrying the relation_proof + the typed `BudgetExceeded` outcome. The warm subset stays binary
+**RI-2 (this block) exercises and satisfies it** by EXERCISING the already-landed rich `RelationPayload`:
+POPULATING it from the relation reducer (with the `relation_proof` + the typed `BudgetExceeded` outcome), adding
+the transient `RelationComputeResult` compute-result split, and performing the wire proof-storage migration
+(tag-28 → payload-side `relation_proofs` table) — NOT upgrading a placeholder; the rich shape is already landed
+(see Decision 4 above and the RI-2 row in the dependency table). The warm subset stays binary
 `Assignable`/`NotAssignable` + within-budget; `Unknown` stays OFF the public surface (unchanged).
 
 **Public value-domain payload vs warm-admitted subset vs transient-only results — THREE layers, not two.**
