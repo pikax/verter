@@ -7189,3 +7189,255 @@ fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
          after its last registration is stripped",
     );
 }
+
+/// U2B.9 FORK-A — env-scoped key-identity guards.
+///
+/// These pin the migration of `Instantiate.base` / `ResolveMacroPayload.owner`
+/// from the retired content-free, env-FREE `DeclKey` to the env-bearing,
+/// content-free `ResolvedDeclSlotIdentity`, plus the env-scoping of the
+/// `HostResolvedNamedTypeKey` resolved-named-type artifact identity. Each is
+/// DISCRIMINATING: on the pre-migration content-free key the two compared
+/// queries collapsed onto ONE family slot (a warm-hit collision); post-migration
+/// the env dim enters the `FamilyKey` identity so they occupy distinct slots.
+mod u2b9_fork_a_key_migration_guards {
+    use super::super::family::{family_and_slot, FamilyKey};
+    use crate::semantic_query::{
+        HashValue, InstantiateContext, MacroPayloadContext, ProjectionMode,
+        ProjectionReductionContext, ResolvedDeclSlotIdentity, SemanticNodeId, SemanticQueryKey,
+    };
+    use std::sync::Arc;
+
+    fn empty_args() -> Arc<[SemanticNodeId]> {
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
+    }
+
+    fn inst_key(slot: ResolvedDeclSlotIdentity, resolve_env: HashValue) -> SemanticQueryKey {
+        SemanticQueryKey::Instantiate {
+            base: slot,
+            args: empty_args(),
+            context: InstantiateContext::new(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                resolve_env,
+            ),
+        }
+    }
+
+    fn fam(key: &SemanticQueryKey) -> FamilyKey {
+        family_and_slot(key).0
+    }
+
+    /// Two `Instantiate` queries over the SAME declaration `(canonical, name)`
+    /// that differ ONLY in an env dim — slot `type_env_hash` / `lib_env_hash` /
+    /// `project_identity`, or the context `resolve_env_hash` — map to DISTINCT
+    /// `FamilyKey`s and so cannot warm-hit each other. Pre-migration the
+    /// content-free `DeclKey` base + env-free context carried NONE of these, so
+    /// all four pairs collapsed onto one family slot.
+    #[test]
+    fn instantiate_same_base_different_env_or_context_do_not_warm_hit() {
+        let canonical: Arc<str> = Arc::from("/u2b9/a.ts");
+        let name: Arc<str> = Arc::from("Foo");
+        let base_t = ResolvedDeclSlotIdentity::type_slot(
+            Arc::clone(&canonical),
+            Arc::clone(&name),
+            0,
+            [1u8; 16],
+            [0u8; 16],
+        );
+        let baseline = fam(&inst_key(base_t.clone(), [0u8; 16]));
+
+        // type_env differs on the slot.
+        let t2 = ResolvedDeclSlotIdentity::type_slot(
+            Arc::clone(&canonical),
+            Arc::clone(&name),
+            0,
+            [2u8; 16],
+            [0u8; 16],
+        );
+        assert_ne!(
+            baseline,
+            fam(&inst_key(t2, [0u8; 16])),
+            "type_env change must distinguish the Instantiate FamilyKey"
+        );
+
+        // lib_env differs on the slot.
+        let l = ResolvedDeclSlotIdentity::type_slot(
+            Arc::clone(&canonical),
+            Arc::clone(&name),
+            0,
+            [1u8; 16],
+            [9u8; 16],
+        );
+        assert_ne!(
+            baseline,
+            fam(&inst_key(l, [0u8; 16])),
+            "lib_env change must distinguish the Instantiate FamilyKey"
+        );
+
+        // project_identity differs on the slot.
+        let j = ResolvedDeclSlotIdentity::type_slot(
+            Arc::clone(&canonical),
+            Arc::clone(&name),
+            7,
+            [1u8; 16],
+            [0u8; 16],
+        );
+        assert_ne!(
+            baseline,
+            fam(&inst_key(j, [0u8; 16])),
+            "project_identity change must distinguish the Instantiate FamilyKey"
+        );
+
+        // resolve_env differs in the context (same slot).
+        assert_ne!(
+            baseline,
+            fam(&inst_key(base_t.clone(), [5u8; 16])),
+            "resolve_env change in InstantiateContext must distinguish the FamilyKey"
+        );
+
+        // Identical env + context → SAME family slot (warm-hit IS allowed).
+        assert_eq!(baseline, fam(&inst_key(base_t, [0u8; 16])));
+    }
+
+    /// Closes the "env validity purely ReadSetSignature" gap: a `type_env` /
+    /// `lib_env` change to the DECLARATION ITSELF (its slot — not a dependency)
+    /// now produces a KEY difference, not merely a fact-revalidation miss.
+    #[test]
+    fn decl_self_type_or_lib_env_change_produces_distinct_instantiate_key() {
+        let canonical: Arc<str> = Arc::from("/u2b9/self.ts");
+        let name: Arc<str> = Arc::from("Decl");
+        let k = |t: HashValue, l: HashValue| {
+            inst_key(
+                ResolvedDeclSlotIdentity::type_slot(
+                    Arc::clone(&canonical),
+                    Arc::clone(&name),
+                    0,
+                    t,
+                    l,
+                ),
+                [0u8; 16],
+            )
+        };
+        // The KEYS themselves differ (env entered the query identity)...
+        assert_ne!(k([1u8; 16], [0u8; 16]), k([2u8; 16], [0u8; 16]));
+        assert_ne!(k([0u8; 16], [1u8; 16]), k([0u8; 16], [2u8; 16]));
+        // ...and so do their family slots.
+        assert_ne!(fam(&k([1u8; 16], [0u8; 16])), fam(&k([2u8; 16], [0u8; 16])));
+        assert_ne!(fam(&k([0u8; 16], [1u8; 16])), fam(&k([0u8; 16], [2u8; 16])));
+    }
+
+    /// Two `ResolveMacroPayload` queries over the SAME owner that differ only in
+    /// an env dim (slot `type_env`/`lib_env`/`project_identity` or context
+    /// `resolve_env_hash`) map to DISTINCT `FamilyKey`s. Pre-migration the
+    /// content-free `DeclKey` owner + bare `mode` carried none of these.
+    #[test]
+    fn resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit() {
+        use verter_semantic::analysis::AnalyzedMacroKind;
+        let canonical: Arc<str> = Arc::from("/u2b9/sfc.vue");
+        let name: Arc<str> = Arc::from("<sfc-script-setup>");
+        let macro_key = |slot: ResolvedDeclSlotIdentity, resolve_env: HashValue| {
+            SemanticQueryKey::ResolveMacroPayload {
+                owner: slot,
+                macro_index: 0,
+                macro_kind: AnalyzedMacroKind::DefineProps,
+                type_args: empty_args(),
+                context: MacroPayloadContext::new(resolve_env, ProjectionMode::Navigate),
+            }
+        };
+        let owner_t = ResolvedDeclSlotIdentity::type_slot(
+            Arc::clone(&canonical),
+            Arc::clone(&name),
+            0,
+            [1u8; 16],
+            [0u8; 16],
+        );
+        let baseline = fam(&macro_key(owner_t.clone(), [0u8; 16]));
+
+        let t2 = ResolvedDeclSlotIdentity::type_slot(
+            Arc::clone(&canonical),
+            Arc::clone(&name),
+            0,
+            [2u8; 16],
+            [0u8; 16],
+        );
+        assert_ne!(
+            baseline,
+            fam(&macro_key(t2, [0u8; 16])),
+            "type_env change must distinguish the ResolveMacroPayload FamilyKey"
+        );
+
+        let l = ResolvedDeclSlotIdentity::type_slot(
+            Arc::clone(&canonical),
+            Arc::clone(&name),
+            0,
+            [1u8; 16],
+            [9u8; 16],
+        );
+        assert_ne!(baseline, fam(&macro_key(l, [0u8; 16])), "lib_env must distinguish");
+
+        assert_ne!(
+            baseline,
+            fam(&macro_key(owner_t.clone(), [5u8; 16])),
+            "resolve_env change in MacroPayloadContext must distinguish the FamilyKey"
+        );
+
+        assert_eq!(baseline, fam(&macro_key(owner_t, [0u8; 16])));
+    }
+
+    /// The `HostResolvedNamedTypeKey` resolved-named-type artifact identity is
+    /// env-scoped (R T L J): two resolutions of the SAME file content
+    /// (`whole_hash`) under different envs are DISTINCT identities AND the
+    /// `SemanticGraphStore` serves them as distinct entries. Pre-migration the
+    /// key carried only `(canonical_id, whole_hash, inner)` — env-blind — so the
+    /// two collided and a wrong-env macro surface could be served.
+    #[test]
+    fn resolved_named_type_key_identity_is_env_scoped() {
+        use super::super::SemanticGraphStore;
+        use crate::semantic_query::HostResolvedNamedTypeKey;
+        use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
+        use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+
+        let inner = |name: &str| ResolvedNamedTypeCacheKey {
+            name: name.as_bytes().to_vec().into_boxed_slice(),
+            surface: None,
+            base_offset: 0,
+            from_root_body: true,
+            companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
+            type_param_bindings: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let mk = |resolve: HashValue, type_e: HashValue, lib_e: HashValue, pid: u32| {
+            HostResolvedNamedTypeKey {
+                canonical_id: Arc::from("/u2b9/x.ts"),
+                whole_hash: [3u8; 16],
+                resolve_env_hash: resolve,
+                type_env_hash: type_e,
+                lib_env_hash: lib_e,
+                project_identity: pid,
+                inner: inner("Foo"),
+            }
+        };
+
+        let base = mk([0u8; 16], [1u8; 16], [0u8; 16], 0);
+        // Each env dim independently forks the key identity.
+        assert_ne!(base, mk([7u8; 16], [1u8; 16], [0u8; 16], 0), "resolve_env scopes the key");
+        assert_ne!(base, mk([0u8; 16], [2u8; 16], [0u8; 16], 0), "type_env scopes the key");
+        assert_ne!(base, mk([0u8; 16], [1u8; 16], [9u8; 16], 0), "lib_env scopes the key");
+        assert_ne!(base, mk([0u8; 16], [1u8; 16], [0u8; 16], 5), "project_identity scopes the key");
+
+        // The store serves env-distinct entries distinctly: an insert under
+        // `base` must NOT be served to a different-type_env lookup.
+        let store = SemanticGraphStore::new();
+        let other_env = mk([0u8; 16], [2u8; 16], [0u8; 16], 0);
+        let gen = store.named_type_generation();
+        store
+            .insert_resolved_named_type(base.clone(), Arc::new(ResolvedElements::default()), gen)
+            .expect("current-generation insert is accepted");
+        assert!(
+            store.get_resolved_named_type(&base).is_some(),
+            "same-env lookup hits"
+        );
+        assert!(
+            store.get_resolved_named_type(&other_env).is_none(),
+            "different-type_env lookup must MISS — the key is env-scoped, not env-blind"
+        );
+    }
+}
