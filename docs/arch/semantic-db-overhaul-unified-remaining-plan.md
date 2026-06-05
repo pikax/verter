@@ -1005,9 +1005,9 @@ is produced at its rescope session (§3.2) before it implements.
 | U4 | NOT-STARTED | persistent (B9); ← U2 |
 | U5 | NOT-STARTED | mem/audit (B10); ← B2, best ≥ U2 |
 | U6 | RESCOPE-GATE-PENDING | cross-engine flow-return recursion; ← U2.RELATION_INFER |
-| U7 | RESCOPE-GATE-PENDING | scheduler `submit_dag` (justify-or-cut); ← U1 |
+| U7 | DEFERRED-TO-U9 | scheduler `submit_dag` envelope deferred (multi-node DAG held un-built); substrate + leaf primitives KEPT; gap closed at U9 via single-node lowering into existing `SchedulerDag::submit`. See `docs/arch/u7-scheduler-submit-dag-decision.md`; ← U1 |
 | U8 | NOT-STARTED | wire-surface closure; ← U6 + S5.B12 |
-| U9 | NOT-STARTED | session bridge (B7f); ← U7 |
+| U9 | NOT-STARTED | session bridge (B7f); ← U1 (CacheNode substrate + executor surface) + B7a (leaf primitives) — NOT a built `submit_dag` envelope (U7 deferred); see `docs/arch/u7-scheduler-submit-dag-decision.md` |
 | U10 | NOT-STARTED | result DB; ← U3 + U8 |
 | U11 | NOT-STARTED | public relation/session; ← U12 |
 | U12 | NOT-STARTED | exporter; ← U10 |
@@ -1109,7 +1109,8 @@ The two tracks are **largely PARALLEL**. The key structural fact (§C):
 the semantic-graph EXECUTION layer (U8 wire closure, U3 cache/fact model, U10 result
 DB, U12 exporter, U11/U13, …) binds to the **already-landed singleflight /
 fact-signature substrate**, NOT to the unbuilt scheduler cache-node DAG
-(`submit_dag`). So scheduler work (U1 → U7 → U9) and semantic-graph execution
+(`submit_dag`). So scheduler work (U1 → U9; the U7 `submit_dag` envelope is
+DEFERRED-to-U9, so U9 depends on U1 + B7a, NOT on a built U7) and semantic-graph execution
 (U8 → U3 → U10 → U12 → U11/U13 → … → U15) proceed on **dependency-parallel lanes**
 after the one convergence gate.
 
@@ -1130,8 +1131,8 @@ after the one convergence gate.
    U5 (B10 mem/audit)   ──► B2, best ≥U2     (keystone of the subplan)       │
    U6 (B11 flow-return) ──► depends U2,U4    U3.CACHE_FACT_MODEL ──► U8       │
    U7 (B7e submit_dag)  ──► depends U1          (+U2,U6; after wire closure)  │
-        (parallel after U1)                 U10 (result DB)  ──► U3 + U8      │
-   U9 (B7f session bridge)──► depends U7     U12 (exporter)   ──► U10         │
+     (submit_dag DEFERRED-to-U9)            U10 (result DB)  ──► U3 + U8      │
+   U9 (B7f session bridge)──► depends U1+B7a U12 (exporter)   ──► U10         │
         │                                    U11 (relation/session) ──► U12   │
         │                                    U13 (projection) ──► U12         │
         │                                    U14 (Vue adapter)  ──► U13 + U11 │
@@ -1305,7 +1306,7 @@ U2  = CONVERGENCE GATE  (finalizes ResolveMacroPayload identity + the slot-ident
          → S5.B6 / S5.B7 / S5.B8 → S5.B9 → S5.B10 → S5.B11 → S5.B12         │
                                                                             │
   parallel after U2:                                                        │
-       U4 → U6        U5        scheduler U7 → U9        G.P3 ∥ N0.NAV_LOCATION_INDEX │
+       U4 → U6        U5        scheduler U9 (←U1+B7a; U7 DEFERRED)   G.P3 ∥ N0.NAV_LOCATION_INDEX │
                                                                             │
   U8  ONLY after  U6 + S5.B12   ◄── HARD GATE (no U8+ around the sidecar)   │
        │   (#7 warm-hit-validity BLOCKS U3 + U10; #9 degradation taxonomy   │
@@ -2365,6 +2366,23 @@ guards**. Sequence is faithful to §A; do not reorder.
 
 ### U7 — Scheduler Cache-Node DAG Admission (B7e)
 
+> **SUPERSEDED by the rescope gate — `docs/arch/u7-scheduler-submit-dag-decision.md`
+> (LOCKED).** Verdict: **DEFER**. The multi-node `submit_dag` envelope
+> (`CacheNodeDag`/`KeyedJob`/`EdgeGate`/`DagHandle`/`DagCompletionAggregator`) is held
+> **un-built**: the hard scheduling core is already landed in `SchedulerDag::submit`, a
+> cache→cache result edge is expressible at the raw `SchedulerDag` layer via
+> `DepKey::CacheNode` + single-node `submit()` (the production scheduler *dispatch* path
+> still asserts cache nodes are terminal — `scheduler.rs:237`/`249`/`263`/`4793` — so the
+> edge is not yet live end-to-end), and the biggest workload (`TypeInfoGraphResultDb`) is
+> permanently singleflight-bound (§2.1). The landed cache-node substrate + B7a leaf
+> primitives are KEPT (U9 machinery). U9 closes the `execute_cache_node` reachability gap
+> via single-node lowering into the existing `SchedulerDag::submit` — lifting those
+> terminal-cache dispatch assertions and wiring cache-node waiter-release + failure
+> propagation — NOT a net-new envelope. The envelope
+> is re-gated for JUSTIFY at U9 **only** on a proven all-or-none-atomic-admission
+> correctness property OR a measured graph-scoped completion/cancellation need; default
+> absent that = permanent CUT. The scope sketch below stands only if that re-gate passes.
+
 - **Source track:** cache-runtime / scheduler.
 - **Scope:** Add `CacheNodeDag`, `CacheNodeDagNode` (non-Clone; ready-queue
   element is `Arc<CacheNodeDagNode>`), `CacheNodeDagEdge` / `EdgeGate`, `KeyedJob`
@@ -2462,8 +2480,12 @@ guards**. Sequence is faithful to §A; do not reorder.
   from scheduler config, NOT a removed per-call `threads` option). Update
   `.claude/skills/scheduler/SKILL.md` (stale re: `submit_batch` / pre-cache-node
   surface). Crosses the H20 boundary deliberately at the session edge only.
-- **Deps:** U7 (cache-node DAG); B7a (`CpuConcurrencySemaphore` — landed but
-  unwired).
+- **Deps:** U1 (landed `TaskKind::CacheNode` + `WorkNodeIdentity::CacheNode` +
+  `DepKey::CacheNode` + `execute_cache_node` surface) + B7a (`CpuConcurrencySemaphore`,
+  `DedupeHook`, `SchedulerCacheId`, `SubmissionResult`, `CancellationToken` — landed but
+  unwired). **NOT a built `submit_dag` envelope** — U7 is DEFERRED-TO-U9
+  (`docs/arch/u7-scheduler-submit-dag-decision.md`): U9 closes the cache-node
+  reachability gap via single-node lowering into the existing `SchedulerDag::submit`.
 - **Parallelism:** Cache-runtime lane tail; beside the semantic-graph lane.
 - **Risk:** medium — spans `verter_scheduler` ↔ `verter_session`; keep the session
   bridge thin.
@@ -2973,7 +2995,7 @@ intentional, tracked deliverable, not an oversight.
 | **U4** | `/type-cache-architecture` (persistent pure-artifact rules, sealed `PersistentArtifactNode`); `docs/arch/fact-based-cache.md`. |
 | **U5** | `/type-cache-architecture` (memory policy, metrics); `/audit-infrastructure` (`StructuredAuditEvent::CacheNode*`). |
 | **U6** | `docs/arch/native-flow-return.md` (moved here in U6); `/type-resolution` (`FlowReturn` query node); `/compiler-codegen` if flow lowering surfaces. |
-| **U7** | `/scheduler` SKILL (`CacheNodeDag`, `submit_dag`, `KeyedJob`, `DagHandle`). |
+| **U7** | `docs/arch/u7-scheduler-submit-dag-decision.md` (the DEFER decision — multi-node `submit_dag` envelope held un-built). **No `/scheduler` envelope-symbol docs** (`CacheNodeDag` / `submit_dag` / `KeyedJob` / `DagHandle`) are written unless the envelope is re-gated AND built at U9; the deferred-substrate skill refresh rides U1/U9. |
 | **U8** | `/type-cache-architecture` (wire-payload notes — `TypeInfoGraphPayload` / `ProgramAnalysisGraph` / `DeclarationAnalysisGraph` placement); `Typeinfo Wire Contract` rule pointers; amend `docs/arch/semantic-type-graph-plan-recovered.md` stale wire wording. |
 | **U9** | `/scheduler` + `/host-session` SKILL (session bridge, `CpuConcurrencySemaphore` wiring, `execute_cache_node`). |
 | **U10** | `/type-resolution` (`TypeInfoGraphResultDb`, `CompletionFence`; **the Query Mode Contract → the `ProjectionDemand` / `EvalPolicy` demand-lattice with the five modes as presets + the demand-lattice dominance satisfaction relation, replacing the mode-rank/enum-order model**) + `/type-cache-architecture` (result-DB membership on `ProjectTypeStore`). The `U2.QUERY_VALUE_DOMAIN` block lands the demand-lattice DEFINITION; U10 lands the satisfaction relation and updates the skill's mode-contract text. |
@@ -3026,10 +3048,13 @@ The unified effort is "done" when ALL of the following hold:
 - [ ] **`TypeInfoGraphResultDb`** admits through the singleflight / fact-validation
   substrate (NOT `submit_dag`), with warm-exact-only admission, the canonical
   3-retry fence, no second retry constant, and zero-alloc warm hits.
-- [ ] **Scheduler** has the TaskKind split (U1), `submit_dag` cache-node DAG (U7)
-  under one admission path with no second readiness/ledger structure, and the
-  session bridge (U9) wiring `CpuConcurrencySemaphore`; `dag_arch_guards` and the
-  B7b guards green.
+- [ ] **Scheduler** has the TaskKind split (U1) and the landed cache-node substrate +
+  B7a leaf primitives under one admission path with no second readiness/ledger
+  structure. The multi-node `submit_dag` cache-node DAG envelope (U7) is **DEFERRED to
+  U9 / default permanent CUT** (`docs/arch/u7-scheduler-submit-dag-decision.md`) — this
+  checklist does NOT require it built; U9 closes the cache-node reachability gap via
+  single-node lowering into the existing `SchedulerDag::submit` and wires the
+  session bridge (`CpuConcurrencySemaphore`); `dag_arch_guards` and the B7b guards green.
 - [ ] **Typeinfo session** exposes the 8 `_with_audit` methods + public `relate()`,
   validate-before-execute, with cold/warm/degraded audit + footprint cell + nested
   records using `exactness_counts: BTreeMap`; every request response echoes the
