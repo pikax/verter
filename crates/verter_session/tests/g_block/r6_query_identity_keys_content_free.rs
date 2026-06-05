@@ -57,7 +57,7 @@ fn read_file(rel: &str) -> String {
 }
 
 /// Compile-time proof that `SemanticQueryKey::Instantiate.base` is the
-/// env-bearing, content-free `ResolvedDeclSlotIdentity` (U2B.9 FORK-A) —
+/// env-bearing, content-free `ResolvedDeclSlotIdentity` —
 /// NOT a `DeclIdentity` (versioned) and NOT carrying any
 /// content/version hash. The slot's env dims (`project_identity` /
 /// `type_env_hash` / `lib_env_hash`) are ENV dimensions, not content
@@ -163,7 +163,12 @@ fn r6_semantic_query_key_variants_carry_no_version_hash_in_source() {
     // would re-introduce a content/version hash into a query-identity
     // key. The scan looks for each name with the field-shape suffix
     // ': ' inside the variant body block.
-    const FORBIDDEN_FIELDS: &[&str] = &["whole_hash:", "content_hash:", "fact_dep_signature:"];
+    const FORBIDDEN_FIELDS: &[&str] = &[
+        "whole_hash:",
+        "content_hash:",
+        "parse_stable_hash:",
+        "fact_dep_signature:",
+    ];
     // Forbidden embedded types that transitively contain a version
     // hash. `DeclIdentity` is the canonical offender — keeping it as
     // a value-side payload is fine, embedding it in a query-identity
@@ -194,8 +199,9 @@ fn r6_semantic_query_key_variants_carry_no_version_hash_in_source() {
                 "R6 GUARD VIOLATION — `SemanticQueryKey::{}` body in \
                  `semantic_query.rs` embeds `{}`. `DeclIdentity` is a \
                  versioned (`whole_hash`-bearing) type and must NOT be \
-                 embedded in a query-identity key — use the content-free \
-                 `DeclKey` instead. Body:\n{}",
+                 embedded in a query-identity key — use the env-bearing \
+                 content-free `ResolvedDeclSlotIdentity` slot (built via \
+                 `type_slot_for`) instead. Body:\n{}",
                 variant.trim_end_matches(" {"),
                 needle,
                 body
@@ -214,7 +220,12 @@ fn r6_semantic_query_key_variants_carry_no_version_hash_in_source() {
 fn r6_family_key_variants_carry_no_version_hash_in_source() {
     let source = read_file("crates/verter_session/src/semantic_query_memo/family.rs");
 
-    const FORBIDDEN_FIELDS: &[&str] = &["whole_hash:", "content_hash:", "fact_dep_signature:"];
+    const FORBIDDEN_FIELDS: &[&str] = &[
+        "whole_hash:",
+        "content_hash:",
+        "parse_stable_hash:",
+        "fact_dep_signature:",
+    ];
     const FORBIDDEN_EMBEDS: &[&str] = &["base: DeclIdentity", "owner: DeclIdentity"];
 
     for variant in ["Instantiate {", "ResolveMacroPayload {"] {
@@ -239,7 +250,8 @@ fn r6_family_key_variants_carry_no_version_hash_in_source() {
                 !body.contains(needle),
                 "R6 GUARD VIOLATION — `FamilyKey::{}` body in \
                  `family.rs` embeds `{}`. `DeclIdentity` is a \
-                 versioned type — use the content-free `DeclKey` \
+                 versioned type — use the env-bearing content-free \
+                 `ResolvedDeclSlotIdentity` slot (built via `type_slot_for`) \
                  instead. Body:\n{}",
                 variant.trim_end_matches(" {"),
                 needle,
@@ -251,13 +263,13 @@ fn r6_family_key_variants_carry_no_version_hash_in_source() {
 
 /// Source-AST scan over `semantic_query.rs` — the
 /// `ResolvedDeclSlotIdentity` slot (the `Instantiate` / `ResolveMacroPayload`
-/// base/owner identity since U2B.9 FORK-A) must be content-free. It
+/// base/owner identity) must be content-free. It
 /// legitimately carries the `project_identity` / `type_env_hash` /
 /// `lib_env_hash` ENV dims, but adding a `whole_hash` / `content_hash` /
 /// `parse_stable_hash` / `fact_dep_signature` field would re-violate R6
 /// across every key that embeds it, so this guard independently pins the
-/// struct shape. The retired content-free `DeclKey` must NOT be
-/// reintroduced.
+/// struct shape. The retired content-free `DeclKey` struct must NOT be
+/// reintroduced in ANY declaration form.
 #[test]
 fn r6_decl_slot_struct_is_content_free_in_source() {
     let source = read_file("crates/verter_session/src/semantic_query.rs");
@@ -284,12 +296,65 @@ fn r6_decl_slot_struct_is_content_free_in_source() {
     }
 
     // The retired content-free `DeclKey` query-identity struct must not
-    // be reintroduced (U2B.9 FORK-A one-clean-cutover).
+    // be reintroduced in ANY declaration form: unit (`pub struct DeclKey;`),
+    // tuple (`pub struct DeclKey(...)`), generic (`pub struct DeclKey<...>`),
+    // braced (`pub struct DeclKey { ... }`), or whitespace variants. The
+    // base/owner identity is the env-bearing content-free
+    // `ResolvedDeclSlotIdentity` slot. The word-boundary check on the char
+    // following `DeclKey` keeps this from false-matching `ResolveDeclKey`
+    // (the distinct, live `ResolveDecl` query key) or any other
+    // `*DeclKey`-suffixed identifier.
     assert!(
-        !source.contains("pub struct DeclKey {"),
+        !source_reintroduces_decl_key_struct(&source),
         "R6 GUARD VIOLATION — the retired `pub struct DeclKey` reappeared in \
-         semantic_query.rs; the base/owner identity is `ResolvedDeclSlotIdentity`."
+         semantic_query.rs (in some declaration form); the base/owner identity \
+         is the env-bearing content-free `ResolvedDeclSlotIdentity` slot."
     );
+}
+
+/// True iff `source` reintroduces the retired query-identity struct
+/// `pub struct DeclKey` in ANY declaration form: braced
+/// (`pub struct DeclKey { ... }`), unit (`pub struct DeclKey;`), tuple
+/// (`pub struct DeclKey(...)`), generic (`pub struct DeclKey<...>`), or
+/// with arbitrary whitespace before the delimiter
+/// (`pub struct DeclKey\n{`). After the literal `pub struct DeclKey`
+/// prefix the scanner skips any run of whitespace, then requires the
+/// next non-whitespace char to be a struct-declaration delimiter
+/// (`{` / `;` / `(` / `<`). That delimiter requirement is the
+/// trailing-side word boundary on `DeclKey`: it rejects any longer
+/// identifier (`DeclKeyV2`) AND prose mentions
+/// (`pub struct DeclKey was retired`) while still catching every decl
+/// form. The leading side is anchored by the literal `pub struct `
+/// prefix, which `ResolveDeclKey` does not match (its prefix is
+/// `pub struct ResolveDeclKey`).
+fn source_reintroduces_decl_key_struct(source: &str) -> bool {
+    const PREFIX: &str = "pub struct DeclKey";
+    let mut rest = source;
+    while let Some(idx) = rest.find(PREFIX) {
+        let after = &rest[idx + PREFIX.len()..];
+        // Skip whitespace between `DeclKey` and the decl delimiter so a
+        // `pub struct DeclKey\n{` reintroduction is caught, but require
+        // the first non-whitespace char after `DeclKey` to itself be a
+        // decl delimiter — otherwise `DeclKeyV2` / prose does not match.
+        // If `after` continues with an identifier char (`DeclKeyV2`),
+        // `next == after` and the delimiter check below fails on `V`. If
+        // it starts with whitespace, that whitespace separated `DeclKey`
+        // from the rest, so a following identifier (prose) is also
+        // rejected — only an actual decl delimiter (`{`/`;`/`(`/`<`)
+        // matches.
+        let next = after.trim_start_matches(|c: char| c.is_whitespace());
+        if matches!(
+            next.chars().next(),
+            Some('{') | Some(';') | Some('(') | Some('<')
+        ) {
+            return true;
+        }
+        // No-whitespace-then-non-delimiter (`DeclKeyV2`) OR
+        // whitespace-then-non-delimiter (prose) — different token, keep
+        // scanning.
+        rest = &rest[idx + PREFIX.len()..];
+    }
+    false
 }
 
 /// Locate the first `{ ... }` brace block following a textual

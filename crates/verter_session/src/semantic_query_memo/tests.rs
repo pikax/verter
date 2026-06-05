@@ -7235,9 +7235,11 @@ mod env_scoped_key_identity_guards {
     /// Two `Instantiate` queries over the SAME declaration `(canonical, name)`
     /// that differ ONLY in an env dim — slot `type_env_hash` / `lib_env_hash` /
     /// `project_identity`, or the context `resolve_env_hash` — map to DISTINCT
-    /// `FamilyKey`s and so cannot warm-hit each other. Pre-migration the
-    /// content-free `DeclKey` base + env-free context carried NONE of these, so
-    /// all four pairs collapsed onto one family slot.
+    /// `FamilyKey`s and so cannot warm-hit each other. The env dims ride on the
+    /// `ResolvedDeclSlotIdentity` base (`type_env_hash` / `lib_env_hash` /
+    /// `project_identity`) and the dedicated `InstantiateContext`
+    /// (`resolve_env_hash`); an env-free base would collapse all four pairs onto
+    /// one family slot, so this test would fail.
     #[test]
     fn instantiate_same_base_different_env_or_context_do_not_warm_hit() {
         let canonical: Arc<str> = Arc::from("/u2b9/a.ts");
@@ -7333,8 +7335,10 @@ mod env_scoped_key_identity_guards {
 
     /// Two `ResolveMacroPayload` queries over the SAME owner that differ only in
     /// an env dim (slot `type_env`/`lib_env`/`project_identity` or context
-    /// `resolve_env_hash`) map to DISTINCT `FamilyKey`s. Pre-migration the
-    /// content-free `DeclKey` owner + bare `mode` carried none of these.
+    /// `resolve_env_hash`) map to DISTINCT `FamilyKey`s. The env dims ride on the
+    /// `ResolvedDeclSlotIdentity` owner (`type_env`/`lib_env`/`project_identity`)
+    /// and the dedicated `MacroPayloadContext` (`resolve_env_hash`); an env-free
+    /// owner + bare `mode` would carry none of these.
     #[test]
     fn resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit() {
         use verter_semantic::analysis::AnalyzedMacroKind;
@@ -7382,6 +7386,24 @@ mod env_scoped_key_identity_guards {
             baseline,
             fam(&macro_key(l, [0u8; 16])),
             "lib_env must distinguish"
+        );
+
+        // project_identity differs on the owner slot. Mirrors the
+        // `Instantiate` sibling's J case: the slot derives Hash/Eq over
+        // `project_identity`, so a differing J → distinct FamilyKey →
+        // no warm-hit. An env-free owner key would collapse this onto
+        // the baseline slot and this assertion would fail.
+        let j = ResolvedDeclSlotIdentity::type_slot(
+            Arc::clone(&canonical),
+            Arc::clone(&name),
+            7,
+            [1u8; 16],
+            [0u8; 16],
+        );
+        assert_ne!(
+            baseline,
+            fam(&macro_key(j, [0u8; 16])),
+            "project_identity change must distinguish the ResolveMacroPayload FamilyKey"
         );
 
         assert_ne!(
