@@ -1347,13 +1347,15 @@ pub(crate) fn node_data_for(
 /// Returns the content-free, env-bearing
 /// [`ResolvedDeclSlotIdentity`](crate::semantic_query::ResolvedDeclSlotIdentity)
 /// used as `SemanticQueryKey::Instantiate.base` for the Pick builtin
-/// (`build_builtin_utility` Pick arm). A test-fixture helper: it carries
-/// a zeroed env (project / type-env / lib-env), so it is suitable for
-/// identity assertions, not for an env-discriminating production
+/// (`build_builtin_utility` Pick arm). TEST-ONLY fixture: it carries a
+/// zeroed env (project / type-env / lib-env), so it is suitable for
+/// identity assertions, NOT for an env-discriminating production
 /// dispatch — the production path uses
 /// [`ProjectSemanticDispatch::builtin_type_slot`] with the live host env.
+/// `#[cfg(test)]`-gated so no production caller can pick the zero-env
+/// degenerate slot.
+#[cfg(test)]
 #[must_use]
-#[allow(dead_code)]
 pub fn pick_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotIdentity {
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
         Arc::from("__builtin__"),
@@ -1366,9 +1368,10 @@ pub fn pick_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotId
 
 /// `__builtin__` type-space slot for the `Omit` utility.
 ///
-/// Mirrors [`pick_builtin_decl_identity`] for the Omit builtin.
+/// Mirrors [`pick_builtin_decl_identity`] for the Omit builtin. TEST-ONLY
+/// fixture, `#[cfg(test)]`-gated.
+#[cfg(test)]
 #[must_use]
-#[allow(dead_code)]
 pub fn omit_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotIdentity {
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
         Arc::from("__builtin__"),

@@ -207,7 +207,7 @@ pub enum SemanticQueryKey {
     TupleKey(TupleKeyPayload),
     #[doc = \"an attribute carrying a } brace\"]
     StructKey {
-        base: DeclKey,
+        base: ResolvedDeclSlotIdentity,
         args: Arc<[SemanticNodeId]>,
     },
 }

@@ -296,63 +296,82 @@ fn r6_decl_slot_struct_is_content_free_in_source() {
     }
 
     // The retired content-free `DeclKey` query-identity struct must not
-    // be reintroduced in ANY declaration form: unit (`pub struct DeclKey;`),
-    // tuple (`pub struct DeclKey(...)`), generic (`pub struct DeclKey<...>`),
-    // braced (`pub struct DeclKey { ... }`), or whitespace variants. The
-    // base/owner identity is the env-bearing content-free
-    // `ResolvedDeclSlotIdentity` slot. The word-boundary check on the char
-    // following `DeclKey` keeps this from false-matching `ResolveDeclKey`
-    // (the distinct, live `ResolveDecl` query key) or any other
-    // `*DeclKey`-suffixed identifier.
+    // be reintroduced in ANY declaration form OR under ANY visibility:
+    // `pub struct DeclKey`, `pub(crate) struct DeclKey`,
+    // `pub(super) struct DeclKey`, or bare `struct DeclKey` — each in unit
+    // (`struct DeclKey;`), tuple (`struct DeclKey(...)`), generic
+    // (`struct DeclKey<...>`), braced (`struct DeclKey { ... }`), or
+    // whitespace-variant form. The base/owner identity is the env-bearing
+    // content-free `ResolvedDeclSlotIdentity` slot. The leading boundary
+    // (non-identifier char before `struct`) plus the literal `struct `
+    // keyword keep this from false-matching `ResolveDeclKey` (the distinct,
+    // live `ResolveDecl` query key, declared `struct ResolveDeclKey`); the
+    // trailing delimiter boundary rejects `DeclKeyV2` and prose.
     assert!(
         !source_reintroduces_decl_key_struct(&source),
-        "R6 GUARD VIOLATION — the retired `pub struct DeclKey` reappeared in \
-         semantic_query.rs (in some declaration form); the base/owner identity \
-         is the env-bearing content-free `ResolvedDeclSlotIdentity` slot."
+        "R6 GUARD VIOLATION — the retired `struct DeclKey` reappeared in \
+         semantic_query.rs (in some declaration form, under some visibility); \
+         the base/owner identity is the env-bearing content-free \
+         `ResolvedDeclSlotIdentity` slot."
     );
 }
 
 /// True iff `source` reintroduces the retired query-identity struct
-/// `pub struct DeclKey` in ANY declaration form: braced
-/// (`pub struct DeclKey { ... }`), unit (`pub struct DeclKey;`), tuple
-/// (`pub struct DeclKey(...)`), generic (`pub struct DeclKey<...>`), or
-/// with arbitrary whitespace before the delimiter
-/// (`pub struct DeclKey\n{`). After the literal `pub struct DeclKey`
-/// prefix the scanner skips any run of whitespace, then requires the
-/// next non-whitespace char to be a struct-declaration delimiter
-/// (`{` / `;` / `(` / `<`). That delimiter requirement is the
-/// trailing-side word boundary on `DeclKey`: it rejects any longer
-/// identifier (`DeclKeyV2`) AND prose mentions
-/// (`pub struct DeclKey was retired`) while still catching every decl
-/// form. The leading side is anchored by the literal `pub struct `
-/// prefix, which `ResolveDeclKey` does not match (its prefix is
-/// `pub struct ResolveDeclKey`).
+/// `struct DeclKey` in ANY declaration form AND under ANY visibility:
+/// `pub struct DeclKey`, `pub(crate) struct DeclKey`,
+/// `pub(super) struct DeclKey`, or bare `struct DeclKey` — each in any
+/// shape: braced (`struct DeclKey { ... }`), unit (`struct DeclKey;`),
+/// tuple (`struct DeclKey(...)`), generic (`struct DeclKey<...>`), or with
+/// arbitrary whitespace before the delimiter (`struct DeclKey\n{`).
+///
+/// The scanner anchors on the literal `struct DeclKey` token (the `pub`
+/// /`pub(crate)`/`pub(...)` visibility prefix is OPTIONAL, so anchoring on
+/// `struct DeclKey` rather than `pub struct DeclKey` catches the
+/// visibility-evasion forms `pub(crate) struct DeclKey {` and bare
+/// `struct DeclKey {`). For each `struct DeclKey` occurrence it then
+/// applies BOTH word boundaries:
+///
+/// - LEADING boundary: the char immediately before `struct` must be a
+///   non-identifier char (whitespace / start-of-source). This keeps the
+///   scan from matching `notstruct DeclKey` style identifiers; the
+///   literal `struct ` keyword also means `ResolveDeclKey` cannot match
+///   (its declaration is `struct ResolveDeclKey`, never `struct DeclKey`).
+/// - TRAILING boundary: after `struct DeclKey` the scanner skips any run
+///   of whitespace, then requires the next non-whitespace char to be a
+///   struct-declaration delimiter (`{` / `;` / `(` / `<`). That rejects
+///   any longer identifier (`DeclKeyV2`) AND prose mentions
+///   (`struct DeclKey was retired`) while still catching every decl form.
 fn source_reintroduces_decl_key_struct(source: &str) -> bool {
-    const PREFIX: &str = "pub struct DeclKey";
-    let mut rest = source;
-    while let Some(idx) = rest.find(PREFIX) {
-        let after = &rest[idx + PREFIX.len()..];
-        // Skip whitespace between `DeclKey` and the decl delimiter so a
-        // `pub struct DeclKey\n{` reintroduction is caught, but require
-        // the first non-whitespace char after `DeclKey` to itself be a
-        // decl delimiter — otherwise `DeclKeyV2` / prose does not match.
-        // If `after` continues with an identifier char (`DeclKeyV2`),
-        // `next == after` and the delimiter check below fails on `V`. If
-        // it starts with whitespace, that whitespace separated `DeclKey`
-        // from the rest, so a following identifier (prose) is also
-        // rejected — only an actual decl delimiter (`{`/`;`/`(`/`<`)
-        // matches.
-        let next = after.trim_start_matches(|c: char| c.is_whitespace());
-        if matches!(
-            next.chars().next(),
-            Some('{') | Some(';') | Some('(') | Some('<')
-        ) {
-            return true;
+    const ANCHOR: &str = "struct DeclKey";
+    let mut search_from = 0usize;
+    while let Some(rel) = source[search_from..].find(ANCHOR) {
+        let idx = search_from + rel;
+        // LEADING word boundary: the char before `struct` must not be an
+        // identifier char (so `notstruct DeclKey` is not a match). A match
+        // at the start of source has no preceding char and is accepted.
+        let leading_ok = idx == 0
+            || !source[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if leading_ok {
+            let after = &source[idx + ANCHOR.len()..];
+            // TRAILING word boundary: skip whitespace between `DeclKey` and
+            // the decl delimiter so `struct DeclKey\n{` is caught, but
+            // require the first non-whitespace char after `DeclKey` to
+            // itself be a decl delimiter — otherwise `DeclKeyV2` / prose
+            // does not match. If `after` continues with an identifier char
+            // (`DeclKeyV2`), `next == after` and the delimiter check fails
+            // on `V`.
+            let next = after.trim_start_matches(|c: char| c.is_whitespace());
+            if matches!(
+                next.chars().next(),
+                Some('{') | Some(';') | Some('(') | Some('<')
+            ) {
+                return true;
+            }
         }
-        // No-whitespace-then-non-delimiter (`DeclKeyV2`) OR
-        // whitespace-then-non-delimiter (prose) — different token, keep
-        // scanning.
-        rest = &rest[idx + PREFIX.len()..];
+        search_from = idx + ANCHOR.len();
     }
     false
 }
