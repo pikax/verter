@@ -26,15 +26,21 @@ use rustc_hash::FxHashSet;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     DeclIdentity, DepSignature, FunctionParam, IndexSignature, InferBinding, LiteralValue,
-    PrimitiveKind, QueryError, QueryResult, RelationResult, SemanticNodeData, SemanticNodeId,
-    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceMember, SurfaceView,
+    PrimitiveKind, QueryError, QueryResult, RelateMemoKey, RelationResult, SemanticNodeData,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceMember,
+    SurfaceView,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
 thread_local! {
-    /// Per-thread relation in-flight set.
-    /// Cyclic re-entry returns `RelationResult::Unknown` per
-    /// contract row without recursing.
+    /// Per-thread relation in-flight (coinductive assumption) set, keyed by
+    /// the FULL relation identity [`RelateMemoKey`] — NEVER the bare
+    /// `(source, target)` pair. Cyclic re-entry on the same full identity
+    /// returns `RelationResult::Unknown` per contract row without recursing.
+    /// Keying on the full identity keeps two in-flight goals over the same
+    /// nodes but a different relation kind / policy / freshness / inference
+    /// context distinct, so the cycle guard does not over-merge them when the
+    /// per-axis algorithms land in U2.RELATION_INFER.
     ///
     /// Stack-safety is provided iteratively: structural fan-out
     /// (Alias unwrap, Union / Intersection distribution, Array /
@@ -44,21 +50,21 @@ thread_local! {
     /// Termination is guaranteed by the graph-size-scaled work
     /// budget in `decide_relation` plus the in-flight set's cycle
     /// detection.
-    static RELATION_IN_FLIGHT: RefCell<FxHashSet<(SemanticNodeId, SemanticNodeId)>> =
+    static RELATION_IN_FLIGHT: RefCell<FxHashSet<RelateMemoKey>> =
         RefCell::new(FxHashSet::default());
 }
 
-/// Attempt to enter the relation guard for `(source, target)`. Returns
-/// `true` on fresh entry (caller must call [`exit_relation_guard`] before
-/// returning); returns `false` on cyclic re-entry so the caller emits
-/// `Unknown` without infinite recursion.
-fn enter_relation_guard(source: SemanticNodeId, target: SemanticNodeId) -> bool {
-    RELATION_IN_FLIGHT.with(|cell| cell.borrow_mut().insert((source, target)))
+/// Attempt to enter the relation guard for the full relation identity
+/// `key`. Returns `true` on fresh entry (caller must call
+/// [`exit_relation_guard`] before returning); returns `false` on cyclic
+/// re-entry so the caller emits `Unknown` without infinite recursion.
+fn enter_relation_guard(key: &RelateMemoKey) -> bool {
+    RELATION_IN_FLIGHT.with(|cell| cell.borrow_mut().insert(key.clone()))
 }
 
-fn exit_relation_guard(source: SemanticNodeId, target: SemanticNodeId) {
+fn exit_relation_guard(key: &RelateMemoKey) {
     RELATION_IN_FLIGHT.with(|cell| {
-        cell.borrow_mut().remove(&(source, target));
+        cell.borrow_mut().remove(key);
     });
 }
 
@@ -138,21 +144,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // live generation differs.
         let validated_at_generation = self.ctx.project_type_store().current_project_generation();
         let fence = self.project_generation_signature();
-        let result = if enter_relation_guard(source, target) {
-            let mut bindings: Vec<InferBinding> = Vec::new();
-            let r = self.decide_relation_with_dispatch(source, target, &mut bindings);
-            exit_relation_guard(source, target);
-            r
-        } else {
-            RelationResult::Unknown
+        // Cold compute under a nested fact tracer. The relation judgement
+        // may instantiate identity carriers through the shared dispatch
+        // (`unwrap_identity_carrier_for_relation` and the Object-vs-Record
+        // arm both `execute(Instantiate …)`), so the result can depend on
+        // imported / body facts beyond the `source` / `target` self-roots.
+        // The tracer fans out into every active scope, so an enclosing cold
+        // build still observes these facts; the inner read-set additionally
+        // fences THIS relation memo entry on the transitive dependencies it
+        // actually read. The cycle guard is keyed on the full relation
+        // identity `key`, never the bare node pair.
+        let host = self.ctx.host_for_fact_tracer_install();
+        let (result, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
+            if enter_relation_guard(&key) {
+                let mut bindings: Vec<InferBinding> = Vec::new();
+                let r = self.decide_relation_with_dispatch(source, target, &mut bindings);
+                exit_relation_guard(&key);
+                r
+            } else {
+                RelationResult::Unknown
+            }
+        });
+        // Overflowed read-set: the judgement is returned to the caller but
+        // refused memo admission — the dependency fence cannot be
+        // represented — matching the cooperative cold-build contract.
+        let traced_facts: &[crate::resolver_core::FactVersionRef] = match &finalise {
+            crate::resolver_core::FactReadSetFinalise::Ok(facts) => facts,
+            crate::resolver_core::FactReadSetFinalise::Overflow => return (result, fence),
         };
         // Self-version rooting: the relation judgement depends on the
-        // `source` and `target` node surfaces — root the memo entry on
-        // the file content version each file-derived input was lowered
-        // from. A `None` carrier (a torn / conflicting self-root
-        // observation, or an unvalidated `RouteGeneration` dependency)
-        // makes the judgement non-cacheable: it is returned to the
-        // caller but not admitted to the relation memo.
+        // `source` and `target` node surfaces plus the transitive facts
+        // traced above — root the memo entry on the file content version
+        // each file-derived input was lowered from and merge the traced
+        // cross-file facts. A `None` carrier (a torn / conflicting self-root
+        // observation, or a traced `FileWholeHash` that disagrees with the
+        // observed self-root) makes the judgement non-cacheable: it is
+        // returned to the caller but not admitted to the relation memo.
         let observed_self_roots = self.observed_self_roots_from_nodes([source, target]);
         let mut self_root_canonicals: Vec<std::sync::Arc<str>> =
             Vec::with_capacity(observed_self_roots.len());
@@ -161,9 +188,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self_root_canonicals.push(std::sync::Arc::clone(canonical));
             }
         }
-        if let Some(carrier) =
-            crate::semantic_query_memo::semantic_graph_read_set_signature(&observed_self_roots, &[])
-        {
+        if let Some(carrier) = crate::semantic_query_memo::semantic_graph_read_set_signature(
+            &observed_self_roots,
+            traced_facts,
+        ) {
             graph.insert_relation(
                 key,
                 carrier,
