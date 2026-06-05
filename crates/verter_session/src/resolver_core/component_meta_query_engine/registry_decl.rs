@@ -940,10 +940,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // R6: Instantiate.base is content-free `DeclKey`; the
         // cold build re-sources the live whole_hash from
         // `ensure_indexed_ready`.
-        let base = crate::semantic_query::DeclKey {
-            canonical_id: std::sync::Arc::from(resolved_root.0.as_str()),
-            decl_name: std::sync::Arc::from(resolved_root.1.as_str()),
-        };
+        let root_canonical: std::sync::Arc<str> = std::sync::Arc::from(resolved_root.0.as_str());
+        let base = dispatch.type_slot_for(
+            std::sync::Arc::clone(&root_canonical),
+            std::sync::Arc::from(resolved_root.1.as_str()),
+        );
+        let root_inst_ctx = dispatch.instantiate_context_for(
+            &root_canonical,
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Expanded,
+            ),
+        );
         match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
             base,
             args: empty_semantic_args(),
@@ -952,9 +959,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // root's surface members, call/construct lists, etc. Expanded
             // is required so the surface is interpretable; Navigate
             // would yield the lazy shell with no readable view.
-            context: crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Expanded,
-            ),
+            context: root_inst_ctx,
         }) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => Some(id),
             _ => Some(anchor),
@@ -1030,14 +1035,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 .dispatch_routed_pick_omit_via_shared_engine(
                     scope_canonical_id,
                     root_symbol,
-                    crate::semantic_query::DeclKey::builtin("Pick"),
+                    "Pick",
                     members,
                 ),
             RouteDemand::Omit(members) if !members.is_empty() => self
                 .dispatch_routed_pick_omit_via_shared_engine(
                     scope_canonical_id,
                     root_symbol,
-                    crate::semantic_query::DeclKey::builtin("Omit"),
+                    "Omit",
                     members,
                 ),
             _ => None,
@@ -1057,7 +1062,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &mut self,
         scope_canonical_id: &str,
         root_symbol: &str,
-        builtin_identity: crate::semantic_query::DeclKey,
+        builtin_name: &str,
         keys: &[String],
     ) -> Option<TypeExpr> {
         // Step A: instantiate the route root to a projectable body. Navigate
@@ -1070,10 +1075,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // `[body, keys]` in the publication Expanded mode — the same path as a
         // userland `Pick<…>` / `Omit<…>`, so fix-#1's public gate applies.
         match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-            base: builtin_identity,
+            base: dispatch.builtin_type_slot(builtin_name),
             args: std::sync::Arc::from(vec![body_id, keys_node].into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(
-                ProjectionMode::Expanded,
+            context: dispatch.instantiate_context_for(
+                "__builtin__",
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
             ),
         }) {
             QueryResult::Value(SemanticQueryOutput { value: node, .. }) => dispatch

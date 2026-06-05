@@ -1091,6 +1091,105 @@ impl ProjectionReductionContext {
     }
 }
 
+/// Per-key env+reduction context for [`SemanticQueryKey::Instantiate`].
+///
+/// `Instantiate`'s slot-intrinsic env dims (`type_env_hash` = `T`,
+/// `lib_env_hash` = `L`, `project_identity` = `J`) come from its
+/// `base: `[`ResolvedDeclSlotIdentity`]; this dedicated context adds the
+/// one extra env dim the instantiation depends on — `resolve_env_hash`
+/// (`R`), because substituting type arguments into the base body can
+/// resolve imported type-argument references — alongside the embedded
+/// [`ProjectionReductionContext`] (the `mode` / `demand` / `provenance` /
+/// `merge_role` projection-demand identity).
+///
+/// **Per-key context, not shared global (parity §2.6):** the env dim
+/// rides on this dedicated `Instantiate` context — NOT on the shared
+/// [`ProjectionReductionContext`] (which stays a pure projection-demand
+/// identity, carried unchanged by `KeyOf` / `MappedType` / `ProjectPath`).
+/// This mirrors the way [`RelationContext`] / `CallResolutionContext`
+/// embed a `ProjectionReductionContext` as a field rather than mutating
+/// it. `family_and_slot` folds `resolve_env_hash` onto
+/// [`crate::semantic_query_memo::FamilyKey::Instantiate`] (so two
+/// instantiations differing only in `R` never warm-hit) and strips the
+/// embedded projection mode into the `ModeSlot`.
+///
+/// **R6-clean:** `resolve_env_hash` is an ENV dimension, NOT a
+/// content/version hash; the slot stays content-free and the file
+/// content version is re-sourced at value-compute time from
+/// [`ResolverContext::ensure_indexed_ready`]. No `parse_stable_hash`,
+/// content hash, or `fact_dep_signature` enters this context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InstantiateContext {
+    /// Embedded projection-demand identity (`mode` / `demand` /
+    /// `provenance` / `merge_role`). The shared
+    /// [`ProjectionReductionContext`] stays a pure projection identity;
+    /// the env dim lives on this wrapper, never inside it.
+    pub projection_reduction: ProjectionReductionContext,
+    /// `resolve_env_hash` (`R`) — instantiation can resolve imported
+    /// type-argument references, so two instantiations of the same
+    /// `(base, args, projection)` under different module-resolution envs
+    /// are distinct. Folded onto `FamilyKey::Instantiate`. ENV hash, NOT
+    /// a content/version hash (R6-clean).
+    pub resolve_env_hash: HashValue,
+}
+
+impl InstantiateContext {
+    /// Build an `Instantiate` context from an embedded
+    /// [`ProjectionReductionContext`] plus the resolve-env dim.
+    #[must_use]
+    pub const fn new(
+        projection_reduction: ProjectionReductionContext,
+        resolve_env_hash: HashValue,
+    ) -> Self {
+        Self {
+            projection_reduction,
+            resolve_env_hash,
+        }
+    }
+
+    /// The embedded projection mode — shorthand for
+    /// `self.projection_reduction.mode`, consulted by the audit / mode
+    /// accessors that previously read the bare context's `mode`.
+    #[must_use]
+    pub const fn mode(self) -> ProjectionMode {
+        self.projection_reduction.mode
+    }
+}
+
+/// Per-key env+mode context for [`SemanticQueryKey::ResolveMacroPayload`].
+///
+/// The macro owner's slot-intrinsic env dims (`T` / `L` / `J`) come from
+/// `owner: `[`ResolvedDeclSlotIdentity`]; this context adds the one extra
+/// env dim the macro-payload resolution depends on — `resolve_env_hash`
+/// (`R`), because the macro payload (`defineProps<T>()` etc.) can resolve
+/// imported references — plus the projection `mode` (stripped into the
+/// `ModeSlot` by `family_and_slot`).
+///
+/// **R6-clean:** `resolve_env_hash` is an ENV dimension; the slot stays
+/// content-free with the file content version re-sourced at value-compute
+/// time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MacroPayloadContext {
+    /// `resolve_env_hash` (`R`) — the macro payload resolves imports.
+    /// Folded onto `FamilyKey::ResolveMacroPayload`. ENV hash, NOT a
+    /// content/version hash (R6-clean).
+    pub resolve_env_hash: HashValue,
+    /// Projection mode for downstream type lowering inside the macro
+    /// body. Stripped into the `ModeSlot` by `family_and_slot`.
+    pub mode: ProjectionMode,
+}
+
+impl MacroPayloadContext {
+    /// Build a macro-payload context from the resolve-env dim + mode.
+    #[must_use]
+    pub const fn new(resolve_env_hash: HashValue, mode: ProjectionMode) -> Self {
+        Self {
+            resolve_env_hash,
+            mode,
+        }
+    }
+}
+
 /// Carrier-stop predicate (codex-hybrid spec).
 ///
 /// Returns `true` exactly when an operator (`keyof T`, `{ [K in S]: V }`)
@@ -2928,14 +3027,18 @@ pub enum SemanticQueryKey {
     /// and `(Shallow, Published)` evaluations do not collide on a
     /// single shared entry.
     ///
-    /// `base` is a content-free [`DeclKey`] (R6) — version-rooting
-    /// lives on the cached value's `ReadSetSignature.facts` and
-    /// `self_root_canonicals`, re-sourced at value-build time from
-    /// the live indexed view.
+    /// `base` is the env-bearing, content-free
+    /// [`ResolvedDeclSlotIdentity`] of the declaration being instantiated
+    /// (always `symbol_space = Type` — you instantiate a type / interface
+    /// / class-type / alias / builtin-utility carrier). The slot carries
+    /// the `T` / `L` / `J` env dims; `context.resolve_env_hash` adds `R`.
+    /// Version-rooting lives on the cached value's
+    /// `ReadSetSignature.facts` + `self_root_canonicals`, re-sourced at
+    /// value-build time from the live indexed view (R6).
     Instantiate {
-        base: DeclKey,
+        base: ResolvedDeclSlotIdentity,
         args: Arc<[SemanticNodeId]>,
-        context: ProjectionReductionContext,
+        context: InstantiateContext,
     },
     ProjectMember {
         base: SemanticNodeId,
@@ -3100,16 +3203,20 @@ pub enum SemanticQueryKey {
     /// - `DefineExpose` / `DefineOptions`: 0 args → `Opaque(Miss)`;
     ///   else `type_args[0]` unchanged.
     ///
-    /// `owner` is a content-free [`DeclKey`] (R6) — version-rooting
-    /// lives on the cached value's `ReadSetSignature.facts` and
-    /// `self_root_canonicals`, re-sourced at value-build time from
-    /// the live indexed view.
+    /// `owner` is the env-bearing, content-free
+    /// [`ResolvedDeclSlotIdentity`] of the synthetic SFC declaration
+    /// (`defining_canonical` = the SFC file path, `symbol_space = Type`).
+    /// The slot carries `T` / `L` / `J`; `context.resolve_env_hash` adds
+    /// `R` and `context.mode` selects the projection mode. Version-rooting
+    /// lives on the cached value's `ReadSetSignature.facts` +
+    /// `self_root_canonicals`, re-sourced at value-build time from the
+    /// live indexed view (R6).
     ResolveMacroPayload {
-        owner: DeclKey,
+        owner: ResolvedDeclSlotIdentity,
         macro_index: usize,
         macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
         type_args: Arc<[SemanticNodeId]>,
-        mode: ProjectionMode,
+        context: MacroPayloadContext,
     },
     /// Resolve the instance OR static surface of a class declaration
     /// (the dual-space model).
@@ -4160,6 +4267,21 @@ pub struct TypeParamDecl {
 /// `canonical_id` is `Arc<str>` so every adapter clone / `get`-time key
 /// construction is a refcount bump instead of a `String` heap allocation.
 ///
+/// **Env-scoped identity (R T L J).** Beyond `(canonical_id, whole_hash)`
+/// content scoping, the key carries the env dims the resolved macro
+/// surface depends on: `resolve_env_hash` (`R` — heritage / import
+/// resolution), `type_env_hash` (`T`), `lib_env_hash` (`L` — apparent /
+/// lib-declared surfaces), and `project_identity` (`J`). Two resolutions
+/// of the same file content (equal `whole_hash`) under different envs
+/// (e.g. a different `lib` selection that changes heritage resolution)
+/// occupy DISTINCT entries instead of colliding — the host adapter
+/// supplies these from `host_view_env_hashes()` /
+/// `host_view_project_identity()`. These are ENV hashes, NOT
+/// content/version hashes; `whole_hash` already carries the content
+/// version (this key is a content-addressed artifact identity, so it
+/// legitimately carries `whole_hash`, unlike the query-identity family
+/// keys).
+///
 /// Entries keyed by this struct live inside
 /// [`SemanticGraphStore`](crate::semantic_query_memo::SemanticGraphStore) via
 /// [`SemanticNodeData::VueMacroElements`]; the graph owns the identity map
@@ -4168,6 +4290,14 @@ pub struct TypeParamDecl {
 pub struct HostResolvedNamedTypeKey {
     pub canonical_id: Arc<str>,
     pub whole_hash: Hash16,
+    /// `resolve_env_hash` (`R`) — heritage / import resolution dim.
+    pub resolve_env_hash: HashValue,
+    /// `type_env_hash` (`T`).
+    pub type_env_hash: HashValue,
+    /// `lib_env_hash` (`L`) — lib-declared apparent surfaces.
+    pub lib_env_hash: HashValue,
+    /// `project_identity` (`J`).
+    pub project_identity: u32,
     pub inner:
         verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey,
 }
@@ -4237,14 +4367,18 @@ pub trait SemanticQueryApi {
     }
     fn instantiate(
         &self,
-        base: DeclKey,
+        base: ResolvedDeclSlotIdentity,
         args: Arc<[SemanticNodeId]>,
+        resolve_env_hash: HashValue,
         body_mode: ProjectionMode,
     ) -> QueryResult<SemanticNodeId> {
         strip_output_provenance(self.execute_type_node(SemanticQueryKey::Instantiate {
             base,
             args,
-            context: ProjectionReductionContext::published(body_mode),
+            context: InstantiateContext::new(
+                ProjectionReductionContext::published(body_mode),
+                resolve_env_hash,
+            ),
         }))
     }
     fn project_member(

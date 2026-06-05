@@ -104,13 +104,11 @@ impl VerterHost {
         // (shallow-by-default). The empty-path `Shallow` terminal below
         // synthesises the one-level surface under publication demand.
         let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-            base: crate::semantic_query::DeclKey {
-                canonical_id: Arc::from(canonical_id),
-                decl_name: Arc::from("default"),
-            },
+            base: dispatch.type_slot_for(Arc::from(canonical_id), Arc::from("default")),
             args: Arc::from(Vec::new().into_boxed_slice()),
-            context: ProjectionReductionContext::structural_transit_with_mode(
-                ProjectionMode::Navigate,
+            context: dispatch.instantiate_context_for(
+                canonical_id,
+                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
             ),
         }) {
             QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,

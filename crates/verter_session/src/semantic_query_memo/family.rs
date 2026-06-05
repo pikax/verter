@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::fact_signature_helpers::ReadSetSignature;
 use crate::semantic_query::{
-    DeclKey, DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, PathSegment,
+    DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, PathSegment,
     ProjectionMode, ProjectionReductionContext, QueryResult, ReductionDemand, ResolveDeclKey,
     SemanticNodeId, SemanticQueryKey, ValueRootKey,
 };
@@ -118,13 +118,19 @@ impl MemoEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum FamilyKey {
     ResolveDecl(ResolveDeclKey),
-    /// `base` is a content-free [`DeclKey`] (R6) — version-rooting
-    /// lives on each candidate's `ReadSetSignature.facts` +
-    /// `self_root_canonicals` inside the multi-candidate
-    /// [`FamilySlots`].
+    /// `base` is the env-bearing, content-free
+    /// [`crate::semantic_query::ResolvedDeclSlotIdentity`] (R6 — carries
+    /// the slot's intrinsic `T` / `L` / `J` env, NEVER a content/version
+    /// hash); version-rooting lives on each candidate's
+    /// `ReadSetSignature.facts` + `self_root_canonicals` inside the
+    /// multi-candidate [`FamilySlots`]. `resolve_env_hash` (`R`) is folded
+    /// here from the key's [`crate::semantic_query::InstantiateContext`]
+    /// so two instantiations differing only in `R` never warm-hit; the
+    /// embedded projection mode strips into the [`ModeSlot`].
     Instantiate {
-        base: DeclKey,
+        base: crate::semantic_query::ResolvedDeclSlotIdentity,
         args: Arc<[SemanticNodeId]>,
+        resolve_env_hash: crate::semantic_query::HashValue,
         /// Surface-provenance dimension (codex BINDING design). A
         /// macro-type-argument own-body instantiation and a plain
         /// structural instantiation of the SAME decl + args produce
@@ -197,15 +203,21 @@ pub(super) enum FamilyKey {
     ResolvedNamedType {
         key: Arc<HostResolvedNamedTypeKey>,
     },
-    /// Mode-erased ResolveMacroPayload identity. `owner` is a
-    /// content-free [`DeclKey`] (R6) — version-rooting lives on each
-    /// candidate's `ReadSetSignature.facts` + `self_root_canonicals`
-    /// inside the multi-candidate [`FamilySlots`].
+    /// Mode-erased ResolveMacroPayload identity. `owner` is the
+    /// env-bearing, content-free
+    /// [`crate::semantic_query::ResolvedDeclSlotIdentity`] (R6 — carries
+    /// the slot's intrinsic `T` / `L` / `J` env); version-rooting lives on
+    /// each candidate's `ReadSetSignature.facts` + `self_root_canonicals`
+    /// inside the multi-candidate [`FamilySlots`]. `resolve_env_hash`
+    /// (`R`) is folded here from the key's
+    /// [`crate::semantic_query::MacroPayloadContext`]; the projection mode
+    /// strips into the [`ModeSlot`].
     ResolveMacroPayload {
-        owner: DeclKey,
+        owner: crate::semantic_query::ResolvedDeclSlotIdentity,
         macro_index: usize,
         macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
         type_args: Arc<[SemanticNodeId]>,
+        resolve_env_hash: crate::semantic_query::HashValue,
     },
     /// Mode-erased `ResolveClassSurface` identity. `decl_slot` is the
     /// content-free [`crate::semantic_query::ResolvedDeclSlotIdentity`]
@@ -944,15 +956,19 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             base,
             args,
             context,
-        } => (
-            FamilyKey::Instantiate {
-                base: base.clone(),
-                args: Arc::clone(args),
-                provenance: context.provenance,
-                merge_role: context.merge_role,
-            },
-            context_to_slot(*context),
-        ),
+        } => {
+            let prc = context.projection_reduction;
+            (
+                FamilyKey::Instantiate {
+                    base: base.clone(),
+                    args: Arc::clone(args),
+                    resolve_env_hash: context.resolve_env_hash,
+                    provenance: prc.provenance,
+                    merge_role: prc.merge_role,
+                },
+                context_to_slot(prc),
+            )
+        }
         SemanticQueryKey::ProjectMember { base, member, mode } => (
             FamilyKey::ProjectMember {
                 base: *base,
@@ -1077,15 +1093,16 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             macro_index,
             macro_kind,
             type_args,
-            mode,
+            context,
         } => (
             FamilyKey::ResolveMacroPayload {
                 owner: owner.clone(),
                 macro_index: *macro_index,
                 macro_kind: *macro_kind,
                 type_args: Arc::clone(type_args),
+                resolve_env_hash: context.resolve_env_hash,
             },
-            mode_to_slot(*mode),
+            mode_to_slot(context.mode),
         ),
         // ResolveClassSurface — `side` is real family identity (instance
         // vs static halves never collide); the projection mode strips

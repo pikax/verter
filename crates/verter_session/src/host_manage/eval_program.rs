@@ -450,6 +450,11 @@ impl VerterHost {
         // straggler inserts are rejected — see
         // `SemanticGraphStore::insert_resolved_named_type`.
         let named_type_generation = graph.named_type_generation();
+        // Env-scope the resolved named-type identity (R T L J) from the
+        // defining canonical's per-project env view — two resolutions of
+        // the same content under different envs must not collide.
+        let env = self.host_view_env_hashes_for(canonical_id);
+        let project_identity = self.host_view_project_identity_for(canonical_id).fold_u32();
         let adapter: std::sync::Arc<
             dyn verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
                 + Send
@@ -458,6 +463,10 @@ impl VerterHost {
             graph,
             canonical_id: Arc::<str>::from(canonical_id),
             whole_hash,
+            resolve_env_hash: env.resolve_env_hash,
+            type_env_hash: env.type_env_hash,
+            lib_env_hash: env.lib_env_hash,
+            project_identity,
             named_type_generation,
         });
         let type_context = Rc::new(crate::ParsedTypeResolutionContext::new(

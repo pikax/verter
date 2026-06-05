@@ -365,10 +365,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     name,
                     whole_hash: _,
                 }) => {
-                    let base = crate::semantic_query::DeclKey {
-                        canonical_id: Arc::clone(canonical_id),
-                        decl_name: Arc::clone(name),
-                    };
+                    let base = self.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
+                    let owner_canonical = Arc::clone(canonical_id);
                     drop(data);
                     // Codex-hybrid spec: the
                     // declaration-placeholder unwrap inherits the
@@ -380,7 +378,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     match self.execute_type_node(SemanticQueryKey::Instantiate {
                         base,
                         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                        context: reduction_context,
+                        context: self
+                            .instantiate_context_for(&owner_canonical, reduction_context),
                     }) {
                         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => break self.opaque(QueryError::Miss),

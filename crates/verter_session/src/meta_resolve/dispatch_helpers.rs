@@ -174,15 +174,17 @@ fn realize_callable_member_inner(
         // Conditional reduction (which is what turns
         // `ExtendSlotWithPlan<TPlan, K>` into a Function) fires.
         SemanticNodeData::InstantiationRef { base, args } => {
-            let base = base.to_decl_key();
+            let slot =
+                dispatch.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+            let owner_canonical = Arc::clone(&base.canonical_id);
             let args = Arc::clone(args);
             drop(data);
             let body_context =
                 ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
             let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-                base,
+                base: slot,
                 args,
-                context: body_context,
+                context: dispatch.instantiate_context_for(&owner_canonical, body_context),
             });
             emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
             let body = match read.value {
@@ -230,18 +232,19 @@ fn realize_callable_member_inner(
             name,
             whole_hash: _,
         }) => {
-            let key = crate::semantic_query::DeclKey {
-                canonical_id: Arc::clone(canonical_id),
-                decl_name: Arc::clone(name),
-            };
+            let slot = dispatch.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
+            let owner_canonical = Arc::clone(canonical_id);
             drop(data);
             let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-                base: key,
+                base: slot,
                 args: Arc::from(
                     Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
                 ),
-                context: ProjectionReductionContext::structural_transit_with_mode(
-                    ProjectionMode::Navigate,
+                context: dispatch.instantiate_context_for(
+                    &owner_canonical,
+                    ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Navigate,
+                    ),
                 ),
             });
             emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);

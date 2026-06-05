@@ -390,9 +390,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         );
                     }
                     return match self.execute_type_node(SemanticQueryKey::Instantiate {
-                        base: builtin_identity.to_decl_key(),
+                        base: self.type_slot_for(
+                            Arc::clone(&builtin_identity.canonical_id),
+                            Arc::clone(&builtin_identity.decl_name),
+                        ),
                         args: Arc::from(arg_ids.into_boxed_slice()),
-                        context: reduction_context,
+                        context: self.instantiate_context_for(
+                            &builtin_identity.canonical_id,
+                            reduction_context,
+                        ),
                     }) {
                         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => self.opaque(QueryError::Miss),
@@ -635,9 +641,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         })
                         .collect();
                     match self.execute_type_node(SemanticQueryKey::Instantiate {
-                        base: decl_identity.to_decl_key(),
+                        base: self.type_slot_for(
+                            Arc::clone(&decl_identity.canonical_id),
+                            Arc::clone(&decl_identity.decl_name),
+                        ),
                         args: Arc::from(arg_ids.into_boxed_slice()),
-                        context: reduction_context,
+                        context: self
+                            .instantiate_context_for(&decl_identity.canonical_id, reduction_context),
                     }) {
                         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => self.opaque(QueryError::Miss),

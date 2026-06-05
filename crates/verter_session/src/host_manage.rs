@@ -365,6 +365,15 @@ pub(in crate::host_manage) struct HostNamedTypeCacheAdapter {
     /// `instantiate_type_params_ctx`) don't each allocate a fresh `String`.
     pub(in crate::host_manage) canonical_id: Arc<str>,
     pub(in crate::host_manage) whole_hash: Hash16,
+    /// Env-scoping dims (R T L J) for the resolved named-type identity,
+    /// captured from the host view at adapter construction. Two
+    /// resolutions of the same content (`whole_hash`) under different envs
+    /// occupy DISTINCT entries instead of colliding (e.g. a different
+    /// `lib` selection that changes heritage resolution).
+    pub(in crate::host_manage) resolve_env_hash: Hash16,
+    pub(in crate::host_manage) type_env_hash: Hash16,
+    pub(in crate::host_manage) lib_env_hash: Hash16,
+    pub(in crate::host_manage) project_identity: u32,
     /// Resolved-named-type reset epoch snapshotted when this adapter was
     /// constructed (a fresh adapter per `build_type_context` call). Every
     /// `insert` threads this snapshot into
@@ -393,6 +402,10 @@ impl verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
         let host_key = crate::project_type_store::HostResolvedNamedTypeKey {
             canonical_id: Arc::clone(&self.canonical_id),
             whole_hash: self.whole_hash,
+            resolve_env_hash: self.resolve_env_hash,
+            type_env_hash: self.type_env_hash,
+            lib_env_hash: self.lib_env_hash,
+            project_identity: self.project_identity,
             inner: key.clone(),
         };
         self.graph.get_resolved_named_type(&host_key)
@@ -406,6 +419,10 @@ impl verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
         let host_key = crate::project_type_store::HostResolvedNamedTypeKey {
             canonical_id: Arc::clone(&self.canonical_id),
             whole_hash: self.whole_hash,
+            resolve_env_hash: self.resolve_env_hash,
+            type_env_hash: self.type_env_hash,
+            lib_env_hash: self.lib_env_hash,
+            project_identity: self.project_identity,
             inner: key,
         };
         // Threads the construction-time epoch snapshot: the insert is

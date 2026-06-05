@@ -726,15 +726,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // drives any deeper projection), matching `resolve_vue_public_type`'s
         // own intermediate-hop demand.
         let instance_return = match self.execute_type_node(SemanticQueryKey::Instantiate {
-            base: crate::semantic_query::DeclKey {
-                canonical_id: Arc::clone(resolved_default_canonical),
-                decl_name: Arc::from("default"),
-            },
+            base: self.type_slot_for(Arc::clone(resolved_default_canonical), Arc::from("default")),
             args: Arc::from(Vec::new().into_boxed_slice()),
-            context:
+            context: self.instantiate_context_for(
+                resolved_default_canonical,
                 crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                     ProjectionMode::Navigate,
                 ),
+            ),
         }) {
             QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
             QueryResult::Recursive(node) => node,
@@ -811,7 +810,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         side: crate::semantic_query::ClassSurfaceSide,
         _context: crate::semantic_query::ClassSurfaceContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        use crate::semantic_query::{ClassSurfaceSide, DeclKey, ProjectionReductionContext};
+        use crate::semantic_query::{ClassSurfaceSide, ProjectionReductionContext};
 
         // Self-root the composed surface on the class declaration's own
         // live content version (R6/R20 — the key is content-free).
@@ -830,15 +829,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let composed = match side {
             ClassSurfaceSide::Instance => {
                 // Instance side = the TYPE-space half: instantiate under
-                // Shallow.
-                let base = DeclKey {
-                    canonical_id: Arc::clone(&decl_slot.defining_canonical),
-                    decl_name: Arc::clone(&decl_slot.merged_symbol_name),
-                };
+                // Shallow. The class slot is already the env-bearing
+                // type-space slot; canonicalize its symbol space to `Type`
+                // for the `Instantiate` base (the dual-space selector is
+                // `side`, not the slot's space).
+                let base = decl_slot
+                    .with_symbol_space(crate::semantic_query::SemanticSymbolSpace::Type);
+                let inst_ctx = self.instantiate_context_for(
+                    &decl_slot.defining_canonical,
+                    ProjectionReductionContext::published(ProjectionMode::Shallow),
+                );
                 self.execute_type_node(SemanticQueryKey::Instantiate {
                     base,
                     args: Arc::clone(type_args),
-                    context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+                    context: inst_ctx,
                 })
             }
             ClassSurfaceSide::Static => {
@@ -892,10 +896,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   reference visited at the shell level, sourced from the bound arg.
     pub(super) fn build_instantiate(
         &self,
-        identity: &crate::semantic_query::DeclKey,
+        base: &crate::semantic_query::ResolvedDeclSlotIdentity,
         args: &Arc<[SemanticNodeId]>,
-        context: crate::semantic_query::ProjectionReductionContext,
+        instantiate_context: crate::semantic_query::InstantiateContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // U2B.9 FORK-A: the key carries an `InstantiateContext` (embedded
+        // projection-reduction identity + the `resolve_env_hash` env dim).
+        // Destructure into the embedded `ProjectionReductionContext` so the
+        // rest of the lowering pipeline keeps consulting `context`
+        // unchanged; `resolve_env_hash` is threaded onto any nested
+        // `Instantiate` sub-key this build re-emits via
+        // `instantiate_context_for`.
+        let context = instantiate_context.projection_reduction;
         // Codex-hybrid spec: the call-site provides
         // the publication / structural-transit context. `body_mode` is
         // shorthand for `context.mode` everywhere the existing lowering
@@ -936,8 +948,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::request_context::note_expanded_instantiate_for_synthesis_scope();
         }
 
-        let decl_canonical = &identity.canonical_id;
-        let decl_name = &identity.decl_name;
+        let decl_canonical = &base.defining_canonical;
+        let decl_name = &base.merged_symbol_name;
         // R6 / R20: the key is content-free. Re-source the base file's
         // content version from the live indexed view at value-build
         // time, so the cached `MemoEntry` self-roots on the current
@@ -3487,12 +3499,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.evaluate_deferred_semantic_node_with_context(mapper.value_expr, context);
             let resolved = match graph.node_data(evaluated).as_deref() {
                 Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                    let base = base.to_decl_key();
+                    let slot = self
+                        .type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+                    let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
                     let args = Arc::clone(args);
                     match self.execute_type_node(SemanticQueryKey::Instantiate {
-                        base,
+                        base: slot,
                         args,
-                        context,
+                        context: inst_ctx,
                     }) {
                         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => evaluated,
@@ -3718,12 +3732,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let evaluated = self.evaluate_deferred_semantic_node_with_context(substituted, context);
         let resolved = match self.graph().node_data(evaluated).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                let base = base.to_decl_key();
+                let slot =
+                    self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+                let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
                 let args = Arc::clone(args);
                 match self.execute_type_node(SemanticQueryKey::Instantiate {
-                    base,
+                    base: slot,
                     args,
-                    context,
+                    context: inst_ctx,
                 }) {
                     QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => evaluated,
@@ -3851,12 +3867,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let evaluated = self.evaluate_deferred_semantic_node_with_context(substituted, context);
         let resolved = match self.graph().node_data(evaluated).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                let base = base.to_decl_key();
+                let slot =
+                    self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+                let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
                 let args = Arc::clone(args);
                 match self.execute_type_node(SemanticQueryKey::Instantiate {
-                    base,
+                    base: slot,
                     args,
-                    context,
+                    context: inst_ctx,
                 }) {
                     QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => evaluated,
@@ -3924,12 +3942,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.evaluate_deferred_semantic_node_with_context(mapper.value_expr, context);
         let resolved = match self.graph().node_data(evaluated).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                let base = base.to_decl_key();
+                let slot =
+                    self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+                let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
                 let args = Arc::clone(args);
                 match self.execute_type_node(SemanticQueryKey::Instantiate {
-                    base,
+                    base: slot,
                     args,
-                    context,
+                    context: inst_ctx,
                 }) {
                     QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => evaluated,
@@ -4594,7 +4614,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// - `DefineExpose` / `DefineOptions`: 0 args → `Opaque(Miss)`;
     ///   else `type_args[0]` unchanged.
     ///
-    /// All arms record `(owner.canonical_id, WholeHash(owner.whole_hash))`
+    /// All arms record `(owner.defining_canonical, WholeHash(owner.whole_hash))`
     /// in the local fence so warm-hit revalidation against the live
     /// `StoreView` observes the macro's owning file generation.
     ///
@@ -4606,7 +4626,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// which propagates here as `QueryResult::Recursive(node)`.
     pub(super) fn build_resolve_macro_payload(
         &self,
-        owner: &crate::semantic_query::DeclKey,
+        owner: &crate::semantic_query::ResolvedDeclSlotIdentity,
         macro_index: usize,
         macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
         type_args: &Arc<[SemanticNodeId]>,
@@ -4627,7 +4647,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // DefineSlots / DefineModel) re-check below and refuse
         // admission with `cache_suppress = true` when the snapshot
         // is missing.
-        let owner_indexed = self.ctx.ensure_indexed_ready(owner.canonical_id.as_ref());
+        let owner_indexed = self.ctx.ensure_indexed_ready(owner.defining_canonical.as_ref());
         let owner_whole_hash: crate::semantic_query::HashValue = owner_indexed
             .as_ref()
             .map(|indexed| indexed.whole_hash)
@@ -4640,7 +4660,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // stored signature, and the cold build re-runs.
         let mut local_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
         local_fence.push((
-            Arc::clone(&owner.canonical_id),
+            Arc::clone(&owner.defining_canonical),
             crate::semantic_query::DepVersion::WholeHash(owner_whole_hash),
         ));
         // Also pin the project-generation so the fence catches
@@ -4648,7 +4668,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // basis (mirrors `dep_signature_for` semantics).
         let project_gen = self.ctx.project_type_store().project_generation();
         local_fence.push((
-            Arc::clone(&owner.canonical_id),
+            Arc::clone(&owner.defining_canonical),
             crate::semantic_query::DepVersion::ProjectGeneration(project_gen),
         ));
 
@@ -4758,7 +4778,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // SFC OR to any type argument's originating file misses the warm
         // read. Structural type args (`Global`-scoped primitives) and an
         // empty `type_args` set contribute nothing.
-        let mut observed_self_roots = vec![(Arc::clone(&owner.canonical_id), owner_whole_hash)];
+        let mut observed_self_roots = vec![(Arc::clone(&owner.defining_canonical), owner_whole_hash)];
         for arg_root in self.observed_self_roots_from_nodes(type_args.iter().copied()) {
             if !observed_self_roots
                 .iter()

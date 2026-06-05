@@ -957,9 +957,15 @@ pub(crate) fn materialize_component_meta_structure(
                     // original args (preserves generic carriers per
                     // Codex2 P0 #3).
                     let body_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-                        base: extraction.root_identity.to_decl_key(),
+                        base: dispatch.type_slot_for(
+                            Arc::clone(&extraction.root_identity.canonical_id),
+                            Arc::clone(&extraction.root_identity.decl_name),
+                        ),
                         args: Arc::clone(&extraction.root_args),
-                        context: crate::semantic_query::ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate),
+                        context: dispatch.instantiate_context_for(
+                            &extraction.root_identity.canonical_id,
+                            crate::semantic_query::ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate),
+                        ),
                     });
                     crate::component_meta_audit::merge_dep_signature_into_local_fence(
                         &mut local_fence,
@@ -983,15 +989,18 @@ pub(crate) fn materialize_component_meta_structure(
                     // mode (typically Expanded) drives the final
                     // projection's expansion behavior.
                     let keys_node = crate::meta_resolve::build_keys_union_node(graph, keys);
-                    let pick_or_omit_identity = match &extraction.route {
-                        RouteDemand::Pick(_) => crate::semantic_query::DeclKey::builtin("Pick"),
-                        RouteDemand::Omit(_) => crate::semantic_query::DeclKey::builtin("Omit"),
+                    let pick_or_omit_name = match &extraction.route {
+                        RouteDemand::Pick(_) => "Pick",
+                        RouteDemand::Omit(_) => "Omit",
                         _ => unreachable!("matched only Pick/Omit"),
                     };
                     let projected = dispatch.execute_read(SemanticQueryKey::Instantiate {
-                        base: pick_or_omit_identity,
+                        base: dispatch.builtin_type_slot(pick_or_omit_name),
                         args: Arc::from(vec![body_id, keys_node].into_boxed_slice()),
-                        context: crate::semantic_query::ProjectionReductionContext::published(key_for_compute.mode),
+                        context: dispatch.instantiate_context_for(
+                            "__builtin__",
+                            crate::semantic_query::ProjectionReductionContext::published(key_for_compute.mode),
+                        ),
                     });
                     crate::component_meta_audit::merge_dep_signature_into_local_fence(
                         &mut local_fence,
@@ -1082,9 +1091,15 @@ pub(crate) fn materialize_component_meta_structure(
                 };
             resolve_target.map(|(identity, args)| {
                 let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-                    base: identity.to_decl_key(),
+                    base: dispatch.type_slot_for(
+                        Arc::clone(&identity.canonical_id),
+                        Arc::clone(&identity.decl_name),
+                    ),
+                    context: dispatch.instantiate_context_for(
+                        &identity.canonical_id,
+                        crate::semantic_query::ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate),
+                    ),
                     args,
-                    context: crate::semantic_query::ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate),
                 });
                 crate::component_meta_audit::merge_dep_signature_into_local_fence(
                     &mut local_fence,

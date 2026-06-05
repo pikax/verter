@@ -154,6 +154,94 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Build the env-bearing, content-free type-space
+    /// [`ResolvedDeclSlotIdentity`](crate::semantic_query::ResolvedDeclSlotIdentity)
+    /// for the declaration `name` defined in `canonical`.
+    ///
+    /// This is the SINGLE production derivation point for an
+    /// `Instantiate` / `ResolveMacroPayload` base/owner slot (U2B.9
+    /// FORK-A): it reads the DEFINING file's per-canonical env
+    /// (`type_env_hash` = `T`, `lib_env_hash` = `L`) and folds the project
+    /// identity (`J`) from `host_view_project_identity_for`, building the
+    /// slot DIRECTLY (no `DeclKey` ↔ slot adapter). `symbol_space` is
+    /// always `Type` — an `Instantiate` base / macro owner is a
+    /// type-space carrier (interface / type alias / class-type / builtin
+    /// utility / synthetic SFC owner). The slot stays content-free (R6);
+    /// the file content version is re-sourced at value-compute time.
+    #[must_use]
+    pub(crate) fn type_slot_for(
+        &self,
+        canonical: Arc<str>,
+        name: Arc<str>,
+    ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
+        let host = self.ctx.host_for_fact_tracer_install();
+        let env = host.host_view_env_hashes_for(canonical.as_ref());
+        let project_identity = host
+            .host_view_project_identity_for(canonical.as_ref())
+            .fold_u32();
+        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
+            canonical,
+            name,
+            project_identity,
+            env.type_env_hash,
+            env.lib_env_hash,
+        )
+    }
+
+    /// Build the env-bearing type-space slot for a built-in utility
+    /// carrier (`Pick` / `Omit` / `Required` / `Partial` / …). The
+    /// defining canonical is the `"__builtin__"` sentinel; builtins root
+    /// self-version through their `args` nodes (no file fact), and their
+    /// env dims come from the workspace-default env (the `"__builtin__"`
+    /// canonical has no owning project).
+    #[must_use]
+    pub(crate) fn builtin_type_slot(
+        &self,
+        name: &str,
+    ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
+        self.type_slot_for(Arc::from("__builtin__"), Arc::from(name))
+    }
+
+    /// The `resolve_env_hash` (`R`) dimension for a declaration defined in
+    /// `canonical` — the extra env dim carried by
+    /// [`InstantiateContext`](crate::semantic_query::InstantiateContext) /
+    /// [`MacroPayloadContext`](crate::semantic_query::MacroPayloadContext)
+    /// beyond the slot's `T` / `L` / `J`.
+    #[must_use]
+    pub(crate) fn resolve_env_hash_for(
+        &self,
+        canonical: &str,
+    ) -> crate::semantic_query::HashValue {
+        self.ctx
+            .host_for_fact_tracer_install()
+            .host_view_env_hashes_for(canonical)
+            .resolve_env_hash
+    }
+
+    /// Build the [`InstantiateContext`](crate::semantic_query::InstantiateContext)
+    /// for a base defined in `canonical` from the projection-reduction
+    /// context `prc` plus the base canonical's `resolve_env_hash`.
+    #[must_use]
+    pub(crate) fn instantiate_context_for(
+        &self,
+        canonical: &str,
+        prc: crate::semantic_query::ProjectionReductionContext,
+    ) -> crate::semantic_query::InstantiateContext {
+        crate::semantic_query::InstantiateContext::new(prc, self.resolve_env_hash_for(canonical))
+    }
+
+    /// Build the [`MacroPayloadContext`](crate::semantic_query::MacroPayloadContext)
+    /// for an owner defined in `canonical` from the owner canonical's
+    /// `resolve_env_hash` plus the projection `mode`.
+    #[must_use]
+    pub(crate) fn macro_payload_context_for(
+        &self,
+        canonical: &str,
+        mode: crate::semantic_query::ProjectionMode,
+    ) -> crate::semantic_query::MacroPayloadContext {
+        crate::semantic_query::MacroPayloadContext::new(self.resolve_env_hash_for(canonical), mode)
+    }
+
     /// Push `identity` onto the active-instantiation stack. Returns `true`
     /// when the identity was not already present (caller MUST pair with
     /// `pop_instantiate_active` on the same identity). Returns `false`
@@ -727,7 +815,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             move || {
                 if let SemanticQueryKey::Instantiate { base, .. } = &sentinel_key {
                     return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                        name: Arc::clone(&base.decl_name),
+                        name: Arc::clone(&base.merged_symbol_name),
                     }));
                 }
                 graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
@@ -828,13 +916,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     macro_index,
                     macro_kind,
                     type_args,
-                    mode,
+                    context,
                 } => self.build_resolve_macro_payload(
                     owner,
                     *macro_index,
                     *macro_kind,
                     type_args,
-                    *mode,
+                    context.mode,
                 ),
                 // ResolveClassSurface — LIVE producer. Composes the
                 // dual-space sub-queries through the ONE shared engine.
@@ -1159,7 +1247,7 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
                     ctx.bump_type_resolution_projection_op();
                 }
                 SemanticQueryKey::Instantiate { context, .. } => {
-                    ctx.bump_type_resolution_hop(context.mode);
+                    ctx.bump_type_resolution_hop(context.projection_reduction.mode);
                 }
                 SemanticQueryKey::Conditional { .. } => {
                     ctx.bump_type_resolution_conditional_decision();
@@ -1257,24 +1345,41 @@ pub(crate) fn node_data_for(
 // classes A/B/C, 5/6/7/8/9 classes D + R) land in 5d-5f.
 // ──────────────────────────────────────────────────────────────────────────
 
-/// `__builtin__` decl key for the `Pick` utility.
+/// `__builtin__` type-space slot for the `Pick` utility.
 ///
-/// Returns the content-free [`DeclKey`](crate::semantic_query::DeclKey)
+/// Returns the content-free, env-bearing
+/// [`ResolvedDeclSlotIdentity`](crate::semantic_query::ResolvedDeclSlotIdentity)
 /// used as `SemanticQueryKey::Instantiate.base` for the Pick builtin
-/// (`build_builtin_utility` Pick arm).
+/// (`build_builtin_utility` Pick arm). A test-fixture helper: it carries
+/// a zeroed env (project / type-env / lib-env), so it is suitable for
+/// identity assertions, not for an env-discriminating production
+/// dispatch — the production path uses
+/// [`ProjectSemanticDispatch::builtin_type_slot`] with the live host env.
 #[must_use]
 #[allow(dead_code)]
-pub fn pick_builtin_decl_identity() -> crate::semantic_query::DeclKey {
-    crate::semantic_query::DeclKey::builtin("Pick")
+pub fn pick_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotIdentity {
+    crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
+        Arc::from("__builtin__"),
+        Arc::from("Pick"),
+        0,
+        Default::default(),
+        Default::default(),
+    )
 }
 
-/// `__builtin__` decl key for the `Omit` utility.
+/// `__builtin__` type-space slot for the `Omit` utility.
 ///
 /// Mirrors [`pick_builtin_decl_identity`] for the Omit builtin.
 #[must_use]
 #[allow(dead_code)]
-pub fn omit_builtin_decl_identity() -> crate::semantic_query::DeclKey {
-    crate::semantic_query::DeclKey::builtin("Omit")
+pub fn omit_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotIdentity {
+    crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
+        Arc::from("__builtin__"),
+        Arc::from("Omit"),
+        0,
+        Default::default(),
+        Default::default(),
+    )
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -1327,9 +1432,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let key_set = self.intern_string_literal_union(members);
         crate::semantic_query::strip_output_provenance(self.execute_type_node(
             SemanticQueryKey::Instantiate {
-                base: crate::semantic_query::DeclKey::builtin("Pick"),
+                base: self.builtin_type_slot("Pick"),
                 args: Arc::from(vec![base, key_set].into_boxed_slice()),
-                context: crate::semantic_query::ProjectionReductionContext::published(mode),
+                context: self.instantiate_context_for(
+                    "__builtin__",
+                    crate::semantic_query::ProjectionReductionContext::published(mode),
+                ),
             },
         ))
     }
@@ -1351,9 +1459,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let key_set = self.intern_string_literal_union(members);
         crate::semantic_query::strip_output_provenance(self.execute_type_node(
             SemanticQueryKey::Instantiate {
-                base: crate::semantic_query::DeclKey::builtin("Omit"),
+                base: self.builtin_type_slot("Omit"),
                 args: Arc::from(vec![base, key_set].into_boxed_slice()),
-                context: crate::semantic_query::ProjectionReductionContext::published(mode),
+                context: self.instantiate_context_for(
+                    "__builtin__",
+                    crate::semantic_query::ProjectionReductionContext::published(mode),
+                ),
             },
         ))
     }

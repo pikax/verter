@@ -287,21 +287,24 @@ impl KeyFamily {
             (
                 KeyFamily::InstantiateForResolvedName(name),
                 SemanticQueryKey::Instantiate { base, .. },
-            ) => base.decl_name.as_ref() == *name,
+            ) => base.merged_symbol_name.as_ref() == *name,
             (
                 KeyFamily::ShallowForResolvedName(name),
                 SemanticQueryKey::Instantiate { base, context, .. },
             ) => {
-                base.decl_name.as_ref() == *name
-                    && matches!(context.mode, crate::semantic_query::ProjectionMode::Shallow)
+                base.merged_symbol_name.as_ref() == *name
+                    && matches!(
+                        context.projection_reduction.mode,
+                        crate::semantic_query::ProjectionMode::Shallow
+                    )
             }
             (
                 KeyFamily::SkeletonForResolvedName(name),
                 SemanticQueryKey::Instantiate { base, context, .. },
             ) => {
-                base.decl_name.as_ref() == *name
+                base.merged_symbol_name.as_ref() == *name
                     && matches!(
-                        context.mode,
+                        context.projection_reduction.mode,
                         crate::semantic_query::ProjectionMode::Skeleton
                     )
             }
@@ -309,9 +312,9 @@ impl KeyFamily {
                 KeyFamily::InstantiateExpandedForResolvedName(name),
                 SemanticQueryKey::Instantiate { base, context, .. },
             ) => {
-                base.decl_name.as_ref() == *name
+                base.merged_symbol_name.as_ref() == *name
                     && matches!(
-                        context.mode,
+                        context.projection_reduction.mode,
                         crate::semantic_query::ProjectionMode::Expanded
                     )
             }

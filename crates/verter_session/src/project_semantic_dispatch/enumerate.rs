@@ -205,10 +205,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 name,
                 whole_hash: _,
             }) => {
-                let base = crate::semantic_query::DeclKey {
-                    canonical_id: Arc::clone(canonical_id),
-                    decl_name: Arc::clone(name),
-                };
+                let base = self.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
+                let owner_canonical = Arc::clone(canonical_id);
                 drop(data);
                 match self.execute_type_node(crate::semantic_query::SemanticQueryKey::Instantiate {
                     base,
@@ -222,8 +220,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // demand (the keyspace is the explicit consumer
                     // surface), so the context stays `Published +
                     // Expanded`.
-                    context: crate::semantic_query::ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Expanded,
+                    context: self.instantiate_context_for(
+                        &owner_canonical,
+                        crate::semantic_query::ProjectionReductionContext::published(
+                            crate::semantic_query::ProjectionMode::Expanded,
+                        ),
                     ),
                 }) {
                     crate::semantic_query::QueryResult::Value(SemanticQueryOutput {
@@ -339,10 +340,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::DeclRef { identity } => {
                 let instantiated = match self.execute_type_node(
                     crate::semantic_query::SemanticQueryKey::Instantiate {
-                        base: identity.to_decl_key(),
+                        base: self.type_slot_for(
+                            Arc::clone(&identity.canonical_id),
+                            Arc::clone(&identity.decl_name),
+                        ),
                         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                        context: crate::semantic_query::ProjectionReductionContext::published(
-                            crate::semantic_query::ProjectionMode::Expanded,
+                        context: self.instantiate_context_for(
+                            &identity.canonical_id,
+                            crate::semantic_query::ProjectionReductionContext::published(
+                                crate::semantic_query::ProjectionMode::Expanded,
+                            ),
                         ),
                     },
                 ) {
@@ -360,10 +367,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::InstantiationRef { base, args } => {
                 let instantiated = match self.execute_type_node(
                     crate::semantic_query::SemanticQueryKey::Instantiate {
-                        base: base.to_decl_key(),
+                        base: self.type_slot_for(
+                            Arc::clone(&base.canonical_id),
+                            Arc::clone(&base.decl_name),
+                        ),
                         args: Arc::clone(args),
-                        context: crate::semantic_query::ProjectionReductionContext::published(
-                            crate::semantic_query::ProjectionMode::Expanded,
+                        context: self.instantiate_context_for(
+                            &base.canonical_id,
+                            crate::semantic_query::ProjectionReductionContext::published(
+                                crate::semantic_query::ProjectionMode::Expanded,
+                            ),
                         ),
                     },
                 ) {

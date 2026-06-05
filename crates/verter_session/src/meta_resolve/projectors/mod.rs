@@ -564,11 +564,11 @@ pub(crate) fn resolve_macro_payload(
     };
 
     let payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
-        owner: owner.to_decl_key(),
+        owner: dispatch.type_slot_for(Arc::clone(&owner.canonical_id), Arc::clone(&owner.decl_name)),
         macro_index,
         macro_kind,
         type_args,
-        mode: ProjectionMode::Navigate,
+        context: dispatch.macro_payload_context_for(&owner.canonical_id, ProjectionMode::Navigate),
     });
     emit_dispatch_dep_signature_facts(dispatch.ctx, &payload_read.dep_signature);
     if !payload_read.walker_diagnostics.is_empty() {

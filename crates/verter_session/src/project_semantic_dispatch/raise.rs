@@ -1138,14 +1138,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // build re-sources the live whole_hash from
                 // `ensure_indexed_ready`.
                 let _ = whole_hash;
-                let base = crate::semantic_query::DeclKey {
-                    canonical_id: Arc::clone(canonical_id),
-                    decl_name: Arc::clone(name),
-                };
+                let base = self.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
                 let key = SemanticQueryKey::Instantiate {
+                    context: self.instantiate_context_for(&base.defining_canonical, context),
                     base,
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    context,
                 };
                 self.dispatch_operator_with_recurse(node, key, context, state)
             }
@@ -1340,7 +1337,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // reduce regardless of body shape.
                     return node;
                 }
-                let base_key = base.to_decl_key();
+                let base_key =
+                    self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+                let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
                 let args: Arc<[SemanticNodeId]> = Arc::from(
                     args.iter()
                         .map(|id| state.mapping.get(&(*id, context)).copied().unwrap_or(*id))
@@ -1350,7 +1349,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let key = SemanticQueryKey::Instantiate {
                     base: base_key,
                     args,
-                    context,
+                    context: inst_ctx,
                 };
                 self.dispatch_operator_with_recurse(node, key, context, state)
             }

@@ -406,9 +406,9 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
     match key {
         SemanticQueryKey::ProjectPath { context, .. } => context.mode,
         SemanticQueryKey::ProjectMember { mode, .. }
-        | SemanticQueryKey::IndexedAccess { mode, .. }
-        | SemanticQueryKey::ResolveMacroPayload { mode, .. } => *mode,
-        SemanticQueryKey::Instantiate { context, .. } => context.mode,
+        | SemanticQueryKey::IndexedAccess { mode, .. } => *mode,
+        SemanticQueryKey::ResolveMacroPayload { context, .. } => context.mode,
+        SemanticQueryKey::Instantiate { context, .. } => context.projection_reduction.mode,
         SemanticQueryKey::ResolveClassSurface { context, .. } => context.mode,
         SemanticQueryKey::ResolveAmbientNamespace { context, .. } => context.mode,
         SemanticQueryKey::ResolveDecl(_)

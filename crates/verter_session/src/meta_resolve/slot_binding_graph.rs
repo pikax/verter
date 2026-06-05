@@ -517,12 +517,15 @@ pub(crate) fn slot_param_root_is_symbolic_only(
             //   ProjectPath, on the carrier.)
             use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
             let key = SemanticQueryKey::Instantiate {
-                base: base.to_decl_key(),
+                base: dispatch
+                    .type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name)),
                 args: Arc::clone(args),
-                context:
+                context: dispatch.instantiate_context_for(
+                    &base.canonical_id,
                     crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Skeleton,
                     ),
+                ),
             };
             let read = dispatch.execute_read(key);
             // Dual-emit: legacy accumulator + fact-tracer fan-out.
@@ -772,11 +775,12 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             break 'macro_loop;
         }
         let macro_payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
-            owner: owner.to_decl_key(),
+            owner: dispatch
+                .type_slot_for(Arc::clone(&owner.canonical_id), Arc::clone(&owner.decl_name)),
             macro_index,
             macro_kind: AnalyzedMacroKind::DefineSlots,
             type_args: type_args.clone(),
-            mode: ProjectionMode::Navigate,
+            context: dispatch.macro_payload_context_for(&owner.canonical_id, ProjectionMode::Navigate),
         });
         // Dual-emit: legacy accumulator + fact-tracer fan-out.
         emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &macro_payload_read.dep_signature);

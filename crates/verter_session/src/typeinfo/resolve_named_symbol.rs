@@ -431,15 +431,15 @@ fn resolve_named_symbol_inner(
         local_scope: None,
     };
     let _ = &scope_node;
-    let base = crate::semantic_query::DeclKey {
-        canonical_id: Arc::clone(&scope_arc),
-        decl_name: Arc::from(name),
-    };
+    let base = dispatch.type_slot_for(Arc::clone(&scope_arc), Arc::from(name));
 
     let instantiate_key = SemanticQueryKey::Instantiate {
+        context: dispatch.instantiate_context_for(
+            &scope_arc,
+            crate::semantic_query::ProjectionReductionContext::published(effective_mode),
+        ),
         base,
         args: Arc::from(lowered_args.into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(effective_mode),
     };
     let node = match dispatch.execute_type_node(instantiate_key) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
@@ -531,14 +531,14 @@ fn materialize_through_aliases(
             )) => {
                 // Materialise the placeholder by dispatching an
                 // empty-args Instantiate against its identity.
-                let base = crate::semantic_query::DeclKey {
-                    canonical_id: Arc::clone(canonical_id),
-                    decl_name: Arc::clone(name),
-                };
+                let base = dispatch.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
                 let key = SemanticQueryKey::Instantiate {
+                    context: dispatch.instantiate_context_for(
+                        canonical_id,
+                        crate::semantic_query::ProjectionReductionContext::published(mode),
+                    ),
                     base,
                     args: Arc::from(Vec::new().into_boxed_slice()),
-                    context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 };
                 let step_result = match dispatch.execute_type_node(key) {
                     QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {

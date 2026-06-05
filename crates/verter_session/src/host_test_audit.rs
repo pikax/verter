@@ -196,10 +196,10 @@ impl DispatchTrace {
                     crate::semantic_query::SemanticQueryKey::ProjectMember { mode, .. }
                     | crate::semantic_query::SemanticQueryKey::IndexedAccess { mode, .. } => *mode,
                     crate::semantic_query::SemanticQueryKey::ResolveMacroPayload {
-                        mode, ..
-                    } => *mode,
+                        context, ..
+                    } => context.mode,
                     crate::semantic_query::SemanticQueryKey::Instantiate { context, .. } => {
-                        context.mode
+                        context.projection_reduction.mode
                     }
                     _ => crate::semantic_query::ProjectionMode::Expanded,
                 };

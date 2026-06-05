@@ -577,7 +577,8 @@ pub(crate) fn bfs_compute_inner(
         let current_decl_name_for_test = Arc::clone(&current.decl_name);
 
         let key = SemanticQueryKey::Instantiate {
-            base: current.to_decl_key(),
+            base: dispatch
+                .type_slot_for(Arc::clone(&current.canonical_id), Arc::clone(&current.decl_name)),
             args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             // Skeleton mode preserves open generics so body lowering
             // produces TypeParam graph nodes for T-refs (not
@@ -585,10 +586,12 @@ pub(crate) fn bfs_compute_inner(
             // publication boundary, so keep the Skeleton shape while
             // using StructuralTransit demand to prevent nested mapped
             // operators from emitting member publication edges.
-            context:
+            context: dispatch.instantiate_context_for(
+                &current.canonical_id,
                 crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                     ProjectionMode::Skeleton,
                 ),
+            ),
         };
         let read = dispatch.execute_read(key);
         crate::component_meta_audit::merge_dep_signature_into_local_fence(

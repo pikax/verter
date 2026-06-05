@@ -340,9 +340,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // anchors during binding.
         let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
         let unwrapped = match self.execute_type_node(SemanticQueryKey::Instantiate {
-            base: identity.to_decl_key(),
+            base: self.type_slot_for(Arc::clone(&identity.canonical_id), Arc::clone(&identity.decl_name)),
+            context: self.instantiate_context_for(&identity.canonical_id, transit),
             args,
-            context: transit,
         }) {
             QueryResult::Value(SemanticQueryOutput {
                 value: unwrapped, ..
@@ -428,9 +428,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // without re-reducing nested `keyof` / `Mapped` operators.
         let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
         let unwrapped = match self.execute_type_node(SemanticQueryKey::Instantiate {
-            base: identity.to_decl_key(),
+            base: self.type_slot_for(Arc::clone(&identity.canonical_id), Arc::clone(&identity.decl_name)),
+            context: self.instantiate_context_for(&identity.canonical_id, transit),
             args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            context: transit,
         }) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => {
                 self.evaluate_deferred_semantic_node_with_context(id, transit)

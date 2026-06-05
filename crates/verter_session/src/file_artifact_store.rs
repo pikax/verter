@@ -89,6 +89,29 @@ pub use verter_semantic::facts::registry::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProjectIdentity(pub Hash16);
 
+impl ProjectIdentity {
+    /// Fold the 16-byte project-identity hash into the `u32`
+    /// project-isolation dimension carried by query-identity keys that
+    /// store `project_identity: u32` (the
+    /// [`ResolvedDeclSlotIdentity`](crate::semantic_query::ResolvedDeclSlotIdentity)
+    /// slot, `ApparentTypeContext`, `TemplateLiteralReduceContext`, …).
+    ///
+    /// The full 16-byte hash is the workspace + tsconfig + provider-root
+    /// discriminator; this is a deterministic, order-fixed fold of all 16
+    /// bytes (four little-endian `u32` lanes XOR-combined) so two distinct
+    /// project identities keep distinct folds with overwhelming
+    /// probability while keeping the key field a compact `u32`. The fold
+    /// is the SINGLE conversion point (codex consult) — callers building a
+    /// slot from `host_view_project_identity_for(..)` route through here
+    /// rather than re-deriving a fold inline.
+    #[must_use]
+    pub fn fold_u32(self) -> u32 {
+        let b = self.0;
+        let lane = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        lane(0) ^ lane(4) ^ lane(8) ^ lane(12)
+    }
+}
+
 // ── FileArtifactKey ──
 
 /// Cache key for [`FileArtifacts`].

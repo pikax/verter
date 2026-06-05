@@ -1336,12 +1336,13 @@ impl VerterHost {
             // Step 7: execute the shared `Instantiate` query in the same
             // Navigate transit context so the substituted body materializes
             // through the one engine.
-            let instantiate_context =
+            let instantiate_prc =
                 ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
             let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-                base: base.to_decl_key(),
+                base: dispatch
+                    .type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name)),
+                context: dispatch.instantiate_context_for(&base.canonical_id, instantiate_prc),
                 args: std::sync::Arc::clone(args),
-                context: instantiate_context,
             }) {
                 crate::semantic_query::QueryResult::Value(
                     crate::semantic_query::SemanticQueryOutput { value: node, .. },

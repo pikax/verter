@@ -360,14 +360,14 @@ fn evaluate_inner(
         local_scope: None,
     };
     let _ = &scope_node;
-    let base = crate::semantic_query::DeclKey {
-        canonical_id: Arc::clone(&scratch_canonical),
-        decl_name: Arc::from(SCRATCH_ALIAS_NAME),
-    };
+    let base = dispatch.type_slot_for(Arc::clone(&scratch_canonical), Arc::from(SCRATCH_ALIAS_NAME));
     let instantiate_key = SemanticQueryKey::Instantiate {
+        context: dispatch.instantiate_context_for(
+            &scratch_canonical,
+            crate::semantic_query::ProjectionReductionContext::published(req.mode),
+        ),
         base,
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(req.mode),
     };
     let resolved_alias_node = match dispatch.execute_type_node(instantiate_key) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
@@ -479,14 +479,14 @@ fn materialize_through_aliases(
                     whole_hash: _,
                 },
             )) => {
-                let base = crate::semantic_query::DeclKey {
-                    canonical_id: Arc::clone(canonical_id),
-                    decl_name: Arc::clone(name),
-                };
+                let base = dispatch.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
                 let key = SemanticQueryKey::Instantiate {
+                    context: dispatch.instantiate_context_for(
+                        canonical_id,
+                        crate::semantic_query::ProjectionReductionContext::published(mode),
+                    ),
                     base,
                     args: Arc::from(Vec::new().into_boxed_slice()),
-                    context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 };
                 let step_result = match dispatch.execute_type_node(key) {
                     QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
