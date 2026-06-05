@@ -20,9 +20,11 @@
 > slot: `{defining_canonical, merged_symbol_name, symbol_space: SemanticSymbolSpace,
 > project_identity: u32, type_env_hash, lib_env_hash}` — it carries type+lib+project for the
 > declaration SITE but NEITHER `resolve_env_hash` NOR `parse_env_hash`. `Instantiate{base}` /
-> `ResolveMacroPayload{owner}` (`SemanticQueryKey` L1599 / family.rs L125,204) today key on a
-> content-free `DeclKey {canonical_id, decl_name}` with NO env hashes (env validity is purely
-> `ReadSetSignature`). The relation key is the full `RelateMemoKey` (`semantic_query.rs:2682`):
+> `ResolveMacroPayload{owner}` (`SemanticQueryKey` L1599 / family.rs L125,204) key on the
+> env-bearing, content-free `ResolvedDeclSlotIdentity` (the `Instantiate`/`ResolveMacroPayload`
+> base/owner are always `symbol_space = Type`); the extra `resolve_env_hash` rides on the
+> per-key `InstantiateContext` / `MacroPayloadContext`. The relation key is the full
+> `RelateMemoKey` (`semantic_query.rs:2682`):
 > `{source, target, relation: RelationKind, policy: RelationPolicy, source_freshness: FreshnessKey,
 > inference_context: Option<InferenceContextKey>, context: RelationContext}`, where
 > `RelationContext` (`:2616`) carries the `R T L J` env dims (`resolve_env_hash`, `type_env_hash`,
@@ -48,7 +50,7 @@
 
 Every query-identity key in this design is `(IdentityCore, EnvProjection, DemandAxis)` where:
 
-- **`IdentityCore`** — the content-free *what* (a `DeclKey`, a `ResolvedDeclSlotIdentity`, a
+- **`IdentityCore`** — the content-free *what* (a `ResolveDeclKey`, a `ResolvedDeclSlotIdentity`, a
   `ProgramPointId`, a `(source,target,RelationKind,…)` tuple). Carries NO content hash, NO
   `parse_stable_hash`, NO `fact_dep_signature` (**R6**).
 - **`EnvProjection`** — the per-key `*Context` struct naming ONLY the split env dimensions the
@@ -377,22 +379,18 @@ while the slot's three dims are correct *declaration identity*, not an over-key.
 `declaration_augmentation_target_is_env_free_env_comes_from_context` and the per-key
 `*_same_site_different_env_or_context_do_not_warm_hit` set mechanize this.
 
-**`Instantiate`/`ResolveMacroPayload` migration (DECISION — FORK-A = MIGRATE; see Locked
-decisions).** Today both key on a content-free `DeclKey` with NO env hashes; env validity is purely
-`ReadSetSignature`. The plan (reducers L175, §2.9 table L854/L866) migrates `base`/`owner` to the
-env-bearing `ResolvedDeclSlotIdentity`. **DECISION: migrate `base`/`owner` to
-`ResolvedDeclSlotIdentity` directly** (do NOT keep `DeclKey` + bolt on a separate env context).
+**`Instantiate`/`ResolveMacroPayload` key on the env-bearing slot.** `base`/`owner` key on the
+env-bearing, content-free `ResolvedDeclSlotIdentity` directly (not a content-free, env-FREE
+declaration key plus a separate env context).
 *Rationale:* (a) the slot is the canonical declaration identity the rest of U2 keys on, so a single
 identity type across `ResolveMergedDeclaration` / `ResolveClassSurface` / `Instantiate` /
-`ResolveMacroPayload` means one resolution path and no `DeclKey↔slot` adapter; (b) the slot is
-already content-free (R6-clean) and env-bearing for exactly the three dims a declaration's meaning
-depends on; (c) it eliminates the "env validity is purely `ReadSetSignature`" gap where a
+`ResolveMacroPayload` means one resolution path and no decl-key↔slot adapter; (b) the slot is
+content-free (R6-clean) and env-bearing for exactly the three dims a declaration's meaning
+depends on; (c) it closes the "env validity is purely `ReadSetSignature`" gap where a
 `type_env`/`lib_env` change to the *declaration* (not its deps) would only be caught by fact
 revalidation rather than key separation — keying on the slot makes that difference a key
 difference, which is strictly more correct and avoids candidate-slot churn.
-*Alternative (rejected):* keep `DeclKey` + add an `InstantiateEnvContext`. Rejected because it
-duplicates the slot's three dims in a second struct and reintroduces the `DeclKey↔slot` mapping the
-migration is meant to delete. **`Instantiate` additionally carries `resolve_env_hash` (`R`) on a
+**`Instantiate` additionally carries `resolve_env_hash` (`R`) on a
 dedicated per-key `InstantiateContext { projection_reduction: ProjectionReductionContext,
 resolve_env_hash }`** because instantiation can resolve imported type-argument references — the `R`
 dim rides on this wrapper, NOT mutated into the shared `ProjectionReductionContext` (which stays a
@@ -400,12 +398,11 @@ pure projection-demand identity carried unchanged by `KeyOf` / `MappedType` / `P
 §2.6's per-key-context rule; this mirrors how `RelationContext` / `CallResolutionContext` embed a
 `projection_reduction: ProjectionReductionContext` field). `ResolveMacroPayload` carries a dedicated
 `MacroPayloadContext { resolve_env_hash, mode }` (macro payload resolves imports). The `T,L,J` dims
-come from the env-bearing `ResolvedDeclSlotIdentity` base/owner. (FORK-A scope: KeyOf / MappedType /
-ProjectPath / RelationContext and the shared `ProjectionReductionContext` are UNTOUCHED — their env
-migration is a separate later block.)
-*This is the one place the migration is breaking — `FamilyKey::Instantiate` / `ResolveMacroPayload`
-change their `base`/`owner` field type from `DeclKey` to `ResolvedDeclSlotIdentity`. **FORK-A
-breaking-change CONDITION (locked):** the existing `provenance` + `merge_role` discriminators STAY
+come from the env-bearing `ResolvedDeclSlotIdentity` base/owner. KeyOf / MappedType /
+ProjectPath / RelationContext and the shared `ProjectionReductionContext` are SEPARATE — their env
+identity is unaffected by this slot/context shape.
+*`FamilyKey::Instantiate` / `ResolveMacroPayload` carry the `base`/`owner` as a
+`ResolvedDeclSlotIdentity`. The `provenance` + `merge_role` discriminators STAY
 at FAMILY-IDENTITY level (carried on `FamilyKey` alongside `base`), NOT demoted into a `*Context`.
 They are query-identity discriminators (which merge arm / which provenance regime this instantiation
 answers), not env dimensions, so they belong on the family key, not the env context.*
@@ -1027,11 +1024,12 @@ The design panel (codex best-arch + harsh-reviewer) confirmed the core architect
 (two-tier env model, regime-stratified meet-semilattice, display-as-projection, fact-rooted error
 line) and LOCKED all four forks. These are DECISIONS, not open questions:
 
-- **FORK-A = MIGRATE.** `Instantiate`/`ResolveMacroPayload` migrate `base`/`owner` from content-free
-  `DeclKey` → env-bearing `ResolvedDeclSlotIdentity` (one identity type, R6-clean, closes the "env
-  validity purely ReadSetSignature" gap). Breaking: `FamilyKey::Instantiate`/`ResolveMacroPayload`
-  field type changes. **CONDITION (locked):** the existing `provenance` + `merge_role` discriminators
-  STAY at FAMILY-IDENTITY level on `FamilyKey`, NOT demoted into a `*Context` (§2.1, §2.2 table).
+- **Slot-keyed `Instantiate`/`ResolveMacroPayload`.** `Instantiate`/`ResolveMacroPayload` key
+  `base`/`owner` on the env-bearing, content-free `ResolvedDeclSlotIdentity` (one identity type,
+  R6-clean, closes the "env validity purely ReadSetSignature" gap), with the extra
+  `resolve_env_hash` on the per-key `InstantiateContext` / `MacroPayloadContext`. The `provenance` +
+  `merge_role` discriminators stay at FAMILY-IDENTITY level on `FamilyKey`, NOT demoted into a
+  `*Context` (§2.1, §2.2 table).
 - **FORK-B = U0 FOUNDATION.** The #18 broken-input taint PRODUCERS (parser error-recovery
   `SyntaxError` taint, resolver `MissingDependency`/`UnresolvedReference` facts, completion-fence
   `TornRead`) are owned by U0. This gate owns ONLY the value-domain SHAPE + `admit_decision`.

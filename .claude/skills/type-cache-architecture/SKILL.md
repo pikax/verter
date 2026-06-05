@@ -1326,23 +1326,29 @@ key, and no env-less uniform envelope is permitted.
   `TypeLibEnvKey`) must appear NOWHERE in production source; the `GraphDeclSlotRef` wire slot still
   exists as a pre-existing DTO and is banned from the `verter_session` query-identity surface now —
   its full wire-DTO retirement (replaced by the env-bearing `GraphResolvedDeclSlotIdentity`) is
-  FORK-A / STAGE-B work, after which the guard tightens to ban it across all production source.
+  still pending, after which the guard tightens to ban it across all production source.
 - **Module-resolution keys on SPLIT env.** A module-resolution result keys on `resolve_env_hash`
   (moduleResolution / paths / baseUrl / conditions) + `lib_env_hash` (typeRoots / types corpus) +
   `project_identity`, plus the transitive `parse_env` carried by the parsed import-specifier list.
   Lib dimensions are NEVER folded into `resolve_env`.
-- **FORK-A locked (MIGRATE).** `SemanticQueryKey::Instantiate` / `ResolveMacroPayload` migrate their
-  `base` / `owner` from the content-free `DeclKey` to env-bearing `ResolvedDeclSlotIdentity`. The
-  existing `provenance` + `merge_role` discriminators STAY at FAMILY-IDENTITY level on `FamilyKey` —
-  they are NOT demoted into a `*Context`.
-- **Planned STAGE-B guards (gap tracked here per the architecture-guard rule).** The discriminating
-  behavioural guards land with the STAGE-B implementation:
+- **Slot-keyed `Instantiate` / `ResolveMacroPayload`.** `SemanticQueryKey::Instantiate` /
+  `ResolveMacroPayload` key their `base` / `owner` on the env-bearing, content-free
+  `ResolvedDeclSlotIdentity` (the extra `resolve_env_hash` rides on the per-key `InstantiateContext`
+  / `MacroPayloadContext`). The `provenance` + `merge_role` discriminators STAY at FAMILY-IDENTITY
+  level on `FamilyKey` — they are NOT demoted into a `*Context`.
+- **Discriminating guards.** The env-scoping and value-domain guards are landed:
   `every_semantic_query_key_maps_to_exactly_one_value_domain`,
-  `module_resolution_keys_on_resolve_env_not_type_or_lib`, the per-key
-  `*_same_site_different_env_or_context_do_not_warm_hit` set, and
-  `semantic_query_key_spec_table_equals_enum`. The design-gate guards landed NOW are
+  `module_resolution_keys_on_resolve_env_not_type_or_lib`, and
+  `semantic_query_key_spec_table_equals_enum`
+  (`crates/verter_session/tests/g_block/`); the per-key
+  `*_do_not_warm_hit` set — including
+  `instantiate_same_base_different_env_or_context_do_not_warm_hit`,
+  `decl_self_type_or_lib_env_change_produces_distinct_instantiate_key`,
+  `resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit`, and
+  `resolved_named_type_key_identity_is_env_scoped` —
+  lives in `crates/verter_session/src/semantic_query_memo/tests.rs`. The design-gate guards
   `no_envless_semantic_query_env_key_envelope` and `u2_value_domain_design_doc_locks_invariants`
-  (both in `crates/verter_session/tests/g_block/u2_value_domain_design_guards.rs`).
+  live in `crates/verter_session/tests/g_block/u2_value_domain_design_guards.rs`.
 
 ## Related skills
 

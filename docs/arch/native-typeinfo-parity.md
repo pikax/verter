@@ -1193,7 +1193,7 @@ quirk):
   terminates). A parameter whose measurement cannot close (budget-abandoned) is treated
   as invariant (the sound conservative direction), never silently assumed covariant.
 - **Cached by declaration / env / TS-version.** Measured variance is CACHED keyed by
-  the generic's declaration identity (content-free `DeclKey`, R6) + the split env
+  the generic's declaration identity (the content-free, env-bearing `ResolvedDeclSlotIdentity`, R6) + the split env
   hashes it depends on (`type_env_hash` — which now folds in the TS semantic version,
   §2 / `fact-based-cache.md`) + `lib_env_hash` where the parameter's constraint reaches
   lib surfaces. The cached measured-variance value is version-rooted on

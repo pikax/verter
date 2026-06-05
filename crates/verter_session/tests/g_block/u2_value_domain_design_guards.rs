@@ -344,7 +344,10 @@ fn error_rides_opaque_no_new_error_type_wire_arm_discriminator_self_test() {
 /// The load-bearing locked phrases that MUST remain verbatim in the
 /// design doc. Each was confirmed present by grep before landing.
 const LOCKED_DESIGN_PHRASES: &[&str] = &[
-    "FORK-A = MIGRATE",
+    // The locked `Instantiate`/`ResolveMacroPayload` slot-keying decision
+    // (env-bearing `ResolvedDeclSlotIdentity` base/owner). Pinned by a
+    // final-state phrase, not the former plan-fork label.
+    "key on the env-bearing slot",
     "Partial join is ACCEPTABLE",
     "two-tier env model",
     "MaterializedSet",

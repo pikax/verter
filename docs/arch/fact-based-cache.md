@@ -132,7 +132,9 @@ together. Concretely:
 
 These are split-env-hash **additions**, not query-identity content: none of
 them is a field on any query-identity key struct. Query-identity keys stay
-content-free (R6) — they carry the content-free `DeclKey` plus the relevant
+content-free (R6) — they carry a content-free declaration identity (the
+env-bearing `ResolvedDeclSlotIdentity` for `Instantiate`/`ResolveMacroPayload`,
+or the env-free `ResolveDeclKey` for `ResolveDecl`) plus the relevant
 split env hashes; they never carry a content/version hash or
 `fact_dep_signature`. A query-identity value is version-rooted on the cached
 value (`ReadSetSignature.facts` + self-roots), not on the key.
