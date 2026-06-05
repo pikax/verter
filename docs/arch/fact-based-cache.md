@@ -143,17 +143,20 @@ Two dimensions are **session-scoped identity**, never persistent-cache key
 material:
 
 - **Overlay / session identity** (`overlay_identity`, the active editor
-  overlay set) enters **session cache identity ONLY**. A persistent / base
-  cache layer (`FileArtifactStore`, the base population of `RouteDb` /
-  `ModuleAugmentationIndex` / `EffectiveExportSet`, and any pure artifact
-  cache) **NEVER** admits an overlay-only result and never keys on
-  `overlay_identity`: an overlay edit produces a session-scoped value that is
-  returned to the caller but is **not** written into the base / persistent
-  store. This is the existing base-only discipline already stated for
-  `ModuleAugmentationIndex` and `EffectiveExportSet` (the cold scan + refresh
-  filter to base `is_legacy` artifacts), generalised to a hard rule: a result
-  computed under any overlay/session-scoped input may populate the
-  session-scoped cache but never the base/persistent one. Pinned by
+  overlay set) enters **session cache identity ONLY** — never the **base**
+  population of any layer. A base/persistent slot (`FileArtifactStore`, the
+  `Base` population of `ModuleAugmentationIndex`, the `Base` scope of
+  `EffectiveExportSet`, and any pure artifact cache) **NEVER** admits an
+  overlay-only result: an overlay edit produces a session-scoped value
+  returned to the caller but routed into a SESSION-keyed slot, never the base
+  one. `ModuleAugmentationIndex` and `EffectiveExportSet` are OVERLAY-AWARE:
+  the index's `AugmentationPopulation::Session(overlay-set fingerprint)` slot
+  unions the session's overlay augmenters with base (content-addressed
+  compute cache → content fingerprint in the key), while
+  `EffectiveExportSet`'s query-identity `EffectiveExportSetScope::Session(scope_id)`
+  slot is keyed by the content-free session scope (R6) with overlay content
+  rooted on the value's facts. Either way an overlay result populates the
+  session-scoped slot, never the `Base` one. Pinned by
   **`persistent_caches_never_admit_overlay_only_results`**.
 - **Instantiation-depth policy** (`InstantiationDepthPolicy` — the
   recursive-conditional / recursive-mapped instantiation-depth limit beyond
@@ -182,7 +185,7 @@ material:
 | `MemberDisplayFactStore` | Content-addressed | `(canonical, content_hash, parse_env_hash, exporter, member_name, symbol_space)` | Keyed on `content_hash`; cosmetic edits recompute display only |
 | `RouteDb` per-name resolution | Query-identity (multi-candidate) | `(provider_canonical, exported_name, symbol_space, resolve_env_hash, lib_env_hash, resolver_version)` | Fact-validated; stable misses preserved |
 | `RouteDb` effective barrel surface | Query-identity (multi-candidate) | `barrel_canonical` | Fact-validated per candidate via `BarrelRouteSurface.fact_dep_signature: Arc<[FactVersionRef]>` (Stage 6c) |
-| `RouteDb` effective export set | Query-identity (multi-candidate) | `EffectiveExportSetKey { provider_canonical, project_identity, resolve_env_hash, lib_env_hash }` (R21 — lib_env enters because module augmentations live in libs) | Fact-validated per candidate via `EffectiveExportSetEntry.fact_dep_signature`, which records `RouteSurface(ModuleAugmentationIndexShape)` + per-contributor `FileWholeHash` anchors (R29 + G1; Stage 6c). **Base-only** — `get_or_compute_effective_export_set` fails closed on a session view; the augmentation index it stitches has no base/session population identity (deferred to a future block) |
+| `RouteDb` effective export set | Query-identity (multi-candidate) | `EffectiveExportSetKey { provider_canonical, project_identity, resolve_env_hash, lib_env_hash, session_scope }` (R21 — lib_env enters because module augmentations live in libs; `session_scope: EffectiveExportSetScope {Base, Session(scope_id)}` is the CONTENT-FREE session scope, R6 — the overlay-set content fingerprint never enters the key) | Fact-validated per candidate via `EffectiveExportSetEntry.fact_dep_signature`, which records `RouteSurface(ModuleAugmentationIndexShape)` (the augmenter-set fingerprint) + per-contributor `FileWholeHash` anchors (R29 + G1). **Overlay-aware**: a session view stitches its own overlay augmenters (unioned with base) into a `Session(scope_id)` slot distinct from the `Base` slot; overlay CONTENT identity is validated on the value's facts (revalidated on every warm hit), NOT smuggled into the key. The content-addressed augmentation index it stitches keys its `Session` slot by the overlay-set fingerprint (compute input). |
 | `MaterializeStructureDb` | Query-identity (multi-candidate) | `MaterializationCacheKey { decl: ResolvedDeclSlotIdentity, projection_path, projection_mode, normalized_type_args, options_hash }` | Fact-validated per candidate |
 | `RefCycleResultDb`, `SemanticGraphStore` query nodes | Query-identity (multi-candidate) | `ResolvedDeclSlotIdentity` (slot) + `VersionedDeclIdentity` payload | Fact-validated per candidate |
 | `ComponentMetaResultDb` | Query-identity (multi-candidate) | Owner identity (per R8) | Fact-validated per candidate |

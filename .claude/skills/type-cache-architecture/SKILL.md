@@ -958,24 +958,52 @@ cold-path compute. Both audit-event variants live on
 forbidden on the augmentation stitching surface (R23 scope-fence
 guarded by `tests/audit_event_shape.rs`).
 
-**Base-only contract.** Augmentation stitching / `EffectiveExportSet`
-is **base-only**. `AugmentationTargetKey` has no base/session
-discriminator, and the augmentation index's cold scan + refresh path
-filter to base (`FileArtifactKey::is_legacy`) artifacts — an
-overlay-scoped artifact never contributes, so the base augmenter set
-is never poisoned by a session overlay. The consequence is that a
-session that overlays a `declare module` block would observe the
-*base* augmenter set, not its own. `EffectiveExportSet` therefore has
-no session-correct result yet:
-`RouteDb::get_or_compute_effective_export_set` **fails closed** on a
-session view (`StoreViewCompatToken::session.is_some()`) — it asserts
-the view is base, so a session call is observably an error rather than
-a silently-wrong base-only result. There is no live production
-`EffectiveExportSet` consumer today; the base-only contract is locked
-by `tests/module_augmentation_stitching.rs::effective_export_set_rejects_session_view`.
-Session-correct augmentation stitching — an overlay-aware
-`AugmentationTargetKey` with artifact-population identity plus the
-wired live session consumer — is deferred to a future block.
+**Overlay-aware contract (R6 key split).** Augmentation stitching is
+OVERLAY-AWARE across two layers with deliberately DIFFERENT key
+discipline:
+
+- The **content-addressed** augmentation index (`AugmentationTargetKey`
+  on `FileArtifactStore`) carries `population: AugmentationPopulation
+  {Base, Session(overlay-set fingerprint)}`. A `Base` scan filters to
+  base (`FileArtifactKey::is_legacy`) artifacts; a `Session` scan unions
+  the session's own overlay augmenters (matched by the session overlay
+  discriminator derived from `SessionView::fingerprint`) with base. The
+  fingerprint legitimately keys this slot because the index is a
+  content-addressed compute cache — the fingerprint IS part of its
+  content view identity, and it self-invalidates when overlay
+  content/membership changes (new fingerprint → fresh scan).
+- The **query-identity** `EffectiveExportSetKey` (on `RouteDb`) is keyed
+  by the CONTENT-FREE `session_scope: EffectiveExportSetScope {Base,
+  Session(session_scope_id)}` — the `StoreViewCompatToken::session`
+  (R6: the overlay-set content fingerprint NEVER enters a query-identity
+  key). Base and session reads occupy DISTINCT slots, so a base warm
+  entry can never satisfy a session lookup (the "base-as-session"
+  hazard) and vice-versa. Overlay CONTENT identity is rooted on the
+  VALUE's `fact_dep_signature` (the `ModuleAugmentationIndexShape`
+  augmenter-set fingerprint fact + per-contributor `FileWholeHash`
+  anchors), revalidated against the live view on every warm hit — so a
+  within-session overlay edit invalidates through facts, not through a
+  new key.
+
+Both producers (the body stitch in `project_semantic_dispatch::build`
+and `RouteDb::get_or_compute_effective_export_set`) derive the
+content-addressed `(population, overlay_discriminator)` through the
+single shared `session_view::augmentation_population_for_view`; the
+content-free `EffectiveExportSetScope` and the route-surface validator's
+`EffectiveExportSet`-fact slot lookup both derive from
+`EffectiveExportSetScope::from_session(compat_token().session)`. Overlay
+augmenters NEVER poison the base index and NEVER cross sessions. The
+contract is locked by
+`tests/g_misc3/module_augmentation_stitching.rs` —
+`session_overlay_augmenter_isolated_from_base_index`,
+`effective_export_set_warm_base_entry_does_not_satisfy_session_lookup`,
+`effective_export_set_warm_session_entry_does_not_satisfy_base_lookup`,
+`effective_export_set_same_session_overlay_content_edit_invalidates_via_facts`,
+`effective_export_set_content_free_key_warm_hits_across_unrelated_fingerprint_change` —
+plus the guard `no_effective_export_set_base_only_session_assert`
+(`tests/g_misc0/critical_rules_have_guards.rs`) which pins that NO
+base-only `compat_token().session.is_none()` assert is re-introduced on
+this surface.
 
 **R30 (No heuristic cache semantics).** Cache identity and cache
 admission must not encode semantic policy through local heuristics.
