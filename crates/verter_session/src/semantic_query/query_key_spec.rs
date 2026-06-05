@@ -651,22 +651,29 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "",
             admission: AdmissionSpec::ReadDominantNoExecute,
         },
-        // Relate { source, target } — assignability/relation judgement over
+        // Relate { source, target, relation, policy, source_freshness,
+        // inference_context, context } — full-identity relation judgement over
         // already-resolved nodes. Resolves to the `Relation` value domain
         // (`SemanticQueryValue::Relation(RelationPayload)`), NOT `TypeNode`.
         // The family `execute` path is intentionally non-producing (returns
         // `Opaque(Miss)`); the authoritative judgement is produced + cached by
-        // `relate_nodes` in the dedicated dep-signature-fenced `relation_memo`
-        // (admission `RelationMemo`, not the family singleflight). `env_dims`
-        // stays `T L J` for the current bare `{source,target}` key (structural
-        // over already-resolved nodes); it gains `R` only when the relation
-        // upgrade lands.
+        // `relate_nodes` in the dedicated dep-signature-fenced `relation_memo`,
+        // now re-keyed on the full `RelateMemoKey` identity (admission
+        // `RelationMemo`, not the family singleflight). `env_dims` is `R T L J`:
+        // the `RelationContext` carries the `R T L J` env the relation outcome
+        // depends on (relating imported surfaces resolves their references on
+        // the relation's own step — the `R` the bare `{source,target}` key
+        // lacked — plus the structural `T L J`); no `P`, since a relation
+        // operates over already-lowered interned nodes, not a fresh parsed body
+        // skeleton. The relation kind / policy / freshness / inference-context
+        // axes are identity discriminators carried on the key.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::Relate,
             lifecycle: KeyLifecycle::Live,
-            context_shape: "(source,target)",
+            context_shape:
+                "(source,target,relation,policy,source_freshness,inference_context,context)",
             value_domain: SemanticQueryValueTag::Relation,
-            env_dims: env_structural(),
+            env_dims: env_resolve(),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "",
             admission: AdmissionSpec::RelationMemo,

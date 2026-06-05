@@ -13,7 +13,7 @@ NormalizeUnion | Live | TypeNode | T L J | — | (members) | — | Singleflight
 NormalizeIntersection | Live | TypeNode | T L J | — | (members) | — | Singleflight
 ProjectPath | Live | TypeNode | T L J | Path,Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop,Provenance,MergeRole | ProjectionReductionContext | — | Singleflight
 ResolvedNamedType | Live | TypeNode | R T L J | — | HostResolvedNamedTypeKey | — | ReadDominantNoExecute
-Relate | Live | Relation | T L J | — | (source,target) | — | RelationMemo
+Relate | Live | Relation | R T L J | — | (source,target,relation,policy,source_freshness,inference_context,context) | — | RelationMemo
 ResolveMacroPayload | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | (owner,macro_index,macro_kind,type_args,mode) | — | Singleflight
 ResolveClassSurface | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ClassSurfaceContext | resolve_class_surface_do_not_warm_hit | Singleflight
 ResolveAmbientNamespace | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | AmbientNamespaceContext | resolve_ambient_namespace_do_not_warm_hit | NonProducingPendingReducer
