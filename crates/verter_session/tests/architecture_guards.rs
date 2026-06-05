@@ -15604,3 +15604,121 @@ fn compile_batch_options_guard_catches_readded_thread_field() {
          real guard is vacuous"
     );
 }
+
+/// Return the byte span `[start, end)` of the body of `fn <fn_name>` in
+/// `src` via brace matching, starting from the `{` that opens the body.
+/// Panics if the function (or its opening brace) is not found — a moved
+/// anchor must fail loudly rather than silently vacuously pass.
+fn fn_body_span(src: &str, fn_name: &str) -> (usize, usize) {
+    let needle = format!("fn {fn_name}");
+    let fn_at = src
+        .find(&needle)
+        .unwrap_or_else(|| panic!("guard anchor moved: `fn {fn_name}` not found"));
+    let open = src[fn_at..]
+        .find('{')
+        .map(|o| fn_at + o)
+        .unwrap_or_else(|| panic!("guard anchor moved: no `{{` after `fn {fn_name}`"));
+    let bytes = src.as_bytes();
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (open, i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    panic!("guard anchor moved: unbalanced braces in `fn {fn_name}`");
+}
+
+/// STRUCTURAL guard for the augmentation-index under-invalidation class.
+///
+/// Every path that drops an entry from `self.artifacts` in
+/// `file_artifact_store.rs` MUST route through the single removal
+/// chokepoint `evict_artifact_keys`, which is the only site allowed to
+/// call `self.artifacts.remove(...)` / `.retain(...)` / `.drain(...)` /
+/// `.swap_remove(...)` / `.pop(...)`. The chokepoint always collects the
+/// removed entries' augmentation facts and feeds them to
+/// `invalidate_augmentation_index_for_augmenter`, so it is impossible by
+/// construction to evict an artifact while leaving a stale `AugmenterSet`
+/// behind. The single exception is the whole-store reset
+/// `self.artifacts.clear()` in `evict_if_schema_mismatch`, which is paired
+/// with `self.augmentation_index.clear()` in the same method (the
+/// strongest possible invalidation).
+///
+/// This closes the class as a compile-time invariant: a 3rd, 4th, … future
+/// removal site that bypasses the chokepoint fails this guard instead of
+/// silently reintroducing the round-6 P1 bug.
+#[test]
+fn artifact_removal_routes_through_single_chokepoint() {
+    let src = read_workspace_file("crates/verter_session/src/file_artifact_store.rs");
+
+    let (choke_start, choke_end) = fn_body_span(&src, "evict_artifact_keys");
+    let (schema_start, schema_end) = fn_body_span(&src, "evict_if_schema_mismatch");
+
+    // Mutating-removal operations that drop entries from the map.
+    let removal_ops = [
+        "self.artifacts.remove(",
+        "self.artifacts.retain(",
+        "self.artifacts.drain(",
+        "self.artifacts.swap_remove(",
+        "self.artifacts.pop(",
+    ];
+    for op in removal_ops {
+        let mut search_from = 0usize;
+        while let Some(rel) = src[search_from..].find(op) {
+            let at = search_from + rel;
+            search_from = at + op.len();
+            let inside_chokepoint = at >= choke_start && at < choke_end;
+            assert!(
+                inside_chokepoint,
+                "`{op}` at byte {at} is OUTSIDE the `evict_artifact_keys` \
+                 chokepoint (bytes {choke_start}..{choke_end}). Every \
+                 `self.artifacts` removal MUST route through that chokepoint so \
+                 the augmentation index is invalidated for the removed \
+                 augmenters — otherwise a stale `AugmenterSet` survives an \
+                 artifact-only eviction (round-6 P1 under-invalidation class). \
+                 Route this removal through `evict_artifact_keys` / \
+                 `drop_artifact_entry`."
+            );
+        }
+    }
+
+    // `self.artifacts.clear()` is only allowed in the schema-mismatch
+    // whole-store reset, which clears the augmentation index in the same
+    // method.
+    let clear_op = "self.artifacts.clear(";
+    let mut search_from = 0usize;
+    while let Some(rel) = src[search_from..].find(clear_op) {
+        let at = search_from + rel;
+        search_from = at + clear_op.len();
+        let inside_schema_reset = at >= schema_start && at < schema_end;
+        assert!(
+            inside_schema_reset,
+            "`{clear_op}` at byte {at} is OUTSIDE `evict_if_schema_mismatch` \
+             (bytes {schema_start}..{schema_end}). A whole-store clear must be \
+             paired with `self.augmentation_index.clear()` in that method; any \
+             other `self.artifacts.clear()` would orphan the augmentation index."
+        );
+    }
+    assert!(
+        src[schema_start..schema_end].contains("self.augmentation_index.clear("),
+        "the `evict_if_schema_mismatch` whole-store reset MUST clear the \
+         augmentation index in the same method, else the clear orphans a \
+         stale index."
+    );
+
+    // The chokepoint must actually invalidate — not a vacuous wrapper.
+    assert!(
+        src[choke_start..choke_end].contains("invalidate_augmentation_index_for_augmenter"),
+        "`evict_artifact_keys` MUST call \
+         `invalidate_augmentation_index_for_augmenter` — the chokepoint exists \
+         precisely to make removal and index-invalidation inseparable."
+    );
+}

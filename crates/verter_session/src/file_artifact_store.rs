@@ -837,6 +837,68 @@ impl FileArtifactStore {
             .collect()
     }
 
+    /// THE sole artifact-removal chokepoint.
+    ///
+    /// Every path that drops entries from `self.artifacts` funnels
+    /// through here: the public [`Self::remove`] / [`Self::remove_artifacts`]
+    /// / [`Self::remove_canonical`], the legacy [`Self::insert`]
+    /// prior-version drain, and the internal memory-bound sweeps
+    /// ([`Self::evict_lru_promoted`] + [`Self::enforce_per_canonical_retention`]).
+    ///
+    /// Removing the entries and invalidating the `augmentation_index`
+    /// entries they contributed to is ONE inseparable operation, so it is
+    /// **structurally impossible** to evict an artifact while leaving a
+    /// stale [`AugmenterSet`] behind — closing the augmentation-index
+    /// under-invalidation class by construction rather than by enumerating
+    /// callers. The static guard
+    /// `artifact_removal_routes_through_single_chokepoint` pins that this
+    /// method (and [`Self::drop_artifact_entry`]) is the only `self.artifacts`
+    /// removal site.
+    ///
+    /// Counter / audit-event bookkeeping is **caller policy** — an LRU
+    /// drop, a replacement drain, and a hard delete attribute
+    /// `live_counter` / `stale_sweeps` / structured events differently —
+    /// so this chokepoint touches none of them; it returns the removed
+    /// `(key, payload)` pairs and lets the caller account for them. It DOES
+    /// drop the per-key `hit_counters` entry: an evicted key must never
+    /// carry a stale hit count into a later same-key insert.
+    ///
+    /// Invalidation runs ONCE over the union of every removed entry's
+    /// augmentation facts, after every `self.artifacts` shard guard is
+    /// released (all removes complete before the index scan), preserving
+    /// the no-shard-guard-across-reentrancy discipline of
+    /// [`Self::invalidate_augmentation_index_for_augmenter`].
+    fn evict_artifact_keys(
+        &self,
+        keys: &[FileArtifactKey],
+    ) -> Vec<(FileArtifactKey, Arc<FileArtifacts>)> {
+        let mut removed: Vec<(FileArtifactKey, Arc<FileArtifacts>)> =
+            Vec::with_capacity(keys.len());
+        let mut removed_augmentations: Vec<ModuleAugmentationFact> = Vec::new();
+        for key in keys {
+            if let Some((removed_key, payload)) = self.artifacts.remove(key) {
+                removed_augmentations.extend(payload.augmentations.iter().cloned());
+                self.hit_counters.remove(key);
+                removed.push((removed_key, payload));
+            }
+        }
+        // Demand-driven coherence: every removed augmenter drops every index
+        // entry it contributed to so the next cold-rescan rebuilds without it.
+        self.invalidate_augmentation_index_for_augmenter(&removed_augmentations);
+        removed
+    }
+
+    /// Single-key convenience over the [`Self::evict_artifact_keys`]
+    /// chokepoint. Returns the removed payload, or `None` if `key` was
+    /// absent. The augmentation-index invalidation is performed by the
+    /// chokepoint — callers cannot bypass it.
+    fn drop_artifact_entry(&self, key: &FileArtifactKey) -> Option<Arc<FileArtifacts>> {
+        self.evict_artifact_keys(std::slice::from_ref(key))
+            .into_iter()
+            .next()
+            .map(|(_, payload)| payload)
+    }
+
     /// LRU floor — drop entries down to `min_floor` by oldest-access
     /// order.
     ///
@@ -892,12 +954,18 @@ impl FileArtifactStore {
                 _ => a.2.cmp(&b.2), // within partition, oldest first
             }
         });
-        for (key, _hits, _tick) in entries.into_iter().take(drop_count) {
-            if self.artifacts.remove(&key).is_some() {
-                self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
-            }
-            self.hit_counters.remove(&key);
+        let drop_keys: Vec<FileArtifactKey> = entries
+            .into_iter()
+            .take(drop_count)
+            .map(|(key, _hits, _tick)| key)
+            .collect();
+        // Route through the single removal chokepoint: it drops the
+        // entries, clears their hit counters, and invalidates the
+        // augmentation index the evicted augmenters contributed to.
+        let removed = self.evict_artifact_keys(&drop_keys);
+        for (key, _payload) in &removed {
+            self.live_counter.fetch_sub(1, Ordering::Relaxed);
+            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
             // Only remove `last_access` if no other version of the
             // same canonical survives — the access tick is per
             // canonical, not per FileArtifactKey.
@@ -937,6 +1005,7 @@ impl FileArtifactStore {
                 .or_default()
                 .push(entry.key().clone());
         }
+        let mut drop_keys: Vec<FileArtifactKey> = Vec::new();
         for (_canonical, mut keys) in by_canonical {
             if keys.len() <= retention {
                 continue;
@@ -945,13 +1014,15 @@ impl FileArtifactStore {
             // from the front (older / lower-numbered variants).
             keys.sort_by(|a, b| a.content_hash.cmp(&b.content_hash));
             let drop_count = keys.len() - retention;
-            for key in keys.into_iter().take(drop_count) {
-                if self.artifacts.remove(&key).is_some() {
-                    self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                    self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
-                }
-                self.hit_counters.remove(&key);
-            }
+            drop_keys.extend(keys.into_iter().take(drop_count));
+        }
+        // Route through the single removal chokepoint: it drops the
+        // entries, clears their hit counters, and invalidates the
+        // augmentation index the evicted augmenters contributed to.
+        let removed = self.evict_artifact_keys(&drop_keys);
+        for _ in &removed {
+            self.live_counter.fetch_sub(1, Ordering::Relaxed);
+            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -1000,9 +1071,11 @@ impl FileArtifactStore {
 
         // Legacy semantics: drain every prior version of the same
         // canonical before inserting. The new entry replaces them all.
-        // Capture each drained version's augmentations: a content edit that
-        // RETARGETS or DROPS an augmentation must invalidate the prior
-        // target's index entry, which the new facts alone would not cover.
+        // The drain routes through the single removal chokepoint, which
+        // invalidates the prior versions' augmentation-index entries — a
+        // content edit that RETARGETS or DROPS an augmentation must clean
+        // the PRIOR target's index entry, which the new facts alone would
+        // not cover.
         let prior_keys: Vec<FileArtifactKey> = self
             .artifacts
             .iter()
@@ -1010,23 +1083,21 @@ impl FileArtifactStore {
             .map(|entry| entry.key().clone())
             .collect();
         let had_prior = !prior_keys.is_empty();
-        let mut changed_augmentations: Vec<ModuleAugmentationFact> = Vec::new();
-        for prior_key in prior_keys {
-            if let Some((_, prior)) = self.artifacts.remove(&prior_key) {
-                changed_augmentations.extend(prior.augmentations.iter().cloned());
-            }
-            self.hit_counters.remove(&prior_key);
-        }
+        let _drained = self.evict_artifact_keys(&prior_keys);
 
         let key = FileArtifactKey::legacy(canonical_id, whole_hash);
         let payload = Arc::new(FileArtifacts::with_indexed(indexed));
-        changed_augmentations.extend(payload.augmentations.iter().cloned());
+        // Capture the NEW artifact's augmentations before the move so the
+        // publish-side invalidation can fold them (the drain above already
+        // cleaned the prior target).
+        let new_augmentations: Vec<ModuleAugmentationFact> =
+            payload.augmentations.iter().cloned().collect();
         self.artifacts.insert(key, payload);
 
-        // Demand-driven coherence: a published artifact whose augmentation
-        // contribution changed (prior ∪ new facts) invalidates every index
-        // entry it could touch so the next cold-rescan folds the change in.
-        self.invalidate_augmentation_index_for_augmenter(&changed_augmentations);
+        // Demand-driven coherence: the published artifact's augmentation
+        // facts invalidate every index entry they could touch (a retarget
+        // cleans the NEW target) so the next cold-rescan folds the change in.
+        self.invalidate_augmentation_index_for_augmenter(&new_augmentations);
 
         if had_prior {
             // Replacement: live count unchanged, bump stale sweep.
@@ -1055,19 +1126,15 @@ impl FileArtifactStore {
             .filter(|entry| entry.key().canonical.as_ref() == canonical_id)
             .map(|entry| entry.key().clone())
             .collect();
-        let mut removed_augmentations: Vec<ModuleAugmentationFact> = Vec::new();
-        for key in &to_remove {
-            if let Some((_, removed)) = self.artifacts.remove(key) {
-                self.live_counter.fetch_sub(1, Ordering::Relaxed);
-                self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
-                removed_augmentations.extend(removed.augmentations.iter().cloned());
-            }
-            self.hit_counters.remove(key);
+        // Route through the single removal chokepoint: it clears hit
+        // counters and invalidates the augmentation index the removed
+        // augmenters contributed to.
+        let removed = self.evict_artifact_keys(&to_remove);
+        for _ in &removed {
+            self.live_counter.fetch_sub(1, Ordering::Relaxed);
+            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
         }
         self.last_access.remove(canonical_id);
-        // Demand-driven coherence: a removed augmenter must drop every index
-        // entry it contributed to so the next cold-rescan rebuilds without it.
-        self.invalidate_augmentation_index_for_augmenter(&removed_augmentations);
     }
 
     /// Number of live entries.
@@ -1309,15 +1376,13 @@ impl FileArtifactStore {
         let canonical = Arc::clone(&key.canonical);
         let content_hash = key.content_hash;
         let parse_env_hash = key.parse_env_hash;
-        let removed = self.artifacts.remove(key).map(|(_, v)| v);
-        if let Some(removed) = removed.as_ref() {
+        // Route through the single removal chokepoint: it clears the hit
+        // counter and invalidates the augmentation index the removed
+        // augmenter contributed to.
+        let removed = self.drop_artifact_entry(key);
+        if removed.is_some() {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
-            self.hit_counters.remove(key);
-            // Demand-driven coherence: a removed augmenter must drop every
-            // index entry it contributed to so the next cold-rescan rebuilds
-            // without it.
-            self.invalidate_augmentation_index_for_augmenter(&removed.augmentations);
             // R23 typed event: a `FileArtifactStore` entry was
             // evicted. Best-effort emission.
             crate::host_manage::push_structured_event(
@@ -1335,21 +1400,17 @@ impl FileArtifactStore {
 
     /// Drain every entry whose canonical matches `canonical_id`.
     pub fn remove_canonical(&self, canonical_id: &str) -> usize {
-        let mut removed_keys: Vec<FileArtifactKey> = Vec::new();
-        let mut removed_augmentations: Vec<ModuleAugmentationFact> = Vec::new();
-        self.artifacts.retain(|key, value| {
-            if key.canonical.as_ref() == canonical_id {
-                removed_keys.push(key.clone());
-                removed_augmentations.extend(value.augmentations.iter().cloned());
-                false
-            } else {
-                true
-            }
-        });
-        // Demand-driven coherence: a removed augmenter must drop every index
-        // entry it contributed to so the next cold-rescan rebuilds without it.
-        self.invalidate_augmentation_index_for_augmenter(&removed_augmentations);
-        let removed = removed_keys.len();
+        let to_remove: Vec<FileArtifactKey> = self
+            .artifacts
+            .iter()
+            .filter(|entry| entry.key().canonical.as_ref() == canonical_id)
+            .map(|entry| entry.key().clone())
+            .collect();
+        // Route through the single removal chokepoint: it clears hit
+        // counters and invalidates the augmentation index the removed
+        // augmenters contributed to.
+        let removed_pairs = self.evict_artifact_keys(&to_remove);
+        let removed = removed_pairs.len();
         if removed > 0 {
             self.live_counter
                 .fetch_sub(removed as u64, Ordering::Relaxed);
@@ -1358,8 +1419,7 @@ impl FileArtifactStore {
             // R23 typed event: each eviction emits one event so
             // downstream telemetry can attribute drain footprint
             // per `FileArtifactKey` dimension.
-            for key in removed_keys {
-                self.hit_counters.remove(&key);
+            for (key, _payload) in &removed_pairs {
                 crate::host_manage::push_structured_event(
                     crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                         canonical_id: Arc::clone(&key.canonical),
@@ -1724,6 +1784,12 @@ impl crate::cache_schema::CacheSchemaVersioned for FileArtifactStore {
             return 0;
         }
         let count = self.artifacts.len();
+        // Whole-store nuke: this is the strongest possible augmentation-index
+        // invalidation — clearing every artifact is paired with clearing the
+        // entire `augmentation_index` in the same step, so no stale
+        // `AugmenterSet` can survive. (The per-key removal chokepoint
+        // `evict_artifact_keys` covers every partial removal; this paired
+        // clear covers the total reset.)
         self.artifacts.clear();
         self.last_access.clear();
         self.augmentation_index.clear();

@@ -1634,6 +1634,255 @@ fn base_augmenter_legacy_insert_invalidates_index() {
 }
 
 // ────────────────────────────────────────────────────────────────
+// Artifact-only EVICTION paths (LRU floor + per-canonical retention)
+// must invalidate the augmentation index too.
+//
+// `remove`/`remove_artifacts`/`remove_canonical` are the *public* drop
+// surfaces — round-5 wired those into the index-invalidation rail. But
+// `FileArtifactStore::evict_lru_promoted` and
+// `enforce_per_canonical_retention` drop entries from `self.artifacts`
+// internally (driven by `evict_unreachable_artifacts_with_policy` on
+// memory-pressure / long-session sweeps). If those internal drops bypass
+// the rail, an evicted augmenter's `AugmenterSet` survives stale and the
+// next `EffectiveExportSet` stitch republishes a stale fingerprint over
+// an incomplete export surface — the round-6 P1 class.
+//
+// These tests drive the REAL eviction methods and assert the index
+// transitions. They FAIL on the pre-fix tree (eviction bypassed the rail)
+// and PASS once every artifact-removal path funnels through the single
+// invalidating chokepoint.
+// ────────────────────────────────────────────────────────────────
+
+/// LRU floor eviction of an augmenter artifact MUST invalidate the
+/// augmentation-index entry it contributed to.
+///
+/// - **Pre-fix tree** (`evict_lru_promoted` drops the entry without
+///   invalidating): the re-`ensure` warm-hits the stale 2-augmenter set,
+///   so `/secondary.ts` is still PRESENT — FAILS.
+/// - **Post-fix tree** (LRU eviction funnels through the invalidating
+///   chokepoint): the re-`ensure` cold-rebuilds WITHOUT the evicted
+///   augmenter — PASSES.
+#[test]
+fn lru_eviction_of_augmenter_invalidates_index() {
+    use verter_session::file_artifact_store::AugmentationPopulation;
+
+    let store = FileArtifactStore::new();
+    // Insert `/secondary.ts` FIRST (older access tick) so it is the LRU
+    // victim, then `/primary.ts` (newer tick) which must survive.
+    let _secondary = insert_artifact_from_fixture(
+        &store,
+        "/secondary.ts",
+        "module_augmentation_external.ts",
+        [71u8; 16],
+    );
+    let _primary = insert_artifact_from_fixture(
+        &store,
+        "/primary.ts",
+        "module_augmentation_external.ts",
+        [72u8; 16],
+    );
+
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
+        target,
+    };
+
+    let before = store.ensure_augmentation_index_populated(&key, |_, _| None, None);
+    let before_canonicals: Vec<&str> = before
+        .entries
+        .iter()
+        .map(|e| e.canonical().as_ref())
+        .collect();
+    assert!(
+        before_canonicals.contains(&"/primary.ts") && before_canonicals.contains(&"/secondary.ts"),
+        "index must start with BOTH augmenters; got {before_canonicals:?}"
+    );
+
+    // Memory-pressure LRU floor down to 1 entry: drops the oldest-tick
+    // entry (`/secondary.ts`). promote_threshold = 0 → pure recency.
+    store.evict_lru_promoted(1, 0);
+    assert_eq!(
+        store.len(),
+        1,
+        "LRU floor must have dropped exactly one artifact"
+    );
+
+    let after = store.ensure_augmentation_index_populated(&key, |_, _| None, None);
+    let after_canonicals: Vec<&str> = after
+        .entries
+        .iter()
+        .map(|e| e.canonical().as_ref())
+        .collect();
+    assert!(
+        after_canonicals.contains(&"/primary.ts"),
+        "surviving augmenter must remain; got {after_canonicals:?}"
+    );
+    assert!(
+        !after_canonicals.contains(&"/secondary.ts"),
+        "LRU-evicted augmenter MUST be dropped from the index; a stale warm \
+         entry was returned. got {after_canonicals:?}"
+    );
+    assert_ne!(
+        before.fingerprint, after.fingerprint,
+        "augmenter-set fingerprint MUST transition after the LRU eviction"
+    );
+}
+
+/// Per-canonical retention eviction of an augmenter artifact MUST
+/// invalidate the augmentation-index entry it contributed to.
+///
+/// `enforce_per_canonical_retention(0)` drops every variant of every
+/// canonical — the most aggressive retention sweep. The store empties,
+/// so the only correct post-eviction index is the empty set.
+///
+/// - **Pre-fix tree** (retention drops entries without invalidating): the
+///   re-`ensure` warm-hits the stale non-empty set — FAILS.
+/// - **Post-fix tree** (retention funnels through the invalidating
+///   chokepoint): the re-`ensure` cold-rebuilds the empty set — PASSES.
+#[test]
+fn retention_eviction_of_augmenter_invalidates_index() {
+    use verter_session::file_artifact_store::AugmentationPopulation;
+
+    let store = FileArtifactStore::new();
+    let _primary = insert_artifact_from_fixture(
+        &store,
+        "/primary.ts",
+        "module_augmentation_external.ts",
+        [81u8; 16],
+    );
+    let _secondary = insert_artifact_from_fixture(
+        &store,
+        "/secondary.ts",
+        "module_augmentation_external.ts",
+        [82u8; 16],
+    );
+
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
+        target,
+    };
+
+    let before = store.ensure_augmentation_index_populated(&key, |_, _| None, None);
+    assert_eq!(
+        before.entries.len(),
+        2,
+        "index must start with both augmenters"
+    );
+
+    // Retention 0 drops every variant of every canonical.
+    store.enforce_per_canonical_retention(0);
+    assert_eq!(
+        store.len(),
+        0,
+        "retention(0) must drain the store; the test relies on this to \
+         exercise the retention removal path"
+    );
+
+    let after = store.ensure_augmentation_index_populated(&key, |_, _| None, None);
+    assert!(
+        after.entries.is_empty(),
+        "retention eviction emptied the store, so the index MUST cold-rebuild \
+         to the empty set; a stale warm entry was returned. got {:?}",
+        after
+            .entries
+            .iter()
+            .map(|e| e.canonical().as_ref())
+            .collect::<Vec<_>>()
+    );
+    assert_ne!(
+        before.fingerprint, after.fingerprint,
+        "augmenter-set fingerprint MUST transition from non-empty to empty"
+    );
+}
+
+/// The codex-noted SEQUENCE: an artifact-only eviction followed by a
+/// later "normal" delete of the SAME canonical. After the eviction the
+/// canonical has NO artifact left in the store, so the subsequent
+/// `remove_canonical` finds nothing to collect and can invalidate
+/// nothing. Therefore the eviction ITSELF must have invalidated the
+/// index — there is no downstream delete that can heal it.
+///
+/// - **Pre-fix tree**: the LRU eviction bypassed the rail AND the later
+///   delete has no facts to invalidate the stale `"vue"` entry, so the
+///   re-`ensure` warm-hits a set that still lists the evicted augmenter
+///   — FAILS.
+/// - **Post-fix tree**: the LRU eviction invalidated at drop time, so the
+///   index is already coherent and the no-op delete changes nothing —
+///   PASSES.
+#[test]
+fn artifact_eviction_then_unrelated_delete_keeps_index_coherent() {
+    use verter_session::file_artifact_store::AugmentationPopulation;
+
+    let store = FileArtifactStore::new();
+    let _secondary = insert_artifact_from_fixture(
+        &store,
+        "/secondary.ts",
+        "module_augmentation_external.ts",
+        [91u8; 16],
+    );
+    let _primary = insert_artifact_from_fixture(
+        &store,
+        "/primary.ts",
+        "module_augmentation_external.ts",
+        [92u8; 16],
+    );
+
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
+        target,
+    };
+
+    let before = store.ensure_augmentation_index_populated(&key, |_, _| None, None);
+    assert_eq!(before.entries.len(), 2, "index starts with both augmenters");
+
+    // Artifact-only eviction of `/secondary.ts` (oldest tick).
+    store.evict_lru_promoted(1, 0);
+    assert_eq!(store.len(), 1, "LRU dropped one artifact");
+
+    // Later "normal" delete of the SAME canonical. It is already gone, so
+    // this drains zero entries and has zero augmentation facts to feed the
+    // invalidation rail — it cannot heal a stale index entry.
+    let drained = store.remove_canonical("/secondary.ts");
+    assert_eq!(
+        drained, 0,
+        "the canonical was already evicted, so the delete drains nothing"
+    );
+
+    let after = store.ensure_augmentation_index_populated(&key, |_, _| None, None);
+    let after_canonicals: Vec<&str> = after
+        .entries
+        .iter()
+        .map(|e| e.canonical().as_ref())
+        .collect();
+    assert!(
+        !after_canonicals.contains(&"/secondary.ts"),
+        "the evicted augmenter MUST be absent: the eviction had to invalidate \
+         the index itself, because the later delete has no facts left to do \
+         it. got {after_canonicals:?}"
+    );
+    assert!(
+        after_canonicals.contains(&"/primary.ts"),
+        "the surviving augmenter must remain; got {after_canonicals:?}"
+    );
+    assert_ne!(
+        before.fingerprint, after.fingerprint,
+        "fingerprint MUST transition after the augmenter eviction"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────
 // Session-scope-keyed warm cache — base/session entries occupy distinct
 // `EffectiveExportSetKey` slots on the SAME `RouteDb`.
 //
