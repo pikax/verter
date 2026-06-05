@@ -172,8 +172,27 @@ fn r6_semantic_query_key_variants_carry_no_version_hash_in_source() {
     // Forbidden embedded types that transitively contain a version
     // hash. `DeclIdentity` is the canonical offender — keeping it as
     // a value-side payload is fine, embedding it in a query-identity
-    // key is the R6 violation.
-    const FORBIDDEN_EMBEDS: &[&str] = &["base: DeclIdentity", "owner: DeclIdentity"];
+    // key is the R6 violation. The retired content-free `DeclKey`
+    // type is ALSO forbidden as an embed: it was deleted in this
+    // migration, and re-embedding it (`base: DeclKey` / `owner:
+    // DeclKey`) would re-introduce the dual-path key it replaced. The
+    // bare `: DeclKey` markers are defensive — they catch any other
+    // field embedding `DeclKey` while the trailing field-shape suffix
+    // (`,` / ` ` / `}`) keeps them from false-matching `ResolveDeclKey`
+    // (the distinct, live `ResolveDecl` query key).
+    const FORBIDDEN_EMBEDS: &[&str] = &[
+        "base: DeclIdentity",
+        "owner: DeclIdentity",
+        "base: DeclKey,",
+        "base: DeclKey ",
+        "base: DeclKey}",
+        "owner: DeclKey,",
+        "owner: DeclKey ",
+        "owner: DeclKey}",
+        ": DeclKey,",
+        ": DeclKey ",
+        ": DeclKey}",
+    ];
 
     for variant in ["Instantiate {", "ResolveMacroPayload {"] {
         let body = extract_brace_block(&source, variant).unwrap_or_else(|| {
@@ -226,7 +245,24 @@ fn r6_family_key_variants_carry_no_version_hash_in_source() {
         "parse_stable_hash:",
         "fact_dep_signature:",
     ];
-    const FORBIDDEN_EMBEDS: &[&str] = &["base: DeclIdentity", "owner: DeclIdentity"];
+    // See the `semantic_query.rs` scan above for the rationale: the
+    // versioned `DeclIdentity` AND the retired content-free `DeclKey`
+    // are both forbidden as `base`/`owner` embeds in the mode-erased
+    // `FamilyKey` identity. The trailing field-shape suffixes keep the
+    // bare `: DeclKey` markers from matching `ResolveDeclKey`.
+    const FORBIDDEN_EMBEDS: &[&str] = &[
+        "base: DeclIdentity",
+        "owner: DeclIdentity",
+        "base: DeclKey,",
+        "base: DeclKey ",
+        "base: DeclKey}",
+        "owner: DeclKey,",
+        "owner: DeclKey ",
+        "owner: DeclKey}",
+        ": DeclKey,",
+        ": DeclKey ",
+        ": DeclKey}",
+    ];
 
     for variant in ["Instantiate {", "ResolveMacroPayload {"] {
         let body = extract_brace_block(&source, variant).unwrap_or_else(|| {
@@ -306,7 +342,10 @@ fn r6_decl_slot_struct_is_content_free_in_source() {
     // (non-identifier char before `struct`) plus the literal `struct `
     // keyword keep this from false-matching `ResolveDeclKey` (the distinct,
     // live `ResolveDecl` query key, declared `struct ResolveDeclKey`); the
-    // trailing delimiter boundary rejects `DeclKeyV2` and prose.
+    // trailing delimiter boundary rejects `DeclKeyV2` and prose. The
+    // tree-wide scan below pins the same invariant across EVERY production
+    // file — `semantic_query.rs` is no longer the only place a reintroduced
+    // `struct DeclKey` could land and be embedded by `FamilyKey`.
     assert!(
         !source_reintroduces_decl_key_struct(&source),
         "R6 GUARD VIOLATION — the retired `struct DeclKey` reappeared in \
@@ -314,6 +353,81 @@ fn r6_decl_slot_struct_is_content_free_in_source() {
          the base/owner identity is the env-bearing content-free \
          `ResolvedDeclSlotIdentity` slot."
     );
+}
+
+/// Tree-wide reinforcement of the `struct DeclKey`-reintroduction ban:
+/// the retired content-free query-identity struct must not reappear in
+/// ANY production source file, not just `semantic_query.rs`. A
+/// `pub struct DeclKey` reintroduced in a different module and then
+/// embedded by `FamilyKey` would evade the single-file scan in
+/// [`r6_decl_slot_struct_is_content_free_in_source`]; this guard walks
+/// every `crates/*/src/**.rs` file and asserts none reintroduces a
+/// `struct DeclKey` in any declaration form. `ResolveDeclKey` /
+/// `DeclKeyV2` / prose are still rejected by the same shared
+/// [`source_reintroduces_decl_key_struct`] boundary logic.
+#[test]
+fn r6_no_decl_key_struct_reintroduced_anywhere_in_production() {
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let crates_dir = crate_root.parent().expect("crates/").to_path_buf();
+    assert!(
+        crates_dir.is_dir(),
+        "R6 GUARD fixture invariant: `{}` MUST exist",
+        crates_dir.display(),
+    );
+
+    let mut offenders: Vec<String> = Vec::new();
+    for src_file in walk_crate_src_rs_files(&crates_dir) {
+        let source = match fs::read_to_string(&src_file) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if source_reintroduces_decl_key_struct(&source) {
+            offenders.push(src_file.display().to_string());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "R6 GUARD VIOLATION — the retired `struct DeclKey` query-identity \
+         struct reappeared in production source. The base/owner identity is \
+         the env-bearing content-free `ResolvedDeclSlotIdentity` slot (built \
+         via `type_slot_for` / `builtin_type_slot`) — `DeclKey` must NOT be \
+         reintroduced anywhere. Offending file(s):\n{}",
+        offenders.join("\n"),
+    );
+}
+
+/// Walk every `crates/*/src/**/*.rs` production file under `crates_dir`.
+/// Mirrors the production-window file-walk convention used by the
+/// sibling `no_default_env_hashes_in_production` guard.
+fn walk_crate_src_rs_files(crates_dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = fs::read_dir(crates_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let src = path.join("src");
+            if src.is_dir() {
+                walk_rs_files(&src, &mut out);
+            }
+        }
+    }
+    out
+}
+
+fn walk_rs_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk_rs_files(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
 }
 
 /// True iff `source` reintroduces the retired query-identity struct

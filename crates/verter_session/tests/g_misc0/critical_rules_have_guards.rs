@@ -134,6 +134,12 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "r6_semantic_query_key_variants_carry_no_version_hash_in_source",
             "r6_family_key_variants_carry_no_version_hash_in_source",
             "r6_decl_slot_struct_is_content_free_in_source",
+            "r6_no_decl_key_struct_reintroduced_anywhere_in_production",
+            // One-path slot derivation: production code must derive the
+            // `Instantiate` / `ResolveMacroPayload` slot via the shared
+            // env-bearing `type_slot_for` / `builtin_type_slot`; the
+            // zero-env fixture-only constructors are a forbidden bypass.
+            "no_production_caller_of_zero_env_slot_constructors",
         ],
     ),
     (

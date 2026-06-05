@@ -90,6 +90,8 @@ mod no_default_env_hashes_in_production;
 mod no_legacy_compile_many_upsert_fanout;
 #[path = "g_misc0/no_legacy_walker.rs"]
 mod no_legacy_walker;
+#[path = "g_misc0/no_production_caller_of_zero_env_slot_constructors.rs"]
+mod no_production_caller_of_zero_env_slot_constructors;
 #[path = "g_misc0/origin_graph_consumer_contract.rs"]
 mod origin_graph_consumer_contract;
 #[path = "g_misc0/overlay_prepared_decl_no_base_cache_pollution.rs"]
