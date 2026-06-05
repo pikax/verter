@@ -587,9 +587,13 @@ fn relation_memo_warm_read_validates_self_root() {
         hash: [0xEF; 16],
     }]));
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(untracked)]);
-    store.insert_relation(
+    let key = crate::semantic_query::RelateMemoKey::assignable(
         source,
         target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    store.insert_relation(
+        key.clone(),
         carrier,
         self_roots,
         crate::semantic_query::RelationResult::Assignable {
@@ -599,7 +603,7 @@ fn relation_memo_warm_read_validates_self_root() {
     );
 
     assert!(
-        store.get_relation(ctx, source, target).is_none(),
+        store.get_relation(ctx, &key).is_none(),
         "the relation memo's warm read MUST validate the stored entry's self-version-rooted \
          carrier strictly — an entry self-rooted on an untracked canonical must miss",
     );
@@ -620,9 +624,13 @@ fn relation_memo_warm_read_serves_validated_entry() {
     ));
 
     // An empty carrier with no self-roots validates vacuously.
-    store.insert_relation(
+    let key = crate::semantic_query::RelateMemoKey::assignable(
         source,
         target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    store.insert_relation(
+        key.clone(),
         ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
         crate::semantic_query::RelationResult::Assignable {
@@ -631,7 +639,7 @@ fn relation_memo_warm_read_serves_validated_entry() {
         host.project_type_store().current_project_generation(),
     );
 
-    let cached = store.get_relation(ctx, source, target);
+    let cached = store.get_relation(ctx, &key);
     assert!(
         matches!(
             cached,

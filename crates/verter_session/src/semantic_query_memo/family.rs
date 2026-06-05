@@ -953,7 +953,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         // `family_and_slot` returning a placeholder is safe because
         // `execute_cooperative` admission short-circuits `Relate`
         // before this function is consulted.
-        SemanticQueryKey::Relate { source, target } => (
+        SemanticQueryKey::Relate { source, target, .. } => (
             FamilyKey::IndexedAccess {
                 base: *source,
                 index: crate::semantic_query::IndexKey::TypeNode(*target),

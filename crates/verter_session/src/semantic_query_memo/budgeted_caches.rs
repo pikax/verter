@@ -28,11 +28,12 @@ use std::sync::Arc;
 use dashmap::DashMap;
 
 use crate::bounded_query_retention::GlobalRetentionBudget;
-use crate::semantic_query::{HostResolvedNamedTypeKey, SemanticNodeId};
+use crate::semantic_query::{HostResolvedNamedTypeKey, RelateMemoKey, SemanticNodeId};
 
 /// One entry in the relation memo ([`BudgetedRelationMemo`]).
 ///
-/// A relation judgement for a `(source, target)` semantic-node pair is
+/// A relation judgement for a [`RelateMemoKey`] (the full relation identity,
+/// not the bare `(source, target)` pair) is
 /// self-version-rooted: `carrier` leads with a self-root `FileWholeHash`
 /// for each file-derived input node's originating file, so a content
 /// edit to either the source's or the target's file misses the warm
@@ -74,14 +75,19 @@ pub(crate) struct RelationMemoEntry {
     admission_seq: u64,
 }
 
-/// Relation-engine memo: `(source, target)` semantic-node pairs → a
+/// Relation-engine memo: full-identity [`RelateMemoKey`]s → a
 /// [`RelationMemoEntry`], bounded by a FIFO [`GlobalRetentionBudget`].
+///
+/// Keyed by the FULL relation identity (source / target / relation kind /
+/// policy / source freshness / inference context / env), NOT the bare
+/// `(source, target)` pair — two judgements over the same nodes that differ in
+/// any identity axis occupy distinct slots.
 ///
 /// Owns the map, the budget, and the lifecycle `retention_gate`. See
 /// the module docs for the map/budget lock-domain invariant.
 pub(crate) struct BudgetedRelationMemo {
-    memo: DashMap<(SemanticNodeId, SemanticNodeId), RelationMemoEntry>,
-    budget: GlobalRetentionBudget<(SemanticNodeId, SemanticNodeId)>,
+    memo: DashMap<RelateMemoKey, RelationMemoEntry>,
+    budget: GlobalRetentionBudget<RelateMemoKey>,
     /// Lifecycle gate. `insert` takes the read guard across the whole
     /// map + budget mutation; `clear` takes the write guard across the
     /// whole map + budget clear.
@@ -129,19 +135,15 @@ impl Default for BudgetedRelationMemo {
 }
 
 impl BudgetedRelationMemo {
-    /// Clone the entry stored for `(source, target)` out of its
+    /// Clone the entry stored for `key` out of its
     /// `DashMap` shard guard. The caller validates the cloned entry
     /// after the shard guard is released so a validator that re-enters
     /// the relation memo cannot deadlock against a held shard guard.
-    pub(crate) fn get_cloned(
-        &self,
-        source: SemanticNodeId,
-        target: SemanticNodeId,
-    ) -> Option<RelationMemoEntry> {
-        self.memo.get(&(source, target)).map(|e| e.value().clone())
+    pub(crate) fn get_cloned(&self, key: &RelateMemoKey) -> Option<RelationMemoEntry> {
+        self.memo.get(key).map(|e| e.value().clone())
     }
 
-    /// Publish a relation judgement for `(source, target)`.
+    /// Publish a relation judgement for `key`.
     ///
     /// Holds the `retention_gate` read guard across the WHOLE map +
     /// budget mutation: the map insert, the new-key budget admission,
@@ -169,8 +171,7 @@ impl BudgetedRelationMemo {
     /// entry from its ledger record and leak it past a budget removal.
     pub(crate) fn insert(
         &self,
-        source: SemanticNodeId,
-        target: SemanticNodeId,
+        key: RelateMemoKey,
         carrier: crate::fact_signature_helpers::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         result: crate::semantic_query::RelationResult,
@@ -183,13 +184,15 @@ impl BudgetedRelationMemo {
         // `DashMap::entry` decision, the `record_admission`, and the
         // victim `remove_if`.
         let _admission = self.admission_lock.lock();
-        let key = (source, target);
         // Decide new-vs-replace and write the slot atomically under the
         // shard write guard the `entry` API holds. `admitted_seq` is
         // `Some(seq)` only when this call freshly admitted the key — on
         // a same-key replace the prior seq is carried forward (the
         // ledger record was never removed) and no admission is recorded.
-        let admitted_seq = match self.memo.entry(key) {
+        // `RelateMemoKey` is not `Copy`; clone it for the `entry` slot so
+        // the original stays owned for the `record_admission` below (only
+        // reached on the vacant path).
+        let admitted_seq = match self.memo.entry(key.clone()) {
             Entry::Occupied(mut occ) => {
                 let admission_seq = occ.get().admission_seq;
                 occ.insert(RelationMemoEntry {
@@ -853,21 +856,21 @@ impl Drop for BudgetedGateGuard<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::semantic_query::RelationResult;
+    use crate::semantic_query::{RelateMemoKey, RelationContext, RelationResult};
     use std::sync::{Arc as StdArc, Barrier};
     use std::thread;
 
-    /// Publish one relation judgement for `(source, target)` with empty
-    /// carrier / self-roots and an `Unknown` result — the minimal entry
-    /// the budget/desync tests admit.
+    /// Publish one relation judgement for the assignability identity of
+    /// `(source, target)` with empty carrier / self-roots and an `Unknown`
+    /// result — the minimal entry the budget/desync tests admit. Distinct
+    /// `(source, target)` pairs map to distinct [`RelateMemoKey`]s.
     fn insert_relation(
         memo: &BudgetedRelationMemo,
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) {
         memo.insert(
-            source,
-            target,
+            RelateMemoKey::assignable(source, target, RelationContext::default()),
             crate::fact_signature_helpers::ReadSetSignature::empty(),
             StdArc::from(Vec::<StdArc<str>>::new()),
             RelationResult::Unknown,

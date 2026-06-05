@@ -5218,7 +5218,10 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
 /// test for the relation memo carrier.
 #[test]
 fn relation_memo_get_relation_rejects_entry_from_superseded_generation() {
-    use crate::semantic_query::{PrimitiveKind, RelationResult, SemanticNodeData, SemanticNodeId};
+    use crate::semantic_query::{
+        PrimitiveKind, RelateMemoKey, RelationContext, RelationResult, SemanticNodeData,
+        SemanticNodeId,
+    };
     use crate::semantic_query_memo::SemanticGraphStore;
 
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -5228,13 +5231,13 @@ fn relation_memo_get_relation_rejects_entry_from_superseded_generation() {
         store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let target: SemanticNodeId =
         store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let key = RelateMemoKey::assignable(source, target, RelationContext::default());
 
     // Plant a relation judgement with a valid (empty + empty
     // self-roots) carrier tagged at the CURRENT project generation.
     let gen0 = host.project_type_store().current_project_generation();
     store.insert_relation(
-        source,
-        target,
+        key.clone(),
         crate::fact_signature_helpers::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
         RelationResult::NotAssignable,
@@ -5244,7 +5247,7 @@ fn relation_memo_get_relation_rejects_entry_from_superseded_generation() {
     // Same generation — the carrier validates vacuously and the
     // generation matches, so `get_relation` HITs.
     assert!(
-        store.get_relation(ctx, source, target).is_some(),
+        store.get_relation(ctx, &key).is_some(),
         "a relation memo entry with a valid carrier and a matching \
          project generation must warm-hit",
     );
@@ -5267,7 +5270,7 @@ fn relation_memo_get_relation_rejects_entry_from_superseded_generation() {
     // alone still passes (no file content changed) and the stale
     // relation judgement is served.
     assert!(
-        store.get_relation(ctx, source, target).is_none(),
+        store.get_relation(ctx, &key).is_none(),
         "STALE-GENERATION READ: `SemanticGraphStore::get_relation` \
          served a relation memo entry whose `validated_at_generation` \
          is superseded — a `ProjectGeneration` reset bumps no file \

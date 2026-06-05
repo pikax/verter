@@ -108,6 +108,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> (RelationResult, DepSignature) {
         let graph = self.graph();
         graph.record_relation_check();
+        // The full relation identity: the current engine computes
+        // ASSIGNABILITY under the live `R T L J` env, with default policy /
+        // regular source freshness / no inference context. The relation kind /
+        // policy / freshness / inference axes become live discriminators with
+        // U2.RELATION_INFER; today they take their fixed default so the memo is
+        // keyed on the full identity rather than the bare `(source, target)`
+        // pair.
+        let key = self.relate_memo_key(source, target);
         // Strict warm-hit fast path: a memoised judgement returns only
         // when its self-version-rooted carrier validates against the
         // live store view AND its `validated_at_generation` still
@@ -115,7 +123,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // source's or the target's originating file, OR a
         // project-shape change, misses the warm read and the
         // judgement recomputes below.
-        if let Some((fence, cached)) = graph.get_relation(self.ctx, source, target) {
+        if let Some((fence, cached)) = graph.get_relation(self.ctx, &key) {
             return (cached, fence);
         }
         // Snapshot the project generation BEFORE the cold compute
@@ -157,8 +165,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query_memo::semantic_graph_read_set_signature(&observed_self_roots, &[])
         {
             graph.insert_relation(
-                source,
-                target,
+                key,
                 carrier,
                 std::sync::Arc::from(self_root_canonicals),
                 result.clone(),
@@ -166,6 +173,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
         }
         (result, fence)
+    }
+
+    /// The full relation-memo key for `(source, target)` under the current
+    /// engine's identity: [`RelationKind::Assignable`], default policy, regular
+    /// source freshness, no inference context, and the live `R T L J` env. This
+    /// is the SINGLE key constructor `relate_nodes` uses to read and write the
+    /// relation memo — tests reconstruct the exact key through it.
+    ///
+    /// [`RelationKind::Assignable`]: crate::semantic_query::RelationKind::Assignable
+    pub(crate) fn relate_memo_key(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> crate::semantic_query::RelateMemoKey {
+        crate::semantic_query::RelateMemoKey::assignable(source, target, self.relation_context())
+    }
+
+    /// The live `R T L J` env the relation outcome depends on, sourced from the
+    /// host view. `relate_nodes` keys the relation memo under this so a
+    /// tsconfig / lib / project change isolates judgements (belt-and-suspenders
+    /// with the `validated_at_generation` gate, and the design's env-on-key
+    /// rule). `project_identity` is the live `ProjectIdentity` hash.
+    fn relation_context(&self) -> crate::semantic_query::RelationContext {
+        let host = self.ctx.host_for_fact_tracer_install();
+        let env = host.host_view_env_hashes();
+        crate::semantic_query::RelationContext {
+            resolve_env_hash: env.resolve_env_hash,
+            type_env_hash: env.type_env_hash,
+            lib_env_hash: env.lib_env_hash,
+            project_identity: host.host_view_project_identity().0,
+        }
     }
 
     /// Dispatch-aware relation entry. Runs the Object-vs-Record arm

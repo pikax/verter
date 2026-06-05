@@ -1554,8 +1554,8 @@ impl SemanticGraphStore {
     // Relation memo
     // ──────────────────────────────────────────────────────────────────
 
-    /// Strict warm-hit read of a cached relation judgement for
-    /// `(source, target)`.
+    /// Strict warm-hit read of a cached relation judgement for the full
+    /// relation identity `key`.
     ///
     /// Returns the tri-state
     /// [`RelationResult`](crate::semantic_query::RelationResult) plus
@@ -1569,12 +1569,16 @@ impl SemanticGraphStore {
     /// generation. A stale entry (same-canonical content edit,
     /// untracked self-root, or `ProjectGeneration` bump) returns
     /// `None`. Validation failure does NOT bubble the carrier.
+    ///
+    /// A `key` differing only in relation kind / policy / source freshness /
+    /// inference context / env from a cached one is a DISTINCT slot and misses
+    /// — the warm hit is on the FULL identity, not the bare `(source, target)`
+    /// pair.
     #[must_use]
     pub(crate) fn get_relation(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
-        source: SemanticNodeId,
-        target: SemanticNodeId,
+        key: &crate::semantic_query::RelateMemoKey,
     ) -> Option<(DepSignature, crate::semantic_query::RelationResult)> {
         // Clone the entry OUT of the `DashMap` shard guard before
         // validating: `validate_with_self_roots` / `bubble` consult the
@@ -1582,7 +1586,7 @@ impl SemanticGraphStore {
         // re-enter the relation memo — holding the shard guard across
         // that re-entry would deadlock. `BudgetedRelationMemo::get_cloned`
         // performs exactly that clone-out-of-guard.
-        let entry = self.relation_memo.get_cloned(source, target)?;
+        let entry = self.relation_memo.get_cloned(key)?;
         // Project-generation gate — carrier alone misses a reset.
         if entry.validated_at_generation != ctx.project_type_store().current_project_generation()
             || !entry
@@ -1598,9 +1602,9 @@ impl SemanticGraphStore {
         Some((empty_signature(), entry.result))
     }
 
-    /// Publish a relation judgement for `(source, target)`. Writes to the
-    /// dedicated relation memo DashMap, separate from the family memo so
-    /// pairwise identity does not inflate the single-node keyspace.
+    /// Publish a relation judgement for the full relation identity `key`.
+    /// Writes to the dedicated relation memo DashMap, separate from the family
+    /// memo so pairwise identity does not inflate the single-node keyspace.
     ///
     /// The entry is self-version-rooted: `carrier` is built by
     /// [`semantic_graph_read_set_signature`] from the relation build's
@@ -1608,8 +1612,7 @@ impl SemanticGraphStore {
     /// and `validated_at_generation` gates on a project-shape bump.
     pub fn insert_relation(
         &self,
-        source: SemanticNodeId,
-        target: SemanticNodeId,
+        key: crate::semantic_query::RelateMemoKey,
         carrier: crate::fact_signature_helpers::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         result: crate::semantic_query::RelationResult,
@@ -1619,8 +1622,7 @@ impl SemanticGraphStore {
         // guard; `DashMap::entry` makes the new-vs-replace decision
         // atomic. `admission_seq` stays paired with the ledger record.
         self.relation_memo.insert(
-            source,
-            target,
+            key,
             carrier,
             self_root_canonicals,
             result,

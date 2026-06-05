@@ -1556,8 +1556,11 @@ fn invalidate_all_clears_id_keyed_semantic_caches() {
         dep_sig_for("/w/a.ts", 1),
     );
     store.insert_relation(
-        result,
-        result,
+        crate::semantic_query::RelateMemoKey::assignable(
+            result,
+            result,
+            crate::semantic_query::RelationContext::default(),
+        ),
         crate::fact_signature_helpers::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         crate::semantic_query::RelationResult::NotAssignable,

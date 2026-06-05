@@ -1019,6 +1019,11 @@ mod tests {
         let relate = SemanticQueryKey::Relate {
             source: dummy_node,
             target: dummy_node,
+            relation: crate::semantic_query::RelationKind::Assignable,
+            policy: crate::semantic_query::RelationPolicy::default(),
+            source_freshness: crate::semantic_query::FreshnessKey::Regular,
+            inference_context: None,
+            context: crate::semantic_query::RelationContext::default(),
         };
         let slot = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&dummy_id),

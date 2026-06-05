@@ -2314,7 +2314,7 @@ pub struct InferenceContextKey {
 /// is the real [`crate::file_artifact_store::ProjectIdentity`] hash rather than
 /// a placeholder integer — env hashes are content-free key dimensions (R6), the
 /// same convention as `ClassSurfaceContext::resolve_env_hash`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct RelationContext {
     /// Import / name-resolution dimension (`R`).
     pub resolve_env_hash: HashValue,
@@ -2324,6 +2324,64 @@ pub struct RelationContext {
     pub lib_env_hash: HashValue,
     /// Project-isolation dimension (`J`) — the live `ProjectIdentity` hash.
     pub project_identity: HashValue,
+}
+
+/// The relation memo's query-identity key — the full `Relate` identity.
+///
+/// Mirrors the [`SemanticQueryKey::Relate`] identity fields exactly: the
+/// relation memo
+/// ([`BudgetedRelationMemo`](crate::semantic_query_memo::SemanticGraphStore))
+/// is keyed by THIS, never by the bare `(source, target)` pair. Two relation
+/// judgements over the same nodes but a different relation kind / policy /
+/// source freshness / inference context / env are DISTINCT and occupy distinct
+/// memo slots.
+///
+/// Version rooting stays on the cached VALUE (the `ReadSetSignature` carrier +
+/// `validated_at_generation`), never in this key — env hashes are content-free
+/// key dimensions (R6), the same convention as the family memo's
+/// `resolve_env_hash`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RelateMemoKey {
+    /// The source node of the relation.
+    pub source: SemanticNodeId,
+    /// The target node of the relation.
+    pub target: SemanticNodeId,
+    /// Which relation is asked (assignable / subtype / identity / …).
+    pub relation: RelationKind,
+    /// Policy flags that govern the comparison.
+    pub policy: RelationPolicy,
+    /// Whether the source carries freshness.
+    pub source_freshness: FreshnessKey,
+    /// The inference session this relation runs within, if any.
+    pub inference_context: Option<InferenceContextKey>,
+    /// The `R T L J` env the relation outcome depends on.
+    pub context: RelationContext,
+}
+
+impl RelateMemoKey {
+    /// The current engine's relation identity for `(source, target)`:
+    /// [`RelationKind::Assignable`], default [`RelationPolicy`], regular
+    /// (widened) [`FreshnessKey`], NO inference context, under `context`.
+    ///
+    /// This is the identity `relate_nodes` keys the memo under today — the
+    /// relation engine computes assignability; the kind / policy / freshness /
+    /// inference axes become live discriminators with U2.RELATION_INFER.
+    #[must_use]
+    pub fn assignable(
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        context: RelationContext,
+    ) -> Self {
+        Self {
+            source,
+            target,
+            relation: RelationKind::Assignable,
+            policy: RelationPolicy::default(),
+            source_freshness: FreshnessKey::default(),
+            inference_context: None,
+            context,
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -2449,14 +2507,41 @@ pub enum SemanticQueryKey {
     ResolvedNamedType {
         key: Arc<HostResolvedNamedTypeKey>,
     },
-    /// Assignability / relation query between `source` and `target` semantic
-    /// nodes. Dispatches through
-    /// `ProjectSemanticDispatch::relate_nodes` and memoises the result in
-    /// [`SemanticGraphStore::relation_memo`](crate::semantic_query_memo::SemanticGraphStore)
-    /// with dep-signature fencing. Added in Phase D §5.4 WIP-S.
+    /// Full-identity relation query between `source` and `target` semantic
+    /// nodes.
+    ///
+    /// The identity is NOT the bare `(source, target)` pair: it carries the
+    /// relation `relation` (assignable / subtype / identity / …), the comparison
+    /// `policy`, the `source_freshness` discriminator, an optional
+    /// `inference_context` (the inference session the relation runs within), and
+    /// the `R T L J` env `context`. Two judgements over the same nodes that
+    /// differ in any of these are DISTINCT and occupy distinct memo slots —
+    /// `relate_nodes` keys the dedicated
+    /// [`relation_memo`](crate::semantic_query_memo::SemanticGraphStore) by the
+    /// full [`RelateMemoKey`], dep-signature fenced.
+    ///
+    /// **Forward-declared value domain.** The spec row records value domain
+    /// [`SemanticQueryValueTag::Relation`]
+    /// (`SemanticQueryValue::Relation(RelationPayload)`). The `execute` arm is
+    /// non-producing (returns `Miss`): the current production authority is
+    /// `relate_nodes`, which emits the engine's [`RelationResult`] into the
+    /// relation memo. The per-kind / per-policy / inference-aware relation
+    /// algorithm — and the reducer that fills the `RelationPayload` outcome /
+    /// proof / budget carrier — is U2.RELATION_INFER. Until then the engine
+    /// computes [`RelationKind::Assignable`] and the kind / policy / freshness /
+    /// inference axes are identity discriminators with a fixed default value.
+    ///
+    /// All identity fields are content-free (R6): node ids, content-free kind /
+    /// policy / freshness enums, content-free inference targets, and env hashes
+    /// (env hashes are key dimensions, never file content/version hashes).
     Relate {
         source: SemanticNodeId,
         target: SemanticNodeId,
+        relation: RelationKind,
+        policy: RelationPolicy,
+        source_freshness: FreshnessKey,
+        inference_context: Option<InferenceContextKey>,
+        context: RelationContext,
     },
     /// Resolve a Vue macro (`defineProps`, `defineEmits`, `defineSlots`,
     /// `defineModel`, `defineExpose`, `defineOptions`, `withDefaults`)

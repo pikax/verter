@@ -1318,7 +1318,7 @@ fn relation_unknown_is_cached_with_fence_not_recomputed_on_repeated_cycle() {
     );
     // Belt-and-braces: the memo exposes the cached outcome via
     // `get_relation`.
-    let cached = graph.get_relation(&host, source, target);
+    let cached = graph.get_relation(&host, &dispatch.relate_memo_key(source, target));
     assert!(
         matches!(cached, Some((_, RelationResult::Unknown))),
         "memo must expose the cached Unknown; got {cached:?}"
@@ -1607,9 +1607,9 @@ fn resolver_core_mod_no_longer_reexports_type_surface_db() {
 fn semantic_graph_store_has_relation_memo_field() {
     // SemanticGraphStore must carry a single `relation_memo` field for
     // the relation engine. The field is a `BudgetedRelationMemo` — a
-    // wrapper owning the `(source, target)` map, its retention budget,
-    // and the `retention_gate` that keeps the map and the budget in one
-    // lock domain — so the relation memo and its retention ledger
+    // wrapper owning the full-identity `RelateMemoKey` map, its retention
+    // budget, and the `retention_gate` that keeps the map and the budget
+    // in one lock domain — so the relation memo and its retention ledger
     // cannot desync (`clear` is exclusive against concurrent inserts).
     let memo_src = include_str!("semantic_query_memo/mod.rs");
     assert!(
@@ -1810,12 +1810,21 @@ fn relation_memo_has_exactly_one_owner() {
         field_count, 1,
         "relation_memo field must have exactly one owner; got {field_count}"
     );
-    // The wrapper owns the backing map exactly once.
-    let map_count = count_def_in_crates("memo: DashMap<(SemanticNodeId, SemanticNodeId)");
+    // The wrapper owns the backing map exactly once. Keyed by the full
+    // relation identity `RelateMemoKey`, NOT the retired bare
+    // `(SemanticNodeId, SemanticNodeId)` pair.
+    let map_count = count_def_in_crates("memo: DashMap<RelateMemoKey,");
     assert_eq!(
         map_count, 1,
         "the relation memo's DashMap must have exactly one owner \
          (BudgetedRelationMemo); got {map_count}"
+    );
+    // The retired bare-pair relation memo key must not survive anywhere.
+    let bare_pair_count = count_def_in_crates("memo: DashMap<(SemanticNodeId, SemanticNodeId)");
+    assert_eq!(
+        bare_pair_count, 0,
+        "the bare-pair relation memo key is RETIRED — re-keyed on the \
+         full RelateMemoKey identity; got {bare_pair_count}"
     );
 }
 
@@ -2624,9 +2633,14 @@ fn type_surface_db_identity_moved_to_semantic_graph_store_memo() {
     let graph = host.project_type_store().semantic_graph();
     let a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let key = crate::semantic_query::RelateMemoKey::assignable(
+        a,
+        b,
+        crate::semantic_query::RelationContext::default(),
+    );
     // Cold: no entry.
     assert!(
-        graph.get_relation(&host, a, b).is_none(),
+        graph.get_relation(&host, &key).is_none(),
         "cold relation memo must return None before publish"
     );
     // Publish a NotAssignable judgement. The relation memo entry is
@@ -2636,8 +2650,7 @@ fn type_surface_db_identity_moved_to_semantic_graph_store_memo() {
     let carrier = crate::fact_signature_helpers::ReadSetSignature::empty();
     let generation = host.project_type_store().current_project_generation();
     graph.insert_relation(
-        a,
-        b,
+        key.clone(),
         carrier,
         std::sync::Arc::from([]),
         RelationResult::NotAssignable,
@@ -2645,7 +2658,7 @@ fn type_surface_db_identity_moved_to_semantic_graph_store_memo() {
     );
     // Warm: must return the same judgement.
     let (_, cached) = graph
-        .get_relation(&host, a, b)
+        .get_relation(&host, &key)
         .expect("published relation memo must be readable");
     assert_eq!(cached, RelationResult::NotAssignable);
     assert_eq!(graph.relation_memo_count(), 1);
