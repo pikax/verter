@@ -1177,7 +1177,9 @@ fn effective_export_set_session_view_stitches_overlay_augmenter() {
     // SESSION read: derives the overlay discriminator from the session view's
     // fingerprint and unions the overlay augmenter with base. Separate RouteDb
     // instances keep the base and session result caches from cross-pollinating
-    // (the `EffectiveExportSetKey` carries no population dimension).
+    // here; the shared-`RouteDb` warm-slot separation (the content-free
+    // `EffectiveExportSetKey.session_scope`, R6) is exercised by the
+    // session-scope-keyed warm-cache tests below.
     let session_store_view = SessionScopedView::new(1, 42);
     let overlay_session = OverlayFingerprintView {
         fingerprint,
@@ -1480,31 +1482,34 @@ fn base_augmenter_change_invalidates_session_augmentation_index() {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Population-keyed warm cache — base/session entries occupy distinct
-// `EffectiveExportSetKey` slots on the SAME `RouteDb` (FIX A).
+// Session-scope-keyed warm cache — base/session entries occupy distinct
+// `EffectiveExportSetKey` slots on the SAME `RouteDb`.
 //
 // `effective_export_set_session_view_stitches_overlay_augmenter` above
 // proves the cold scan is overlay-correct, but it uses SEPARATE
 // `RouteDb` instances for the base and session reads, so it can never
 // exercise the warm-cache collision. The hazard the deleted base-only
 // assert guarded is reintroduced at the cache layer if
-// `EffectiveExportSetKey` is population-blind: a base-populated warm
-// entry then satisfies a session lookup (base-as-session) and vice
-// versa, because both reads hash to the same slot.
+// `EffectiveExportSetKey` is scope-blind: a base-populated warm entry
+// then satisfies a session lookup (base-as-session) and vice versa,
+// because both reads hash to the same slot.
 //
 // These two tests share ONE `RouteDb`. Both views' `validates()`
 // accepts every fact, so warm validation never spuriously misses — the
 // ONLY thing that can separate the base and session results is the
-// cache key carrying the augmentation `population` dimension.
+// cache key carrying the CONTENT-FREE `session_scope` dimension
+// (`EffectiveExportSetScope`, derived from `compat_token().session`;
+// the overlay-set content fingerprint never enters this query-identity
+// key — R6).
 //
-// - **Pre-fix tree** (`EffectiveExportSetKey` has no `population`
-//   field): the first read populates the shared slot, the second read
-//   hashes to the SAME slot and warm-hits the wrong-population entry —
-//   so the session read sees base-only augmenters / the base read sees
-//   the session overlay augmenter. Both asserts below FAIL.
+// - **Pre-fix tree** (`EffectiveExportSetKey` has no session-
+//   distinguishing field): the first read populates the shared slot, the
+//   second read hashes to the SAME slot and warm-hits the wrong-scope
+//   entry — so the session read sees base-only augmenters / the base read
+//   sees the session overlay augmenter. Both asserts below FAIL.
 // - **Post-fix tree**: base keys under `Base`, session keys under
-//   `Session(overlay-set fingerprint)`; the second read misses the warm
-//   slot and cold-computes its own population. PASSES.
+//   `Session(scope_id)`; the second read misses the warm slot and
+//   cold-computes its own scope. PASSES.
 // ────────────────────────────────────────────────────────────────
 
 /// Seed a shared store with a base augmenter (`/aug-base.ts`, legacy

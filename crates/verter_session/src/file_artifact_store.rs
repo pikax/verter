@@ -1391,10 +1391,15 @@ impl FileArtifactStore {
     /// as the existing snapshot in
     /// [`Self::refresh_augmentation_index_for_canonical`].
     ///
-    /// Only base ([`FileArtifactKey::is_legacy`]) artifacts carrying at
-    /// least one augmentation fact are collected: the augmentation index
-    /// is a base resolve-domain structure, so session-overlay artifacts
-    /// must not contribute (see `ensure_augmentation_index_populated`).
+    /// Candidate selection is population-aware (overlay isolation): a base
+    /// scan (`overlay_discriminator: None`) collects base
+    /// ([`FileArtifactKey::is_legacy`]) artifacts only; a session scan
+    /// (`Some(discriminator)`) collects base artifacts UNIONED with this
+    /// session's own overlay artifacts (the non-legacy key whose
+    /// `parse_env_hash` discriminator matches). A different session's overlay
+    /// artifact carries a different discriminator and is excluded — overlay
+    /// augmenters never cross sessions or poison the base index. Only
+    /// artifacts carrying at least one augmentation fact are collected.
     fn collect_augmenter_candidates(
         &self,
         overlay_discriminator: Option<Hash16>,

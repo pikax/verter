@@ -126,14 +126,17 @@ pub struct HostStoreView {
     /// non-zero once [`Self::with_session_overlay`] captures the
     /// session's [`crate::session_view::SessionView::fingerprint`].
     ///
-    /// This is the augmentation-index population identity for the
-    /// view: the route-surface validator composes
+    /// This is the CONTENT-ADDRESSED augmentation-index population
+    /// identity for the view: the route-surface validator composes
     /// [`Self::augmentation_population`] from it so a session read
     /// validates against the `Session(fingerprint)` augmenter-set
     /// fingerprint and a base read against the `Base` one — the
-    /// `EffectiveExportSetKey` / `RouteSurfaceIndexShapeKey` population
-    /// dimension can never be cross-validated. Mirrors the SINGLE
-    /// derivation in
+    /// content-addressed `AugmentationTargetKey.population` slot can
+    /// never be cross-validated. The QUERY-IDENTITY `EffectiveExportSetKey`
+    /// is keyed instead by the CONTENT-FREE `session_scope`
+    /// ([`crate::resolver_core::EffectiveExportSetScope`], derived from
+    /// `compat_token().session`, R6) — this overlay-set fingerprint never
+    /// enters that key. Mirrors the SINGLE derivation in
     /// [`crate::session_view::augmentation_population_for_view`].
     session_overlay_fingerprint: u64,
     whole_hashes: FxHashMap<String, Hash16>,
