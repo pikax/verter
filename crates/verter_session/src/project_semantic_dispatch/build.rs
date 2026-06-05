@@ -888,9 +888,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// declaration's structural shape with `args` bound to the decl's
     /// type parameters.
     ///
-    /// `body_mode` controls how the decl body and its argument
-    /// expressions are lowered after substitution. Memo entries split
-    /// per body_mode (see `family_and_slot` in
+    /// The `InstantiateContext`'s embedded `projection_reduction` mode
+    /// controls how the decl body and its argument expressions are
+    /// lowered after substitution. Memo entries split per the
+    /// `InstantiateContext` (its `projection_reduction` mode plus the
+    /// `resolve_env_hash` env dim; see `family_and_slot` in
     /// [`semantic_query_memo`](crate::semantic_query_memo)) so a Navigate
     /// caller and an Expanded caller never collide on the same shell
     /// result. Member bodies are not recursively lowered — nested
