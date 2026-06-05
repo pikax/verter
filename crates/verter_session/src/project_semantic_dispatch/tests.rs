@@ -1297,7 +1297,7 @@ fn expand_variant_and_expand_mode_absent_from_workspace() {
         "project_semantic_dispatch.rs",
         "project_semantic_dispatch\\tests.rs",
         "project_semantic_dispatch/tests.rs",
-        // The plan + the audit feedback file describe the retirement.
+        // Design docs that describe the retirement of the singleton path.
         "generic-navigation-prep-plan.md",
         "feedback-2026-04-19-gennav.md",
         "tmp-plan.md",
@@ -5361,22 +5361,23 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
 /// on the target. Readonly Array-Array relation is covariant (forward
 /// only) so descent is linear in depth — one sub-pair per level,
 /// not the exponential 2ⁿ growth of mutable-array bidirectional
-/// comparison. Pre-C8 the linear 500-deep descent exceeded the
-/// 192-frame cap and returned `Unknown`; post-C8 the iterative
-/// worklist walks to the innermost `Number` vs `String` mismatch and
-/// returns `NotAssignable`.
+/// comparison. The iterative worklist driver bounds itself on a
+/// graph-size work budget rather than a fixed recursion-frame cap, so
+/// it walks to the innermost `Number` vs `String` mismatch and returns
+/// `NotAssignable` instead of short-circuiting to `Unknown` once a
+/// recursion-depth limit is reached.
 #[test]
-fn relation_handles_deeply_nested_arrays_beyond_pre_c8_depth_cap() {
+fn relation_handles_deeply_nested_arrays_beyond_recursion_depth() {
     use crate::semantic_query::RelationResult;
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     // Build 500 levels of `readonly T[]` nesting with distinct inner
-    // primitives so the two chains don't alias under C7 structural
-    // dedup. Pre-C8 the linear 500-deep forward descent exceeded the
-    // per-frame recursion cap; the iterative engine bounds itself on
-    // the graph-size work budget instead.
+    // primitives so the two chains don't alias under structural
+    // interning dedup. A linear 500-deep forward descent would exceed
+    // any fixed per-frame recursion cap; the iterative engine bounds
+    // itself on the graph-size work budget instead.
     fn nest_readonly_array(
         graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
         base: PrimitiveKind,
@@ -5396,16 +5397,16 @@ fn relation_handles_deeply_nested_arrays_beyond_pre_c8_depth_cap() {
     let target = nest_readonly_array(&graph, PrimitiveKind::String, DEPTH);
     assert_ne!(
         source, target,
-        "distinct base primitives must not alias under C7"
+        "distinct base primitives must not alias under structural interning"
     );
 
     let (result, _fence) = dispatch.relate_nodes(source, target);
     assert!(
         matches!(result, RelationResult::NotAssignable),
-        "post-C8 iterative relate must walk a 500-deep readonly Array \
+        "iterative relate must walk a 500-deep readonly Array \
          chain to the leaf primitive mismatch and return NotAssignable \
-         rather than short-circuiting to Unknown as the pre-C8 \
-         recursive form did at the 192-frame cap; got {result:?}",
+         rather than short-circuiting to Unknown at a recursion-depth \
+         cap; got {result:?}",
     );
 }
 

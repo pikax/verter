@@ -330,10 +330,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             _ => return IdentityCarrierUnwrap::Concrete(id),
         };
         drop(data);
-        // Codex-hybrid spec: the relation engine's
-        // identity-carrier unwrap is a STRUCTURAL TRANSIT — the
-        // relation result is consumed for assignability decisions, not
-        // published on a consumer-visible surface. Dispatch the
+        // The relation engine's identity-carrier unwrap is a
+        // STRUCTURAL TRANSIT — the relation result is consumed for
+        // assignability decisions, not published on a consumer-visible
+        // surface. Dispatch the
         // instantiation under `StructuralTransit/Shallow` so nested
         // `keyof T` / `{ [K in S]: V }` operators carrier-stop and the
         // identity-carrier audit footprint does NOT reify per-member
@@ -419,8 +419,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         let target_record = self.record_target_shape(target)?;
 
-        // Codex-hybrid spec: the Object-vs-Record
-        // arm is a STRUCTURAL TRANSIT — the relation engine needs the
+        // The Object-vs-Record arm is a STRUCTURAL TRANSIT — the
+        // relation engine needs the
         // unwrapped Object surface, but the surface itself is consumed
         // for assignability, not published. Dispatch under
         // `StructuralTransit/Shallow` so the unwrap reads members /
@@ -460,7 +460,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// generic-key Record (single index signature, no members).
     fn record_target_shape(&self, target: SemanticNodeId) -> Option<RecordTargetShape> {
         let graph = self.graph();
-        // The Cluster-C Object-vs-Record arm needs the target
+        // The Object-vs-Record arm needs the target
         // normalised to a concrete `SemanticNodeData::Object`
         // (literal-key members surface or generic-key index
         // signature) to recognise a `Record<K, V>` shape — a `Mapped`

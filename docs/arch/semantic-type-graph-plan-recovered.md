@@ -1723,11 +1723,27 @@ export interface FrameworkSurfaceRequest {
   schemaVersion: number
 }
 
+// The VALUE payload — mirrors the authoritative Decision 4 value shape in
+// `docs/arch/u2-relation-infer-design.md` (§Decision 4). `outcome` is the
+// PUBLIC value-domain outcome (no public `Unknown`; budget is folded into
+// `outcome` via `BudgetExceeded`). Proof DETAIL is NOT embedded — it lives
+// in the payload-side `relationProofs` table, addressed by the opaque
+// `relationProof` id.
 export interface RelationPayload {
+  outcome: RelationOutcome              // Assignable | NotAssignable | BudgetExceeded — no public Unknown
+  bindings: TypeParameterBinding[]      // empty for non-binding / pure assignability / BudgetExceeded
+  relationProof: RelationProofId        // opaque id into the payload-side relationProofs table — proof detail is OFF this value surface
+}
+
+// The WIRE RESPONSE envelope returned by `relate_with_audit`. The graph
+// handle (for progressive expansion around the proof) and the diagnostics
+// list are transport concerns, NOT part of the cached value payload — they
+// wrap the value `RelationPayload` rather than living inside it. The actual
+// envelope assembly (populating `graph` + `diagnostics` from the relation
+// reducer) lands in RI-2 alongside the wire migration.
+export interface RelationGraphPayload {
   graph: SemanticTypeGraph
-  result: RelationOutcome
-  proof: RelationProof
-  inferenceBindings: TypeParameterBinding[]
+  payload: RelationPayload
   diagnostics: TypeInfoDiagnostic[]
 }
 ```
@@ -1742,7 +1758,7 @@ impl TypeInfoSession {
     pub fn resolve_symbol_graph_with_audit(&self, request: ResolveSymbolGraphRequest) -> AuditedResult<Arc<TypeInfoGraphPayload>, TypeInfoRequestError>;
     pub fn evaluate_type_expression_graph_with_audit(&self, request: EvaluateTypeExpressionGraphRequest) -> AuditedResult<Arc<TypeInfoGraphPayload>, TypeInfoRequestError>;
     pub fn project_path_graph_with_audit(&self, request: ProjectPathGraphRequest) -> AuditedResult<Arc<TypeInfoGraphPayload>, TypeInfoRequestError>;
-    pub fn relate_with_audit(&self, request: RelateRequest) -> AuditedResult<Arc<RelationPayload>, TypeInfoRequestError>;
+    pub fn relate_with_audit(&self, request: RelateRequest) -> AuditedResult<Arc<RelationGraphPayload>, TypeInfoRequestError>;
     pub fn evaluate_flow_narrowing_at_with_audit(&self, request: FlowNarrowingRequest) -> AuditedResult<Arc<TypeInfoGraphPayload>, TypeInfoRequestError>;
     pub fn evaluate_contextual_type_at_with_audit(&self, request: ContextualTypeRequest) -> AuditedResult<Arc<TypeInfoGraphPayload>, TypeInfoRequestError>;
     pub fn expand_graph_around_with_audit(&self, request: ExpandGraphAroundRequest) -> AuditedResult<Arc<TypeInfoGraphPayload>, TypeInfoRequestError>;
