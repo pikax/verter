@@ -19,3 +19,5 @@ ResolveClassSurface | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreserv
 ResolveAmbientNamespace | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | AmbientNamespaceContext | resolve_ambient_namespace_do_not_warm_hit | NonProducingPendingReducer
 ResolveEnum | Live | TypeNode | R T L J | — | EnumContext | resolve_enum_do_not_warm_hit | NonProducingPendingReducer
 ResolveOverloadSet | Live | OverloadSet | R T L J | — | OverloadSetContext | resolve_overload_set_do_not_warm_hit | NonProducingPendingReducer
+ApparentType | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ApparentTypeContext | apparent_type_do_not_warm_hit | NonProducingPendingReducer
+TemplateLiteralReduce | Live | TypeNode | R T L J | — | TemplateLiteralReduceContext | template_literal_reduce_do_not_warm_hit | Singleflight

@@ -103,3 +103,5 @@ mod u2_spec_table_guards;
 mod u2_value_domain_design_guards;
 #[path = "g_block/u2b5_class_ns_enum_overload_guards.rs"]
 mod u2b5_class_ns_enum_overload_guards;
+#[path = "g_block/u2b6_apparent_template_guards.rs"]
+mod u2b6_apparent_template_guards;

@@ -7173,6 +7173,8 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
             ResolveAmbientNamespace { .. } => "ResolveAmbientNamespace",
             ResolveEnum { .. } => "ResolveEnum",
             ResolveOverloadSet { .. } => "ResolveOverloadSet",
+            ApparentType { .. } => "ApparentType",
+            TemplateLiteralReduce { .. } => "TemplateLiteralReduce",
         }
     }
     // Sanity probe: each variant carries a distinct label and the

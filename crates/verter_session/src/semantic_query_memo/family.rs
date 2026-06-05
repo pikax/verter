@@ -257,6 +257,34 @@ pub(super) enum FamilyKey {
         type_args: Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
     },
+    /// Mode-erased `ApparentType` identity. `ApparentType` has no slot, so
+    /// its R21 env dims (`type_env_hash` = `T`, `lib_env_hash` = `L`,
+    /// `project_identity` = `J`) ride here ON the family key — these are
+    /// ENV hashes, NOT content/version hashes (R6-clean). Two queries
+    /// differing only in any env dim do NOT collide. Non-producing (the
+    /// lib-member index is unimplemented): the execute path returns
+    /// `Opaque(Miss)` and nothing is ever admitted under this family; like
+    /// `Relate`, the variant exists so `family_and_slot` stays total and
+    /// honest.
+    ApparentType {
+        base: SemanticNodeId,
+        type_env_hash: crate::semantic_query::HashValue,
+        lib_env_hash: crate::semantic_query::HashValue,
+        project_identity: u32,
+    },
+    /// Mode-erased `TemplateLiteralReduce` identity. `pattern` (quasis) and
+    /// the ORDER-SIGNIFICANT `args` (NEVER reordered — concatenation order
+    /// is semantic) are the identity core; the context's `{R, T, L, J}` env
+    /// dims ride here ON the family key (env hashes, R6-clean). LIVE
+    /// producer (build folds via the shared deferred evaluator).
+    TemplateLiteralReduce {
+        pattern: Arc<[Arc<str>]>,
+        args: Arc<[SemanticNodeId]>,
+        resolve_env_hash: crate::semantic_query::HashValue,
+        type_env_hash: crate::semantic_query::HashValue,
+        lib_env_hash: crate::semantic_query::HashValue,
+        project_identity: u32,
+    },
 }
 
 /// Per-family slot selector. For non-mode variants only `Single` is used;
@@ -981,6 +1009,37 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 callee: *callee,
                 type_args: Arc::clone(type_args),
                 resolve_env_hash: context.resolve_env_hash,
+            },
+            ModeSlot::Single,
+        ),
+        // ApparentType — non-producing. No projection mode → the `Single`
+        // slot. The `{T, L, J}` env dims ride on the family key (the key
+        // has no slot to carry them).
+        SemanticQueryKey::ApparentType { base, context } => (
+            FamilyKey::ApparentType {
+                base: *base,
+                type_env_hash: context.type_env_hash,
+                lib_env_hash: context.lib_env_hash,
+                project_identity: context.project_identity,
+            },
+            ModeSlot::Single,
+        ),
+        // TemplateLiteralReduce — LIVE producer. No projection mode → the
+        // `Single` slot. `args` is carried VERBATIM (NOT canonicalized /
+        // reordered): concatenation order is semantic. The `{R, T, L, J}`
+        // env dims ride on the family key.
+        SemanticQueryKey::TemplateLiteralReduce {
+            pattern,
+            args,
+            context,
+        } => (
+            FamilyKey::TemplateLiteralReduce {
+                pattern: Arc::clone(pattern),
+                args: Arc::clone(args),
+                resolve_env_hash: context.resolve_env_hash,
+                type_env_hash: context.type_env_hash,
+                lib_env_hash: context.lib_env_hash,
+                project_identity: context.project_identity,
             },
             ModeSlot::Single,
         ),

@@ -841,16 +841,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     side,
                     context,
                 } => self.build_class_surface(decl_slot, type_args, *side, *context),
-                // ResolveAmbientNamespace / ResolveEnum / ResolveOverloadSet
-                // — non-producing: these variants have no execute-side
-                // reducer. The build returns `Opaque(Miss)` verbatim
-                // (mirroring the `Relate` arm above); an `Error` result is
-                // never warm-published, so nothing is admitted or cached.
-                // Returning an empty `OverloadSet` for `ResolveOverloadSet`
-                // would be a stub — `Miss` is the honest non-result.
+                // TemplateLiteralReduce — LIVE producer. Folds the template
+                // through the ONE shared deferred evaluator (no hand-rolled
+                // concatenation), as its own live arm (NOT in the Miss group).
+                SemanticQueryKey::TemplateLiteralReduce {
+                    pattern,
+                    args,
+                    context,
+                } => self.build_template_literal_reduce(pattern, args, *context),
+                // ResolveAmbientNamespace / ResolveEnum / ResolveOverloadSet /
+                // ApparentType — non-producing: these variants have no
+                // execute-side reducer. The build returns `Opaque(Miss)`
+                // verbatim (mirroring the `Relate` arm above); an `Error`
+                // result is never warm-published, so nothing is admitted or
+                // cached. Returning an empty `OverloadSet` for
+                // `ResolveOverloadSet` — or a fabricated apparent surface for
+                // `ApparentType` (whose lib-member index does not exist yet) —
+                // would be a stub; `Miss` is the honest non-result.
                 SemanticQueryKey::ResolveAmbientNamespace { .. }
                 | SemanticQueryKey::ResolveEnum { .. }
-                | SemanticQueryKey::ResolveOverloadSet { .. } => {
+                | SemanticQueryKey::ResolveOverloadSet { .. }
+                | SemanticQueryKey::ApparentType { .. } => {
                     let fence = self.project_generation_signature();
                     (QueryResult::Error(QueryError::Miss), fence).into()
                 }

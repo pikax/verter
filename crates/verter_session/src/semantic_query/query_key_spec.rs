@@ -733,6 +733,49 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "resolve_overload_set_do_not_warm_hit",
             admission: AdmissionSpec::NonProducingPendingReducer,
         },
+        // ApparentType { base, context } — resolves the apparent member
+        // surface of an already-substituted node (a primitive widens to its
+        // lib wrapper). The surface is a function of the base node + the
+        // lib/type/project env, NOT of import resolution or the parsed body
+        // skeleton, so `T L J` (no `R`, no `P` — keying on either would be a
+        // dead axis; the substitution axis rides on the `base` node, not a
+        // separate field). The key has NO slot, so these env dims ride IN
+        // the context. Non-producing: the lib-member index reducer is
+        // unimplemented, so the execute arm returns Miss and never
+        // admits/caches (a fabricated apparent surface would be a stub). The
+        // member-facet demand the apparent surface implies is the mode-axis
+        // facet mask.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ApparentType,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "ApparentTypeContext",
+            value_domain: SemanticQueryValueTag::TypeNode,
+            env_dims: env_structural(),
+            allowed_demand: mode_axes,
+            cross_context_guard: "apparent_type_do_not_warm_hit",
+            admission: AdmissionSpec::NonProducingPendingReducer,
+        },
+        // TemplateLiteralReduce { pattern, args, context } — folds a
+        // template-literal type to its surface through the shared deferred
+        // evaluator. An arg expression may resolve imported references on
+        // its own step, so `R T L J` (no `P` — the reduction operates over
+        // already-lowered interned arg nodes, content-version rooted via
+        // ReadSetSignature, not a fresh parsed body skeleton). The key has
+        // NO slot, so these env dims ride IN the context. LIVE producer.
+        // Carries no `mode` and no DemandAxis — the substitution axis rides
+        // on the order-significant `args` (part of identity), which the
+        // DemandAxis vocabulary does not express, so `allowed_demand` is
+        // empty.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::TemplateLiteralReduce,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "TemplateLiteralReduceContext",
+            value_domain: SemanticQueryValueTag::TypeNode,
+            env_dims: env_resolve(),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "template_literal_reduce_do_not_warm_hit",
+            admission: AdmissionSpec::Singleflight,
+        },
     ]
 }
 

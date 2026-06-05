@@ -223,6 +223,8 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::ResolveAmbientNamespace { .. } => "ResolveAmbientNamespace",
         SemanticQueryKey::ResolveEnum { .. } => "ResolveEnum",
         SemanticQueryKey::ResolveOverloadSet { .. } => "ResolveOverloadSet",
+        SemanticQueryKey::ApparentType { .. } => "ApparentType",
+        SemanticQueryKey::TemplateLiteralReduce { .. } => "TemplateLiteralReduce",
     }
 }
 

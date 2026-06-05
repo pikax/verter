@@ -275,7 +275,9 @@ pub fn record_outer_call_type_expr(expr: &verter_type_expr::TypeExpr) {
 ///  15 = ResolveAmbientNamespace
 ///  16 = ResolveEnum
 ///  17 = ResolveOverloadSet
-pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 18;
+///  18 = ApparentType
+///  19 = TemplateLiteralReduce
+pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 20;
 
 /// Human-readable labels for each operator-kind index. Kept in sync
 /// with the comment on `DISPATCH_OPERATOR_KIND_COUNT` and with the
@@ -299,12 +301,18 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
     "ResolveAmbientNamespace",
     "ResolveEnum",
     "ResolveOverloadSet",
+    "ApparentType",
+    "TemplateLiteralReduce",
 ];
 
 /// Per-kind call counts. `dispatch_operator_with_recurse` increments
 /// the matching index on entry. Sum across all indices equals
 /// `DISPATCH_OPERATOR_WITH_RECURSE_CALLS`.
 pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
+    // 18 = ApparentType, 19 = TemplateLiteralReduce (all zero-initialised;
+    // order within the array is immaterial — `kind_index_for_key` keys it).
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -331,6 +339,10 @@ pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUN
 /// function entry / exit. Sum across all indices is approximately
 /// `DISPATCH_OPERATOR_TOTAL_NS`.
 pub static DISPATCH_OPERATOR_KIND_NS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
+    // 18 = ApparentType, 19 = TemplateLiteralReduce (all zero-initialised;
+    // order within the array is immaterial — `kind_index_for_key` keys it).
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -498,6 +510,8 @@ pub fn kind_index_for_key(key: &crate::semantic_query::SemanticQueryKey) -> usiz
         SemanticQueryKey::ResolveAmbientNamespace { .. } => 15,
         SemanticQueryKey::ResolveEnum { .. } => 16,
         SemanticQueryKey::ResolveOverloadSet { .. } => 17,
+        SemanticQueryKey::ApparentType { .. } => 18,
+        SemanticQueryKey::TemplateLiteralReduce { .. } => 19,
     }
 }
 
@@ -1032,6 +1046,24 @@ mod tests {
                 resolve_env_hash: Default::default(),
             },
         };
+        let apparent_type = SemanticQueryKey::ApparentType {
+            base: dummy_node,
+            context: crate::semantic_query::ApparentTypeContext {
+                type_env_hash: Default::default(),
+                lib_env_hash: Default::default(),
+                project_identity: 0,
+            },
+        };
+        let template_literal_reduce = SemanticQueryKey::TemplateLiteralReduce {
+            pattern: Arc::from(Vec::new().into_boxed_slice()),
+            args: Arc::from(Vec::new().into_boxed_slice()),
+            context: crate::semantic_query::TemplateLiteralReduceContext {
+                resolve_env_hash: Default::default(),
+                type_env_hash: Default::default(),
+                lib_env_hash: Default::default(),
+                project_identity: 0,
+            },
+        };
 
         // Discriminating: each of these MUST hit a distinct index in
         // the kind table; if any two collide the test fails.
@@ -1050,8 +1082,10 @@ mod tests {
             kind_index_for_key(&ambient_namespace),
             kind_index_for_key(&resolve_enum),
             kind_index_for_key(&overload_set),
+            kind_index_for_key(&apparent_type),
+            kind_index_for_key(&template_literal_reduce),
         ];
-        let expected = [0usize, 1, 2, 3, 4, 6, 8, 9, 10, 12, 14, 15, 16, 17];
+        let expected = [0usize, 1, 2, 3, 4, 6, 8, 9, 10, 12, 14, 15, 16, 17, 18, 19];
         assert_eq!(observed, expected);
         // No off-by-one in the static label table:
         assert_eq!(

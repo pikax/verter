@@ -4483,6 +4483,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
         .with_observed_self_roots(observed_self_roots)
     }
 
+    /// Template-literal reduction — the LIVE producer for
+    /// [`SemanticQueryKey::TemplateLiteralReduce`].
+    ///
+    /// ONE-ENGINE shape: this build does NOT re-implement concatenation. It
+    /// interns the existing [`SemanticNodeData::TemplateLiteral`] carrier
+    /// from the key's `pattern` (quasis) + `args` (expressions), then asks
+    /// the existing deferred evaluator
+    /// ([`Self::evaluate_deferred_semantic_node_with_context`]) to resolve
+    /// that carrier. The evaluator's `TemplateLiteral` arm folds an
+    /// all-literal template into a single
+    /// [`SemanticNodeData::Literal`] string (`quasis[0] expr[0] quasis[1]
+    /// …`) and carrier-stops to the `TemplateLiteral` shell when any
+    /// expression is non-literal — so the produced node is either the
+    /// folded literal or the shell, never a hand-rolled result.
+    ///
+    /// Self-version rooting: the reduction depends on every interpolated
+    /// arg node, so the memo entry roots on the file content version each
+    /// file-derived arg was lowered from (mirrors `build_normalize_union`).
+    /// `args` is consumed in ORDER — concatenation order is semantic and is
+    /// never reordered.
+    pub(super) fn build_template_literal_reduce(
+        &self,
+        pattern: &Arc<[Arc<str>]>,
+        args: &Arc<[SemanticNodeId]>,
+        _context: crate::semantic_query::TemplateLiteralReduceContext,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // Construct/intern the existing carrier, then defer to the shared
+        // evaluator under the key's context (Expanded publication).
+        let node = self.graph().intern_node(SemanticNodeData::TemplateLiteral {
+            quasis: Arc::clone(pattern),
+            expressions: Arc::clone(args),
+        });
+        let reduced = self.evaluate_deferred_semantic_node_with_context(
+            node,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        );
+        let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
+        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+            QueryResult::Value(reduced),
+            self.project_generation_signature(),
+        ))
+        .with_observed_self_roots(observed_self_roots)
+    }
+
     /// Vue macro resolution lookup.
     ///
     /// Hot-path reads go through

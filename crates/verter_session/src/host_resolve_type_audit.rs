@@ -421,7 +421,9 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         | SemanticQueryKey::ResolvedNamedType { .. }
         | SemanticQueryKey::Relate { .. }
         | SemanticQueryKey::ResolveEnum { .. }
-        | SemanticQueryKey::ResolveOverloadSet { .. } => ProjectionMode::Identity,
+        | SemanticQueryKey::ResolveOverloadSet { .. }
+        | SemanticQueryKey::ApparentType { .. }
+        | SemanticQueryKey::TemplateLiteralReduce { .. } => ProjectionMode::Identity,
     }
 }
 

@@ -1998,6 +1998,65 @@ pub struct OverloadSetContext {
     pub resolve_env_hash: HashValue,
 }
 
+/// Env a [`SemanticQueryKey::ApparentType`] value depends on (env dims
+/// `T L J`).
+///
+/// `ApparentType` has NO slot (its identity core is the `base`
+/// [`SemanticNodeId`]), so the R21 env dimensions ride here IN the context
+/// rather than inside a [`ResolvedDeclSlotIdentity`]. Per R21 this carries
+/// ONLY the dimensions the apparent surface genuinely depends on:
+///
+/// - `type_env_hash` (`T`) — the active type-env (e.g. `strictNullChecks`).
+/// - `lib_env_hash` (`L`) — the apparent surface of a primitive widens to
+///   its lib wrapper (`string` → `String`'s members), so the value is a
+///   function of the lib-member index.
+/// - `project_identity` (`J`) — project isolation.
+///
+/// There is deliberately NO `resolve_env_hash` (`R`) and NO `parse_env_hash`
+/// (`P`): the apparent surface is a function of the base node + the
+/// lib/type/project env, not of import resolution or the parsed body
+/// skeleton, so keying on those would be a dead axis (R21). The
+/// substitution axis is NOT carried here — the `base` node is already
+/// substituted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ApparentTypeContext {
+    /// Type-env dimension (`T`).
+    pub type_env_hash: HashValue,
+    /// Lib-env dimension (`L`).
+    pub lib_env_hash: HashValue,
+    /// Project-isolation dimension (`J`).
+    pub project_identity: u32,
+}
+
+/// Env a [`SemanticQueryKey::TemplateLiteralReduce`] value depends on (env
+/// dims `R T L J`).
+///
+/// `TemplateLiteralReduce` has NO slot (its identity core is the `pattern`
+/// quasis + the `args` expression nodes), so the R21 env dimensions ride
+/// here IN the context. Per R21 this carries `R T L J`:
+///
+/// - `resolve_env_hash` (`R`) — an arg expression may resolve imported
+///   references on its own step.
+/// - `type_env_hash` (`T`), `lib_env_hash` (`L`) — the standard structural
+///   reduction env.
+/// - `project_identity` (`J`) — project isolation.
+///
+/// There is deliberately NO `parse_env_hash` (`P`): the reduction operates
+/// over already-lowered interned arg nodes (content-version rooted via
+/// `ReadSetSignature`), not a fresh parsed body skeleton. The substitution
+/// axis rides on the key's `args` field, not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TemplateLiteralReduceContext {
+    /// Import / name-resolution dimension (`R`).
+    pub resolve_env_hash: HashValue,
+    /// Type-env dimension (`T`).
+    pub type_env_hash: HashValue,
+    /// Lib-env dimension (`L`).
+    pub lib_env_hash: HashValue,
+    /// Project-isolation dimension (`J`).
+    pub project_identity: u32,
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Canonical semantic key surface
 // ──────────────────────────────────────────────────────────────────────────
@@ -2277,6 +2336,61 @@ pub enum SemanticQueryKey {
         type_args: Arc<[SemanticNodeId]>,
         context: OverloadSetContext,
     },
+    /// Resolve the APPARENT type of `base` — the member surface a value of
+    /// that type exposes (a primitive widens to its lib wrapper:
+    /// `string` → `String`'s members; an object type contributes its own
+    /// members; etc.).
+    ///
+    /// `base` is the already-substituted [`SemanticNodeId`] (the
+    /// substitution axis rides on `base`, so there is NO separate `args`
+    /// field and NO `mode` field); `context` carries the `{T, L, J}` env
+    /// the apparent surface depends on (NO `R`, NO `P` — see
+    /// [`ApparentTypeContext`]).
+    ///
+    /// **Non-producing.** This variant has no `execute`-side producer: the
+    /// lib-member / primitive→wrapper member index it would read does not
+    /// exist yet. The `execute` build arm returns
+    /// [`QueryError::Miss`] (`Opaque(Miss)`) verbatim and never admits or
+    /// caches a value (admission
+    /// [`AdmissionSpec::NonProducingPendingReducer`]). Value domain:
+    /// [`SemanticQueryValueTag::TypeNode`]. The producer lands with the
+    /// lib-member-index block.
+    ///
+    /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
+    ApparentType {
+        base: SemanticNodeId,
+        context: ApparentTypeContext,
+    },
+    /// Reduce a template-literal type `` `${...}${...}` `` to its folded
+    /// surface.
+    ///
+    /// `pattern` mirrors [`SemanticNodeData::TemplateLiteral`]'s `quasis`
+    /// (the alternating literal text spans) and `args` mirrors its
+    /// `expressions` (the interpolated type nodes). `args` is ORDER-
+    /// SIGNIFICANT — it is part of semantic identity and is NEVER reordered
+    /// (concatenation order matters, unlike `NormalizeUnion`'s
+    /// order-insensitive members). `context` carries the `{R, T, L, J}` env
+    /// (NO `P`; substitution rides on `args` — see
+    /// [`TemplateLiteralReduceContext`]).
+    ///
+    /// **LIVE producer** ([`AdmissionSpec::Singleflight`]). The build does
+    /// NOT re-implement concatenation: it interns the
+    /// [`SemanticNodeData::TemplateLiteral`] carrier and asks the ONE shared
+    /// deferred evaluator to fold it. All-literal expressions fold to a
+    /// single [`SemanticNodeData::Literal`] string; any non-literal
+    /// expression carrier-stops to the `TemplateLiteral` shell. Value
+    /// domain: [`SemanticQueryValueTag::TypeNode`].
+    ///
+    /// Literal-precise intrinsic transforms (`Uppercase<"a">` → `"A"`) are
+    /// NOT part of this key — those ride the `Instantiate` path and widen
+    /// to `Primitive(String)`.
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
+    TemplateLiteralReduce {
+        pattern: Arc<[Arc<str>]>,
+        args: Arc<[SemanticNodeId]>,
+        context: TemplateLiteralReduceContext,
+    },
 }
 
 /// Content-free discriminant for [`SemanticQueryKey`] — the variant identity
@@ -2312,6 +2426,8 @@ pub enum SemanticQueryKeyTag {
     ResolveAmbientNamespace,
     ResolveEnum,
     ResolveOverloadSet,
+    ApparentType,
+    TemplateLiteralReduce,
 }
 
 impl SemanticQueryKeyTag {
@@ -2337,6 +2453,8 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::ResolveAmbientNamespace,
         SemanticQueryKeyTag::ResolveEnum,
         SemanticQueryKeyTag::ResolveOverloadSet,
+        SemanticQueryKeyTag::ApparentType,
+        SemanticQueryKeyTag::TemplateLiteralReduce,
     ];
 
     /// The EXACT `SemanticQueryKey` variant identifier this tag names. The
@@ -2364,6 +2482,8 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::ResolveAmbientNamespace => "ResolveAmbientNamespace",
             SemanticQueryKeyTag::ResolveEnum => "ResolveEnum",
             SemanticQueryKeyTag::ResolveOverloadSet => "ResolveOverloadSet",
+            SemanticQueryKeyTag::ApparentType => "ApparentType",
+            SemanticQueryKeyTag::TemplateLiteralReduce => "TemplateLiteralReduce",
         }
     }
 }
@@ -2401,6 +2521,10 @@ impl SemanticQueryKey {
             }
             SemanticQueryKey::ResolveEnum { .. } => SemanticQueryKeyTag::ResolveEnum,
             SemanticQueryKey::ResolveOverloadSet { .. } => SemanticQueryKeyTag::ResolveOverloadSet,
+            SemanticQueryKey::ApparentType { .. } => SemanticQueryKeyTag::ApparentType,
+            SemanticQueryKey::TemplateLiteralReduce { .. } => {
+                SemanticQueryKeyTag::TemplateLiteralReduce
+            }
         }
     }
 }
