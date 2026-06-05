@@ -119,7 +119,8 @@ pub struct ComponentMetaPayload {
     /// final-result cache.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub should_suppress: bool,
-    /// Per-request count of `Instantiate { body_mode: Expanded }`
+    /// Per-request count of Expanded-mode `Instantiate`
+    /// (`context.projection_reduction.mode == Expanded`)
     /// dispatches observed against this request. Mirror of the
     /// process-global `SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS`
     /// counter, partitioned per-request so attribution tests can
@@ -136,7 +137,8 @@ pub struct ComponentMetaPayload {
     #[ts(type = "string")]
     pub expanded_instantiate_calls: u64,
     /// Synthesis-ATTRIBUTABLE subset of [`Self::expanded_instantiate_calls`]:
-    /// `Instantiate { body_mode: Expanded }` dispatches observed WHILE the
+    /// Expanded-mode `Instantiate` (`context.projection_reduction.mode ==
+    /// Expanded`) dispatches observed WHILE the
     /// slot-binding synthesis phase was active on the request. The
     /// request-wide `expanded_instantiate_calls` also counts the canonical
     /// macro-surface PRODUCER's legitimate `Expanded` expansions; this
