@@ -17,6 +17,9 @@ use super::{
     empty_signature, utility_param_names, DispatchHost, ProjectSemanticDispatch,
     SessionDispatchHost, ShallowRelation,
 };
+use crate::semantic_query::demand::{
+    Demand, MaterializedPoint, MaterializedSet, ProjectionPath,
+};
 use crate::semantic_query::{
     BranchSelection, DepSignature, HostResolvedNamedTypeKey, IndexSignature, LiteralValue,
     NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
@@ -3063,6 +3066,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 graph_carrier: None,
                 self_root_canonicals: Arc::from([]),
                 pending_prefix_backfills: Vec::new(),
+                // Recursive / budget-exceeded sentinel — never warm-published,
+                // so it records nothing the §3.4 gate could reuse.
+                satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
             };
         }
         // Emit a whole-path `ProjectPath` edge on the result so consumers
@@ -3095,6 +3101,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // codex flagged in `publish_warm_if_absent`).
         let pending_prefix_backfills =
             collect_prefix_backfills(start_base, &walker_path, &walker.intermediate_nodes);
+        // §3.4 materialised-record set for the TERMINAL entry: the
+        // terminal point at the FULL path (the caller's terminal mode)
+        // PLUS one `Demand::navigate(prefix)` per CONTIGUOUS LINEAR walked
+        // intermediate (§3.5). This is what the compute ACTUALLY
+        // materialised — a deep terminal that only `Navigate`-walked its
+        // intermediates records a `Navigate` point there, NEVER the
+        // terminal mode it never expanded at the prefix. The navigate-hop
+        // points are inert for THIS family's warm-hit gate (every request
+        // to family `(base, full_path)` is at `full_path`, so only the
+        // terminal point can match), but they record the honest
+        // materialisation per §3.4 and never inflate a prefix to the
+        // terminal mode.
+        let satisfied_projection =
+            path_walk_materialized_set(path, context.mode, start_index, &walker.intermediate_nodes);
         // Self-version rooting: the projection result depends on the
         // file content the projection `base` was lowered from. The
         // base node's origin scope (recorded in the arena sidecar)
@@ -3111,6 +3131,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             graph_carrier: None,
             self_root_canonicals: Arc::from([]),
             pending_prefix_backfills,
+            satisfied_projection,
         }
     }
 
@@ -4945,6 +4966,51 @@ fn find_longest_warm_prefix(
 /// Skips `None` entries (arm-splits at Union / Intersection /
 /// open-Conditional positions); those positions have no single
 /// canonical answer for `(base, path[..k], Navigate)`.
+/// The §3.4 materialised-record set for a path-projection terminal entry:
+/// the terminal point at the FULL `path` (the caller's `terminal_mode`)
+/// PLUS one `Demand::navigate(path[..k])` per CONTIGUOUS LINEAR walked
+/// intermediate. The linear run spans the warm prefix already established
+/// by [`find_longest_warm_prefix`] (`start_index` positions, all linear by
+/// construction — a prior walk produced a single canonical node at
+/// `path[..start_index]`) plus the leading `Some` run of the current
+/// walk's `intermediates` (excluding the terminal slot), stopping at the
+/// first arm-split `None` exactly as [`collect_prefix_backfills`] does.
+///
+/// The navigate-hop points are inert for the terminal family's own
+/// warm-hit gate (requests there are always at the full path); they record
+/// the honest materialisation per §3.4 and NEVER inflate a prefix hop to
+/// the terminal mode it never expanded.
+fn path_walk_materialized_set(
+    path: &Arc<[PathSegment]>,
+    terminal_mode: ProjectionMode,
+    start_index: usize,
+    intermediates: &[Option<SemanticNodeId>],
+) -> MaterializedSet {
+    let n = path.len();
+    let mut terminal = Demand::from(terminal_mode);
+    terminal.projection.path = ProjectionPath::from(Arc::clone(path));
+    let mut points = vec![MaterializedPoint::new(terminal)];
+    if n >= 2 {
+        // Number of full-path intermediate positions (1..=n-1) that are on
+        // the contiguous linear run. `start_index` warm-prefix positions
+        // are linear; the current walk extends the run by its leading
+        // `Some` count (excluding the terminal slot at index
+        // `walker_path.len() - 1`).
+        let walker_path_len = n - start_index;
+        let walked_linear = intermediates
+            .iter()
+            .take(walker_path_len.saturating_sub(1))
+            .take_while(|node| node.is_some())
+            .count();
+        let linear_hops = (start_index + walked_linear).min(n - 1);
+        for k in 1..=linear_hops {
+            let prefix: Arc<[PathSegment]> = Arc::from(path[..k].to_vec().into_boxed_slice());
+            points.push(MaterializedPoint::new(Demand::navigate(ProjectionPath::from(prefix))));
+        }
+    }
+    MaterializedSet::from_points(points)
+}
+
 fn collect_prefix_backfills(
     base: SemanticNodeId,
     path: &Arc<[PathSegment]>,
@@ -4976,14 +5042,23 @@ fn collect_prefix_backfills(
         let prefix_path: Arc<[PathSegment]> = Arc::from(path[..i + 1].to_vec().into_boxed_slice());
         let prefix_key = SemanticQueryKey::ProjectPath {
             base,
-            path: prefix_path,
+            path: Arc::clone(&prefix_path),
             context: crate::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Navigate,
             ),
         };
+        // §3.4: the prefix family's entry records exactly its own
+        // `Navigate` hop at the prefix path — NOT a nominal/meet point. A
+        // `Navigate` request at this prefix self-satisfies; a `Shallow` /
+        // `Expanded` request at this prefix misses (the walk never
+        // expanded the prefix — it only navigated through it).
+        let satisfied_projection = MaterializedSet::single(MaterializedPoint::new(
+            Demand::navigate(ProjectionPath::from(prefix_path)),
+        ));
         out.push(crate::project_semantic_dispatch::walk::PrefixBackfill {
             key: prefix_key,
             node,
+            satisfied_projection,
         });
     }
     out

@@ -123,6 +123,13 @@ pub enum ShallowDiagnostic {
 pub struct PrefixBackfill {
     pub key: crate::semantic_query::SemanticQueryKey,
     pub node: SemanticNodeId,
+    /// The §3.4 materialised-record set for this prefix hop — a single
+    /// `Demand::navigate(prefix_path)` point (intermediate hops run
+    /// `Navigate`, §3.5). Recorded by the walk, NOT the nominal request:
+    /// the prefix family's published entry self-satisfies a `Navigate`
+    /// request at its own path, and a `Shallow`/`Expanded` request at that
+    /// path misses (a deep terminal never expanded the prefix).
+    pub satisfied_projection: crate::semantic_query::demand::MaterializedSet,
 }
 
 #[derive(Debug)]
@@ -182,6 +189,15 @@ pub struct QueryBuildOutput {
     /// carry the parent's authoritative carrier (the same
     /// self-version-rooted [`Self::graph_carrier`]).
     pub pending_prefix_backfills: Vec<PrefixBackfill>,
+    /// The §3.4 **materialised-record set** this build actually produced —
+    /// for a path walk, the terminal point at the full path PLUS one
+    /// `Demand::navigate(prefix)` per walked intermediate (§3.5); for a
+    /// non-path build, left EMPTY here and defaulted to the single
+    /// terminal point for the canonical key by the cold-build helper. NOT
+    /// the nominal request demand. Recorded onto the published
+    /// [`crate::semantic_query_memo::MemoEntry`] and consulted by the
+    /// warm-hit `cached_satisfies` gate.
+    pub satisfied_projection: crate::semantic_query::demand::MaterializedSet,
 }
 
 impl From<(QueryResult<SemanticNodeId>, DepSignature)> for QueryBuildOutput {
@@ -196,6 +212,7 @@ impl From<(QueryResult<SemanticNodeId>, DepSignature)> for QueryBuildOutput {
             graph_carrier: None,
             self_root_canonicals: Arc::from([]),
             pending_prefix_backfills: Vec::new(),
+            satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
         }
     }
 }

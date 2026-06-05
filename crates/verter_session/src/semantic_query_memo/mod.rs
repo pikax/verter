@@ -81,9 +81,10 @@ use budgeted_caches::{BudgetedNamedTypeIndex, BudgetedRelationMemo};
 use derivation::DerivationStore;
 pub use family::AuditEagerKeyRow;
 use family::{
-    carrier_facts_reference_canonical, family_and_slot, CandidateList, FamilyKey, FamilySlots,
-    MemoEntry, ModeSlot,
+    carrier_facts_reference_canonical, family_and_slot, requested_path_for_key,
+    requested_point_for_key, CandidateList, FamilyKey, FamilySlots, MemoEntry, ModeSlot,
 };
+use crate::semantic_query::demand::{cached_satisfies, MaterializedSet};
 use inflight::{
     InflightEntry, InflightPanicGuard, RecursionStackGuard, IN_FLIGHT_ON_THIS_THREAD,
     MAX_INFLIGHT_RETRIES,
@@ -2077,8 +2078,14 @@ impl SemanticGraphStore {
             let entries = self.entries_lock_diagnosed();
             entries.get(&family).map(|slots| slots.snapshot_slot(slot))
         };
-        let validated =
-            snapshot.and_then(|list| list.into_iter().find(|entry| entry.validate(ctx)));
+        // §3.4 TWO-GATE warm hit — `cached_satisfies` (recorded-point
+        // dominance, pure) AND `validate_with_self_roots` (fact rail).
+        // Both must pass; see `try_warm_hit_fast_path` for the rationale.
+        let requested = requested_point_for_key(key);
+        let validated = snapshot.and_then(|list| {
+            list.into_iter()
+                .find(|entry| cached_satisfies(&entry.satisfied_projection, &requested) && entry.validate(ctx))
+        });
         if let Some(entry) = &validated {
             // Brief LRU bookkeeping — reacquire ONLY to update FIFO
             // order so subsequent lookups treat this candidate as
@@ -2324,7 +2331,16 @@ impl SemanticGraphStore {
             let entries = self.entries.lock();
             entries.get(&family).map(|slots| slots.snapshot_slot(slot))
         };
-        let entry: MemoEntry = snapshot?.into_iter().find(|e| e.validate(ctx))?;
+        // §3.4 TWO-GATE warm hit. Gate 1: `cached_satisfies` — the
+        // candidate's RECORDED materialised set must dominate the
+        // requested point (pure, no store view; cheap, so first). Gate 2:
+        // `validate_with_self_roots` — the fact rail must validate against
+        // the live view. BOTH must pass; a candidate failing either is
+        // skipped without bubbling.
+        let requested = requested_point_for_key(key);
+        let entry: MemoEntry = snapshot?
+            .into_iter()
+            .find(|e| cached_satisfies(&e.satisfied_projection, &requested) && e.validate(ctx))?;
         // Brief LRU bookkeeping — reacquire ONLY to move the matching
         // candidate to the back of the FIFO order so subsequent
         // lookups treat it as freshest. The match is by discriminant
@@ -2744,7 +2760,22 @@ impl SemanticGraphStore {
             graph_carrier,
             self_root_canonicals,
             pending_prefix_backfills,
+            satisfied_projection,
         } = build_output;
+        // §3.4 default: a non-path build (`Instantiate`, `KeyOf`,
+        // `TypeOf`, …) leaves `satisfied_projection` EMPTY (it has no
+        // path-walk hops to record). Default it to the single terminal
+        // point for the canonical key — the demand the slot's mode
+        // denotes at the key's path. This is the honest materialisation
+        // for a single-terminal compute (the producer computed exactly the
+        // slot's mode), NOT a nominal echo of an unrelated request. A
+        // modeless `Single` family yields `Demand::identity()`, so its
+        // gate is a trivial pass.
+        let satisfied_projection = if satisfied_projection.is_empty() {
+            MaterializedSet::single(requested_point_for_key(&key))
+        } else {
+            satisfied_projection
+        };
         let walker_diagnostics: std::sync::Arc<
             [crate::project_semantic_dispatch::walk::ShallowDiagnostic],
         > = std::sync::Arc::from(walker_diagnostics.into_boxed_slice());
@@ -2856,6 +2887,7 @@ impl SemanticGraphStore {
                 carrier,
                 &dep_signature,
                 &self_root_canonicals,
+                &satisfied_projection,
                 &inflight,
             );
             // Test-only injection point — parked AFTER `warm_publish_one`
@@ -2897,6 +2929,7 @@ impl SemanticGraphStore {
                         carrier.clone(),
                         dep_signature.clone(),
                         Arc::clone(&self_root_canonicals),
+                        backfill.satisfied_projection,
                         &inflight,
                     );
                 }
@@ -3068,6 +3101,7 @@ impl SemanticGraphStore {
         read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
         dispatch_dep_signature: &DepSignature,
         self_root_canonicals: &Arc<[Arc<str>]>,
+        satisfied_projection: &MaterializedSet,
         inflight: &Arc<InflightEntry>,
     ) -> bool {
         let publishable = matches!(result, QueryResult::Value(_));
@@ -3083,6 +3117,7 @@ impl SemanticGraphStore {
         if matches!(family, FamilyKey::ResolvedNamedType { .. }) {
             return true;
         }
+        let requested_path = requested_path_for_key(key);
         // The carrier is the COMPLETED self-version-rooted carrier the
         // shared cold-build helper produced via
         // `semantic_graph_read_set_signature` — it already leads with a
@@ -3098,6 +3133,7 @@ impl SemanticGraphStore {
             dispatch_dep_signature: Arc::clone(dispatch_dep_signature),
             self_root_canonicals: Arc::clone(self_root_canonicals),
             walker_diagnostics: Arc::clone(walker_diagnostics),
+            satisfied_projection: satisfied_projection.clone(),
             validated_at_generation,
             admission_seq,
         };
@@ -3129,7 +3165,7 @@ impl SemanticGraphStore {
         let outcome = entries
             .entry(family.clone())
             .or_default()
-            .publish(slot, entry);
+            .publish(slot, entry, &requested_path);
         let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution. Each populated slot
         // (primary plus any backfilled narrower slots) counts as one
@@ -3244,6 +3280,7 @@ impl SemanticGraphStore {
         read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
         dispatch_dep_signature: DepSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
+        satisfied_projection: MaterializedSet,
         parent_inflight: &Arc<InflightEntry>,
     ) {
         if !matches!(result, QueryResult::Value(_)) {
@@ -3253,6 +3290,7 @@ impl SemanticGraphStore {
         if matches!(family, FamilyKey::ResolvedNamedType { .. }) {
             return;
         }
+        let requested_path = requested_path_for_key(&key);
         // Skip if already warm OR currently in flight. Both checks
         // happen BEFORE acquiring the entries lock; a concurrent cold
         // winner publish that lands between this check and the publish
@@ -3277,6 +3315,7 @@ impl SemanticGraphStore {
             dispatch_dep_signature,
             self_root_canonicals,
             walker_diagnostics: Arc::from([]),
+            satisfied_projection,
             validated_at_generation,
             admission_seq,
         };
@@ -3300,7 +3339,7 @@ impl SemanticGraphStore {
         let outcome = entries
             .entry(family.clone())
             .or_default()
-            .publish(slot, entry);
+            .publish(slot, entry, &requested_path);
         let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution — see
         // `warm_publish_one` for the full rationale; the prefix-backfill
@@ -3538,7 +3577,12 @@ impl SemanticGraphStore {
     }
 
     /// Variant taking an explicit `validated_at_generation` — used
-    /// by multi-candidate overlay/base tests.
+    /// by multi-candidate overlay/base tests. The `satisfied_projection`
+    /// defaults to the single requested point for `key` (so the published
+    /// entry self-satisfies its own slot's warm-hit gate). Use
+    /// [`Self::publish_with_materialized_set_for_tests`] to craft a record
+    /// set that DIFFERS from the nominal slot (the §3.4 discriminating
+    /// guards).
     #[doc(hidden)]
     pub fn publish_with_carrier_dispatch_and_generation_for_tests(
         &self,
@@ -3549,6 +3593,36 @@ impl SemanticGraphStore {
         dispatch_dep_signature: DepSignature,
         validated_at_generation: u64,
     ) -> usize {
+        let satisfied_projection = MaterializedSet::single(requested_point_for_key(&key));
+        self.publish_with_materialized_set_for_tests(
+            key,
+            result,
+            read_set_signature,
+            self_root_canonicals,
+            dispatch_dep_signature,
+            validated_at_generation,
+            satisfied_projection,
+        )
+    }
+
+    /// Test-only direct publish taking an EXPLICIT
+    /// `satisfied_projection` — the §3.4 materialised-record set the
+    /// published entry carries. Lets a guard publish an entry whose
+    /// recorded points DIFFER from its nominal slot (e.g. an `Expanded`
+    /// slot whose compute only materialised a `Navigate` point), exercising
+    /// the warm-hit `cached_satisfies` gate and the recorded-point
+    /// backfill directly.
+    #[doc(hidden)]
+    pub fn publish_with_materialized_set_for_tests(
+        &self,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        dispatch_dep_signature: DepSignature,
+        validated_at_generation: u64,
+        satisfied_projection: MaterializedSet,
+    ) -> usize {
         if !matches!(result, QueryResult::Value(_)) {
             return 0;
         }
@@ -3556,6 +3630,7 @@ impl SemanticGraphStore {
         if matches!(family, FamilyKey::ResolvedNamedType { .. }) {
             return 0;
         }
+        let requested_path = requested_path_for_key(&key);
         let admission_seq = self.alloc_candidate_admission_seq();
         let entry = MemoEntry {
             result,
@@ -3563,6 +3638,7 @@ impl SemanticGraphStore {
             dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
             self_root_canonicals,
             walker_diagnostics: Arc::from([]),
+            satisfied_projection,
             validated_at_generation,
             admission_seq,
         };
@@ -3571,7 +3647,7 @@ impl SemanticGraphStore {
         let outcome = entries
             .entry(family.clone())
             .or_default()
-            .publish(slot, entry);
+            .publish(slot, entry, &requested_path);
         let populated_slots = outcome.populated;
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(

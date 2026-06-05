@@ -1032,6 +1032,52 @@ impl MaterializedPoint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializedSet(pub Arc<[MaterializedPoint]>);
 
+impl Default for MaterializedSet {
+    #[inline]
+    fn default() -> Self {
+        MaterializedSet::empty()
+    }
+}
+
+impl MaterializedSet {
+    /// The empty record set — a build that materialised nothing the memo
+    /// can reuse (post-processing replaces an empty set with the single
+    /// terminal point for the canonical key, so an empty set never reaches
+    /// the warm-hit gate of a published entry).
+    #[inline]
+    #[must_use]
+    pub fn empty() -> Self {
+        MaterializedSet(Arc::from([] as [MaterializedPoint; 0]))
+    }
+
+    /// Build a set from a single materialised point.
+    #[inline]
+    #[must_use]
+    pub fn single(point: MaterializedPoint) -> Self {
+        MaterializedSet(Arc::from([point]))
+    }
+
+    /// Build a set from an iterator of materialised points.
+    #[must_use]
+    pub fn from_points<I: IntoIterator<Item = MaterializedPoint>>(points: I) -> Self {
+        MaterializedSet(points.into_iter().collect())
+    }
+
+    /// The recorded points (borrow).
+    #[inline]
+    #[must_use]
+    pub fn points(&self) -> &[MaterializedPoint] {
+        &self.0
+    }
+
+    /// Whether the set is empty.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// A warm hit serves `requested` iff SOME recorded materialised point
 /// SEMANTICALLY dominates it AT THE SAME PATH (structural path equality — NOT
 /// prefix; a `Navigate` hop a deep compute walked never proves it expanded that

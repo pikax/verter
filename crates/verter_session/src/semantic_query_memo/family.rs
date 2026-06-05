@@ -3,12 +3,15 @@
 //! `FamilyKey` is the mode-erased identity for one [`SemanticQueryKey`]
 //! family; per-mode results live in distinct slots inside `FamilySlots`.
 //! `family_and_slot` projects a key onto its `(family, slot)` pair, and
-//! `backfill_targets` describes the slot-fan-out used by the
-//! broader-satisfies-narrower backfill rule.
+//! `slot_domain_siblings` describes the same-domain slots the §3.4
+//! recorded-point backfill rule may fill from a broader compute.
 
 use std::sync::Arc;
 
 use crate::fact_signature_helpers::ReadSetSignature;
+use crate::semantic_query::demand::{
+    cached_satisfies, Demand, MaterializedPoint, MaterializedSet, ProjectionPath,
+};
 use crate::semantic_query::{
     DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, PathSegment, ProjectionMode,
     ProjectionReductionContext, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeId,
@@ -60,6 +63,20 @@ pub(super) struct MemoEntry {
     /// this entry. Replayed on warm hits via `CacheRead.walker_diagnostics`.
     /// Empty for non-walker queries.
     pub(super) walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    /// The §3.4 **materialised-record set** — the concrete `(path, point)`
+    /// records this candidate's compute ACTUALLY produced (terminal point
+    /// + one `Navigate` hop per walked intermediate for a path walk; the
+    /// single terminal point for a non-path build). This is NOT the
+    /// candidate's nominal request demand: a deep terminal that only
+    /// `Navigate`-walked an intermediate records a `Navigate` point there,
+    /// never the terminal mode it never expanded. The warm-hit gate is
+    /// `cached_satisfies(satisfied_projection, requested_point)` — one of
+    /// the two independent gates (the other is
+    /// `read_set_signature.validate_with_self_roots`); BOTH must pass.
+    /// Same-family backfill clones this entry into a sibling slot ONLY when
+    /// a recorded point dominates that sibling's requested point — never by
+    /// enum rank.
+    pub(super) satisfied_projection: MaterializedSet,
     /// LRU eviction-recency metadata for the multi-candidate slot
     /// vector — NOT a semantic-validity oracle. Validity is decided
     /// exclusively by `read_set_signature.validate_with_self_roots`
@@ -642,13 +659,16 @@ impl FamilySlots {
     /// - Different discriminant ⇒ append at the back.
     /// - At cap ⇒ FIFO-evict the front (oldest by insertion).
     ///
-    /// Backfill into a narrower slot is the conservative "broader
-    /// satisfies narrower when no narrower compute landed first" rule
-    /// — backfill writes ONLY if the narrower candidate list is
-    /// empty, preserving any prior narrower-specific publish. A
-    /// narrower compute that wrote first survives the broader
-    /// compute's backfill (consistent with the legacy single-entry
-    /// `if cell.is_none()` semantics).
+    /// §3.4 **recorded-point backfill** into a same-domain sibling slot:
+    /// the broader compute's entry is cloned UNCHANGED into an EMPTY
+    /// sibling slot ONLY when a recorded point in its
+    /// `satisfied_projection` dominates that sibling's requested point
+    /// (`cached_satisfies`) — NEVER by enum rank, NEVER synthesising a
+    /// target-slot point. `requested_path` is the projection path of the
+    /// owning family (empty for non-path families); the sibling's
+    /// requested point is `point_for_slot(sibling, requested_path)`. A
+    /// narrower compute that wrote first survives (backfill writes only
+    /// into an empty slot).
     ///
     /// Returns the list of slots this publish populated AND the
     /// candidates that the publish displaced (same-discriminant
@@ -656,7 +676,12 @@ impl FamilySlots {
     /// drains each displaced candidate's reverse-index registrations
     /// under its own admission_seq so a sibling candidate in the same
     /// slot keeps its registrations.
-    pub(super) fn publish(&mut self, slot: ModeSlot, entry: MemoEntry) -> FamilyPublishOutcome {
+    pub(super) fn publish(
+        &mut self,
+        slot: ModeSlot,
+        entry: MemoEntry,
+        requested_path: &ProjectionPath,
+    ) -> FamilyPublishOutcome {
         let mut populated = smallvec::SmallVec::<[ModeSlot; 6]>::new();
         let mut displaced: smallvec::SmallVec<[(ModeSlot, MemoEntry); 4]> =
             smallvec::SmallVec::new();
@@ -664,13 +689,24 @@ impl FamilySlots {
             displaced.push((slot, victim));
         }
         populated.push(slot);
-        for narrower in backfill_targets(slot) {
-            if self.slot_list(*narrower).is_empty() {
-                for victim in self.publish_one(*narrower, entry.clone()) {
-                    displaced.push((*narrower, victim));
-                }
-                populated.push(*narrower);
+        for sibling in slot_domain_siblings(slot) {
+            if !self.slot_list(*sibling).is_empty() {
+                continue;
             }
+            // §3.4 gate: the broader compute's recorded materialised set
+            // must dominate the sibling's requested point. Enum rank is
+            // NOT consulted — a `Shallow` record does NOT satisfy a
+            // `Navigate` request even though `Navigate` is a "narrower"
+            // enum mode, while a `Navigate` record DOES satisfy a
+            // `Shallow` request (`Navigate ⊒ Shallow` in the lattice).
+            let sibling_point = MaterializedPoint::new(point_for_slot(*sibling, requested_path));
+            if !cached_satisfies(&entry.satisfied_projection, &sibling_point) {
+                continue;
+            }
+            for victim in self.publish_one(*sibling, entry.clone()) {
+                displaced.push((*sibling, victim));
+            }
+            populated.push(*sibling);
         }
         FamilyPublishOutcome {
             populated,
@@ -870,40 +906,89 @@ pub struct AuditEagerKeyRow {
     pub dep_signature: String,
 }
 
-/// Slot fan-out for backfill. `Expanded` satisfies `Shallow` / `Navigate` /
-/// `Identity`; `Shallow` satisfies `Navigate` / `Identity`; `Navigate`
-/// satisfies `Identity`. `Identity` and `Single` backfill nothing.
-/// `Skeleton` is independent of the Identity/Navigate/Shallow/Expanded
-/// hierarchy (different semantics: preserves open generics) — it backfills
-/// nothing AND nothing backfills it.
+/// The same-DOMAIN sibling slots a publish into `slot` may consider for
+/// §3.4 recorded-point backfill (the eligible targets — the actual
+/// backfill of each is gated by `cached_satisfies` in
+/// [`FamilySlots::publish`], NOT by this membership). The four
+/// publication slots form one domain; the four `Transit*` mirrors form a
+/// second; `Skeleton`, `MacroSurfaceShallow`, and `Single` are each
+/// alone (no cross-domain backfill).
 ///
-/// Codex-hybrid spec: the `Transit*` slots mirror the
-/// publication-slot fan-out within the transit family. Cross-family
-/// backfill (Transit → publication or publication → Transit) is NOT
-/// admitted — a publication-context result and a transit-context
-/// result have different reduction semantics and must not share a
-/// cache cell.
-pub(super) fn backfill_targets(slot: ModeSlot) -> &'static [ModeSlot] {
+/// This REPLACES the legacy `backfill_targets` enum-rank hierarchy
+/// (`Expanded→Shallow→Navigate→Identity`). Enum rank was WRONG: the
+/// landed demand lattice has `Shallow ⊅ Navigate`
+/// (`normalization_depth: None < NavigateOnly`), so a `Shallow` compute
+/// must NOT backfill `Navigate`, while `Navigate ⊒ Shallow` means a
+/// `Navigate` compute MUST be allowed to backfill `Shallow`. Membership
+/// here is the full intra-domain candidate set; the lattice decides
+/// which are actually filled.
+pub(super) fn slot_domain_siblings(slot: ModeSlot) -> &'static [ModeSlot] {
     match slot {
-        ModeSlot::Single => &[],
-        ModeSlot::Identity => &[],
-        ModeSlot::Navigate => &[ModeSlot::Identity],
-        ModeSlot::Shallow => &[ModeSlot::Navigate, ModeSlot::Identity],
-        ModeSlot::Expanded => &[ModeSlot::Shallow, ModeSlot::Navigate, ModeSlot::Identity],
-        ModeSlot::Skeleton => &[],
-        ModeSlot::TransitIdentity => &[],
-        ModeSlot::TransitNavigate => &[ModeSlot::TransitIdentity],
-        ModeSlot::TransitShallow => &[ModeSlot::TransitNavigate, ModeSlot::TransitIdentity],
-        ModeSlot::TransitExpanded => &[
-            ModeSlot::TransitShallow,
+        ModeSlot::Identity => &[ModeSlot::Navigate, ModeSlot::Shallow, ModeSlot::Expanded],
+        ModeSlot::Navigate => &[ModeSlot::Identity, ModeSlot::Shallow, ModeSlot::Expanded],
+        ModeSlot::Shallow => &[ModeSlot::Identity, ModeSlot::Navigate, ModeSlot::Expanded],
+        ModeSlot::Expanded => &[ModeSlot::Identity, ModeSlot::Navigate, ModeSlot::Shallow],
+        ModeSlot::TransitIdentity => &[
             ModeSlot::TransitNavigate,
-            ModeSlot::TransitIdentity,
+            ModeSlot::TransitShallow,
+            ModeSlot::TransitExpanded,
         ],
-        // The macro object-surface slot is an independent evaluation (union
-        // of arm members) — it does NOT backfill the publication / transit
-        // slots and is not backfilled by them.
-        ModeSlot::MacroSurfaceShallow => &[],
+        ModeSlot::TransitNavigate => &[
+            ModeSlot::TransitIdentity,
+            ModeSlot::TransitShallow,
+            ModeSlot::TransitExpanded,
+        ],
+        ModeSlot::TransitShallow => &[
+            ModeSlot::TransitIdentity,
+            ModeSlot::TransitNavigate,
+            ModeSlot::TransitExpanded,
+        ],
+        ModeSlot::TransitExpanded => &[
+            ModeSlot::TransitIdentity,
+            ModeSlot::TransitNavigate,
+            ModeSlot::TransitShallow,
+        ],
+        // Independent evaluations — no sibling backfill in either direction.
+        ModeSlot::Skeleton | ModeSlot::MacroSurfaceShallow | ModeSlot::Single => &[],
     }
+}
+
+/// The [`ProjectionMode`] a [`ModeSlot`] stores results for — the inverse
+/// of [`mode_to_slot`] / [`context_to_slot`] for the purpose of building
+/// the slot's requested [`Demand`] point. The `Transit*` mirrors map to
+/// the same mode as their publication peer; `MacroSurfaceShallow` is a
+/// Shallow surface; `Single` has no mode.
+fn mode_of_slot(slot: ModeSlot) -> Option<ProjectionMode> {
+    match slot {
+        ModeSlot::Identity | ModeSlot::TransitIdentity => Some(ProjectionMode::Identity),
+        ModeSlot::Navigate | ModeSlot::TransitNavigate => Some(ProjectionMode::Navigate),
+        ModeSlot::Shallow | ModeSlot::TransitShallow | ModeSlot::MacroSurfaceShallow => {
+            Some(ProjectionMode::Shallow)
+        }
+        ModeSlot::Expanded | ModeSlot::TransitExpanded => Some(ProjectionMode::Expanded),
+        ModeSlot::Skeleton => Some(ProjectionMode::Skeleton),
+        // Modeless families (`ResolveDecl` / `TypeOf` / `Conditional` /
+        // `Normalize*` / …) carry no projection demand; their satisfaction
+        // is decided purely by `validate_with_self_roots`. Represent their
+        // point as the regime-`⊥` `Demand::identity()` at the empty path so
+        // the recorded point and the requested point coincide (trivial
+        // `cached_satisfies` pass — the gate never blocks a modeless hit).
+        ModeSlot::Single => None,
+    }
+}
+
+/// The [`Demand`] point a request targeting `slot` at `path` denotes —
+/// the slot's mode preset with `projection.path = path`. Modeless
+/// (`Single`) slots use `Demand::identity()` at `path`. Shared by the
+/// warm-hit gate (`requested_point_for_key`) and the recorded-point
+/// backfill gate in [`FamilySlots::publish`].
+pub(super) fn point_for_slot(slot: ModeSlot, path: &ProjectionPath) -> Demand {
+    let mut demand = match mode_of_slot(slot) {
+        Some(mode) => Demand::from(mode),
+        None => Demand::identity(),
+    };
+    demand.projection.path = path.clone();
+    demand
 }
 
 pub(super) fn mode_to_slot(mode: ProjectionMode) -> ModeSlot {
@@ -1248,6 +1333,39 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             ModeSlot::Single,
         ),
     }
+}
+
+/// The projection path a query targets — the path carried by the
+/// path-bearing key variants (`ProjectPath` / `ProjectMember` /
+/// `IndexedAccess`), empty for every other variant (`Instantiate`,
+/// `KeyOf`, modeless families, …). This is the path of the owning
+/// `FamilyKey`, so the §3.4 recorded-point backfill in
+/// [`FamilySlots::publish`] builds each sibling slot's requested point at
+/// the SAME path.
+pub(super) fn requested_path_for_key(key: &SemanticQueryKey) -> ProjectionPath {
+    match key {
+        SemanticQueryKey::ProjectPath { path, .. } => ProjectionPath::from(Arc::clone(path)),
+        SemanticQueryKey::ProjectMember { member, .. } => {
+            ProjectionPath::from_segments([PathSegment::Member(Arc::clone(member))])
+        }
+        SemanticQueryKey::IndexedAccess { index, .. } => {
+            ProjectionPath::from_segments([PathSegment::Index(index.clone())])
+        }
+        _ => ProjectionPath::empty(),
+    }
+}
+
+/// The §3.4 **requested materialised point** for `key` — the demand point
+/// a warm hit on `key` must be served by. Built from the key's
+/// `(slot, path)`: the slot's mode preset at the key's projection path
+/// (modeless `Single` families use `Demand::identity()`, so the gate is a
+/// trivial pass — their satisfaction is decided purely by
+/// `validate_with_self_roots`). Used by the warm-hit gate
+/// (`cached_satisfies(entry.satisfied_projection, requested_point_for_key(key))`).
+pub(super) fn requested_point_for_key(key: &SemanticQueryKey) -> MaterializedPoint {
+    let (_, slot) = family_and_slot(key);
+    let path = requested_path_for_key(key);
+    MaterializedPoint::new(point_for_slot(slot, &path))
 }
 
 /// Returns true iff any [`crate::resolver_core::FactVersionRef`] in
