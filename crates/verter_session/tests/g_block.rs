@@ -105,3 +105,5 @@ mod u2_value_domain_design_guards;
 mod u2b5_class_ns_enum_overload_guards;
 #[path = "g_block/u2b6_apparent_template_guards.rs"]
 mod u2b6_apparent_template_guards;
+#[path = "g_block/u2b7_flow_contextual_guards.rs"]
+mod u2b7_flow_contextual_guards;
