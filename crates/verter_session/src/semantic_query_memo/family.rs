@@ -659,14 +659,14 @@ impl FamilySlots {
     /// - Different discriminant ⇒ append at the back.
     /// - At cap ⇒ FIFO-evict the front (oldest by insertion).
     ///
-    /// §3.4 **recorded-point backfill** into a same-domain sibling slot:
-    /// the broader compute's entry is cloned UNCHANGED into an EMPTY
-    /// sibling slot ONLY when a recorded point in its
-    /// `satisfied_projection` dominates that sibling's requested point
-    /// (`cached_satisfies`) — NEVER by enum rank, NEVER synthesising a
-    /// target-slot point. `requested_path` is the projection path of the
-    /// owning family (empty for non-path families); the sibling's
-    /// requested point is `point_for_slot(sibling, requested_path)`. A
+    /// §3.4 **recorded-point backfill** into a projection-depth-narrower
+    /// target slot: the broader compute's entry is cloned UNCHANGED into
+    /// an EMPTY narrower slot ONLY when a recorded point in its
+    /// `satisfied_projection` dominates that slot's requested point
+    /// (`cached_satisfies`) — NEVER by enum rank alone, NEVER synthesising
+    /// a target-slot point. `requested_path` is the projection path of the
+    /// owning family (empty for non-path families); the target slot's
+    /// requested point is `point_for_slot(target, requested_path)`. A
     /// narrower compute that wrote first survives (backfill writes only
     /// into an empty slot).
     ///
@@ -689,24 +689,24 @@ impl FamilySlots {
             displaced.push((slot, victim));
         }
         populated.push(slot);
-        for sibling in slot_domain_siblings(slot) {
-            if !self.slot_list(*sibling).is_empty() {
+        for target in slot_domain_siblings(slot) {
+            if !self.slot_list(*target).is_empty() {
                 continue;
             }
             // §3.4 gate: the broader compute's recorded materialised set
-            // must dominate the sibling's requested point. Enum rank is
-            // NOT consulted — a `Shallow` record does NOT satisfy a
-            // `Navigate` request even though `Navigate` is a "narrower"
-            // enum mode, while a `Navigate` record DOES satisfy a
-            // `Shallow` request (`Navigate ⊒ Shallow` in the lattice).
-            let sibling_point = MaterializedPoint::new(point_for_slot(*sibling, requested_path));
-            if !cached_satisfies(&entry.satisfied_projection, &sibling_point) {
+            // must dominate the narrower target slot's requested point.
+            // Enum rank alone is NOT sufficient — e.g. a `Shallow` record
+            // does NOT satisfy a `Navigate` request (`Shallow ⊅ Navigate`:
+            // `normalization_depth None < NavigateOnly`), so the legacy
+            // `Shallow → Navigate` clone is rejected here.
+            let target_point = MaterializedPoint::new(point_for_slot(*target, requested_path));
+            if !cached_satisfies(&entry.satisfied_projection, &target_point) {
                 continue;
             }
-            for victim in self.publish_one(*sibling, entry.clone()) {
-                displaced.push((*sibling, victim));
+            for victim in self.publish_one(*target, entry.clone()) {
+                displaced.push((*target, victim));
             }
-            populated.push(*sibling);
+            populated.push(*target);
         }
         FamilyPublishOutcome {
             populated,
@@ -906,50 +906,56 @@ pub struct AuditEagerKeyRow {
     pub dep_signature: String,
 }
 
-/// The same-DOMAIN sibling slots a publish into `slot` may consider for
-/// §3.4 recorded-point backfill (the eligible targets — the actual
-/// backfill of each is gated by `cached_satisfies` in
-/// [`FamilySlots::publish`], NOT by this membership). The four
-/// publication slots form one domain; the four `Transit*` mirrors form a
-/// second; `Skeleton`, `MacroSurfaceShallow`, and `Single` are each
-/// alone (no cross-domain backfill).
+/// The candidate backfill TARGET slots a publish into `slot` may fill —
+/// the PROJECTION-DEPTH-narrower slots in the same domain. The ACTUAL
+/// backfill of each is then gated by `cached_satisfies` in
+/// [`FamilySlots::publish`]; this is only the candidate set.
 ///
-/// This REPLACES the legacy `backfill_targets` enum-rank hierarchy
-/// (`Expanded→Shallow→Navigate→Identity`). Enum rank was WRONG: the
-/// landed demand lattice has `Shallow ⊅ Navigate`
-/// (`normalization_depth: None < NavigateOnly`), so a `Shallow` compute
-/// must NOT backfill `Navigate`, while `Navigate ⊒ Shallow` means a
-/// `Navigate` compute MUST be allowed to backfill `Shallow`. Membership
-/// here is the full intra-domain candidate set; the lattice decides
-/// which are actually filled.
+/// The target set is DIRECTIONAL (broader-projection → narrower-projection
+/// only), the same direction as the legacy `backfill_targets` enum-rank
+/// fan-out (`Expanded → Shallow → Navigate → Identity`). The §3.4 change
+/// is NOT the direction but the GATE: each candidate is backfilled ONLY
+/// when a recorded materialised point in the publishing entry's
+/// `satisfied_projection` `cached_satisfies` the candidate's requested
+/// point. So the legacy `Shallow → Navigate` clone is now REJECTED
+/// (`Shallow ⊅ Navigate` — `normalization_depth: None < NavigateOnly`),
+/// while `Expanded → {Shallow, Navigate, Identity}` and
+/// `Shallow/Navigate → Identity` survive the gate.
+///
+/// **Why directional, not the full lattice-dominance peer set.** The
+/// landed lattice ALSO has `Navigate ⊒ Shallow` (Navigate's higher
+/// normalization/operator rungs dominate Shallow's), so a naive
+/// all-peers-gated backfill would clone a `Navigate` result into the
+/// `Shallow` slot. That is OPERATIONALLY UNSOUND: `Navigate` is the
+/// intermediate next-hop demand (it carrier-stops / does NOT materialise a
+/// one-shell surface), so serving a `Shallow` surface request from a
+/// `Navigate` result returns an under-materialised surface — e.g. it hides
+/// a cyclic-heritage expansion the Shallow request would have surfaced
+/// (regression caught by
+/// `meta_resolve::slot_binding_graph_tests::cache_suppress_true_skips_memo_insertion`).
+/// Backfill therefore only ever flows toward strictly-shallower projection
+/// depth; the gate prunes the unsound enum-rank cases within that
+/// direction.
+///
+/// `Skeleton`, `MacroSurfaceShallow`, and `Single` are independent
+/// evaluations with no backfill in either direction.
 pub(super) fn slot_domain_siblings(slot: ModeSlot) -> &'static [ModeSlot] {
     match slot {
-        ModeSlot::Identity => &[ModeSlot::Navigate, ModeSlot::Shallow, ModeSlot::Expanded],
-        ModeSlot::Navigate => &[ModeSlot::Identity, ModeSlot::Shallow, ModeSlot::Expanded],
-        ModeSlot::Shallow => &[ModeSlot::Identity, ModeSlot::Navigate, ModeSlot::Expanded],
-        ModeSlot::Expanded => &[ModeSlot::Identity, ModeSlot::Navigate, ModeSlot::Shallow],
-        ModeSlot::TransitIdentity => &[
-            ModeSlot::TransitNavigate,
-            ModeSlot::TransitShallow,
-            ModeSlot::TransitExpanded,
-        ],
-        ModeSlot::TransitNavigate => &[
-            ModeSlot::TransitIdentity,
-            ModeSlot::TransitShallow,
-            ModeSlot::TransitExpanded,
-        ],
-        ModeSlot::TransitShallow => &[
-            ModeSlot::TransitIdentity,
-            ModeSlot::TransitNavigate,
-            ModeSlot::TransitExpanded,
-        ],
+        ModeSlot::Single => &[],
+        ModeSlot::Identity => &[],
+        ModeSlot::Navigate => &[ModeSlot::Identity],
+        ModeSlot::Shallow => &[ModeSlot::Navigate, ModeSlot::Identity],
+        ModeSlot::Expanded => &[ModeSlot::Shallow, ModeSlot::Navigate, ModeSlot::Identity],
+        ModeSlot::Skeleton => &[],
+        ModeSlot::TransitIdentity => &[],
+        ModeSlot::TransitNavigate => &[ModeSlot::TransitIdentity],
+        ModeSlot::TransitShallow => &[ModeSlot::TransitNavigate, ModeSlot::TransitIdentity],
         ModeSlot::TransitExpanded => &[
-            ModeSlot::TransitIdentity,
-            ModeSlot::TransitNavigate,
             ModeSlot::TransitShallow,
+            ModeSlot::TransitNavigate,
+            ModeSlot::TransitIdentity,
         ],
-        // Independent evaluations — no sibling backfill in either direction.
-        ModeSlot::Skeleton | ModeSlot::MacroSurfaceShallow | ModeSlot::Single => &[],
+        ModeSlot::MacroSurfaceShallow => &[],
     }
 }
 

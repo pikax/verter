@@ -1512,9 +1512,9 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
             )
         },
     );
-    // §3.4: Navigate backfills Shallow + Identity (`Navigate ⊒ {Shallow,
-    // Identity}`) with the narrow-only dep-sig — three slots.
-    assert_eq!(store.memo_entry_count(), 3);
+    // Navigate backfills Identity (directional, gated) with the
+    // narrow-only dep-sig — two slots.
+    assert_eq!(store.memo_entry_count(), 2);
 
     let removed = store.invalidate_canonical("/w/wide.ts");
     assert_eq!(
@@ -3437,25 +3437,25 @@ fn family_shallow_backfills_identity_only_not_navigate() {
     assert_eq!(store.memo_entry_count(), 2);
 }
 
-// 3. Navigate backfills Shallow + Identity (×3) — §3.4 lattice, NOT enum
-//    rank. `Navigate ⊒ Shallow` AND `Navigate ⊒ Identity` (Navigate's
-//    NavigateOnly normalization/operator rungs dominate Shallow's). So the
-//    Shallow slot IS backfilled. (Legacy enum rank wrongly omitted Shallow.)
+// 3. Navigate backfills Identity only (×2). Backfill is DIRECTIONAL
+//    (broader-projection → narrower-projection); Navigate's only
+//    projection-narrower target is Identity, and `Navigate ⊒ Identity`
+//    passes the §3.4 gate. Navigate does NOT backfill Shallow even though
+//    `Navigate ⊒ Shallow` in the lattice — backfill never flows toward a
+//    shallower-but-not-narrower-projection slot (see `slot_domain_siblings`).
 
 #[test]
-fn family_navigate_backfills_shallow_and_identity() {
+fn family_navigate_backfills_identity_only() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let id = warm_family_slot(&host, &store, base, ProjectionMode::Navigate);
 
     assert_warm_at(&store, base, ProjectionMode::Navigate, id);
-    assert_warm_at(&store, base, ProjectionMode::Shallow, id);
     assert_warm_at(&store, base, ProjectionMode::Identity, id);
-    // Expanded MUST stay cold — `Navigate ⊅ Expanded` (member SetOnly <
-    // SetPlusBody).
+    assert_cold_at(&store, base, ProjectionMode::Shallow);
     assert_cold_at(&store, base, ProjectionMode::Expanded);
-    assert_eq!(store.memo_entry_count(), 3);
+    assert_eq!(store.memo_entry_count(), 2);
 }
 
 // 4. Identity backfills NOTHING (single test, the negative case for it).
@@ -3476,17 +3476,16 @@ fn family_identity_does_not_backfill_anything() {
 
 // 5. Six negative cases: narrower never satisfies broader.
 
-// §3.4 lattice: `Navigate ⊒ Shallow` (so Navigate DOES satisfy/backfill
-// Shallow — the enum-rank intuition that Navigate is "narrower" than
-// Shallow is WRONG), but `Navigate ⊅ Expanded` (member SetOnly <
-// SetPlusBody), so Expanded stays cold.
+// Backfill is DIRECTIONAL: Navigate's only narrower-projection target is
+// Identity, so Navigate backfills NEITHER Shallow NOR Expanded (Shallow is
+// not a narrower-projection target of Navigate; Expanded is broader).
 #[test]
-fn family_navigate_satisfies_shallow_but_not_expanded() {
+fn family_navigate_does_not_satisfy_shallow_or_expanded() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let id = warm_family_slot(&host, &store, base, ProjectionMode::Navigate);
-    assert_warm_at(&store, base, ProjectionMode::Shallow, id);
+    let _ = warm_family_slot(&host, &store, base, ProjectionMode::Navigate);
+    assert_cold_at(&store, base, ProjectionMode::Shallow);
     assert_cold_at(&store, base, ProjectionMode::Expanded);
 }
 
@@ -3586,7 +3585,7 @@ fn family_wider_backfill_noop_when_narrower_slot_already_filled() {
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
     // Narrow build first — Navigate completes and fills Navigate +
-    // Shallow + Identity slots (§3.4: `Navigate ⊒ {Shallow, Identity}`).
+    // Identity slots (directional backfill: Navigate → Identity only).
     let nav_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let _ = store.execute_cooperative(
         &host,
@@ -3595,13 +3594,11 @@ fn family_wider_backfill_noop_when_narrower_slot_already_filled() {
         || (QueryResult::Value(nav_id), family_test_dep_signature()),
     );
     assert_warm_at(&store, base, ProjectionMode::Navigate, nav_id);
-    assert_warm_at(&store, base, ProjectionMode::Shallow, nav_id);
     assert_warm_at(&store, base, ProjectionMode::Identity, nav_id);
 
     // Now an Expanded build with a DIFFERENT result. Backfill writes
-    // only into EMPTY slots, so Navigate + Shallow + Identity keep their
-    // narrower-build result; only the (previously empty) Expanded slot
-    // gets the new id.
+    // only into EMPTY slots, so Navigate + Identity keep their
+    // narrower-build result; only Shallow + Expanded get the new id.
     let exp_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let _ = store.execute_cooperative(
         &host,
@@ -3610,9 +3607,9 @@ fn family_wider_backfill_noop_when_narrower_slot_already_filled() {
         || (QueryResult::Value(exp_id), family_test_dep_signature()),
     );
     assert_warm_at(&store, base, ProjectionMode::Expanded, exp_id);
+    assert_warm_at(&store, base, ProjectionMode::Shallow, exp_id);
     // Critical: the populated narrower slots survive — backfill is a
-    // no-op against them (Shallow keeps the Navigate-build result).
-    assert_warm_at(&store, base, ProjectionMode::Shallow, nav_id);
+    // no-op against them.
     assert_warm_at(&store, base, ProjectionMode::Navigate, nav_id);
     assert_warm_at(&store, base, ProjectionMode::Identity, nav_id);
 }
