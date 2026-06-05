@@ -1,38 +1,31 @@
-//! dispatch-direct surface helpers + bridge helpers.
+//! Dispatch-direct surface helpers + surface bridge helpers.
 //!
-//! domains 1+2 of the meta_resolve.rs split.
+//! These helpers resolve a root or surface expression through the shared
+//! `ProjectSemanticDispatch` path. They sit next to their `meta_resolve`
+//! callers so each callsite stays a one-liner over the shared resolver.
 //!
-//! dispatch-direct surface helpers.
+//! They fall into two structural categories:
 //!
-//! The trampolines on `ComponentMetaQueryEngine` are slated for
-//! retirement in 5g. migrates Class A and Class B callers off
-//! the engine helpers. The two helpers below are the dispatch-direct
-//! equivalents of the trampoline bodies, placed next to the meta_resolve
-//! callers so each migrated callsite stays a one-liner.
+//! Class A helpers resolve an arbitrary expression through
+//! `dispatch.execute_to_type_expr(ProjectPath { lowered, [], mode })`
+//! after caller-side lowering, with an expanded-surface filter that drops
+//! results still carrying deferred shells or semantic-miss markers.
 //!
-//! Class A migrates to `dispatch.execute_to_type_expr(ProjectPath{
-//! lowered, [], mode })` after caller-side lowering, with the same
-//! expanded-surface filter the trampoline applied (drops results that
-//! still carry deferred shells or semantic-miss markers).
+//! Class B helpers resolve a root symbol's surface through
+//! `dispatch.execute_to_type_expr(Instantiate { base, args: [], context:
+//! InstantiateContext { projection_reduction, resolve_env_hash } })` with
+//! `context.projection_reduction.mode = Expanded`, where `base` is the
+//! env-bearing content-free `ResolvedDeclSlotIdentity` slot. The slot
+//! carries the project-identity / type-env / lib-env dims and the
+//! resolve-env dim rides on `InstantiateContext`; the live whole-hash is
+//! re-sourced at value-compute via `ensure_indexed_ready`, never in the key.
 //!
-//! Class B migrates to `dispatch.execute_to_type_expr(Instantiate { base,
-//! args: [], context: InstantiateContext { projection_reduction,
-//! resolve_env_hash } })` with `context.projection_reduction.mode = Expanded`
-//! and `base` the env-bearing content-free `ResolvedDeclSlotIdentity` slot —
-//! the trampoline went through `project_type_surface` which itself lowered to
-//! an Expanded-mode `Instantiate` per `build.rs`'s utility router; the Class B
-//! helper inlines that path.
-//!
-//! bridge helpers (post engine-method deletion).
-//!
-//! The 18 external callsites that 5m migrated onto these wrappers continue
-//! to call them, but their bodies no longer dispatch through the deleted
-//! `ComponentMetaQueryEngine` resolver methods. Each helper inlines the
-//! same trampoline body the deprecated method had — a thin composition of
-//! the engine's surviving `pub(crate)` cycle-protected dispatch helpers
-//! (`dispatch_projected_surface`, `dispatch_routed_expr_surface_expr`,
-//! `project_direct_utility_surface_shape`, etc.) plus the surface→expr
-//! / surface→shape raises.
+//! The surface bridge helpers thread the caller's `ResolverContext` through
+//! dispatch and compose the surviving `pub(crate)` cycle-protected dispatch
+//! helpers (`dispatch_projected_surface`, `dispatch_routed_expr_surface_expr`,
+//! `project_direct_utility_surface_shape`, etc.) plus the surface→expr /
+//! surface→shape raises. Dispatch is the sole resolution authority on these
+//! paths.
 
 use crate::resolver_core::ResolverContext;
 use crate::types::ProjectionMode;
@@ -369,16 +362,14 @@ fn route_outer_utility_is_shadowed(
     }
 }
 
-/// Class A surface projection — dispatch-equivalent
-/// of `ComponentMetaQueryEngine::project_expr_surface_expr`.
+/// Class A surface projection through the shared dispatch.
 ///
-/// The trampoline's body has TWO paths:
+/// The body has TWO paths:
 ///   1. Registry-route fast path for indexed-access / utility shapes
 ///      (`Button['ui']`, `Pick<Foo, K>`). This routes through the
 ///      Class D route helpers (`project_route_surface_expr` /
-///      `lower_and_project_to_expanded`); we call them via a
-///      transient engine instance so route projection stays correct
-///      after callsite migration.
+///      `lower_and_project_to_expanded`) via an engine instance so route
+///      projection stays correct.
 ///   2. Generic ProjectPath dispatch for arbitrary expressions —
 ///      direct Expanded-mode `ProjectPath` query (the `Instantiate`
 ///      equivalent being `Instantiate { base, args: [], context:
@@ -388,8 +379,7 @@ fn route_outer_utility_is_shadowed(
 ///
 /// Returns `Some(projected)` only when the projection produced a
 /// fully-expanded surface (no deferred `KeyOf` / `IndexedAccess` /
-/// `Mapped` / `TypeOf` / `Conditional` shells). This matches the
-/// trampoline's post-filter so Class A parity is preserved.
+/// `Mapped` / `TypeOf` / `Conditional` shells).
 pub(crate) fn project_expr_class_a_via_dispatch(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
@@ -415,9 +405,9 @@ pub(crate) fn project_expr_class_a_via_dispatch(
 /// the dispatch's `lower_type_expr_in_scope` does not subsume —
 /// removing it would cause stack overflows on realistic
 /// indexed-access / utility shapes (e.g., `*_keeps_imported_*`
-/// member-path test family). The engine method itself remains a
-/// trampoline (already routes through dispatch), so the
-/// fast-path remains semantically aligned with dispatch.
+/// member-path test family). The engine route helper itself routes
+/// through dispatch, so the fast-path stays semantically aligned with
+/// dispatch.
 pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
     ctx: &'ctx dyn ResolverContext,
     engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
@@ -475,13 +465,12 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
             Some(e) => e,
             None => transient_engine.insert(ComponentMetaQueryEngine::new(ctx)),
         };
-        // route engine.project_route_surface_expr
-        // and engine.lower_and_project_to_expanded through the bridge
-        // helpers so the §5.14.1 pre-flight gate sees zero external
-        // engine-method callers. The bridges' bodies remain
-        // engine-method consumers for the migration window per
-        // §5.13a.2's "the engine continues to serve the route fast-
-        // path until 5l atomically deletes engine + bridges".
+        // Route through the surface bridge helpers
+        // (`project_route_surface_expr_via_host_threaded` /
+        // `lower_and_project_to_expanded_via_host_threaded`), which thread
+        // the caller's engine through dispatch. The bridges compose the
+        // engine's surviving cycle-protected route helpers — dispatch is
+        // the resolution authority on this path.
         if let Some(projected) = project_route_surface_expr_via_host_threaded(
             engine_ref,
             scope_canonical_id,
@@ -660,11 +649,9 @@ pub(crate) fn pick_via_dispatch_pick_helper(
 
 /// Class D — generic-Ref instantiation via dispatch.
 ///
-/// Dispatch-equivalent of
-/// `ComponentMetaQueryEngine::instantiate_local_generic_ref`. The
-/// engine method matched a `TypeExpr::Ref { name, type_arguments }`
-/// with non-empty type_arguments, resolved the declaration, gated
-/// against package-backed targets, and applied the prepared-decl's
+/// Matches a `TypeExpr::Ref { name, type_arguments }` with non-empty
+/// type_arguments, resolves the declaration through dispatch, gates
+/// against package-backed targets, and applies the prepared-decl's
 /// type-parameter substitutions to produce the instantiated body.
 ///
 /// The dispatch path goes through `lower_type_expr_in_scope` which
@@ -678,13 +665,13 @@ pub(crate) fn pick_via_dispatch_pick_helper(
 /// instantiation path for component-meta type resolution.
 ///
 /// Returns `Some(reduced)` only when:
-/// - `expr` is a generic `Ref` (else returns `None`, matching the
-///   engine method's bail-on-non-Ref / bail-on-empty-args),
+/// - `expr` is a generic `Ref` (else returns `None`: bail on non-Ref /
+///   empty type-arguments),
 /// - the dispatch lowering produced a node distinct from the carrier
 ///   `Opaque(Miss)` shell (the dispatcher's miss sentinel for
 ///   unresolved decl / package-backed / substitution-failure cases),
-/// - the raised body differs from the input expression (matches the
-///   engine method's "no change ⇒ caller falls back" semantics).
+/// - the raised body differs from the input expression (so a no-op lets
+///   the caller fall back).
 pub(crate) fn instantiate_local_generic_ref_via_dispatch(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
@@ -725,7 +712,7 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
 }
 
 // =============================================================================
-// Class B bridge helpers — Class B engine methods are deleted; these bridges thread `query_engine.ctx` through dispatch.
+// Class B surface bridge helpers — these thread `query_engine.ctx` through dispatch.
 //
 // The threaded `_threaded(engine, …)` variants are the production
 // callsite shape (engine threaded through caller). The `_via_host_threaded`
@@ -879,8 +866,8 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
 
 /// Mode-explicit dispatch-direct surface projection. Caller states
 /// `(base_mode, terminal_mode, demand)` so each callsite expresses
-/// its publication intent rather than inheriting the legacy
-/// `Expanded`/`Expanded` default.
+/// its publication intent explicitly rather than defaulting to
+/// `Expanded`/`Expanded`.
 ///
 /// Behaviour:
 /// 1. **Registry-route fast-path** — `Pick<…>` / `Omit<…>` /
@@ -893,9 +880,8 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
 /// 2. **Pure-dispatch path** — lower the whole expression at
 ///    `base_mode`, dispatch
 ///    `ProjectPath { base, path: [], context: { mode: terminal_mode, demand } }`
-///    against the lowered base. The empty-path form preserves the
-///    engine method's "no IndexedAccess decomposition" semantics for
-///    callers that depend on it (e.g.
+///    against the lowered base. The empty-path form performs no
+///    IndexedAccess decomposition, which callers depend on (e.g.
 ///    `solve_or_project_leaf_expr_until_stable`).
 ///
 /// Mode-aware result filter:

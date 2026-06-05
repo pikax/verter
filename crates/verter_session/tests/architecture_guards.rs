@@ -743,8 +743,8 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
     //      external engine-method callers post-5m.
     //
     //   2. The bridge section header (the literal anchor stored in
-    //      `BRIDGE_SECTION_MARKER` below — "Class B bridge helpers —
-    //      …") MUST be present in `dispatch_helpers.rs` — the
+    //      `BRIDGE_SECTION_MARKER` below — "Class B surface bridge
+    //      helpers — …") MUST be present in `dispatch_helpers.rs` — the
     //      location anchor that names where bridges live.
     //
     //   3. The stale helper names `project_type_class_b_via_dispatch`
@@ -787,7 +787,7 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
     // The single allowed location for Class B bridge bodies.
     const BRIDGE_FILE_REL: &str = "crates/verter_session/src/meta_resolve/dispatch_helpers.rs";
     const BRIDGE_SECTION_MARKER: &str =
-        "Class B bridge helpers — Class B engine methods are deleted; these bridges thread `query_engine.ctx` through dispatch.";
+        "Class B surface bridge helpers — these thread `query_engine.ctx` through dispatch.";
 
     let module_root = workspace_root().join("crates/verter_session/src/meta_resolve");
     let shell_path = workspace_root().join("crates/verter_session/src/meta_resolve.rs");
