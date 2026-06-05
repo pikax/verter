@@ -95,6 +95,21 @@ use test_gates::validate_running_probe;
 #[cfg(any(test, debug_assertions))]
 pub use test_gates::{ValidateRunningProbeGuard, VALIDATE_RUNNING_PROBE_TEST_LOCK};
 
+/// Test-only: the stable variant label of the [`FamilyKey`] a
+/// [`SemanticQueryKey`] maps to under `family_and_slot`. Lets the g_block
+/// guards assert the family-domain mapping (e.g. that `Relate` maps to the
+/// dedicated `FamilyKey::Relate`, never aliasing `IndexedAccess`) without
+/// exposing the `pub(super)` `FamilyKey` taxonomy outside the crate.
+#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
+#[must_use]
+pub fn family_variant_label_for_tests(
+    key: &crate::semantic_query::SemanticQueryKey,
+) -> &'static str {
+    let (family, _slot) = family_and_slot(key);
+    family.variant_label()
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // (NodeArena moved to `arena.rs` — see that module for the structural-
 // interning sharded dedup hot path.)
@@ -176,12 +191,15 @@ pub struct SemanticGraphStore {
     /// straggler insert is fully ordered against a project-generation
     /// reset with no window (see `BudgetedNamedTypeIndex`'s docs).
     named_type_index: BudgetedNamedTypeIndex,
-    /// Relation-engine memo. Maps `(source, target)` semantic-node pairs
-    /// to the tri-state
+    /// Relation-engine memo. Maps the FULL relation identity
+    /// [`RelateMemoKey`](crate::semantic_query::RelateMemoKey) (source / target
+    /// / relation kind / policy / source freshness / inference context /
+    /// env+substitution+projection-reduction context) to the tri-state
     /// [`RelationResult`](crate::semantic_query::RelationResult) plus the
     /// self-version-rooted carrier + the self-root canonical set used
     /// for strict warm-hit validation. Separate from the family memo
-    /// because relation identity is pairwise, not single-node.
+    /// because relation identity is over the full `RelateMemoKey`, not a
+    /// single node.
     ///
     /// The stored `RelationMemoEntry` is validated on every warm read
     /// (`get_relation`) — every self-root canonical's `FileWholeHash` is

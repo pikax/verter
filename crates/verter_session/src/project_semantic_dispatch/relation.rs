@@ -1,22 +1,22 @@
 //! Relation engine for semantic-node assignability.
 //!
-//! This is the authoritative relation engine on the semantic graph.
-//! Results
-//! memoise through [`SemanticGraphStore::insert_relation`] /
-//! [`SemanticGraphStore::get_relation`] keyed by the `(source, target)`
-//! node pair, with dep-signature fencing so warm hits revalidate under
-//! content changes.
+//! The authoritative relation engine on the semantic graph. Results memoise
+//! through [`SemanticGraphStore::insert_relation`] /
+//! [`SemanticGraphStore::get_relation`] keyed by the FULL relation identity
+//! [`crate::semantic_query::RelateMemoKey`] (source / target / relation kind /
+//! policy / source freshness / inference context / env+substitution+
+//! projection-reduction context), with dep-signature fencing. The current
+//! engine computes [`RelationKind::Assignable`]; the other identity axes carry
+//! their fixed default (per-axis algorithms land in U2.RELATION_INFER).
 //!
 //! All three [`RelationResult`] variants cache-with-fence:
 //! `Assignable`/`NotAssignable`/`Unknown`. `Unknown` covers genuinely
 //! undecidable judgements — deferred shells (`KeyOf`, `IndexedAccess`,
 //! `Mapped`, `Conditional`, `TypeOf`, `TemplateLiteral`), cyclic
-//! re-entry via [`RelationGuard`], and opaque carriers.
-//!
-//! The engine operates on [`SemanticNodeData`] exclusively and never
-//! reaches into the arena. It is path-independent: two callers reaching
-//! the same `(source, target)` from different execution contexts see the
-//! same memoised result.
+//! re-entry via [`RelationGuard`], and opaque carriers. The engine operates on
+//! [`SemanticNodeData`] exclusively and never reaches into the arena. It is
+//! path-independent: two callers reaching the same full relation identity see
+//! the same memoised result.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -177,13 +177,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// The full relation-memo key for `(source, target)` under the current
     /// engine's identity: assignability, default policy, regular source
-    /// freshness, no inference context, and the live `R T L J` env (sourced from
-    /// the host view; `project_identity` is the live `ProjectIdentity` hash).
-    /// The env keys the memo so a tsconfig / lib / project change isolates
-    /// judgements (belt-and-suspenders with the `validated_at_generation` gate,
-    /// and the design's env-on-key rule). The SINGLE key constructor
-    /// `relate_nodes` uses to read and write the relation memo — tests
-    /// reconstruct the exact key through it.
+    /// freshness, no inference context, the WORKSPACE-GLOBAL `R T L J` env
+    /// (host-view sourced — the established one-engine convention; per-judgement
+    /// env threading is a U2.RELATION_INFER concern, not done here), the EMPTY
+    /// canonical substitution, and the structural-transit reduction context. The
+    /// SINGLE constructor `relate_nodes` uses to read/write the memo.
     pub(crate) fn relate_memo_key(
         &self,
         source: SemanticNodeId,
@@ -196,6 +194,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             type_env_hash: env.type_env_hash,
             lib_env_hash: env.lib_env_hash,
             project_identity: host.host_view_project_identity().0,
+            // Empty substitution + structural-transit reduction — see the doc.
+            substitution: crate::semantic_query::SubstitutionCanonicalHash::empty(),
+            projection_reduction:
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
         };
         crate::semantic_query::RelateMemoKey::assignable(source, target, context)
     }

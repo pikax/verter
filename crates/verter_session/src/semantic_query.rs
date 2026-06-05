@@ -1785,17 +1785,24 @@ pub struct DeclarationAnalysisValue {
 /// The forward-declared value-domain payload of a [`SemanticQueryKey::Relate`]
 /// judgement — the carrier of [`SemanticQueryValue::Relation`].
 ///
-/// Carries the relation OUTCOME, the (off-surface) coinductive PROOF witness,
-/// and the BUDGET state the judgement was decided under. No live `execute`
-/// producer: `ProjectSemanticDispatch::execute` returns `Miss` for `Relate`,
-/// and the current production authority `relate_nodes` emits the engine's
-/// [`RelationResult`] into the dedicated relation memo. This struct is the
-/// SHAPE the relation reducer (U2.RELATION_INFER) will publish once it lands;
-/// it never crosses the typeinfo wire.
+/// Carries the relation OUTCOME, the inference BINDINGS a binding-producing
+/// relation deposited, the (off-surface) coinductive PROOF witness, and the
+/// BUDGET state the judgement was decided under (design §2.7:773-776). No live
+/// `execute` producer: `ProjectSemanticDispatch::execute` returns `Miss` for
+/// `Relate`, and the current production authority `relate_nodes` emits the
+/// engine's [`RelationResult`] into the dedicated relation memo. This struct is
+/// the SHAPE the relation reducer (U2.RELATION_INFER) will publish once it
+/// lands; it never crosses the typeinfo wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationPayload {
     /// The tri-state relation outcome.
     pub outcome: RelationOutcome,
+    /// The inference bindings a binding-producing relation produced (the
+    /// `infer T` captures a successful [`RelationResult::Assignable`] surfaces).
+    /// Empty for a pure non-binding assignability check. This is exactly where
+    /// public `relate` returns its bindings off the type-values surface
+    /// (design §2.7).
+    pub bindings: Arc<[InferBinding]>,
     /// Off-surface coinductive proof witness (never published on the wire).
     pub proof: CoinductiveProof,
     /// The budget regime the judgement was decided under — distinguishes a
@@ -1804,12 +1811,14 @@ pub struct RelationPayload {
 }
 
 impl RelationPayload {
-    /// An `Unknown` payload with no proof witness, decided within budget — the
-    /// honest forward-declared default until the relation reducer lands.
+    /// An `Unknown` payload with no bindings, no proof witness, decided within
+    /// budget — the honest forward-declared default until the relation reducer
+    /// lands. Empty bindings = a pure (non-binding) assignability judgement.
     #[must_use]
     pub fn unknown() -> Self {
         Self {
             outcome: RelationOutcome::Unknown,
+            bindings: Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
             proof: CoinductiveProof::None,
             budget_state: RelationBudgetState::WithinBudget,
         }
@@ -1842,12 +1851,14 @@ pub enum CoinductiveProof {
     None,
     /// Discharged directly, with no coinductive assumption taken.
     Direct,
-    /// Discharged by closing a cycle: the assumed `(source, target)` pairs
-    /// taken on faith to break the recursion. Node ids are content-free
-    /// interning identities (R6), so the witness is a sound `Hash`/`Eq` key.
-    Coinductive {
-        assumptions: Arc<[(SemanticNodeId, SemanticNodeId)]>,
-    },
+    /// Discharged by closing a cycle: the assumed relation goals taken on faith
+    /// to break the recursion, each keyed by its FULL relation identity
+    /// ([`RelateMemoKey`]) per design §4.1 — an assumption recorded for `K` is
+    /// never reused for a different relation identity, so a bare
+    /// `(source, target)` pair (which cannot distinguish relation kind / policy
+    /// / freshness / inference context / env) is NOT a sound assumption key. The
+    /// keys are content-free (R6), so the witness is a sound `Hash`/`Eq` key.
+    CoinductiveCycle { keys: Arc<[RelateMemoKey]> },
 }
 
 /// The budget regime a relation judgement was decided under.
@@ -2228,20 +2239,62 @@ impl Default for RelationKind {
     }
 }
 
-/// Flags that govern a relation comparison and are part of relation IDENTITY.
+/// The comparison policy that governs a relation and is part of relation
+/// IDENTITY — the three §2.7 / §4.0 policy axes: overload selection,
+/// excess-property checking, and variance (including method-parameter
+/// bivariance). Two judgements over the same nodes that differ in any policy
+/// axis can reach a different OUTCOME / bindings, so they are DISTINCT and must
+/// not share a memo slot. SHAPE only: the policy-driven comparison substrate is
+/// U2.RELATION_INFER.
 ///
-/// A relation discharged with excess-property checking ON can reject a fresh
-/// source a check with it OFF would accept, and an error-reporting comparison
-/// elaborates structure a silent probe short-circuits — so two judgements that
-/// differ only in policy are DISTINCT and must not share a memo slot. SHAPE
-/// only: the policy-driven comparison substrate is U2.RELATION_INFER.
+/// `report_errors` is deliberately ABSENT: error elaboration is a diagnostic
+/// side-effect, not a relation-identity axis — it does not change the
+/// outcome/bindings, so folding it into the key would over-split the cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct RelationPolicy {
+    /// How an overloaded callee's signatures are selected when relating
+    /// against it (§2.7:705).
+    pub overload_selection: OverloadSelectionPolicy,
     /// Excess-property checking applies to a fresh object-literal source.
     pub excess_property_check: bool,
-    /// The comparison reports errors (elaborating into members) rather than
-    /// returning a silent boolean probe.
-    pub report_errors: bool,
+    /// Variance regime — including the method-parameter bivariance quirk
+    /// (§4.0:1176-1182).
+    pub variance: VariancePolicy,
+}
+
+/// How an overloaded callee's signatures are selected during a relation
+/// (§2.7:705 overload-selection axis). Closed enum, content-free (R6). SHAPE
+/// only: the overload-resolution substrate is U2.RELATION_INFER.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum OverloadSelectionPolicy {
+    /// Relate against the WHOLE overload set — every target call/construct
+    /// signature must be satisfied. This is the structural object-relation
+    /// default (matches the current engine's `relate_objects` signature loop).
+    #[default]
+    All,
+    /// Select the first applicable overload (call-resolution order) and relate
+    /// against it alone.
+    FirstApplicable,
+}
+
+/// The variance regime a relation comparison runs under (§4.0:1176-1182).
+/// Distinguishes TS's method-parameter bivariance from strict contravariance —
+/// the policy flag the relation reads to decide method-parameter variance,
+/// rather than a scattered per-call-site special-case. Closed enum,
+/// content-free (R6). SHAPE only: the variance-driven comparison substrate is
+/// U2.RELATION_INFER. NOTE: this names the policy REGIME, not the MEASURED
+/// variance of a generic parameter (which §4.1's relation measures separately
+/// via the marker-probe fixed point).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum VariancePolicy {
+    /// Method-shaped members' parameters relate BIVARIANTLY — the
+    /// non-`strictFunctionTypes` method rule (TS's always-on default for
+    /// method-shaped members).
+    #[default]
+    MethodParameterBivariance,
+    /// Method/function parameters relate strictly CONTRAVARIANTLY — the
+    /// `strictFunctionTypes` regime with no method-bivariance exemption.
+    StrictContravariance,
 }
 
 /// Whether the relation SOURCE carries freshness — part of relation IDENTITY.
@@ -2268,32 +2321,143 @@ impl Default for FreshnessKey {
 }
 
 /// Content-free projection of an inference session (design §4.2) — the
-/// identity of the inference context a relation runs WITHIN.
+/// cache-identity fingerprint of the active inference setup a relation runs
+/// WITHIN, NOT a standalone bag of axes assembled independently of the session.
 ///
-/// While solving `infer T` in a conditional type, the relation engine runs
-/// relations against an evolving candidate set; a judgement discharged under
-/// one session's candidates must NOT warm-hit a judgement discharged under a
-/// different session, so the inference context is part of relation identity.
+/// A binding-producing relation runs inside the enclosing transaction's active
+/// `InferenceSession`; a judgement discharged under one session's setup must NOT
+/// warm-hit a judgement discharged under a different setup, so this projection
+/// is part of relation identity. The six axes are exactly the fields the active
+/// session carries (§4.2), projected content-free onto the cache key.
 ///
-/// **Content-free (R6).** The identity is the interned inference-target node
-/// ids plus a fixing-pass discriminant — a `SemanticNodeId` is an interning
-/// identity, never a content/version hash. SHAPE only: the inference-session
-/// substrate is U2.RELATION_INFER.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// **Content-free (R6).** Every axis is a node-set interning identity, a closed
+/// enum, or a small occurrence-local mask — never an env / content / parse /
+/// version hash and never a `fact_dep_signature`. SHAPE only: the
+/// inference-session substrate is U2.RELATION_INFER.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct InferenceContextKey {
-    /// The inference type-parameter targets being solved, as interned graph
-    /// node ids.
-    pub inference_targets: Arc<[SemanticNodeId]>,
-    /// The inference fixing pass / priority this relation runs under.
-    pub pass: u32,
+    /// Which type parameters are open / inferable in this session.
+    pub inferable_params: InferableParamSetId,
+    /// The covariant / contravariant / invariant variance MEASUREMENT pass this
+    /// relation runs under (§4.0). Names the pass; does not settle measured
+    /// variance.
+    pub variance_phase: VariancePhase,
+    /// Candidate priority — return-type vs argument vs naked-type-parameter
+    /// inference position (§4.2).
+    pub candidate_priority: InferenceCandidatePriority,
+    /// The occurrence-local `NoInfer` suppression mask in effect (§1.2 / §4.2).
+    pub no_infer_mask: NoInferMask,
+    /// `<const T>` const-ness propagation policy (§4.2).
+    pub const_param_policy: ConstParamPolicy,
+    /// Whether / how a contextual target drives inference in this session
+    /// (§4.2).
+    pub contextual_inference_mode: ContextualInferenceMode,
 }
 
-/// Env a [`SemanticQueryKey::Relate`] value depends on (env dims `R T L J`).
+/// Content-free identity of the set of inferable (open) type parameters in an
+/// inference session (§4.2). Realised as the interned set of graph node ids —
+/// the same content-free realisation the graph uses for node sets elsewhere
+/// (e.g. [`SemanticQueryKey::NormalizeUnion`]) — never a content/version hash
+/// (R6). `Default` / [`empty`](Self::empty) is the empty set (no open
+/// parameters). SHAPE only: the interning substrate is U2.RELATION_INFER.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InferableParamSetId(pub Arc<[SemanticNodeId]>);
+
+impl InferableParamSetId {
+    /// The empty inferable-parameter set (no open type parameters).
+    #[must_use]
+    pub fn empty() -> Self {
+        Self(Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()))
+    }
+
+    /// Construct from an ordered set of interned type-parameter node ids.
+    #[must_use]
+    pub fn new(params: Arc<[SemanticNodeId]>) -> Self {
+        Self(params)
+    }
+}
+
+impl Default for InferableParamSetId {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// The variance MEASUREMENT pass a binding-producing relation runs under
+/// (§4.0). Names the pass — it does NOT settle the MEASURED variance of a
+/// generic parameter (which §4.1's relation measures separately via the
+/// marker-probe fixed point). Closed enum, content-free (R6). SHAPE only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum VariancePhase {
+    /// Covariant measurement pass — the default outbound direction.
+    #[default]
+    Covariant,
+    /// Contravariant measurement pass.
+    Contravariant,
+    /// Invariant measurement pass (both directions must hold).
+    Invariant,
+}
+
+/// Inference candidate priority — which inference position is in scope when a
+/// relation deposits a candidate (§4.2). Closed enum, content-free (R6). SHAPE
+/// only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum InferenceCandidatePriority {
+    /// Ordinary argument-position inference — the baseline priority.
+    #[default]
+    Argument,
+    /// Return-type-position inference (lower priority than naked-type-parameter
+    /// inference, higher precedence semantics handled by the engine).
+    ReturnType,
+    /// Naked-type-parameter inference (a bare `T` in the source position).
+    NakedTypeParameter,
+}
+
+/// The occurrence-local `NoInfer<T>` suppression mask in effect for a relation
+/// (§1.2 / §4.2). A content-free bitset of the occurrence-local positions where
+/// inference is suppressed; `Default` / [`empty`](Self::empty) is no
+/// suppression. Never a content/version hash (R6). SHAPE only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct NoInferMask(pub u64);
+
+impl NoInferMask {
+    /// The empty mask — no `NoInfer` suppression in effect.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+}
+
+/// `<const T>` const-ness propagation policy in effect for a relation (§4.2).
+/// Closed enum, content-free (R6). SHAPE only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ConstParamPolicy {
+    /// No const-ness propagation — the ordinary (non-`const`) type parameter.
+    #[default]
+    NonConst,
+    /// `<const T>` const-ness propagation is active for this inference.
+    Const,
+}
+
+/// Whether / how a contextual target drives inference in a session (§4.2).
+/// Closed enum, content-free (R6). SHAPE only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ContextualInferenceMode {
+    /// No contextual target drives this inference.
+    #[default]
+    None,
+    /// A contextual target (e.g. the expected return type) drives inference.
+    Contextual,
+}
+
+/// The env + substitution + projection-reduction context a
+/// [`SemanticQueryKey::Relate`] value depends on (design §2.7:711-718).
 ///
 /// `Relate` has NO slot (its identity core is the `source` / `target` nodes
 /// plus the relation-kind / policy / freshness / inference discriminators), so
-/// the R21 env dimensions ride here IN the context. Per R21 this carries the
-/// `R T L J` set:
+/// the env dimensions ride here IN the context. Per design §2.7 this carries
+/// the `R T L J` env set PLUS the canonical substitution hash and the
+/// projection-reduction context:
 ///
 /// - `resolve_env_hash` (`R`) — relating imported surfaces resolves their
 ///   references on the relation's own step.
@@ -2301,20 +2465,29 @@ pub struct InferenceContextKey {
 ///   the relation outcome.
 /// - `lib_env_hash` (`L`) — relations reach lib types (`Array`, `Promise`).
 /// - `project_identity` (`J`) — project isolation.
+/// - `substitution` — the canonical hash of the active substitution
+///   environment (the same canonical-substitution hash the flow / call keys
+///   use). Two relations over the same `(source, target)` under a different
+///   ambient substitution can relate differently, so this is part of identity.
+/// - `projection_reduction` — the reduction context relation descent runs
+///   under (structural-transit vs published reduction). Load-bearing: a
+///   relation descended via structural transit reads a different surface than
+///   one descended via published reduction.
 ///
 /// There is deliberately NO `parse_env_hash` (`P`): a relation operates over
 /// already-lowered interned `source` / `target` nodes (content-version rooted
-/// via `ReadSetSignature`), not a fresh parsed body skeleton. The substitution
-/// axis rides on the already-substituted `source` / `target` nodes, not here.
+/// via `ReadSetSignature`), not a fresh parsed body skeleton. There is NO
+/// `project_config_hash` (R21) and NO content / `parse_stable_hash` /
+/// `fact_dep_signature` (R6) — every field is a content-free key dimension.
 ///
-/// **Field-type note.** Unlike the forward-declared `ApparentTypeContext` /
-/// `ProgramAnalysisContext` (whose `project_identity` is a placeholder `u32`
-/// never wired to a live producer), `RelationContext` IS populated in
-/// production by `relate_nodes` from the live host env, so `project_identity`
-/// is the real [`crate::file_artifact_store::ProjectIdentity`] hash rather than
-/// a placeholder integer — env hashes are content-free key dimensions (R6), the
-/// same convention as `ClassSurfaceContext::resolve_env_hash`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+/// **Env-sourcing note.** `relate_nodes` populates the env fields from the
+/// WORKSPACE-GLOBAL host view (the established one-engine dispatch convention),
+/// not per-canonical: per-judgement multi-project env threading is a
+/// cross-cutting concern owned by U2.RELATION_INFER, not introduced here. The
+/// fields ARE real env hashes (e.g. `project_identity` is the live
+/// [`crate::file_artifact_store::ProjectIdentity`] hash), but isolation is at
+/// workspace-env granularity, not per-judgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RelationContext {
     /// Import / name-resolution dimension (`R`).
     pub resolve_env_hash: HashValue,
@@ -2324,6 +2497,46 @@ pub struct RelationContext {
     pub lib_env_hash: HashValue,
     /// Project-isolation dimension (`J`) — the live `ProjectIdentity` hash.
     pub project_identity: HashValue,
+    /// Canonical hash of the active substitution environment (§2.7:716).
+    pub substitution: SubstitutionCanonicalHash,
+    /// Reduction context relation descent runs under (§2.7:717).
+    pub projection_reduction: ProjectionReductionContext,
+}
+
+impl Default for RelationContext {
+    /// All-zero env, empty canonical substitution, and the structural-transit
+    /// reduction context the relation engine descends under (it consumes
+    /// surfaces for assignability decisions, never publication).
+    fn default() -> Self {
+        Self {
+            resolve_env_hash: HashValue::default(),
+            type_env_hash: HashValue::default(),
+            lib_env_hash: HashValue::default(),
+            project_identity: HashValue::default(),
+            substitution: SubstitutionCanonicalHash::empty(),
+            projection_reduction: ProjectionReductionContext::structural_transit(),
+        }
+    }
+}
+
+/// Canonical hash of the active substitution environment (design §2.7:716) —
+/// the same canonical-substitution hash the flow / call keys use.
+///
+/// **Content-free (R6).** A hash over the canonical substitution MAPPING, never
+/// a file content/version hash. [`empty`](Self::empty) / `Default` is the
+/// canonical hash of the EMPTY substitution (no ambient type-parameter
+/// bindings) — the absence of any substitution is itself a canonical value, not
+/// a missing axis. The relation key carries THIS hash, never raw `type_args`.
+/// SHAPE only: the substitution-canonicalisation substrate is U2.RELATION_INFER.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SubstitutionCanonicalHash(pub HashValue);
+
+impl SubstitutionCanonicalHash {
+    /// The canonical hash of the empty substitution environment.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self([0u8; 16])
+    }
 }
 
 /// The relation memo's query-identity key — the full `Relate` identity.
