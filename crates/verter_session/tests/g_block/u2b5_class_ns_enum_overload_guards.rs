@@ -135,8 +135,30 @@ fn class_surface_key_with_mode(
         type_args,
         side,
         context: ClassSurfaceContext {
+            parse_env_hash: hash16(0),
             resolve_env_hash: hash16(resolve_env),
             mode,
+        },
+    }
+}
+
+/// `ResolveClassSurface` key with explicit `parse_env` + `resolve_env` — used
+/// by the parse-env-axis identity guard. `parse_env_hash` is the FULL-planned-
+/// identity axis (forward-declared for the decorator-reading reducer).
+fn class_surface_key_with_parse_env(
+    canonical: &str,
+    name: &str,
+    parse_env: u8,
+    resolve_env: u8,
+) -> SemanticQueryKey {
+    SemanticQueryKey::ResolveClassSurface {
+        decl_slot: slot(canonical, name, SemanticSymbolSpace::Type),
+        type_args: Arc::from(Vec::new().into_boxed_slice()),
+        side: ClassSurfaceSide::Instance,
+        context: ClassSurfaceContext {
+            parse_env_hash: hash16(parse_env),
+            resolve_env_hash: hash16(resolve_env),
+            mode: ProjectionMode::Identity,
         },
     }
 }
@@ -157,8 +179,29 @@ fn ambient_namespace_key_with_mode(
         namespace_slot: slot(canonical, name, SemanticSymbolSpace::Namespace),
         type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: AmbientNamespaceContext {
+            parse_env_hash: hash16(0),
             resolve_env_hash: hash16(resolve_env),
             mode,
+        },
+    }
+}
+
+/// `ResolveAmbientNamespace` key with explicit `parse_env` + `resolve_env` —
+/// used by the parse-env-axis identity guard (forward-declared for the body-
+/// reading namespace-member reducer).
+fn ambient_namespace_key_with_parse_env(
+    canonical: &str,
+    name: &str,
+    parse_env: u8,
+    resolve_env: u8,
+) -> SemanticQueryKey {
+    SemanticQueryKey::ResolveAmbientNamespace {
+        namespace_slot: slot(canonical, name, SemanticSymbolSpace::Namespace),
+        type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: AmbientNamespaceContext {
+            parse_env_hash: hash16(parse_env),
+            resolve_env_hash: hash16(resolve_env),
+            mode: ProjectionMode::Identity,
         },
     }
 }
@@ -209,13 +252,38 @@ fn resolve_class_surface_key_covers_side_demand_type_args_and_context() {
     assert_distinct_identity(&base, &with_args);
 
     // A context env-hash difference (resolve_env) is part of identity.
-    // `ClassSurfaceContext` carries ONLY `resolve_env_hash` (`R`) + `mode`
-    // — there is deliberately NO `parse_env` axis (R21: the composed
-    // surface identity-routes `Instantiate` + `TypeOf` and reads no parsed
-    // body skeleton, so keying on `parse_env` would be a dead axis).
+    // `ClassSurfaceContext` carries the FULL planned identity `{P, R} + mode`
+    // (design §419) — both `parse_env` (P, forward-declared for the decorator-
+    // reading reducer) and `resolve_env` (R) are identity axes; the parse_env
+    // axis is exercised independently by
+    // `resolve_class_surface_identity_covers_parse_env_axis`.
     let other_resolve_env =
         class_surface_key("/c.ts", "Foo", Arc::from([]), ClassSurfaceSide::Instance, 9);
     assert_distinct_identity(&base, &other_resolve_env);
+}
+
+// ---------------------------------------------------------------------------
+// (1a) ResolveClassSurface / ResolveAmbientNamespace identity covers the
+//      parse_env (P) axis. `P` is the FULL-planned-identity dimension the
+//      shipped reduced `{R}`-only context dropped: two keys differing ONLY in
+//      parse_env MUST occupy DISTINCT (FamilyKey, slot). A context / FamilyKey
+//      that omits parse_env collapses them → count 1 → FAIL. This is the
+//      discriminating negative that pins the forward-declared axis.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolve_class_surface_identity_covers_parse_env_axis() {
+    let base = class_surface_key_with_parse_env("/c.ts", "Foo", 0, 0);
+    // Differ ONLY in parse_env (resolve_env held at 0).
+    let other_parse_env = class_surface_key_with_parse_env("/c.ts", "Foo", 9, 0);
+    assert_distinct_identity(&base, &other_parse_env);
+}
+
+#[test]
+fn resolve_ambient_namespace_identity_covers_parse_env_axis() {
+    let base = ambient_namespace_key_with_parse_env("/n.ts", "N", 0, 0);
+    let other_parse_env = ambient_namespace_key_with_parse_env("/n.ts", "N", 9, 0);
+    assert_distinct_identity(&base, &other_parse_env);
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +304,7 @@ fn resolve_class_surface_identity_canonicalizes_decl_slot_symbol_space() {
         type_args: Arc::from(Vec::new().into_boxed_slice()),
         side: ClassSurfaceSide::Instance,
         context: ClassSurfaceContext {
+            parse_env_hash: hash16(0),
             resolve_env_hash: hash16(0),
             mode: ProjectionMode::Identity,
         },
@@ -313,8 +382,9 @@ fn resolve_ambient_namespace_identity_covers_mode_axis() {
 
 #[test]
 fn resolve_ambient_namespace_key_covers_context() {
-    // `AmbientNamespaceContext` carries ONLY `resolve_env_hash` (`R`) +
-    // `mode` — there is deliberately NO `parse_env` axis (R21).
+    // `AmbientNamespaceContext` carries the FULL planned identity `{P, R} +
+    // mode` (design §414); here we vary `resolve_env` (R). The `parse_env` (P)
+    // axis is exercised by `resolve_ambient_namespace_identity_covers_parse_env_axis`.
     let base = ambient_namespace_key("/n.ts", "N", 0);
     assert_distinct_identity(&base, &ambient_namespace_key("/n.ts", "N", 9));
 }
@@ -508,6 +578,7 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
 
     let decl_slot = slot(canonical, "Foo", SemanticSymbolSpace::Type);
     let ctx = ClassSurfaceContext {
+        parse_env_hash: Default::default(),
         resolve_env_hash: Default::default(),
         mode: ProjectionMode::Shallow,
     };

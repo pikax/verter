@@ -20,8 +20,9 @@ use std::sync::Arc;
 use verter_session::for_tests::ReadSetSignature;
 use verter_session::semantic_query::query_key_spec::semantic_query_key_specs;
 use verter_session::semantic_query::{
-    PrimitiveKind, ProgramAnalysisContext, ProgramPointId, QueryError, QueryResult,
-    SemanticNodeData, SemanticQueryKey, SemanticQueryKeyTag, SemanticQueryValueTag,
+    ContextualTypingKey, FlowNarrowingKey, PrimitiveKind, ProgramAnalysisContext, ProgramPointId,
+    QueryError, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    SemanticQueryKeyTag, SemanticQueryValueTag, SubstitutionCanonicalHash,
 };
 use verter_session::{HostConfig, VerterHost};
 
@@ -83,14 +84,26 @@ fn point(canonical: &str, offset: u32) -> ProgramPointId {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn analysis_context(p: u8, r: u8, t: u8, l: u8, j: u32) -> ProgramAnalysisContext {
+    analysis_context_with_subst(p, r, t, l, j, SubstitutionCanonicalHash::empty())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analysis_context_with_subst(
+    p: u8,
+    r: u8,
+    t: u8,
+    l: u8,
+    j: u32,
+    substitution: SubstitutionCanonicalHash,
+) -> ProgramAnalysisContext {
     ProgramAnalysisContext {
         parse_env_hash: hash16(p),
         resolve_env_hash: hash16(r),
         type_env_hash: hash16(t),
         lib_env_hash: hash16(l),
         project_identity: j,
+        substitution,
     }
 }
 
@@ -105,6 +118,7 @@ fn flow_narrowing_key(
 ) -> SemanticQueryKey {
     SemanticQueryKey::FlowNarrowingAt {
         point: point(canonical, offset),
+        flow: FlowNarrowingKey::empty(),
         context: analysis_context(p, r, t, l, j),
     }
 }
@@ -120,8 +134,67 @@ fn contextual_type_key(
 ) -> SemanticQueryKey {
     SemanticQueryKey::ContextualTypeAt {
         point: point(canonical, offset),
+        contextual: ContextualTypingKey::empty(),
         context: analysis_context(p, r, t, l, j),
     }
+}
+
+/// A `FlowNarrowingAt` key with an explicit `flow` demand axis (all env at 0).
+fn flow_narrowing_key_with_flow(
+    canonical: &str,
+    offset: u32,
+    flow: FlowNarrowingKey,
+) -> SemanticQueryKey {
+    SemanticQueryKey::FlowNarrowingAt {
+        point: point(canonical, offset),
+        flow,
+        context: analysis_context(0, 0, 0, 0, 0),
+    }
+}
+
+/// A `FlowNarrowingAt` key with an explicit `substitution` axis (all env / flow
+/// at default).
+fn flow_narrowing_key_with_subst(
+    canonical: &str,
+    offset: u32,
+    substitution: SubstitutionCanonicalHash,
+) -> SemanticQueryKey {
+    SemanticQueryKey::FlowNarrowingAt {
+        point: point(canonical, offset),
+        flow: FlowNarrowingKey::empty(),
+        context: analysis_context_with_subst(0, 0, 0, 0, 0, substitution),
+    }
+}
+
+/// A `ContextualTypeAt` key with an explicit `contextual` demand axis.
+fn contextual_type_key_with_contextual(
+    canonical: &str,
+    offset: u32,
+    contextual: ContextualTypingKey,
+) -> SemanticQueryKey {
+    SemanticQueryKey::ContextualTypeAt {
+        point: point(canonical, offset),
+        contextual,
+        context: analysis_context(0, 0, 0, 0, 0),
+    }
+}
+
+/// A `ContextualTypeAt` key with an explicit `substitution` axis.
+fn contextual_type_key_with_subst(
+    canonical: &str,
+    offset: u32,
+    substitution: SubstitutionCanonicalHash,
+) -> SemanticQueryKey {
+    SemanticQueryKey::ContextualTypeAt {
+        point: point(canonical, offset),
+        contextual: ContextualTypingKey::empty(),
+        context: analysis_context_with_subst(0, 0, 0, 0, 0, substitution),
+    }
+}
+
+/// A non-empty interned node set, for varying the `flow` / `contextual` axes.
+fn node_set(id: u64) -> Arc<[SemanticNodeId]> {
+    Arc::from(vec![SemanticNodeId(id)].into_boxed_slice())
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +270,50 @@ fn contextual_type_at_do_not_warm_hit() {
         0,
         "ContextualTypeAt must not warm-hit across a parse_env boundary"
     );
+}
+
+// ---------------------------------------------------------------------------
+// (3c) Per-variant demand-axis identity — the FULL-planned-identity axes the
+//      shipped reduced context dropped. Each axis INDEPENDENTLY changes
+//      family_and_slot's output: two keys differing ONLY in `flow` /
+//      `contextual` / `substitution` (env held identical) MUST occupy DISTINCT
+//      (FamilyKey, slot). A context / FamilyKey that omits the axis collapses
+//      them → count 1 → FAIL. These are the discriminating negatives that pin
+//      the forward-declared flow / contextual / substitution axes — the
+//      committed guard only varied parse_env and could not catch a dropped
+//      flow / contextual / subst axis.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn flow_narrowing_at_identity_covers_flow_axis() {
+    // Differ ONLY in the per-variant `flow` demand axis (env all 0).
+    let base = flow_narrowing_key_with_flow("a.ts", 0, FlowNarrowingKey::empty());
+    let other = flow_narrowing_key_with_flow("a.ts", 0, FlowNarrowingKey::new(node_set(7)));
+    assert_distinct_identity(&base, &other);
+}
+
+#[test]
+fn flow_narrowing_at_identity_covers_substitution_axis() {
+    // Differ ONLY in the shared `substitution` axis (env all 0, flow empty).
+    let base = flow_narrowing_key_with_subst("a.ts", 0, SubstitutionCanonicalHash::empty());
+    let other = flow_narrowing_key_with_subst("a.ts", 0, SubstitutionCanonicalHash(hash16(9)));
+    assert_distinct_identity(&base, &other);
+}
+
+#[test]
+fn contextual_type_at_identity_covers_contextual_axis() {
+    // Differ ONLY in the per-variant `contextual` demand axis (env all 0).
+    let base = contextual_type_key_with_contextual("a.ts", 0, ContextualTypingKey::empty());
+    let other =
+        contextual_type_key_with_contextual("a.ts", 0, ContextualTypingKey::new(node_set(7)));
+    assert_distinct_identity(&base, &other);
+}
+
+#[test]
+fn contextual_type_at_identity_covers_substitution_axis() {
+    let base = contextual_type_key_with_subst("a.ts", 0, SubstitutionCanonicalHash::empty());
+    let other = contextual_type_key_with_subst("a.ts", 0, SubstitutionCanonicalHash(hash16(9)));
+    assert_distinct_identity(&base, &other);
 }
 
 // ---------------------------------------------------------------------------
