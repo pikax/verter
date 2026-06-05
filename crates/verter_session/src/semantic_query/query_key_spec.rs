@@ -21,8 +21,9 @@
 //!    variant identifiers scanned from the live `pub enum SemanticQueryKey`
 //!    source (fails when a variant is added/removed without regenerating).
 //! 3. **Per-row sanity** — every row is `Live`; every row carries the
-//!    `TypeNode` value domain EXCEPT `Relate` (`Relation`) and
-//!    `ResolveOverloadSet` (`OverloadSet`), which is the current-tree truth,
+//!    `TypeNode` value domain EXCEPT `Relate` (`Relation`),
+//!    `ResolveOverloadSet` (`OverloadSet`), and `FlowNarrowingAt` /
+//!    `ContextualTypeAt` (`ProgramAnalysis`), which is the current-tree truth,
 //!    and the
 //!    [`SemanticQueryKeyTag::ALL`](crate::semantic_query::SemanticQueryKeyTag::ALL)
 //!    set triangulates against both the spec set and the enum-scan set.
@@ -30,8 +31,9 @@
 //! # Current-tree honesty
 //!
 //! - Every live variant resolves to
-//!   [`SemanticQueryValueTag::TypeNode`] EXCEPT `Relate` and
-//!   `ResolveOverloadSet`: `ProjectSemanticDispatch::execute` wraps the
+//!   [`SemanticQueryValueTag::TypeNode`] EXCEPT `Relate`,
+//!   `ResolveOverloadSet`, `FlowNarrowingAt`, and `ContextualTypeAt`:
+//!   `ProjectSemanticDispatch::execute` wraps the
 //!   `TypeNode` keys' results as `SemanticQueryValue::TypeNode(node)`.
 //!   `Relate` records its value domain as
 //!   [`SemanticQueryValueTag::Relation`] — the tri-state assignability
@@ -46,8 +48,13 @@
 //!   value domain: its `execute` arm is non-producing (returns `Miss`,
 //!   admission [`NonProducingPendingReducer`](AdmissionSpec::NonProducingPendingReducer))
 //!   until the overload-producing reducer that fills the `OverloadSet`
-//!   carrier lands — it never fabricates an empty set. No other value
-//!   domain appears.
+//!   carrier lands — it never fabricates an empty set. `FlowNarrowingAt`
+//!   and `ContextualTypeAt` both record
+//!   [`SemanticQueryValueTag::ProgramAnalysis`] as a FORWARD-DECLARED
+//!   value domain: each `execute` arm is non-producing (returns `Miss`,
+//!   admission [`NonProducingPendingReducer`](AdmissionSpec::NonProducingPendingReducer))
+//!   until the flow-narrowing / contextual-type reducers land in U6. No
+//!   other value domain appears.
 //! - `allowed_demand` is a [`DemandAxis`]-vocabulary mask and does NOT capture
 //!   the `ReductionDemand` slot-selection dimension. A key carrying a
 //!   `ProjectionReductionContext` (`Instantiate` / `KeyOf` / `MappedType` /
