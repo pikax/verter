@@ -1007,7 +1007,7 @@ is produced at its rescope session (§3.2) before it implements.
 | U6 | RESCOPE-GATE-PENDING | cross-engine flow-return recursion; ← U2.RELATION_INFER |
 | U7 | DEFERRED-TO-U9 | scheduler `submit_dag` envelope deferred (multi-node DAG held un-built); substrate + leaf primitives KEPT; gap closed at U9 via single-node lowering into existing `SchedulerDag::submit`. See `docs/arch/u7-scheduler-submit-dag-decision.md`; ← U1 |
 | U8 | NOT-STARTED | wire-surface closure; ← U6 + S5.B12 |
-| U9 | NOT-STARTED | session bridge (B7f); ← U1 (CacheNode substrate + executor surface) + B7a (leaf primitives) — NOT a built `submit_dag` envelope (U7 deferred); see `docs/arch/u7-scheduler-submit-dag-decision.md` |
+| U9 | DESIGN-LOCKED | scheduler cache-node lowering (B7f); ← U1 (CacheNode substrate + executor surface) + B7a (leaf primitives) — NOT a built `submit_dag` envelope (U7 deferred). NO session bridge / registry / `DedupeHook` / `CpuConcurrencySemaphore` (no consumer; `DedupeHook` unbuildable under R6). Scope = finish+harden the cache-node DAG edge (success release + net-new failure propagation + cycle guard, test-only `StageExecutor` proof) + DELETE 4 dead B7a leaf primitives per U7 §6; core arm under a hard deletion re-gate. See `docs/arch/u9-session-bridge-design.md` |
 | U10 | NOT-STARTED | result DB; ← U3 + U8 |
 | U11 | NOT-STARTED | public relation/session; ← U12 |
 | U12 | NOT-STARTED | exporter; ← U10 |
@@ -2470,29 +2470,41 @@ guards**. Sequence is faithful to §A; do not reorder.
 
 ---
 
-### U9 — Scheduler Session Bridge (B7f)
+### U9 — Scheduler Cache-Node Lowering (B7f) — DESIGN-LOCKED
+
+**LOCKED design: `docs/arch/u9-session-bridge-design.md` (supersedes this block body).** The design gate
+found NO cache-node consumer (tree-wide or committed; the only result DB, `TypeInfoGraphResultDb`, is
+permanently singleflight-bound) and that the central `DedupeHook` bridge is UNBUILDABLE under R6 (the
+`WorkNodeIdentity.key_hash: Hash16 → InflightTable<K>` map is lossy + pre-admission). So U9 is NOT a session
+bridge.
 
 - **Source track:** cache-runtime / scheduler.
-- **Scope:** Session-side `DedupeHook` impl, opaque cache-id registry,
-  `HostStageExecutor::execute_cache_node`. Wire the §6-deferred
-  `CpuConcurrencySemaphore` propagation (workers acquire a fresh
-  `CpuConcurrencyPermit` per CPU task at dispatch, RAII release; capacity sourced
-  from scheduler config, NOT a removed per-call `threads` option). Update
-  `.claude/skills/scheduler/SKILL.md` (stale re: `submit_batch` / pre-cache-node
-  surface). Crosses the H20 boundary deliberately at the session edge only.
-- **Deps:** U1 (landed `TaskKind::CacheNode` + `WorkNodeIdentity::CacheNode` +
-  `DepKey::CacheNode` + `execute_cache_node` surface) + B7a (`CpuConcurrencySemaphore`,
-  `DedupeHook`, `SchedulerCacheId`, `SubmissionResult`, `CancellationToken` — landed but
-  unwired). **NOT a built `submit_dag` envelope** — U7 is DEFERRED-TO-U9
-  (`docs/arch/u7-scheduler-submit-dag-decision.md`): U9 closes the cache-node
-  reachability gap via single-node lowering into the existing `SchedulerDag::submit`.
+- **Scope:** (a) finish + HARDEN the half-built cache-node DAG edge so a cache→cache dependency is live and
+  sound — lift the three terminal-cache dispatch asserts → `Submission::Wake`; net-new cache failed-dep fanout
+  (`cancel()` records `FailedDepRecord` under `DepKey::CacheNode` + persistent `terminal_dep_failures`) + a
+  cache-arm pre-execute `DependencyFailed` short-circuit (the file-stage chokepoints are `unreachable!()` for
+  `CacheNode`); a net-new bounded cache-edge cycle guard at the submit chokepoint; relax the
+  `scheduler.rs:4793` forbid for the cache path ONLY. Proven by a discriminating test-only `StageExecutor`
+  (release / failure-propagate / cycle-reject). (b) DELETE the dead B7a leaf primitives (below). NO session
+  bridge, NO registry, NO `DedupeHook`, NO `CpuConcurrencySemaphore` wiring, NO host back-edge, NO production
+  materializer, NO H20 session edge. Update `.claude/skills/{scheduler,host-session}/SKILL.md`.
+- **Deps:** U1 (landed `TaskKind::CacheNode` + `WorkNodeIdentity::CacheNode` + `DepKey::CacheNode` +
+  `execute_cache_node` surface) + B7a (leaf primitives). **NOT a built `submit_dag` envelope** — U7 is
+  DEFERRED-TO-U9 (`docs/arch/u7-scheduler-submit-dag-decision.md`): U9 closes the gap via single-node lowering
+  into the existing `SchedulerDag::submit`.
 - **Parallelism:** Cache-runtime lane tail; beside the semantic-graph lane.
-- **Risk:** medium — spans `verter_scheduler` ↔ `verter_session`; keep the session
-  bridge thin.
-- **Required deletions:** none (wires the already-landed B7a substrate).
-- **Guards:** keep `no_session_dep` (H20) green except at the sanctioned session
-  edge; a discriminating test that `CpuConcurrencySemaphore` actually caps
-  concurrent CPU tasks; opaque-cache-id-registry round-trip.
+- **Risk:** medium — the load-bearing work is the net-new failure path + cycle guard, NOT the assert lift.
+- **Required deletions:** `DedupeHook`/`DedupeJoiner`/`NoDedupeHook` (`dedupe_hook.rs`), `SubmissionResult`,
+  `CpuConcurrencySemaphore`/`CpuConcurrencyPermit` (`cpu_concurrency.rs`), the rich `CancellationToken`
+  (`cancellation.rs`) — per the U7 §6 standing-honesty condition (unconsumed B7a primitives). `SchedulerCacheId`
+  survives as the opaque `WorkNodeIdentity` identity field only.
+- **Core re-gate:** the `WorkNodeIdentity::CacheNode` arm survives U9 with a test-only proof under a HARD
+  deletion re-gate — if the next block lands no committed production cache-node submitter, the whole arm is
+  re-gated for deletion (full γ). See design §7.
+- **Guards:** keep `no_session_dep` (H20) green (NO sanctioned session edge is added);
+  `b7b_no_second_admission_budget_or_ready_queue` + `no_parking_lot_semaphore` stay green; the discriminating
+  three-axis cache-edge characterization test (release / failure-propagate / cycle-reject) is the correctness
+  guard.
 
 ---
 
