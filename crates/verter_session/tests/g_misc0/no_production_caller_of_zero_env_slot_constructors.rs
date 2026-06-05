@@ -60,13 +60,22 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The fixture-only / zero-env slot constructors. A production-window
-/// CALL to any of these (`<marker>(`) is the bypass we forbid.
+/// The fixture-only / zero-env slot constructor NAMES. A production-window
+/// CALL to any of these — the name with a non-identifier boundary before it
+/// (so `to_type_slot_unscoped` matches on its OWN boundary and does not
+/// false-match inside an unrelated identifier), then optional
+/// whitespace/comments, then `(` — is the bypass we forbid.
+///
+/// The trailing `(` is NOT part of the marker (Finding 2 hardening): a
+/// production call written `type_slot_unscoped (` (space before paren) or
+/// `type_slot_unscoped\n(` (newline) must still be caught, so the paren is
+/// matched after comment-stripping + whitespace normalization rather than
+/// as a literal suffix of the marker.
 const ZERO_ENV_SLOT_CONSTRUCTORS: &[&str] = &[
-    "type_slot_unscoped(",
-    "builtin_unscoped(",
-    "to_type_slot_unscoped(",
-    "from_decl_identity(",
+    "type_slot_unscoped",
+    "builtin_unscoped",
+    "to_type_slot_unscoped",
+    "from_decl_identity",
 ];
 
 /// Files we always skip outright (basename match). `semantic_query.rs`
@@ -106,17 +115,18 @@ fn is_excluded_path(path: &Path) -> bool {
     SKIP_FILES.iter().any(|f| basename.ends_with(f))
 }
 
-/// Yields `(line_no, line)` for every line surviving the production
-/// window: lines inside `impl Default for … { }` bodies and inside
-/// `#[cfg(test)]` annotated items are dropped.
-fn production_lines(source: &str) -> Vec<(usize, &str)> {
-    let mut excluded_ranges: Vec<(usize, usize)> = Vec::new();
+/// The merged, sorted byte ranges of the production-window EXCLUSIONS:
+/// `impl Default for … { }` bodies and `#[cfg(test)]` annotated items.
+/// A byte offset inside any returned `(start, end)` range is test-only /
+/// non-production and must be skipped by the caller scan.
+fn excluded_ranges(source: &str) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
 
     for marker_idx in find_all(source, "impl Default for ") {
         if let Some(open_rel) = source[marker_idx..].find('{') {
             let open = marker_idx + open_rel;
             if let Some(close) = find_matching_close_brace(source, open) {
-                excluded_ranges.push((marker_idx, close + 1));
+                ranges.push((marker_idx, close + 1));
             }
         }
     }
@@ -124,14 +134,14 @@ fn production_lines(source: &str) -> Vec<(usize, &str)> {
         if let Some(open_rel) = source[marker_idx..].find('{') {
             let open = marker_idx + open_rel;
             if let Some(close) = find_matching_close_brace(source, open) {
-                excluded_ranges.push((marker_idx, close + 1));
+                ranges.push((marker_idx, close + 1));
             }
         }
     }
 
-    excluded_ranges.sort_by_key(|r| r.0);
+    ranges.sort_by_key(|r| r.0);
     let mut merged: Vec<(usize, usize)> = Vec::new();
-    for (start, end) in excluded_ranges {
+    for (start, end) in ranges {
         if let Some(last) = merged.last_mut() {
             if start <= last.1 {
                 last.1 = last.1.max(end);
@@ -140,23 +150,7 @@ fn production_lines(source: &str) -> Vec<(usize, &str)> {
         }
         merged.push((start, end));
     }
-    let is_excluded = |pos: usize| merged.iter().any(|(s, e)| pos >= *s && pos < *e);
-
-    let mut line_starts: Vec<usize> = vec![0];
-    for (i, b) in source.bytes().enumerate() {
-        if b == b'\n' {
-            line_starts.push(i + 1);
-        }
-    }
-
-    let mut out: Vec<(usize, &str)> = Vec::new();
-    for (line_no, line) in source.lines().enumerate() {
-        let line_start = line_starts.get(line_no).copied().unwrap_or(0);
-        if !is_excluded(line_start) {
-            out.push((line_no + 1, line));
-        }
-    }
-    out
+    merged
 }
 
 fn find_all(haystack: &str, needle: &str) -> Vec<usize> {
@@ -220,14 +214,114 @@ fn walk_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Skip a run of ASCII whitespace AND `//` line / `/* */` block comments
+/// starting at `pos` in `bytes`, returning the index of the first
+/// significant (non-whitespace, non-comment) byte. This lets the call
+/// detector tolerate ANY formatting between the constructor name and its
+/// `(` — `name (`, `name\n(`, `name /*x*/(` — without false-matching.
+fn skip_ws_and_comments(bytes: &[u8], mut pos: usize) -> usize {
+    loop {
+        // Whitespace.
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        // Line comment.
+        if pos + 1 < bytes.len() && bytes[pos] == b'/' && bytes[pos + 1] == b'/' {
+            pos += 2;
+            while pos < bytes.len() && bytes[pos] != b'\n' {
+                pos += 1;
+            }
+            continue;
+        }
+        // Block comment.
+        if pos + 1 < bytes.len() && bytes[pos] == b'/' && bytes[pos + 1] == b'*' {
+            pos += 2;
+            while pos + 1 < bytes.len() && !(bytes[pos] == b'*' && bytes[pos + 1] == b'/') {
+                pos += 1;
+            }
+            pos = (pos + 2).min(bytes.len());
+            continue;
+        }
+        return pos;
+    }
+}
+
+/// True iff `name` occurs at `idx` in `bytes` with a LEADING non-identifier
+/// boundary (so `to_type_slot_unscoped` is NOT matched inside another
+/// identifier when scanning for `type_slot_unscoped`, and vice-versa), a
+/// TRAILING non-identifier boundary (so `type_slot_unscoped_v2` does not
+/// match `type_slot_unscoped`), and — after skipping whitespace/comments —
+/// is immediately followed by `(` (so it is a CALL, not a bare name).
+fn is_boundaried_call_at(bytes: &[u8], idx: usize, name: &[u8]) -> bool {
+    // Leading boundary.
+    if idx > 0 {
+        let prev = bytes[idx - 1];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return false;
+        }
+    }
+    let after = idx + name.len();
+    // Trailing identifier boundary: the char right after the name must not
+    // continue an identifier (rejects `type_slot_unscoped_v2`).
+    if let Some(&next) = bytes.get(after) {
+        if next.is_ascii_alphanumeric() || next == b'_' {
+            return false;
+        }
+    }
+    // After optional whitespace/comments, the next significant char is `(`.
+    let call_at = skip_ws_and_comments(bytes, after);
+    bytes.get(call_at) == Some(&b'(')
+}
+
 /// Collect production-window calls to any zero-env slot constructor in
 /// `source`, returning `(line_no, line, marker)` for each.
+///
+/// Matching is boundary-aware and tolerates arbitrary whitespace/comments
+/// before the `(` (Finding 2 hardening): the line-based `line.contains(...)`
+/// scan was evadable by `name (` / `name\n(`. The window-exclusion ranges
+/// (`impl Default` / `#[cfg(test)]`) are computed once over the raw source;
+/// each match's byte offset is tested against them so a call whose `(` lands
+/// on a different line than the name is still attributed and filtered.
 fn zero_env_callers(source: &str) -> Vec<(usize, String, &'static str)> {
+    let bytes = source.as_bytes();
+    let excluded = excluded_ranges(source);
+    let is_excluded = |pos: usize| excluded.iter().any(|(s, e)| pos >= *s && pos < *e);
+
+    // Precompute line-start offsets for byte-offset → line-number mapping.
+    let mut line_starts: Vec<usize> = vec![0];
+    for (i, b) in source.bytes().enumerate() {
+        if b == b'\n' {
+            line_starts.push(i + 1);
+        }
+    }
+    let line_no_of = |pos: usize| -> usize {
+        match line_starts.binary_search(&pos) {
+            Ok(i) => i + 1,
+            Err(i) => i, // i = number of line-starts <= pos
+        }
+    };
+    let line_text_of = |line_no: usize| -> String {
+        source
+            .lines()
+            .nth(line_no.saturating_sub(1))
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+
     let mut hits = Vec::new();
-    for (line_no, line) in production_lines(source) {
-        for marker in ZERO_ENV_SLOT_CONSTRUCTORS {
-            if line.contains(marker) {
-                hits.push((line_no, line.trim().to_string(), *marker));
+    for marker in ZERO_ENV_SLOT_CONSTRUCTORS {
+        let needle = marker.as_bytes();
+        let mut cursor = 0usize;
+        while let Some(rel) = source[cursor..].find(marker) {
+            let idx = cursor + rel;
+            cursor = idx + needle.len();
+            if is_excluded(idx) {
+                continue;
+            }
+            if is_boundaried_call_at(bytes, idx, needle) {
+                let line_no = line_no_of(idx);
+                hits.push((line_no, line_text_of(line_no), *marker));
             }
         }
     }
@@ -262,7 +356,7 @@ fn no_production_caller_of_zero_env_slot_constructors() {
                 "{}:{} — production call to zero-env slot constructor `{}`\n    {}",
                 file.display(),
                 line_no,
-                marker.trim_end_matches('('),
+                marker,
                 line,
             ));
         }
@@ -306,10 +400,11 @@ mod tests {
 }
 "#;
     let hits = zero_env_callers(fixture);
-    // The production caller is flagged. (`to_type_slot_unscoped(` also
-    // contains the substring `type_slot_unscoped(`, so the single
-    // production line legitimately matches two markers — assert on the
-    // distinct flagged LINES, not raw hit count.)
+    // The production caller is flagged. Boundary-aware matching attributes
+    // `to_type_slot_unscoped(` to the `to_type_slot_unscoped` marker only —
+    // the embedded `type_slot_unscoped` substring is rejected by the leading
+    // identifier boundary (`_` of `to_`) — so assert on the distinct flagged
+    // LINE, not raw hit count.
     assert!(
         hits.iter().any(|(_, t, _)| t.contains("some_id")),
         "filter MUST flag the PRODUCTION caller (`some_id`); got: {hits:?}",
@@ -317,5 +412,64 @@ mod tests {
     assert!(
         !hits.iter().any(|(_, t, _)| t.contains("other_id")),
         "the `#[cfg(test)]` caller (`other_id`) must NOT be flagged; got: {hits:?}",
+    );
+}
+
+/// Finding 2 hardening discrimination: the call detector must catch a
+/// production caller written with a SPACE before the paren
+/// (`type_slot_unscoped (planted)`) — the exact evasion that defeated the
+/// old `line.contains("type_slot_unscoped(")` literal-suffix scan — and a
+/// NEWLINE before the paren, while still rejecting a bare mention with no
+/// `(` and still skipping a `#[cfg(test)]` caller.
+#[test]
+fn call_detector_catches_whitespace_before_paren_and_rejects_bare_mention() {
+    // Space before paren — MUST flag.
+    let space_fixture = r#"
+fn production_caller() {
+    let base = type_slot_unscoped (planted_arg);
+    let _ = base;
+}
+"#;
+    let hits = zero_env_callers(space_fixture);
+    assert!(
+        hits.iter().any(|(_, t, _)| t.contains("planted_arg")),
+        "detector MUST flag `type_slot_unscoped (` with a space before the \
+         paren; got: {hits:?}",
+    );
+
+    // Newline before paren — MUST flag.
+    let newline_fixture = "fn p() {\n    let _ = builtin_unscoped\n        (planted_nl);\n}\n";
+    let nl_hits = zero_env_callers(newline_fixture);
+    assert!(
+        nl_hits.iter().any(|(_, _, m)| *m == "builtin_unscoped"),
+        "detector MUST flag `builtin_unscoped` with a newline before the \
+         paren; got: {nl_hits:?}",
+    );
+
+    // Bare mention with NO call paren — MUST NOT flag (it is not a caller).
+    let bare_fixture = "fn p() {\n    // type_slot_unscoped is fixture-only\n    let type_slot_unscoped_ref = 1;\n}\n";
+    let bare_hits = zero_env_callers(bare_fixture);
+    assert!(
+        bare_hits.is_empty(),
+        "a non-call mention / longer identifier (`type_slot_unscoped_ref`) \
+         must NOT be flagged; got: {bare_hits:?}",
+    );
+
+    // `#[cfg(test)]` caller with a space before the paren — MUST be skipped
+    // by the window filter even though the new whitespace-tolerant matcher
+    // would otherwise catch it.
+    let test_window_fixture = r#"
+#[cfg(test)]
+mod tests {
+    fn t() {
+        let _ = type_slot_unscoped (planted_test);
+    }
+}
+"#;
+    let tw_hits = zero_env_callers(test_window_fixture);
+    assert!(
+        tw_hits.is_empty(),
+        "a `#[cfg(test)]`-window caller (even with whitespace before the \
+         paren) must be skipped; got: {tw_hits:?}",
     );
 }
