@@ -490,8 +490,8 @@ Exactly five variants are added beyond the seven:
 | Added key | Lands | Purpose |
 |---|---:|---|
 | `FlowReturn { function_slot, normalized_type_args, context, demand, input }` | U6 | Demand-sliced return/body flow query |
-| `ResolveClassSurface { decl_slot, type_args, side, demand, context: ClassSurfaceContext }` | U2 | Instance/static heritage with generic substitution, member-demand aware |
-| `ApparentType { base, demand, context: ApparentTypeContext }` | U2 | Primitive/array/constrained-generic apparent member lookup via lib facts |
+| `ResolveClassSurface { decl_slot, type_args, side, context: ClassSurfaceContext }` | U2 | Instance/static heritage with generic substitution via the shared dual-space algorithm |
+| `ApparentType { base, context: ApparentTypeContext }` | U2 | Primitive/array/constrained-generic apparent member lookup via lib facts |
 | `TemplateLiteralReduce { pattern, args, context: TemplateLiteralReduceContext }` | U2 | Template literal distribution, intrinsics, and `infer` splitting |
 | `ResolveCall { callee, call_kind, receiver_this, args, explicit_type_args, contextual_result, policy, context }` | U6, with U2 overload key | Reusable call resolution with its own cache identity |
 
@@ -627,63 +627,65 @@ env/context dimensions on a named per-key `*Context` struct, not on a hidden sha
 global context. Each names the **split** env hashes it actually depends on (the
 relevant subset of `parse_env_hash` / `resolve_env_hash` / `type_env_hash` /
 `lib_env_hash` / `project_identity` — never a bundled `project_config_hash`, per
-R21) plus the projection/substitution inputs. No `*Context` carries a content hash,
-`parse_stable_hash`, or `fact_dep_signature` (these are query-identity keys —
-version rooting lives on the cached value, not the key):
+R21). The substitution axis rides on the KEY's instantiated node fields
+(`type_args` / `args`) or is already baked into a `base` node — NOT duplicated in
+the `*Context`; the projection rung rides as `mode` on the one surface that has one
+(`ClassSurfaceContext`). No `*Context` carries a content hash, `parse_stable_hash`,
+or `fact_dep_signature` (these are query-identity keys — version rooting lives on
+the cached value, not the key). The slot-intrinsic `T,L,J` dims of
+`ResolveClassSurface` come from its `decl_slot: ResolvedDeclSlotIdentity`, so its
+`ClassSurfaceContext` carries only the extra `P,R` env plus `mode`; the no-slot
+`ApparentType` / `TemplateLiteralReduce` keys carry their env dims directly on the
+context:
 
 ```rust
 ResolveClassSurface {
-    decl_slot: SemanticNodeId,
+    decl_slot: ResolvedDeclSlotIdentity,  // slot carries T,L,J (+ symbol_space)
     type_args: Arc<[SemanticNodeId]>,     // heritage generic substitution (instantiated)
     side: ClassSurfaceSide,               // instance / static
-    demand: MemberDemand,                 // member-demand aware (no whole-surface flatten)
     context: ClassSurfaceContext,
 }
 
 struct ClassSurfaceContext {
-    parse_env_hash: ParseEnvHash,         // decorator / auto-accessor lowering is parse-env / parser-version sensitive
-    resolve_env_hash: ResolveEnvHash,     // heritage/import resolution
-    type_env_hash: TypeEnvHash,
-    lib_env_hash: LibEnvHash,
-    project_identity: ProjectIdentity,
-    substitution: SubstitutionCanonicalHash,
-    projection_reduction: ProjectionReductionContext,
+    parse_env_hash: HashValue,            // decorator lowering is parse-env / parser-version sensitive (forward-declared for the deferred decorator reducer)
+    resolve_env_hash: HashValue,          // heritage/import resolution
+    mode: ProjectionMode,                 // projection rung the composed surface is produced under
 }
 
 ApparentType {
-    base: SemanticNodeId,
-    demand: MemberDemand,                 // member-demand REQUIRED on the hot path
+    base: SemanticNodeId,                 // already-substituted base node
     context: ApparentTypeContext,
 }
 
 struct ApparentTypeContext {
-    lib_env_hash: LibEnvHash,             // apparent members come from lib wrapper interfaces
-    type_env_hash: TypeEnvHash,
-    project_identity: ProjectIdentity,
-    substitution: SubstitutionCanonicalHash, // constrained-generic apparent lookup under substitution
-    projection_reduction: ProjectionReductionContext,
+    type_env_hash: HashValue,
+    lib_env_hash: HashValue,              // apparent members come from lib wrapper interfaces
+    project_identity: u32,
 }
 
 TemplateLiteralReduce {
-    pattern: SemanticNodeId,
-    args: Arc<[SemanticNodeId]>,          // instantiated distribution arguments
+    pattern: Arc<[Arc<str>]>,             // literal quasis
+    args: Arc<[SemanticNodeId]>,          // instantiated distribution arguments (substitution rides here)
     context: TemplateLiteralReduceContext,
 }
 
 struct TemplateLiteralReduceContext {
-    resolve_env_hash: ResolveEnvHash,     // name/intrinsic resolution
-    type_env_hash: TypeEnvHash,
-    lib_env_hash: LibEnvHash,             // intrinsic (Uppercase/Lowercase/Capitalize/Uncapitalize) facts
-    project_identity: ProjectIdentity,
-    substitution: SubstitutionCanonicalHash, // substitution feeding `infer` splitting / distribution
-    projection_reduction: ProjectionReductionContext,
+    resolve_env_hash: HashValue,          // name/intrinsic resolution
+    type_env_hash: HashValue,
+    lib_env_hash: HashValue,              // intrinsic (Uppercase/Lowercase/Capitalize/Uncapitalize) facts
+    project_identity: u32,
 }
 ```
 
-`ApparentType` omits `parse_env_hash` (apparent-member lookup does not depend on the
-consumer file's parse env); `ResolveClassSurface` carries it (class-surface lowering
-owns decorators / auto-accessors, which are parse-env sensitive). Guards:
-**`resolve_class_surface_key_covers_side_demand_type_args_and_context`** (asserting
+`ApparentType` omits `parse_env_hash` and `resolve_env_hash` (apparent-member lookup
+is a function of the base node + lib/type/project env, not of import resolution or a
+parsed body skeleton); `TemplateLiteralReduce` omits `parse_env_hash` (it reduces
+already-lowered interned arg nodes); `ResolveClassSurface` carries `parse_env_hash`
+(class-surface lowering owns decorators, which are parse-env sensitive — the full
+planned `P R T L J` identity, with `P` forward-declared for the deferred
+decorator-reading reducer). Guards:
+**`resolve_class_surface_key_covers_side_demand_type_args_and_context`** and
+**`resolve_class_surface_identity_covers_parse_env_axis`** (asserting
 `ClassSurfaceContext` carries `parse_env_hash` and none of the R21/R6 forbidden
 fields), **`apparent_type_key_covers_lib_env_demand_and_context`**, and
 **`template_literal_reduce_key_covers_context`**.
@@ -781,18 +783,23 @@ carries a content hash, `parse_stable_hash`, or `fact_dep_signature`:
 
 ```rust
 ResolveMergedDeclaration { decl_slot, type_args, demand: MemberDemand, context: MergedDeclarationContext }
-ResolveAmbientNamespace  { namespace_slot, type_args, demand: MemberDemand, context: AmbientNamespaceContext }
+ResolveAmbientNamespace  { namespace_slot, type_args, context: AmbientNamespaceContext }
 ResolveOverloadSet       { callee, type_args, context: OverloadSetContext }
 ResolveEnum              { enum_slot, context: EnumContext }
 FlowNarrowingAt          { point: ProgramPointId, flow: FlowNarrowingKey, context: ProgramAnalysisContext }
 ContextualTypeAt         { point: ProgramPointId, contextual: ContextualTypingKey, context: ProgramAnalysisContext }
 ```
 
-`MergedDeclarationContext` and `AmbientNamespaceContext` carry the split env
-(including `parse_env_hash` — the skeleton is parse-env sensitive) + substitution +
-projection/reduction. `OverloadSetContext` and `EnumContext` omit `parse_env_hash`
-(they read already-lowered signatures / enum members); `EnumContext` carries no
-substitution axis (an enum declaration is not generic). `ProgramAnalysisContext` is
+The landed `AmbientNamespaceContext` carries only the extra `{parse_env_hash,
+resolve_env_hash}` env plus the projection rung `mode` — its slot-intrinsic `T,L,J`
+come from `namespace_slot: ResolvedDeclSlotIdentity` and its substitution axis rides
+on the key's `type_args` field, not on the context (`parse_env_hash` is
+forward-declared for the deferred body-reading namespace-member reducer — the
+skeleton is parse-env sensitive). The planned `MergedDeclarationContext` follows the
+same split-env discipline for the merged-declaration reducer. `OverloadSetContext`
+and `EnumContext` omit `parse_env_hash` (they read already-lowered signatures / enum
+members); `EnumContext` carries no substitution axis (an enum declaration is not
+generic). `ProgramAnalysisContext` is
 the SHARED program-analysis env context covering env + substitution. The flow /
 contextual demand axis is NOT folded into this shared context — it lives as a
 PER-VARIANT key field so neither variant carries the other's dead axis:

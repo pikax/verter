@@ -2145,7 +2145,7 @@ pub enum ClassSurfaceSide {
 
 /// Extra env (beyond the slot's intrinsic `T,L,J`) plus the projection
 /// axis a [`SemanticQueryKey::ResolveClassSurface`] value depends on
-/// (env dims `R T L J`).
+/// (env dims `P R T L J`).
 ///
 /// Per R21 this carries the dimensions the class-surface value depends on
 /// beyond the [`ResolvedDeclSlotIdentity`] — design §419 `{P,R} + subst +
@@ -2181,7 +2181,7 @@ pub struct ClassSurfaceContext {
 
 /// Extra env (beyond the slot's intrinsic `T,L,J`) plus the projection
 /// axis a [`SemanticQueryKey::ResolveAmbientNamespace`] value depends on
-/// (env dims `R T L J`).
+/// (env dims `P R T L J`).
 ///
 /// Per R21 this carries — design §414 `{P,R} + subst + proj`:
 ///
@@ -3063,8 +3063,8 @@ pub enum SemanticQueryKey {
     /// (TYPE-space) or static (VALUE-space) half and is a MANDATORY
     /// identity discriminator — two keys differing only in `side` are
     /// non-equal and occupy distinct memo slots; `context` carries the
-    /// extra env (`R`) plus the projection rung the value depends on
-    /// (R21).
+    /// extra env (`{P,R}`) plus the projection rung (`mode`) the value
+    /// depends on (env dims `P R T L J`, R21).
     ///
     /// **LIVE producer** ([`AdmissionSpec::Singleflight`]). The build
     /// realises the dual-space algorithm through the ONE shared engine —
@@ -3093,7 +3093,8 @@ pub enum SemanticQueryKey {
     /// `namespace_slot` is the content-free [`ResolvedDeclSlotIdentity`]
     /// with `symbol_space = `[`SemanticSymbolSpace::Namespace`]; `type_args`
     /// are its already-lowered generic arguments; `context` carries the
-    /// extra env (`R`) plus the projection rung (R21).
+    /// extra env (`{P,R}`) plus the projection rung (`mode`) (env dims
+    /// `P R T L J`, R21).
     ///
     /// **Non-producing.** This variant has no `execute`-side producer: its
     /// namespace-analysis reducer is unimplemented. The `execute` build arm

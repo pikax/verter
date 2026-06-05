@@ -396,8 +396,9 @@ This is a tightening the locked relation-infer substrate already implies (§3 ad
 ### 4.3 The contextual-target axis must be a resolved IDENTITY (ADJUDICATED FIX — mirror of 1b)
 
 The `ContextualTypeAt` re-keying must keep the **same callback program point under two different outer-overload
-candidates DISTINCT**. That is carried by the `contextual` axis of `ProgramAnalysisContext` on the
-`ContextualTypeAt` key (qvd §2.2: `ProgramAnalysisContext {P,R} + flow + contextual + subst`). For this to hold,
+candidates DISTINCT**. That is carried by the per-variant `contextual: ContextualTypingKey` field on the
+`ContextualTypeAt` key (qvd §2.2: the `contextual` axis is a PER-VARIANT key field, NOT folded into the shared
+`ProgramAnalysisContext`, which carries `{P,R,T,L,J} + subst` only). For this to hold,
 the `contextual` axis MUST be the **resolved contextual-target type identity** (the candidate's param type), not
 a flag — exactly the same requirement as Decision 1(b)'s `ContextSensitiveExprKey.contextual_typing`. The
 U6.CONTEXTUAL_CALLBACK contract must state this mirror property explicitly (the SHAPE is locked in qvd §2.2; the

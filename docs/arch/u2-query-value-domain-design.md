@@ -414,8 +414,8 @@ adds the marked extras. All keys: NO content/version hash, NO `fact_dep_signatur
 | `ResolveAmbientNamespace` | `namespace_slot` (slot, `SymbolSpace::Namespace`) + `type_args` | `AmbientNamespaceContext` {P,R} + subst + proj | P R T L J | `TypeNode` | r: namespace member facts | `MemberDemand`, subst | `ResolveAmbientNamespace` | `verter_semantic` namespace analysis | `GraphTypeNode` |
 | `ResolveOverloadSet` | `callee: SemanticNodeId` + `type_args` | `OverloadSetContext` {R} (NO parse_env) + subst | R T L J | **`OverloadSet(Arc<[SignatureRef]>)`** | r: signature facts | subst | `ResolveOverloadSet` | signature lowering | `GraphTypeNode` signature list |
 | `ResolveEnum` | `enum_slot` (slot) | `EnumContext` {R} (NO parse_env, NO subst) | R T L J | `TypeNode` | r: enum-member facts | none | `ResolveEnum` | enum analysis | `GraphTypeNode` |
-| `FlowNarrowingAt` | `point: ProgramPointId` | `ProgramAnalysisContext` {P,R} + flow + contextual + subst | P R T L J | **`ProgramAnalysis`** | r: `FlowSlice`, narrowed-symbol facts (`FactDomain::ProgramAnalysis`) | `FlowNarrowingKey`, subst | `FlowNarrowingAt` | flow engine (U6 behavior) | `ProgramAnalysisGraph` |
-| `ContextualTypeAt` | `point: ProgramPointId` | `ProgramAnalysisContext` {P,R} + flow + contextual + subst | P R T L J | **`ProgramAnalysis`** | r: contextual-typing facts | `ContextualTypingKey`, subst | `ContextualTypeAt` | contextual engine (U6) | `ProgramAnalysisGraph` |
+| `FlowNarrowingAt` | `point: ProgramPointId` + `flow: FlowNarrowingKey` (per-key field) | `ProgramAnalysisContext` {P,R,T,L,J} + subst (no slot) | P R T L J | **`ProgramAnalysis`** | r: `FlowSlice`, narrowed-symbol facts (`FactDomain::ProgramAnalysis`) | `FlowNarrowingKey`, subst | `FlowNarrowingAt` | flow engine (U6 behavior) | `ProgramAnalysisGraph` |
+| `ContextualTypeAt` | `point: ProgramPointId` + `contextual: ContextualTypingKey` (per-key field) | `ProgramAnalysisContext` {P,R,T,L,J} + subst (no slot) | P R T L J | **`ProgramAnalysis`** | r: contextual-typing facts | `ContextualTypingKey`, subst | `ContextualTypeAt` | contextual engine (U6) | `ProgramAnalysisGraph` |
 | `ResolveClassSurface` | `decl_slot` + `type_args` + `side: ClassSurfaceSide` | `ClassSurfaceContext` {P,R} (incl. parse_env — decorators) + subst + proj | P R T L J | `TypeNode` | r: heritage, member, brand facts | `MemberDemand`, subst, `side` | `ResolveClassSurface` | class-surface lowering | `GraphTypeNode` |
 | `ApparentType` | `base: SemanticNodeId` | `ApparentTypeContext` {L,T,J} — **NO slot, NO parse/resolve** | T L J | `TypeNode` | r: `LibIntrinsic`, lib-wrapper member facts | `MemberDemand`, subst | `ApparentType` | lib member index | `GraphTypeNode` |
 | `TemplateLiteralReduce` | `pattern` + `args` | `TemplateLiteralReduceContext` {R,T,L,J} (NO parse_env) + subst | R T L J | `TypeNode` | r: intrinsic (`Uppercase`…) facts | subst | `TemplateLiteralReduce` | template reducer | `GraphTypeNode` |
@@ -431,12 +431,12 @@ assignability. NO env/content fields (R6/R21).
 
 `FlowNarrowingKey` / `ContextualTypingKey` are likewise content-free SHAPE-only projections
 (newtypes over an interned `Arc<[SemanticNodeId]>` set, mirroring `InferableParamSetId`;
-substrate in U6). They are PER-VARIANT key fields — `FlowNarrowingAt` carries `flow`,
-`ContextualTypeAt` carries `contextual` — NOT folded into the shared `ProgramAnalysisContext`,
-so neither variant carries the other's dead axis (the `*Context` column's "+ flow + contextual"
-shorthand denotes the family identity each row carries, refined per row by the Allowed-demand-axes
-column). The shared `substitution` axis stays on `ProgramAnalysisContext` (both variants depend on
-it). NO env/content fields (R6/R21).
+substrate in U6). They are PER-VARIANT key fields — `FlowNarrowingAt` carries `flow: FlowNarrowingKey`,
+`ContextualTypeAt` carries `contextual: ContextualTypingKey` (shown directly in each row's
+IdentityCore column) — NOT folded into the shared `ProgramAnalysisContext`, so neither variant
+carries the other's dead axis. The shared `ProgramAnalysisContext` carries `{P,R,T,L,J} +
+substitution` only (no `flow`/`contextual` fields); both variants depend on the shared
+`substitution` axis, which rides on the context. NO env/content fields (R6/R21).
 
 `SemanticSymbolSpace` gains `Namespace` `[mined: producer-discriminator + SymbolSpace::Namespace]`:
 `enum SemanticSymbolSpace { Type, Value, Namespace }` — NEVER a `BothTypeValue` arm. A
