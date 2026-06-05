@@ -37,8 +37,8 @@
 use super::demand::{DisplayFacet, DisplayNeeds};
 use super::{
     DeclarationAnalysisValue, FunctionParam, IndexKey, LiteralValue, OptionalityMod, PrimitiveKind,
-    ProgramAnalysisValue, ReadonlyMod, RelationPayload, SemanticNodeData, SemanticNodeId,
-    SemanticQueryValue, SignatureRef, TypeParamDecl,
+    ProgramAnalysisValue, ReadonlyMod, RelationOutcome, RelationPayload, SemanticNodeData,
+    SemanticNodeId, SemanticQueryValue, SignatureRef, TypeParamDecl,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use std::fmt;
@@ -102,7 +102,7 @@ pub fn display(
                 .collect();
             DisplayString(rendered.join("; "))
         }
-        SemanticQueryValue::Relation(payload) => display_relation(*payload),
+        SemanticQueryValue::Relation(payload) => display_relation(payload),
         SemanticQueryValue::DeclarationAnalysis(d) => display_declaration_analysis(store, d, needs),
         SemanticQueryValue::ProgramAnalysis(p) => display_program_analysis(store, p, needs),
         // §14.1: the reserved native-checker seam. No producer constructs it,
@@ -473,11 +473,13 @@ fn display_signature(
 }
 
 /// Render a relation outcome from the payload — never recomputed (§14.2).
-fn display_relation(payload: RelationPayload) -> DisplayString {
-    let token = match payload {
-        RelationPayload::Holds => "true",
-        RelationPayload::DoesNotHold => "false",
-        RelationPayload::Unknown => "unknown",
+/// Renders the `outcome` only; the off-surface proof / budget state never
+/// appear on a display surface.
+fn display_relation(payload: &RelationPayload) -> DisplayString {
+    let token = match payload.outcome {
+        RelationOutcome::Holds => "true",
+        RelationOutcome::DoesNotHold => "false",
+        RelationOutcome::Unknown => "unknown",
     };
     DisplayString(token.to_string())
 }

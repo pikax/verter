@@ -1782,13 +1782,88 @@ pub struct DeclarationAnalysisValue {
     pub contributors: Arc<[SemanticNodeId]>,
 }
 
+/// The forward-declared value-domain payload of a [`SemanticQueryKey::Relate`]
+/// judgement — the carrier of [`SemanticQueryValue::Relation`].
+///
+/// Carries the relation OUTCOME, the (off-surface) coinductive PROOF witness,
+/// and the BUDGET state the judgement was decided under. No live `execute`
+/// producer: `ProjectSemanticDispatch::execute` returns `Miss` for `Relate`,
+/// and the current production authority `relate_nodes` emits the engine's
+/// [`RelationResult`] into the dedicated relation memo. This struct is the
+/// SHAPE the relation reducer (U2.RELATION_INFER) will publish once it lands;
+/// it never crosses the typeinfo wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationPayload {
+    /// The tri-state relation outcome.
+    pub outcome: RelationOutcome,
+    /// Off-surface coinductive proof witness (never published on the wire).
+    pub proof: CoinductiveProof,
+    /// The budget regime the judgement was decided under — distinguishes a
+    /// definitive negative from a budget-limited `Unknown`.
+    pub budget_state: RelationBudgetState,
+}
+
+impl RelationPayload {
+    /// An `Unknown` payload with no proof witness, decided within budget — the
+    /// honest forward-declared default until the relation reducer lands.
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self {
+            outcome: RelationOutcome::Unknown,
+            proof: CoinductiveProof::None,
+            budget_state: RelationBudgetState::WithinBudget,
+        }
+    }
+}
+
 /// Tri-state outcome of a relation query (assignability / subtype / identity).
-/// No live producer; the live relation path is the separate relation memo.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RelationPayload {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RelationOutcome {
+    /// The relation holds.
     Holds,
+    /// The relation provably does not hold.
     DoesNotHold,
+    /// The relation is undecided (cyclic re-entry, budget exhaustion, or a
+    /// deferred operand the engine could not resolve).
     Unknown,
+}
+
+/// Off-surface coinductive proof witness for a relation judgement.
+///
+/// A structural relation between recursive types is discharged COINDUCTIVELY:
+/// the engine assumes the goal pair holds while it recurses, and a re-entry on
+/// the same pair closes the cycle by the assumption rather than diverging. This
+/// witness records HOW a judgement was discharged. It is an internal engine
+/// artifact — it never crosses the typeinfo wire — hence "off-surface". SHAPE
+/// only: the proof-search substrate is U2.RELATION_INFER.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoinductiveProof {
+    /// No witness — the relation did not hold or was left undecided.
+    None,
+    /// Discharged directly, with no coinductive assumption taken.
+    Direct,
+    /// Discharged by closing a cycle: the assumed `(source, target)` pairs
+    /// taken on faith to break the recursion. Node ids are content-free
+    /// interning identities (R6), so the witness is a sound `Hash`/`Eq` key.
+    Coinductive {
+        assumptions: Arc<[(SemanticNodeId, SemanticNodeId)]>,
+    },
+}
+
+/// The budget regime a relation judgement was decided under.
+///
+/// The relation engine bounds its worklist (conditional distributions, deep
+/// structural recursion). A judgement that completes within the bound is
+/// definitive; one cut short by the bound yields a budget-limited `Unknown`
+/// that must not be cached as a definitive negative. SHAPE only: the budget
+/// accounting substrate is U2.RELATION_INFER.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RelationBudgetState {
+    /// The judgement completed within the relation budget.
+    WithinBudget,
+    /// The judgement was cut short by budget exhaustion — its `Unknown` is
+    /// budget-limited, not a definitive negative.
+    Exhausted,
 }
 
 /// Reserved native-checker seam for diagnostic analysis. NON-LIVE: no
@@ -2120,6 +2195,135 @@ pub struct ProgramAnalysisContext {
     pub lib_env_hash: HashValue,
     /// Project-isolation dimension (`J`).
     pub project_identity: u32,
+}
+
+/// Which relation a [`SemanticQueryKey::Relate`] judgement asks for.
+///
+/// The relation kind is part of relation IDENTITY: `S` assignable-to `T` is a
+/// genuinely different question from `S` identical-to `T`, and the two must
+/// occupy distinct memo slots. SHAPE only — the per-kind relation algorithm is
+/// U2.RELATION_INFER. The current `relate_nodes` engine computes
+/// [`RelationKind::Assignable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RelationKind {
+    /// `S` is assignable to `T` — the default relation TS checks at
+    /// assignments / argument passing.
+    Assignable,
+    /// `S` is a subtype of `T`.
+    Subtype,
+    /// `S` is a strict subtype of `T` (no `any`/`unknown` widening).
+    StrictSubtype,
+    /// `S` and `T` are mutually identical.
+    Identity,
+    /// `S` and `T` are comparable (the bidirectional relation behind
+    /// `switch` / `===`).
+    Comparable,
+}
+
+impl Default for RelationKind {
+    /// [`Assignable`](Self::Assignable) — the relation the current engine
+    /// computes.
+    fn default() -> Self {
+        Self::Assignable
+    }
+}
+
+/// Flags that govern a relation comparison and are part of relation IDENTITY.
+///
+/// A relation discharged with excess-property checking ON can reject a fresh
+/// source a check with it OFF would accept, and an error-reporting comparison
+/// elaborates structure a silent probe short-circuits — so two judgements that
+/// differ only in policy are DISTINCT and must not share a memo slot. SHAPE
+/// only: the policy-driven comparison substrate is U2.RELATION_INFER.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct RelationPolicy {
+    /// Excess-property checking applies to a fresh object-literal source.
+    pub excess_property_check: bool,
+    /// The comparison reports errors (elaborating into members) rather than
+    /// returning a silent boolean probe.
+    pub report_errors: bool,
+}
+
+/// Whether the relation SOURCE carries freshness — part of relation IDENTITY.
+///
+/// A FRESH object-literal type is subject to excess-property checking against
+/// its target; a widened (REGULAR) source is not. The same `(source, target)`
+/// nodes therefore relate differently depending on freshness, so it is a key
+/// discriminator. SHAPE only: the freshness-tracking substrate is
+/// U2.RELATION_INFER.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FreshnessKey {
+    /// The source is a fresh literal / object-literal type — excess-property
+    /// checking applies.
+    Fresh,
+    /// The source has been widened to its regular type.
+    Regular,
+}
+
+impl Default for FreshnessKey {
+    /// [`Regular`](Self::Regular) — the widened default.
+    fn default() -> Self {
+        Self::Regular
+    }
+}
+
+/// Content-free projection of an inference session (design §4.2) — the
+/// identity of the inference context a relation runs WITHIN.
+///
+/// While solving `infer T` in a conditional type, the relation engine runs
+/// relations against an evolving candidate set; a judgement discharged under
+/// one session's candidates must NOT warm-hit a judgement discharged under a
+/// different session, so the inference context is part of relation identity.
+///
+/// **Content-free (R6).** The identity is the interned inference-target node
+/// ids plus a fixing-pass discriminant — a `SemanticNodeId` is an interning
+/// identity, never a content/version hash. SHAPE only: the inference-session
+/// substrate is U2.RELATION_INFER.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InferenceContextKey {
+    /// The inference type-parameter targets being solved, as interned graph
+    /// node ids.
+    pub inference_targets: Arc<[SemanticNodeId]>,
+    /// The inference fixing pass / priority this relation runs under.
+    pub pass: u32,
+}
+
+/// Env a [`SemanticQueryKey::Relate`] value depends on (env dims `R T L J`).
+///
+/// `Relate` has NO slot (its identity core is the `source` / `target` nodes
+/// plus the relation-kind / policy / freshness / inference discriminators), so
+/// the R21 env dimensions ride here IN the context. Per R21 this carries the
+/// `R T L J` set:
+///
+/// - `resolve_env_hash` (`R`) — relating imported surfaces resolves their
+///   references on the relation's own step.
+/// - `type_env_hash` (`T`) — `strictNullChecks` / `strictFunctionTypes` change
+///   the relation outcome.
+/// - `lib_env_hash` (`L`) — relations reach lib types (`Array`, `Promise`).
+/// - `project_identity` (`J`) — project isolation.
+///
+/// There is deliberately NO `parse_env_hash` (`P`): a relation operates over
+/// already-lowered interned `source` / `target` nodes (content-version rooted
+/// via `ReadSetSignature`), not a fresh parsed body skeleton. The substitution
+/// axis rides on the already-substituted `source` / `target` nodes, not here.
+///
+/// **Field-type note.** Unlike the forward-declared `ApparentTypeContext` /
+/// `ProgramAnalysisContext` (whose `project_identity` is a placeholder `u32`
+/// never wired to a live producer), `RelationContext` IS populated in
+/// production by `relate_nodes` from the live host env, so `project_identity`
+/// is the real [`crate::file_artifact_store::ProjectIdentity`] hash rather than
+/// a placeholder integer — env hashes are content-free key dimensions (R6), the
+/// same convention as `ClassSurfaceContext::resolve_env_hash`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RelationContext {
+    /// Import / name-resolution dimension (`R`).
+    pub resolve_env_hash: HashValue,
+    /// Type-env dimension (`T`).
+    pub type_env_hash: HashValue,
+    /// Lib-env dimension (`L`).
+    pub lib_env_hash: HashValue,
+    /// Project-isolation dimension (`J`) — the live `ProjectIdentity` hash.
+    pub project_identity: HashValue,
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -3784,7 +3988,7 @@ mod tests {
                 SemanticQueryValueTag::OverloadSet,
             ),
             (
-                SemanticQueryValue::Relation(RelationPayload::Unknown),
+                SemanticQueryValue::Relation(RelationPayload::unknown()),
                 SemanticQueryValueTag::Relation,
             ),
             (
