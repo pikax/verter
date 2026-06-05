@@ -10,8 +10,9 @@
 //! DISTINCT memo slots), the DEDICATED non-aliasing family mapping (`Relate` →
 //! `FamilyKey::Relate`, never `FamilyKey::IndexedAccess`), the value-domain
 //! mapping (`Relate` → `Relation`, never `TypeNode`), and the shape of the
-//! forward-declared [`RelationPayload`] carrier (outcome + inference bindings +
-//! off-surface coinductive proof + budget state).
+//! forward-declared [`RelationPayload`] carrier (public three-valued outcome +
+//! inference bindings + an opaque [`RelationProofId`] into the payload-side
+//! [`RelationProofTable`]; budget folded into the outcome; no public `Unknown`).
 //!
 //! Each warm-hit guard is DISCRIMINATING against the retired bare-pair key: a
 //! relation memo keyed on `(source, target)` would collapse every variant in a
@@ -25,13 +26,14 @@ use verter_session::for_tests::{
 };
 use verter_session::semantic_query::query_key_spec::semantic_query_key_specs;
 use verter_session::semantic_query::{
-    CoinductiveProof, ConstParamPolicy, ContextualInferenceMode, FreshnessKey, IndexKey,
-    InferableParamSetId, InferenceCandidatePriority, InferenceContextKey, NoInferMask,
-    OverloadSelectionPolicy, PrimitiveKind, ProjectionMode, RelateMemoKey, RelationBudgetState,
-    RelationContext, RelationKind, RelationOutcome, RelationPayload, RelationPolicy,
-    RelationResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryKeyTag,
-    SemanticQueryValue, SemanticQueryValueTag, SubstitutionCanonicalHash, VariancePhase,
-    VariancePolicy,
+    BudgetExceededKind, ConstParamPolicy, ContextualInferenceMode, DerivationTree, FreshnessKey,
+    IndexKey, InferableParamSetId, InferenceCandidatePriority, InferenceContextKey, NoInferMask,
+    OverloadSelectionPolicy, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
+    RecursionOrBudgetCap, RelateKeyId, RelateMemoKey, RelationContext, RelationFailureReason,
+    RelationKind, RelationOutcome, RelationPayload, RelationPolicy, RelationProof, RelationProofId,
+    RelationProofTable, RelationResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    SemanticQueryKeyTag, SemanticQueryValue, SemanticQueryValueTag, SubRelationPosition,
+    SubRelationRef, SubstitutionCanonicalHash, VariancePhase, VariancePolicy,
 };
 use verter_session::{HostConfig, VerterHost};
 
@@ -364,7 +366,11 @@ fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit() {
         "RE-KEY: a different source FRESHNESS must NOT warm-hit — distinct slot"
     );
 
-    // Different ENV (resolve dim) over the SAME nodes → distinct slot.
+    // Each env axis of `RelationContext` is identity — varied ONE AT A TIME so
+    // dropping ANY of `resolve_env_hash` (R) / `type_env_hash` (T) /
+    // `lib_env_hash` (L) / `project_identity` (J) from `RelateMemoKey`'s
+    // `Hash`/`Eq` makes the corresponding slot collapse and this guard FAIL.
+    // Different ENV (resolve dim R) over the SAME nodes → distinct slot.
     publish(RelateMemoKey {
         context: relation_context(9, 0, 0, 0),
         ..base.clone()
@@ -372,7 +378,61 @@ fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit() {
     assert_eq!(
         graph.relation_memo_count(),
         7,
-        "RE-KEY: a different ENV must NOT warm-hit — distinct slot"
+        "RE-KEY: a different resolve-env (R) must NOT warm-hit — distinct slot"
+    );
+
+    // Different ENV (type dim T) over the SAME nodes → distinct slot.
+    publish(RelateMemoKey {
+        context: relation_context(0, 9, 0, 0),
+        ..base.clone()
+    });
+    assert_eq!(
+        graph.relation_memo_count(),
+        8,
+        "RE-KEY: a different type-env (T) must NOT warm-hit — distinct slot \
+         (dropping T from RelateMemoKey collapses this onto the base)"
+    );
+
+    // Different ENV (lib dim L) over the SAME nodes → distinct slot. The
+    // relation outcome reads lib intrinsics, so `L` is in identity.
+    publish(RelateMemoKey {
+        context: relation_context(0, 0, 9, 0),
+        ..base.clone()
+    });
+    assert_eq!(
+        graph.relation_memo_count(),
+        9,
+        "RE-KEY: a different lib-env (L) must NOT warm-hit — distinct slot \
+         (dropping L from RelateMemoKey collapses this onto the base)"
+    );
+
+    // Different ENV (project identity J) over the SAME nodes → distinct slot.
+    publish(RelateMemoKey {
+        context: relation_context(0, 0, 0, 9),
+        ..base.clone()
+    });
+    assert_eq!(
+        graph.relation_memo_count(),
+        10,
+        "RE-KEY: a different project-identity (J) must NOT warm-hit — distinct \
+         slot (dropping J from RelateMemoKey collapses this onto the base)"
+    );
+
+    // Different PROJECTION-REDUCTION (context axis) over the SAME nodes →
+    // distinct slot. The reduction regime a relation runs under is identity.
+    publish(RelateMemoKey {
+        context: RelationContext {
+            projection_reduction: ProjectionReductionContext::published(ProjectionMode::Expanded),
+            ..relation_context(0, 0, 0, 0)
+        },
+        ..base.clone()
+    });
+    assert_eq!(
+        graph.relation_memo_count(),
+        11,
+        "RE-KEY: a different projection-reduction context must NOT warm-hit — \
+         distinct slot (dropping projection_reduction from RelateMemoKey \
+         collapses this onto the base)"
     );
 
     // Different SUBSTITUTION (context axis) over the SAME nodes → distinct slot.
@@ -385,7 +445,7 @@ fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit() {
     });
     assert_eq!(
         graph.relation_memo_count(),
-        8,
+        12,
         "RE-KEY: a different canonical SUBSTITUTION must NOT warm-hit — distinct slot"
     );
 
@@ -393,7 +453,7 @@ fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit() {
     publish(base);
     assert_eq!(
         graph.relation_memo_count(),
-        8,
+        12,
         "re-publishing an identical key replaces in place — no new slot"
     );
 }
@@ -520,57 +580,63 @@ fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
 }
 
 // ---------------------------------------------------------------------------
-// (4) The `Relation` value-domain payload carries the relation outcome, the
-//     inference bindings, the off-surface coinductive proof (keyed on FULL
-//     relation identity), and the budget state. DISCRIMINATES against the
-//     retired fieldless tri-state enum + the retired node-pair proof witness
-//     (which would not compile against this test).
+// (4) The `Relation` value-domain payload carries the public relation outcome,
+//     the inference bindings, and an opaque `RelationProofId` into the
+//     payload-side proof table. The budget state is FOLDED into the outcome
+//     (`BudgetExceeded`), NOT a separate field. The public outcome is EXACTLY
+//     three-valued — no `Unknown` / `Holds` / `DoesNotHold`. DISCRIMINATES
+//     against the retired tri-state enum + the retired embedded `proof:
+//     CoinductiveProof` / `budget_state: RelationBudgetState` fields (this test
+//     would not compile against the old shape).
 // ---------------------------------------------------------------------------
 
 #[test]
 fn relate_query_value_carries_relation_proof_and_budget_state() {
-    let cycle_key = RelateMemoKey::assignable(
-        SemanticNodeId(1),
-        SemanticNodeId(2),
-        relation_context(0, 0, 0, 0),
-    );
     let binding = verter_session::semantic_query::InferBinding {
         name: Arc::from("T"),
         bound: SemanticNodeId(3),
     };
     let payload = RelationPayload {
-        outcome: RelationOutcome::Holds,
+        // Budget state is FOLDED into the outcome — there is no separate
+        // `budget_state` field (the old field would fail to compile here).
+        outcome: RelationOutcome::BudgetExceeded(BudgetExceededKind::RelationBudget),
         bindings: Arc::from(vec![binding].into_boxed_slice()),
-        proof: CoinductiveProof::CoinductiveCycle {
-            keys: Arc::from(vec![cycle_key.clone()].into_boxed_slice()),
-        },
-        budget_state: RelationBudgetState::Exhausted,
+        // Proof rides the payload-side table BY OPAQUE ID — there is no embedded
+        // `proof: CoinductiveProof` field (the old field would fail to compile).
+        relation_proof: RelationProofId(7),
     };
 
-    // The outcome, bindings, proof, and budget state are all reachable.
-    assert_eq!(payload.outcome, RelationOutcome::Holds);
+    assert!(
+        matches!(
+            payload.outcome,
+            RelationOutcome::BudgetExceeded(BudgetExceededKind::RelationBudget)
+        ),
+        "the payload must carry the budget state FOLDED into the outcome"
+    );
+    assert_eq!(
+        payload.relation_proof,
+        RelationProofId(7),
+        "the payload must carry the opaque payload-side proof id"
+    );
     assert_eq!(
         payload.bindings.len(),
         1,
-        "the payload must carry the inference bindings"
+        "the payload carries the bindings"
     );
     assert_eq!(payload.bindings[0].name.as_ref(), "T");
-    assert!(
-        matches!(
-            &payload.proof,
-            CoinductiveProof::CoinductiveCycle { keys }
-                if keys.len() == 1 && keys[0] == cycle_key
-        ),
-        "the proof must carry the off-surface coinductive cycle keyed on the \
-         FULL relation identity (RelateMemoKey), not a bare node pair"
-    );
-    assert_eq!(
-        payload.budget_state,
-        RelationBudgetState::Exhausted,
-        "the payload must carry the budget state"
-    );
 
-    // Wrapped in the value domain, it tags as `Relation`.
+    // Compile-time proof: the public outcome is EXACTLY `Assignable |
+    // NotAssignable { .. } | BudgetExceeded(_)`. This exhaustive match (no
+    // wildcard arm) is impossible to write if `Unknown` / `Holds` /
+    // `DoesNotHold` still exist, or if `NotAssignable` is fieldless.
+    let token = match &payload.outcome {
+        RelationOutcome::Assignable => "assignable",
+        RelationOutcome::NotAssignable { .. } => "not-assignable",
+        RelationOutcome::BudgetExceeded(_) => "budget-exceeded",
+    };
+    assert_eq!(token, "budget-exceeded");
+
+    // Wrapped in the value domain, it tags as `Relation`, never `TypeNode`.
     let value = SemanticQueryValue::Relation(payload);
     assert_eq!(
         value.tag(),
@@ -582,17 +648,136 @@ fn relate_query_value_carries_relation_proof_and_budget_state() {
         SemanticQueryValueTag::TypeNode,
         "the Relation payload must NOT tag as TypeNode"
     );
+}
 
-    // The honest forward-declared default is Unknown / no bindings / no proof /
-    // within budget.
-    let unknown = RelationPayload::unknown();
-    assert_eq!(unknown.outcome, RelationOutcome::Unknown);
-    assert!(
-        unknown.bindings.is_empty(),
-        "the default payload carries no bindings (pure assignability)"
+// ---------------------------------------------------------------------------
+// (4b) The proof witness lives in a payload-side `RelationProofTable` holding
+//      the four `RelationProof` shapes; the payload references one entry by
+//      opaque `RelationProofId`. The coinductive cycle stores opaque
+//      `RelateKeyId`s, NOT `RelateMemoKey` directly. DISCRIMINATES against an
+//      embedded proof enum on the payload and against a `RelateMemoKey`-typed
+//      cycle witness.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn relation_payload_uses_payload_side_relation_proofs_table() {
+    let sub = SubRelationRef {
+        source: SemanticNodeId(1),
+        target: SemanticNodeId(2),
+        position: SubRelationPosition::Member(Arc::from("next")),
+    };
+    let table = RelationProofTable {
+        proofs: Arc::from(
+            vec![
+                RelationProof::Assignable {
+                    witness: DerivationTree {
+                        sub_derivations: Arc::from(vec![sub.clone()].into_boxed_slice()),
+                    },
+                },
+                RelationProof::NotAssignable {
+                    reason: RelationFailureReason::PrimitiveKindMismatch,
+                    failing_sub: sub.clone(),
+                },
+                RelationProof::BudgetExceeded {
+                    cap: RecursionOrBudgetCap {
+                        kind: BudgetExceededKind::RelationBudget,
+                        limit: 64,
+                    },
+                },
+                // The cycle stores OPAQUE `RelateKeyId`s — a `RelateMemoKey`
+                // here would fail to compile, pinning the opaque-id contract.
+                RelationProof::CoinductiveCycle {
+                    keys: Arc::from(vec![RelateKeyId(0), RelateKeyId(1)].into_boxed_slice()),
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+    };
+    assert_eq!(
+        table.proofs.len(),
+        4,
+        "all four RelationProof shapes coexist in the payload-side table"
     );
-    assert_eq!(unknown.proof, CoinductiveProof::None);
-    assert_eq!(unknown.budget_state, RelationBudgetState::WithinBudget);
+
+    // The payload references a proof BY OPAQUE ID into the table — the proof
+    // enum is NOT embedded on the payload.
+    let payload = RelationPayload {
+        outcome: RelationOutcome::NotAssignable {
+            primary_reason: RelationFailureReason::PrimitiveKindMismatch,
+            secondary_reasons: Arc::from(Vec::<RelationFailureReason>::new().into_boxed_slice()),
+        },
+        bindings: Arc::from(
+            Vec::<verter_session::semantic_query::InferBinding>::new().into_boxed_slice(),
+        ),
+        relation_proof: RelationProofId(1),
+    };
+    let RelationProofId(idx) = payload.relation_proof;
+    assert!(
+        matches!(
+            &table.proofs[idx as usize],
+            RelationProof::NotAssignable {
+                reason: RelationFailureReason::PrimitiveKindMismatch,
+                ..
+            }
+        ),
+        "the payload's RelationProofId must index the payload-side proof table"
+    );
+
+    // The coinductive cycle entry stores opaque `RelateKeyId`s.
+    match &table.proofs[3] {
+        RelationProof::CoinductiveCycle { keys } => {
+            assert_eq!(keys.len(), 2);
+            assert_eq!(keys[0], RelateKeyId(0));
+            assert_eq!(keys[1], RelateKeyId(1));
+        }
+        other => panic!("expected CoinductiveCycle at index 3, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (4c) The public relation outcome has NO `Unknown` form on the display
+//      surface. `display_relation` covers exactly Assignable / NotAssignable /
+//      BudgetExceeded. DISCRIMINATES against a `RelationOutcome::Unknown` arm.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn relation_public_outcome_has_no_unknown_display() {
+    // Compile-time proof: an exhaustive match over the public outcome covers
+    // exactly the three public arms (no `Unknown` arm exists to match).
+    fn token(outcome: &RelationOutcome) -> &'static str {
+        match outcome {
+            RelationOutcome::Assignable => "true",
+            RelationOutcome::NotAssignable { .. } => "false",
+            RelationOutcome::BudgetExceeded(_) => "budget-exceeded",
+        }
+    }
+    assert_eq!(token(&RelationOutcome::Assignable), "true");
+    assert_eq!(
+        token(&RelationOutcome::BudgetExceeded(
+            BudgetExceededKind::FlowSliceBudget
+        )),
+        "budget-exceeded"
+    );
+
+    // Static scan of the display renderer: it must NOT reference a public
+    // `RelationOutcome::Unknown` arm, and MUST cover the three public arms.
+    let display_src = include_str!("../../src/semantic_query/display.rs");
+    assert!(
+        !display_src.contains("RelationOutcome::Unknown"),
+        "display_relation must not match a public `RelationOutcome::Unknown` arm"
+    );
+    assert!(
+        display_src.contains("RelationOutcome::Assignable"),
+        "display_relation must cover the Assignable arm"
+    );
+    assert!(
+        display_src.contains("RelationOutcome::NotAssignable"),
+        "display_relation must cover the NotAssignable arm"
+    );
+    assert!(
+        display_src.contains("RelationOutcome::BudgetExceeded"),
+        "display_relation must cover the BudgetExceeded arm"
+    );
 }
 
 // ---------------------------------------------------------------------------

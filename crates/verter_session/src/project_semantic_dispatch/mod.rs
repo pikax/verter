@@ -812,11 +812,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::ResolvedNamedType { key } => {
                     self.build_resolved_named_type(key).into()
                 }
-                // Phase D §5.4 WIP-S: the relation engine routes through
-                // its own `SemanticGraphStore::relation_memo` DashMap
-                // rather than the family memo. Executing `Relate` through
-                // the family path is a degenerate build that always
-                // produces `Opaque(Miss)`.
+                // The relation engine routes through its dedicated
+                // `SemanticGraphStore::relation_memo` (keyed on the full
+                // `RelateMemoKey`) via `relate_nodes`, not the family memo.
+                // The family `execute` path for `Relate` is therefore
+                // degenerate: it owns no relation logic and always yields
+                // `Opaque(Miss)`, fenced on the project generation so a stale
+                // miss never warms.
                 SemanticQueryKey::Relate { .. } => {
                     let fence = self.project_generation_signature();
                     (QueryResult::Error(QueryError::Miss), fence).into()

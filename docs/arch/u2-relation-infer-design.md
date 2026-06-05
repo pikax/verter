@@ -847,9 +847,11 @@ engine.
 
 ## Decision 4 — Relation-proof acceptance (`RelationPayload`)
 
-`SemanticQueryValue::Relation(RelationPayload)` already exists as a landed tri-state display placeholder
-(`enum RelationPayload { Holds, DoesNotHold, Unknown }`). RI-2 **UPGRADES** that placeholder to the rich
-struct + four-shape proof table; it does not add a brand-new value arm.
+`SemanticQueryValue::Relation(RelationPayload)` is a landed forward-declared value arm. Its SHAPE is already
+the rich struct below — `outcome` + `bindings` + an opaque `RelationProofId` into a payload-side four-shape
+proof table — with no live producer yet. RI-2 **POPULATES** that shape from the relation reducer and performs
+the wire migration; it does not add a brand-new value arm. (The historical tri-state display placeholder
+`enum RelationPayload { Holds, DoesNotHold, Unknown }` has been retired — there is no public `Unknown`.)
 
 ```rust
 struct RelationPayload {

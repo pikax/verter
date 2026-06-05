@@ -473,13 +473,15 @@ fn display_signature(
 }
 
 /// Render a relation outcome from the payload — never recomputed (§14.2).
-/// Renders the `outcome` only; the off-surface proof / budget state never
-/// appear on a display surface.
+/// Renders the `outcome` only; the payload-side proof table never appears on a
+/// display surface. The public outcome is three-valued — `Assignable` /
+/// `NotAssignable` / `BudgetExceeded` — and has NO `Unknown` form (a deferred /
+/// undischarged relation routes through `ReturnOnly` and never surfaces here).
 fn display_relation(payload: &RelationPayload) -> DisplayString {
-    let token = match payload.outcome {
-        RelationOutcome::Holds => "true",
-        RelationOutcome::DoesNotHold => "false",
-        RelationOutcome::Unknown => "unknown",
+    let token = match &payload.outcome {
+        RelationOutcome::Assignable => "true",
+        RelationOutcome::NotAssignable { .. } => "false",
+        RelationOutcome::BudgetExceeded(_) => "budget-exceeded",
     };
     DisplayString(token.to_string())
 }

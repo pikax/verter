@@ -1785,96 +1785,202 @@ pub struct DeclarationAnalysisValue {
 /// The forward-declared value-domain payload of a [`SemanticQueryKey::Relate`]
 /// judgement — the carrier of [`SemanticQueryValue::Relation`].
 ///
-/// Carries the relation OUTCOME, the inference BINDINGS a binding-producing
-/// relation deposited, the (off-surface) coinductive PROOF witness, and the
-/// BUDGET state the judgement was decided under (design §2.7:773-776). No live
-/// `execute` producer: `ProjectSemanticDispatch::execute` returns `Miss` for
-/// `Relate`, and the current production authority `relate_nodes` emits the
-/// engine's [`RelationResult`] into the dedicated relation memo. This struct is
-/// the SHAPE the relation reducer (U2.RELATION_INFER) will publish once it
-/// lands; it never crosses the typeinfo wire.
+/// Final-state shape (design "Decision 4 — Relation-proof acceptance"). The
+/// payload carries the public relation [`RelationOutcome`], the inference
+/// [`InferBinding`]s a binding-producing relation deposited, and an opaque
+/// [`RelationProofId`] indexing the payload-side [`RelationProofTable`]: the
+/// derivation / failure / cycle witness rides that table BY ID — it is never
+/// embedded on the value and never crosses the typeinfo wire. The budget regime
+/// is FOLDED into the outcome as [`RelationOutcome::BudgetExceeded`] rather than
+/// carried as a separate field, so there is a single source of truth and an
+/// `Assignable`-with-exceeded-budget contradiction is unrepresentable. There is
+/// NO public `Unknown`: a deferred / opaque / undischarged relation has no
+/// `SemanticQueryValue::Relation` form and routes through `ReturnOnly` in the
+/// cold compute.
+///
+/// SHAPE only: no live `execute` producer fills it yet —
+/// `ProjectSemanticDispatch::execute` returns `Miss` for `Relate`, and the
+/// production authority `relate_nodes` emits the engine's transient
+/// [`RelationResult`] into the dedicated relation memo. The relation reducer
+/// (U2.RELATION_INFER) populates this payload and its proof table once it lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationPayload {
-    /// The tri-state relation outcome.
+    /// The public relation outcome — `Assignable`, `NotAssignable`, or
+    /// `BudgetExceeded`. NEVER `Unknown`.
     pub outcome: RelationOutcome,
     /// The inference bindings a binding-producing relation produced (the
-    /// `infer T` captures a successful [`RelationResult::Assignable`] surfaces).
-    /// Empty for a pure non-binding assignability check. This is exactly where
-    /// public `relate` returns its bindings off the type-values surface
-    /// (design §2.7).
+    /// `infer T` captures a successful assignability judgement surfaces). Empty
+    /// for a pure non-binding assignability check and for a `BudgetExceeded`
+    /// outcome.
     pub bindings: Arc<[InferBinding]>,
-    /// Off-surface coinductive proof witness (never published on the wire).
-    pub proof: CoinductiveProof,
-    /// The budget regime the judgement was decided under — distinguishes a
-    /// definitive negative from a budget-limited `Unknown`.
-    pub budget_state: RelationBudgetState,
+    /// Opaque id into the payload-side [`RelationProofTable`]. The proof witness
+    /// lives OFF this value (and off the typeinfo wire); a consumer that wants
+    /// the derivation / failure / cycle detail dereferences the table by id.
+    pub relation_proof: RelationProofId,
 }
 
-impl RelationPayload {
-    /// An `Unknown` payload with no bindings, no proof witness, decided within
-    /// budget — the honest forward-declared default until the relation reducer
-    /// lands. Empty bindings = a pure (non-binding) assignability judgement.
-    #[must_use]
-    pub fn unknown() -> Self {
-        Self {
-            outcome: RelationOutcome::Unknown,
-            bindings: Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
-            proof: CoinductiveProof::None,
-            budget_state: RelationBudgetState::WithinBudget,
-        }
-    }
-}
-
-/// Tri-state outcome of a relation query (assignability / subtype / identity).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RelationOutcome {
-    /// The relation holds.
-    Holds,
-    /// The relation provably does not hold.
-    DoesNotHold,
-    /// The relation is undecided (cyclic re-entry, budget exhaustion, or a
-    /// deferred operand the engine could not resolve).
-    Unknown,
-}
-
-/// Off-surface coinductive proof witness for a relation judgement.
+/// Public value-domain outcome of a relation query (assignability / subtype /
+/// identity).
 ///
-/// A structural relation between recursive types is discharged COINDUCTIVELY:
-/// the engine assumes the goal pair holds while it recurses, and a re-entry on
-/// the same pair closes the cycle by the assumption rather than diverging. This
-/// witness records HOW a judgement was discharged. It is an internal engine
-/// artifact — it never crosses the typeinfo wire — hence "off-surface". SHAPE
-/// only: the proof-search substrate is U2.RELATION_INFER.
+/// THREE-valued — there is no `Unknown`: a deferred / undischarged / opaque
+/// relation has no public `SemanticQueryValue::Relation` form and routes through
+/// `ReturnOnly` in the cold compute (design "Decision 4"). `BudgetExceeded` IS
+/// public — so [`display_relation`](crate::semantic_query::display) can render
+/// it — yet is `ReturnOnly` at the admission gate: expressible, never
+/// warm-admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CoinductiveProof {
-    /// No witness — the relation did not hold or was left undecided.
-    None,
-    /// Discharged directly, with no coinductive assumption taken.
-    Direct,
-    /// Discharged by closing a cycle: the assumed relation goals taken on faith
-    /// to break the recursion, each keyed by its FULL relation identity
-    /// ([`RelateMemoKey`]) per design §4.1 — an assumption recorded for `K` is
-    /// never reused for a different relation identity, so a bare
-    /// `(source, target)` pair (which cannot distinguish relation kind / policy
-    /// / freshness / inference context / env) is NOT a sound assumption key. The
-    /// keys are content-free (R6), so the witness is a sound `Hash`/`Eq` key.
-    CoinductiveCycle { keys: Arc<[RelateMemoKey]> },
+pub enum RelationOutcome {
+    /// The source relates to the target.
+    Assignable,
+    /// The source provably does NOT relate to the target. `primary_reason` is
+    /// the highest-priority failure under the deterministic priority order of
+    /// [`RelationFailureReason`]; `secondary_reasons` are the remaining failures
+    /// in that same order.
+    NotAssignable {
+        primary_reason: RelationFailureReason,
+        secondary_reasons: Arc<[RelationFailureReason]>,
+    },
+    /// A budget / recursion cap stopped the relate before it decided.
+    /// PUBLIC-but-never-warm: expressible and rendered, gated `ReturnOnly`.
+    BudgetExceeded(BudgetExceededKind),
 }
 
-/// The budget regime a relation judgement was decided under.
+/// Closed set of reasons a relation provably fails, in DETERMINISTIC PRIORITY
+/// ORDER: declaration order IS priority, fastest-reject / most-specific first.
 ///
-/// The relation engine bounds its worklist (conditional distributions, deep
-/// structural recursion). A judgement that completes within the bound is
-/// definitive; one cut short by the bound yields a budget-limited `Unknown`
-/// that must not be cached as a definitive negative. SHAPE only: the budget
-/// accounting substrate is U2.RELATION_INFER.
+/// When a relate fails for several reasons the relation engine selects the
+/// highest-priority (earliest-declared) reason as the outcome's `primary_reason`
+/// and orders the remainder as `secondary_reasons`. SHAPE only: the relation
+/// engine (U2.RELATION_INFER) populates these; the closed set and its order are
+/// the architectural contract consumers branch on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RelationBudgetState {
-    /// The judgement completed within the relation budget.
-    WithinBudget,
-    /// The judgement was cut short by budget exhaustion — its `Unknown` is
-    /// budget-limited, not a definitive negative.
-    Exhausted,
+pub enum RelationFailureReason {
+    /// Disagreeing primitive kinds (e.g. a string-literal `"a"` vs `number`).
+    PrimitiveKindMismatch,
+    /// Same primitive kind, different literal values.
+    LiteralValueMismatch,
+    /// The target requires a member the source lacks.
+    MissingProperty,
+    /// A member present on both sides has non-relating types.
+    PropertyTypeMismatch,
+    /// Call / construct signature parameter counts disagree.
+    SignatureArityMismatch,
+    /// A signature parameter (contravariant position) does not relate.
+    SignatureParameterMismatch,
+    /// A signature return (covariant position) does not relate.
+    SignatureReturnMismatch,
+    /// A generic type-argument violates its declared variance.
+    VarianceMismatch,
+    /// An excess property on a fresh object literal (excess-property check).
+    ExcessProperty,
+    /// A structural mismatch not captured by a more specific reason above.
+    Structural,
+}
+
+/// Which budget tripped a [`RelationOutcome::BudgetExceeded`] (design Decision 4
+/// admission row 4). SHAPE only: the budget accounting substrate is
+/// U2.RELATION_INFER.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BudgetExceededKind {
+    /// The relation worklist budget (deep structural recursion / conditional
+    /// distribution).
+    RelationBudget,
+    /// The call-resolution budget (overload probing during inference).
+    CallResolutionBudget,
+    /// The flow-slice budget.
+    FlowSliceBudget,
+}
+
+/// Opaque index into a [`RelationProofTable`]. Content-free (R6): it identifies
+/// a proof slot, not any versioned content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RelationProofId(pub u32);
+
+/// Opaque id of a COMPLETED full `Relate` key that co-discharged a coinductive
+/// cycle. Content-free (R6): the durable cycle proof references co-discharged
+/// keys by this id rather than embedding a session-bearing [`RelateMemoKey`]
+/// directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RelateKeyId(pub u32);
+
+/// One entry of a payload-side [`RelationProofTable`], addressed by an opaque
+/// [`RelationProofId`]. FOUR shapes (design "Decision 4"). SHAPE only: the
+/// proof-search substrate is U2.RELATION_INFER.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationProof {
+    /// Positive structural derivation: which sub-relations held, member by
+    /// member and across variance arms.
+    Assignable { witness: DerivationTree },
+    /// Negative: the failure reason plus the failing structural sub-relation.
+    /// CONTENT-FREE — [`SubRelationRef`] carries no session-bearing full
+    /// `Relate` key (no inference context, no `SessionId`, no `RelationContext`),
+    /// which is exactly what lets a NEGATIVE member publish on the identity-leak
+    /// axis (design §2.3).
+    NotAssignable {
+        reason: RelationFailureReason,
+        failing_sub: SubRelationRef,
+    },
+    /// The budget / recursion cap that stopped the relate (rides a
+    /// `ReturnOnly`-but-public [`RelationOutcome::BudgetExceeded`]).
+    BudgetExceeded { cap: RecursionOrBudgetCap },
+    /// The set of COMPLETED full `Relate` keys that co-discharged a coinductive
+    /// cycle, referenced by opaque [`RelateKeyId`] — never by [`RelateMemoKey`]
+    /// directly (design §4.1).
+    CoinductiveCycle { keys: Arc<[RelateKeyId]> },
+}
+
+/// The payload-side table of relation proofs. A [`RelationPayload`] references
+/// exactly one entry by [`RelationProofId`]; the table is the durable typed
+/// carrier the relation reducer (U2.RELATION_INFER) populates. SHAPE only —
+/// population is the reducer's job; this declares the carrier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationProofTable {
+    pub proofs: Arc<[RelationProof]>,
+}
+
+/// Positive-derivation witness: the structural sub-relations that held to
+/// discharge a relation, in structural order. SHAPE only: U2.RELATION_INFER
+/// fills it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivationTree {
+    pub sub_derivations: Arc<[SubRelationRef]>,
+}
+
+/// Content-free reference to a structural sub-relation: the source / target
+/// interned nodes plus the structural position they relate at. EXCLUDES any
+/// session-bearing full `Relate` key (no inference context, no `SessionId`, no
+/// `RelationContext`) — design §2.3 / Decision 4. SHAPE only.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SubRelationRef {
+    pub source: SemanticNodeId,
+    pub target: SemanticNodeId,
+    pub position: SubRelationPosition,
+}
+
+/// The structural axis a [`SubRelationRef`] relates at. SHAPE only.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SubRelationPosition {
+    /// The root obligation between two whole types.
+    Root,
+    /// A named member / property.
+    Member(Arc<str>),
+    /// A call / construct signature parameter at the given index.
+    Parameter(u32),
+    /// A call / construct signature return.
+    Return,
+    /// A generic type-argument at the given index.
+    TypeArgument(u32),
+}
+
+/// The budget / recursion cap that stopped a relate. Rides
+/// [`RelationProof::BudgetExceeded`]. SHAPE only: U2.RELATION_INFER owns the
+/// accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RecursionOrBudgetCap {
+    /// Which budget tripped.
+    pub kind: BudgetExceededKind,
+    /// The cap value the relate hit.
+    pub limit: u32,
 }
 
 /// Reserved native-checker seam for diagnostic analysis. NON-LIVE: no
@@ -4286,7 +4392,11 @@ mod tests {
                 SemanticQueryValueTag::OverloadSet,
             ),
             (
-                SemanticQueryValue::Relation(RelationPayload::unknown()),
+                SemanticQueryValue::Relation(RelationPayload {
+                    outcome: RelationOutcome::Assignable,
+                    bindings: Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
+                    relation_proof: RelationProofId(0),
+                }),
                 SemanticQueryValueTag::Relation,
             ),
             (
