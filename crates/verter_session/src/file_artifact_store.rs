@@ -1540,15 +1540,32 @@ impl FileArtifactStore {
     }
 
     /// Refresh existing augmentation-index entries that a newly-
-    /// inserted file's augmentations may contribute to.
+    /// inserted (base) file's augmentations may contribute to.
     ///
-    /// Walks every existing `AugmentationTargetKey`, checks whether
-    /// the new artifact's augmentations match the target under the
-    /// caller's resolver hook, recomputes the augmenter set when it
-    /// does, and emits a refresh audit event when the fingerprint
-    /// changes. Existing entries that the new file does NOT contribute
-    /// to are left untouched — out-of-program files contribute
-    /// nothing.
+    /// Walks every existing `AugmentationTargetKey` and checks whether the
+    /// new artifact's augmentations match the target under the caller's
+    /// resolver hook (a population-independent test — a base augmenter
+    /// participates in BOTH the `Base` set and every `Session` set, which is
+    /// base ∪ overlay, for the same target). For each contributing key:
+    ///
+    /// - **`Base` population** — recompute the augmenter set in place over
+    ///   the base candidate snapshot and emit a refresh audit event when the
+    ///   fingerprint changes.
+    /// - **`Session` population** — INVALIDATE (drop) the entry. A session set
+    ///   is base ∪ overlay and cannot be rebuilt from this base-only scan (it
+    ///   lacks the session's overlay discriminator + overlay candidates), so
+    ///   the stale entry is removed and the next session-scoped
+    ///   [`Self::ensure_augmentation_index_populated`] cold-rescans base ∪
+    ///   overlay, folding in the changed base contributor. Without this a
+    ///   stale session entry would warm-return WITHOUT the new/edited base
+    ///   augmenter and its `ModuleAugmentationIndexShape` fingerprint would
+    ///   stay stale-valid.
+    ///
+    /// Existing entries that the new file does NOT contribute to are left
+    /// untouched — out-of-program files contribute nothing. Overlay isolation
+    /// is preserved: this base-maintenance path never enumerates overlay
+    /// augmenters, so it cannot leak overlay-only augmenters into a base entry
+    /// or vice-versa.
     pub fn refresh_augmentation_index_for_canonical<R>(
         &self,
         new_artifact_key: &FileArtifactKey,
@@ -1584,23 +1601,23 @@ impl FileArtifactStore {
         // which must not run under a shard guard (see
         // `collect_augmenter_candidates`). The artifact set is not
         // mutated during the refresh — only `augmentation_index` is — so
-        // one snapshot serves every key. Refresh maintains BASE-population
-        // entries only (`None` → base artifacts); session-overlay entries are
-        // session-scoped and rebuilt fresh through their own ensure path under
-        // the session view, never via this base-maintenance scan.
+        // one snapshot serves every key. The candidate snapshot is the BASE
+        // corpus (`None` → `is_legacy()` artifacts); it drives the in-place
+        // rebuild of BASE-population entries. SESSION-population entries (base
+        // ∪ overlay) cannot be rebuilt from a base-only snapshot — they are
+        // INVALIDATED instead (see the per-key branch below) so the next
+        // session-scoped `ensure_augmentation_index_populated` rescans base ∪
+        // overlay fresh.
         let candidates = self.collect_augmenter_candidates(None);
 
         for key in existing_keys {
-            // Session-population entries are not maintained by the base
-            // refresh scan (their candidate set includes session-overlay
-            // artifacts this base path cannot enumerate without the session
-            // discriminator). Skip them.
-            if !matches!(key.population, AugmentationPopulation::Base) {
-                continue;
-            }
-            // Does the new artifact contribute to this key? If not,
-            // skip — the cached entry is still valid (no augmenter
-            // set change for this target).
+            // Does the new (base) artifact contribute to this target? Target
+            // matching depends only on `key.target`, NOT `key.population`, so
+            // the check is population-independent: a base augmenter
+            // participates in BOTH the base set and every session set
+            // (base ∪ overlay) for the same target. If it does not contribute,
+            // the cached entry is still valid (no augmenter-set change for this
+            // target) regardless of population — skip it.
             let augmenter_canonical = new_artifact_key.canonical.as_ref();
             let contributes = new_artifacts.augmentations.iter().any(|fact| {
                 augmenter_matches_target(
@@ -1614,56 +1631,81 @@ impl FileArtifactStore {
                 continue;
             }
 
-            // Rebuild the set with the new artifact folded in over the
-            // owned candidate snapshot (no `self.artifacts` guard held).
-            // Same base-only filter as
-            // `ensure_augmentation_index_populated`'s cold scan —
-            // overlay-scoped artifacts never contribute.
-            let mut matched: Vec<AugmenterEntry> = Vec::new();
-            let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> =
-                rustc_hash::FxHashSet::default();
-            for candidate in &candidates {
-                for fact in candidate.augmentations.iter() {
-                    if augmenter_matches_target(
-                        fact,
-                        &key,
-                        candidate.canonical.as_ref(),
-                        &resolve_relative_canonical,
-                    ) {
-                        if seen_canonicals.insert(Arc::clone(&candidate.canonical)) {
-                            matched.push(AugmenterEntry {
-                                artifact_key: candidate.artifact_key.clone(),
-                                parse_stable_hash: candidate.parse_stable_hash,
-                            });
+            match key.population {
+                AugmentationPopulation::Session(_) => {
+                    // A `Session` augmenter set is base ∪ overlay, so a changed
+                    // BASE augmenter participates in it and the cached entry is
+                    // now stale. This base-maintenance scan cannot REBUILD a
+                    // session set — that requires the session's overlay
+                    // discriminator plus the overlay candidate rows, which only
+                    // the session view carries. INVALIDATE the stale session
+                    // entry instead: drop it so the next session-scoped
+                    // `ensure_augmentation_index_populated` cold-rescans base ∪
+                    // overlay and folds in the changed base contributor.
+                    // Removing (never rebuilding) keeps overlay isolation
+                    // intact — this path never enumerates overlay augmenters,
+                    // so it cannot leak overlay-only augmenters into a base
+                    // entry or vice-versa.
+                    self.augmentation_index.remove(&key);
+                }
+                AugmentationPopulation::Base => {
+                    // Rebuild the base set with the new artifact folded in over
+                    // the owned base candidate snapshot (no `self.artifacts`
+                    // guard held). Same base-only filter as
+                    // `ensure_augmentation_index_populated`'s cold scan —
+                    // overlay-scoped artifacts never contribute.
+                    let mut matched: Vec<AugmenterEntry> = Vec::new();
+                    let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> =
+                        rustc_hash::FxHashSet::default();
+                    for candidate in &candidates {
+                        for fact in candidate.augmentations.iter() {
+                            if augmenter_matches_target(
+                                fact,
+                                &key,
+                                candidate.canonical.as_ref(),
+                                &resolve_relative_canonical,
+                            ) {
+                                if seen_canonicals.insert(Arc::clone(&candidate.canonical)) {
+                                    matched.push(AugmenterEntry {
+                                        artifact_key: candidate.artifact_key.clone(),
+                                        parse_stable_hash: candidate.parse_stable_hash,
+                                    });
+                                }
+                                break;
+                            }
                         }
-                        break;
                     }
+                    matched.sort_by(|a, b| {
+                        a.canonical()
+                            .as_ref()
+                            .cmp(b.canonical().as_ref())
+                            .then_with(|| a.parse_stable_hash.cmp(&b.parse_stable_hash))
+                    });
+                    let augmenter_count = matched.len() as u32;
+                    let new_fingerprint = compute_augmenter_set_fingerprint(&matched);
+
+                    // Compare with old fingerprint. If unchanged, skip the
+                    // insert + event emission.
+                    let old = self.augmentation_index.get(&key).map(|e| e.fingerprint);
+                    if old == Some(new_fingerprint) {
+                        continue;
+                    }
+
+                    let entries: SmallVec<[AugmenterEntry; 2]> = matched.into_iter().collect();
+                    let new_set = Arc::new(AugmenterSet {
+                        entries,
+                        fingerprint: new_fingerprint,
+                    });
+                    self.augmentation_index.insert(key.clone(), new_set);
+
+                    emit_module_augmentation_index_shape_event(
+                        &key,
+                        old,
+                        new_fingerprint,
+                        augmenter_count,
+                    );
                 }
             }
-            matched.sort_by(|a, b| {
-                a.canonical()
-                    .as_ref()
-                    .cmp(b.canonical().as_ref())
-                    .then_with(|| a.parse_stable_hash.cmp(&b.parse_stable_hash))
-            });
-            let augmenter_count = matched.len() as u32;
-            let new_fingerprint = compute_augmenter_set_fingerprint(&matched);
-
-            // Compare with old fingerprint. If unchanged, skip the
-            // insert + event emission.
-            let old = self.augmentation_index.get(&key).map(|e| e.fingerprint);
-            if old == Some(new_fingerprint) {
-                continue;
-            }
-
-            let entries: SmallVec<[AugmenterEntry; 2]> = matched.into_iter().collect();
-            let new_set = Arc::new(AugmenterSet {
-                entries,
-                fingerprint: new_fingerprint,
-            });
-            self.augmentation_index.insert(key.clone(), new_set);
-
-            emit_module_augmentation_index_shape_event(&key, old, new_fingerprint, augmenter_count);
         }
     }
 

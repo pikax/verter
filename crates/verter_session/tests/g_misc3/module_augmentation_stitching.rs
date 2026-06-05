@@ -1365,6 +1365,120 @@ fn session_overlay_augmenter_isolated_from_base_index() {
     );
 }
 
+/// A BASE augmenter change MUST invalidate the `Session`
+/// augmentation-index entries that include that base augmenter.
+///
+/// A `Session` augmenter set is base ∪ overlay, and
+/// [`FileArtifactStore::ensure_augmentation_index_populated`] warm-returns
+/// an existing set before rescanning. If
+/// `refresh_augmentation_index_for_canonical` SKIPS the `Session` entries,
+/// then when a base augmenter is added/edited the stale `Session` set
+/// lingers (its `ModuleAugmentationIndexShape` fingerprint never moves) and
+/// a later session `ensure` / `EffectiveExportSet` warm-hits WITHOUT the new
+/// base contributor.
+///
+/// - **Pre-fix tree** (`refresh` `continue`s on every non-`Base` entry): the
+///   re-`ensure` warm-hits the stale base ∪ overlay set, so the newly added
+///   base augmenter `/aug-base-2.ts` is ABSENT — this test FAILS.
+/// - **Post-fix tree** (`refresh` invalidates the matching `Session`
+///   entries): the re-`ensure` cold-rescans base ∪ overlay, so the new base
+///   augmenter is PRESENT and overlay isolation is preserved — PASSES.
+#[test]
+fn base_augmenter_change_invalidates_session_augmentation_index() {
+    use verter_session::file_artifact_store::AugmentationPopulation;
+
+    let store = FileArtifactStore::new();
+    let overlay_fingerprint: u64 = 7;
+    let overlay_discriminator = seed_base_and_overlay_augmenters(&store, overlay_fingerprint);
+
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let session_key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Session(overlay_fingerprint),
+        target: target.clone(),
+    };
+    let base_key = AugmentationTargetKey {
+        population: AugmentationPopulation::Base,
+        ..session_key.clone()
+    };
+
+    // Populate BOTH the base and session entries. Session = base ∪ overlay.
+    let _base_set = store.ensure_augmentation_index_populated(&base_key, |_, _| None, None);
+    let session_before = store.ensure_augmentation_index_populated(
+        &session_key,
+        |_, _| None,
+        Some(overlay_discriminator),
+    );
+    let before: Vec<&str> = session_before
+        .entries
+        .iter()
+        .map(|e| e.canonical().as_ref())
+        .collect();
+    assert!(
+        before.contains(&"/aug-base.ts") && before.contains(&"/aug-overlay.ts"),
+        "session set must start as base ∪ overlay; got {before:?}"
+    );
+    assert!(
+        !before.contains(&"/aug-base-2.ts"),
+        "new base augmenter is not in the store yet; got {before:?}"
+    );
+
+    // Add a NEW base augmenter for the same `"vue"` target, then refresh.
+    let new_base_key = insert_artifact_from_fixture(
+        &store,
+        "/aug-base-2.ts",
+        "module_augmentation_external.ts",
+        [22u8; 16],
+    );
+    let new_base_artifacts = store
+        .get_artifacts(&new_base_key)
+        .expect("just-inserted base augmenter MUST be reachable");
+    store.refresh_augmentation_index_for_canonical(&new_base_key, &new_base_artifacts, |_, _| None);
+
+    // Re-ensure the session entry. Post-fix the prior entry was
+    // invalidated, so this cold-rescans base ∪ overlay and picks up the new
+    // base augmenter. Pre-fix it warm-hits the stale set.
+    let session_after = store.ensure_augmentation_index_populated(
+        &session_key,
+        |_, _| None,
+        Some(overlay_discriminator),
+    );
+    let after: Vec<&str> = session_after
+        .entries
+        .iter()
+        .map(|e| e.canonical().as_ref())
+        .collect();
+
+    assert!(
+        after.contains(&"/aug-base-2.ts"),
+        "session augmentation index MUST reflect the added base augmenter after \
+         `refresh_augmentation_index_for_canonical`; a stale session entry was \
+         warm-returned. got {after:?}"
+    );
+    // Overlay isolation preserved: base ∪ overlay still both present.
+    assert!(
+        after.contains(&"/aug-overlay.ts") && after.contains(&"/aug-base.ts"),
+        "session set must remain base ∪ overlay after the base change; got {after:?}"
+    );
+    // And the base index never absorbed the session-overlay augmenter.
+    let base_after = store.ensure_augmentation_index_populated(&base_key, |_, _| None, None);
+    let base_after_canonicals: Vec<&str> = base_after
+        .entries
+        .iter()
+        .map(|e| e.canonical().as_ref())
+        .collect();
+    assert!(
+        !base_after_canonicals.contains(&"/aug-overlay.ts"),
+        "base index MUST NOT absorb the session-overlay augmenter; got {base_after_canonicals:?}"
+    );
+    assert!(
+        base_after_canonicals.contains(&"/aug-base-2.ts"),
+        "base index must fold in the added base augmenter; got {base_after_canonicals:?}"
+    );
+}
+
 // ────────────────────────────────────────────────────────────────
 // Population-keyed warm cache — base/session entries occupy distinct
 // `EffectiveExportSetKey` slots on the SAME `RouteDb` (FIX A).
