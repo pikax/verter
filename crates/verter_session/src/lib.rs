@@ -707,6 +707,15 @@ pub struct VerterHost {
     /// Armed/cleared by
     /// [`crate::for_tests::MaterializeForceOverflowGuard`].
     pub(crate) materialize_force_overflow_observations: std::sync::atomic::AtomicUsize,
+    /// Per-host test-injection knob for the relation engine's cold
+    /// judgement path — the relation-memo analogue of
+    /// [`Self::materialize_force_overflow_observations`]. When set to `N >
+    /// 0`, the cold relation compute observes `N` synthetic `FileWholeHash`
+    /// facts onto the active tracer, forcing the relation memo's
+    /// `FactReadSetFinalise::Overflow` non-admission path (the judgement is
+    /// returned to the caller but refused memo admission). Set directly in
+    /// the inline relation tests.
+    pub(crate) relation_force_overflow_observations: std::sync::atomic::AtomicUsize,
     /// Per-host invocation counter for
     /// [`VerterHost::prefetch_compile_tier_observation_targets`].
     /// Incremented once per actual call to the prefetch. The cold-compute

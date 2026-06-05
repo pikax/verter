@@ -156,6 +156,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // identity `key`, never the bare node pair.
         let host = self.ctx.host_for_fact_tracer_install();
         let (result, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
+            // Test-only fact-injection hook. When the host's per-host
+            // `relation_force_overflow_observations` knob is non-zero, emit
+            // that many synthetic `FileWholeHash` observations onto the active
+            // tracer so finalise reports `Overflow` once the per-signature cap
+            // is exceeded — exercising the overflow non-admission path below
+            // without a pathological multi-file fixture.
+            let force_n = host
+                .relation_force_overflow_observations
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if force_n > 0 {
+                for n in 0..force_n {
+                    crate::resolver_core::resolver_context::observe_fan_out(
+                        crate::resolver_core::FactVersionRef::FileWholeHash {
+                            canonical_id: format!("__relation_force_overflow_{n}.ts"),
+                            hash: [(n & 0xff) as u8; 16],
+                        },
+                    );
+                }
+            }
             if enter_relation_guard(&key) {
                 let mut bindings: Vec<InferBinding> = Vec::new();
                 let r = self.decide_relation_with_dispatch(source, target, &mut bindings);
@@ -364,8 +383,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    `Object(SurfaceView)`.
     ///
     /// The arm's recursive calls to `decide_relation` on per-member
-    /// relations consume the existing `RELATION_MAX_DEPTH` budget; see
-    /// the plan's §11.2 termination analysis for correctness.
+    /// relations each re-enter the iterative worklist driver, which is
+    /// bounded by its own termination budget (`10 × node_count`, 4096 floor),
+    /// so per-member descent terminates.
     fn try_object_vs_record_relation(
         &self,
         source: SemanticNodeId,
@@ -588,12 +608,10 @@ enum RelateWork {
 /// `Assignable` results surface the bindings to the caller so
 /// `build_conditional`'s true-branch substitution can pick them up.
 ///
-/// **Termination budget).** The
-/// driver caps total work at `10 × graph.node_count()` with a minimum
-/// floor (4096 entries) so tiny graphs still handle pathological
-/// distributions. Exceeding the budget yields [`RelationResult::Unknown`]
-/// rather than looping forever, replacing the retired
-/// `RELATION_MAX_DEPTH` stack-frame cap.
+/// **Termination budget.** The driver caps total work at
+/// `10 × graph.node_count()` with a minimum floor of 4096 entries so tiny
+/// graphs still handle pathological distributions. Exceeding the budget yields
+/// [`RelationResult::Unknown`] rather than looping forever.
 pub(super) fn decide_relation(
     graph: &SemanticGraphStore,
     source: SemanticNodeId,

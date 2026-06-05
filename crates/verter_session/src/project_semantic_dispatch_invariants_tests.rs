@@ -1278,9 +1278,22 @@ fn relate_result_assignable_carries_infer_bindings_into_conditional() {
 }
 
 /// `Unknown` is cached with a dep-signature fence in the relation
-/// memo rather than recomputed on each cyclic re-entry. Discriminates:
-/// a stub that routes `Unknown` through the cold path produces two
-/// distinct memo entries when called twice.
+/// memo rather than recomputed on each cyclic re-entry, AND the warm
+/// path genuinely RETURNS the cached value rather than recomputing it.
+///
+/// Discriminates on two axes:
+/// - A stub that routes `Unknown` through the cold path on every call
+///   produces two distinct memo entries when called twice (the
+///   count-once block below catches it).
+/// - Deleting the warm-cache return in `relate_nodes` is NOT caught by
+///   a bare `relation_memo_count()` check (cold recompute replaces the
+///   same `RelateMemoKey`, leaving the count at `before + 1`). The
+///   seeded-warm-return block below catches it: it publishes a value
+///   cold-compute could never produce for the pair (`Assignable` for a
+///   pair whose cold relation is `Unknown`) and asserts the warm path
+///   returns THAT seeded value. If the warm return is deleted, cold
+///   recompute yields `Unknown` (≠ the seeded `Assignable`) and the
+///   assertion FAILS.
 #[test]
 fn relation_unknown_is_cached_with_fence_not_recomputed_on_repeated_cycle() {
     let host = host_for_relation_tests();
@@ -1323,10 +1336,191 @@ fn relation_unknown_is_cached_with_fence_not_recomputed_on_repeated_cycle() {
         matches!(cached, Some((_, RelationResult::Unknown))),
         "memo must expose the cached Unknown; got {cached:?}"
     );
+
+    // ── Discriminating warm-return check ────────────────────────────────
+    // A fresh deferred-shell pair of the SAME shape as above — its cold
+    // relation is therefore `Unknown` (proven by `r1`/`r2`). Seed the memo
+    // with `Assignable`, a value the cold compute could NEVER produce for
+    // this pair, then read through the warm path.
+    let seed_source = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object,
+        index: crate::semantic_query::IndexKey::String(Arc::from("c")),
+    });
+    let seed_target = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object,
+        index: crate::semantic_query::IndexKey::String(Arc::from("d")),
+    });
+    let seed_key = dispatch.relate_memo_key(seed_source, seed_target);
+    let seeded = RelationResult::Assignable {
+        bindings: Arc::from(Vec::new()),
+    };
+    // Empty carrier + empty self-roots validate trivially; stamp the live
+    // project generation so the warm read's generation gate passes.
+    graph.insert_relation(
+        seed_key.clone(),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new()),
+        seeded.clone(),
+        host.project_type_store().current_project_generation(),
+    );
+    let (warm, _) = dispatch.relate_nodes(seed_source, seed_target);
+    assert_eq!(
+        warm, seeded,
+        "the warm path must RETURN the seeded Assignable, not cold-recompute \
+         (cold relation of this deferred-shell pair is Unknown). Deleting the \
+         warm-cache return in relate_nodes makes this yield Unknown and FAIL."
+    );
+
     // Use `IndexSignature` so the import is exercised (and reviewable
     // in diffs) without producing a dead-code warning.
     let _unused_tag: Option<IndexSignature> = None;
     let _widened: LiteralValue = LiteralValue::String(String::from("_"));
+}
+
+/// FENCE (transitive-fact): a relation whose COLD compute reads a
+/// TRANSITIVE imported fact through `execute(Instantiate)` (the
+/// identity-carrier unwrap / Object-vs-Record arm) records that fact on
+/// the relation-memo carrier. Editing the imported file (bumping its
+/// `FileWholeHash`) MISSES the warm read and recomputes.
+///
+/// DISCRIMINATES the cache-correctness change in `relate_nodes` that runs
+/// the cold judgement under `install_fact_tracer` and merges the traced
+/// transitive facts into the carrier. The source/target nodes are
+/// manually interned (`NodeScopeId::Global`), so they contribute NO file
+/// self-root — the ONLY fence on the entry is the traced transitive fact
+/// set. Against a carrier that recorded `&[]` transitive facts (the
+/// pre-change behavior), the entry would carry an empty signature with no
+/// self-roots → validate trivially → STALE warm hit survives the imported
+/// edit, and the `assert!(after_edit.is_none())` below FAILS.
+#[test]
+fn relation_memo_fences_on_transitive_imported_fact_edit() {
+    let host = host_for_relation_tests();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    // An imported dependency whose body the relation cold-compute reads
+    // through `execute(Instantiate)` while unwrapping the DeclPlaceholder
+    // source. This file is NOT a self-root of the relation nodes — it is a
+    // purely transitive dependency.
+    let upsert_dep = |source: &str| {
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: None,
+                input_id: "/w/dep.ts".to_string(),
+                source: Arc::from(source),
+                file_kind: crate::FileKind::NonSfc,
+                aliases: Vec::new(),
+            })
+            .expect("upsert /w/dep.ts");
+    };
+    upsert_dep("export interface Dep { a: number }");
+    let whole_hash_v1 = host
+        .ensure_indexed_ready("/w/dep.ts")
+        .expect("IndexedReady for /w/dep.ts")
+        .whole_hash;
+
+    // Source: a DeclPlaceholder carrier for `Dep@/w/dep.ts`. Interned via
+    // the scope-less `intern_node`, so `node_scope` is `Global` and it
+    // contributes NO file self-root to the relation entry.
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let source = graph.intern_node(SemanticNodeData::Opaque(
+        crate::semantic_query::QueryError::DeclPlaceholder {
+            canonical_id: Arc::from("/w/dep.ts"),
+            name: Arc::from("Dep"),
+            whole_hash: whole_hash_v1,
+        },
+    ));
+    // Target: a concrete structural Object the unwrapped `Dep` relates to.
+    let target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+        required_member("a", number),
+    ])));
+
+    // Cold compute: unwrapping the DeclPlaceholder dispatches
+    // `execute(Instantiate { Dep@/w/dep.ts })`, which reads `/w/dep.ts` and
+    // traces its `FileWholeHash` onto the active tracer.
+    let key = dispatch.relate_memo_key(source, target);
+    let _ = dispatch.relate_nodes(source, target);
+
+    // Warm precondition: the judgement is admitted and validates against
+    // the unchanged store (else the post-edit miss would not discriminate).
+    assert!(
+        graph.get_relation(&host, &key).is_some(),
+        "precondition: the relation judgement must be admitted and warm before the edit"
+    );
+
+    // Edit the TRANSITIVE imported file → its `FileWholeHash` changes.
+    upsert_dep("export interface Dep { a: string }");
+    let whole_hash_v2 = host
+        .ensure_indexed_ready("/w/dep.ts")
+        .expect("IndexedReady for /w/dep.ts after edit")
+        .whole_hash;
+    assert_ne!(
+        whole_hash_v1, whole_hash_v2,
+        "the imported-file edit must bump its FileWholeHash"
+    );
+
+    // The warm read now MISSES: the carrier's traced `FileWholeHash` for
+    // `/w/dep.ts` no longer matches the live store. A `&[]`-carrier (pre-
+    // change) would still validate and return `Some` here.
+    assert!(
+        graph.get_relation(&host, &key).is_none(),
+        "FENCE: editing the transitive imported fact must MISS the warm relation read \
+         (recompute); a carrier that recorded no transitive facts would stale-hit"
+    );
+}
+
+/// OVERFLOW non-admission: a relation whose traced read-set overflows
+/// (`FactReadSetFinalise::Overflow`) is RETURNED to the caller but NOT
+/// admitted to the relation memo.
+///
+/// DISCRIMINATES the `Overflow => return (result, fence)` early-return in
+/// `relate_nodes`: a mutation that admitted regardless of overflow (e.g.
+/// dropped the `Overflow` arm and always called `insert_relation`) would
+/// grow `relation_memo_count()` and FAIL the count assertion. The
+/// `relation_force_overflow_observations` test knob forces the overflow
+/// without a pathological multi-file fixture.
+#[test]
+fn relation_memo_overflow_returns_result_without_admission() {
+    let host = host_for_relation_tests();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    // Two concrete primitives whose cold relation is a definite
+    // `Assignable` (identity) — the value is returned to the caller.
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    // Arm the overflow knob: observe CAP+1 synthetic facts during the cold
+    // compute so the read-set finalises `Overflow`.
+    host.relation_force_overflow_observations.store(
+        crate::resolver_core::FACT_SIGNATURE_CAP + 1,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    let before = graph.relation_memo_count();
+    let (result, _fence) = dispatch.relate_nodes(string, string);
+    let after = graph.relation_memo_count();
+
+    // The judgement is still computed and returned to the caller.
+    assert!(
+        matches!(result, RelationResult::Assignable { .. }),
+        "overflow must still RETURN the computed judgement to the caller; got {result:?}"
+    );
+    // But it is REFUSED memo admission — the dependency fence cannot be
+    // represented under overflow.
+    assert_eq!(
+        after, before,
+        "OVERFLOW: an overflowed read-set must NOT admit a relation-memo entry \
+         (count must not grow); a mutation that admitted regardless would FAIL here"
+    );
+    assert!(
+        graph
+            .get_relation(&host, &dispatch.relate_memo_key(string, string))
+            .is_none(),
+        "OVERFLOW: no warm entry may be reachable for the overflowed relation"
+    );
+
+    host.relation_force_overflow_observations
+        .store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 // ============================================================================
