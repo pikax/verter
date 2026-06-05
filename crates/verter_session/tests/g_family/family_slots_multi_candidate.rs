@@ -406,7 +406,7 @@ fn family_slot_cap_eviction_prunes_orphan_reverse_index_stamp() {
     let graph = host.project_type_store().semantic_graph();
 
     let canonical_keyed = "/multi_candidate/orphan_check/owner.ts";
-    // Use Identity mode — backfill_targets(Identity) = [], so this
+    // Use Identity mode — slot_domain_siblings(Identity) = [], so this
     // publish populates EXACTLY one slot. That lets the test isolate
     // FIFO-eviction's reverse-index drain from the orthogonal
     // backfill-slot behaviour.

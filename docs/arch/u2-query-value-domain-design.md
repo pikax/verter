@@ -278,6 +278,25 @@ a meet-derived point, never the nominal request demand. The monotone path-compos
 FEEDS this rule: it is what guarantees the recorded intermediate `Navigate` hops are reusable across
 terminal modes (§3.5 corollary).
 
+**Realization (U2B.10) — the two-gate warm hit + DIRECTIONAL gated backfill.** Wired into the
+`semantic_query_memo` family memo: `MemoEntry.satisfied_projection: MaterializedSet` carries the
+recorded set; `try_warm_hit_fast_path` / `get_validated` require BOTH `cached_satisfies(satisfied
+_projection, requested_point_for_key(key))` AND `validate_with_self_roots`; `FamilySlots::publish`
+backfills the recorded entry verbatim into narrower target slots gated by `cached_satisfies`. ONE
+subtlety refines the literal "backfill = every dominated peer": the backfill TARGET set is the
+projection-depth-NARROWER slots (the `Expanded→Shallow→Navigate→Identity` direction), NOT every
+lattice-dominated peer. The lattice has `Navigate ⊒ Shallow` (Navigate's `NavigateOnly`
+normalization/operator rungs dominate Shallow's `None`/`Leave`), but `Navigate` is the intermediate
+next-hop demand that carrier-stops WITHOUT materialising a one-shell surface — so a `Navigate` result
+must NOT be cloned into the `Shallow` slot (it would serve an under-materialised surface and hide,
+e.g., a cyclic-heritage expansion the `Shallow` request would surface). Backfill therefore flows only
+toward strictly-shallower projection depth; the `cached_satisfies` gate prunes the unsound enum-rank
+cases WITHIN that direction (it rejects the legacy `Shallow → Navigate` clone, `Shallow ⊅ Navigate`).
+The directional+gated set is a strict subset of the legacy `backfill_targets` fan-out (now retired),
+so it can never introduce a warm hit the enum-rank path did not. Guards:
+`cache_satisfaction_is_materialized_point_not_nominal_demand`,
+`backfill_writes_only_recorded_materialized_points`.
+
 ### 3.5 Monotone path composition (the path-precise rule, proven)
 
 A path projection `A.b.c.d` runs hop-by-hop. The demand AT each hop is:

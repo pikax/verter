@@ -314,10 +314,44 @@ candidates inside one slot under R20 overlay isolation. Admission
 identity is the pair `(validated_at_generation, ReadSetSignature.facts)`
 — same exact discriminant replaces in place; a different view appends
 at the back; cap overflow FIFO-evicts the oldest. Warm lookup scans
-every candidate and returns the FIRST whose
-`validate_with_self_roots(ctx, ...)` passes against the caller's live
-view; `validated_at_generation` is LRU-recency metadata, NOT a
+every candidate and returns the FIRST that passes BOTH §3.4 gates (see
+below); `validated_at_generation` is LRU-recency metadata, NOT a
 semantic-validity oracle.
+
+**§3.4 materialised-record satisfaction (the two-gate warm hit + recorded
+backfill).** A warm hit is decided by the RECORDED materialised
+`(path, point)` set the candidate's compute ACTUALLY produced —
+`MemoEntry.satisfied_projection: MaterializedSet` — NOT by the candidate's
+nominal slot/mode, and NOT by enum rank. Each `MemoEntry` carries the
+terminal point (`Demand::from(terminal_mode)` at the query path) PLUS one
+`Demand::navigate(prefix)` per actually-walked intermediate (`ProjectPath`
+records these in `build_project_path`; each `PrefixBackfill` records its own
+single `Navigate` point; a non-path build defaults to the single terminal
+point for the canonical key). A warm hit requires **two independent gates,
+both must pass**: (1) `cached_satisfies(satisfied_projection,
+requested_point_for_key(key))` — some recorded point dominates the request
+at the SAME path (interned-id equality, not prefix; regime-equal
+componentwise via `semantically_dominates`, so `display_needs` never gates
+typed-value reuse); (2) `read_set_signature.validate_with_self_roots`
+against the live view. Recording the NOMINAL demand instead of the recorded
+materialised set silently collapses soundness to wrong warm hits (a deep
+compute that only `Navigate`-walked an intermediate serving a `Shallow`/
+`Expanded` request it never materialised) — the discriminating guard
+`cache_satisfaction_is_materialized_point_not_nominal_demand` is the sole
+defense. **Backfill** clones a broader entry UNCHANGED (recorded points
+verbatim, never a meet/nominal point) into a projection-depth-narrower
+target slot (`slot_domain_siblings`: the legacy
+`Expanded→Shallow→Navigate→Identity` DIRECTION), GATED by `cached_satisfies`.
+The direction stays narrower-only because the lattice's `Navigate ⊒ Shallow`
+(higher normalization/operator rungs) does NOT mean a `Navigate` next-hop
+result can serve a `Shallow` shell surface — it carrier-stops without
+materialising the shell; an all-peers backfill would hide cyclic-heritage
+expansions. The gate still REJECTS the unsound legacy `Shallow → Navigate`
+clone (`Shallow ⊅ Navigate`: `normalization_depth None < NavigateOnly`).
+Guards: `cache_satisfaction_is_materialized_point_not_nominal_demand`,
+`backfill_writes_only_recorded_materialized_points` (in
+`semantic_query_memo::tests`); the legacy enum-rank `backfill_targets`
+unconditional fan-out is RETIRED.
 
 **R7.** Shared semantic materialisations key by
 `ResolvedDeclSlotIdentity` (content-free) as the cache slot identity.

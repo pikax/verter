@@ -2367,7 +2367,7 @@ fn open_conditional_stays_deferred_with_shell_branch_refs_not_expanded_bodies() 
 ///
 /// **Discrimination by source grep, not runtime cache peek.** The
 /// memo's broader-satisfies-narrower backfill (Expanded → Shallow →
-/// Navigate → Identity, see `backfill_targets`) means a single
+/// Navigate → Identity, see `slot_domain_siblings`) means a single
 /// Expanded write populates every narrower slot for the same
 /// `(family)`. A runtime peek therefore cannot distinguish
 /// "Expanded-mode sub-dispatch backfilling Navigate" from
