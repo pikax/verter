@@ -2,7 +2,7 @@
 # DO NOT EDIT BY HAND. Regenerate via `pnpm gen:query-key-spec`, then commit this file.
 # Columns: variant | lifecycle | value_domain | env_dims | allowed_demand | context_shape | cross_context_guard | admission
 ResolveDecl | Live | TypeNode | R T L J | — | ResolveDeclKey | — | Singleflight
-Instantiate | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop,Provenance,MergeRole | InstantiateContext | — | Singleflight
+Instantiate | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop,Provenance,MergeRole | InstantiateContext | instantiate_same_base_different_env_or_context_do_not_warm_hit, decl_self_type_or_lib_env_change_produces_distinct_instantiate_key | Singleflight
 ProjectMember | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ProjectionMode | — | Singleflight
 IndexedAccess | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ProjectionMode | — | Singleflight
 KeyOf | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ProjectionReductionContext | — | Singleflight
@@ -14,7 +14,7 @@ NormalizeIntersection | Live | TypeNode | T L J | — | (members) | — | Single
 ProjectPath | Live | TypeNode | T L J | Path,Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop,Provenance,MergeRole | ProjectionReductionContext | — | Singleflight
 ResolvedNamedType | Live | TypeNode | R T L J | — | HostResolvedNamedTypeKey | — | ReadDominantNoExecute
 Relate | Live | Relation | R T L J | — | (source,target,relation,policy,source_freshness,inference_context,context) | — | RelationMemo
-ResolveMacroPayload | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | MacroPayloadContext | — | Singleflight
+ResolveMacroPayload | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | MacroPayloadContext | resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit | Singleflight
 ResolveClassSurface | Live | TypeNode | P R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ClassSurfaceContext | resolve_class_surface_do_not_warm_hit | Singleflight
 ResolveAmbientNamespace | Live | TypeNode | P R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | AmbientNamespaceContext | resolve_ambient_namespace_do_not_warm_hit | NonProducingPendingReducer
 ResolveEnum | Live | TypeNode | R T L J | — | EnumContext | resolve_enum_do_not_warm_hit | NonProducingPendingReducer

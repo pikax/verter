@@ -514,7 +514,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             value_domain: SemanticQueryValueTag::TypeNode,
             env_dims: env_resolve(),
             allowed_demand: reduction_axes,
-            cross_context_guard: "",
+            cross_context_guard: "instantiate_same_base_different_env_or_context_do_not_warm_hit, decl_self_type_or_lib_env_change_produces_distinct_instantiate_key",
             admission: AdmissionSpec::Singleflight,
         },
         // ProjectMember { base, member, mode } — structural projection over an
@@ -703,7 +703,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             value_domain: SemanticQueryValueTag::TypeNode,
             env_dims: env_resolve(),
             allowed_demand: mode_axes,
-            cross_context_guard: "",
+            cross_context_guard: "resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
         },
         // ResolveClassSurface { decl_slot, type_args, side, context } —
