@@ -30,6 +30,11 @@ pub use crate::capture_token::{
 /// `crate::semantic_query_memo::SemanticGraphStore` directly.
 pub use crate::semantic_query_memo::{BatchExpandError, SemanticGraphStore};
 
+/// Re-export the family-domain mapping probe so the U2B.8 `g_block` guards can
+/// assert `Relate` maps to a DEDICATED `FamilyKey::Relate` (never aliasing
+/// `IndexedAccess`) without exposing the `pub(super)` `FamilyKey` taxonomy.
+pub use crate::semantic_query_memo::family_variant_label_for_tests;
+
 /// Re-export the canonical display projection so the `g_block` integration
 /// guards can call it. `display` is `pub` (forced by E0364: it lives in a
 /// `pub mod display`, so it cannot be more private than its enclosing module);

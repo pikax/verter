@@ -257,6 +257,31 @@ pub(super) enum FamilyKey {
         type_args: Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
     },
+    /// DEDICATED, non-aliasing `Relate` family identity carrying the FULL
+    /// relation identity [`crate::semantic_query::RelateMemoKey`] (source /
+    /// target / relation kind / policy / source freshness / inference context /
+    /// env+substitution+projection-reduction context).
+    ///
+    /// No production code constructs a [`SemanticQueryKey::Relate`] value, so
+    /// this variant is never published into or read from the family memo at
+    /// runtime — the production relation authority is `relate_nodes`, which keys
+    /// the dedicated `relation_memo` on the same `RelateMemoKey` and never
+    /// enters `execute_cooperative` / the family memo. The variant exists SOLELY
+    /// so `family_and_slot` stays total and honest over every
+    /// [`SemanticQueryKey`] variant (a real distinct identity, never a
+    /// placeholder reusing another family's shape).
+    ///
+    /// It carries the FULL relation identity (NOT just source/target): even
+    /// though nothing is admitted under it, a `Relate` key can NEVER collide
+    /// with a live [`Self::IndexedAccess`] slot over the same `(source, target)`
+    /// nodes — the prior arm aliased `IndexedAccess` and was a latent
+    /// wrong-domain warm-hit hazard. Carrying the whole `RelateMemoKey` also
+    /// keeps the family identity faithful to the relation memo's own key, so two
+    /// `Relate` keys differing in any relation-identity axis map to distinct
+    /// family identities.
+    Relate {
+        key: crate::semantic_query::RelateMemoKey,
+    },
     /// Mode-erased `ApparentType` identity. `ApparentType` has no slot, so
     /// its R21 env dims (`type_env_hash` = `T`, `lib_env_hash` = `L`,
     /// `project_identity` = `J`) ride here ON the family key — these are
@@ -317,6 +342,40 @@ pub(super) enum FamilyKey {
         lib_env_hash: crate::semantic_query::HashValue,
         project_identity: u32,
     },
+}
+
+impl FamilyKey {
+    /// The stable variant label of this family identity. Used by the family-
+    /// mapping guards (via the `for_tests` probe) to assert the domain a
+    /// [`SemanticQueryKey`] maps to — e.g. that `Relate` maps to the dedicated
+    /// `Relate` family and never aliases `IndexedAccess` — without exposing the
+    /// `pub(super)` taxonomy outside the crate.
+    pub(super) fn variant_label(&self) -> &'static str {
+        match self {
+            FamilyKey::ResolveDecl(_) => "ResolveDecl",
+            FamilyKey::Instantiate { .. } => "Instantiate",
+            FamilyKey::ProjectMember { .. } => "ProjectMember",
+            FamilyKey::IndexedAccess { .. } => "IndexedAccess",
+            FamilyKey::KeyOf { .. } => "KeyOf",
+            FamilyKey::MappedType { .. } => "MappedType",
+            FamilyKey::Conditional { .. } => "Conditional",
+            FamilyKey::TypeOf { .. } => "TypeOf",
+            FamilyKey::NormalizeUnion { .. } => "NormalizeUnion",
+            FamilyKey::NormalizeIntersection { .. } => "NormalizeIntersection",
+            FamilyKey::ProjectPath { .. } => "ProjectPath",
+            FamilyKey::ResolvedNamedType { .. } => "ResolvedNamedType",
+            FamilyKey::ResolveMacroPayload { .. } => "ResolveMacroPayload",
+            FamilyKey::ResolveClassSurface { .. } => "ResolveClassSurface",
+            FamilyKey::ResolveAmbientNamespace { .. } => "ResolveAmbientNamespace",
+            FamilyKey::ResolveEnum { .. } => "ResolveEnum",
+            FamilyKey::ResolveOverloadSet { .. } => "ResolveOverloadSet",
+            FamilyKey::Relate { .. } => "Relate",
+            FamilyKey::ApparentType { .. } => "ApparentType",
+            FamilyKey::TemplateLiteralReduce { .. } => "TemplateLiteralReduce",
+            FamilyKey::FlowNarrowingAt { .. } => "FlowNarrowingAt",
+            FamilyKey::ContextualTypeAt { .. } => "ContextualTypeAt",
+        }
+    }
 }
 
 /// Per-family slot selector. For non-mode variants only `Single` is used;
@@ -948,15 +1007,37 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             ModeSlot::Single,
         ),
-        // `Relate` bypasses the family memo entirely — it stores its
-        // tri-state result in the dedicated `relation_memo` DashMap.
-        // `family_and_slot` returning a placeholder is safe because
-        // `execute_cooperative` admission short-circuits `Relate`
-        // before this function is consulted.
-        SemanticQueryKey::Relate { source, target, .. } => (
-            FamilyKey::IndexedAccess {
-                base: *source,
-                index: crate::semantic_query::IndexKey::TypeNode(*target),
+        // `Relate` maps to a DEDICATED, non-aliasing `FamilyKey::Relate`
+        // carrying the FULL relation identity. No production code constructs a
+        // `SemanticQueryKey::Relate`, so this arm is exercised only by identity
+        // guards; the production relation authority is `relate_nodes`, which
+        // keys the dedicated `relation_memo` on the same `RelateMemoKey` and
+        // never enters `execute_cooperative` / `family_and_slot`.
+        //
+        // `family_and_slot` is consulted UNCONDITIONALLY by
+        // `try_warm_hit_fast_path` BEFORE any admission short-circuit, so this
+        // arm cannot rely on a short-circuit to be safe — it is safe because it
+        // maps to a dedicated family identity that can never collide with a live
+        // `IndexedAccess` slot over the same `(source, target)` nodes.
+        SemanticQueryKey::Relate {
+            source,
+            target,
+            relation,
+            policy,
+            source_freshness,
+            inference_context,
+            context,
+        } => (
+            FamilyKey::Relate {
+                key: crate::semantic_query::RelateMemoKey {
+                    source: *source,
+                    target: *target,
+                    relation: *relation,
+                    policy: *policy,
+                    source_freshness: *source_freshness,
+                    inference_context: inference_context.clone(),
+                    context: *context,
+                },
             },
             ModeSlot::Single,
         ),
