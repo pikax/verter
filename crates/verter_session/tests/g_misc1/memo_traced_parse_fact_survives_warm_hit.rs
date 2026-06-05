@@ -6,8 +6,9 @@
 //!
 //! Pre-fix the dispatch's `install_fact_tracer` wrapper discarded the
 //! traced `Arc<[FactVersionRef]>` in the `Ok` arm with a `_`-prefix
-//! underscore binding. `warm_publish_one` then derived the
-//! `MemoEntry.fact_dep_signature` from
+//! underscore binding. `warm_publish_one` then derived the memo entry's
+//! `read_set_signature` (the `ReadSetSignature.facts` + `self_root_canonicals`
+//! validity rail) from
 //! `crate::component_meta_materialize::fact_signature_from_fence` —
 //! a legacy bridge that only converts `DepVersion::WholeHash` entries
 //! to `FactVersionRef::FileWholeHash`. Every `Parse(...)`,
@@ -15,15 +16,14 @@
 //! during the cold build was silently dropped before the memo entry
 //! landed in the warm cache.
 //!
-//! Post-fix the `Ok` arm sets
-//! `output.fact_dep_signature = Some(fact_dep_signature)` on
-//! `QueryBuildOutput`; `execute_cooperative_slow` destructures the
-//! field; `warm_publish_one` stores it verbatim on the published
-//! `MemoEntry`. The warm-hit fast path (`try_warm_hit_fast_path`)
-//! bubbles the stored signature into the active outer tracer via
-//! `bubble_fact_signature_via_tls` — delivering the full path-precise
-//! observation set to every outer cold-compute scope that depends on
-//! the cached value.
+//! Post-fix the `Ok` arm sets the traced signature on
+//! `QueryBuildOutput.graph_carrier`; `execute_cooperative_slow`
+//! destructures the carrier; `warm_publish_one` stores it verbatim on
+//! the published `MemoEntry.read_set_signature`. The warm-hit fast path
+//! (`try_warm_hit_fast_path`) bubbles the stored signature into the
+//! active outer tracer via `bubble_fact_signature_via_tls` — delivering
+//! the full path-precise observation set to every outer cold-compute
+//! scope that depends on the cached value.
 //!
 //! ## Driver shape
 //!
@@ -32,18 +32,18 @@
 //!    next cold build observes the injected `Parse(...)` fact onto the
 //!    tracer cell `install_fact_tracer` pushes for the inner build. On
 //!    `Ok`, the signature carries the Parse fact verbatim. The fix
-//!    threads it onto `QueryBuildOutput.fact_dep_signature`; the memo
-//!    publishes it on `MemoEntry.fact_dep_signature`.
+//!    threads it onto `QueryBuildOutput.graph_carrier`; the memo
+//!    publishes it on `MemoEntry.read_set_signature`.
 //! 2. T2 (warm path): drop the injection guard so the next dispatch
 //!    does NOT re-observe the fact organically. Open an outer
 //!    `with_fact_tracer` scope, re-issue the same dispatch key — the
-//!    warm-hit fast path fires, bubbles `MemoEntry.fact_dep_signature`
+//!    warm-hit fast path fires, bubbles `MemoEntry.read_set_signature`
 //!    into the outer tracer. The outer tracer's finalised signature
 //!    MUST contain the Parse fact.
 //!
 //! Reverting any one of these three sites makes the test fail:
 //! - `project_semantic_dispatch::mod.rs::execute` Ok arm setting
-//!   `output.fact_dep_signature`.
+//!   `output.graph_carrier`.
 //! - `semantic_query_memo::mod.rs::execute_cooperative_slow`
 //!   destructuring the new field.
 //! - `semantic_query_memo::mod.rs::warm_publish_one` preferring the
@@ -141,9 +141,9 @@ fn dispatch_warm_hit_bubbles_traced_parse_fact_into_outer_tracer() {
     // T1 — cold path. Arm the injection slot, dispatch once.
     // The cold build observes the injected Parse fact onto the
     // install_fact_tracer cell; on Ok, the dispatch threads the
-    // signature onto QueryBuildOutput.fact_dep_signature, and
+    // signature onto QueryBuildOutput.graph_carrier, and
     // execute_cooperative_slow → warm_publish_one persists it on
-    // MemoEntry.fact_dep_signature.
+    // MemoEntry.read_set_signature.
     let cold_result = {
         let _inject_guard = dispatch_inject_parse_fact_for_tests(want.clone());
         dispatch_execute_type_node_for_tests(&host, key.clone())
@@ -160,7 +160,7 @@ fn dispatch_warm_hit_bubbles_traced_parse_fact_into_outer_tracer() {
 
     // T2 — warm path. Install an OUTER fact tracer and re-issue the
     // same dispatch key. The warm-hit fast path bubbles the stored
-    // MemoEntry.fact_dep_signature into the outer tracer's TLS cell
+    // MemoEntry.read_set_signature into the outer tracer's TLS cell
     // via `bubble_fact_signature_via_tls`. The outer tracer's
     // finalised signature MUST contain the injected Parse fact.
     let ((), warm_finalise) = install_fact_tracer_for_tests(&host, || {
@@ -179,13 +179,13 @@ fn dispatch_warm_hit_bubbles_traced_parse_fact_into_outer_tracer() {
                 "P2.A regression: outer tracer's finalised signature MUST contain the \
                  injected Parse fact bubbled from the warm MemoEntry. \
                  Pre-fix: `execute()`'s Ok arm discarded the traced \
-                 `fact_dep_signature` with `_`-prefix binding; \
-                 `warm_publish_one` derived MemoEntry.fact_dep_signature \
+                 signature with `_`-prefix binding; \
+                 `warm_publish_one` derived MemoEntry.read_set_signature \
                  from the legacy DepSignature via `fact_signature_from_fence`, \
                  which only carries FileWholeHash facts; the Parse fact \
                  silently dropped before reaching the warm cache. Post-fix: \
-                 the traced signature threads through QueryBuildOutput → \
-                 warm_publish_one → MemoEntry.fact_dep_signature → \
+                 the traced signature threads through QueryBuildOutput.graph_carrier → \
+                 warm_publish_one → MemoEntry.read_set_signature → \
                  warm-hit bubble → outer tracer.\n\
                  \n\
                  got signature: {sig:?}\n\

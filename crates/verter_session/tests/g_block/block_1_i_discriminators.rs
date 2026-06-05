@@ -45,7 +45,7 @@ fn execute_read_cold_build_persists_traced_facts() {
     // The architectural witness: the shared cold-build helper exists
     // and `execute_read` routes through it. Without the helper, a
     // cold build started via `execute_read` would publish a memo
-    // entry with `fact_dep_signature` derived only from the legacy
+    // entry with `read_set_signature` derived only from the legacy
     // fence — losing every `Parse(...)` / `ResolveImports(...)` /
     // `RouteSurface(...)` observation.
     let mod_src = std::fs::read_to_string(
@@ -84,7 +84,7 @@ fn execute_read_cold_build_persists_traced_facts() {
 ///
 /// The previous tree's `invalidate_canonical` walked only the
 /// reverse index registered from the legacy `DepSignature`
-/// canonicals. A memo entry whose `fact_dep_signature` referenced
+/// canonicals. A memo entry whose `read_set_signature` referenced
 /// canonical `dep.ts` (via a `Parse(...)` fact) but whose legacy
 /// `dep_signature` did NOT name `dep.ts` would survive a
 /// `invalidate_canonical("dep.ts")` sweep.
@@ -297,7 +297,7 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
 /// Discriminator 3 (codex 3) — `semantic_memo_warm_hit_validates_before_bubble`.
 ///
 /// The previous tree's `SemanticGraphStore::get` and
-/// `try_warm_hit_fast_path` bubbled `entry.fact_dep_signature`
+/// `try_warm_hit_fast_path` bubbled `entry.read_set_signature`
 /// unconditionally. A stale entry (carrier no longer validates
 /// against the live view) would return the cached value AND pollute
 /// the outer tracer with stale observations.

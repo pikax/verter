@@ -256,12 +256,19 @@ impl DeclIdentity {
         }
     }
 
-    /// Env-agnostic fixture projection onto a zero-env TYPE-space
-    /// [`ResolvedDeclSlotIdentity`] (the `Instantiate` / `ResolveMacroPayload`
-    /// base/owner shape). For test call sites that previously projected
-    /// onto the retired content-free `DeclKey`; production derives the
-    /// env-bearing slot via
+    /// TEST/FIXTURE-ONLY env-agnostic projection onto a zero-env
+    /// TYPE-space [`ResolvedDeclSlotIdentity`] (the `Instantiate` /
+    /// `ResolveMacroPayload` base/owner shape). All env dims
+    /// (`project_identity` / `type_env_hash` / `lib_env_hash`) default
+    /// to zero, so this is NOT an env-correct slot.
+    ///
+    /// PRODUCTION MUST NOT call this — it must derive the env-bearing
+    /// slot from the live host env via
     /// [`ProjectSemanticDispatch::type_slot_for`](crate::project_semantic_dispatch::ProjectSemanticDispatch::type_slot_for).
+    /// The one-path contract is pinned by the arch guard
+    /// `no_production_caller_of_zero_env_slot_constructors`. This is
+    /// `pub` (not `#[cfg(test)]`-gated) only because external `tests/`
+    /// integration crates consume it.
     #[must_use]
     pub fn to_type_slot_unscoped(&self) -> ResolvedDeclSlotIdentity {
         ResolvedDeclSlotIdentity::type_slot_unscoped(
@@ -333,10 +340,11 @@ pub type DeclPartFingerprint = HashValue;
 ///
 /// **Cache invariant (R7 + multi-candidate substrate):** the slot
 /// identity is **content-free**. Two file versions of "same decl"
-/// produce equal slot keys; the multi-candidate `ValidatedFactCache`
-/// separates them via per-candidate `fact_dep_signature`.
-/// File-content versioning lives in [`VersionedDeclIdentity`]
-/// inside the cached payload.
+/// produce equal slot keys; the multi-candidate semantic-graph memo
+/// (`FamilySlots`) separates them per-candidate via the validity rail
+/// `ReadSetSignature.facts` + `self_root_canonicals`, validated against
+/// the caller's live view. File-content versioning lives in
+/// [`VersionedDeclIdentity`] inside the cached payload.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolvedDeclSlotIdentity {
     /// Canonical id of the declaring file. NOT the consumer scope —
@@ -395,16 +403,19 @@ impl ResolvedDeclSlotIdentity {
         }
     }
 
-    /// Env-agnostic test-fixture constructor: a TYPE-space slot for
+    /// TEST/FIXTURE-ONLY env-agnostic constructor: a TYPE-space slot for
     /// `(canonical, name)` with ZERO env (`project_identity = 0`,
     /// `type_env_hash` / `lib_env_hash` defaulted).
     ///
     /// For identity-shape fixtures and tests that do NOT exercise env
-    /// separation. The PRODUCTION derivation is
+    /// separation. PRODUCTION MUST NOT call this — the production
+    /// derivation is
     /// [`ProjectSemanticDispatch::type_slot_for`](crate::project_semantic_dispatch::ProjectSemanticDispatch::type_slot_for),
-    /// which reads the live host env — never this. Env-discriminating
-    /// guards construct slots with explicit distinct env via
-    /// [`Self::type_slot`].
+    /// which reads the live host env. Env-discriminating guards construct
+    /// slots with explicit distinct env via [`Self::type_slot`]. This is
+    /// `pub` (not `#[cfg(test)]`-gated) only because external `tests/`
+    /// integration crates consume it; the one-path contract is pinned by
+    /// the arch guard `no_production_caller_of_zero_env_slot_constructors`.
     #[must_use]
     pub fn type_slot_unscoped(canonical: Arc<str>, name: Arc<str>) -> Self {
         Self::type_slot(
@@ -416,19 +427,33 @@ impl ResolvedDeclSlotIdentity {
         )
     }
 
-    /// Env-agnostic test-fixture constructor for a built-in utility
+    /// TEST/FIXTURE-ONLY env-agnostic constructor for a built-in utility
     /// carrier (`Pick` / `Omit` / …): a `"__builtin__"` TYPE-space slot
-    /// with zero env. See [`Self::type_slot_unscoped`].
+    /// with zero env. PRODUCTION MUST derive the built-in slot via
+    /// [`ProjectSemanticDispatch::builtin_type_slot`](crate::project_semantic_dispatch::ProjectSemanticDispatch::builtin_type_slot)
+    /// instead. See [`Self::type_slot_unscoped`].
     #[must_use]
     pub fn builtin_unscoped(name: &str) -> Self {
         Self::type_slot_unscoped(Arc::from("__builtin__"), Arc::from(name))
     }
 
-    /// Compatibility constructor: derive a slot identity from a
-    /// legacy [`DeclIdentity`] plus the env dimensions.
+    /// TEST/FIXTURE-ONLY constructor: derive a slot identity from a
+    /// [`DeclIdentity`] plus explicit env dimensions. This is NOT a
+    /// compatibility / dual-path shim — production NEVER routes a slot
+    /// through a `DeclIdentity`; it derives the env-bearing slot
+    /// directly via
+    /// [`ProjectSemanticDispatch::type_slot_for`](crate::project_semantic_dispatch::ProjectSemanticDispatch::type_slot_for).
+    /// This entry point exists ONLY for identity-shape test fixtures
+    /// (e.g. the `from_decl_identity`-strips-`whole_hash` guard) that
+    /// start from a versioned `DeclIdentity`.
+    ///
     /// `whole_hash` is intentionally NOT consumed — the slot is
     /// content-free; per-file content versioning belongs on
-    /// [`VersionedDeclIdentity`].
+    /// [`VersionedDeclIdentity`]. PRODUCTION MUST NOT call this; the
+    /// one-path contract is pinned by the arch guard
+    /// `no_production_caller_of_zero_env_slot_constructors`. It is `pub`
+    /// (not `#[cfg(test)]`-gated) only because external `tests/`
+    /// integration crates consume it.
     #[must_use]
     pub fn from_decl_identity(
         identity: &DeclIdentity,
@@ -498,17 +523,18 @@ pub fn value_root_of(value_slot: &ResolvedDeclSlotIdentity) -> ValueRootKey {
 /// - `content_hash`: per-file content version (sourced from
 ///   `IndexedReady.whole_hash` at admission time). Two file versions
 ///   of "same decl" produce equal slot keys + distinct `content_hash`
-///   payloads — the multi-candidate `ValidatedFactCache` separates
-///   them via per-candidate fact validation.
+///   payloads — the multi-candidate semantic-graph memo separates them
+///   per-candidate via the `ReadSetSignature.facts` + `self_root_canonicals`
+///   validity rail.
 /// - `parse_env_hash`: parser flags + SFC compiler flags
 ///   dimension. Cosmetic edits within the same parser flags
 ///   produce the same `parse_env_hash`; flag changes invalidate
 ///   the cached entry.
 /// - `merged_parts`: per-part fingerprints inside a merged
 ///   declaration group. **Payload, NOT a validation oracle (R7).**
-///   Consumers observe specific parts via their `fact_dep_signature`;
-///   adding an overload does NOT, by itself, invalidate consumers
-///   that observed only one overload's facts.
+///   Consumers observe specific parts via the recorded
+///   `ReadSetSignature.facts`; adding an overload does NOT, by itself,
+///   invalidate consumers that observed only one overload's facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionedDeclIdentity {
     pub slot: ResolvedDeclSlotIdentity,
@@ -1659,9 +1685,10 @@ pub enum QueryError {
     /// Catch-all for text-bearing failures surfaced to the caller.
     Other(Arc<str>),
     /// C16: Declaration resolved but not yet materialized. The node
-    /// carries the file scope sidecar so callers can construct a
-    /// `DeclIdentity` for `Instantiate` keys. Walk/enumerate code
-    /// treats this as "expandable via Instantiate" rather than "not found."
+    /// carries the file scope sidecar so callers can construct the
+    /// content-free `ResolvedDeclSlotIdentity` slot for `Instantiate`
+    /// keys. Walk/enumerate code treats this as "expandable via
+    /// Instantiate" rather than "not found."
     DeclPlaceholder {
         canonical_id: Arc<str>,
         name: Arc<str>,
@@ -3161,8 +3188,8 @@ pub enum SemanticQueryKey {
     /// that compose existing variants and read the
     /// `ComponentMetaResultDb<ComponentMetaAnalysis>` sidecar.
     ///
-    /// `owner` is the synthetic SFC declaration identity (`canonical_id`
-    /// = the SFC file path, `decl_name` per repo convention).
+    /// `owner` is the synthetic SFC declaration slot (`defining_canonical`
+    /// = the SFC file path, `merged_symbol_name` per repo convention).
     /// `macro_index` is the stable index into `ScriptAnalysisSnapshot.macros`
     /// per `macro_kind` is the semantic-level
     /// [`AnalyzedMacroKind`], NOT [`verter_semantic::analysis::template::MacroKind`].
@@ -3170,19 +3197,19 @@ pub enum SemanticQueryKey {
     /// `SemanticNodeId`s by the caller). `mode` selects the projection
     /// mode for downstream type lowering inside the macro body.
     ///
-    /// The body reuses the sidecar's `AnalyzedMacro` (no AST re-walk per
-    /// §A14) for emit/model construction. Per `ResolveMacroPayload`'s
-    /// closure rules, dispatch resolves to:
+    /// The body reads the sidecar's `AnalyzedMacro` (no AST re-walk per
+    /// §A14) only to confirm the macro exists and anchor the fence, then
+    /// resolves the macro's ONE type through the shared resolver — it does
+    /// NOT build per-kind member objects itself. The one-engine
+    /// `build_resolve_macro_payload` dispatch is:
     /// - `DefineProps` / `WithDefaults`: 0 args → `Opaque(Miss)`; 1 arg
     ///   → arg unchanged; ≥2 args → `NormalizeIntersection`.
-    /// - `DefineEmits`: build `Object` whose members are
-    ///   `name → tuple-of-params` from the parsed type-argument's
-    ///   properties + call signatures.
-    /// - `DefineSlots`: build `Object` from slot members (function-shape
-    ///   values).
-    /// - `DefineModel`: build `Object` with `model_name → T` and
-    ///   `update:<model_name> → (val: T) -> void` from `analyzed.model_name`
-    ///   and `type_args[0]`.
+    /// - `DefineEmits` / `DefineSlots` / `DefineModel`: dispatch
+    ///   `type_args[0]` through `ProjectPath` in the caller's mode and
+    ///   return the projected surface. Per-kind member construction
+    ///   (emit `name → params`, slot members, model
+    ///   `{ <model_name>: T, "update:<model_name>": … }`) is the
+    ///   consumer's thin normalisation step, NOT this resolver's job.
     /// - `DefineExpose` / `DefineOptions`: 0 args → `Opaque(Miss)`;
     ///   else `type_args[0]` unchanged.
     ///

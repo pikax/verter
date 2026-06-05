@@ -66,7 +66,10 @@ impl VerterHost {
         let _ = level;
 
         // The `.vue`'s synthesized public instance is the first-class semantic
-        // query `Instantiate{ DeclIdentity(canonical, whole_hash, "default"), [] }`
+        // query `Instantiate { base: ResolvedDeclSlotIdentity(canonical, "default",
+        // Type, env…), args: [], context: InstantiateContext { … } }` — the
+        // content-free slot carries env dims only; the live `whole_hash` is
+        // re-sourced at value-compute, not carried by the key
         // (`build_instantiate`'s `.vue default` branch lowers the synthesized
         // `{ $props, $emit, $slots }` instance object to an `Object` surface).
         // This is the SAME keyed identity a `.vue`-importing-`.vue` reference

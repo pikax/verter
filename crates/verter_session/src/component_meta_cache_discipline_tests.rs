@@ -51,15 +51,17 @@ fn intern_empty_object(host: &VerterHost) -> SemanticNodeId {
         }))
 }
 
-/// Upsert a minimal `defineProps` SFC at `canonical` and build a
-/// `ResolveMacroPayload` owner [`DeclIdentity`] carrying that file's
-/// REAL whole hash.
+/// Upsert a minimal `defineProps` SFC at `canonical` and build the
+/// content-free `ResolveMacroPayload` owner
+/// [`ResolvedDeclSlotIdentity`] slot for that file.
 ///
 /// A `ResolveMacroPayload` memo entry self-roots on the owner SFC's
 /// `FileWholeHash`; the strict warm-read validator rejects an entry
 /// whose self-root canonical is untracked or hash-mismatched. The
-/// owner must therefore be a tracked file with the real content
-/// version threaded into the key identity.
+/// owner slot is content-free (no whole hash in the key) — the real
+/// content version is re-sourced live at value-build time via
+/// `ensure_indexed_ready`, so the owner must be a TRACKED file or the
+/// cold build cannot self-root and the entry stays non-cacheable.
 fn tracked_macro_owner(
     host: &VerterHost,
     canonical: &str,

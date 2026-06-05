@@ -674,8 +674,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
         }
 
-        // `decl_whole_hash` (carried by the `Instantiate` key's `DeclIdentity`)
-        // and `observed_hash` (the artifact just read) agree under a stable
+        // `decl_whole_hash` (re-sourced live at value-compute from
+        // `ensure_indexed_ready(base.defining_canonical).whole_hash` — the
+        // content-free `Instantiate` key carries no version) and
+        // `observed_hash` (the artifact just read) agree under a stable
         // content generation; root on the observed hash, which is the basis the
         // instance shape was actually read from.
         let _ = decl_whole_hash;
@@ -875,9 +877,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Generic instantiation.
     ///
-    /// Receives `DeclIdentity` directly from the `Instantiate` key —
-    /// declaration identity is part of the key rather than a separate
-    /// `DeclAnchor` node. Fetches the [`PreparedTypeDecl`] via
+    /// Receives the content-free `ResolvedDeclSlotIdentity` slot directly
+    /// from the `Instantiate` key — declaration identity is part of the
+    /// key rather than a separate `DeclAnchor` node. The slot carries the
+    /// env dims only; the live content version (`decl_whole_hash`) is
+    /// re-sourced at value-compute from
+    /// `ensure_indexed_ready(base.defining_canonical).whole_hash`, never
+    /// from the key. Fetches the [`PreparedTypeDecl`] via
     /// [`DispatchHost`] and produces **one shell level** of the
     /// declaration's structural shape with `args` bound to the decl's
     /// type parameters.

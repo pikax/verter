@@ -228,9 +228,10 @@ fn r7_project_identity_isolates_slots() {
     assert_ne!(slot_p1, slot_p2);
 }
 
-/// R7 — compatibility constructor from `DeclIdentity` strips the
-/// `whole_hash` field. The resulting slot identity is content-free
-/// regardless of which `whole_hash` value the input carried.
+/// R7 — the test-fixture constructor from `DeclIdentity`
+/// (`from_decl_identity`) strips the `whole_hash` field. The resulting
+/// slot identity is content-free regardless of which `whole_hash` value
+/// the input carried.
 #[test]
 fn r7_from_decl_identity_strips_whole_hash() {
     let decl_v1 = DeclIdentity {

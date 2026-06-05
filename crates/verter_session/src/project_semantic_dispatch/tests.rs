@@ -1715,7 +1715,7 @@ fn resolve_decl_records_file_scope_in_sidecar() {
 //  - `build_instantiate` resolving the base via `DispatchHost` and
 //    interning the shell-level object with member refs.
 //  - `Instantiate` + `SubstituteTypeParam` origin edges.
-//  - `DeclIdentity` on `Instantiate.base`.
+//  - the content-free `ResolvedDeclSlotIdentity` slot on `Instantiate.base`.
 
 fn resolve_decl_anchor(
     dispatch: &ProjectSemanticDispatch<'_>,
@@ -1892,7 +1892,8 @@ fn instantiate_with_concrete_args_emits_substitute_edges() {
         inst_edges
     );
     let edge = &inst_edges[0];
-    // sources = [args...] (base is now DeclIdentity, not a node).
+    // sources = [args...] (base is the content-free ResolvedDeclSlotIdentity
+    // slot, not a node).
     assert!(
         edge.sources.contains(&string_arg),
         "Instantiate edge sources must include each arg"
@@ -4279,7 +4280,8 @@ fn utility_dispatch_emits_instantiate_edge() {
         "utility dispatch emits exactly one Instantiate edge"
     );
     let sources = inst_edges[0].sources.as_ref();
-    // base is now DeclIdentity (not a node), so sources contain args only.
+    // base is the content-free ResolvedDeclSlotIdentity slot (not a node),
+    // so sources contain args only.
     assert!(
         sources.contains(&source),
         "Instantiate edge sources must include args[0] = source"
@@ -4719,7 +4721,8 @@ fn return_type_of_typeof_local_fn_resolves_via_dispatch() {
     // Origin-edge invariants: `Instantiate` edge with sources
     // containing the typeof node, one `SubstituteTypeParam`
     // edge on the result for the utility's `T` parameter.
-    // (base is now DeclIdentity, not a node — so sources contain args only.)
+    // (base is the content-free ResolvedDeclSlotIdentity slot, not a node —
+    // so sources contain args only.)
     let inst_edges = graph.origins_of_kind(result, OriginEdgeKind::Instantiate);
     assert!(
         !inst_edges.is_empty(),
