@@ -1000,6 +1000,9 @@ impl FileArtifactStore {
 
         // Legacy semantics: drain every prior version of the same
         // canonical before inserting. The new entry replaces them all.
+        // Capture each drained version's augmentations: a content edit that
+        // RETARGETS or DROPS an augmentation must invalidate the prior
+        // target's index entry, which the new facts alone would not cover.
         let prior_keys: Vec<FileArtifactKey> = self
             .artifacts
             .iter()
@@ -1007,14 +1010,23 @@ impl FileArtifactStore {
             .map(|entry| entry.key().clone())
             .collect();
         let had_prior = !prior_keys.is_empty();
+        let mut changed_augmentations: Vec<ModuleAugmentationFact> = Vec::new();
         for prior_key in prior_keys {
-            self.artifacts.remove(&prior_key);
+            if let Some((_, prior)) = self.artifacts.remove(&prior_key) {
+                changed_augmentations.extend(prior.augmentations.iter().cloned());
+            }
             self.hit_counters.remove(&prior_key);
         }
 
         let key = FileArtifactKey::legacy(canonical_id, whole_hash);
         let payload = Arc::new(FileArtifacts::with_indexed(indexed));
+        changed_augmentations.extend(payload.augmentations.iter().cloned());
         self.artifacts.insert(key, payload);
+
+        // Demand-driven coherence: a published artifact whose augmentation
+        // contribution changed (prior ∪ new facts) invalidates every index
+        // entry it could touch so the next cold-rescan folds the change in.
+        self.invalidate_augmentation_index_for_augmenter(&changed_augmentations);
 
         if had_prior {
             // Replacement: live count unchanged, bump stale sweep.
@@ -1043,14 +1055,19 @@ impl FileArtifactStore {
             .filter(|entry| entry.key().canonical.as_ref() == canonical_id)
             .map(|entry| entry.key().clone())
             .collect();
+        let mut removed_augmentations: Vec<ModuleAugmentationFact> = Vec::new();
         for key in &to_remove {
-            if self.artifacts.remove(key).is_some() {
+            if let Some((_, removed)) = self.artifacts.remove(key) {
                 self.live_counter.fetch_sub(1, Ordering::Relaxed);
                 self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+                removed_augmentations.extend(removed.augmentations.iter().cloned());
             }
             self.hit_counters.remove(key);
         }
         self.last_access.remove(canonical_id);
+        // Demand-driven coherence: a removed augmenter must drop every index
+        // entry it contributed to so the next cold-rescan rebuilds without it.
+        self.invalidate_augmentation_index_for_augmenter(&removed_augmentations);
     }
 
     /// Number of live entries.
@@ -1241,7 +1258,19 @@ impl FileArtifactStore {
         // the DashMap. Cold-path: this is a cheap Arc clone over
         // the public `facts: Arc<FileFacts>` field.
         let facts_for_emit: Arc<FileFacts> = Arc::clone(&artifacts.facts);
+        // Capture the new artifact's augmentations BEFORE the move so the
+        // index-coherence rail can fold them (∪ any replaced version's facts)
+        // without re-reading the DashMap.
+        let mut changed_augmentations: Vec<ModuleAugmentationFact> =
+            artifacts.augmentations.iter().cloned().collect();
         let prev = self.artifacts.insert(key, artifacts);
+        if let Some(prev) = prev.as_ref() {
+            changed_augmentations.extend(prev.augmentations.iter().cloned());
+        }
+        // Demand-driven coherence: a published artifact whose augmentation
+        // contribution changed (new ∪ replaced facts) invalidates every index
+        // entry it could touch so the next cold-rescan folds the change in.
+        self.invalidate_augmentation_index_for_augmenter(&changed_augmentations);
         let is_fresh = prev.is_none();
         if is_fresh {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -1281,10 +1310,14 @@ impl FileArtifactStore {
         let content_hash = key.content_hash;
         let parse_env_hash = key.parse_env_hash;
         let removed = self.artifacts.remove(key).map(|(_, v)| v);
-        if removed.is_some() {
+        if let Some(removed) = removed.as_ref() {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
             self.hit_counters.remove(key);
+            // Demand-driven coherence: a removed augmenter must drop every
+            // index entry it contributed to so the next cold-rescan rebuilds
+            // without it.
+            self.invalidate_augmentation_index_for_augmenter(&removed.augmentations);
             // R23 typed event: a `FileArtifactStore` entry was
             // evicted. Best-effort emission.
             crate::host_manage::push_structured_event(
@@ -1303,14 +1336,19 @@ impl FileArtifactStore {
     /// Drain every entry whose canonical matches `canonical_id`.
     pub fn remove_canonical(&self, canonical_id: &str) -> usize {
         let mut removed_keys: Vec<FileArtifactKey> = Vec::new();
-        self.artifacts.retain(|key, _| {
+        let mut removed_augmentations: Vec<ModuleAugmentationFact> = Vec::new();
+        self.artifacts.retain(|key, value| {
             if key.canonical.as_ref() == canonical_id {
                 removed_keys.push(key.clone());
+                removed_augmentations.extend(value.augmentations.iter().cloned());
                 false
             } else {
                 true
             }
         });
+        // Demand-driven coherence: a removed augmenter must drop every index
+        // entry it contributed to so the next cold-rescan rebuilds without it.
+        self.invalidate_augmentation_index_for_augmenter(&removed_augmentations);
         let removed = removed_keys.len();
         if removed > 0 {
             self.live_counter
@@ -1388,8 +1426,8 @@ impl FileArtifactStore {
     /// `iter()` guard would block on itself. Collecting the candidate
     /// rows first — and only matching/resolving after every shard guard
     /// is released — keeps the resolver off the guard. Same discipline
-    /// as the existing snapshot in
-    /// [`Self::refresh_augmentation_index_for_canonical`].
+    /// as the snapshot in
+    /// [`Self::ensure_augmentation_index_populated`].
     ///
     /// Candidate selection is population-aware (overlay isolation): a base
     /// scan (`overlay_discriminator: None`) collects base
@@ -1544,221 +1582,54 @@ impl FileArtifactStore {
         set
     }
 
-    /// Refresh existing augmentation-index entries that a newly-
-    /// inserted (base) file's augmentations may contribute to.
-    ///
-    /// Walks every existing `AugmentationTargetKey` and checks whether the
-    /// new artifact's augmentations match the target under the caller's
-    /// resolver hook (a population-independent test — a base augmenter
-    /// participates in BOTH the `Base` set and every `Session` set, which is
-    /// base ∪ overlay, for the same target). For each contributing key:
-    ///
-    /// - **`Base` population** — recompute the augmenter set in place over
-    ///   the base candidate snapshot and emit a refresh audit event when the
-    ///   fingerprint changes.
-    /// - **`Session` population** — INVALIDATE (drop) the entry. A session set
-    ///   is base ∪ overlay and cannot be rebuilt from this base-only scan (it
-    ///   lacks the session's overlay discriminator + overlay candidates), so
-    ///   the stale entry is removed and the next session-scoped
-    ///   [`Self::ensure_augmentation_index_populated`] cold-rescans base ∪
-    ///   overlay, folding in the changed base contributor. Without this a
-    ///   stale session entry would warm-return WITHOUT the new/edited base
-    ///   augmenter and its `ModuleAugmentationIndexShape` fingerprint would
-    ///   stay stale-valid.
-    ///
-    /// Existing entries that the new file does NOT contribute to are left
-    /// untouched — out-of-program files contribute nothing. Overlay isolation
-    /// is preserved: this base-maintenance path never enumerates overlay
-    /// augmenters, so it cannot leak overlay-only augmenters into a base entry
-    /// or vice-versa.
-    pub fn refresh_augmentation_index_for_canonical<R>(
-        &self,
-        new_artifact_key: &FileArtifactKey,
-        new_artifacts: &FileArtifacts,
-        resolve_relative_canonical: R,
-    ) where
-        R: Fn(&str, &str) -> Option<Arc<str>>,
-    {
-        // The augmentation index is a base resolve-domain structure
-        // (see `ensure_augmentation_index_populated`). A session-overlay
-        // artifact ([`FileArtifactKey::overlay_scoped`]) must not refresh
-        // it — its augmentations are session-divergent.
-        if !new_artifact_key.is_legacy() {
-            return;
-        }
-        if new_artifacts.augmentations.is_empty() {
-            return;
-        }
-
-        // Snapshot existing keys so we don't hold an `augmentation_index`
-        // shard read-lock while we recompute + insert (DashMap
-        // re-entrance hazard).
-        let existing_keys: Vec<AugmentationTargetKey> = self
-            .augmentation_index
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        // Snapshot the base augmenter rows once so the per-key rebuild
-        // scans an owned `Vec` rather than `self.artifacts.iter()`: the
-        // resolver `augmenter_matches_target` invokes for a relative
-        // target re-enters the store and inserts into `self.artifacts`,
-        // which must not run under a shard guard (see
-        // `collect_augmenter_candidates`). The artifact set is not
-        // mutated during the refresh — only `augmentation_index` is — so
-        // one snapshot serves every key. The candidate snapshot is the BASE
-        // corpus (`None` → `is_legacy()` artifacts); it drives the in-place
-        // rebuild of BASE-population entries. SESSION-population entries (base
-        // ∪ overlay) cannot be rebuilt from a base-only snapshot — they are
-        // INVALIDATED instead (see the per-key branch below) so the next
-        // session-scoped `ensure_augmentation_index_populated` rescans base ∪
-        // overlay fresh.
-        let candidates = self.collect_augmenter_candidates(None);
-
-        for key in existing_keys {
-            // Does the new (base) artifact contribute to this target? Target
-            // matching depends only on `key.target`, NOT `key.population`, so
-            // the check is population-independent: a base augmenter
-            // participates in BOTH the base set and every session set
-            // (base ∪ overlay) for the same target. If it does not contribute,
-            // the cached entry is still valid (no augmenter-set change for this
-            // target) regardless of population — skip it.
-            let augmenter_canonical = new_artifact_key.canonical.as_ref();
-            let contributes = new_artifacts.augmentations.iter().any(|fact| {
-                augmenter_matches_target(
-                    fact,
-                    &key,
-                    augmenter_canonical,
-                    &resolve_relative_canonical,
-                )
-            });
-            if !contributes {
-                continue;
-            }
-
-            match key.population {
-                AugmentationPopulation::Session(_) => {
-                    // A `Session` augmenter set is base ∪ overlay, so a changed
-                    // BASE augmenter participates in it and the cached entry is
-                    // now stale. This base-maintenance scan cannot REBUILD a
-                    // session set — that requires the session's overlay
-                    // discriminator plus the overlay candidate rows, which only
-                    // the session view carries. INVALIDATE the stale session
-                    // entry instead: drop it so the next session-scoped
-                    // `ensure_augmentation_index_populated` cold-rescans base ∪
-                    // overlay and folds in the changed base contributor.
-                    // Removing (never rebuilding) keeps overlay isolation
-                    // intact — this path never enumerates overlay augmenters,
-                    // so it cannot leak overlay-only augmenters into a base
-                    // entry or vice-versa.
-                    self.augmentation_index.remove(&key);
-                }
-                AugmentationPopulation::Base => {
-                    // Rebuild the base set with the new artifact folded in over
-                    // the owned base candidate snapshot (no `self.artifacts`
-                    // guard held). Same base-only filter as
-                    // `ensure_augmentation_index_populated`'s cold scan —
-                    // overlay-scoped artifacts never contribute.
-                    let mut matched: Vec<AugmenterEntry> = Vec::new();
-                    let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> =
-                        rustc_hash::FxHashSet::default();
-                    for candidate in &candidates {
-                        for fact in candidate.augmentations.iter() {
-                            if augmenter_matches_target(
-                                fact,
-                                &key,
-                                candidate.canonical.as_ref(),
-                                &resolve_relative_canonical,
-                            ) {
-                                if seen_canonicals.insert(Arc::clone(&candidate.canonical)) {
-                                    matched.push(AugmenterEntry {
-                                        artifact_key: candidate.artifact_key.clone(),
-                                        parse_stable_hash: candidate.parse_stable_hash,
-                                    });
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    matched.sort_by(|a, b| {
-                        a.canonical()
-                            .as_ref()
-                            .cmp(b.canonical().as_ref())
-                            .then_with(|| a.parse_stable_hash.cmp(&b.parse_stable_hash))
-                    });
-                    let augmenter_count = matched.len() as u32;
-                    let new_fingerprint = compute_augmenter_set_fingerprint(&matched);
-
-                    // Compare with old fingerprint. If unchanged, skip the
-                    // insert + event emission.
-                    let old = self.augmentation_index.get(&key).map(|e| e.fingerprint);
-                    if old == Some(new_fingerprint) {
-                        continue;
-                    }
-
-                    let entries: SmallVec<[AugmenterEntry; 2]> = matched.into_iter().collect();
-                    let new_set = Arc::new(AugmenterSet {
-                        entries,
-                        fingerprint: new_fingerprint,
-                    });
-                    self.augmentation_index.insert(key.clone(), new_set);
-
-                    emit_module_augmentation_index_shape_event(
-                        &key,
-                        old,
-                        new_fingerprint,
-                        augmenter_count,
-                    );
-                }
-            }
-        }
-    }
-
     /// Invalidate every `augmentation_index` entry that the augmenter
-    /// at `augmenter_canonical` could contribute to.
+    /// facts on `augmenter_facts` could contribute to.
     ///
-    /// Called from the side-effect import probe walk
-    /// (`VerterHost::owner_has_module_augmentation_dependency`) after
-    /// newly materialising an augmenter via `ensure_indexed_ready`.
-    /// Without this step the next
-    /// [`Self::ensure_augmentation_index_populated`] call would
-    /// warm-hit any entry whose cold scan ran BEFORE the augmenter
-    /// entered the artifact store (and therefore saw no facts for
-    /// the queried target); that warm-empty hit would falsely report
-    /// "no augmenters for this target" and let a `Content` request
-    /// reuse a content-addressed entry that does not fingerprint the
-    /// augmenter.
+    /// This is the SOLE augmentation-index invalidation primitive. It is the
+    /// demand-driven coherence rail for the index: whenever the augmenter
+    /// SET changes (a file is published as / edited into / removed as an
+    /// augmenter), every entry the changed facts could touch is DROPPED, and
+    /// the next [`Self::ensure_augmentation_index_populated`] cold-rescan
+    /// rebuilds it from the now-current `artifacts` corpus. There is no eager
+    /// in-place rebuild — invalidate-then-lazy-rebuild keeps the index
+    /// query-scoped (Build Philosophy) and uniform across populations.
     ///
-    /// The invalidation removes entries the augmenter would
-    /// contribute to and lets the next probe cold-scan against the
-    /// now-fresh `artifacts` set. Entries the augmenter does NOT
-    /// contribute to are left untouched — they are unaffected by
-    /// this augmenter's materialisation.
+    /// Wired into every artifact-set mutation that changes a file's
+    /// augmentation contribution: [`Self::insert`] / [`Self::insert_artifacts`]
+    /// (publish — using the prior ∪ new facts so a retarget cleans BOTH the
+    /// old and the new target) and [`Self::remove`] / [`Self::remove_artifacts`]
+    /// / [`Self::remove_canonical`] (evict — using the removed facts). It is
+    /// also called from the side-effect-import probe walk
+    /// (`VerterHost::owner_has_module_augmentation_dependency`) after newly
+    /// materialising an augmenter, so a probe of a target whose cold scan ran
+    /// BEFORE the augmenter entered the store does not warm-hit a stale empty
+    /// set.
     ///
-    /// Snapshot-first / no-shard-guard discipline mirrors
-    /// [`Self::refresh_augmentation_index_for_canonical`]: the
-    /// resolver hook may re-enter the store (relative
-    /// `declare module "./X"` targets resolve through
-    /// `ensure_indexed_ready`), and `DashMap`'s `std::sync::RwLock`
-    /// shard guards are non-reentrant.
+    /// Matching is the resolver-free, population-agnostic conservative test
+    /// [`augmenter_fact_could_contribute`] — it removes BOTH `Base` and
+    /// `Session` entries the augmenter could touch (a base augmenter
+    /// participates in every `Session` set, which is base ∪ overlay), and
+    /// over-matches relative targets safely (drop-then-rebuild can never add a
+    /// wrong augmenter, so overlay isolation and the no-base-poison rule hold).
+    /// Entries the facts do NOT touch are left untouched — out-of-program
+    /// files contribute nothing.
+    ///
+    /// Snapshot-first / no-shard-guard discipline: existing keys are collected
+    /// off the `augmentation_index` shard guard before any removal, so the
+    /// removal loop never holds a guard across a re-entrant store access.
     ///
     /// Returns the count of entries actually removed.
-    pub fn invalidate_augmentation_index_for_augmenter<R>(
+    pub fn invalidate_augmentation_index_for_augmenter(
         &self,
-        augmenter_canonical: &str,
         augmenter_facts: &[ModuleAugmentationFact],
-        resolve_relative_canonical: R,
-    ) -> usize
-    where
-        R: Fn(&str, &str) -> Option<Arc<str>>,
-    {
+    ) -> usize {
         if augmenter_facts.is_empty() {
             return 0;
         }
-        // Snapshot existing keys off the shard guard before computing
-        // contribution / removing entries: `augmenter_matches_target`
-        // may invoke the resolver hook for relative-target facts, and
-        // the resolver re-enters the store via `ensure_indexed_ready`.
+        if self.augmentation_index.is_empty() {
+            return 0;
+        }
+        // Snapshot existing keys off the shard guard before removing entries.
         let existing_keys: Vec<AugmentationTargetKey> = self
             .augmentation_index
             .iter()
@@ -1766,14 +1637,9 @@ impl FileArtifactStore {
             .collect();
         let mut removed = 0usize;
         for key in existing_keys {
-            let contributes = augmenter_facts.iter().any(|fact| {
-                augmenter_matches_target(
-                    fact,
-                    &key,
-                    augmenter_canonical,
-                    &resolve_relative_canonical,
-                )
-            });
+            let contributes = augmenter_facts
+                .iter()
+                .any(|fact| augmenter_fact_could_contribute(fact, &key));
             if !contributes {
                 continue;
             }
@@ -1935,6 +1801,46 @@ where
                 None => false,
             }
         }
+        AugmentationTargetKind::WildcardAmbient(target_pattern) => {
+            specifier.contains('*') && specifier == target_pattern.as_ref()
+        }
+        AugmentationTargetKind::GlobalAugmentation => specifier == GLOBAL_AUGMENTATION_TAG,
+    }
+}
+
+/// Resolver-free, conservative variant of [`augmenter_matches_target`] used
+/// for cache INVALIDATION on the artifact lifecycle.
+///
+/// Exact arms (`ExternalSpecifier` / `WildcardAmbient` / `GlobalAugmentation`)
+/// are decided from the fact's specifier alone — no resolver needed. The
+/// `ResolvedRelativeCanonical` arm cannot resolve the augmenter's relative
+/// specifier without a module resolver (the store layer has none), so it
+/// answers CONSERVATIVELY: any relative `declare module "./x"` fact is treated
+/// as a potential contributor to EVERY relative-target entry.
+///
+/// Over-matching here is correctness-safe: an invalidation only DROPS an index
+/// entry, and the next [`FileArtifactStore::ensure_augmentation_index_populated`]
+/// cold-rescan rebuilds it identically (re-applying the exact, resolver-backed
+/// [`augmenter_matches_target`] and the population filter). The only cost of a
+/// conservative match is recomputing a relative-target entry that did not
+/// strictly need it — and relative `declare module` augmentation is rare. It
+/// can NEVER add a wrong augmenter to a set, so overlay isolation and the
+/// no-base-poison rule are preserved.
+fn augmenter_fact_could_contribute(
+    fact: &ModuleAugmentationFact,
+    target_key: &AugmentationTargetKey,
+) -> bool {
+    let specifier: &str = fact.specifier.as_ref();
+    let is_relative = specifier.starts_with("./") || specifier.starts_with("../");
+    match &target_key.target {
+        AugmentationTargetKind::ExternalSpecifier(target_spec) => {
+            let is_wildcard = specifier.contains('*');
+            let is_global = specifier == GLOBAL_AUGMENTATION_TAG;
+            !is_relative && !is_wildcard && !is_global && specifier == target_spec.as_ref()
+        }
+        // Conservative: cannot resolve the relative specifier without a
+        // module resolver, so any relative fact could target this entry.
+        AugmentationTargetKind::ResolvedRelativeCanonical(_) => is_relative,
         AugmentationTargetKind::WildcardAmbient(target_pattern) => {
             specifier.contains('*') && specifier == target_pattern.as_ref()
         }

@@ -12187,30 +12187,30 @@ mod content_pinned_artifact_read_guards {
             "self-test: a scheduler-authority call MUST NOT be flagged",
         );
 
-        // (g) A `where`-clause method that returns `()` and whose
-        //     `where R: Fn(&str) -> Option<T>` bound contains both a
-        //     `&str` and an `-> Option<...>` → MUST NOT be flagged. The
-        //     signature parser must not mistake the `Fn` bound's params
-        //     / arrow for the method's own — this is the
-        //     `refresh_augmentation_index_for_canonical` shape.
-        let where_clause_sig = "fn refresh_augmentation_index_for_canonical<R>(&self, new_artifact_key: &FileArtifactKey, resolve_relative_canonical: R) where R: Fn(&str, &str) -> Option<Arc<str>>";
+        // (g) A `where`-clause method whose `where R: Fn(&str, &str) ->
+        //     Option<T>` bound contains both a `&str` and an `-> Option<...>`
+        //     → MUST NOT be flagged. The signature parser must not mistake the
+        //     `Fn` bound's params / arrow for the method's own. This mirrors
+        //     the augmentation-index resolver-hook shape
+        //     (`ensure_augmentation_index_populated`).
+        let where_clause_sig = "fn resolve_augmenter_set<R>(&self, key: &AugmentationTargetKey, resolve_relative_canonical: R) where R: Fn(&str, &str) -> Option<Arc<str>>";
         assert!(
             !returns_singular_option(where_clause_sig),
-            "self-test: a `()`-returning method whose `where` clause carries \
+            "self-test: a method whose `where` clause carries \
              `Fn(..) -> Option<T>` MUST NOT be read as Option-returning",
         );
         assert!(
             !is_canonical_only_signature(where_clause_sig),
-            "self-test: a `&FileArtifactKey`-taking method is content-pinned \
-             (the exact key carries the content hash) — MUST NOT be flagged \
-             canonical-only, and the `Fn(&str)` bound's `&str` must not be \
-             mistaken for a method parameter",
+            "self-test: a `&AugmentationTargetKey`-taking method keys on a \
+             structured query key, not a bare `&str` canonical — MUST NOT be \
+             flagged canonical-only, and the `Fn(&str)` bound's `&str` must \
+             not be mistaken for the method's own canonical parameter",
         );
         let where_clause_body = "{ for e in self.artifacts.iter() { } }";
         assert!(
             !is_unpinned_currency_oracle(where_clause_sig, where_clause_body),
-            "self-test: the `where`-clause `()`-returning augmentation-index \
-             refresh shape MUST NOT be flagged as a currency oracle",
+            "self-test: the `where`-clause augmentation-index resolver-hook \
+             shape MUST NOT be flagged as a currency oracle",
         );
     }
 }

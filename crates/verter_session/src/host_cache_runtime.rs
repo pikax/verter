@@ -131,8 +131,7 @@ impl VerterHost {
         // Memoise the `(augmenter_canonical, specifier) → resolved`
         // map per invocation. The walk resolves the same tuple from
         // multiple sites: direct emission for `declare module "./X"`
-        // facts, the re-export edge walk, the augmentation-index
-        // invalidation helper, and inside
+        // facts, the re-export edge walk, and inside
         // `ensure_augmentation_index_populated`'s cold scan
         // (`augmenter_matches_target` calls the resolver per
         // candidate fact). A multi-fact augmenter that retargets the
@@ -335,9 +334,7 @@ impl VerterHost {
                     // fresh artifact set.
                     if !augmenter_artifacts.augmentations.is_empty() {
                         store.invalidate_augmentation_index_for_augmenter(
-                            &resolved_canonical,
                             &augmenter_artifacts.augmentations,
-                            resolver,
                         );
                     }
                     for fact in augmenter_artifacts.augmentations.iter() {
@@ -358,8 +355,7 @@ impl VerterHost {
                             // through the invocation-local memo so the
                             // same `(augmenter, specifier)` tuple
                             // resolves at most once across the per-fact
-                            // emission, the augmentation-index
-                            // invalidation helper, and the
+                            // emission and the
                             // `ensure_augmentation_index_populated`
                             // cold scan.
                             if let Some(target_canonical) =

@@ -464,11 +464,16 @@ fn cross_project_augmenter_isolation() {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Test 12 — augmenter-set refresh invalidates downstream.
+// Test 12 — publishing a new augmenter through the ORDINARY artifact
+// API invalidates the augmentation index, so the downstream
+// `EffectiveExportSet` fingerprint transitions and a stale-fingerprint
+// view refuses the cached entry. Drives the REAL publish path
+// (`FileArtifactStore::insert_artifacts`) — NO direct index-refresh
+// call — so it characterizes production lifecycle behavior.
 // ────────────────────────────────────────────────────────────────
 
 #[test]
-fn augmenter_set_refresh_invalidates_downstream() {
+fn augmenter_publish_invalidates_downstream_via_artifact_api() {
     let store = FileArtifactStore::new();
 
     // Step 1 — workspace starts with only the primary augmenter.
@@ -508,22 +513,18 @@ fn augmenter_set_refresh_invalidates_downstream() {
     let initial_fingerprint = effective_initial.augmenter_set_fingerprint;
     assert_eq!(effective_initial.augmenter_count, 1);
 
-    // Step 2 — load the secondary augmenter. The new artifact's
-    // augmentations target the same `"vue"` specifier so the
-    // augmentation index for the queried target refreshes — the
-    // fingerprint transitions.
-    let secondary_key = insert_artifact_from_fixture(
+    // Step 2 — publish the secondary augmenter through the ORDINARY
+    // artifact API. The new artifact's augmentations target the same
+    // `"vue"` specifier, so the publish invalidates the augmentation
+    // index entry for that target (lifecycle coherence rail) — there is
+    // NO direct index-refresh call. The next `ensure` cold-rebuilds and
+    // the fingerprint transitions.
+    let _secondary_key = insert_artifact_from_fixture(
         &store,
         "/secondary-aug.ts",
         "module_augmentation_added_augmenter_secondary.ts",
         [32u8; 16],
     );
-    let secondary_artifacts = store
-        .get_artifacts(&secondary_key)
-        .expect("just-inserted artifact MUST be reachable");
-    store.refresh_augmentation_index_for_canonical(&secondary_key, &secondary_artifacts, |_, _| {
-        None
-    });
 
     // The previously-recorded fingerprint is now stale: a view that
     // refuses it should fail to validate the cached entry.
@@ -538,17 +539,22 @@ fn augmenter_set_refresh_invalidates_downstream() {
     let warm = route_db.get_effective_export_set(&key, &stale_view);
     assert!(
         warm.is_none(),
-        "augmenter-set refresh MUST invalidate downstream `EffectiveExportSet` \
+        "an augmenter-set change MUST invalidate the downstream `EffectiveExportSet` \
          consumer (G1) — the cached entry's `RouteSurface(ModuleAugmentationIndexShape)` \
          fact MUST fail validation under the stale fingerprint"
     );
 
-    // Step 3 — recompute under a view that knows the post-refresh
+    // Step 3 — recompute under a view that knows the post-publish
     // fingerprint (`new_fingerprint`) but rejects the stale one. The
     // new effective set MUST include BOTH augmenters.
     //
-    // First look up the current fingerprint from the augmentation
-    // index — this is what the view would snapshot in production.
+    // The publish in Step 2 INVALIDATED (dropped) the index entry, so the
+    // next `ensure` cold-rebuilds it from the now-current artifact corpus
+    // (base ∪ {secondary}) — this is exactly what the next production query
+    // does, and what a fresh view would then snapshot. A pre-fix tree (where
+    // `insert_artifacts` did NOT invalidate the index) warm-returns the stale
+    // 1-augmenter set here, so `new_fingerprint == initial_fingerprint` and
+    // the `assert_ne!` below FAILS.
     let new_target_key = AugmentationTargetKey {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
@@ -556,13 +562,18 @@ fn augmenter_set_refresh_invalidates_downstream() {
         population: verter_session::file_artifact_store::AugmentationPopulation::Base,
         target: target.clone(),
     };
-    let new_set = store
-        .get_augmenter_set(&new_target_key)
-        .expect("augmentation index MUST have an entry after refresh");
+    let new_set = store.ensure_augmentation_index_populated(&new_target_key, |_, _| None, None);
+    assert_eq!(
+        new_set.entries.len(),
+        2,
+        "publish MUST invalidate the index so the cold-rebuild includes BOTH \
+         augmenters; a stale warm entry was returned"
+    );
     let new_fingerprint = new_set.fingerprint;
     assert_ne!(
         new_fingerprint, initial_fingerprint,
-        "augmenter-set fingerprint MUST transition under refresh (G1)"
+        "augmenter-set fingerprint MUST transition after the new augmenter is \
+         published through the ordinary artifact API (G1)"
     );
 
     #[derive(Debug)]
@@ -1367,26 +1378,28 @@ fn session_overlay_augmenter_isolated_from_base_index() {
     );
 }
 
-/// A BASE augmenter change MUST invalidate the `Session`
-/// augmentation-index entries that include that base augmenter.
+/// Publishing a BASE augmenter through the ORDINARY artifact API MUST
+/// invalidate the `Session` augmentation-index entries that include that base
+/// augmenter — driven by the lifecycle coherence rail, NOT a direct
+/// index-refresh call.
 ///
 /// A `Session` augmenter set is base ∪ overlay, and
 /// [`FileArtifactStore::ensure_augmentation_index_populated`] warm-returns
-/// an existing set before rescanning. If
-/// `refresh_augmentation_index_for_canonical` SKIPS the `Session` entries,
-/// then when a base augmenter is added/edited the stale `Session` set
-/// lingers (its `ModuleAugmentationIndexShape` fingerprint never moves) and
-/// a later session `ensure` / `EffectiveExportSet` warm-hits WITHOUT the new
-/// base contributor.
+/// an existing set before rescanning. The `Session`-population key carries the
+/// overlay-set fingerprint, which a BASE membership change does NOT move — so
+/// without lifecycle invalidation the stale `Session` set lingers (its
+/// `ModuleAugmentationIndexShape` fingerprint never moves) and a later session
+/// `ensure` / `EffectiveExportSet` warm-hits WITHOUT the new base contributor.
 ///
-/// - **Pre-fix tree** (`refresh` `continue`s on every non-`Base` entry): the
-///   re-`ensure` warm-hits the stale base ∪ overlay set, so the newly added
-///   base augmenter `/aug-base-2.ts` is ABSENT — this test FAILS.
-/// - **Post-fix tree** (`refresh` invalidates the matching `Session`
-///   entries): the re-`ensure` cold-rescans base ∪ overlay, so the new base
-///   augmenter is PRESENT and overlay isolation is preserved — PASSES.
+/// - **Pre-fix tree** (`insert_artifacts` does NOT invalidate the index): the
+///   re-`ensure` warm-hits the stale base ∪ overlay set, so the newly
+///   published base augmenter `/aug-base-2.ts` is ABSENT — this test FAILS.
+/// - **Post-fix tree** (publish invalidates the matching `Base` AND `Session`
+///   entries population-agnostically): the re-`ensure` cold-rescans base ∪
+///   overlay, so the new base augmenter is PRESENT and overlay isolation is
+///   preserved — PASSES.
 #[test]
-fn base_augmenter_change_invalidates_session_augmentation_index() {
+fn base_augmenter_publish_invalidates_session_augmentation_index() {
     use verter_session::file_artifact_store::AugmentationPopulation;
 
     let store = FileArtifactStore::new();
@@ -1427,21 +1440,20 @@ fn base_augmenter_change_invalidates_session_augmentation_index() {
         "new base augmenter is not in the store yet; got {before:?}"
     );
 
-    // Add a NEW base augmenter for the same `"vue"` target, then refresh.
-    let new_base_key = insert_artifact_from_fixture(
+    // Publish a NEW base augmenter for the same `"vue"` target through the
+    // ORDINARY artifact API. The publish itself invalidates the matching
+    // index entries (base AND session) — there is NO direct index-refresh
+    // call.
+    let _new_base_key = insert_artifact_from_fixture(
         &store,
         "/aug-base-2.ts",
         "module_augmentation_external.ts",
         [22u8; 16],
     );
-    let new_base_artifacts = store
-        .get_artifacts(&new_base_key)
-        .expect("just-inserted base augmenter MUST be reachable");
-    store.refresh_augmentation_index_for_canonical(&new_base_key, &new_base_artifacts, |_, _| None);
 
     // Re-ensure the session entry. Post-fix the prior entry was
-    // invalidated, so this cold-rescans base ∪ overlay and picks up the new
-    // base augmenter. Pre-fix it warm-hits the stale set.
+    // invalidated by the publish, so this cold-rescans base ∪ overlay and
+    // picks up the new base augmenter. Pre-fix it warm-hits the stale set.
     let session_after = store.ensure_augmentation_index_populated(
         &session_key,
         |_, _| None,
@@ -1455,8 +1467,8 @@ fn base_augmenter_change_invalidates_session_augmentation_index() {
 
     assert!(
         after.contains(&"/aug-base-2.ts"),
-        "session augmentation index MUST reflect the added base augmenter after \
-         `refresh_augmentation_index_for_canonical`; a stale session entry was \
+        "session augmentation index MUST reflect the base augmenter published \
+         through the ordinary artifact API; a stale session entry was \
          warm-returned. got {after:?}"
     );
     // Overlay isolation preserved: base ∪ overlay still both present.
@@ -1478,6 +1490,146 @@ fn base_augmenter_change_invalidates_session_augmentation_index() {
     assert!(
         base_after_canonicals.contains(&"/aug-base-2.ts"),
         "base index must fold in the added base augmenter; got {base_after_canonicals:?}"
+    );
+}
+
+/// REMOVING a base augmenter through the ORDINARY evict API
+/// (`FileArtifactStore::remove_canonical`) MUST invalidate the index
+/// entry it contributed to, so the next `ensure` cold-rebuilds WITHOUT
+/// the removed augmenter.
+///
+/// - **Pre-fix tree** (`remove_canonical` does NOT invalidate the index):
+///   the re-`ensure` warm-hits the stale 2-augmenter set, so `/secondary.ts`
+///   is still PRESENT after removal — this test FAILS.
+/// - **Post-fix tree** (evict invalidates the index using the removed
+///   augmenter's facts): the re-`ensure` cold-rescans the now-current corpus
+///   and `/secondary.ts` is ABSENT — PASSES.
+#[test]
+fn base_augmenter_remove_invalidates_index_via_evict() {
+    use verter_session::file_artifact_store::AugmentationPopulation;
+
+    let store = FileArtifactStore::new();
+    let _primary = insert_artifact_from_fixture(
+        &store,
+        "/primary.ts",
+        "module_augmentation_external.ts",
+        [51u8; 16],
+    );
+    let _secondary = insert_artifact_from_fixture(
+        &store,
+        "/secondary.ts",
+        "module_augmentation_external.ts",
+        [52u8; 16],
+    );
+
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
+        target,
+    };
+
+    // Warm the index entry: base ∪ {primary, secondary}.
+    let before = store.ensure_augmentation_index_populated(&key, |_, _| None, None);
+    let before_canonicals: Vec<&str> = before
+        .entries
+        .iter()
+        .map(|e| e.canonical().as_ref())
+        .collect();
+    assert!(
+        before_canonicals.contains(&"/primary.ts") && before_canonicals.contains(&"/secondary.ts"),
+        "index must start with BOTH augmenters; got {before_canonicals:?}"
+    );
+
+    // Remove `/secondary.ts` through the ordinary evict API.
+    let removed = store.remove_canonical("/secondary.ts");
+    assert_eq!(removed, 1, "exactly one artifact key must be drained");
+
+    // Re-ensure: post-fix the evict invalidated the index, so this
+    // cold-rebuilds WITHOUT the removed augmenter.
+    let after = store.ensure_augmentation_index_populated(&key, |_, _| None, None);
+    let after_canonicals: Vec<&str> = after
+        .entries
+        .iter()
+        .map(|e| e.canonical().as_ref())
+        .collect();
+    assert!(
+        after_canonicals.contains(&"/primary.ts"),
+        "surviving augmenter must remain; got {after_canonicals:?}"
+    );
+    assert!(
+        !after_canonicals.contains(&"/secondary.ts"),
+        "removed augmenter MUST be dropped from the index after evict; a stale \
+         warm entry was returned. got {after_canonicals:?}"
+    );
+    assert_ne!(
+        before.fingerprint, after.fingerprint,
+        "augmenter-set fingerprint MUST transition after the evict"
+    );
+}
+
+/// Publishing a base augmenter through the PRODUCTION legacy publish
+/// primitive (`FileArtifactStore::insert`, the path
+/// `host_manage::prepared_decl` uses at materialisation time) MUST
+/// invalidate the index entry it contributes to.
+///
+/// This pins the EXACT production base-publish primitive (not just the
+/// content-addressed `insert_artifacts`): `insert` emits the augmentations
+/// from the `IndexedReady` via `FileArtifacts::with_indexed` and folds them
+/// through the same lifecycle coherence rail.
+///
+/// - **Pre-fix tree** (`insert` does NOT invalidate): the re-`ensure`
+///   warm-hits the stale 1-augmenter set — FAILS.
+/// - **Post-fix tree**: the publish invalidates, the re-`ensure`
+///   cold-rebuilds with both augmenters — PASSES.
+#[test]
+fn base_augmenter_legacy_insert_invalidates_index() {
+    use verter_session::file_artifact_store::AugmentationPopulation;
+
+    let store = FileArtifactStore::new();
+
+    // Publish the first augmenter through the legacy `insert` primitive.
+    let primary_raw = fixture("module_augmentation_external.ts");
+    store.insert(
+        Arc::from("/primary.ts"),
+        build_indexed_with_source(&primary_raw, [61u8; 16]),
+    );
+
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        population: AugmentationPopulation::Base,
+        target,
+    };
+
+    let before = store.ensure_augmentation_index_populated(&key, |_, _| None, None);
+    assert_eq!(
+        before.entries.len(),
+        1,
+        "index must start with exactly the first augmenter"
+    );
+
+    // Publish a SECOND augmenter through the same legacy primitive.
+    let secondary_raw = fixture("module_augmentation_external.ts");
+    store.insert(
+        Arc::from("/secondary.ts"),
+        build_indexed_with_source(&secondary_raw, [62u8; 16]),
+    );
+
+    let after = store.ensure_augmentation_index_populated(&key, |_, _| None, None);
+    let after_canonicals: Vec<&str> = after
+        .entries
+        .iter()
+        .map(|e| e.canonical().as_ref())
+        .collect();
+    assert!(
+        after_canonicals.contains(&"/primary.ts") && after_canonicals.contains(&"/secondary.ts"),
+        "legacy `insert` publish MUST invalidate the index so the cold-rebuild \
+         folds in the new augmenter; got {after_canonicals:?}"
     );
 }
 
