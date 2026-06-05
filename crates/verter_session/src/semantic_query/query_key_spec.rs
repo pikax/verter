@@ -343,8 +343,10 @@ pub struct SemanticQueryKeySpec {
     pub env_dims: EnvDimMask,
     /// Which [`DemandAxis`] this family branches on.
     pub allowed_demand: AxisMask,
-    /// The per-key `*_do_not_warm_hit` cross-context guard name — empty for
-    /// current rows (populated when a key gains its dedicated guard).
+    /// The per-key `*_do_not_warm_hit` cross-context guard name — populated for
+    /// the class-surface / ambient-namespace / enum / overload-set rows (each
+    /// carries its dedicated `*_do_not_warm_hit` guard) and empty (`—`) for the
+    /// rest.
     pub cross_context_guard: &'static str,
     /// The admission / budget discriminant for the cold build.
     pub admission: AdmissionSpec,

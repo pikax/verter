@@ -1,8 +1,8 @@
 //! U2B.5 guards — the class / namespace / enum / overload key surface.
 //!
-//! These tests pin the IDENTITY contract of the four new
-//! [`SemanticQueryKey`] variants (`ResolveClassSurface`,
-//! `ResolveAmbientNamespace`, `ResolveEnum`, `ResolveOverloadSet`), the
+//! These tests pin the IDENTITY contract of the
+//! [`SemanticQueryKey`] variants `ResolveClassSurface`,
+//! `ResolveAmbientNamespace`, `ResolveEnum`, and `ResolveOverloadSet`, the
 //! `SemanticSymbolSpace::Namespace` arm, and the class dual-space routing
 //! through the ONE shared engine.
 //!

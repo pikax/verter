@@ -72,12 +72,21 @@ use crate::semantic_query::{
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
-// Phase D §5.2 WIP-Split — module tree. Extracted sub-modules are `pub(crate)`
-// so external callers see only the `ProjectSemanticDispatch` struct / trait
-// impl. Stub sub-modules (`build`, `guards`, `enumerate`, `relation`, `lower`,
-// `substitute`, `evaluate`, `origin`) are placeholders for the extractions
-// performed in §5.3–§5.10; for now the corresponding content still lives in
-// this `mod.rs`.
+// Module tree. The sub-modules are `pub(crate)` so external callers see only
+// the `ProjectSemanticDispatch` struct / trait impl, while each module owns one
+// concern of the dispatcher and shares private accessors through `impl` blocks:
+//   - `build`     — the `build_*` builders for every query variant that
+//                   produces a new `SemanticNodeId` (`build_resolve_decl`,
+//                   `build_typeof`, `build_instantiate`, `build_class_surface`,
+//                   `build_resolve_macro_payload`, …).
+//   - `lower` / `raise` — `TypeExpr` ⇄ `SemanticNodeId` structural conversion.
+//   - `walk`      — path-walking + the non-recursive shallow-mode terminal
+//                   surface synthesiser.
+//   - `enumerate` — `keyof` member-name enumeration helpers.
+//   - `evaluate`  — the deferred-shell fix-point evaluation loop.
+//   - `substitute`— generic type-parameter substitution into the graph.
+//   - `relation`  — the authoritative semantic-node assignability engine.
+// `mod.rs` retains the dispatch entry points and shared dispatcher state.
 pub(crate) mod build;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
@@ -1161,10 +1170,12 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         // `CacheRead`; `execute_read` keeps them.
         //
         // The helper resolves to a bare node id; wrap it into the
-        // domain-agnostic value here at the public boundary. Every live
-        // key resolves to a type, so the value is always `TypeNode`. The
-        // boundary provenance is `clean` — a wrapper only, never a cached
-        // semantic fact.
+        // domain-agnostic value here at the public boundary. This wrap
+        // fires ONLY on the `Value` arm, so the value is always `TypeNode`;
+        // the non-producing keys (`Relate`, `ResolveOverloadSet`) return
+        // `Error(Miss)` and never reach the wrap, which keeps the
+        // unconditional `TypeNode` wrap correct. The boundary provenance is
+        // `clean` — a wrapper only, never a cached semantic fact.
         match self.execute_via_cold_build_helper(key).value {
             QueryResult::Value(node) => QueryResult::Value(SemanticQueryOutput {
                 value: SemanticQueryValue::TypeNode(node),

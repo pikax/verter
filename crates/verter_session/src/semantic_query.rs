@@ -1690,11 +1690,14 @@ pub enum QueryResult<T> {
 
 /// Canonical typed value a semantic query resolves to.
 ///
-/// Every live [`SemanticQueryKey`] produces [`TypeNode`](Self::TypeNode):
-/// the interned graph node id for the resolved type. The other arms are
-/// shells with no live producer — overload sets, flow / contextual program
-/// analysis, declaration / augmentation analysis, and relations. They carry
-/// honest data shapes so the value domain is closed and exhaustive.
+/// Every live [`SemanticQueryKey`] that PRODUCES a value produces
+/// [`TypeNode`](Self::TypeNode): the interned graph node id for the resolved
+/// type. The non-producing keys (`Relate`, `ResolveOverloadSet`) return `Miss`
+/// and forward-declare the `Relation` / `OverloadSet` domains they will produce
+/// once their reducers land. The remaining arms are shells with no live
+/// producer — flow / contextual program analysis, declaration / augmentation
+/// analysis, and diagnostic analysis. They carry honest data shapes so the
+/// value domain is closed and exhaustive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SemanticQueryValue {
     /// The interned graph node id for the resolved type — the only domain a
@@ -3147,8 +3150,10 @@ pub trait SemanticGraphRead {
 pub trait SemanticQueryApi {
     /// Canonical entry point. Returns the domain-agnostic
     /// [`SemanticQueryValue`] wrapped with the provenance of the producing
-    /// work. Every live key resolves to [`SemanticQueryValue::TypeNode`];
-    /// callers that want the node narrow with [`execute_type_node`].
+    /// work. Every live key that produces a value resolves to
+    /// [`SemanticQueryValue::TypeNode`]; the non-producing keys (`Relate`,
+    /// `ResolveOverloadSet`) return `Miss`. Callers that want the node narrow
+    /// with [`execute_type_node`].
     ///
     /// [`execute_type_node`]: Self::execute_type_node
     fn execute(
