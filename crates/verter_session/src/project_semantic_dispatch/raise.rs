@@ -225,6 +225,8 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::ResolveOverloadSet { .. } => "ResolveOverloadSet",
         SemanticQueryKey::ApparentType { .. } => "ApparentType",
         SemanticQueryKey::TemplateLiteralReduce { .. } => "TemplateLiteralReduce",
+        SemanticQueryKey::FlowNarrowingAt { .. } => "FlowNarrowingAt",
+        SemanticQueryKey::ContextualTypeAt { .. } => "ContextualTypeAt",
     }
 }
 

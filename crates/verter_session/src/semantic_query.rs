@@ -2456,6 +2456,54 @@ pub enum SemanticQueryKey {
         args: Arc<[SemanticNodeId]>,
         context: TemplateLiteralReduceContext,
     },
+    /// Resolve the FLOW-NARROWED type of the value referenced at `point` —
+    /// the type after control-flow analysis has applied the type guards
+    /// dominating that program point (e.g. inside `if (typeof x ===
+    /// "string")` the narrowed type of `x` is `string`).
+    ///
+    /// `point` is the [`ProgramPointId`] identity core (the substitution
+    /// axis is already fixed by the enclosing context, so there is NO
+    /// separate `args` field and NO `mode` field); `context` carries the
+    /// full `{P, R, T, L, J}` env the narrowing depends on (see
+    /// [`ProgramAnalysisContext`]).
+    ///
+    /// **Non-producing.** This variant has no `execute`-side producer: the
+    /// flow engine that walks the control-flow graph and applies guard
+    /// narrowing does not exist yet (it lands in U6). The `execute` build
+    /// arm returns [`QueryError::Miss`] (`Opaque(Miss)`) verbatim and never
+    /// admits or caches a value (admission
+    /// [`AdmissionSpec::NonProducingPendingReducer`]). Value domain:
+    /// [`SemanticQueryValueTag::ProgramAnalysis`]. Fabricating a narrowed
+    /// node here would be a stub — `Miss` is the honest non-result.
+    ///
+    /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
+    FlowNarrowingAt {
+        point: ProgramPointId,
+        context: ProgramAnalysisContext,
+    },
+    /// Resolve the CONTEXTUAL (expected) type at `point` — the type the
+    /// surrounding context expects an expression at that position to have
+    /// (e.g. the parameter type a callee expects for an argument position,
+    /// or the declared type an initializer is checked against).
+    ///
+    /// `point` is the [`ProgramPointId`] identity core (no `args`, no `mode`
+    /// — the contextual type is fixed by the program point); `context`
+    /// carries the full `{P, R, T, L, J}` env (see
+    /// [`ProgramAnalysisContext`]).
+    ///
+    /// **Non-producing.** This variant has no `execute`-side producer: the
+    /// contextual-typing engine that derives the expected type from the
+    /// surrounding syntax lands in U6. The `execute` build arm returns
+    /// [`QueryError::Miss`] (`Opaque(Miss)`) verbatim and never admits or
+    /// caches a value (admission
+    /// [`AdmissionSpec::NonProducingPendingReducer`]). Value domain:
+    /// [`SemanticQueryValueTag::ProgramAnalysis`].
+    ///
+    /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
+    ContextualTypeAt {
+        point: ProgramPointId,
+        context: ProgramAnalysisContext,
+    },
 }
 
 /// Content-free discriminant for [`SemanticQueryKey`] — the variant identity
@@ -2493,6 +2541,8 @@ pub enum SemanticQueryKeyTag {
     ResolveOverloadSet,
     ApparentType,
     TemplateLiteralReduce,
+    FlowNarrowingAt,
+    ContextualTypeAt,
 }
 
 impl SemanticQueryKeyTag {
@@ -2520,6 +2570,8 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::ResolveOverloadSet,
         SemanticQueryKeyTag::ApparentType,
         SemanticQueryKeyTag::TemplateLiteralReduce,
+        SemanticQueryKeyTag::FlowNarrowingAt,
+        SemanticQueryKeyTag::ContextualTypeAt,
     ];
 
     /// The EXACT `SemanticQueryKey` variant identifier this tag names. The
@@ -2549,6 +2601,8 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::ResolveOverloadSet => "ResolveOverloadSet",
             SemanticQueryKeyTag::ApparentType => "ApparentType",
             SemanticQueryKeyTag::TemplateLiteralReduce => "TemplateLiteralReduce",
+            SemanticQueryKeyTag::FlowNarrowingAt => "FlowNarrowingAt",
+            SemanticQueryKeyTag::ContextualTypeAt => "ContextualTypeAt",
         }
     }
 }
@@ -2590,6 +2644,8 @@ impl SemanticQueryKey {
             SemanticQueryKey::TemplateLiteralReduce { .. } => {
                 SemanticQueryKeyTag::TemplateLiteralReduce
             }
+            SemanticQueryKey::FlowNarrowingAt { .. } => SemanticQueryKeyTag::FlowNarrowingAt,
+            SemanticQueryKey::ContextualTypeAt { .. } => SemanticQueryKeyTag::ContextualTypeAt,
         }
     }
 }

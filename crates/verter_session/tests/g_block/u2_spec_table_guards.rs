@@ -141,14 +141,20 @@ fn semantic_query_key_spec_table_equals_enum() {
         let expected_domain = match spec.variant {
             SemanticQueryKeyTag::Relate => SemanticQueryValueTag::Relation,
             SemanticQueryKeyTag::ResolveOverloadSet => SemanticQueryValueTag::OverloadSet,
+            // Flow narrowing + contextual typing carry the program-analysis
+            // value domain (the narrowed / contextual node), NOT `TypeNode`.
+            SemanticQueryKeyTag::FlowNarrowingAt | SemanticQueryKeyTag::ContextualTypeAt => {
+                SemanticQueryValueTag::ProgramAnalysis
+            }
             _ => SemanticQueryValueTag::TypeNode,
         };
         assert_eq!(
             spec.value_domain,
             expected_domain,
             "value-domain mismatch for `{}`: `Relate` must be `Relation`, \
-             `ResolveOverloadSet` must be `OverloadSet`, and every other live \
-             key must be `TypeNode`",
+             `ResolveOverloadSet` must be `OverloadSet`, `FlowNarrowingAt` / \
+             `ContextualTypeAt` must be `ProgramAnalysis`, and every other \
+             live key must be `TypeNode`",
             spec.variant.name()
         );
     }

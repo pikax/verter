@@ -850,18 +850,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     context,
                 } => self.build_template_literal_reduce(pattern, args, *context),
                 // ResolveAmbientNamespace / ResolveEnum / ResolveOverloadSet /
-                // ApparentType — non-producing: these variants have no
-                // execute-side reducer. The build returns `Opaque(Miss)`
-                // verbatim (mirroring the `Relate` arm above); an `Error`
-                // result is never warm-published, so nothing is admitted or
-                // cached. Returning an empty `OverloadSet` for
-                // `ResolveOverloadSet` — or a fabricated apparent surface for
-                // `ApparentType` (whose lib-member index does not exist yet) —
-                // would be a stub; `Miss` is the honest non-result.
+                // ApparentType / FlowNarrowingAt / ContextualTypeAt —
+                // non-producing: these variants have no execute-side reducer.
+                // The build returns `Opaque(Miss)` verbatim (mirroring the
+                // `Relate` arm above); an `Error` result is never
+                // warm-published, so nothing is admitted or cached. Returning
+                // an empty `OverloadSet` for `ResolveOverloadSet` — a
+                // fabricated apparent surface for `ApparentType` (whose
+                // lib-member index does not exist yet) — or a fabricated
+                // narrowed / contextual node for `FlowNarrowingAt` /
+                // `ContextualTypeAt` (whose flow / contextual engines land in
+                // U6) — would be a stub; `Miss` is the honest non-result.
                 SemanticQueryKey::ResolveAmbientNamespace { .. }
                 | SemanticQueryKey::ResolveEnum { .. }
                 | SemanticQueryKey::ResolveOverloadSet { .. }
-                | SemanticQueryKey::ApparentType { .. } => {
+                | SemanticQueryKey::ApparentType { .. }
+                | SemanticQueryKey::FlowNarrowingAt { .. }
+                | SemanticQueryKey::ContextualTypeAt { .. } => {
                     let fence = self.project_generation_signature();
                     (QueryResult::Error(QueryError::Miss), fence).into()
                 }

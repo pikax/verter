@@ -277,7 +277,9 @@ pub fn record_outer_call_type_expr(expr: &verter_type_expr::TypeExpr) {
 ///  17 = ResolveOverloadSet
 ///  18 = ApparentType
 ///  19 = TemplateLiteralReduce
-pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 20;
+///  20 = FlowNarrowingAt
+///  21 = ContextualTypeAt
+pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 22;
 
 /// Human-readable labels for each operator-kind index. Kept in sync
 /// with the comment on `DISPATCH_OPERATOR_KIND_COUNT` and with the
@@ -303,14 +305,19 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
     "ResolveOverloadSet",
     "ApparentType",
     "TemplateLiteralReduce",
+    "FlowNarrowingAt",
+    "ContextualTypeAt",
 ];
 
 /// Per-kind call counts. `dispatch_operator_with_recurse` increments
 /// the matching index on entry. Sum across all indices equals
 /// `DISPATCH_OPERATOR_WITH_RECURSE_CALLS`.
 pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
-    // 18 = ApparentType, 19 = TemplateLiteralReduce (all zero-initialised;
-    // order within the array is immaterial — `kind_index_for_key` keys it).
+    // 18 = ApparentType, 19 = TemplateLiteralReduce, 20 = FlowNarrowingAt,
+    // 21 = ContextualTypeAt (all zero-initialised; order within the array is
+    // immaterial — `kind_index_for_key` keys it).
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -339,8 +346,11 @@ pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUN
 /// function entry / exit. Sum across all indices is approximately
 /// `DISPATCH_OPERATOR_TOTAL_NS`.
 pub static DISPATCH_OPERATOR_KIND_NS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
-    // 18 = ApparentType, 19 = TemplateLiteralReduce (all zero-initialised;
-    // order within the array is immaterial — `kind_index_for_key` keys it).
+    // 18 = ApparentType, 19 = TemplateLiteralReduce, 20 = FlowNarrowingAt,
+    // 21 = ContextualTypeAt (all zero-initialised; order within the array is
+    // immaterial — `kind_index_for_key` keys it).
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -512,6 +522,8 @@ pub fn kind_index_for_key(key: &crate::semantic_query::SemanticQueryKey) -> usiz
         SemanticQueryKey::ResolveOverloadSet { .. } => 17,
         SemanticQueryKey::ApparentType { .. } => 18,
         SemanticQueryKey::TemplateLiteralReduce { .. } => 19,
+        SemanticQueryKey::FlowNarrowingAt { .. } => 20,
+        SemanticQueryKey::ContextualTypeAt { .. } => 21,
     }
 }
 
@@ -1064,6 +1076,32 @@ mod tests {
                 project_identity: 0,
             },
         };
+        let flow_narrowing_at = SemanticQueryKey::FlowNarrowingAt {
+            point: crate::semantic_query::ProgramPointId {
+                canonical_id: Arc::from("f.ts"),
+                offset: 0,
+            },
+            context: crate::semantic_query::ProgramAnalysisContext {
+                parse_env_hash: Default::default(),
+                resolve_env_hash: Default::default(),
+                type_env_hash: Default::default(),
+                lib_env_hash: Default::default(),
+                project_identity: 0,
+            },
+        };
+        let contextual_type_at = SemanticQueryKey::ContextualTypeAt {
+            point: crate::semantic_query::ProgramPointId {
+                canonical_id: Arc::from("f.ts"),
+                offset: 0,
+            },
+            context: crate::semantic_query::ProgramAnalysisContext {
+                parse_env_hash: Default::default(),
+                resolve_env_hash: Default::default(),
+                type_env_hash: Default::default(),
+                lib_env_hash: Default::default(),
+                project_identity: 0,
+            },
+        };
 
         // Discriminating: each of these MUST hit a distinct index in
         // the kind table; if any two collide the test fails.
@@ -1084,8 +1122,12 @@ mod tests {
             kind_index_for_key(&overload_set),
             kind_index_for_key(&apparent_type),
             kind_index_for_key(&template_literal_reduce),
+            kind_index_for_key(&flow_narrowing_at),
+            kind_index_for_key(&contextual_type_at),
         ];
-        let expected = [0usize, 1, 2, 3, 4, 6, 8, 9, 10, 12, 14, 15, 16, 17, 18, 19];
+        let expected = [
+            0usize, 1, 2, 3, 4, 6, 8, 9, 10, 12, 14, 15, 16, 17, 18, 19, 20, 21,
+        ];
         assert_eq!(observed, expected);
         // No off-by-one in the static label table:
         assert_eq!(

@@ -369,6 +369,23 @@ fn env_structural() -> EnvDimMask {
     EnvDimMask::from_dims(&[EnvDim::Type, EnvDim::Lib, EnvDim::Project])
 }
 
+/// The FULL env set `{P, R, T, L, J}` — the widest-env tier (design §2.1
+/// tier-1). Used by the program-analysis keys (`FlowNarrowingAt` /
+/// `ContextualTypeAt`): flow narrowing and contextual typing walk the
+/// program point's parsed body / control-flow skeleton (so they DO depend on
+/// `parse_env`, unlike the structural reducers), resolve imported references
+/// on their own step (`resolve_env`), and are governed by the type / lib /
+/// project env.
+fn env_full() -> EnvDimMask {
+    EnvDimMask::from_dims(&[
+        EnvDim::Parse,
+        EnvDim::Resolve,
+        EnvDim::Type,
+        EnvDim::Lib,
+        EnvDim::Project,
+    ])
+}
+
 /// The demand axes a [`ProjectionMode`](crate::semantic_query::ProjectionMode)
 /// spans — the union of the axes on which the five projection rungs differ.
 ///
@@ -775,6 +792,46 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "template_literal_reduce_do_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
+        },
+        // FlowNarrowingAt { point, context } — resolves the flow-narrowed
+        // type of the value referenced at a program point (the type after
+        // control-flow guard narrowing). Program analysis is the
+        // widest-env operation: it walks the program point's parsed body /
+        // control-flow skeleton (`P`), resolves imported references on its
+        // own step (`R`), and is governed by the type / lib / project env
+        // (`T L J`) — so the FULL `P R T L J` set. The key has NO slot, so
+        // these env dims ride IN the context. Value domain is
+        // `ProgramAnalysis` (NOT `TypeNode`): the narrowed/contextual node
+        // is the program-analysis carrier. Non-producing: the flow engine
+        // lands in U6, so the execute arm returns Miss and never
+        // admits/caches (a fabricated narrowed node would be a stub). No
+        // `mode` and no DemandAxis — narrowing is not a projection-rung
+        // operation, so `allowed_demand` is empty.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::FlowNarrowingAt,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "ProgramAnalysisContext",
+            value_domain: SemanticQueryValueTag::ProgramAnalysis,
+            env_dims: env_full(),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "flow_narrowing_at_do_not_warm_hit",
+            admission: AdmissionSpec::NonProducingPendingReducer,
+        },
+        // ContextualTypeAt { point, context } — resolves the contextual
+        // (expected) type at a program point. Same env tier and shape as
+        // FlowNarrowingAt: FULL `P R T L J` (parses the surrounding syntax,
+        // resolves imported contextual signatures), no slot (env in the
+        // context), `ProgramAnalysis` value domain, empty `allowed_demand`.
+        // Non-producing: the contextual-typing engine lands in U6.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ContextualTypeAt,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "ProgramAnalysisContext",
+            value_domain: SemanticQueryValueTag::ProgramAnalysis,
+            env_dims: env_full(),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "contextual_type_at_do_not_warm_hit",
+            admission: AdmissionSpec::NonProducingPendingReducer,
         },
     ]
 }

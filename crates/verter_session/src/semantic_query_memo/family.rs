@@ -285,6 +285,38 @@ pub(super) enum FamilyKey {
         lib_env_hash: crate::semantic_query::HashValue,
         project_identity: u32,
     },
+    /// Mode-erased `FlowNarrowingAt` identity. The [`ProgramPointId`]
+    /// (`canonical_id` + `offset`) is the identity core; the context's full
+    /// `{P, R, T, L, J}` env dims ride here ON the family key (env hashes,
+    /// NOT content/version hashes — R6-clean). Non-producing (the flow
+    /// engine lands in U6): the execute path returns `Opaque(Miss)` and
+    /// nothing is ever admitted under this family; like `Relate`, the
+    /// variant exists so `family_and_slot` stays total and honest.
+    ///
+    /// [`ProgramPointId`]: crate::semantic_query::ProgramPointId
+    FlowNarrowingAt {
+        point: crate::semantic_query::ProgramPointId,
+        parse_env_hash: crate::semantic_query::HashValue,
+        resolve_env_hash: crate::semantic_query::HashValue,
+        type_env_hash: crate::semantic_query::HashValue,
+        lib_env_hash: crate::semantic_query::HashValue,
+        project_identity: u32,
+    },
+    /// Mode-erased `ContextualTypeAt` identity. Same shape as
+    /// [`FlowNarrowingAt`](Self::FlowNarrowingAt): the [`ProgramPointId`] is
+    /// the identity core and the full `{P, R, T, L, J}` env dims ride here
+    /// (env hashes, R6-clean). Non-producing (the contextual engine lands in
+    /// U6).
+    ///
+    /// [`ProgramPointId`]: crate::semantic_query::ProgramPointId
+    ContextualTypeAt {
+        point: crate::semantic_query::ProgramPointId,
+        parse_env_hash: crate::semantic_query::HashValue,
+        resolve_env_hash: crate::semantic_query::HashValue,
+        type_env_hash: crate::semantic_query::HashValue,
+        lib_env_hash: crate::semantic_query::HashValue,
+        project_identity: u32,
+    },
 }
 
 /// Per-family slot selector. For non-mode variants only `Single` is used;
@@ -1036,6 +1068,35 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             FamilyKey::TemplateLiteralReduce {
                 pattern: Arc::clone(pattern),
                 args: Arc::clone(args),
+                resolve_env_hash: context.resolve_env_hash,
+                type_env_hash: context.type_env_hash,
+                lib_env_hash: context.lib_env_hash,
+                project_identity: context.project_identity,
+            },
+            ModeSlot::Single,
+        ),
+        // FlowNarrowingAt — non-producing. No projection mode → the `Single`
+        // slot. The full `{P, R, T, L, J}` env dims ride on the family key
+        // (the key has no slot to carry them); the `ProgramPointId` is
+        // carried VERBATIM as the identity core.
+        SemanticQueryKey::FlowNarrowingAt { point, context } => (
+            FamilyKey::FlowNarrowingAt {
+                point: point.clone(),
+                parse_env_hash: context.parse_env_hash,
+                resolve_env_hash: context.resolve_env_hash,
+                type_env_hash: context.type_env_hash,
+                lib_env_hash: context.lib_env_hash,
+                project_identity: context.project_identity,
+            },
+            ModeSlot::Single,
+        ),
+        // ContextualTypeAt — non-producing. Same shape as FlowNarrowingAt:
+        // `Single` slot, full `{P, R, T, L, J}` env on the family key,
+        // `ProgramPointId` as the verbatim identity core.
+        SemanticQueryKey::ContextualTypeAt { point, context } => (
+            FamilyKey::ContextualTypeAt {
+                point: point.clone(),
+                parse_env_hash: context.parse_env_hash,
                 resolve_env_hash: context.resolve_env_hash,
                 type_env_hash: context.type_env_hash,
                 lib_env_hash: context.lib_env_hash,
