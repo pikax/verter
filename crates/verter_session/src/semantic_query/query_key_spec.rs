@@ -358,9 +358,10 @@ pub struct SemanticQueryKeySpec {
     /// Which [`DemandAxis`] this family branches on.
     pub allowed_demand: AxisMask,
     /// The per-key `*_do_not_warm_hit` cross-context guard name — populated for
-    /// the class-surface / ambient-namespace / enum / overload-set rows (each
-    /// carries its dedicated `*_do_not_warm_hit` guard) and empty (`—`) for the
-    /// rest.
+    /// every U2B.5/6/7 spine row (class-surface / ambient-namespace / enum /
+    /// overload-set / apparent-type / template-literal-reduce / flow-narrowing /
+    /// contextual-type — each carries its dedicated `*_do_not_warm_hit` guard)
+    /// and empty (`—`) for the rest.
     pub cross_context_guard: &'static str,
     /// The admission / budget discriminant for the cold build.
     pub admission: AdmissionSpec,
@@ -819,7 +820,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "template_literal_reduce_do_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
         },
-        // FlowNarrowingAt { point, context } — resolves the flow-narrowed
+        // FlowNarrowingAt { point, flow, context } — resolves the flow-narrowed
         // type of the value referenced at a program point (the type after
         // control-flow guard narrowing). Program analysis is the
         // widest-env operation: it walks the program point's parsed body /
@@ -832,7 +833,10 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         // lands in U6, so the execute arm returns Miss and never
         // admits/caches (a fabricated narrowed node would be a stub). No
         // `mode` and no DemandAxis — narrowing is not a projection-rung
-        // operation, so `allowed_demand` is empty.
+        // operation, so `allowed_demand` is empty. The per-variant
+        // `flow: FlowNarrowingKey` axis (a key field, NOT a DemandAxis) plus the
+        // shared `substitution` axis on `ProgramAnalysisContext` complete the
+        // identity.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::FlowNarrowingAt,
             lifecycle: KeyLifecycle::Live,
@@ -843,12 +847,15 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "flow_narrowing_at_do_not_warm_hit",
             admission: AdmissionSpec::NonProducingPendingReducer,
         },
-        // ContextualTypeAt { point, context } — resolves the contextual
+        // ContextualTypeAt { point, contextual, context } — resolves the contextual
         // (expected) type at a program point. Same env tier and shape as
         // FlowNarrowingAt: FULL `P R T L J` (parses the surrounding syntax,
         // resolves imported contextual signatures), no slot (env in the
         // context), `ProgramAnalysis` value domain, empty `allowed_demand`.
-        // Non-producing: the contextual-typing engine lands in U6.
+        // Non-producing: the contextual-typing engine lands in U6. The
+        // per-variant `contextual: ContextualTypingKey` axis (a key field, NOT a
+        // DemandAxis) plus the shared `substitution` axis on
+        // `ProgramAnalysisContext` complete the identity.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::ContextualTypeAt,
             lifecycle: KeyLifecycle::Live,

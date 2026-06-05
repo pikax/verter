@@ -830,7 +830,9 @@ there is one flow/narrowing axis space and one contextual-typing axis space shar
 across the call, flow-return, and program-analysis keys. `ContextualTypeAt` and
 `FlowNarrowingAt` are nodes on the ONE shared `CheckerReentryGraph` (§4.2)
 alongside `ResolveCall` and `FlowReturn` — each keyed by its full normalized
-`ProgramAnalysisContext + ProgramPointId` identity — so a contextual / narrowing
+`ProgramPointId + ProgramAnalysisContext + the per-variant flow / contextual key`
+identity (`FlowNarrowingAt` carries `flow: FlowNarrowingKey`, `ContextualTypeAt`
+carries `contextual: ContextualTypingKey`) — so a contextual / narrowing
 re-entry on the mutual-recursion cycle records the in-flight re-entry assumption
 rather than self-awaiting; and contextual-callback inference at such a point runs
 inside the active `InferenceSession` (§4.2), not a private callback-inference loop.
@@ -1497,7 +1499,9 @@ beneath them), carried on the `CheckerTransaction.reentry_stack`:
   keyed by the FULL normalized identity of its query: a `FlowReturn` node by
   `FlowReturnContext + ReturnProjectionDemand + FlowInputContext` (§2.5, §5), a
   `ResolveCall` node by the full `ResolveCall` identity (§2.4), a `ContextualTypeAt`
-  / `FlowNarrowingAt` node by its `ProgramAnalysisContext` + `ProgramPointId`
+  / `FlowNarrowingAt` node by its `ProgramPointId` + `ProgramAnalysisContext` PLUS
+  its per-variant key axis (`FlowNarrowingAt` carries `flow: FlowNarrowingKey`,
+  `ContextualTypeAt` carries `contextual: ContextualTypingKey`)
   (§2.8). The re-entry stack is the single shared cycle-id space — the per-flow
   cycle space (§5) and the relation assumption stack (§4.1) are the relation /
   flow-typed views of this one shared stack, not separate spaces that could

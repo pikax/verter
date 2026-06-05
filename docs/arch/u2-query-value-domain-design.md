@@ -30,7 +30,8 @@
 > relation result is `SemanticQueryValue::Relation(RelationPayload)` (`:1726`). `ProjectionMode`
 > (L608) is the coarse five-rung enum; `ReductionDemand` (L646) is Published/StructuralTransit/
 > MacroObjectSurface; `ModeSlot` (family.rs L224) is the per-slot selector. `SemanticSymbolSpace`
-> (L265) is `Type|Value` only. `QueryError` (L1443) carries `Miss / UnsupportedIntrinsic /
+> (L265) is `Type|Value|Namespace` (U2B.5 added `Namespace` as a real slot
+> discriminator). `QueryError` (L1443) carries `Miss / UnsupportedIntrinsic /
 > BudgetExceeded / UnstableState / AliasCycle / RecursiveRef / Other / DeclPlaceholder`;
 > `SemanticNodeData::Opaque(QueryError)` (L1820) is the boundary error carrier.
 >
