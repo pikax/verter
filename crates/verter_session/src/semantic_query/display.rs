@@ -480,7 +480,7 @@ fn display_signature(
 fn display_relation(payload: &RelationPayload) -> DisplayString {
     let token = match &payload.outcome {
         RelationOutcome::Assignable => "true",
-        RelationOutcome::NotAssignable { .. } => "false",
+        RelationOutcome::NotAssignable => "false",
         RelationOutcome::BudgetExceeded(_) => "budget-exceeded",
     };
     DisplayString(token.to_string())

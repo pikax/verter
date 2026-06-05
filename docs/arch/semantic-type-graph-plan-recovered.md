@@ -3103,6 +3103,8 @@ message UnsupportedDowngradedFromNewerSchema {
 
 ### A.9 RelationOutcome — Closed Reason With Deterministic Priority
 
+> **SUPERSEDED** by `u2-relation-infer-design.md` Decision 4: the public `RelationOutcome::NotAssignable` is FIELD-LESS (no `primary_reason` / `secondary_reasons`) and there is no public `Unknown` arm; the failure reason (`RelationFailureCode`) plus the content-free failing sub-relation ride the payload-side `RelationProof::NotAssignable` table entry. The enriched `NotAssignable` and the `Unknown` arm shown below are the pre-Decision-4 shape, retained here for history.
+
 ```rust
 pub enum RelationFailureReason {
     ParameterContravariance { parameter_index: u32 },

@@ -1828,33 +1828,41 @@ pub struct RelationPayload {
 /// public — so [`display_relation`](crate::semantic_query::display) can render
 /// it — yet is `ReturnOnly` at the admission gate: expressible, never
 /// warm-admitted.
+///
+/// The outcome is the MINIMAL public discriminant. `NotAssignable` is
+/// FIELD-LESS by design (Decision 4): the failure reason and the failing
+/// structural sub-relation do NOT ride the outcome — they live OFF the value on
+/// the payload-side [`RelationProof::NotAssignable`] table entry
+/// ([`RelationFailureCode`] + content-free [`SubRelationRef`]). Keeping the
+/// reason off the outcome is load-bearing for the negative carve-out: a
+/// published `NotAssignable` proof is content-free and never leaks a transient
+/// `SessionId`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelationOutcome {
     /// The source relates to the target.
     Assignable,
-    /// The source provably does NOT relate to the target. `primary_reason` is
-    /// the highest-priority failure under the deterministic priority order of
-    /// [`RelationFailureReason`]; `secondary_reasons` are the remaining failures
-    /// in that same order.
-    NotAssignable {
-        primary_reason: RelationFailureReason,
-        secondary_reasons: Arc<[RelationFailureReason]>,
-    },
+    /// The source provably does NOT relate to the target. FIELD-LESS: the
+    /// failure reason ([`RelationFailureCode`]) and failing structural
+    /// sub-relation ride the payload-side [`RelationProof::NotAssignable`] table
+    /// entry, never the outcome itself (design "Decision 4").
+    NotAssignable,
     /// A budget / recursion cap stopped the relate before it decided.
     /// PUBLIC-but-never-warm: expressible and rendered, gated `ReturnOnly`.
     BudgetExceeded(BudgetExceededKind),
 }
 
-/// Closed set of reasons a relation provably fails, in DETERMINISTIC PRIORITY
-/// ORDER: declaration order IS priority, fastest-reject / most-specific first.
+/// Closed set of codes a relation provably fails with, in DETERMINISTIC
+/// PRIORITY ORDER: declaration order IS priority, fastest-reject /
+/// most-specific first.
 ///
 /// When a relate fails for several reasons the relation engine selects the
-/// highest-priority (earliest-declared) reason as the outcome's `primary_reason`
-/// and orders the remainder as `secondary_reasons`. SHAPE only: the relation
+/// highest-priority (earliest-declared) code as the
+/// [`RelationProof::NotAssignable`] entry's `reason`. SHAPE only: the relation
 /// engine (U2.RELATION_INFER) populates these; the closed set and its order are
-/// the architectural contract consumers branch on.
+/// the architectural contract consumers branch on. This code rides ONLY the
+/// payload-side proof table — never the public [`RelationOutcome`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RelationFailureReason {
+pub enum RelationFailureCode {
     /// Disagreeing primitive kinds (e.g. a string-literal `"a"` vs `number`).
     PrimitiveKindMismatch,
     /// Same primitive kind, different literal values.
@@ -1917,7 +1925,7 @@ pub enum RelationProof {
     /// which is exactly what lets a NEGATIVE member publish on the identity-leak
     /// axis (design §2.3).
     NotAssignable {
-        reason: RelationFailureReason,
+        reason: RelationFailureCode,
         failing_sub: SubRelationRef,
     },
     /// The budget / recursion cap that stopped the relate (rides a

@@ -29,7 +29,7 @@ use verter_session::semantic_query::{
     BudgetExceededKind, ConstParamPolicy, ContextualInferenceMode, DerivationTree, FreshnessKey,
     IndexKey, InferableParamSetId, InferenceCandidatePriority, InferenceContextKey, NoInferMask,
     OverloadSelectionPolicy, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
-    RecursionOrBudgetCap, RelateKeyId, RelateMemoKey, RelationContext, RelationFailureReason,
+    RecursionOrBudgetCap, RelateKeyId, RelateMemoKey, RelationContext, RelationFailureCode,
     RelationKind, RelationOutcome, RelationPayload, RelationPolicy, RelationProof, RelationProofId,
     RelationProofTable, RelationResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
     SemanticQueryKeyTag, SemanticQueryValue, SemanticQueryValueTag, SubRelationPosition,
@@ -626,12 +626,14 @@ fn relate_query_value_carries_relation_proof_and_budget_state() {
     assert_eq!(payload.bindings[0].name.as_ref(), "T");
 
     // Compile-time proof: the public outcome is EXACTLY `Assignable |
-    // NotAssignable { .. } | BudgetExceeded(_)`. This exhaustive match (no
-    // wildcard arm) is impossible to write if `Unknown` / `Holds` /
-    // `DoesNotHold` still exist, or if `NotAssignable` is fieldless.
+    // NotAssignable | BudgetExceeded(_)`. This exhaustive match (no wildcard
+    // arm) is impossible to write if `Unknown` / `Holds` / `DoesNotHold` still
+    // exist. `NotAssignable` is FIELD-LESS (Decision 4) — a unit-variant match
+    // arm, not a struct pattern; re-adding `primary_reason` / `secondary_reasons`
+    // to the outcome (the superseded A.9 shape) would break this arm.
     let token = match &payload.outcome {
         RelationOutcome::Assignable => "assignable",
-        RelationOutcome::NotAssignable { .. } => "not-assignable",
+        RelationOutcome::NotAssignable => "not-assignable",
         RelationOutcome::BudgetExceeded(_) => "budget-exceeded",
     };
     assert_eq!(token, "budget-exceeded");
@@ -675,7 +677,7 @@ fn relation_payload_uses_payload_side_relation_proofs_table() {
                     },
                 },
                 RelationProof::NotAssignable {
-                    reason: RelationFailureReason::PrimitiveKindMismatch,
+                    reason: RelationFailureCode::PrimitiveKindMismatch,
                     failing_sub: sub.clone(),
                 },
                 RelationProof::BudgetExceeded {
@@ -700,12 +702,13 @@ fn relation_payload_uses_payload_side_relation_proofs_table() {
     );
 
     // The payload references a proof BY OPAQUE ID into the table — the proof
-    // enum is NOT embedded on the payload.
+    // enum is NOT embedded on the payload. The outcome is FIELD-LESS
+    // `NotAssignable` (Decision 4): the failure reason rides ONLY the
+    // payload-side proof entry, NEVER the outcome. Constructing `NotAssignable`
+    // with no fields here would fail to compile against the superseded A.9
+    // shape (which carried `primary_reason` / `secondary_reasons`).
     let payload = RelationPayload {
-        outcome: RelationOutcome::NotAssignable {
-            primary_reason: RelationFailureReason::PrimitiveKindMismatch,
-            secondary_reasons: Arc::from(Vec::<RelationFailureReason>::new().into_boxed_slice()),
-        },
+        outcome: RelationOutcome::NotAssignable,
         bindings: Arc::from(
             Vec::<verter_session::semantic_query::InferBinding>::new().into_boxed_slice(),
         ),
@@ -716,11 +719,24 @@ fn relation_payload_uses_payload_side_relation_proofs_table() {
         matches!(
             &table.proofs[idx as usize],
             RelationProof::NotAssignable {
-                reason: RelationFailureReason::PrimitiveKindMismatch,
+                reason: RelationFailureCode::PrimitiveKindMismatch,
                 ..
             }
         ),
         "the payload's RelationProofId must index the payload-side proof table"
+    );
+
+    // DISCRIMINATING: the failure REASON is reachable ONLY through the
+    // payload-side `RelationProof::NotAssignable { reason: RelationFailureCode,
+    // .. }` entry — the `RelationOutcome::NotAssignable` outcome itself carries
+    // NO reason. A static scan of the value-domain source pins this: the
+    // superseded A.9 `primary_reason` / `secondary_reasons` outcome fields must
+    // be absent from the source entirely (they are the enriched-outcome shape).
+    let qvd_src = include_str!("../../src/semantic_query.rs");
+    assert!(
+        !qvd_src.contains("primary_reason") && !qvd_src.contains("secondary_reasons"),
+        "RelationOutcome::NotAssignable must be field-less — the reason rides the \
+         payload-side RelationProof table, never the outcome (superseded A.9 shape)"
     );
 
     // The coinductive cycle entry stores opaque `RelateKeyId`s.
@@ -747,7 +763,7 @@ fn relation_public_outcome_has_no_unknown_display() {
     fn token(outcome: &RelationOutcome) -> &'static str {
         match outcome {
             RelationOutcome::Assignable => "true",
-            RelationOutcome::NotAssignable { .. } => "false",
+            RelationOutcome::NotAssignable => "false",
             RelationOutcome::BudgetExceeded(_) => "budget-exceeded",
         }
     }
