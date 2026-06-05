@@ -1711,11 +1711,13 @@ pub enum QueryResult<T> {
 ///
 /// Every live [`SemanticQueryKey`] that PRODUCES a value produces
 /// [`TypeNode`](Self::TypeNode): the interned graph node id for the resolved
-/// type. The non-producing keys (`Relate`, `ResolveOverloadSet`) return `Miss`
-/// and forward-declare the `Relation` / `OverloadSet` domains they will produce
-/// once their reducers land. The remaining arms are shells with no live
-/// producer — flow / contextual program analysis, declaration / augmentation
-/// analysis, and diagnostic analysis. They carry honest data shapes so the
+/// type. The non-producing keys (`Relate`, plus the `NonProducingPendingReducer`
+/// variants `ResolveAmbientNamespace`, `ResolveEnum`, `ResolveOverloadSet`,
+/// `ApparentType`, `FlowNarrowingAt`, `ContextualTypeAt`) return `Miss` and
+/// forward-declare the `Relation` / `OverloadSet` / `ProgramAnalysis` domains
+/// they will produce once their reducers land. The remaining arms are shells
+/// with no live producer — declaration / augmentation analysis and diagnostic
+/// analysis. They carry honest data shapes so the
 /// value domain is closed and exhaustive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SemanticQueryValue {

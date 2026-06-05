@@ -1191,9 +1191,11 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         // The helper resolves to a bare node id; wrap it into the
         // domain-agnostic value here at the public boundary. This wrap
         // fires ONLY on the `Value` arm, so the value is always `TypeNode`;
-        // the non-producing keys (`Relate`, `ResolveOverloadSet`) return
-        // `Error(Miss)` and never reach the wrap, which keeps the
-        // unconditional `TypeNode` wrap correct. The boundary provenance is
+        // the non-producing keys (`Relate` and the `NonProducingPendingReducer`
+        // variants: `ResolveAmbientNamespace`, `ResolveEnum`,
+        // `ResolveOverloadSet`, `ApparentType`, `FlowNarrowingAt`,
+        // `ContextualTypeAt`) return `Error(Miss)` and never reach the wrap,
+        // which keeps the unconditional `TypeNode` wrap correct. The boundary provenance is
         // `clean` — a wrapper only, never a cached semantic fact.
         match self.execute_via_cold_build_helper(key).value {
             QueryResult::Value(node) => QueryResult::Value(SemanticQueryOutput {
