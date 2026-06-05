@@ -2147,22 +2147,32 @@ pub enum ClassSurfaceSide {
 /// axis a [`SemanticQueryKey::ResolveClassSurface`] value depends on
 /// (env dims `R T L J`).
 ///
-/// Per R21 this carries ONLY the dimensions the class-surface value
-/// genuinely depends on beyond the [`ResolvedDeclSlotIdentity`]:
+/// Per R21 this carries the dimensions the class-surface value depends on
+/// beyond the [`ResolvedDeclSlotIdentity`] — design §419 `{P,R} + subst +
+/// proj`:
 ///
+/// - `parse_env_hash` (`P`) — a class surface reads the parsed body skeleton
+///   (decorator expressions on the class / its members participate in the
+///   surface), so the value is a function of the parse env. This is the FULL
+///   planned identity: `P` is FORWARD-DECLARED here NOW even though the
+///   current `build_class_surface` composes `Instantiate` + `TypeOf` and does
+///   not yet read decorators — when the decorator-reading reducer lands it
+///   must NOT need a breaking re-key, and no false warm-hit may occur across a
+///   missing `P` axis in the interim.
 /// - `resolve_env_hash` (`R`) — the surface resolves imported heritage /
 ///   member-type references.
 /// - `mode` — the projection rung the composed surface is produced under
-///   (mirrors how [`ProjectionReductionContext`] carries `mode`).
+///   (the `proj` axis; mirrors how [`ProjectionReductionContext`] carries
+///   `mode`).
 ///
 /// The substitution axis is carried by the key's `type_args` field, not
-/// duplicated here. There is deliberately NO `parse_env_hash` (`P`): the
-/// composed surface identity-routes `Instantiate` + `TypeOf` (both `R`-env
-/// keys) and does not read the parsed body skeleton at query time, so
-/// keying on `parse_env` would be a dead axis (R21). The `P` dimension
-/// enters when the decorator-reading surface reducer is added.
+/// duplicated here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClassSurfaceContext {
+    /// Parse-env dimension (`P`) — the surface reads the parsed body skeleton
+    /// (decorators). Forward-declared for the deferred decorator-reading
+    /// reducer.
+    pub parse_env_hash: HashValue,
     /// Import / name-resolution dimension (`R`).
     pub resolve_env_hash: HashValue,
     /// Projection rung the composed surface is produced under.
@@ -2173,19 +2183,26 @@ pub struct ClassSurfaceContext {
 /// axis a [`SemanticQueryKey::ResolveAmbientNamespace`] value depends on
 /// (env dims `R T L J`).
 ///
-/// Per R21 this carries ONLY:
+/// Per R21 this carries — design §414 `{P,R} + subst + proj`:
 ///
+/// - `parse_env_hash` (`P`) — the namespace-member surface reads the parsed
+///   body skeleton (the namespace's inner declarations), so the value is a
+///   function of the parse env. FORWARD-DECLARED here NOW for the deferred
+///   body-reading namespace-member reducer: the full planned identity carries
+///   `P` so the reducer needs no breaking re-key and no false warm-hit can
+///   occur across a missing `P` axis in the interim.
 /// - `resolve_env_hash` (`R`) — namespace members resolve imported
 ///   references.
-/// - `mode` — the projection rung the namespace surface is produced under.
+/// - `mode` — the projection rung the namespace surface is produced under
+///   (the `proj` axis).
 ///
-/// The substitution axis is carried by the key's `type_args` field. There
-/// is deliberately NO `parse_env_hash` (`P`): the value does not read the
-/// parsed body skeleton at query time, so keying on `parse_env` would be a
-/// dead axis (R21). The `P` dimension enters when the body-reading
-/// namespace-member reducer is added.
+/// The substitution axis is carried by the key's `type_args` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AmbientNamespaceContext {
+    /// Parse-env dimension (`P`) — the namespace-member surface reads the
+    /// parsed body skeleton. Forward-declared for the deferred body-reading
+    /// namespace-member reducer.
+    pub parse_env_hash: HashValue,
     /// Import / name-resolution dimension (`R`).
     pub resolve_env_hash: HashValue,
     /// Projection rung the namespace surface is produced under.
@@ -2325,11 +2342,20 @@ pub struct ProgramPointId {
 /// - `lib_env_hash` (`L`) — guards and contextual surfaces reach lib types
 ///   (`Array`, `Promise`, the global `this`).
 /// - `project_identity` (`J`) — project isolation.
+/// - `substitution` ([`SubstitutionCanonicalHash`]) — the active substitution
+///   environment a flow / contextual query runs under. Both program-analysis
+///   keys carry `subst` (design §417/418 demand-axes column): the narrowed /
+///   contextual type at a point is a function of the ambient type-parameter
+///   bindings in scope, so two queries at the same point under different
+///   substitutions must occupy distinct memo slots. SHARED across both keys
+///   (it rides on the context, not a per-variant field).
 ///
-/// The substitution axis is NOT carried here — a program point is already
-/// instantiated in its enclosing context. This is the only context that
-/// carries the full `P R T L J` set: it is `EnvDimMask::all()`, not a
-/// structural / resolve subset.
+/// The per-variant demand axis is NOT carried here — it lives on the key
+/// variant: [`FlowNarrowingAt`](SemanticQueryKey::FlowNarrowingAt) carries
+/// [`FlowNarrowingKey`] and [`ContextualTypeAt`](SemanticQueryKey::ContextualTypeAt)
+/// carries [`ContextualTypingKey`], so neither variant carries the other's
+/// dead axis. This is the widest-env context — the full `P R T L J` set
+/// (`EnvDimMask::all()`) plus the shared substitution axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProgramAnalysisContext {
     /// Parse-env dimension (`P`).
@@ -2342,6 +2368,86 @@ pub struct ProgramAnalysisContext {
     pub lib_env_hash: HashValue,
     /// Project-isolation dimension (`J`).
     pub project_identity: u32,
+    /// Active substitution environment the analysis runs under — shared by
+    /// both program-analysis keys (design §417/418 `subst` demand axis).
+    pub substitution: SubstitutionCanonicalHash,
+}
+
+/// Content-free projection of the FLOW-NARROWING demand at a program point
+/// (design §417 / §4.2) — the flow-in narrowing facts in scope at the queried
+/// point that fork the narrowed result, projected content-free onto the cache
+/// key. This is the per-variant demand axis of
+/// [`SemanticQueryKey::FlowNarrowingAt`].
+///
+/// Realised as the interned set of antecedent guard / narrowing graph node ids
+/// — the same content-free realisation [`InferableParamSetId`] uses for node
+/// sets — never an env / content / parse / version hash and never a
+/// `fact_dep_signature` (R6). [`empty`](Self::empty) / `Default` is the empty
+/// set (no narrowing in scope — the unnarrowed declared type). SHAPE only: the
+/// flow engine that walks the control-flow graph and produces the narrowed
+/// type is the U6 reducer (not yet implemented). It is the SHARED flow-axis
+/// space the call / flow-return / program-analysis keys all key on (there is
+/// one flow/narrowing axis space).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FlowNarrowingKey(pub Arc<[SemanticNodeId]>);
+
+impl FlowNarrowingKey {
+    /// The empty flow-narrowing demand (no narrowing in scope).
+    #[must_use]
+    pub fn empty() -> Self {
+        Self(Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()))
+    }
+
+    /// Construct from an ordered set of interned antecedent guard / narrowing
+    /// node ids.
+    #[must_use]
+    pub fn new(facts: Arc<[SemanticNodeId]>) -> Self {
+        Self(facts)
+    }
+}
+
+impl Default for FlowNarrowingKey {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// Content-free projection of the CONTEXTUAL-TYPING demand at a program point
+/// (design §418 / §4.2) — the contextual target / expected-type propagation in
+/// scope at the queried point that forks the contextual result, projected
+/// content-free onto the cache key. This is the per-variant demand axis of
+/// [`SemanticQueryKey::ContextualTypeAt`].
+///
+/// Realised as the interned set of contextual-target graph node ids (the same
+/// content-free realisation [`InferableParamSetId`] uses) — never an env /
+/// content / parse / version hash and never a `fact_dep_signature` (R6).
+/// [`empty`](Self::empty) / `Default` is the empty set (no contextual target —
+/// a non-contextual position). SHAPE only: the contextual-typing engine that
+/// derives the expected type from the surrounding syntax is the U6 reducer (not
+/// yet implemented). It is the SHARED contextual-typing axis space the call /
+/// flow-return / program-analysis keys all key on (there is one contextual-
+/// typing axis space).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ContextualTypingKey(pub Arc<[SemanticNodeId]>);
+
+impl ContextualTypingKey {
+    /// The empty contextual-typing demand (no contextual target in scope).
+    #[must_use]
+    pub fn empty() -> Self {
+        Self(Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()))
+    }
+
+    /// Construct from an ordered set of interned contextual-target node ids.
+    #[must_use]
+    pub fn new(targets: Arc<[SemanticNodeId]>) -> Self {
+        Self(targets)
+    }
+}
+
+impl Default for ContextualTypingKey {
+    fn default() -> Self {
+        Self::empty()
+    }
 }
 
 /// Which relation a [`SemanticQueryKey::Relate`] judgement asks for.
@@ -3107,10 +3213,11 @@ pub enum SemanticQueryKey {
     /// dominating that program point (e.g. inside `if (typeof x ===
     /// "string")` the narrowed type of `x` is `string`).
     ///
-    /// `point` is the [`ProgramPointId`] identity core (the substitution
-    /// axis is already fixed by the enclosing context, so there is NO
-    /// separate `args` field and NO `mode` field); `context` carries the
-    /// full `{P, R, T, L, J}` env the narrowing depends on (see
+    /// `point` is the [`ProgramPointId`] identity core (no `args`, no `mode`
+    /// field); `flow` is the per-variant [`FlowNarrowingKey`] demand axis (the
+    /// flow-in narrowing facts in scope — forward-declared for the deferred U6
+    /// flow engine); `context` carries the full `{P, R, T, L, J}` env plus the
+    /// shared `substitution` axis the narrowing depends on (see
     /// [`ProgramAnalysisContext`]).
     ///
     /// **Non-producing.** This variant has no `execute`-side producer: the
@@ -3125,6 +3232,7 @@ pub enum SemanticQueryKey {
     /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
     FlowNarrowingAt {
         point: ProgramPointId,
+        flow: FlowNarrowingKey,
         context: ProgramAnalysisContext,
     },
     /// Resolve the CONTEXTUAL (expected) type at `point` — the type the
@@ -3132,9 +3240,11 @@ pub enum SemanticQueryKey {
     /// (e.g. the parameter type a callee expects for an argument position,
     /// or the declared type an initializer is checked against).
     ///
-    /// `point` is the [`ProgramPointId`] identity core (no `args`, no `mode`
-    /// — the contextual type is fixed by the program point); `context`
-    /// carries the full `{P, R, T, L, J}` env (see
+    /// `point` is the [`ProgramPointId`] identity core (no `args`, no `mode`);
+    /// `contextual` is the per-variant [`ContextualTypingKey`] demand axis (the
+    /// contextual target / expected-type propagation in scope — forward-
+    /// declared for the deferred U6 contextual engine); `context` carries the
+    /// full `{P, R, T, L, J}` env plus the shared `substitution` axis (see
     /// [`ProgramAnalysisContext`]).
     ///
     /// **Non-producing.** This variant has no `execute`-side producer: the
@@ -3148,6 +3258,7 @@ pub enum SemanticQueryKey {
     /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
     ContextualTypeAt {
         point: ProgramPointId,
+        contextual: ContextualTypingKey,
         context: ProgramAnalysisContext,
     },
 }

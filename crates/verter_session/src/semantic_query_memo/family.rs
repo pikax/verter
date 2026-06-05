@@ -219,27 +219,33 @@ pub(super) enum FamilyKey {
     /// differing only in `symbol_space` compute the same value and so
     /// share one slot). `side` is a MANDATORY identity discriminator —
     /// instance and static halves of the same class occupy DISTINCT
-    /// family slots and never collide. The context's EXTRA env dim
-    /// (`resolve_env_hash` = `R`; env stays ON the key) is carried here so
-    /// two queries differing only in the context env-hash do NOT collide.
-    /// This is an ENV hash, NOT a content/version hash (R6-clean). The
-    /// projection mode is stripped into the [`ModeSlot`].
+    /// family slots and never collide. The context's EXTRA env dims
+    /// (`parse_env_hash` = `P`, `resolve_env_hash` = `R`; env stays ON the
+    /// key) are carried here so two queries differing only in a context
+    /// env-hash do NOT collide. `P` is FORWARD-DECLARED for the deferred
+    /// decorator-reading reducer (design §419 `{P,R}`). These are ENV
+    /// hashes, NOT content/version hashes (R6-clean). The projection mode is
+    /// stripped into the [`ModeSlot`].
     ResolveClassSurface {
         decl_slot: crate::semantic_query::ResolvedDeclSlotIdentity,
         type_args: Arc<[SemanticNodeId]>,
         side: crate::semantic_query::ClassSurfaceSide,
+        parse_env_hash: crate::semantic_query::HashValue,
         resolve_env_hash: crate::semantic_query::HashValue,
     },
     /// Mode-erased `ResolveAmbientNamespace` identity. Carries the
     /// namespace slot (`symbol_space = Namespace`) + type args + the
-    /// context's extra env dim (`resolve_env_hash` = `R`). The execute
-    /// path is non-producing (returns `Opaque(Miss)`); like `Relate`,
-    /// nothing is ever admitted under this family — the variant exists so
-    /// `family_and_slot` stays total and honest (a real distinct
-    /// identity, never a placeholder reusing another family's shape).
+    /// context's extra env dims (`parse_env_hash` = `P`, `resolve_env_hash` =
+    /// `R`; `P` is FORWARD-DECLARED for the deferred body-reading namespace-
+    /// member reducer, design §414 `{P,R}`). The execute path is
+    /// non-producing (returns `Opaque(Miss)`); like `Relate`, nothing is ever
+    /// admitted under this family — the variant exists so `family_and_slot`
+    /// stays total and honest (a real distinct identity, never a placeholder
+    /// reusing another family's shape).
     ResolveAmbientNamespace {
         namespace_slot: crate::semantic_query::ResolvedDeclSlotIdentity,
         type_args: Arc<[SemanticNodeId]>,
+        parse_env_hash: crate::semantic_query::HashValue,
         resolve_env_hash: crate::semantic_query::HashValue,
     },
     /// Mode-erased `ResolveEnum` identity. Carries the context's extra
@@ -321,36 +327,47 @@ pub(super) enum FamilyKey {
         project_identity: u32,
     },
     /// Mode-erased `FlowNarrowingAt` identity. The [`ProgramPointId`]
-    /// (`canonical_id` + `offset`) is the identity core; the context's full
-    /// `{P, R, T, L, J}` env dims ride here ON the family key (env hashes,
-    /// NOT content/version hashes — R6-clean). Non-producing (the flow
-    /// engine lands in U6): the execute path returns `Opaque(Miss)` and
-    /// nothing is ever admitted under this family; like `Relate`, the
-    /// variant exists so `family_and_slot` stays total and honest.
+    /// (`canonical_id` + `offset`) is the identity core; the per-variant
+    /// [`FlowNarrowingKey`] demand axis (`flow`, FORWARD-DECLARED for the U6
+    /// flow engine) and the context's full `{P, R, T, L, J}` env dims +
+    /// shared `substitution` axis ride here ON the family key (env hashes,
+    /// NOT content/version hashes — R6-clean; `flow`/`substitution` are
+    /// content-free SHAPE-only identities). Non-producing (the flow engine
+    /// lands in U6): the execute path returns `Opaque(Miss)` and nothing is
+    /// ever admitted under this family; like `Relate`, the variant exists so
+    /// `family_and_slot` stays total and honest.
     ///
     /// [`ProgramPointId`]: crate::semantic_query::ProgramPointId
+    /// [`FlowNarrowingKey`]: crate::semantic_query::FlowNarrowingKey
     FlowNarrowingAt {
         point: crate::semantic_query::ProgramPointId,
+        flow: crate::semantic_query::FlowNarrowingKey,
         parse_env_hash: crate::semantic_query::HashValue,
         resolve_env_hash: crate::semantic_query::HashValue,
         type_env_hash: crate::semantic_query::HashValue,
         lib_env_hash: crate::semantic_query::HashValue,
         project_identity: u32,
+        substitution: crate::semantic_query::SubstitutionCanonicalHash,
     },
-    /// Mode-erased `ContextualTypeAt` identity. Same shape as
-    /// [`FlowNarrowingAt`](Self::FlowNarrowingAt): the [`ProgramPointId`] is
-    /// the identity core and the full `{P, R, T, L, J}` env dims ride here
-    /// (env hashes, R6-clean). Non-producing (the contextual engine lands in
+    /// Mode-erased `ContextualTypeAt` identity. The [`ProgramPointId`] is the
+    /// identity core; the per-variant [`ContextualTypingKey`] demand axis
+    /// (`contextual`, FORWARD-DECLARED for the U6 contextual engine) and the
+    /// full `{P, R, T, L, J}` env dims + shared `substitution` axis ride here
+    /// (env hashes, R6-clean; `contextual`/`substitution` are content-free
+    /// SHAPE-only identities). Non-producing (the contextual engine lands in
     /// U6).
     ///
     /// [`ProgramPointId`]: crate::semantic_query::ProgramPointId
+    /// [`ContextualTypingKey`]: crate::semantic_query::ContextualTypingKey
     ContextualTypeAt {
         point: crate::semantic_query::ProgramPointId,
+        contextual: crate::semantic_query::ContextualTypingKey,
         parse_env_hash: crate::semantic_query::HashValue,
         resolve_env_hash: crate::semantic_query::HashValue,
         type_env_hash: crate::semantic_query::HashValue,
         lib_env_hash: crate::semantic_query::HashValue,
         project_identity: u32,
+        substitution: crate::semantic_query::SubstitutionCanonicalHash,
     },
 }
 
@@ -1090,6 +1107,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                     .with_symbol_space(crate::semantic_query::SemanticSymbolSpace::Type),
                 type_args: Arc::clone(type_args),
                 side: *side,
+                parse_env_hash: context.parse_env_hash,
                 resolve_env_hash: context.resolve_env_hash,
             },
             mode_to_slot(context.mode),
@@ -1108,6 +1126,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             FamilyKey::ResolveAmbientNamespace {
                 namespace_slot: namespace_slot.clone(),
                 type_args: Arc::clone(type_args),
+                parse_env_hash: context.parse_env_hash,
                 resolve_env_hash: context.resolve_env_hash,
             },
             mode_to_slot(context.mode),
@@ -1167,31 +1186,45 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             ModeSlot::Single,
         ),
         // FlowNarrowingAt — non-producing. No projection mode → the `Single`
-        // slot. The full `{P, R, T, L, J}` env dims ride on the family key
+        // slot. The per-variant `flow` demand axis, the full `{P, R, T, L, J}`
+        // env dims, and the shared `substitution` axis ride on the family key
         // (the key has no slot to carry them); the `ProgramPointId` is
         // carried VERBATIM as the identity core.
-        SemanticQueryKey::FlowNarrowingAt { point, context } => (
+        SemanticQueryKey::FlowNarrowingAt {
+            point,
+            flow,
+            context,
+        } => (
             FamilyKey::FlowNarrowingAt {
                 point: point.clone(),
+                flow: flow.clone(),
                 parse_env_hash: context.parse_env_hash,
                 resolve_env_hash: context.resolve_env_hash,
                 type_env_hash: context.type_env_hash,
                 lib_env_hash: context.lib_env_hash,
                 project_identity: context.project_identity,
+                substitution: context.substitution,
             },
             ModeSlot::Single,
         ),
         // ContextualTypeAt — non-producing. Same shape as FlowNarrowingAt:
-        // `Single` slot, full `{P, R, T, L, J}` env on the family key,
+        // `Single` slot, the per-variant `contextual` demand axis, full
+        // `{P, R, T, L, J}` env + shared `substitution` on the family key,
         // `ProgramPointId` as the verbatim identity core.
-        SemanticQueryKey::ContextualTypeAt { point, context } => (
+        SemanticQueryKey::ContextualTypeAt {
+            point,
+            contextual,
+            context,
+        } => (
             FamilyKey::ContextualTypeAt {
                 point: point.clone(),
+                contextual: contextual.clone(),
                 parse_env_hash: context.parse_env_hash,
                 resolve_env_hash: context.resolve_env_hash,
                 type_env_hash: context.type_env_hash,
                 lib_env_hash: context.lib_env_hash,
                 project_identity: context.project_identity,
+                substitution: context.substitution,
             },
             ModeSlot::Single,
         ),

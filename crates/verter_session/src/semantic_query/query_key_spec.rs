@@ -77,21 +77,28 @@
 //!   benched-minimality pass (U3/U15) that empirically pins each family's
 //!   minimal axis set against its `FamilyKey`.
 //! - `env_dims` is a current-tree classification per the design's §2.1
-//!   two-tier env model: `parse_env` (`P`) enters a key ONLY when the value
-//!   reads the parsed body skeleton (class-surface decorator lowering,
-//!   flow/contextual body analysis). No current variant reads a body skeleton
-//!   at query time — re-sourcing a file's `whole_hash` / reading an already-
-//!   lowered `IndexedReady` `TypeExpr` is content-version rooting through
-//!   `ReadSetSignature`, not a `parse_env` dependency — so no current row
-//!   carries `P`. This hand-classification is pending the design's §3.6
-//!   benched-minimality pass (U3/U15) that empirically pins each row's
-//!   minimal dimension set.
+//!   two-tier env model: `parse_env` (`P`) enters a key when the value reads
+//!   the parsed body skeleton (class-surface decorator lowering, namespace-
+//!   member body analysis, flow/contextual body analysis). The rows that carry
+//!   `P` are the body-/decorator-reading surface keys `ResolveClassSurface`
+//!   (§419) and `ResolveAmbientNamespace` (§414) and the program-analysis keys
+//!   `FlowNarrowingAt` / `ContextualTypeAt` (`env_full`). On the surface keys
+//!   `P` is FORWARD-DECLARED for their deferred reducers (decorator-reading /
+//!   namespace-member) — the value carries its FULL planned identity now so the
+//!   reducer needs no breaking re-key and no false warm-hit can cross a missing
+//!   `P` axis in the interim. The remaining rows that operate over already-
+//!   lowered interned nodes (re-sourcing a file's `whole_hash` / reading an
+//!   `IndexedReady` `TypeExpr` is content-version rooting through
+//!   `ReadSetSignature`, NOT a `parse_env` dependency) do not carry `P`. The
+//!   per-row minimal dimension set remains pending the design's §3.6 benched-
+//!   minimality pass (U3/U15).
 //! - `cross_context_guard` names the per-key `*_do_not_warm_hit` guard that
 //!   pins the row's cross-context warm-hit isolation, or is empty (`""`) for a
-//!   row that does not yet have one. The four `Resolve{ClassSurface,
-//!   AmbientNamespace,Enum,OverloadSet}` rows name their guards
-//!   (`resolve_*_do_not_warm_hit`); the remaining rows carry `""` as the
-//!   ACCURATE present state, not a placeholder.
+//!   row that does not yet have one. Several rows name their guards
+//!   (`resolve_*_do_not_warm_hit`, `flow_narrowing_at_*`,
+//!   `contextual_type_at_*`, `apparent_type_*`, `template_literal_reduce_*`);
+//!   any row carrying `""` does so as the ACCURATE present state, not a
+//!   placeholder.
 
 use crate::semantic_query::demand::{relevant_demand_axes, AxisMask, DemandAxis};
 use crate::semantic_query::{SemanticQueryKeyTag, SemanticQueryValueTag};
@@ -377,12 +384,16 @@ fn env_structural() -> EnvDimMask {
 }
 
 /// The FULL env set `{P, R, T, L, J}` — the widest-env tier (design §2.1
-/// tier-1). Used by the program-analysis keys (`FlowNarrowingAt` /
-/// `ContextualTypeAt`): flow narrowing and contextual typing walk the
-/// program point's parsed body / control-flow skeleton (so they DO depend on
-/// `parse_env`, unlike the structural reducers), resolve imported references
-/// on their own step (`resolve_env`), and are governed by the type / lib /
-/// project env.
+/// tier-1), shared by every key whose value READS THE PARSED BODY SKELETON on
+/// its own step (so it depends on `parse_env`, unlike the structural reducers):
+/// the program-analysis keys (`FlowNarrowingAt` / `ContextualTypeAt` walk the
+/// program point's parsed body / control-flow skeleton) and the body-/
+/// decorator-reading surface keys (`ResolveClassSurface` reads decorator
+/// expressions, `ResolveAmbientNamespace` reads the namespace's inner
+/// declarations — design §419/§414 `{P,R}`). All also resolve imported
+/// references on their own step (`resolve_env`) and are governed by the type /
+/// lib / project env. The `parse_env` axis on the surface keys is FORWARD-
+/// DECLARED for their deferred reducers (decorator-reading / namespace-member).
 fn env_full() -> EnvDimMask {
     EnvDimMask::from_dims(&[
         EnvDim::Parse,
@@ -696,37 +707,38 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         },
         // ResolveClassSurface { decl_slot, type_args, side, context } —
         // resolves the instance (TYPE-space) or static (VALUE-space) half
-        // of a class via the shared dual-space algorithm. The composed
-        // surface identity-routes `execute(Instantiate)` /
-        // `execute(TypeOf)` and reads no parsed body skeleton at query
-        // time, so `R T L J` (no `P` — keying on `parse_env` would be a
-        // dead axis; `P` enters with the decorator-reading reducer). LIVE
-        // producer; branches on the axes the `mode` spans (`side` is a
-        // FAMILY-IDENTITY discriminator on `FamilyKey`, not a DemandAxis).
+        // of a class via the shared dual-space algorithm. A class surface
+        // reads the parsed body skeleton (decorator expressions on the class
+        // / its members), so the FULL planned identity is `P R T L J`
+        // (design §419 `{P,R}`); `P` is FORWARD-DECLARED for the deferred
+        // decorator-reading reducer so it needs no breaking re-key and no
+        // false warm-hit can cross a missing `P` axis. LIVE producer;
+        // branches on the axes the `mode` spans (`side` is a FAMILY-IDENTITY
+        // discriminator on `FamilyKey`, not a DemandAxis).
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::ResolveClassSurface,
             lifecycle: KeyLifecycle::Live,
             context_shape: "ClassSurfaceContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_resolve(),
+            env_dims: env_full(),
             allowed_demand: mode_axes,
             cross_context_guard: "resolve_class_surface_do_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
         },
         // ResolveAmbientNamespace { namespace_slot, type_args, context } —
-        // resolves an ambient namespace surface. The value reads no parsed
-        // body skeleton at query time, so `R T L J` (no `P` — keying on
-        // `parse_env` would be a dead axis; `P` enters with the
-        // body-reading namespace-member reducer). Non-producing: the
-        // execute arm returns Miss and never admits/caches. Carries a
-        // projection `mode`, so the family branches on the axes the `mode`
-        // spans.
+        // resolves an ambient namespace surface. The namespace-member
+        // surface reads the parsed body skeleton (the namespace's inner
+        // declarations), so the FULL planned identity is `P R T L J` (design
+        // §414 `{P,R}`); `P` is FORWARD-DECLARED for the deferred body-
+        // reading namespace-member reducer. Non-producing: the execute arm
+        // returns Miss and never admits/caches. Carries a projection `mode`,
+        // so the family branches on the axes the `mode` spans.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::ResolveAmbientNamespace,
             lifecycle: KeyLifecycle::Live,
             context_shape: "AmbientNamespaceContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_resolve(),
+            env_dims: env_full(),
             allowed_demand: mode_axes,
             cross_context_guard: "resolve_ambient_namespace_do_not_warm_hit",
             admission: AdmissionSpec::NonProducingPendingReducer,

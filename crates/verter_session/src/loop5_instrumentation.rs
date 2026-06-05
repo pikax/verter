@@ -1037,6 +1037,7 @@ mod tests {
             type_args: Arc::from(Vec::new().into_boxed_slice()),
             side: crate::semantic_query::ClassSurfaceSide::Instance,
             context: crate::semantic_query::ClassSurfaceContext {
+                parse_env_hash: Default::default(),
                 resolve_env_hash: Default::default(),
                 mode: ProjectionMode::Shallow,
             },
@@ -1046,6 +1047,7 @@ mod tests {
                 .with_symbol_space(crate::semantic_query::SemanticSymbolSpace::Namespace),
             type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: crate::semantic_query::AmbientNamespaceContext {
+                parse_env_hash: Default::default(),
                 resolve_env_hash: Default::default(),
                 mode: ProjectionMode::Shallow,
             },
@@ -1086,12 +1088,14 @@ mod tests {
                 canonical_id: Arc::from("f.ts"),
                 offset: 0,
             },
+            flow: crate::semantic_query::FlowNarrowingKey::empty(),
             context: crate::semantic_query::ProgramAnalysisContext {
                 parse_env_hash: Default::default(),
                 resolve_env_hash: Default::default(),
                 type_env_hash: Default::default(),
                 lib_env_hash: Default::default(),
                 project_identity: 0,
+                substitution: Default::default(),
             },
         };
         let contextual_type_at = SemanticQueryKey::ContextualTypeAt {
@@ -1099,12 +1103,14 @@ mod tests {
                 canonical_id: Arc::from("f.ts"),
                 offset: 0,
             },
+            contextual: crate::semantic_query::ContextualTypingKey::empty(),
             context: crate::semantic_query::ProgramAnalysisContext {
                 parse_env_hash: Default::default(),
                 resolve_env_hash: Default::default(),
                 type_env_hash: Default::default(),
                 lib_env_hash: Default::default(),
                 project_identity: 0,
+                substitution: Default::default(),
             },
         };
 
