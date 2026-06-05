@@ -257,8 +257,16 @@ admission outside `set_import_dependencies`.
   variants coexist as candidates inside one slot.
 
 Version rooting for query-identity caches lives **inside the cached
-value** as `VersionedDeclIdentity` + `fact_dep_signature`, not in
-the key.
+value**, never in the key. Two value-side rails carry it. Most
+query-identity caches (`RouteDb`, `MaterializeStructureDb`,
+`RefCycleResultDb`, `ComponentMetaResultDb`) root via
+`VersionedDeclIdentity` + `fact_dep_signature`. The
+`SemanticGraphStore` family memo (the `Instantiate` /
+`ResolveMacroPayload` query nodes) instead roots via the candidate's
+`ReadSetSignature.facts` + `self_root_canonicals`, with the live
+whole-hash re-sourced at value-compute time via
+`ensure_indexed_ready` (NOT carried in the key) — see the
+per-key-context detail below.
 
 **R6.** Cache keys never include `fact_dep_signature` or content /
 version hashes (for query-identity caches). Signatures and version
