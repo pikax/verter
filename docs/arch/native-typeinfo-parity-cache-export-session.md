@@ -107,10 +107,11 @@ the whole U2 / U6 parents — are done.
 > the exporter, and the projections described below are the **end state** to be
 > built. The current `crates/verter_protocol/proto/verter/v1/typeinfo.proto` still
 > carries the live non-type-value `GraphTypeNode` arms and the bare
-> `SemanticTypeGraph` embeddings the parent retires (PART 1 §§1.3–1.5); the current
-> `SemanticQueryKey::Relate` is the bare `{ source, target }` tri-state-returning
-> shape; the manifest is the old four-field schema with 363 rows. This subplan does
-> not imply the end state already exists.
+> `SemanticTypeGraph` embeddings the parent retires (PART 1 §§1.3–1.5); the pre-U2
+> `SemanticQueryKey::Relate` was the bare `{ source, target }` tri-state-returning
+> shape (now landed as the full `RelateMemoKey` relation identity); the manifest is
+> the old four-field schema with 363 rows. This subplan does not imply the end state
+> already exists.
 
 ---
 

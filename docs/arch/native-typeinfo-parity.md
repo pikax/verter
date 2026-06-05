@@ -691,11 +691,11 @@ fields), **`apparent_type_key_covers_lib_env_demand_and_context`**, and
 ### 2.7 `Relate` key shape (existing-key upgrade, full relation identity)
 
 `Relate` is the sole assignability authority (§4) and carries the same
-cache-soundness discipline. The current `Relate` is only `{ source, target }`, which
-is not a sound cache identity: the same pair relates differently under a different
+cache-soundness discipline. The pre-U2 `Relate` was only `{ source, target }`, which
+was not a sound cache identity: the same pair relates differently under a different
 relation kind, overload-selection / excess-check policy, source freshness, or
-env/substitution context. This is an explicit existing-key upgrade (not a new key —
-the added-key count stays five):
+env/substitution context. This block landed that as an explicit existing-key upgrade
+(not a new key — the added-key count stays five) to the full identity below:
 
 ```rust
 Relate {
