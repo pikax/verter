@@ -596,6 +596,60 @@ fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
 }
 
 // ---------------------------------------------------------------------------
+// (3b) `InferableParamSetId` is an ORDER-INSENSITIVE SET identity — its
+//      constructor canonicalizes (sort + dedup), so two inference sessions over
+//      the SAME open-parameter set in different orderings carry the SAME
+//      `inferable_params` identity (and therefore the same `InferenceContextKey`
+//      and the same relation memo slot), while a genuinely different set stays
+//      distinct. FAILS against the pre-fix order-sensitive `Arc` derive.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn inferable_param_set_id_is_order_insensitive_set() {
+    let ab = InferableParamSetId::new(Arc::from(
+        vec![SemanticNodeId(3), SemanticNodeId(8)].into_boxed_slice(),
+    ));
+    let ba = InferableParamSetId::new(Arc::from(
+        vec![SemanticNodeId(8), SemanticNodeId(3)].into_boxed_slice(),
+    ));
+    assert_eq!(
+        ab, ba,
+        "InferableParamSetId must be an order-insensitive set"
+    );
+    assert_eq!(
+        ab.ids(),
+        ba.ids(),
+        "canonical ids must agree across orderings"
+    );
+
+    // The set identity reaches the enclosing InferenceContextKey.
+    let ctx_ab = InferenceContextKey {
+        inferable_params: ab.clone(),
+        ..InferenceContextKey::default()
+    };
+    let ctx_ba = InferenceContextKey {
+        inferable_params: ba,
+        ..InferenceContextKey::default()
+    };
+    assert_eq!(
+        ctx_ab, ctx_ba,
+        "two inference sessions over the same open-param set must be equal regardless of order"
+    );
+
+    // A genuinely different SET stays distinct.
+    let ac = InferableParamSetId::new(Arc::from(
+        vec![SemanticNodeId(3), SemanticNodeId(9)].into_boxed_slice(),
+    ));
+    assert_ne!(ab, ac, "a different inferable-param set must be distinct");
+
+    // Duplicates collapse — each open parameter appears once.
+    let dup = InferableParamSetId::new(Arc::from(
+        vec![SemanticNodeId(5), SemanticNodeId(5), SemanticNodeId(2)].into_boxed_slice(),
+    ));
+    assert_eq!(dup.ids(), &[SemanticNodeId(2), SemanticNodeId(5)]);
+}
+
+// ---------------------------------------------------------------------------
 // (4) The `Relation` value-domain payload carries the public relation outcome,
 //     the inference bindings, and an opaque `RelationProofId` into the
 //     payload-side proof table. The budget state is FOLDED into the outcome

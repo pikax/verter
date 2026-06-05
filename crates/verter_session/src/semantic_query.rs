@@ -76,8 +76,27 @@ pub type HashValue = Hash16;
 /// graph. The ID is handed out by the graph interner and is only meaningful
 /// inside one [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore)
 /// for one project generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SemanticNodeId(pub u64);
+
+/// Canonicalize a node-id sequence into a true SET: sorted ascending and
+/// deduplicated. The content-free node-set cache-key axes
+/// ([`FlowNarrowingKey`], [`ContextualTypingKey`], [`InferableParamSetId`])
+/// canonicalize through this on construction so their derived `Eq`/`Hash` are
+/// order-insensitive — `[a, b]` and `[b, a]` are the SAME key (the
+/// "canonicalize before key construction" contract). Without it the
+/// order-sensitive `Arc` derive would over-key equivalent axes.
+#[must_use]
+fn canonical_node_set(ids: Arc<[SemanticNodeId]>) -> Arc<[SemanticNodeId]> {
+    // Fast path: empty / single sequences are already canonical.
+    if ids.len() < 2 {
+        return ids;
+    }
+    let mut owned: Vec<SemanticNodeId> = ids.to_vec();
+    owned.sort_unstable();
+    owned.dedup();
+    Arc::from(owned.into_boxed_slice())
+}
 
 /// Lexical scope key used to disambiguate bare-name lookups during
 /// [`SemanticQueryKey::ResolveDecl`]. Two callers that reach the same name
@@ -2389,7 +2408,7 @@ pub struct ProgramAnalysisContext {
 /// space the call / flow-return / program-analysis keys all key on (there is
 /// one flow/narrowing axis space).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FlowNarrowingKey(pub Arc<[SemanticNodeId]>);
+pub struct FlowNarrowingKey(Arc<[SemanticNodeId]>);
 
 impl FlowNarrowingKey {
     /// The empty flow-narrowing demand (no narrowing in scope).
@@ -2398,11 +2417,23 @@ impl FlowNarrowingKey {
         Self(Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()))
     }
 
-    /// Construct from an ordered set of interned antecedent guard / narrowing
-    /// node ids.
+    /// Construct from a set of interned antecedent guard / narrowing node ids.
+    ///
+    /// The ids are CANONICALIZED (sorted + deduplicated) before storage so the
+    /// derived `Eq`/`Hash` are order-insensitive and represent a true SET — two
+    /// constructions of the same set (`[a, b]` / `[b, a]`) are the SAME key
+    /// (the §2.58 "canonicalize before key construction" contract). Without
+    /// this the order-sensitive `Arc` derive would over-key equivalent flow
+    /// axes.
     #[must_use]
     pub fn new(facts: Arc<[SemanticNodeId]>) -> Self {
-        Self(facts)
+        Self(canonical_node_set(facts))
+    }
+
+    /// The canonical (sorted, deduplicated) node-id set.
+    #[must_use]
+    pub fn ids(&self) -> &[SemanticNodeId] {
+        &self.0
     }
 }
 
@@ -2428,7 +2459,7 @@ impl Default for FlowNarrowingKey {
 /// flow-return / program-analysis keys all key on (there is one contextual-
 /// typing axis space).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ContextualTypingKey(pub Arc<[SemanticNodeId]>);
+pub struct ContextualTypingKey(Arc<[SemanticNodeId]>);
 
 impl ContextualTypingKey {
     /// The empty contextual-typing demand (no contextual target in scope).
@@ -2437,10 +2468,21 @@ impl ContextualTypingKey {
         Self(Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()))
     }
 
-    /// Construct from an ordered set of interned contextual-target node ids.
+    /// Construct from a set of interned contextual-target node ids.
+    ///
+    /// The ids are CANONICALIZED (sorted + deduplicated) before storage so the
+    /// derived `Eq`/`Hash` are order-insensitive and represent a true SET — two
+    /// constructions of the same set (`[a, b]` / `[b, a]`) are the SAME key
+    /// (the §2.58 "canonicalize before key construction" contract).
     #[must_use]
     pub fn new(targets: Arc<[SemanticNodeId]>) -> Self {
-        Self(targets)
+        Self(canonical_node_set(targets))
+    }
+
+    /// The canonical (sorted, deduplicated) node-id set.
+    #[must_use]
+    pub fn ids(&self) -> &[SemanticNodeId] {
+        &self.0
     }
 }
 
@@ -2607,7 +2649,7 @@ pub struct InferenceContextKey {
 /// parameters). SHAPE only: the interning substrate is the relation-inference
 /// reducer (not yet implemented).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct InferableParamSetId(pub Arc<[SemanticNodeId]>);
+pub struct InferableParamSetId(Arc<[SemanticNodeId]>);
 
 impl InferableParamSetId {
     /// The empty inferable-parameter set (no open type parameters).
@@ -2616,10 +2658,21 @@ impl InferableParamSetId {
         Self(Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()))
     }
 
-    /// Construct from an ordered set of interned type-parameter node ids.
+    /// Construct from a set of interned type-parameter node ids.
+    ///
+    /// The ids are CANONICALIZED (sorted + deduplicated) before storage so the
+    /// derived `Eq`/`Hash` are order-insensitive and represent a true SET — two
+    /// constructions of the same open-parameter set are the SAME key (the
+    /// §2.58 "canonicalize before key construction" contract).
     #[must_use]
     pub fn new(params: Arc<[SemanticNodeId]>) -> Self {
-        Self(params)
+        Self(canonical_node_set(params))
+    }
+
+    /// The canonical (sorted, deduplicated) node-id set.
+    #[must_use]
+    pub fn ids(&self) -> &[SemanticNodeId] {
+        &self.0
     }
 }
 

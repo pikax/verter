@@ -317,6 +317,94 @@ fn contextual_type_at_identity_covers_substitution_axis() {
 }
 
 // ---------------------------------------------------------------------------
+// (3d) Node-set demand axes are ORDER-INSENSITIVE SET identities. The
+//      `FlowNarrowingKey` / `ContextualTypingKey` constructors canonicalize
+//      (sort + dedup), so `[a, b]` and `[b, a]` are the SAME key — they MUST
+//      land in the SAME (FamilyKey, slot) — while a genuinely different set
+//      (`[a, c]`) stays DISTINCT, and duplicates collapse. These FAIL against
+//      the pre-fix order-sensitive `Arc` derive (which would treat `[a, b]`
+//      and `[b, a]` as two distinct keys → two slots).
+// ---------------------------------------------------------------------------
+
+/// A two-element interned node set in the given order.
+fn node_set2(a: u64, b: u64) -> Arc<[SemanticNodeId]> {
+    Arc::from(vec![SemanticNodeId(a), SemanticNodeId(b)].into_boxed_slice())
+}
+
+#[test]
+fn flow_narrowing_key_is_order_insensitive_set() {
+    let ab = FlowNarrowingKey::new(node_set2(3, 8));
+    let ba = FlowNarrowingKey::new(node_set2(8, 3));
+    assert_eq!(ab, ba, "FlowNarrowingKey must be an order-insensitive set");
+    assert_eq!(
+        ab.ids(),
+        ba.ids(),
+        "canonical ids must agree across orderings"
+    );
+
+    // The canonicalization must reach the full SemanticQueryKey identity too.
+    let key_ab = flow_narrowing_key_with_flow("a.ts", 0, ab);
+    let key_ba = flow_narrowing_key_with_flow("a.ts", 0, ba);
+    assert_eq!(
+        key_ab, key_ba,
+        "two FlowNarrowingAt keys differing only in flow-set ORDER must be equal"
+    );
+    assert_eq!(
+        count_for_b_after_publishing_a(&key_ab, &key_ba),
+        1,
+        "a candidate published under the `[a, b]` ordering must be reachable \
+         from the `[b, a]` ordering — they are the SAME memo slot"
+    );
+
+    // A genuinely DIFFERENT set must stay distinct.
+    let key_ac = flow_narrowing_key_with_flow("a.ts", 0, FlowNarrowingKey::new(node_set2(3, 9)));
+    assert_distinct_identity(&key_ab, &key_ac);
+
+    // Duplicates collapse — the set carries each id once.
+    let dup = FlowNarrowingKey::new(Arc::from(
+        vec![SemanticNodeId(5), SemanticNodeId(5), SemanticNodeId(2)].into_boxed_slice(),
+    ));
+    assert_eq!(dup.ids(), &[SemanticNodeId(2), SemanticNodeId(5)]);
+}
+
+#[test]
+fn contextual_type_key_is_order_insensitive_set() {
+    let ab = ContextualTypingKey::new(node_set2(3, 8));
+    let ba = ContextualTypingKey::new(node_set2(8, 3));
+    assert_eq!(
+        ab, ba,
+        "ContextualTypingKey must be an order-insensitive set"
+    );
+    assert_eq!(
+        ab.ids(),
+        ba.ids(),
+        "canonical ids must agree across orderings"
+    );
+
+    let key_ab = contextual_type_key_with_contextual("a.ts", 0, ab);
+    let key_ba = contextual_type_key_with_contextual("a.ts", 0, ba);
+    assert_eq!(
+        key_ab, key_ba,
+        "two ContextualTypeAt keys differing only in contextual-set ORDER must be equal"
+    );
+    assert_eq!(
+        count_for_b_after_publishing_a(&key_ab, &key_ba),
+        1,
+        "a candidate published under the `[a, b]` ordering must be reachable \
+         from the `[b, a]` ordering — they are the SAME memo slot"
+    );
+
+    let key_ac =
+        contextual_type_key_with_contextual("a.ts", 0, ContextualTypingKey::new(node_set2(3, 9)));
+    assert_distinct_identity(&key_ab, &key_ac);
+
+    let dup = ContextualTypingKey::new(Arc::from(
+        vec![SemanticNodeId(5), SemanticNodeId(5), SemanticNodeId(2)].into_boxed_slice(),
+    ));
+    assert_eq!(dup.ids(), &[SemanticNodeId(2), SemanticNodeId(5)]);
+}
+
+// ---------------------------------------------------------------------------
 // (4) HONEST-PENDING discriminator — both execute arms are non-producing:
 //     they return Error(Miss) and admit NOTHING. FAILS if a fake producer is
 //     ever wired (a Value result, or an admitted candidate).
