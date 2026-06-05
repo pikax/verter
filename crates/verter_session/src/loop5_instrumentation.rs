@@ -1006,7 +1006,6 @@ mod tests {
             type_args: Arc::from(Vec::new().into_boxed_slice()),
             side: crate::semantic_query::ClassSurfaceSide::Instance,
             context: crate::semantic_query::ClassSurfaceContext {
-                parse_env_hash: Default::default(),
                 resolve_env_hash: Default::default(),
                 mode: ProjectionMode::Shallow,
             },
@@ -1016,7 +1015,6 @@ mod tests {
                 .with_symbol_space(crate::semantic_query::SemanticSymbolSpace::Namespace),
             type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: crate::semantic_query::AmbientNamespaceContext {
-                parse_env_hash: Default::default(),
                 resolve_env_hash: Default::default(),
                 mode: ProjectionMode::Shallow,
             },

@@ -833,13 +833,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     context,
                 } => self.build_class_surface(decl_slot, type_args, *side, *context),
                 // ResolveAmbientNamespace / ResolveEnum / ResolveOverloadSet
-                // — NON-PRODUCING in this block: the reducer lands in a
-                // later U2 block. The build returns `Opaque(Miss)`
-                // verbatim (mirroring the `Relate` arm above); an `Error`
-                // result is never warm-published, so nothing is admitted
-                // or cached. Returning an empty `OverloadSet` for
-                // `ResolveOverloadSet` would be a stub — `Miss` is the
-                // honest non-result.
+                // — non-producing: these variants have no execute-side
+                // reducer. The build returns `Opaque(Miss)` verbatim
+                // (mirroring the `Relate` arm above); an `Error` result is
+                // never warm-published, so nothing is admitted or cached.
+                // Returning an empty `OverloadSet` for `ResolveOverloadSet`
+                // would be a stub — `Miss` is the honest non-result.
                 SemanticQueryKey::ResolveAmbientNamespace { .. }
                 | SemanticQueryKey::ResolveEnum { .. }
                 | SemanticQueryKey::ResolveOverloadSet { .. } => {

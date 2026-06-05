@@ -447,12 +447,15 @@ impl ResolvedDeclSlotIdentity {
 
     /// Return a clone of this slot with its [`symbol_space`] replaced.
     ///
-    /// The class dual-space algorithm
-    /// ([`ProjectSemanticDispatch::build_class_surface`](crate::project_semantic_dispatch::ProjectSemanticDispatch))
-    /// addresses the same `(defining_canonical, merged_symbol_name)`
-    /// declaration in BOTH symbol spaces: the instance side reads the
-    /// `Type`-space half, the static side reads the `Value`-space half.
-    /// Every other field of the slot identity is preserved verbatim.
+    /// Used to CANONICALIZE the symbol space of a slot to a single value
+    /// when the consumer's identity must not fork on it. The
+    /// `ResolveClassSurface` family key canonicalizes its `decl_slot` to
+    /// `Type` (`semantic_query_memo::family::family_and_slot`): the class
+    /// dual-space algorithm selects the half via `side` and derives the
+    /// composed sub-query from `(defining_canonical, merged_symbol_name)`
+    /// alone, so the incoming slot's `symbol_space` must not become part of
+    /// the cache identity. Every other field of the slot identity is
+    /// preserved verbatim.
     ///
     /// [`symbol_space`]: Self::symbol_space
     #[must_use]
@@ -1708,7 +1711,11 @@ pub enum SemanticQueryValue {
     /// nested `GraphDeclarationPart`). This value variant has no live producer
     /// and never crosses the wire — do not read it as the merge wire source.
     DeclarationAnalysis(DeclarationAnalysisValue),
-    /// An ordered set of call/construct signatures (an overload set).
+    /// An ordered set of call/construct signatures (an overload set). The
+    /// forward-declared value domain of
+    /// [`SemanticQueryKey::ResolveOverloadSet`]: that key's spec row records
+    /// this domain, but its `execute` arm is non-producing (returns `Miss`)
+    /// until the overload-producing reducer that fills this carrier lands.
     /// No live producer.
     OverloadSet(Arc<[SignatureRef]>),
     /// The tri-state outcome of a relation query. No live producer; the
@@ -1888,13 +1895,13 @@ pub(crate) fn strip_output_provenance<T>(
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Class / namespace / enum / overload key context shapes (U2 §2.2 / §2.3)
+// Class / namespace / enum / overload key context shapes
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Which symbol-space half of a class declaration a
 /// [`SemanticQueryKey::ResolveClassSurface`] query addresses.
 ///
-/// A class occupies BOTH symbol spaces (design §2.3 dual-space). The
+/// A class occupies BOTH symbol spaces (the dual-space model). The
 /// `side` is a MANDATORY identity discriminator: two `ResolveClassSurface`
 /// keys that differ only in `side` are NON-equal and occupy DISTINCT memo
 /// slots (`FamilyKey::ResolveClassSurface` carries `side`).
@@ -1913,24 +1920,24 @@ pub enum ClassSurfaceSide {
 
 /// Extra env (beyond the slot's intrinsic `T,L,J`) plus the projection
 /// axis a [`SemanticQueryKey::ResolveClassSurface`] value depends on
-/// (design §2.2: env dims `P R T L J`).
+/// (env dims `R T L J`).
 ///
 /// Per R21 this carries ONLY the dimensions the class-surface value
 /// genuinely depends on beyond the [`ResolvedDeclSlotIdentity`]:
 ///
-/// - `parse_env_hash` (`P`) — the class-surface lowering reads the parsed
-///   body skeleton (decorators / member modifiers).
 /// - `resolve_env_hash` (`R`) — the surface resolves imported heritage /
 ///   member-type references.
 /// - `mode` — the projection rung the composed surface is produced under
 ///   (mirrors how [`ProjectionReductionContext`] carries `mode`).
 ///
 /// The substitution axis is carried by the key's `type_args` field, not
-/// duplicated here.
+/// duplicated here. There is deliberately NO `parse_env_hash` (`P`): the
+/// composed surface identity-routes `Instantiate` + `TypeOf` (both `R`-env
+/// keys) and does not read the parsed body skeleton at query time, so
+/// keying on `parse_env` would be a dead axis (R21). The `P` dimension
+/// enters when the decorator-reading surface reducer is added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClassSurfaceContext {
-    /// Parser flags + SFC compiler flags dimension (`P`).
-    pub parse_env_hash: HashValue,
     /// Import / name-resolution dimension (`R`).
     pub resolve_env_hash: HashValue,
     /// Projection rung the composed surface is produced under.
@@ -1939,21 +1946,21 @@ pub struct ClassSurfaceContext {
 
 /// Extra env (beyond the slot's intrinsic `T,L,J`) plus the projection
 /// axis a [`SemanticQueryKey::ResolveAmbientNamespace`] value depends on
-/// (design §2.2: env dims `P R T L J`).
+/// (env dims `R T L J`).
 ///
 /// Per R21 this carries ONLY:
 ///
-/// - `parse_env_hash` (`P`) — namespace-member analysis reads the parsed
-///   body skeleton.
 /// - `resolve_env_hash` (`R`) — namespace members resolve imported
 ///   references.
 /// - `mode` — the projection rung the namespace surface is produced under.
 ///
-/// The substitution axis is carried by the key's `type_args` field.
+/// The substitution axis is carried by the key's `type_args` field. There
+/// is deliberately NO `parse_env_hash` (`P`): the value does not read the
+/// parsed body skeleton at query time, so keying on `parse_env` would be a
+/// dead axis (R21). The `P` dimension enters when the body-reading
+/// namespace-member reducer is added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AmbientNamespaceContext {
-    /// Parser flags + SFC compiler flags dimension (`P`).
-    pub parse_env_hash: HashValue,
     /// Import / name-resolution dimension (`R`).
     pub resolve_env_hash: HashValue,
     /// Projection rung the namespace surface is produced under.
@@ -1961,8 +1968,7 @@ pub struct AmbientNamespaceContext {
 }
 
 /// Extra env (beyond the slot's intrinsic `T,L,J`) a
-/// [`SemanticQueryKey::ResolveEnum`] value depends on (design §2.2: env
-/// dims `R T L J`).
+/// [`SemanticQueryKey::ResolveEnum`] value depends on (env dims `R T L J`).
 ///
 /// Per R21 this carries ONLY `resolve_env_hash` (`R`): an enum
 /// declaration is not generic (NO substitution axis) and enum-member
@@ -1976,8 +1982,8 @@ pub struct EnumContext {
 }
 
 /// Extra env (beyond the slot's intrinsic `T,L,J`) a
-/// [`SemanticQueryKey::ResolveOverloadSet`] value depends on (design
-/// §2.2: env dims `R T L J`).
+/// [`SemanticQueryKey::ResolveOverloadSet`] value depends on (env dims
+/// `R T L J`).
 ///
 /// Per R21 this carries ONLY `resolve_env_hash` (`R`) — signature
 /// lowering resolves imported parameter / return references. The
@@ -2170,7 +2176,7 @@ pub enum SemanticQueryKey {
         mode: ProjectionMode,
     },
     /// Resolve the instance OR static surface of a class declaration
-    /// (design §2.2 / §2.3 dual-space).
+    /// (the dual-space model).
     ///
     /// `decl_slot` is the content-free [`ResolvedDeclSlotIdentity`] of the
     /// class declaration; `type_args` are its already-lowered generic
@@ -2178,7 +2184,7 @@ pub enum SemanticQueryKey {
     /// (TYPE-space) or static (VALUE-space) half and is a MANDATORY
     /// identity discriminator — two keys differing only in `side` are
     /// non-equal and occupy distinct memo slots; `context` carries the
-    /// extra env (`P,R`) plus the projection rung the value depends on
+    /// extra env (`R`) plus the projection rung the value depends on
     /// (R21).
     ///
     /// **LIVE producer** ([`AdmissionSpec::Singleflight`]). The build
@@ -2189,11 +2195,11 @@ pub enum SemanticQueryKey {
     /// - `Static` → `execute(TypeOf { value_root: value_root_of(value_slot) })`.
     ///
     /// The post-query projection is THIN / non-owning (identity
-    /// projection): the deep instance/static surface projection
-    /// (`project_instance_surface` / `project_static_surface`) is the
-    /// LATER `U2ClassSurfaces` block — this block returns the composed
-    /// sub-query node directly and does NOT walk heritage or eagerly
-    /// materialise members. Value domain: [`SemanticQueryValueTag::TypeNode`].
+    /// projection): the build returns the composed sub-query node directly
+    /// and does NOT walk heritage or eagerly materialise members. A deep
+    /// instance/static surface projection (heritage descent, member-demand
+    /// materialisation) is not part of this producer. Value domain:
+    /// [`SemanticQueryValueTag::TypeNode`].
     ///
     /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
     ResolveClassSurface {
@@ -2203,15 +2209,15 @@ pub enum SemanticQueryKey {
         context: ClassSurfaceContext,
     },
     /// Resolve an ambient namespace (`namespace N {}` / `module N {}`)
-    /// surface (design §2.2).
+    /// surface.
     ///
     /// `namespace_slot` is the content-free [`ResolvedDeclSlotIdentity`]
     /// with `symbol_space = `[`SemanticSymbolSpace::Namespace`]; `type_args`
     /// are its already-lowered generic arguments; `context` carries the
-    /// extra env (`P,R`) plus the projection rung (R21).
+    /// extra env (`R`) plus the projection rung (R21).
     ///
-    /// **NON-PRODUCING in this block** — the namespace-analysis reducer
-    /// lands in the later `U2Namespaces` block. The `execute` build arm
+    /// **Non-producing.** This variant has no `execute`-side producer: its
+    /// namespace-analysis reducer is unimplemented. The `execute` build arm
     /// returns [`QueryError::Miss`] (`Opaque(Miss)`) and never admits or
     /// caches a value (admission
     /// [`AdmissionSpec::NonProducingPendingReducer`]). Value domain:
@@ -2223,15 +2229,15 @@ pub enum SemanticQueryKey {
         type_args: Arc<[SemanticNodeId]>,
         context: AmbientNamespaceContext,
     },
-    /// Resolve an enum declaration's surface (design §2.2).
+    /// Resolve an enum declaration's surface.
     ///
     /// `enum_slot` is the content-free [`ResolvedDeclSlotIdentity`] of the
     /// enum (an enum is not generic — NO `type_args`); `context` carries
     /// only `resolve_env_hash` (`R`).
     ///
-    /// **NON-PRODUCING in this block** — the enum value/type-duality
-    /// reducer lands in the later `U2Enums` block. The `execute` build arm
-    /// returns [`QueryError::Miss`] and never admits or caches
+    /// **Non-producing.** This variant has no `execute`-side producer: its
+    /// enum value/type-duality reducer is unimplemented. The `execute`
+    /// build arm returns [`QueryError::Miss`] and never admits or caches
     /// (admission [`AdmissionSpec::NonProducingPendingReducer`]). Value
     /// domain: [`SemanticQueryValueTag::TypeNode`].
     ///
@@ -2240,21 +2246,27 @@ pub enum SemanticQueryKey {
         enum_slot: ResolvedDeclSlotIdentity,
         context: EnumContext,
     },
-    /// Resolve a callee's overload set (design §2.2).
+    /// Resolve a callee's overload set.
     ///
     /// `callee` is the already-resolved [`SemanticNodeId`] of the callee;
     /// `type_args` are its call-site type arguments (part of semantic
     /// identity); `context` carries only `resolve_env_hash` (`R`).
     ///
-    /// **NON-PRODUCING in this block** — the signature-lowering reducer
-    /// lands in the later signature-lowering block. The `execute` build
-    /// arm returns [`QueryError::Miss`] and never admits or caches
-    /// (admission [`AdmissionSpec::NonProducingPendingReducer`]).
+    /// **Non-producing.** This variant has no `execute`-side producer: its
+    /// signature-lowering reducer is unimplemented. The `execute` build arm
+    /// returns [`QueryError::Miss`] and never admits or caches (admission
+    /// [`AdmissionSpec::NonProducingPendingReducer`]).
     ///
-    /// Value domain: [`SemanticQueryValueTag::OverloadSet`]
-    /// (`SemanticQueryValue::OverloadSet(Arc<[SignatureRef]>)`). Returning
-    /// an empty `OverloadSet(Arc::from([]))` would be a STUB — the build
-    /// returns `Miss`, never a fake empty set.
+    /// **Forward-declared value domain.** The row records value domain
+    /// [`SemanticQueryValueTag::OverloadSet`]
+    /// (`SemanticQueryValue::OverloadSet(Arc<[SignatureRef]>)`) — the
+    /// ordered call/construct signature set this key will ultimately carry.
+    /// This is a forward-declared contract, mirroring how `Relate`
+    /// forward-declares [`SemanticQueryValueTag::Relation`]: the value
+    /// carrier capable of holding an `OverloadSet` is introduced together
+    /// with the overload-producing reducer. Until then the runtime arm is
+    /// non-producing — it returns `Miss`, NEVER a fabricated empty
+    /// `OverloadSet(Arc::from([]))`, which would be a stub.
     ///
     /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
     ResolveOverloadSet {

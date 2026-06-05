@@ -20,18 +20,20 @@
 //! 2. **Enum-equality** — the spec table's variant-name set equals the
 //!    variant identifiers scanned from the live `pub enum SemanticQueryKey`
 //!    source (fails when a variant is added/removed without regenerating).
-//! 3. **Per-row sanity** — every row is `Live`; every row EXCEPT `Relate`
-//!    carries the `TypeNode` value domain, while `Relate` carries `Relation`
-//!    (the current-tree truth), and the
+//! 3. **Per-row sanity** — every row is `Live`; every row carries the
+//!    `TypeNode` value domain EXCEPT `Relate` (`Relation`) and
+//!    `ResolveOverloadSet` (`OverloadSet`), which is the current-tree truth,
+//!    and the
 //!    [`SemanticQueryKeyTag::ALL`](crate::semantic_query::SemanticQueryKeyTag::ALL)
 //!    set triangulates against both the spec set and the enum-scan set.
 //!
 //! # Current-tree honesty
 //!
-//! - Every live variant EXCEPT `Relate` resolves to
-//!   [`SemanticQueryValueTag::TypeNode`]: `ProjectSemanticDispatch::execute`
-//!   wraps those keys' results as `SemanticQueryValue::TypeNode(node)`.
-//!   `Relate` is the one exception. The row records its value domain as
+//! - Every live variant resolves to
+//!   [`SemanticQueryValueTag::TypeNode`] EXCEPT `Relate` and
+//!   `ResolveOverloadSet`: `ProjectSemanticDispatch::execute` wraps the
+//!   `TypeNode` keys' results as `SemanticQueryValue::TypeNode(node)`.
+//!   `Relate` records its value domain as
 //!   [`SemanticQueryValueTag::Relation`] — the tri-state assignability
 //!   classification. Its formal `execute` arm is non-producing: it returns
 //!   `QueryError::Miss` (`Opaque(Miss)`). The current PRODUCTION authority is
@@ -39,8 +41,13 @@
 //!   (RelationResult, DepSignature)`, which produces and dep-signature-fences
 //!   every judgement in the dedicated `SemanticGraphStore::relation_memo` —
 //!   NOT the family singleflight. That is why this row's `admission` is
-//!   [`RelationMemo`](AdmissionSpec::RelationMemo). No other value domain
-//!   appears.
+//!   [`RelationMemo`](AdmissionSpec::RelationMemo). `ResolveOverloadSet`
+//!   records [`SemanticQueryValueTag::OverloadSet`] as a FORWARD-DECLARED
+//!   value domain: its `execute` arm is non-producing (returns `Miss`,
+//!   admission [`NonProducingPendingReducer`](AdmissionSpec::NonProducingPendingReducer))
+//!   until the overload-producing reducer that fills the `OverloadSet`
+//!   carrier lands — it never fabricates an empty set. No other value
+//!   domain appears.
 //! - `allowed_demand` is a [`DemandAxis`]-vocabulary mask and does NOT capture
 //!   the `ReductionDemand` slot-selection dimension. A key carrying a
 //!   `ProjectionReductionContext` (`Instantiate` / `KeyOf` / `MappedType` /
@@ -72,9 +79,11 @@
 //!   carries `P`. This hand-classification is pending the design's §3.6
 //!   benched-minimality pass (U3/U15) that empirically pins each row's
 //!   minimal dimension set.
-//! - `cross_context_guard` is empty (`""`) for every current row. The
-//!   per-key `*_do_not_warm_hit` cross-context guards are populated when a key
-//!   gains its dedicated cross-context warm-hit guard; an empty string is the
+//! - `cross_context_guard` names the per-key `*_do_not_warm_hit` guard that
+//!   pins the row's cross-context warm-hit isolation, or is empty (`""`) for a
+//!   row that does not yet have one. The four `Resolve{ClassSurface,
+//!   AmbientNamespace,Enum,OverloadSet}` rows name their guards
+//!   (`resolve_*_do_not_warm_hit`); the remaining rows carry `""` as the
 //!   ACCURATE present state, not a placeholder.
 
 use crate::semantic_query::demand::{relevant_demand_axes, AxisMask, DemandAxis};
@@ -286,15 +295,15 @@ pub enum AdmissionSpec {
     /// (`Opaque(Miss)`) — so this key never flows through the `Singleflight`
     /// family materialiser. Used by `Relate`.
     RelationMemo,
-    /// Honest non-producing arm: this key has NO `execute`-side producer
-    /// in THIS block. The `execute` build arm returns
+    /// Honest non-producing arm: this key has NO `execute`-side producer.
+    /// The `execute` build arm returns
     /// `QueryResult::Error(QueryError::Miss)` (`Opaque(Miss)`) verbatim —
     /// it NEVER admits, caches, backfills, or fabricates an empty/unknown
     /// value as if it were semantic. The reducer that produces this key's
-    /// value lands in a NAMED later U2 block:
-    /// - `ResolveAmbientNamespace` → the later `U2Namespaces` reducer.
-    /// - `ResolveEnum` → the later `U2Enums` enum value/type-duality reducer.
-    /// - `ResolveOverloadSet` → the later signature-lowering reducer.
+    /// value is unimplemented:
+    /// - `ResolveAmbientNamespace` → the namespace-analysis reducer.
+    /// - `ResolveEnum` → the enum value/type-duality reducer.
+    /// - `ResolveOverloadSet` → the signature-lowering reducer.
     ///
     /// Distinct from [`RelationMemo`](Self::RelationMemo) (implies a
     /// dedicated relation-memo producer), [`Singleflight`](Self::Singleflight)
@@ -356,21 +365,6 @@ fn env_resolve() -> EnvDimMask {
 /// `resolve_env`).
 fn env_structural() -> EnvDimMask {
     EnvDimMask::from_dims(&[EnvDim::Type, EnvDim::Lib, EnvDim::Project])
-}
-
-/// The full five-hash env set `{P, R, T, L, J}` — for keys whose value
-/// reads the parsed body skeleton at query time (design §2.1 tier-2: `P`
-/// enters only for a genuine parsed-body-skeleton read). `ResolveClassSurface`
-/// (decorator / member-modifier lowering) and `ResolveAmbientNamespace`
-/// (namespace-member body analysis) carry `P`.
-fn env_full() -> EnvDimMask {
-    EnvDimMask::from_dims(&[
-        EnvDim::Parse,
-        EnvDim::Resolve,
-        EnvDim::Type,
-        EnvDim::Lib,
-        EnvDim::Project,
-    ])
 }
 
 /// The demand axes a [`ProjectionMode`](crate::semantic_query::ProjectionMode)
@@ -669,35 +663,37 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         },
         // ResolveClassSurface { decl_slot, type_args, side, context } —
         // resolves the instance (TYPE-space) or static (VALUE-space) half
-        // of a class via the shared dual-space algorithm. Reads the parsed
-        // body skeleton (decorators / member modifiers) so it carries `P`
-        // → `P R T L J`. LIVE producer (composes `execute(Instantiate)` /
-        // `execute(TypeOf)`); branches on the axes the `mode` spans
-        // (`side` is a FAMILY-IDENTITY discriminator on `FamilyKey`, not a
-        // DemandAxis).
+        // of a class via the shared dual-space algorithm. The composed
+        // surface identity-routes `execute(Instantiate)` /
+        // `execute(TypeOf)` and reads no parsed body skeleton at query
+        // time, so `R T L J` (no `P` — keying on `parse_env` would be a
+        // dead axis; `P` enters with the decorator-reading reducer). LIVE
+        // producer; branches on the axes the `mode` spans (`side` is a
+        // FAMILY-IDENTITY discriminator on `FamilyKey`, not a DemandAxis).
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::ResolveClassSurface,
             lifecycle: KeyLifecycle::Live,
             context_shape: "ClassSurfaceContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_full(),
+            env_dims: env_resolve(),
             allowed_demand: mode_axes,
             cross_context_guard: "resolve_class_surface_do_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
         },
         // ResolveAmbientNamespace { namespace_slot, type_args, context } —
-        // resolves an ambient namespace surface. Reads the parsed body
-        // skeleton (namespace-member analysis) so it carries `P` →
-        // `P R T L J`. NON-PRODUCING in this block (the reducer lands in
-        // the later U2Namespaces block): the execute arm returns Miss and
-        // never admits/caches. Carries a projection `mode`, so the family
-        // branches on the axes the `mode` spans.
+        // resolves an ambient namespace surface. The value reads no parsed
+        // body skeleton at query time, so `R T L J` (no `P` — keying on
+        // `parse_env` would be a dead axis; `P` enters with the
+        // body-reading namespace-member reducer). Non-producing: the
+        // execute arm returns Miss and never admits/caches. Carries a
+        // projection `mode`, so the family branches on the axes the `mode`
+        // spans.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::ResolveAmbientNamespace,
             lifecycle: KeyLifecycle::Live,
             context_shape: "AmbientNamespaceContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_full(),
+            env_dims: env_resolve(),
             allowed_demand: mode_axes,
             cross_context_guard: "resolve_ambient_namespace_do_not_warm_hit",
             admission: AdmissionSpec::NonProducingPendingReducer,
@@ -705,9 +701,8 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         // ResolveEnum { enum_slot, context } — resolves an enum surface.
         // An enum is not generic (no substitution axis) and enum-member
         // analysis does not read the parsed body skeleton at query time,
-        // so `R T L J` (no `P`). NON-PRODUCING in this block (the reducer
-        // lands in the later U2Enums block): the execute arm returns Miss
-        // and never admits/caches. Carries no `mode` → no demand axes.
+        // so `R T L J` (no `P`). Non-producing: the execute arm returns
+        // Miss and never admits/caches. Carries no `mode` → no demand axes.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::ResolveEnum,
             lifecycle: KeyLifecycle::Live,
@@ -721,10 +716,9 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         // ResolveOverloadSet { callee, type_args, context } — resolves a
         // callee's overload set. Signature lowering resolves imported
         // references but reads no parsed body skeleton at query time, so
-        // `R T L J` (no `P`). NON-PRODUCING in this block (the reducer
-        // lands in the later signature-lowering block): the execute arm
-        // returns Miss and never admits/caches (returning an empty
-        // OverloadSet would be a stub). Value domain is `OverloadSet`, NOT
+        // `R T L J` (no `P`). Non-producing: the execute arm returns Miss
+        // and never admits/caches (returning an empty OverloadSet would be
+        // a stub). Value domain is the forward-declared `OverloadSet`, NOT
         // `TypeNode`. Carries no `mode` → no demand axes (substitution is
         // carried by `type_args` on the key).
         SemanticQueryKeySpec {

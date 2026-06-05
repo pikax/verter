@@ -16,10 +16,12 @@
 //!    the live `pub enum SemanticQueryKey { … }` source. Fails when a variant
 //!    is added/removed without regenerating.
 //! 3. **Per-row sanity** — every row is `Live`; the value domain is `TypeNode`
-//!    for every variant EXCEPT `Relate` (which is `Relation`, since its execute
-//!    arm is non-producing and its judgement lives in the dedicated
-//!    relation_memo), and `SemanticQueryKeyTag::ALL` triangulates against both
-//!    the spec set and the enum-scan set.
+//!    for every variant EXCEPT `Relate` (`Relation` — its execute arm is
+//!    non-producing and its judgement lives in the dedicated relation_memo) and
+//!    `ResolveOverloadSet` (`OverloadSet` — a forward-declared value domain
+//!    whose non-producing execute arm returns `Miss`), and
+//!    `SemanticQueryKeyTag::ALL` triangulates against both the spec set and the
+//!    enum-scan set.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;

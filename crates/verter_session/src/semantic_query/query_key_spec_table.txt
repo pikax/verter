@@ -15,7 +15,7 @@ ProjectPath | Live | TypeNode | T L J | Path,Facets,MemberBody,AliasPreservation
 ResolvedNamedType | Live | TypeNode | R T L J | — | HostResolvedNamedTypeKey | — | ReadDominantNoExecute
 Relate | Live | Relation | T L J | — | (source,target) | — | RelationMemo
 ResolveMacroPayload | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | (owner,macro_index,macro_kind,type_args,mode) | — | Singleflight
-ResolveClassSurface | Live | TypeNode | P R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ClassSurfaceContext | resolve_class_surface_do_not_warm_hit | Singleflight
-ResolveAmbientNamespace | Live | TypeNode | P R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | AmbientNamespaceContext | resolve_ambient_namespace_do_not_warm_hit | NonProducingPendingReducer
+ResolveClassSurface | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ClassSurfaceContext | resolve_class_surface_do_not_warm_hit | Singleflight
+ResolveAmbientNamespace | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | AmbientNamespaceContext | resolve_ambient_namespace_do_not_warm_hit | NonProducingPendingReducer
 ResolveEnum | Live | TypeNode | R T L J | — | EnumContext | resolve_enum_do_not_warm_hit | NonProducingPendingReducer
 ResolveOverloadSet | Live | OverloadSet | R T L J | — | OverloadSetContext | resolve_overload_set_do_not_warm_hit | NonProducingPendingReducer

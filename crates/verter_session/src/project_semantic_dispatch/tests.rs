@@ -7143,7 +7143,7 @@ fn materialize_surface_mirrors_materialize_component_meta_structure() {
 /// this test breaks compilation, surfacing the addition for review (the
 /// dispatch helpers such as `materialize_surface` / `execute_pick` /
 /// `execute_omit` stay NON-variant — methods on `ProjectSemanticDispatch`,
-/// never enum arms). The U2 class/namespace/enum/overload key surface
+/// never enum arms). The class/namespace/enum/overload key surface
 /// (`ResolveClassSurface` / `ResolveAmbientNamespace` / `ResolveEnum` /
 /// `ResolveOverloadSet`) is part of the pinned set.
 #[test]

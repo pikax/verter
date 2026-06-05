@@ -20,8 +20,8 @@ use std::sync::Arc;
 use verter_session::for_tests::ReadSetSignature;
 use verter_session::semantic_query::{
     AmbientNamespaceContext, ClassSurfaceContext, ClassSurfaceSide, DeclKey, EnumContext,
-    OverloadSetContext, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryResult,
-    ResolvedDeclSlotIdentity, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    OverloadSetContext, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError,
+    QueryResult, ResolvedDeclSlotIdentity, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
     SemanticSymbolSpace, ValueRootKey,
 };
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
@@ -107,35 +107,58 @@ fn class_surface_key(
     name: &str,
     type_args: Arc<[SemanticNodeId]>,
     side: ClassSurfaceSide,
-    parse_env: u8,
     resolve_env: u8,
+) -> SemanticQueryKey {
+    class_surface_key_with_mode(
+        canonical,
+        name,
+        type_args,
+        side,
+        resolve_env,
+        // Identity rung → no backfill fan-out muddies the probe.
+        ProjectionMode::Identity,
+    )
+}
+
+/// `class_surface_key` with an explicit projection `mode` — used by the
+/// mode-axis identity test. The slot's symbol space is `Type`.
+fn class_surface_key_with_mode(
+    canonical: &str,
+    name: &str,
+    type_args: Arc<[SemanticNodeId]>,
+    side: ClassSurfaceSide,
+    resolve_env: u8,
+    mode: ProjectionMode,
 ) -> SemanticQueryKey {
     SemanticQueryKey::ResolveClassSurface {
         decl_slot: slot(canonical, name, SemanticSymbolSpace::Type),
         type_args,
         side,
         context: ClassSurfaceContext {
-            parse_env_hash: hash16(parse_env),
             resolve_env_hash: hash16(resolve_env),
-            // Identity rung → no backfill fan-out muddies the probe.
-            mode: ProjectionMode::Identity,
+            mode,
         },
     }
 }
 
-fn ambient_namespace_key(
+fn ambient_namespace_key(canonical: &str, name: &str, resolve_env: u8) -> SemanticQueryKey {
+    ambient_namespace_key_with_mode(canonical, name, resolve_env, ProjectionMode::Identity)
+}
+
+/// `ambient_namespace_key` with an explicit projection `mode` — used by the
+/// mode-axis identity test.
+fn ambient_namespace_key_with_mode(
     canonical: &str,
     name: &str,
-    parse_env: u8,
     resolve_env: u8,
+    mode: ProjectionMode,
 ) -> SemanticQueryKey {
     SemanticQueryKey::ResolveAmbientNamespace {
         namespace_slot: slot(canonical, name, SemanticSymbolSpace::Namespace),
         type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: AmbientNamespaceContext {
-            parse_env_hash: hash16(parse_env),
             resolve_env_hash: hash16(resolve_env),
-            mode: ProjectionMode::Identity,
+            mode,
         },
     }
 }
@@ -165,28 +188,14 @@ fn overload_set_key(callee: SemanticNodeId, resolve_env: u8) -> SemanticQueryKey
 
 #[test]
 fn resolve_class_surface_key_covers_side_demand_type_args_and_context() {
-    let base = class_surface_key(
-        "/c.ts",
-        "Foo",
-        Arc::from([]),
-        ClassSurfaceSide::Instance,
-        0,
-        0,
-    );
+    let base = class_surface_key("/c.ts", "Foo", Arc::from([]), ClassSurfaceSide::Instance, 0);
 
     // `side` is a MANDATORY identity discriminator. Instance vs Static of
     // the SAME class + args + context MUST be non-equal AND occupy
     // distinct memo slots. A single-slot impl that ignored `side` would
     // make these SHARE a slot — `assert_distinct_identity` would then see
     // count 1 (not 0) and FAIL. This is the discriminating negative.
-    let static_side = class_surface_key(
-        "/c.ts",
-        "Foo",
-        Arc::from([]),
-        ClassSurfaceSide::Static,
-        0,
-        0,
-    );
+    let static_side = class_surface_key("/c.ts", "Foo", Arc::from([]), ClassSurfaceSide::Static, 0);
     assert_distinct_identity(&base, &static_side);
 
     // type_args is part of semantic identity.
@@ -196,31 +205,106 @@ fn resolve_class_surface_key_covers_side_demand_type_args_and_context() {
         Arc::from(vec![dummy_node()].into_boxed_slice()),
         ClassSurfaceSide::Instance,
         0,
-        0,
     );
     assert_distinct_identity(&base, &with_args);
 
     // A context env-hash difference (resolve_env) is part of identity.
-    let other_resolve_env = class_surface_key(
-        "/c.ts",
-        "Foo",
-        Arc::from([]),
-        ClassSurfaceSide::Instance,
-        0,
-        9,
-    );
+    // `ClassSurfaceContext` carries ONLY `resolve_env_hash` (`R`) + `mode`
+    // — there is deliberately NO `parse_env` axis (R21: the composed
+    // surface identity-routes `Instantiate` + `TypeOf` and reads no parsed
+    // body skeleton, so keying on `parse_env` would be a dead axis).
+    let other_resolve_env =
+        class_surface_key("/c.ts", "Foo", Arc::from([]), ClassSurfaceSide::Instance, 9);
     assert_distinct_identity(&base, &other_resolve_env);
+}
 
-    // A context env-hash difference (parse_env) is part of identity.
-    let other_parse_env = class_surface_key(
+// ---------------------------------------------------------------------------
+// (1b) ResolveClassSurface identity is PATH-INDEPENDENT w.r.t. the incoming
+//      slot's symbol_space: two keys differing ONLY in `decl_slot.symbol_space`
+//      compute the SAME value (side selects the half; the build ignores
+//      symbol_space) and so MUST share one (FamilyKey, slot).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolve_class_surface_identity_canonicalizes_decl_slot_symbol_space() {
+    // Same class site + side + args + context, but the incoming slot's
+    // symbol space differs (Type vs Value vs Namespace). The family key
+    // canonicalizes the slot's symbol_space, so all three project to the
+    // SAME slot — a warm entry under one is reachable from the others.
+    let key_for = |space: SemanticSymbolSpace| SemanticQueryKey::ResolveClassSurface {
+        decl_slot: slot("/c.ts", "Foo", space),
+        type_args: Arc::from(Vec::new().into_boxed_slice()),
+        side: ClassSurfaceSide::Instance,
+        context: ClassSurfaceContext {
+            resolve_env_hash: hash16(0),
+            mode: ProjectionMode::Identity,
+        },
+    };
+    let type_space = key_for(SemanticSymbolSpace::Type);
+    let value_space = key_for(SemanticSymbolSpace::Value);
+    let namespace_space = key_for(SemanticSymbolSpace::Namespace);
+
+    // The keys are NON-equal (the SemanticQueryKey carries the full slot),
+    // but they must project to the SAME (FamilyKey, slot).
+    assert_ne!(type_space, value_space);
+    assert_ne!(type_space, namespace_space);
+
+    // A candidate published under the Type-space key is reachable from the
+    // Value-space and Namespace-space keys (count 1). A non-canonicalizing
+    // family key (carrying the raw symbol_space) would FORK the slot and
+    // make these counts 0 — that is the discriminating negative.
+    assert_eq!(
+        count_for_b_after_publishing_a(&type_space, &value_space),
+        1,
+        "ResolveClassSurface keys differing only in decl_slot.symbol_space \
+         (Type vs Value) must share ONE (FamilyKey, slot) — symbol_space \
+         must be canonicalized out of the family identity"
+    );
+    assert_eq!(
+        count_for_b_after_publishing_a(&type_space, &namespace_space),
+        1,
+        "ResolveClassSurface keys differing only in decl_slot.symbol_space \
+         (Type vs Namespace) must share ONE (FamilyKey, slot)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (1c) ResolveClassSurface / ResolveAmbientNamespace strip `context.mode`
+//      into the ModeSlot: two keys differing ONLY in `mode` must map to
+//      DISTINCT (FamilyKey, ModeSlot). A ModeSlot-collapsing family_and_slot
+//      (always returning ModeSlot::Single) would make them SHARE a slot.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolve_class_surface_identity_covers_mode_axis() {
+    // Identity vs Navigate — both backfill nothing onto each other's slot
+    // (Navigate backfills only Identity on PUBLISH of Navigate; here we
+    // publish Identity, which backfills nothing), so a correct impl gives
+    // count 0 while a mode-collapsing impl gives count 1.
+    let mode_identity = class_surface_key_with_mode(
         "/c.ts",
         "Foo",
         Arc::from([]),
         ClassSurfaceSide::Instance,
-        9,
         0,
+        ProjectionMode::Identity,
     );
-    assert_distinct_identity(&base, &other_parse_env);
+    let mode_navigate = class_surface_key_with_mode(
+        "/c.ts",
+        "Foo",
+        Arc::from([]),
+        ClassSurfaceSide::Instance,
+        0,
+        ProjectionMode::Navigate,
+    );
+    assert_distinct_identity(&mode_identity, &mode_navigate);
+}
+
+#[test]
+fn resolve_ambient_namespace_identity_covers_mode_axis() {
+    let mode_identity = ambient_namespace_key_with_mode("/n.ts", "N", 0, ProjectionMode::Identity);
+    let mode_navigate = ambient_namespace_key_with_mode("/n.ts", "N", 0, ProjectionMode::Navigate);
+    assert_distinct_identity(&mode_identity, &mode_navigate);
 }
 
 // ---------------------------------------------------------------------------
@@ -229,9 +313,10 @@ fn resolve_class_surface_key_covers_side_demand_type_args_and_context() {
 
 #[test]
 fn resolve_ambient_namespace_key_covers_context() {
-    let base = ambient_namespace_key("/n.ts", "N", 0, 0);
-    assert_distinct_identity(&base, &ambient_namespace_key("/n.ts", "N", 0, 9));
-    assert_distinct_identity(&base, &ambient_namespace_key("/n.ts", "N", 9, 0));
+    // `AmbientNamespaceContext` carries ONLY `resolve_env_hash` (`R`) +
+    // `mode` — there is deliberately NO `parse_env` axis (R21).
+    let base = ambient_namespace_key("/n.ts", "N", 0);
+    assert_distinct_identity(&base, &ambient_namespace_key("/n.ts", "N", 9));
 }
 
 #[test]
@@ -260,22 +345,8 @@ fn resolve_overload_set_key_covers_context() {
 fn resolve_class_surface_do_not_warm_hit() {
     // Same class site, different resolve_env (the R21 split-env
     // convention) — must not warm-hit across the env boundary.
-    let env_a = class_surface_key(
-        "/c.ts",
-        "Foo",
-        Arc::from([]),
-        ClassSurfaceSide::Instance,
-        0,
-        0,
-    );
-    let env_b = class_surface_key(
-        "/c.ts",
-        "Foo",
-        Arc::from([]),
-        ClassSurfaceSide::Instance,
-        0,
-        1,
-    );
+    let env_a = class_surface_key("/c.ts", "Foo", Arc::from([]), ClassSurfaceSide::Instance, 0);
+    let env_b = class_surface_key("/c.ts", "Foo", Arc::from([]), ClassSurfaceSide::Instance, 1);
     assert_eq!(
         count_for_b_after_publishing_a(&env_a, &env_b),
         0,
@@ -285,8 +356,8 @@ fn resolve_class_surface_do_not_warm_hit() {
 
 #[test]
 fn resolve_ambient_namespace_do_not_warm_hit() {
-    let env_a = ambient_namespace_key("/n.ts", "N", 0, 0);
-    let env_b = ambient_namespace_key("/n.ts", "N", 0, 1);
+    let env_a = ambient_namespace_key("/n.ts", "N", 0);
+    let env_b = ambient_namespace_key("/n.ts", "N", 1);
     assert_eq!(
         count_for_b_after_publishing_a(&env_a, &env_b),
         0,
@@ -314,6 +385,64 @@ fn resolve_overload_set_do_not_warm_hit() {
         0,
         "ResolveOverloadSet must not warm-hit across a resolve_env boundary"
     );
+}
+
+// ---------------------------------------------------------------------------
+// (3b) Execute-side NON-PRODUCING behavior. The three non-producing keys'
+//      `execute` arms must (a) return `QueryError::Miss` — NOT a Value, NOT a
+//      fabricated empty/unknown value — AND (b) admit/cache NOTHING. These
+//      dispatch through the REAL `execute()` cooperative path (not a direct
+//      publish), so a fake producer returning `OverloadSet([])` (→ narrows to
+//      `ValueDomainMismatch`, not `Miss`) or `TypeNode(node)` (→ a `Value`,
+//      not `Miss`; also leaves a warm candidate) FAILS both assertions.
+// ---------------------------------------------------------------------------
+
+/// Dispatch `key` through the canonical `execute()` path and assert it is a
+/// non-producing `Miss` that admitted nothing into the shared memo.
+fn assert_execute_is_non_producing_miss(host: &VerterHost, key: SemanticQueryKey) {
+    let result = verter_session::for_tests::dispatch_execute_type_node_for_tests(host, key.clone());
+    // (a) honest Miss — discriminates a `Value` (TypeNode) producer and a
+    // `ValueDomainMismatch` (e.g. an `OverloadSet([])` fake) alike.
+    assert!(
+        matches!(result, QueryResult::Error(QueryError::Miss)),
+        "non-producing execute arm must return Error(Miss), got {result:?}"
+    );
+    // (b) admitted / cached NOTHING — an `Error` result is never warm-published.
+    let graph = host.project_type_store().semantic_graph();
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&key),
+        0,
+        "a non-producing execute arm must admit NOTHING into the shared memo"
+    );
+}
+
+#[test]
+fn resolve_ambient_namespace_execute_is_non_producing_miss() {
+    let host = host();
+    upsert(
+        &host,
+        "/n.ts",
+        "export namespace N {\n  export const a = 1;\n}\n",
+    );
+    assert_execute_is_non_producing_miss(&host, ambient_namespace_key("/n.ts", "N", 0));
+}
+
+#[test]
+fn resolve_enum_execute_is_non_producing_miss() {
+    let host = host();
+    upsert(&host, "/e.ts", "export enum E {\n  A,\n  B,\n}\n");
+    assert_execute_is_non_producing_miss(&host, enum_key("/e.ts", "E", 0));
+}
+
+#[test]
+fn resolve_overload_set_execute_is_non_producing_miss() {
+    let host = host();
+    upsert(
+        &host,
+        "/o.ts",
+        "export function f(x: number): void;\nexport function f(x: string): void;\nexport function f(x: unknown): void {}\n",
+    );
+    assert_execute_is_non_producing_miss(&host, overload_set_key(dummy_node(), 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -379,7 +508,6 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
 
     let decl_slot = slot(canonical, "Foo", SemanticSymbolSpace::Type);
     let ctx = ClassSurfaceContext {
-        parse_env_hash: Default::default(),
         resolve_env_hash: Default::default(),
         mode: ProjectionMode::Shallow,
     };
