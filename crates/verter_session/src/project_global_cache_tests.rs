@@ -1441,6 +1441,10 @@ fn evict_canonical_drops_resolved_named_types_for_that_canonical_only() {
     let mk = |canonical: &str, name: &str| HostResolvedNamedTypeKey {
         canonical_id: Arc::from(canonical),
         whole_hash: [1u8; 16],
+        resolve_env_hash: Default::default(),
+        type_env_hash: Default::default(),
+        lib_env_hash: Default::default(),
+        project_identity: 0,
         inner: ResolvedNamedTypeCacheKey {
             name: name.as_bytes().to_vec().into_boxed_slice(),
             surface: None,
@@ -1484,6 +1488,10 @@ fn bump_project_generation_clears_resolved_named_types() {
     let key = HostResolvedNamedTypeKey {
         canonical_id: Arc::from("/w/a.ts"),
         whole_hash: [1u8; 16],
+        resolve_env_hash: Default::default(),
+        type_env_hash: Default::default(),
+        lib_env_hash: Default::default(),
+        project_identity: 0,
         inner: ResolvedNamedTypeCacheKey {
             name: b"Foo".to_vec().into_boxed_slice(),
             surface: None,

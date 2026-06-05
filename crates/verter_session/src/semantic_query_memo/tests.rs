@@ -1010,16 +1010,14 @@ fn node_arena_invalidation_preserves_global_scope() {
 fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
-    let base = crate::semantic_query::DeclKey::from_identity(
-        &crate::semantic_query::DeclIdentity::synthetic("Foo"),
-    );
+    let base = crate::semantic_query::DeclIdentity::synthetic("Foo").to_type_slot_unscoped();
     let arg = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let key = SemanticQueryKey::Instantiate {
         base,
         args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     };
 
     // Dep-sig references /w/body.ts — the declaration file the
@@ -1059,16 +1057,14 @@ fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body
 fn invalidate_canonical_keeps_instantiate_entries_whose_bases_are_unrelated() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
-    let base = crate::semantic_query::DeclKey::from_identity(
-        &crate::semantic_query::DeclIdentity::synthetic("Foo"),
-    );
+    let base = crate::semantic_query::DeclIdentity::synthetic("Foo").to_type_slot_unscoped();
     let arg = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let key = SemanticQueryKey::Instantiate {
         base,
         args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     };
 
     let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
@@ -3023,6 +3019,10 @@ fn make_key(canonical: &str, whole_hash: [u8; 16], name: &str) -> HostResolvedNa
     HostResolvedNamedTypeKey {
         canonical_id: Arc::from(canonical),
         whole_hash,
+        resolve_env_hash: Default::default(),
+        type_env_hash: Default::default(),
+        lib_env_hash: Default::default(),
+        project_identity: 0,
         inner: ResolvedNamedTypeCacheKey {
             name: name.as_bytes().to_vec().into_boxed_slice(),
             surface: None,

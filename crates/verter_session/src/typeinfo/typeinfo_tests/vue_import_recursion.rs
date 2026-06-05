@@ -99,12 +99,9 @@ fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<Stri
         .expect("indexed ready")
         .whole_hash;
     let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::DeclKey {
-            canonical_id: Arc::from(canonical_id),
-            decl_name: Arc::from("default"),
-        },
+        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical_id), Arc::from("default")),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+        context: crate::semantic_query::InstantiateContext::new(ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         QueryResult::Recursive(node) => node,
@@ -148,12 +145,9 @@ fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Op
         .expect("indexed ready")
         .whole_hash;
     let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::DeclKey {
-            canonical_id: Arc::from(canonical_id),
-            decl_name: Arc::from("default"),
-        },
+        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical_id), Arc::from("default")),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+        context: crate::semantic_query::InstantiateContext::new(ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         QueryResult::Recursive(node) => node,
@@ -195,12 +189,9 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
         .expect("indexed ready")
         .whole_hash;
     let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::DeclKey {
-            canonical_id: Arc::from(canonical_id),
-            decl_name: Arc::from("default"),
-        },
+        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical_id), Arc::from("default")),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+        context: crate::semantic_query::InstantiateContext::new(ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         QueryResult::Recursive(node) => node,
@@ -243,12 +234,9 @@ fn instantiate_vue_default_node(
         .expect("indexed ready")
         .whole_hash;
     match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::DeclKey {
-            canonical_id: Arc::from(canonical_id),
-            decl_name: Arc::from("default"),
-        },
+        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical_id), Arc::from("default")),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+        context: crate::semantic_query::InstantiateContext::new(ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         QueryResult::Recursive(node) => node,
@@ -913,12 +901,9 @@ fn project_vue_default_path_eager(
     // body of the instance shape is lowered while `(canonical, "default")` is on
     // the active-instantiation stack.
     let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::DeclKey {
-            canonical_id: Arc::from(canonical_id),
-            decl_name: Arc::from("default"),
-        },
+        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical_id), Arc::from("default")),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        context: crate::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Expanded), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         QueryResult::Recursive(node) => node,

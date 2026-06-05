@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use verter_session::semantic_query::{
-    DeclKey, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
+    ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
     SemanticNodeId, SemanticQueryKey,
 };
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
@@ -58,12 +58,9 @@ fn instantiate_slot_holds_two_concurrent_candidates_for_distinct_views() {
 
     // Content-free key (R6).
     let key = SemanticQueryKey::Instantiate {
-        base: DeclKey {
-            canonical_id: Arc::from(canonical),
-            decl_name: Arc::from("Foo"),
-        },
+        base: verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical), Arc::from("Foo")),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        context: verter_session::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Expanded), Default::default()),
     };
 
     // Publish two candidates with the SAME key but DIFFERENT
@@ -148,12 +145,9 @@ fn family_slot_caps_concurrent_candidates_at_four_with_fifo_eviction() {
     let graph = host.project_type_store().semantic_graph();
 
     let key = SemanticQueryKey::Instantiate {
-        base: DeclKey {
-            canonical_id: Arc::from(canonical),
-            decl_name: Arc::from("Bar"),
-        },
+        base: verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical), Arc::from("Bar")),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        context: verter_session::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Expanded), Default::default()),
     };
 
     // Publish 5 distinct candidates for the SAME key (5 distinct
@@ -214,7 +208,7 @@ fn multi_candidate_reverse_index_survives_sibling_invalidation() {
     use verter_session::for_tests::ReadSetSignature;
     use verter_session::resolver_core::FactVersionRef;
     use verter_session::semantic_query::{
-        DeclKey, DepSignature, ProjectionMode, ProjectionReductionContext, QueryResult,
+        DepSignature, ProjectionMode, ProjectionReductionContext, QueryResult,
         SemanticNodeData, SemanticNodeId, SemanticQueryKey,
     };
     use verter_session::{HostConfig, VerterHost};
@@ -230,12 +224,9 @@ fn multi_candidate_reverse_index_survives_sibling_invalidation() {
     // Identity mode — no backfills — so each publish populates
     // EXACTLY one slot. Lets the test count registrations cleanly.
     let key = SemanticQueryKey::Instantiate {
-        base: DeclKey {
-            canonical_id: Arc::from(canonical_keyed),
-            decl_name: Arc::from("Owner"),
-        },
+        base: verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical_keyed), Arc::from("Owner")),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: ProjectionReductionContext::published(ProjectionMode::Identity),
+        context: verter_session::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Identity), Default::default()),
     };
 
     // Fact rail for candidate A+C: depends on /a.ts and /c.ts.
@@ -387,7 +378,7 @@ fn family_slot_cap_eviction_prunes_orphan_reverse_index_stamp() {
     use verter_session::for_tests::ReadSetSignature;
     use verter_session::resolver_core::FactVersionRef;
     use verter_session::semantic_query::{
-        DeclKey, DepSignature, ProjectionMode, ProjectionReductionContext, QueryResult,
+        DepSignature, ProjectionMode, ProjectionReductionContext, QueryResult,
         SemanticNodeData, SemanticNodeId, SemanticQueryKey,
     };
     use verter_session::{HostConfig, VerterHost};
@@ -401,12 +392,9 @@ fn family_slot_cap_eviction_prunes_orphan_reverse_index_stamp() {
     // FIFO-eviction's reverse-index drain from the orthogonal
     // backfill-slot behaviour.
     let key = SemanticQueryKey::Instantiate {
-        base: DeclKey {
-            canonical_id: Arc::from(canonical_keyed),
-            decl_name: Arc::from("Foo"),
-        },
+        base: verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical_keyed), Arc::from("Foo")),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: ProjectionReductionContext::published(ProjectionMode::Identity),
+        context: verter_session::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Identity), Default::default()),
     };
 
     // The OLDEST candidate (which the cap-4 FIFO will evict) references

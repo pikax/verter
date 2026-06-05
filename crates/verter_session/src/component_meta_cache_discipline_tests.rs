@@ -61,7 +61,7 @@ fn intern_empty_object(host: &VerterHost) -> SemanticNodeId {
 /// whose self-root canonical is untracked or hash-mismatched. The
 /// owner must therefore be a tracked file with the real content
 /// version threaded into the key identity.
-fn tracked_macro_owner(host: &VerterHost, canonical: &str) -> crate::semantic_query::DeclKey {
+fn tracked_macro_owner(host: &VerterHost, canonical: &str) -> crate::semantic_query::ResolvedDeclSlotIdentity {
     use crate::{FileKind, UpsertRequest};
     let _ = host
         .upsert(UpsertRequest {
@@ -77,10 +77,7 @@ fn tracked_macro_owner(host: &VerterHost, canonical: &str) -> crate::semantic_qu
     let _ = host
         .ensure_indexed_ready(canonical)
         .expect("owner SFC IndexedReady materialises");
-    crate::semantic_query::DeclKey {
-        canonical_id: Arc::from(canonical),
-        decl_name: Arc::from("<sfc-script-setup>"),
-    }
+    crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical), Arc::from("<sfc-script-setup>"))
 }
 
 /// 5b §5.D.1 — `ResolveMacroPayload` repeated identical keys: cold
@@ -105,7 +102,7 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     };
 
     let counter = DispatchCounter;
@@ -138,14 +135,11 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
                 crate::semantic_query::PrimitiveKind::String,
             ));
     let unrelated_key = SemanticQueryKey::ResolveMacroPayload {
-        owner: crate::semantic_query::DeclKey {
-            canonical_id: Arc::from("<synthetic>"),
-            decl_name: Arc::from("OtherOwner"),
-        },
+        owner: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("<synthetic>"), Arc::from("OtherOwner")),
         macro_index: 1,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![unrelated_arg].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     };
     let unrelated_baseline_cold = counter.family_cold(&unrelated_key);
     let unrelated_baseline_warm = counter.family_warm(&unrelated_key);
@@ -267,7 +261,7 @@ fn cache_discipline_execute_pick_repeated_keys_warm() {
     let probe_key = SemanticQueryKey::Instantiate {
         base: pick_builtin_decl_identity(),
         args: Arc::from(vec![base, key_set].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(mode),
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(mode), Default::default()),
     };
 
     let counter = DispatchCounter;
@@ -301,7 +295,7 @@ fn cache_discipline_execute_pick_repeated_keys_warm() {
     let unrelated_probe = SemanticQueryKey::Instantiate {
         base: pick_builtin_decl_identity(),
         args: Arc::from(vec![base, unrelated_key_set].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(mode),
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(mode), Default::default()),
     };
     let unrelated_baseline_cold = counter.family_cold(&unrelated_probe);
     let _ = dispatch.execute_pick(base, &unrelated_members, mode);
@@ -328,7 +322,7 @@ fn cache_discipline_execute_omit_repeated_keys_warm() {
     let probe_key = SemanticQueryKey::Instantiate {
         base: omit_builtin_decl_identity(),
         args: Arc::from(vec![base, key_set].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(mode),
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(mode), Default::default()),
     };
 
     let counter = DispatchCounter;
@@ -361,7 +355,7 @@ fn cache_discipline_execute_omit_repeated_keys_warm() {
     let unrelated_probe = SemanticQueryKey::Instantiate {
         base: omit_builtin_decl_identity(),
         args: Arc::from(vec![base, unrelated_key_set].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(mode),
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(mode), Default::default()),
     };
     let unrelated_baseline_cold = counter.family_cold(&unrelated_probe);
     let _ = dispatch.execute_omit(base, &unrelated_members, mode);

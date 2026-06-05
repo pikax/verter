@@ -11,11 +11,13 @@
 //! Two-layer enforcement:
 //!
 //! 1. **Compile-time destructuring proof** — the `base` / `owner`
-//!    field on each variant is a `DeclKey`, which is a public
-//!    two-field content-free struct (`canonical_id`, `decl_name`).
-//!    The destructuring patterns below would fail to compile if a
-//!    future commit re-introduced `whole_hash` to either the variant
-//!    or to `DeclKey` itself.
+//!    field on each variant is the env-bearing, content-free
+//!    `ResolvedDeclSlotIdentity` slot (`defining_canonical`,
+//!    `merged_symbol_name`, `symbol_space`, + the `project_identity` /
+//!    `type_env_hash` / `lib_env_hash` ENV dims — NOT content hashes).
+//!    The exhaustive destructuring patterns below would fail to compile
+//!    if a future commit re-introduced `whole_hash` / `content_hash` to
+//!    either the variant or to the slot itself.
 //!
 //! 2. **Source-AST scan** — walk
 //!    `crates/verter_session/src/semantic_query.rs` and
@@ -37,7 +39,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use verter_session::semantic_query::{
-    DeclKey, ProjectionMode, ProjectionReductionContext, SemanticNodeId, SemanticQueryKey,
+    ProjectionMode, ProjectionReductionContext, SemanticNodeId, SemanticQueryKey,
 };
 
 fn workspace_root() -> PathBuf {
@@ -54,67 +56,81 @@ fn read_file(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read `{rel}`: {e}"))
 }
 
-/// Compile-time proof that `SemanticQueryKey::Instantiate.base` is a
-/// `DeclKey` (content-free) — NOT a `DeclIdentity` (versioned).
+/// Compile-time proof that `SemanticQueryKey::Instantiate.base` is the
+/// env-bearing, content-free `ResolvedDeclSlotIdentity` (U2B.9 FORK-A) —
+/// NOT a `DeclIdentity` (versioned) and NOT carrying any
+/// content/version hash. The slot's env dims (`project_identity` /
+/// `type_env_hash` / `lib_env_hash`) are ENV dimensions, not content
+/// hashes, so R6 still holds.
 #[test]
 fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
-    let base = DeclKey {
-        canonical_id: Arc::from("/r6_check.ts"),
-        decl_name: Arc::from("Foo"),
-    };
+    use verter_session::semantic_query::{InstantiateContext, ResolvedDeclSlotIdentity};
+    let base = ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/r6_check.ts"), Arc::from("Foo"));
     let key = SemanticQueryKey::Instantiate {
         base: base.clone(),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        context: InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Expanded), Default::default()),
     };
     match key {
         SemanticQueryKey::Instantiate {
-            base: DeclKey {
-                canonical_id,
-                decl_name,
-            },
+            base:
+                ResolvedDeclSlotIdentity {
+                    defining_canonical,
+                    merged_symbol_name,
+                    symbol_space: _,
+                    project_identity: _,
+                    type_env_hash: _,
+                    lib_env_hash: _,
+                },
             args: _,
-            context: _,
+            // `InstantiateContext` carries the embedded projection-reduction
+            // identity + the `resolve_env_hash` ENV dim — no content/version
+            // hash. Destructuring proves the field set is exactly these two.
+            context: InstantiateContext { projection_reduction: _, resolve_env_hash: _ },
         } => {
-            // The `base` field exposes ONLY `canonical_id` and
-            // `decl_name`. Any future addition of `whole_hash` /
-            // `content_hash` / `fact_dep_signature` to `DeclKey`
-            // breaks this destructuring at compile time.
-            assert_eq!(canonical_id.as_ref(), "/r6_check.ts");
-            assert_eq!(decl_name.as_ref(), "Foo");
+            // The slot exposes a fixed field set with NO `whole_hash` /
+            // `content_hash` / `fact_dep_signature`. Any future addition
+            // of such a content/version field breaks this exhaustive
+            // destructuring at compile time.
+            assert_eq!(defining_canonical.as_ref(), "/r6_check.ts");
+            assert_eq!(merged_symbol_name.as_ref(), "Foo");
         }
         _ => panic!("expected Instantiate variant"),
     }
 }
 
 /// Compile-time proof that `SemanticQueryKey::ResolveMacroPayload.owner`
-/// is a `DeclKey` (content-free) — NOT a `DeclIdentity`.
+/// is the env-bearing, content-free `ResolvedDeclSlotIdentity` — NOT a
+/// `DeclIdentity` and carrying no content/version hash.
 #[test]
 fn r6_semantic_query_key_resolve_macro_payload_owner_is_content_free_decl_key() {
-    let owner = DeclKey {
-        canonical_id: Arc::from("/r6_check.vue"),
-        decl_name: Arc::from("<sfc-script-setup>"),
-    };
+    use verter_session::semantic_query::{MacroPayloadContext, ResolvedDeclSlotIdentity};
+    let owner = ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/r6_check.vue"), Arc::from("<sfc-script-setup>"));
     let key = SemanticQueryKey::ResolveMacroPayload {
         owner: owner.clone(),
         macro_index: 0,
         macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     };
     match key {
         SemanticQueryKey::ResolveMacroPayload {
-            owner: DeclKey {
-                canonical_id,
-                decl_name,
-            },
+            owner:
+                ResolvedDeclSlotIdentity {
+                    defining_canonical,
+                    merged_symbol_name,
+                    symbol_space: _,
+                    project_identity: _,
+                    type_env_hash: _,
+                    lib_env_hash: _,
+                },
             macro_index: _,
             macro_kind: _,
             type_args: _,
-            mode: _,
+            context: MacroPayloadContext { resolve_env_hash: _, mode: _ },
         } => {
-            assert_eq!(canonical_id.as_ref(), "/r6_check.vue");
-            assert_eq!(decl_name.as_ref(), "<sfc-script-setup>");
+            assert_eq!(defining_canonical.as_ref(), "/r6_check.vue");
+            assert_eq!(merged_symbol_name.as_ref(), "<sfc-script-setup>");
         }
         _ => panic!("expected ResolveMacroPayload variant"),
     }
@@ -218,28 +234,47 @@ fn r6_family_key_variants_carry_no_version_hash_in_source() {
     }
 }
 
-/// Source-AST scan over `semantic_query.rs` — the `DeclKey` struct
-/// itself must be content-free. Adding a `whole_hash` / `content_hash`
-/// / `fact_dep_signature` field to `DeclKey` would silently re-violate
-/// R6 across every variant that embeds it, so this guard
-/// independently pins the struct shape.
+/// Source-AST scan over `semantic_query.rs` — the
+/// `ResolvedDeclSlotIdentity` slot (the `Instantiate` / `ResolveMacroPayload`
+/// base/owner identity since U2B.9 FORK-A) must be content-free. It
+/// legitimately carries the `project_identity` / `type_env_hash` /
+/// `lib_env_hash` ENV dims, but adding a `whole_hash` / `content_hash` /
+/// `parse_stable_hash` / `fact_dep_signature` field would re-violate R6
+/// across every key that embeds it, so this guard independently pins the
+/// struct shape. The retired content-free `DeclKey` must NOT be
+/// reintroduced.
 #[test]
-fn r6_decl_key_struct_is_content_free_in_source() {
+fn r6_decl_slot_struct_is_content_free_in_source() {
     let source = read_file("crates/verter_session/src/semantic_query.rs");
-    let body = extract_brace_block(&source, "pub struct DeclKey {")
-        .expect("R6 GUARD: could not locate `pub struct DeclKey` body in semantic_query.rs");
+    let body = extract_brace_block(&source, "pub struct ResolvedDeclSlotIdentity {")
+        .expect(
+            "R6 GUARD: could not locate `pub struct ResolvedDeclSlotIdentity` body in semantic_query.rs",
+        );
 
-    for needle in ["whole_hash:", "content_hash:", "fact_dep_signature:"] {
+    for needle in [
+        "whole_hash:",
+        "content_hash:",
+        "parse_stable_hash:",
+        "fact_dep_signature:",
+    ] {
         assert!(
             !body.contains(needle),
-            "R6 GUARD VIOLATION — `pub struct DeclKey` carries forbidden \
-             field `{}`. The query-identity decl key MUST stay \
-             content-free; per-file version rooting belongs on the \
-             cached value, not on the key. Body:\n{}",
+            "R6 GUARD VIOLATION — `pub struct ResolvedDeclSlotIdentity` carries \
+             forbidden content/version field `{}`. The query-identity slot MUST \
+             stay content-free (env dims only); per-file version rooting belongs \
+             on the cached value, not on the key. Body:\n{}",
             needle,
             body
         );
     }
+
+    // The retired content-free `DeclKey` query-identity struct must not
+    // be reintroduced (U2B.9 FORK-A one-clean-cutover).
+    assert!(
+        !source.contains("pub struct DeclKey {"),
+        "R6 GUARD VIOLATION — the retired `pub struct DeclKey` reappeared in \
+         semantic_query.rs; the base/owner identity is `ResolvedDeclSlotIdentity`."
+    );
 }
 
 /// Locate the first `{ ... }` brace block following a textual

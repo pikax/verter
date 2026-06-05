@@ -183,11 +183,11 @@ fn key_family_matches_resolve_decl_for_resolved_name() {
 #[test]
 fn key_family_matches_instantiate_for_resolved_name() {
     let key = SemanticQueryKey::Instantiate {
-        base: DeclIdentity::synthetic("UIMessage").to_decl_key(),
+        base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
         args: Arc::new([]),
-        context: verter_session::semantic_query::ProjectionReductionContext::published(
+        context: verter_session::semantic_query::InstantiateContext::new(verter_session::semantic_query::ProjectionReductionContext::published(
             verter_session::semantic_query::ProjectionMode::Skeleton,
-        ),
+        ), Default::default()),
     };
     assert!(KeyFamily::InstantiateForResolvedName("UIMessage").matches(&key));
     assert!(!KeyFamily::InstantiateForResolvedName("OtherName").matches(&key));
@@ -222,11 +222,11 @@ fn production_paths_are_no_op_without_active_token() {
 fn dispatch_log_records_under_active_token() {
     let guard = CaptureToken::start_for_query("dispatch_log");
     let key = SemanticQueryKey::Instantiate {
-        base: DeclIdentity::synthetic("UIMessage").to_decl_key(),
+        base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
         args: Arc::new([]),
-        context: verter_session::semantic_query::ProjectionReductionContext::published(
+        context: verter_session::semantic_query::InstantiateContext::new(verter_session::semantic_query::ProjectionReductionContext::published(
             verter_session::semantic_query::ProjectionMode::Skeleton,
-        ),
+        ), Default::default()),
     };
     with_active_capture(|t| t.record_dispatch(&key, /* hit */ true));
     with_active_capture(|t| t.record_dispatch(&key, /* hit */ false));
@@ -253,11 +253,11 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
 
     // body_mode == Expanded → matches when name matches.
     let key_expanded = SemanticQueryKey::Instantiate {
-        base: DeclIdentity::synthetic("UIMessage").to_decl_key(),
+        base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
         args: Arc::new([]),
-        context: verter_session::semantic_query::ProjectionReductionContext::published(
+        context: verter_session::semantic_query::InstantiateContext::new(verter_session::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     };
     assert!(KeyFamily::InstantiateExpandedForResolvedName("UIMessage").matches(&key_expanded));
     assert!(!KeyFamily::InstantiateExpandedForResolvedName("OtherName").matches(&key_expanded));
@@ -268,11 +268,11 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
 
     // body_mode == Skeleton → must NOT match the Expanded family.
     let key_skeleton = SemanticQueryKey::Instantiate {
-        base: DeclIdentity::synthetic("UIMessage").to_decl_key(),
+        base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
         args: Arc::new([]),
-        context: verter_session::semantic_query::ProjectionReductionContext::published(
+        context: verter_session::semantic_query::InstantiateContext::new(verter_session::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Skeleton,
-        ),
+        ), Default::default()),
     };
     assert!(!KeyFamily::InstantiateExpandedForResolvedName("UIMessage").matches(&key_skeleton));
     // Correct family for Skeleton still matches.
@@ -280,11 +280,11 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
 
     // body_mode == Shallow → must NOT match the Expanded family.
     let key_shallow = SemanticQueryKey::Instantiate {
-        base: DeclIdentity::synthetic("UIMessage").to_decl_key(),
+        base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
         args: Arc::new([]),
-        context: verter_session::semantic_query::ProjectionReductionContext::published(
+        context: verter_session::semantic_query::InstantiateContext::new(verter_session::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Shallow,
-        ),
+        ), Default::default()),
     };
     assert!(!KeyFamily::InstantiateExpandedForResolvedName("UIMessage").matches(&key_shallow));
     assert!(KeyFamily::ShallowForResolvedName("UIMessage").matches(&key_shallow));

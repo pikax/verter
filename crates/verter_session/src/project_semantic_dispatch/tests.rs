@@ -206,16 +206,16 @@ fn instantiate_dedups_by_args() {
     let k_number = SemanticQueryKey::Instantiate {
         base: base.clone(),
         args: args_number.clone(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     };
     let k_string = SemanticQueryKey::Instantiate {
         base,
         args: args_string.clone(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     };
 
     let n1 = dispatch.execute_type_node(k_number.clone());
@@ -948,14 +948,11 @@ fn indexed_access_intermediate_hop_stays_navigate_only_terminal_expands() {
         other => panic!("MixedNested must resolve: {other:?}"),
     };
     let mixed_body = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::DeclKey {
-            canonical_id: Arc::from("/w/nested.ts"),
-            decl_name: Arc::from("MixedNested"),
-        },
+        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/w/nested.ts"), Arc::from("MixedNested")),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         QueryResult::Recursive(node) => node,
@@ -1101,12 +1098,9 @@ fn raise_path_indexed_access_intermediate_stays_navigate_terminal_expands() {
     // expansion). Neither node identity depends on a transient lowered
     // shell node-id, so the probe is robust.
     let mid_expanded = SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::DeclKey {
-            canonical_id: Arc::from("/w/rnested.ts"),
-            decl_name: Arc::from("Mid"),
-        },
+        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/w/rnested.ts"), Arc::from("Mid")),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        context: crate::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Expanded), Default::default()),
     };
     let _ = whole_hash;
     let leaf_resolve = SemanticQueryKey::ResolveDecl(resolve_decl_key("/w/rnested.ts", "Leaf"));
@@ -1441,6 +1435,10 @@ fn resolved_named_type_dispatch_returns_value_after_insert() {
     let key = HostResolvedNamedTypeKey {
         canonical_id: Arc::from("/w/a.ts"),
         whole_hash: [7u8; 16],
+        resolve_env_hash: Default::default(),
+        type_env_hash: Default::default(),
+        lib_env_hash: Default::default(),
+        project_identity: 0,
         inner: ResolvedNamedTypeCacheKey {
             name: b"Foo".to_vec().into_boxed_slice(),
             surface: None,
@@ -1729,13 +1727,10 @@ fn decl_identity(
     _host: &VerterHost,
     canonical_id: &str,
     name: &str,
-) -> crate::semantic_query::DeclKey {
+) -> crate::semantic_query::ResolvedDeclSlotIdentity {
     // Content-free key (R6); the cold build re-sources the live
     // whole_hash from `ensure_indexed_ready` at value-compute time.
-    crate::semantic_query::DeclKey {
-        canonical_id: Arc::from(canonical_id),
-        decl_name: Arc::from(name),
-    }
+    crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical_id), Arc::from(name))
 }
 
 /// Value-side `DeclIdentity` carrying the file's real whole_hash —
@@ -1799,9 +1794,9 @@ fn instantiate_is_mode_free_one_entry_across_depth_requests() {
     let key = SemanticQueryKey::Instantiate {
         base: base.clone(),
         args: args.clone(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     };
     let _ = dispatch.execute_type_node(key.clone());
 
@@ -1863,9 +1858,9 @@ fn instantiate_with_concrete_args_emits_substitute_edges() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base,
         args: args.clone(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -1940,9 +1935,9 @@ fn shallow_instantiate_does_not_materialise_member_bodies() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base,
         args,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -2006,9 +2001,9 @@ fn same_args_different_callers_dedup_to_one_entry() {
     let first = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: base.clone(),
         args: args.clone(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -2016,9 +2011,9 @@ fn same_args_different_callers_dedup_to_one_entry() {
     let second = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base,
         args: args.clone(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -2061,9 +2056,9 @@ fn expanded_instantiate_materialises_through_dispatcher_not_private_walker() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base,
         args,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -2124,9 +2119,9 @@ fn distinct_instantiations_share_visited_subpath_lowering_not_full_body() {
     let inst_s = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: base.clone(),
         args: args_s,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -2134,9 +2129,9 @@ fn distinct_instantiations_share_visited_subpath_lowering_not_full_body() {
     let inst_n = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base,
         args: args_n,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -3967,9 +3962,9 @@ fn instantiate_ref_with_args_produces_sub_instantiate_shell_with_edge() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: foo,
         args: Arc::clone(&args),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4068,11 +4063,8 @@ fn mapped_type_uses_source_member_names_when_object_source() {
 fn utility_identity(
     _graph: &Arc<SemanticGraphStore>,
     name: &str,
-) -> crate::semantic_query::DeclKey {
-    crate::semantic_query::DeclKey {
-        canonical_id: Arc::from("/w/lib.ts"),
-        decl_name: Arc::from(name),
-    }
+) -> crate::semantic_query::ResolvedDeclSlotIdentity {
+    crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/w/lib.ts"), Arc::from(name))
 }
 
 /// `Partial<T>` routes through `SemanticQueryKey::MappedType` with
@@ -4091,9 +4083,9 @@ fn partial_routes_through_mapped_type_dispatch() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: partial,
         args: args.clone(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4132,9 +4124,9 @@ fn required_routes_through_mapped_type_dispatch() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: required,
         args: Arc::from(vec![source].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4167,9 +4159,9 @@ fn readonly_routes_through_mapped_type_dispatch() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: ro,
         args: Arc::from(vec![source].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4202,9 +4194,9 @@ fn no_infer_returns_arg_with_alias_resolve_edge() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: no_infer,
         args: Arc::from(vec![source].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4240,9 +4232,9 @@ fn utility_dispatch_emits_instantiate_edge() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: partial,
         args: Arc::from(vec![source].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4278,9 +4270,9 @@ fn utility_substitute_type_param_edges_use_real_parameter_names() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: partial,
         args: Arc::from(vec![source].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4307,9 +4299,9 @@ fn utility_substitute_type_param_edges_use_real_parameter_names() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: record,
         args: Arc::from(vec![k, v].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4335,9 +4327,9 @@ fn utility_substitute_type_param_edges_use_real_parameter_names() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: pick,
         args: Arc::from(vec![source, k].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4368,9 +4360,9 @@ fn same_utility_and_args_dedup_to_one_entry() {
     let first = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: partial.clone(),
         args: args.clone(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4378,9 +4370,9 @@ fn same_utility_and_args_dedup_to_one_entry() {
     let second = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: partial,
         args,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4405,9 +4397,9 @@ fn string_intrinsics_return_string_primitive() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: upper,
         args: Arc::from(vec![s].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4514,9 +4506,9 @@ fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
     let utility_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: partial,
         args: Arc::from(vec![source].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected utility Value, got {other:?}"),
@@ -4570,9 +4562,9 @@ fn deferred_utilities_return_opaque_miss_with_instantiate_edge() {
         let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
             base: anchor,
             args: Arc::from(vec![source].into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(
+            context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Expanded,
-            ),
+            ), Default::default()),
         }) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
             other => panic!("expected Value for {name}, got {other:?}"),
@@ -4657,9 +4649,9 @@ fn return_type_of_typeof_local_fn_resolves_via_dispatch() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: return_type_anchor,
         args: Arc::from(vec![typeof_id].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value for ReturnType<typeof>, got {other:?}"),
@@ -4719,9 +4711,9 @@ fn return_type_of_plain_object_stays_opaque() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: anchor,
         args: Arc::from(vec![plain_object].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4769,9 +4761,9 @@ fn semantic_graph_array_variant_preserves_element_and_readonly() {
     let mut_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: mut_base,
         args: Arc::clone(&args),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value for Mut<string>, got {other:?}"),
@@ -4805,9 +4797,9 @@ fn semantic_graph_array_variant_preserves_element_and_readonly() {
     let ro_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: ro_base,
         args,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value for Ro<string>, got {other:?}"),
@@ -4845,9 +4837,9 @@ fn semantic_graph_tuple_variant_preserves_label_optional_rest_and_readonly() {
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base,
         args: Arc::clone(&args),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4895,9 +4887,9 @@ fn semantic_graph_tuple_variant_preserves_label_optional_rest_and_readonly() {
     let ro_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: ro_base,
         args,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -4934,9 +4926,9 @@ fn semantic_graph_template_literal_variant_preserves_quasis_and_expression_refs(
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base,
         args,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -5188,16 +5180,16 @@ fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
     let _ = dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: decl_identity(&host, "/w/two_mapped.ts", "A"),
         args: Arc::from(vec![num].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     });
     let _ = dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: decl_identity(&host, "/w/two_mapped.ts", "B"),
         args: Arc::from(vec![str_].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     });
 
     // Walk every interned node id in the arena and collect the
@@ -5263,9 +5255,9 @@ fn substitute_preserves_scope_on_shell_rebuilds() {
     let instantiated = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: decl_identity(&host, "/w/scope_pres.ts", "Wrap"),
         args: Arc::from(vec![num].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected instantiated, got {other:?}"),
@@ -5316,9 +5308,9 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
     let inst = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: decl_identity(&host, "/w/unresolved.ts", "Has"),
         args: Arc::from(vec![num].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("inst: {other:?}"),
@@ -5992,14 +5984,11 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
 
 use verter_semantic::analysis::AnalyzedMacroKind;
 
-fn synthetic_macro_owner(_host: &VerterHost, canonical: &str) -> crate::semantic_query::DeclKey {
+fn synthetic_macro_owner(_host: &VerterHost, canonical: &str) -> crate::semantic_query::ResolvedDeclSlotIdentity {
     // Content-free key (R6); `build_resolve_macro_payload`
     // re-sources the owner's live `whole_hash` from
     // `ensure_indexed_ready` at value-compute time.
-    crate::semantic_query::DeclKey {
-        canonical_id: Arc::from(canonical),
-        decl_name: Arc::from("<sfc-script-setup>"),
-    }
+    crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical), Arc::from("<sfc-script-setup>"))
 }
 
 /// `DefineProps` / `WithDefaults` with 0 args returns `Opaque(Miss)` —
@@ -6014,7 +6003,7 @@ fn resolve_macro_payload_define_props_no_args_opaque_miss() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     };
     let result = dispatch.execute_type_node(key);
     let node = match result {
@@ -6047,7 +6036,7 @@ fn resolve_macro_payload_define_props_single_arg_returns_arg_unchanged() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     };
     let result = dispatch.execute_type_node(key);
     match result {
@@ -6084,7 +6073,7 @@ fn resolve_macro_payload_define_props_multi_arg_normalize_intersection() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![a, b].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     });
     match via_macro {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => assert_eq!(
@@ -6114,7 +6103,7 @@ fn resolve_macro_payload_define_expose_passthrough() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineExpose,
         type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     });
     let zero_node = match zero {
         QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
@@ -6136,7 +6125,7 @@ fn resolve_macro_payload_define_expose_passthrough() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineExpose,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     });
     match one {
         QueryResult::Value(SemanticQueryOutput { value: n, .. }) => {
@@ -6151,7 +6140,7 @@ fn resolve_macro_payload_define_expose_passthrough() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineOptions,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     });
     match opt_one {
         QueryResult::Value(SemanticQueryOutput { value: n, .. }) => {
@@ -6199,7 +6188,7 @@ fn resolve_macro_payload_define_slots_dispatches_through_project_path() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineSlots,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     });
     // Sidecar miss collapses to QueryError::Miss → either an `Error`
     // QueryResult OR a `Value(Opaque(Miss))` node from the sentinel.
@@ -6243,7 +6232,7 @@ fn resolve_macro_payload_define_model_branches_distinctly() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineModel,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     });
     // Without a real SFC sidecar, DefineModel collapses to Miss (the
     // arm requires the owner artifact's `script_analysis` macro
@@ -6303,7 +6292,7 @@ fn resolve_macro_payload_self_reference_does_not_loop() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineEmits,
         type_args: Arc::from(vec![recursive_ref].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     });
     // MUST-NOT outcome is a stack overflow. Beyond merely returning, the
     // documented terminal contract is that the cycle is absorbed into a
@@ -6359,7 +6348,7 @@ fn resolve_macro_payload_dedups_via_interning() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     };
 
     let stats_before = graph.stats_snapshot();
@@ -6419,7 +6408,7 @@ fn resolve_macro_payload_distinct_family_does_not_collapse() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     };
     // DIFFERENT macro_kind (DefineExpose) → different FamilyKey arm.
     let key_expose = SemanticQueryKey::ResolveMacroPayload {
@@ -6427,7 +6416,7 @@ fn resolve_macro_payload_distinct_family_does_not_collapse() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineExpose,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     };
 
     let stats_before = graph.stats_snapshot();
@@ -6508,7 +6497,7 @@ fn resolve_macro_payload_rematerializes_evicted_but_current_owner_artifact() {
         macro_index,
         macro_kind: AnalyzedMacroKind::DefineEmits,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     };
 
     // Warm the macro payload + the owner `IndexedReady`.
@@ -6591,7 +6580,7 @@ fn resolve_macro_payload_resolves_against_current_owner_content_via_content_free
         macro_index,
         macro_kind: AnalyzedMacroKind::DefineEmits,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     };
     let v1_result = dispatch.execute_type_node(key.clone());
     assert!(
@@ -6619,7 +6608,7 @@ fn resolve_macro_payload_resolves_against_current_owner_content_via_content_free
         macro_index: macro_index_v2,
         macro_kind: AnalyzedMacroKind::DefineEmits,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     };
     let v2_result = dispatch.execute_type_node(key_v2);
     assert!(
@@ -6762,7 +6751,7 @@ fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![inner].into_boxed_slice()),
-        mode: ProjectionMode::Navigate,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Navigate),
     });
     let stats_after_macro = graph.stats_snapshot();
 
@@ -6934,13 +6923,13 @@ fn lower_path_segments_preserves_order_and_arity() {
 fn pick_builtin_decl_identity_uses_canonical_sentinel() {
     let id = pick_builtin_decl_identity();
     assert_eq!(
-        id.canonical_id.as_ref(),
+        id.defining_canonical.as_ref(),
         "__builtin__",
-        "Pick canonical_id must be the `__builtin__` sentinel; \
+        "Pick defining_canonical must be the `__builtin__` sentinel; \
          drift breaks utility_source routing"
     );
-    assert_eq!(id.decl_name.as_ref(), "Pick");
-    // R6: the key is content-free — no `whole_hash` field exists.
+    assert_eq!(id.merged_symbol_name.as_ref(), "Pick");
+    // R6: the slot is content-free — no `whole_hash` field exists.
 }
 
 /// `omit_builtin_decl_identity()` returns the `__builtin__` sentinel
@@ -6948,8 +6937,8 @@ fn pick_builtin_decl_identity_uses_canonical_sentinel() {
 #[test]
 fn omit_builtin_decl_identity_uses_canonical_sentinel() {
     let id = omit_builtin_decl_identity();
-    assert_eq!(id.canonical_id.as_ref(), "__builtin__");
-    assert_eq!(id.decl_name.as_ref(), "Omit");
+    assert_eq!(id.defining_canonical.as_ref(), "__builtin__");
+    assert_eq!(id.merged_symbol_name.as_ref(), "Omit");
 }
 
 /// `execute_pick` dispatches through `Instantiate { base:
@@ -6992,9 +6981,9 @@ fn execute_pick_dispatches_through_instantiate_pick_builtin() {
     let direct = dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: pick_builtin_decl_identity(),
         args: Arc::from(vec![base, key_set].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     });
     let direct_node = match direct {
         QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
@@ -7051,9 +7040,9 @@ fn execute_omit_dispatches_through_instantiate_omit_builtin() {
     let direct = dispatch.execute_type_node(SemanticQueryKey::Instantiate {
         base: omit_builtin_decl_identity(),
         args: Arc::from(vec![base, key_set].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     });
     let direct_node = match direct {
         QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
@@ -7192,7 +7181,7 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        mode: ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     };
     assert_eq!(
         variant_label(&resolve_macro_payload_key),

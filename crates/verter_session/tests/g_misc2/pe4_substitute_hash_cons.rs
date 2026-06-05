@@ -88,16 +88,13 @@ fn lower_mapped(host: &Arc<VerterHost>) -> SemanticNodeId {
             },
         )) => {
             let _ = whole_hash;
-            let base = verter_session::semantic_query::DeclKey {
-                canonical_id: Arc::clone(canonical_id),
-                decl_name: Arc::clone(name),
-            };
+            let base = verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::clone(canonical_id), Arc::clone(name));
             let key = SemanticQueryKey::Instantiate {
                 base,
                 args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                context: ProjectionReductionContext::structural_transit_with_mode(
+                context: verter_session::semantic_query::InstantiateContext::new(ProjectionReductionContext::structural_transit_with_mode(
                     ProjectionMode::Navigate,
-                ),
+                ), Default::default()),
             };
             match for_tests::dispatch_execute_type_node_for_tests(host, key) {
                 QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -133,11 +130,11 @@ fn extract_mapper_inputs(
             }
             SemanticNodeData::DeclRef { identity } => {
                 let key = SemanticQueryKey::Instantiate {
-                    base: identity.to_decl_key(),
+                    base: identity.to_type_slot_unscoped(),
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    context: ProjectionReductionContext::structural_transit_with_mode(
+                    context: verter_session::semantic_query::InstantiateContext::new(ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
-                    ),
+                    ), Default::default()),
                 };
                 current = match for_tests::dispatch_execute_type_node_for_tests(host, key) {
                     QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -148,11 +145,11 @@ fn extract_mapper_inputs(
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 let key = SemanticQueryKey::Instantiate {
-                    base: base.to_decl_key(),
+                    base: base.to_type_slot_unscoped(),
                     args: Arc::clone(args),
-                    context: ProjectionReductionContext::structural_transit_with_mode(
+                    context: verter_session::semantic_query::InstantiateContext::new(ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
-                    ),
+                    ), Default::default()),
                 };
                 current = match for_tests::dispatch_execute_type_node_for_tests(host, key) {
                     QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,

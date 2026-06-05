@@ -215,14 +215,11 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
         crate::semantic_query::PrimitiveKind::String,
     ));
     let key = SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::DeclKey {
-            canonical_id: Arc::from(c),
-            decl_name: Arc::from("Box"),
-        },
+        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(c), Arc::from("Box")),
         args: Arc::from(vec![string_arg].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     };
 
     let primed = dispatch.execute_type_node(key.clone());
@@ -281,14 +278,11 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
         crate::semantic_query::PrimitiveKind::String,
     ));
     let key = SemanticQueryKey::ResolveMacroPayload {
-        owner: crate::semantic_query::DeclKey {
-            canonical_id: Arc::from(c),
-            decl_name: Arc::from("<sfc-script-setup>"),
-        },
+        owner: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(c), Arc::from("<sfc-script-setup>")),
         macro_index: 0,
         macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        mode: crate::semantic_query::ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), crate::semantic_query::ProjectionMode::Expanded),
     };
 
     let primed = dispatch.execute_type_node(key.clone());
@@ -848,14 +842,11 @@ fn file_derived_object_node(host: &VerterHost, canonical: &str) -> SemanticNodeI
         .map(|indexed| indexed.whole_hash)
         .expect("file IndexedReady materialises");
     let key = SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::DeclKey {
-            canonical_id: Arc::from(canonical),
-            decl_name: Arc::from("Foo"),
-        },
+        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical), Arc::from("Foo")),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     };
     match dispatch.execute_type_node(key) {
         crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
@@ -1134,9 +1125,9 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
     let key = SemanticQueryKey::Instantiate {
         base: crate::project_semantic_dispatch::pick_builtin_decl_identity(),
         args: Arc::from(vec![source, key_set].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     };
 
     let primed = dispatch.execute_type_node(key.clone());
@@ -1241,14 +1232,11 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
     // `Box<Foo>` — the single arg is the file-derived `Foo` Object node
     // scoped to `arg`'s file. The declaring file is `gen`.
     let key = SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::DeclKey {
-            canonical_id: Arc::from(gen),
-            decl_name: Arc::from("Box"),
-        },
+        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(gen), Arc::from("Box")),
         args: Arc::from(vec![arg_node].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Expanded,
-        ),
+        ), Default::default()),
     };
 
     let primed = dispatch.execute_type_node(key.clone());
@@ -1358,14 +1346,11 @@ fn resolve_macro_payload_roots_on_type_argument_file() {
     // file-derived `Foo` Object node scoped to `arg`'s file. The owning
     // canonical is `sfc`.
     let key = SemanticQueryKey::ResolveMacroPayload {
-        owner: crate::semantic_query::DeclKey {
-            canonical_id: Arc::from(sfc),
-            decl_name: Arc::from("<sfc-script-setup>"),
-        },
+        owner: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(sfc), Arc::from("<sfc-script-setup>")),
         macro_index: 0,
         macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg_node].into_boxed_slice()),
-        mode: crate::semantic_query::ProjectionMode::Expanded,
+        context: crate::semantic_query::MacroPayloadContext::new(Default::default(), crate::semantic_query::ProjectionMode::Expanded),
     };
 
     let primed = dispatch.execute_type_node(key.clone());

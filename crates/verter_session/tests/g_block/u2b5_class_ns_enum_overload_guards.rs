@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use verter_session::for_tests::ReadSetSignature;
 use verter_session::semantic_query::{
-    AmbientNamespaceContext, ClassSurfaceContext, ClassSurfaceSide, DeclKey, EnumContext,
+    AmbientNamespaceContext, ClassSurfaceContext, ClassSurfaceSide, EnumContext,
     OverloadSetContext, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError,
     QueryResult, ResolvedDeclSlotIdentity, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
     SemanticSymbolSpace, ValueRootKey,
@@ -622,12 +622,9 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
     // themselves warm in the shared memo: Instance warmed the
     // Instantiate(type DeclKey) slot.
     let inner_instantiate = SemanticQueryKey::Instantiate {
-        base: DeclKey {
-            canonical_id: Arc::from(canonical),
-            decl_name: Arc::from("Foo"),
-        },
+        base: verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical), Arc::from("Foo")),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+        context: verter_session::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Shallow), Default::default()),
     };
     assert!(
         graph.slot_candidate_count_for_tests(&inner_instantiate) > 0,

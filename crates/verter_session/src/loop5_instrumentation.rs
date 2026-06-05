@@ -955,7 +955,7 @@ mod tests {
 
     #[test]
     fn kind_index_for_key_distinct_for_each_variant() {
-        use crate::semantic_query::{DeclKey, IndexKey, ResolveDeclKey, ScopeId, SemanticQueryKey};
+        use crate::semantic_query::{IndexKey, ResolveDeclKey, ScopeId, SemanticQueryKey};
         use crate::ProjectionMode;
 
         let dummy_id: Arc<str> = Arc::from("/x");
@@ -963,10 +963,7 @@ mod tests {
             canonical_id: Arc::clone(&dummy_id),
             local_scope: None,
         };
-        let identity = DeclKey {
-            canonical_id: Arc::clone(&dummy_id),
-            decl_name: Arc::from("X"),
-        };
+        let identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::clone(&dummy_id), Arc::from("X"));
         let dummy_node = crate::semantic_query::SemanticNodeId(1);
 
         let resolve_decl = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -976,9 +973,9 @@ mod tests {
         let instantiate = SemanticQueryKey::Instantiate {
             base: identity.clone(),
             args: Arc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(
+            context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Skeleton,
-            ),
+            ), Default::default()),
         };
         let project_member = SemanticQueryKey::ProjectMember {
             base: dummy_node,

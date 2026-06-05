@@ -944,18 +944,15 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     let _shallow = host
         .shallow_file_state("/types.ts")
         .expect("shallow state for /types.ts");
-    let key = crate::semantic_query::DeclKey {
-        canonical_id: Arc::from("/types.ts"),
-        decl_name: Arc::from("ColorModeSelectProps"),
-    };
+    let key = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/types.ts"), Arc::from("ColorModeSelectProps"));
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
     let node =
         match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::Instantiate {
             base: key,
             args: Arc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(
+            context: crate::semantic_query::InstantiateContext::new(crate::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Expanded,
-            ),
+            ), Default::default()),
         }) {
             crate::semantic_query::QueryResult::Value(
                 crate::semantic_query::SemanticQueryOutput { value: n, .. },

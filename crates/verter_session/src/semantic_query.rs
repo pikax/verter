@@ -256,64 +256,18 @@ impl DeclIdentity {
         }
     }
 
-    /// Project this identity onto a content-free [`DeclKey`] suitable
-    /// for use as a query-identity cache key component. The version
-    /// (`whole_hash`) is dropped — query-identity keys hold no
-    /// content/version hashes (R6); per-value version rooting lives
-    /// on the cached `MemoEntry`'s `ReadSetSignature.facts` and
-    /// `self_root_canonicals`, re-sourced at value-build time from the
-    /// live indexed view.
+    /// Env-agnostic fixture projection onto a zero-env TYPE-space
+    /// [`ResolvedDeclSlotIdentity`] (the `Instantiate` / `ResolveMacroPayload`
+    /// base/owner shape). For test call sites that previously projected
+    /// onto the retired content-free `DeclKey`; production derives the
+    /// env-bearing slot via
+    /// [`ProjectSemanticDispatch::type_slot_for`](crate::project_semantic_dispatch::ProjectSemanticDispatch::type_slot_for).
     #[must_use]
-    pub fn to_decl_key(&self) -> DeclKey {
-        DeclKey {
-            canonical_id: Arc::clone(&self.canonical_id),
-            decl_name: Arc::clone(&self.decl_name),
-        }
-    }
-}
-
-/// Content-free declaration key used as a query-identity component
-/// inside derived-`Hash` `SemanticQueryKey` / `FamilyKey` variants.
-///
-/// Two file-content versions of "same decl" produce equal `DeclKey`s;
-/// version-rooting lives entirely on the cached value via the
-/// multi-candidate `FamilySlots` substrate (each candidate carries its
-/// own `ReadSetSignature.facts` + `self_root_canonicals`). The build
-/// path re-sources the owning file's content hash from
-/// [`ResolverContext::ensure_indexed_ready`] at value-compute time
-/// (R6 + R20).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DeclKey {
-    /// Canonical id of the declaring file. Empty for the global /
-    /// structural sentinel; `"__builtin__"` for built-in utility
-    /// carriers (`Pick`, `Omit`, …); a concrete canonical otherwise.
-    pub canonical_id: Arc<str>,
-    /// Stable declaring-entity name (interface, type alias, class,
-    /// script-setup sentinel, `"Pick"` / `"Omit"` for builtins, etc.).
-    pub decl_name: Arc<str>,
-}
-
-impl DeclKey {
-    /// Project a [`DeclIdentity`] onto its content-free [`DeclKey`].
-    #[must_use]
-    pub fn from_identity(identity: &DeclIdentity) -> Self {
-        DeclKey {
-            canonical_id: Arc::clone(&identity.canonical_id),
-            decl_name: Arc::clone(&identity.decl_name),
-        }
-    }
-
-    /// Build a built-in utility decl key (`Pick` / `Omit` / `Extract`
-    /// / `Exclude` / `NonNullable` / `Required` / `Partial` / `Readonly`
-    /// / `ReturnType` / …). The `canonical_id` is the `"__builtin__"`
-    /// sentinel; builtins root self-version through their `args` nodes
-    /// (no file fact).
-    #[must_use]
-    pub fn builtin(name: &str) -> Self {
-        DeclKey {
-            canonical_id: Arc::from("__builtin__"),
-            decl_name: Arc::from(name),
-        }
+    pub fn to_type_slot_unscoped(&self) -> ResolvedDeclSlotIdentity {
+        ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::clone(&self.canonical_id),
+            Arc::clone(&self.decl_name),
+        )
     }
 }
 
@@ -439,6 +393,29 @@ impl ResolvedDeclSlotIdentity {
             type_env_hash,
             lib_env_hash,
         }
+    }
+
+    /// Env-agnostic test-fixture constructor: a TYPE-space slot for
+    /// `(canonical, name)` with ZERO env (`project_identity = 0`,
+    /// `type_env_hash` / `lib_env_hash` defaulted).
+    ///
+    /// For identity-shape fixtures and tests that do NOT exercise env
+    /// separation. The PRODUCTION derivation is
+    /// [`ProjectSemanticDispatch::type_slot_for`](crate::project_semantic_dispatch::ProjectSemanticDispatch::type_slot_for),
+    /// which reads the live host env — never this. Env-discriminating
+    /// guards construct slots with explicit distinct env via
+    /// [`Self::type_slot`].
+    #[must_use]
+    pub fn type_slot_unscoped(canonical: Arc<str>, name: Arc<str>) -> Self {
+        Self::type_slot(canonical, name, 0, HashValue::default(), HashValue::default())
+    }
+
+    /// Env-agnostic test-fixture constructor for a built-in utility
+    /// carrier (`Pick` / `Omit` / …): a `"__builtin__"` TYPE-space slot
+    /// with zero env. See [`Self::type_slot_unscoped`].
+    #[must_use]
+    pub fn builtin_unscoped(name: &str) -> Self {
+        Self::type_slot_unscoped(Arc::from("__builtin__"), Arc::from(name))
     }
 
     /// Compatibility constructor: derive a slot identity from a
@@ -4468,18 +4445,18 @@ mod tests {
     /// instantiations of the same base must not alias to one cache entry.
     #[test]
     fn instantiate_keys_disambiguate_by_args() {
-        let base = DeclKey::from_identity(&DeclIdentity::synthetic("Foo"));
+        let base = DeclIdentity::synthetic("Foo").to_type_slot_unscoped();
         let string_id = SemanticNodeId(1);
         let number_id = SemanticNodeId(2);
         let a = SemanticQueryKey::Instantiate {
             base: base.clone(),
             args: Arc::from(vec![string_id].into_boxed_slice()),
-            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+            context: crate::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Expanded), Default::default()),
         };
         let b = SemanticQueryKey::Instantiate {
             base,
             args: Arc::from(vec![number_id].into_boxed_slice()),
-            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+            context: crate::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Expanded), Default::default()),
         };
         assert_ne!(a, b);
     }
@@ -4637,19 +4614,19 @@ mod tests {
         //
         // The current assertion is the structural invariant: same
         // `(base, args, body_mode)` triple constructs an equal key.
-        let base = DeclKey::from_identity(&DeclIdentity::synthetic("Foo"));
+        let base = DeclIdentity::synthetic("Foo").to_type_slot_unscoped();
         let args = Arc::from(vec![SemanticNodeId(2)].into_boxed_slice());
         let key = SemanticQueryKey::Instantiate {
             base: base.clone(),
             args: Arc::clone(&args),
-            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+            context: crate::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Expanded), Default::default()),
         };
         let mut map = std::collections::HashMap::new();
         map.insert(key.clone(), 1);
         let key2 = SemanticQueryKey::Instantiate {
             base,
             args,
-            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+            context: crate::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Expanded), Default::default()),
         };
         assert_eq!(map.get(&key2), Some(&1), "same args dedup to one entry");
     }

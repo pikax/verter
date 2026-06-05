@@ -60,16 +60,13 @@ fn type_resolution_audit_pathological_recursion_observes_depth_cap_exactly() {
     // userland `Pick` declaration regardless of whole_hash because
     // `build_resolve_decl` keys on `(canonical, name)` for top-level
     // decl name lookups.
-    let pick_identity = verter_session::semantic_query::DeclKey {
-        canonical_id: Arc::from("/pathological.ts"),
-        decl_name: Arc::from("Pick"),
-    };
+    let pick_identity = verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/pathological.ts"), Arc::from("Pick"));
     let key = SemanticQueryKey::Instantiate {
         base: pick_identity,
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: verter_session::semantic_query::ProjectionReductionContext::published(
+        context: verter_session::semantic_query::InstantiateContext::new(verter_session::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Skeleton,
-        ),
+        ), Default::default()),
     };
 
     let (_resolved, record) = host
