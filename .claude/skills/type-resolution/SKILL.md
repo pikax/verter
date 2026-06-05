@@ -110,7 +110,7 @@ Architectural target for the project-global cache cutover:
 - Request ids are not query ids. They must not be the primary dedup key for reusable type work.
 - Reusable semantic operations such as resolved declaration lookup, indexed access, member projection, instantiation, mapped-type application, and conditional-type branches should enter through shared query-key types.
 - Bare-name lookups must include the declaration scope or resolved root identity needed to avoid cross-scope poisoning.
-- Semantic query identity must be version-rooted. Resolved declaration or route identities should carry the canonical whole hash / export-surface generation needed to distinguish old and new source versions.
+- Semantic query-identity keys are content-free (R6): a resolved declaration or route identity carries semantic identity plus the split env dimensions only, never a content/version hash, whole-hash, or `fact_dep_signature`. Version-rooting lives EXCLUSIVELY on the cached value (`ReadSetSignature.facts` + `self_root_canonicals`, revalidated on every warm read); the live content version (whole-hash) is re-sourced at value-compute time (`ensure_indexed_ready`), never carried in the key.
 - Semantic nodes are immutable. File changes create new identities rather than mutating old ones in place.
 - The shared semantic layer should be a host-owned memo table keyed by semantic query identity. Any ID-backed semantic graph behind it is secondary and must store immutable AST-free semantic data rather than borrowed OXC pointers.
 - Same-file shallow closure may run inside the winning query, but reusable cross-file and projection work should be represented as dedupable semantic subqueries.

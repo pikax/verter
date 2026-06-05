@@ -16,26 +16,27 @@
 > not designed, here.
 >
 > **Model facts this design is built against (verified in tree).**
-> `ResolvedDeclSlotIdentity` (`semantic_query.rs:316`) is the 6-field ENV-BEARING, content-free
+> `ResolvedDeclSlotIdentity` (in `semantic_query.rs`) is the 6-field ENV-BEARING, content-free
 > slot: `{defining_canonical, merged_symbol_name, symbol_space: SemanticSymbolSpace,
 > project_identity: u32, type_env_hash, lib_env_hash}` — it carries type+lib+project for the
 > declaration SITE but NEITHER `resolve_env_hash` NOR `parse_env_hash`. `Instantiate{base}` /
-> `ResolveMacroPayload{owner}` (`SemanticQueryKey` L1599 / family.rs L125,204) key on the
+> `ResolveMacroPayload{owner}` (`SemanticQueryKey` in `semantic_query.rs`, mirrored on `FamilyKey`
+> in `semantic_query_memo/family.rs`) key on the
 > env-bearing, content-free `ResolvedDeclSlotIdentity` (the `Instantiate`/`ResolveMacroPayload`
 > base/owner are always `symbol_space = Type`); the extra `resolve_env_hash` rides on the
 > per-key `InstantiateContext` / `MacroPayloadContext`. The relation key is the full
-> `RelateMemoKey` (`semantic_query.rs:2682`):
+> `RelateMemoKey` (in `semantic_query.rs`):
 > `{source, target, relation: RelationKind, policy: RelationPolicy, source_freshness: FreshnessKey,
 > inference_context: Option<InferenceContextKey>, context: RelationContext}`, where
-> `RelationContext` (`:2616`) carries the `R T L J` env dims (`resolve_env_hash`, `type_env_hash`,
-> `lib_env_hash`, `project_identity`) plus `substitution` + `projection_reduction`; the public
-> relation result is `SemanticQueryValue::Relation(RelationPayload)` (`:1726`). `ProjectionMode`
-> (L608) is the coarse five-rung enum; `ReductionDemand` (L646) is Published/StructuralTransit/
-> MacroObjectSurface; `ModeSlot` (family.rs L224) is the per-slot selector. `SemanticSymbolSpace`
-> (L265) is `Type|Value|Namespace` (U2B.5 added `Namespace` as a real slot
-> discriminator). `QueryError` (L1443) carries `Miss / UnsupportedIntrinsic /
+> `RelationContext` (in `semantic_query.rs`) carries the `R T L J` env dims (`resolve_env_hash`,
+> `type_env_hash`, `lib_env_hash`, `project_identity`) plus `substitution` + `projection_reduction`;
+> the public relation result is `SemanticQueryValue::Relation(RelationPayload)` (in
+> `semantic_query.rs`). `ProjectionMode` is the coarse five-rung enum; `ReductionDemand` is
+> Published/StructuralTransit/MacroObjectSurface; `ModeSlot` (in `semantic_query_memo/family.rs`) is
+> the per-slot selector. `SemanticSymbolSpace` is `Type|Value|Namespace` (U2B.5 added `Namespace` as
+> a real slot discriminator). `QueryError` carries `Miss / UnsupportedIntrinsic /
 > BudgetExceeded / UnstableState / AliasCycle / RecursiveRef / Other / DeclPlaceholder`;
-> `SemanticNodeData::Opaque(QueryError)` (L1820) is the boundary error carrier.
+> `SemanticNodeData::Opaque(QueryError)` (in `semantic_query.rs`) is the boundary error carrier.
 >
 > **Superseded model (FORBIDDEN).** The `feat/u2a-semantic-key-cutover` env-LESS uniform
 > envelope (`SemanticQueryEnvKey`/`TypeLibEnvKey`, `GraphDeclSlotRef` wire slot, schema_version v2,
@@ -62,7 +63,7 @@ Every query-identity key in this design is `(IdentityCore, EnvProjection, Demand
 
 Version-rooting lives EXCLUSIVELY on the cached VALUE via the multi-candidate `FamilySlots`
 substrate: each candidate carries `ReadSetSignature.facts` + `self_root_canonicals`, validated on
-every warm read (`validate_with_self_roots`, `fact_signature_helpers.rs:796`). The key never roots
+every warm read (`validate_with_self_roots` in `fact_signature_helpers.rs`). The key never roots
 versions.
 
 We write `⊑` for "is dominated by / less-or-equal-demand", `⊔` lub/join, `⊓` glb/meet, `⊤` top,
@@ -249,7 +250,7 @@ against MATERIALISED points, never against a computed `meet(terminal, request)` 
 request.
 
 A warm hit is served iff `cached_satisfies` AND the candidate's `ReadSetSignature` validates against
-the caller's live view (`validate_with_self_roots`, `fact_signature_helpers.rs:796`). Demand
+the caller's live view (`validate_with_self_roots` in `fact_signature_helpers.rs`). Demand
 dominance over a materialised point and fact validity are **two independent gates**; both must pass.
 
 **Backfill rule (broader → narrower) — RECORDED points only.** When a broader compute completes, it
@@ -490,7 +491,7 @@ rail (parent §9.5 of the superseded plan, re-expressed):
 
 - Cross-file declaration merging (`interface Foo` in file A + `interface Foo` in file B) resolves
   to ONE merged slot; each contributor part carries `DeclPartId` provenance
-  (`VersionedDeclIdentity.merged_parts`, payload not validation — semantic_query.rs:285). Adding an
+  (`VersionedDeclIdentity.merged_parts`, payload not validation — in `semantic_query.rs`). Adding an
   overload to one part invalidates only consumers that observed THAT part's facts (slot-level fact
   validation is the oracle).
 - The augmentation index (`AugmentationTargetKey {project_identity, resolve_env_hash, lib_env_hash,
@@ -504,7 +505,7 @@ rail (parent §9.5 of the superseded plan, re-expressed):
 
 Per LIVE variant: `(lifecycle, context shape, value domain, env dims, allowed demand, cross-context
 guard, admission/budget)`. The U2-landed rows are the seven + three U2 added keys + the `Relate`
-upgrade + the migrated `Instantiate`/`ResolveMacroPayload`; the parent §2.9 table (L851–878) is the
+upgrade + the migrated `Instantiate`/`ResolveMacroPayload`; the parent §2.9 table is the
 end-state superset. Reserved NON-LIVE `DiagnosticAnalysis(CheckResult)` arm + `Check*` names carry
 **NO** spec row (counted only over live variants — `semantic_query_key_spec_table_equals_enum`
 stays green). The table is GENERATED by a `cargo run` target; the Rust test only diffs.
@@ -625,7 +626,7 @@ the existing error carriers:
   computed over well-formed input; `Partial` = computed over input with recoverable errors (a
   missing member, an unresolved import the resolver degraded past); `Broken` = computed over a
   syntactically torn / mid-edit input or a torn read.
-- **Existing carriers** — `SemanticNodeData::Opaque(QueryError)` (semantic_query.rs:1820) is the
+- **Existing carriers** — `SemanticNodeData::Opaque(QueryError)` (in `semantic_query.rs`) is the
   in-graph carrier for a node whose value could not be computed. `QueryError` gains nothing
   *required*, but `BrokenInputClass` is a small closed enum:
   `enum BrokenInputClass { SyntaxError, UnresolvedReference, IncompleteDeclaration, TornRead,
@@ -855,7 +856,7 @@ deliberately *outside* the partial order (it relates both directions), modeled a
 `GraphTypeNode::Any` that the relation engine short-circuits. `error` does **NOT** get a new
 `GraphTypeNode` wire arm — introducing `GraphTypeNode::ErrorType` would violate the wire-purity
 closure + closed-enum discipline (parent §1.3/§1.4). The error type rides the EXISTING carrier:
-`SemanticNodeData::Opaque(QueryError)` (semantic_query.rs:1820) plus the §18 `ResultTaint` provenance
+`SemanticNodeData::Opaque(QueryError)` (in `semantic_query.rs`) plus the §18 `ResultTaint` provenance
 taint. Relation-wise an `Opaque(QueryError)` error node behaves like `any` (relates both directions
 so a broken sub-result does not cascade spurious assignability failures), but it carries the §18
 taint via `ResultProvenance` and follows §18 admission. No wire-arm addition; no schema_version bump.
