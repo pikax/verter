@@ -17,9 +17,7 @@ use super::{
     empty_signature, utility_param_names, DispatchHost, ProjectSemanticDispatch,
     SessionDispatchHost, ShallowRelation,
 };
-use crate::semantic_query::demand::{
-    Demand, MaterializedPoint, MaterializedSet, ProjectionPath,
-};
+use crate::semantic_query::demand::{Demand, MaterializedPoint, MaterializedSet, ProjectionPath};
 use crate::semantic_query::{
     BranchSelection, DepSignature, HostResolvedNamedTypeKey, IndexSignature, LiteralValue,
     NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
@@ -5005,7 +5003,9 @@ fn path_walk_materialized_set(
         let linear_hops = (start_index + walked_linear).min(n - 1);
         for k in 1..=linear_hops {
             let prefix: Arc<[PathSegment]> = Arc::from(path[..k].to_vec().into_boxed_slice());
-            points.push(MaterializedPoint::new(Demand::navigate(ProjectionPath::from(prefix))));
+            points.push(MaterializedPoint::new(Demand::navigate(
+                ProjectionPath::from(prefix),
+            )));
         }
     }
     MaterializedSet::from_points(points)

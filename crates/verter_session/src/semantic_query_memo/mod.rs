@@ -74,6 +74,7 @@ pub use interner::DepSignatureInterner;
 #[cfg(test)]
 use interner::SWEEP_INTERVAL;
 
+use crate::semantic_query::demand::{cached_satisfies, MaterializedSet};
 use arena::NodeArena;
 #[cfg(test)]
 use arena::{shard_index_for, NUM_SHARDS};
@@ -84,7 +85,6 @@ use family::{
     carrier_facts_reference_canonical, family_and_slot, requested_path_for_key,
     requested_point_for_key, CandidateList, FamilyKey, FamilySlots, MemoEntry, ModeSlot,
 };
-use crate::semantic_query::demand::{cached_satisfies, MaterializedSet};
 use inflight::{
     InflightEntry, InflightPanicGuard, RecursionStackGuard, IN_FLIGHT_ON_THIS_THREAD,
     MAX_INFLIGHT_RETRIES,
@@ -2083,8 +2083,9 @@ impl SemanticGraphStore {
         // Both must pass; see `try_warm_hit_fast_path` for the rationale.
         let requested = requested_point_for_key(key);
         let validated = snapshot.and_then(|list| {
-            list.into_iter()
-                .find(|entry| cached_satisfies(&entry.satisfied_projection, &requested) && entry.validate(ctx))
+            list.into_iter().find(|entry| {
+                cached_satisfies(&entry.satisfied_projection, &requested) && entry.validate(ctx)
+            })
         });
         if let Some(entry) = &validated {
             // Brief LRU bookkeeping — reacquire ONLY to update FIFO
@@ -3162,10 +3163,11 @@ impl SemanticGraphStore {
         // Record whether this family is newly entering the memo so the
         // retention budget tracks one ledger record per family.
         let family_was_new = !entries.contains_key(&family);
-        let outcome = entries
-            .entry(family.clone())
-            .or_default()
-            .publish(slot, entry, &requested_path);
+        let outcome =
+            entries
+                .entry(family.clone())
+                .or_default()
+                .publish(slot, entry, &requested_path);
         let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution. Each populated slot
         // (primary plus any backfilled narrower slots) counts as one
@@ -3336,10 +3338,11 @@ impl SemanticGraphStore {
             return;
         }
         let family_was_new = !entries.contains_key(&family);
-        let outcome = entries
-            .entry(family.clone())
-            .or_default()
-            .publish(slot, entry, &requested_path);
+        let outcome =
+            entries
+                .entry(family.clone())
+                .or_default()
+                .publish(slot, entry, &requested_path);
         let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution — see
         // `warm_publish_one` for the full rationale; the prefix-backfill
@@ -3663,10 +3666,11 @@ impl SemanticGraphStore {
         };
         let mut entries = self.entries_lock_diagnosed();
         let family_was_new = !entries.contains_key(&family);
-        let outcome = entries
-            .entry(family.clone())
-            .or_default()
-            .publish(slot, entry, &requested_path);
+        let outcome =
+            entries
+                .entry(family.clone())
+                .or_default()
+                .publish(slot, entry, &requested_path);
         let populated_slots = outcome.populated;
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(
