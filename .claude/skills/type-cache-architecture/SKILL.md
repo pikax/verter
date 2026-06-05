@@ -267,7 +267,7 @@ info live on the cached value.
 The `SemanticGraphStore` family memo applies R6 to its
 `SemanticQueryKey::Instantiate.base` and
 `SemanticQueryKey::ResolveMacroPayload.owner` fields (mirrored on the
-`FamilyKey` memo identity). Since U2B.9 FORK-A these carry the
+`FamilyKey` memo identity). These carry the
 env-bearing, content-free `ResolvedDeclSlotIdentity`
 (`defining_canonical`, `merged_symbol_name`, `symbol_space` + the
 `project_identity` / `type_env_hash` / `lib_env_hash` ENV dims —

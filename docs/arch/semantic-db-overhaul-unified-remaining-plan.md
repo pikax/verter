@@ -2203,7 +2203,8 @@ guards**. Sequence is faithful to §A; do not reorder.
   invalid-first/LRU-by-valid-hit eviction + a global memory ceiling** (replacing the
   uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` FIFO); the five-dimension env-hash split
   (R21) with `lib_env_hash` entering only the layers whose value depends on lib data;
-  content-free `DeclKey` query-identity keys (R6) with `ReadSetSignature.facts` as the
+  content-free query-identity keys (R6 — declaration-keyed families carry the env-bearing
+  content-free `ResolvedDeclSlotIdentity` slot) with `ReadSetSignature.facts` as the
   sole validity rail; and route-fact validation / invalidation (selected-leaf-edit
   propagation, barrel-route redirect + prior-leaf drop, package-source-change
   invalidation, single-materialization collapse, VFS-authoritative). The B8

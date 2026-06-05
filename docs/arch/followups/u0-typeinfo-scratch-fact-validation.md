@@ -24,8 +24,10 @@ inversion of this branch's cache model:
   `docs/arch/fact-based-cache.md`) is **read-side authoritative**: a query-identity
   cache value is valid iff its recorded `ReadSetSignature.facts` still validates
   against the live `StoreView`, revalidated on **every** warm hit. Query-identity
-  keys carry a content-free `DeclKey` and exclude content/version hashes and
-  `fact_dep_signature` (R6); the five env-hash dimensions stay split (R21).
+  keys are content-free and exclude content/version hashes and
+  `fact_dep_signature` (R6 — declaration-keyed families carry the env-bearing
+  content-free `ResolvedDeclSlotIdentity` slot); the five env-hash dimensions
+  stay split (R21).
 - The scratch cache does the opposite: it stuffs every invalidation dimension into
   the **key** and trusts the key.
 
@@ -81,7 +83,7 @@ family memo. So:
 
 1. **Key on query identity, not a synthesised URI** —
    `(scope_canonical, mode, expression, extra_imports_syntax)`, content-free
-   (`DeclKey`-style, R6). No `content_generation`, no `project_generation`, no
+   (R6, in the style of the env-bearing `ResolvedDeclSlotIdentity` slot). No `content_generation`, no `project_generation`, no
    `mode_tag`-into-a-hash, no VFS string in the key.
 2. **Decide validity on the value via a recorded `ReadSetSignature.facts`**,
    captured path-precisely over exactly the files/decls the dispatch read (scope

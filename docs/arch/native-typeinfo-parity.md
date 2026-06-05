@@ -874,7 +874,7 @@ discipline as the oracle rows, the proof registry, and the row-test wrapper).
 
 | Variant | Lifecycle | Context shape | Value domain | Cross-context guard | Admission / budget |
 |---|---|---|---|---|---|
-| `ResolveDecl` | live | `ResolveDeclContext` (split env + projection-reduction) | `TypeNode` | `resolve_decl_same_site_different_env_or_context_do_not_warm_hit` | `Singleflight`; `ReturnOnly` on overflow/cancel |
+| `ResolveDecl` | live | `ResolveDeclKey` (split env `R T L J`; the key IS the context) | `TypeNode` | — (no dedicated cross-context guard row in the generated spec table) | `Singleflight` |
 | `Instantiate` | live | `InstantiateContext` (`projection_reduction: ProjectionReductionContext` + `resolve_env_hash` = `R`); base is the env-bearing content-free `ResolvedDeclSlotIdentity` (slot carries `T,L,J`); `provenance` + `merge_role` stay FAMILY-IDENTITY on `FamilyKey` | `TypeNode` | `instantiate_same_base_different_env_or_context_do_not_warm_hit` | `Singleflight`; `ReturnOnly` on overflow/cancel/budget |
 | `ProjectMember` | live (canonicalised to length-1 `ProjectPath`) | `ProjectionReductionContext` + split env | `TypeNode` | covered by `ProjectPath` guard | `Singleflight` |
 | `IndexedAccess` | live | `ProjectionReductionContext` + split env | `TypeNode` | `indexed_access_same_base_different_env_or_context_do_not_warm_hit` | `Singleflight` (union-key distribution guarded by the planned `KeyspaceBudget` reducer; `ReturnOnly` on overflow) |
