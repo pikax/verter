@@ -15,7 +15,9 @@
 >   U6 wires the `FlowReturn` / `ResolveCall` / `ContextualTypeAt` / `FlowNarrowingAt` typed views onto it.
 > - `docs/arch/u2-query-value-domain-design.md` §2.1, §2.2, §2.5, §14 — LOCKED SHAPES. `FlowNarrowingAt` /
 >   `ContextualTypeAt` → `ProgramAnalysis` value domain (`ProgramAnalysisGraph` wire, never `GraphTypeNode`);
->   the `Relate` row; `ProgramAnalysisContext` {P,R}+flow+contextual+subst; R21 five split env hashes; R6
+>   the `Relate` row; `ProgramAnalysisContext` {P,R,T,L,J}+subst (the five split env hashes + `substitution`),
+>   with `flow` (`FlowNarrowingKey`) / `contextual` (`ContextualTypingKey`) carried as per-variant key fields on
+>   `FlowNarrowingAt` / `ContextualTypeAt`, NOT inside `ProgramAnalysisContext`; R21 five split env hashes; R6
 >   content-free keys. This design does NOT redesign these shapes.
 > - `docs/arch/native-flow-return.md` — the parent U6 subplan (the block contracts, the `FlowReturn` key shape,
 >   the `FlowSlice` fact + `validates_program_analysis_domain`, the demand-sliced `ReturnPathPeeker`). This
@@ -175,8 +177,9 @@ include the **different-candidate-contextual-param** case (not only different fl
 
 ## Decision 2 — Flow narrowing (`FlowNarrowingAt`) + NARROW_INVALIDATION — the invalidation-soundness CRUX (ADJUDICATED FIX)
 
-`FlowNarrowingAt { point: ProgramPointId }` → `ProgramAnalysis` value domain (`ProgramAnalysisContext`
-{P,R}+flow+contextual+subst, env dims P R T L J), facts in `FactDomain::ProgramAnalysis`, published via
+`FlowNarrowingAt { point: ProgramPointId, flow: FlowNarrowingKey, context: ProgramAnalysisContext }` →
+`ProgramAnalysis` value domain (`ProgramAnalysisContext` = the five split env hashes P R T L J + `substitution`;
+`flow` / `contextual` carried as per-variant key fields, NOT inside `ProgramAnalysisContext`), facts in `FactDomain::ProgramAnalysis`, published via
 `ProgramAnalysisGraph` — **never a `GraphTypeNode` arm** (qvd §2.2). The narrowing JOIN ALGEBRA lives on the
 shared `FlowFrame` lattice (positive / negative / intersection / union composition for conflicting predicates;
 `AliasCorrelation` for destructured-discriminant correlation), built across the `U6.NARROW_*` sub-blocks on the
@@ -374,7 +377,7 @@ self-await or budget-spin. Object-literal-argument contextual typing (`acc` in
 caller frame. `ThisType<T>` contextual `this` binding is supplied through `ContextualTypeAt` (no apparent
 members, a `ProgramAnalysisGraph` fact, no surface rewrite).
 
-`ContextualTypeAt { point }` → `ProgramAnalysis` value domain. `FlowInputContext` (the `input` key field of
+`ContextualTypeAt { point, contextual: ContextualTypingKey, context: ProgramAnalysisContext }` → `ProgramAnalysis` value domain. `FlowInputContext` (the `input` key field of
 `FlowReturn`: the contextual callback input signature + the relation/call demand mode) makes two re-entries
 differing only in contextual input signature distinct cache candidates.
 

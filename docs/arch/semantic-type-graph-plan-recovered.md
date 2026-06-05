@@ -244,8 +244,8 @@ Semantic resolution for these constructs lives in `verter_session::semantic_quer
 - `SemanticQueryKey::ResolveAmbientNamespace { canonical, name }` → `SemanticNodeData::AmbientNamespace`.
 - `SemanticQueryKey::ResolveOverloadSet { decl: ResolvedDeclSlotIdentity }` → ordered `Arc<[SignatureRef]>`.
 - `SemanticQueryKey::ResolveEnum { decl: ResolvedDeclSlotIdentity }` → first-class enum representation.
-- `SemanticQueryKey::FlowNarrowingAt { canonical, span }` → `TypeNode::FlowNarrowing` payload (§3.11).
-- `SemanticQueryKey::ContextualTypeAt { canonical, span }` → `TypeNode::ContextualType` payload (§3.11).
+- `SemanticQueryKey::FlowNarrowingAt { point: ProgramPointId, flow: FlowNarrowingKey, context: ProgramAnalysisContext }` → `ProgramAnalysis` value domain (Option-B identity; the `ProgramAnalysisGraph` wire, never `GraphTypeNode`).
+- `SemanticQueryKey::ContextualTypeAt { point: ProgramPointId, contextual: ContextualTypingKey, context: ProgramAnalysisContext }` → `ProgramAnalysis` value domain (Option-B identity; the `ProgramAnalysisGraph` wire, never `GraphTypeNode`).
 
 Env composition is uniform across all seven variants — the cache key produced by `SemanticGraphStore::execute_cooperative` for variant `V(payload)` is `(variant_tag, payload, resolve_env_hash, type_env_hash, lib_env_hash, project_identity, resolver_version)` for query-identity layers (`parse_env_hash` flows through `parse_stable_hash` on cross-file dependencies, never enters the key directly). Guard: `new_semantic_query_keys_uniform_env_composition` (Phase 0a) asserts none of the seven new variants names an env-hash field on its struct (consistency check).
 
@@ -1309,8 +1309,8 @@ The producer side lives in `verter_semantic::analysis::type_parameter_analysis` 
 
 Flow narrowing and contextual typing are not part of the default `resolveSymbolGraph` payload — they require a dedicated query. Env hashes flow through `ResolverContext` per the uniform convention (§2.17); the variants themselves only carry semantic identity:
 
-- `SemanticQueryKey::FlowNarrowingAt { canonical, span }` → returns `TypeNode::FlowNarrowing` for the given expression position.
-- `SemanticQueryKey::ContextualTypeAt { canonical, span }` → returns `TypeNode::ContextualType`.
+- `SemanticQueryKey::FlowNarrowingAt { point: ProgramPointId, flow: FlowNarrowingKey, context: ProgramAnalysisContext }` → `ProgramAnalysis` value domain (Option-B identity; `ProgramAnalysisGraph` wire) for the given program point.
+- `SemanticQueryKey::ContextualTypeAt { point: ProgramPointId, contextual: ContextualTypingKey, context: ProgramAnalysisContext }` → `ProgramAnalysis` value domain (Option-B identity; `ProgramAnalysisGraph` wire).
 
 `TypeInfoSession.evaluateFlowNarrowingAt(canonical, span)` and `.evaluateContextualTypeAt(canonical, span)` are public typeinfo methods. They are admitted to the typeinfo graph payload only when `closure: GraphClosurePolicy::ProjectionRequired { projection: FlowNarrowing | ContextualType }`. Default closure does NOT include them (keeps default payload size manageable). Guard: `flow_narrowing_only_when_projection_required`.
 
