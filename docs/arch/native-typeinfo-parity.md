@@ -846,7 +846,8 @@ names are the shorter `*_do_not_warm_hit` forms:
 **`resolve_overload_set_do_not_warm_hit`**,
 **`resolve_enum_do_not_warm_hit`**,
 **`flow_narrowing_at_do_not_warm_hit`**,
-**`contextual_type_at_do_not_warm_hit`**
+**`contextual_type_at_do_not_warm_hit`**,
+**`resolve_class_surface_do_not_warm_hit`**
 (plus the per-axis discriminators, e.g. `resolve_ambient_namespace_identity_covers_parse_env_axis`).
 The FORWARD-PLANNED U2 keys carry their planned guard names:
 **`resolve_merged_declaration_same_site_different_env_or_context_do_not_warm_hit`**
@@ -3890,19 +3891,18 @@ introduces lands with at least one named guard here.
 
 ## Query keys — per-key cross-context closure + meta-guard
 
-LANDED U2B.5/6/7 keys (live guard names are the shorter `*_do_not_warm_hit` forms):
+The per-key cross-context closure discipline (one no-cross-context-warm-hit guard per key). For the LANDED U2B.5/6/7
+keys the live test-tree guards are the short `*_do_not_warm_hit` forms (named here); the remaining entries are the
+design-intent names for keys whose closure guards land alongside their reducers:
 
-- `resolve_ambient_namespace_do_not_warm_hit`
-- `resolve_overload_set_do_not_warm_hit`
-- `resolve_enum_do_not_warm_hit`
-- `flow_narrowing_at_do_not_warm_hit`
-- `contextual_type_at_do_not_warm_hit`
-- `resolve_class_surface_do_not_warm_hit`
-
-FORWARD-PLANNED U2 keys (planned guard names, not yet in the test tree):
-
-- `resolve_merged_declaration_same_site_different_env_or_context_do_not_warm_hit`
-- `declaration_augmentation_key_same_site_different_env_or_context_do_not_warm_hit`
+- `resolve_ambient_namespace_do_not_warm_hit` (landed)
+- `resolve_overload_set_do_not_warm_hit` (landed)
+- `resolve_enum_do_not_warm_hit` (landed)
+- `flow_narrowing_at_do_not_warm_hit` (landed)
+- `contextual_type_at_do_not_warm_hit` (landed)
+- `resolve_class_surface_do_not_warm_hit` (landed)
+- `resolve_merged_declaration_same_site_different_env_or_context_do_not_warm_hit` (forward-planned U2)
+- `declaration_augmentation_key_same_site_different_env_or_context_do_not_warm_hit` (forward-planned U2)
 - `resolve_decl_same_site_different_env_or_context_do_not_warm_hit`
 - `instantiate_same_base_different_env_or_context_do_not_warm_hit`
 - `indexed_access_same_base_different_env_or_context_do_not_warm_hit`
@@ -3915,7 +3915,8 @@ FORWARD-PLANNED U2 keys (planned guard names, not yet in the test tree):
 - `project_path_same_base_path_different_env_or_context_do_not_warm_hit`
 - `resolved_named_type_key_identity_is_env_scoped`
 - `resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit`
-- `semantic_query_key_spec_table_equals_enum` (the mechanical enum/table-equality meta-guard, replacing the soft
+- `semantic_query_key_spec_table_equals_enum` (the mechanical enum/table-equality meta-guard — LIVE in
+  `crates/verter_session/tests/g_block/u2_spec_table_guards.rs` — replacing the soft
   `every_semantic_query_key_has_explicit_context_and_cross_context_warm_hit_guard`)
 - plus dispatch-completeness and schema-version guards for any public wire arm
 

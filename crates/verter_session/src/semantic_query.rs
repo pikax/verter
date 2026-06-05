@@ -2167,8 +2167,9 @@ pub enum ClassSurfaceSide {
 /// (env dims `P R T L J`).
 ///
 /// Per R21 this carries the dimensions the class-surface value depends on
-/// beyond the [`ResolvedDeclSlotIdentity`] — design §419 `{P,R} + subst +
-/// proj`:
+/// beyond the [`ResolvedDeclSlotIdentity`] — `{P,R} + mode` (the design §419
+/// `proj` axis is the `mode` field below; substitution rides on the key's
+/// `type_args`, not duplicated here):
 ///
 /// - `parse_env_hash` (`P`) — a class surface reads the parsed body skeleton
 ///   (decorator expressions on the class / its members participate in the
@@ -2202,7 +2203,8 @@ pub struct ClassSurfaceContext {
 /// axis a [`SemanticQueryKey::ResolveAmbientNamespace`] value depends on
 /// (env dims `P R T L J`).
 ///
-/// Per R21 this carries — design §414 `{P,R} + subst + proj`:
+/// Per R21 this carries — `{P,R} + mode` (the design §414 `proj` axis is the
+/// `mode` field below; substitution rides on the key's `type_args`):
 ///
 /// - `parse_env_hash` (`P`) — the namespace-member surface reads the parsed
 ///   body skeleton (the namespace's inner declarations), so the value is a
