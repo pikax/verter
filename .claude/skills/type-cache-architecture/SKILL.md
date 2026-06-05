@@ -1216,7 +1216,12 @@ The discrimination matrix:
   `StoreView` (per-domain validator methods),
   `StoreViewCompatToken`.
 - `crates/verter_session/src/semantic_query.rs` — `DeclIdentity`
-  (migrating to `ResolvedDeclSlotIdentity`).
+  (the live value-side versioned identity) and
+  `ResolvedDeclSlotIdentity` (the env-bearing content-free
+  query-identity slot used as `Instantiate.base` /
+  `ResolveMacroPayload.owner`; the migration to it has LANDED — the
+  former content-free `DeclKey` query-key struct and `to_decl_key()`
+  were deleted in the cutover).
 
 ## Discriminating tests
 

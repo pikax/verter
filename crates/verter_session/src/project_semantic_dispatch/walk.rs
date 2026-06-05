@@ -1,6 +1,7 @@
 //! Path-walking helper for [`ProjectSemanticDispatch::build_project_path`]
 //! plus the iterative shallow-mode terminal-surface synthesiser used by
-//! `Instantiate { body_mode: ProjectionMode::Shallow }` and by empty-path
+//! `Instantiate` in `Shallow` mode (`context.projection_reduction.mode =
+//! ProjectionMode::Shallow`) and by empty-path
 //! `ProjectPath` projections in `Shallow` mode. The synthesiser is
 //! deliberately non-recursive — it drives a heap-backed worklist so
 //! 100-arm intersections / unions cannot overflow the Rust call stack.
@@ -55,7 +56,8 @@ pub enum ShallowDiagnostic {
     /// True graph cycle detected during shallow-mode walk; the walker
     /// terminates the offending arm without contribution.
     CycleShortCircuited { node: SemanticNodeId },
-    /// `Instantiate { ..., body_mode: Navigate }` returned `Recursive`
+    /// `Instantiate` in `Navigate` mode
+    /// (`context.projection_reduction.mode = Navigate`) returned `Recursive`
     /// — the declaration referenced itself transitively. Carries the
     /// declaration identity for diagnostic context.
     CyclicInstantiation { decl: DeclIdentity },

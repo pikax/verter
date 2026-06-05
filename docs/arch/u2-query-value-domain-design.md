@@ -783,11 +783,23 @@ dims are NEVER hidden inside `resolve_env`:
   earlier flat "NOT parse_env" claim: parse_env is a transitive dependency, not absent.
 
 This is the answer to "where does `resolve_env_hash` enter the U2 key surface" (it is absent from
-`ResolvedDeclSlotIdentity`): it enters through every per-key `*Context` that resolves imports —
-`MergedDeclarationContext`, `DeclarationAnalysisContext`, `AmbientNamespaceContext`,
-`TemplateLiteralReduceContext`, `RelationContext`, `ProgramAnalysisContext`, and the migrated
-`Instantiate`/`ResolveMacroPayload` contexts (§2.2) — each carrying `{resolve_env, lib_env (when it
-consults the ambient/types corpus), parse_env (transitive specifier list), project_identity}` SPLIT.
+`ResolvedDeclSlotIdentity`): it enters through the per-key `*Context`, with the EXACT dim split per
+key — NOT a uniform `{resolve_env, lib_env, parse_env, project_identity}` bundle on every context
+(that would re-bundle dims R21 keeps split):
+
+- `MergedDeclarationContext`, `DeclarationAnalysisContext`, `AmbientNamespaceContext`,
+  `TemplateLiteralReduceContext`, `RelationContext`, `ProgramAnalysisContext` — these resolve imports
+  AND/OR read the ambient/types corpus from the context, so each carries the dims it actually
+  consults (`resolve_env`; `lib_env` when it consults the ambient/types corpus; `parse_env`
+  transitively through the specifier list it reads; `project_identity`) SPLIT.
+- The MIGRATED `Instantiate` / `ResolveMacroPayload` keys (§2.2) split DIFFERENTLY: the `T,L,J` dims
+  (`type_env_hash`, `lib_env_hash`, `project_identity`) ride the env-bearing content-free
+  `ResolvedDeclSlotIdentity` base/owner SLOT, and ONLY `resolve_env_hash` (`R`) rides the dedicated
+  per-key context (`InstantiateContext { projection_reduction, resolve_env_hash }` /
+  `MacroPayloadContext { resolve_env_hash, mode }`). These contexts do NOT carry `lib_env`,
+  `project_identity`, or a standalone `parse_env` — those are on the slot (`T,L,J`) or simply not in
+  this key's identity. Total env identity is `R T L J` for both keys (§2.2 table).
+
 The slot itself stays resolve-env-free because it is the ALREADY-resolved declaration identity; the
 resolution that produced it keys on `resolve_env_hash` UPSTREAM (in `ResolvedImportFacts`, which
 carries `resolve_env_hash` + `parse_env_hash` but NOT `lib_env_hash` — type-cache skill R21 audit

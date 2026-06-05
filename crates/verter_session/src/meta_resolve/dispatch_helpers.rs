@@ -15,11 +15,13 @@
 //! expanded-surface filter the trampoline applied (drops results that
 //! still carry deferred shells or semantic-miss markers).
 //!
-//! Class B migrates to `dispatch.execute_to_type_expr(Instantiate{
-//! base: bare_name_decl_identity, args: [], body_mode: Expanded })` —
-//! the trampoline went through `project_type_surface` which itself
-//! lowered to `Instantiate { args: [], body_mode: Expanded }` per
-//! `build.rs`'s utility router; the Class B helper inlines that path.
+//! Class B migrates to `dispatch.execute_to_type_expr(Instantiate { base,
+//! args: [], context: InstantiateContext { projection_reduction,
+//! resolve_env_hash } })` with `context.projection_reduction.mode = Expanded`
+//! and `base` the env-bearing content-free `ResolvedDeclSlotIdentity` slot —
+//! the trampoline went through `project_type_surface` which itself lowered to
+//! an Expanded-mode `Instantiate` per `build.rs`'s utility router; the Class B
+//! helper inlines that path.
 //!
 //! bridge helpers (post engine-method deletion).
 //!
@@ -378,9 +380,11 @@ fn route_outer_utility_is_shadowed(
 ///      transient engine instance so route projection stays correct
 ///      after callsite migration.
 ///   2. Generic ProjectPath dispatch for arbitrary expressions —
-///      direct `Instantiate { args: [], body_mode: Expanded }`-shaped
-///      `ProjectPath` query, raised to a `TypeExpr` and filtered for
-///      a fully-expanded surface.
+///      direct Expanded-mode `ProjectPath` query (the `Instantiate`
+///      equivalent being `Instantiate { base, args: [], context:
+///      InstantiateContext { projection_reduction, resolve_env_hash } }`
+///      with `context.projection_reduction.mode = Expanded`), raised to a
+///      `TypeExpr` and filtered for a fully-expanded surface.
 ///
 /// Returns `Some(projected)` only when the projection produced a
 /// fully-expanded surface (no deferred `KeyOf` / `IndexedAccess` /
@@ -665,7 +669,9 @@ pub(crate) fn pick_via_dispatch_pick_helper(
 ///
 /// The dispatch path goes through `lower_type_expr_in_scope` which
 /// routes a generic `Ref` through
-/// `SemanticQueryKey::Instantiate { base, args, body_mode: Expanded }`
+/// `SemanticQueryKey::Instantiate { base, args, context: InstantiateContext {
+/// projection_reduction, resolve_env_hash } }` (with
+/// `context.projection_reduction.mode = Expanded`)
 /// internally — the dispatcher's `build_instantiate` binds the explicit
 /// / default type arguments into the lowering env and substitutes them
 /// while lowering the prepared-decl body. This is the sole generic-Ref

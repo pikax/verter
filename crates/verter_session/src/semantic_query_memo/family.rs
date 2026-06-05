@@ -1087,7 +1087,9 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         // Binding amendment — `ResolveMacroPayload`. The
         // mode is stripped into the slot per the standard mode-bearing
         // pattern; the family identity is the (owner, macro_index,
-        // macro_kind, type_args) tuple.
+        // macro_kind, type_args, resolve_env_hash) tuple — the `R` env
+        // dim rides the dedicated `MacroPayloadContext` and is folded onto
+        // the family key (the `owner` slot itself carries the J/T/L dims).
         SemanticQueryKey::ResolveMacroPayload {
             owner,
             macro_index,

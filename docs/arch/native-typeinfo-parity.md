@@ -998,7 +998,8 @@ EvalPolicy)` point:
 
 `Skeleton` is therefore **not a special semantic mode** — it is exactly
 `generic_open = TypeParamShells` plus the carrier-stop policy on the same lattice;
-`Instantiate { args: [], body_mode: Skeleton }` is `Instantiate` with that preset.
+`Instantiate { base, args: [], context: InstantiateContext { projection_reduction, resolve_env_hash } }`
+with `context.projection_reduction.mode = Skeleton` is `Instantiate` with that preset.
 The presets are a closed convenience surface; a demand that does not fit a preset
 constructs a `(ProjectionDemand, EvalPolicy)` point directly rather than adding a
 sixth mode rung.
@@ -1990,7 +1991,8 @@ whole-body lowering).
 
 `Skeleton` is not a special semantic mode: it is the `generic_open = TypeParamShells`
 + carrier-stop preset over the demand lattice (§2.10), used by
-`Instantiate { args: [], body_mode: Skeleton }` — unbound type parameters become
+`Instantiate { base, args: [], context: InstantiateContext { projection_reduction, resolve_env_hash } }`
+with `context.projection_reduction.mode = Skeleton` — unbound type parameters become
 `TypeParam` shells so Conditional branches do not collapse to `never` for unbound
 generics.
 

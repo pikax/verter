@@ -70,7 +70,8 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 /// (`compute_component_meta_state_inner` no longer calls
 /// `produce_macro_object_shapes_for_purpose`; `define_props`/`define_emits`/
 /// `define_slots` are now owned by `projectors::define_shapes`). The
-/// materialiser ran a DUPLICATE eager `Instantiate { body_mode: Expanded }` of
+/// materialiser ran a DUPLICATE eager Expanded-mode `Instantiate` (its
+/// `context.projection_reduction.mode = Expanded`) of
 /// the macro root (`produce_one_macro_object_shape` → the registry/projection
 /// pre-pass) over the SAME `(base, args, context)` the projector path already
 /// resolves once through `ResolveMacroPayload` / the empty-path Shallow walker.

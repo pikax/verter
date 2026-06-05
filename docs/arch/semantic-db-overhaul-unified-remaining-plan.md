@@ -1070,12 +1070,19 @@ PARALLEL to the remaining scheduler work (U1/U7/U9).
   split `MaterializeMemoDb` / `MemberShapeCacheDb` shape caches. The static guard
   `block_6i_static_guards.rs::shape_cache_db_replaces_split_caches` forbids
   re-introduction.
-- **Treat the `DeclKey` whole-hash fix as ALREADY LANDED.** `Instantiate.base` /
-  `ResolveMacroPayload.owner` already carry a content-free
-  `DeclKey { canonical_id, decl_name }` (via §6c / A0a / reconcile-#4
-  `to_decl_key()`). Only the further **slot-identity** refinement
-  (`→ ResolvedDeclSlotIdentity`) remains, and it lands in U2. The R6 whole-hash
-  violation is resolved.
+- **The whole-hash fix AND the slot-identity refinement BOTH LANDED.**
+  `Instantiate.base` / `ResolveMacroPayload.owner` now carry the env-bearing
+  content-free `ResolvedDeclSlotIdentity` slot (built via
+  `dispatch.type_slot_for(...)` / `builtin_type_slot(...)`). The intermediate
+  content-free `DeclKey { canonical_id, decl_name }` shape and the
+  `to_decl_key()` / `DeclIdentity::to_decl_key` helpers it was produced through
+  were DELETED in the U2 cutover — neither the struct nor the helper exists.
+  The slot carries env dims `project_identity` / `type_env_hash` / `lib_env_hash`;
+  the `resolve_env_hash` dim rides the dedicated per-key context
+  (`InstantiateContext` / `MacroPayloadContext`). Per R6 the slot is content-free;
+  the live whole-hash is re-sourced at value-compute time via
+  `ensure_indexed_ready(base.defining_canonical).whole_hash`, NOT in the key. The
+  R6 whole-hash violation is resolved.
 - **Do NOT resurrect** `queue.rs`, `submit_batch` (the non-atomic one — 0 callers,
   deleted in §6c), `JobIndex`, `QueueEntry`, `EffectiveKey`,
   `AgingConfig`/`DagAgingConfig`, `BlockerRegistry`, `BlockerRef`,
@@ -2078,9 +2085,10 @@ guards**. Sequence is faithful to §A; do not reorder.
      satisfaction-relation EXACTNESS gating lands in U10; the lattice DEFINITION
      lands here.
   1. Finalize the **`SemanticQueryKey` identity SHAPE once** (the slot-identity
-     model for every variant): migrate existing `Instantiate { base }` /
-     `ResolveMacroPayload { owner }` from `DeclKey` → `ResolvedDeclSlotIdentity`
-     (slot identity), AND add the **7 U2 variants** in that identity shape
+     model for every variant): existing `Instantiate { base }` /
+     `ResolveMacroPayload { owner }` moved from the (now-deleted) intermediate
+     `DeclKey` to `ResolvedDeclSlotIdentity` (slot identity, LANDED), AND add the
+     **7 U2 variants** in that identity shape
      (`ResolveMergedDeclaration`, **`ResolveDeclarationAugmentation`**,
      `ResolveAmbientNamespace`, `ResolveOverloadSet`, `ResolveEnum`,
      `FlowNarrowingAt`, `ContextualTypeAt`). The seventh variant is the
@@ -2151,10 +2159,12 @@ guards**. Sequence is faithful to §A; do not reorder.
   resolver. Declaration merging + ambient + augmentation are the hardest
   TS-fidelity cases; cross-file merge completeness (§9.5 five properties) is a
   known hard sub-item.
-- **Required deletions:** none of substance at this block — but it FORBIDS adding
-  the 7 variants on the `DeclKey` shape and re-keying later (that double-migration
-  is the anti-pattern §B exists to prevent). Use `ShapeCacheDb`, never the retired
-  split shape caches. The `DeclKey` whole-hash fix is already landed (§2.2).
+- **Required deletions:** none of substance at this block — but it FORBADE adding
+  the 7 variants on the intermediate `DeclKey` shape and re-keying later (that
+  double-migration is the anti-pattern §B exists to prevent). Use `ShapeCacheDb`,
+  never the retired split shape caches. The `DeclKey` whole-hash fix landed and the
+  `DeclKey` struct itself was subsequently deleted when the base/owner moved to
+  `ResolvedDeclSlotIdentity` (§2.2).
 - **Guards:** an H3 runtime guard
   (`cache_key_runtime_guards::semantic_query_keys_contain_no_content_hash_or_fact_signature`
   / equivalent) — query-identity keys carry no content/version hash or
@@ -2833,21 +2843,24 @@ bridge.
 ## 5. U2 in depth — B4 ↔ SemanticQueryKey co-sequencing (§B)
 
 **Binding decision (§B): merge Block-4 and the 7-variant `SemanticQueryKey`
-addition into a single block, U2. Do NOT add the 7 variants on the current
-`DeclKey` shape and later migrate B4 to slot identity.** One clean cutover, no
-migrate-twice.
+addition into a single block, U2. The 7 variants were NOT staged on the
+(now-deleted) intermediate `DeclKey` shape and then re-migrated to slot
+identity.** One clean cutover, no migrate-twice. (LANDED: `Instantiate.base` /
+`ResolveMacroPayload.owner` now key on `ResolvedDeclSlotIdentity`; the `DeclKey`
+struct and `to_decl_key()` were deleted in the cutover.)
 
 U2 finalizes the **`SemanticQueryKey` identity SHAPE once** (the slot-identity
 model). It does NOT freeze the variant LIST — later ADDITIVE variants land in this
 same shape with no cache re-key (notably U6's `SemanticQueryKey::FlowReturn`, B11).
 What U2 fixes once is the identity model every variant keys on:
 
-1. **Existing variants → slot identity.** `Instantiate { base }` and
-   `ResolveMacroPayload { owner }` move from the content-free
-   `DeclKey { canonical_id, decl_name }` (already landed via §6c/A0a/reconcile-#4)
-   to `ResolvedDeclSlotIdentity`. This is the only remaining identity refinement;
-   the whole-hash R6 violation is already resolved (§2.2), so this is a
-   slot-precision change, not a re-key from scratch.
+1. **Existing variants → slot identity (LANDED).** `Instantiate { base }` and
+   `ResolveMacroPayload { owner }` moved from the intermediate content-free
+   `DeclKey { canonical_id, decl_name }` to `ResolvedDeclSlotIdentity`; the
+   `DeclKey` struct and the `to_decl_key()` / `DeclIdentity::to_decl_key` helpers
+   were DELETED in the same cutover. This was the last identity refinement; the
+   whole-hash R6 violation was already resolved (§2.2), so it was a slot-precision
+   change, not a re-key from scratch.
 
 2. **7 U2 variants in the final shape.** `ResolveMergedDeclaration`,
    **`ResolveDeclarationAugmentation`**, `ResolveAmbientNamespace`,

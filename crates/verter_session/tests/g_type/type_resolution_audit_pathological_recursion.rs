@@ -46,8 +46,9 @@ fn type_resolution_audit_pathological_recursion_observes_depth_cap_exactly() {
     // dispatcher's same-identity guard will catch the structural
     // self-reference; we observe the high-water mark afterwards.
     //
-    // Construct an Instantiate{base = userland Pick decl identity}
-    // with empty args + Skeleton body_mode (the BFS dispatch path
+    // Construct an Instantiate{base = userland Pick decl slot}
+    // with empty args + `context.projection_reduction.mode = Skeleton`
+    // (the BFS dispatch path
     // used by recursive-helper detection per CLAUDE.md §"Macro Type
     // Traversal Rule"). The dispatcher's instantiate_active stack
     // is the reentry guard; this exercise is a real production

@@ -4611,21 +4611,22 @@ mod tests {
     /// distinct `Instantiate` calls that visit the same path.
     #[test]
     fn navigation_once_invariant_contract() {
-        // Structural: `SemanticQueryKey::Instantiate { base, args, body_mode }`
-        // splits the family memo per `body_mode`, so two distinct
-        // projections under the SAME body_mode into the same declaration
-        // body share family memo entries for every structurally-equal
-        // path segment.
+        // Structural: `SemanticQueryKey::Instantiate { base, args, context:
+        // InstantiateContext { projection_reduction, resolve_env_hash } }`
+        // splits the family memo per projection mode
+        // (`context.projection_reduction.mode`), so two distinct projections
+        // under the SAME mode into the same declaration body share family memo
+        // entries for every structurally-equal path segment.
         //
         // When the F2 counter `decl_subexpression_lowering_count` lands
         // as a post-track refinement, this test's strict assertion
-        // becomes: after N `Instantiate(Foo, [V_i], body_mode)` +
-        // matching `ProjectPath(result, [p], Identity)`, the counter
-        // equals the size of the visited path intersection, not
-        // N × body_size — within one body_mode slot.
+        // becomes: after N `Instantiate(Foo, [V_i], mode)` + matching
+        // `ProjectPath(result, [p], Identity)`, the counter equals the size of
+        // the visited path intersection, not N × body_size — within one mode
+        // slot.
         //
         // The current assertion is the structural invariant: same
-        // `(base, args, body_mode)` triple constructs an equal key.
+        // `(base, args, context)` triple constructs an equal key.
         let base = DeclIdentity::synthetic("Foo").to_type_slot_unscoped();
         let args = Arc::from(vec![SemanticNodeId(2)].into_boxed_slice());
         let key = SemanticQueryKey::Instantiate {

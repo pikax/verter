@@ -336,10 +336,12 @@ fn evaluate_inner(
     }
 
     // Resolve the synthesised alias by dispatching through
-    // `Instantiate { args: [], body_mode }`. The scratch alias has
-    // no declaration-site type parameters so `args = []` is
-    // correct; the dispatch lifts the `DeclPlaceholder` into a
-    // concrete body in the requested mode.
+    // `Instantiate { base, args: [], context: InstantiateContext {
+    // projection_reduction, resolve_env_hash } }` in the requested mode
+    // (`context.projection_reduction.mode`). The scratch alias has no
+    // declaration-site type parameters so `args = []` is correct; the
+    // dispatch lifts the `DeclPlaceholder` into a concrete body in the
+    // requested mode.
     //
     // Build a request-bound `HostResolverContext` for the dispatch so
     // resolver-tier reads (prepared_decl_bundle, prepared_type_decl,

@@ -28,8 +28,10 @@
 //!   member's `value` stays as a `Conditional` carrier shell. The
 //!   `Function`-arm match in the consumer fails. FAILS this test.
 //! - Post-Commit-2 substrate: the new `materialize_selected_key_mapped_value`
-//!   helper dispatches `Instantiate { args: [], body_mode: Navigate }`
-//!   with the substituted key, then the per-key body's
+//!   helper dispatches `Instantiate { base, args: [], context:
+//!   InstantiateContext { projection_reduction, resolve_env_hash } }` with
+//!   `context.projection_reduction.mode = Navigate` and the substituted key,
+//!   then the per-key body's
 //!   `PricingPlanSlots["badge"]` reduces through the selected-index
 //!   path projection (the brief's Q1 dispatch chain), Conditional
 //!   closes, Function emerges. PASSES this test.

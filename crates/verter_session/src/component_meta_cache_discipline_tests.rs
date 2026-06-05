@@ -258,8 +258,8 @@ fn cache_discipline_materialize_surface_repeated_keys_warm() {
 }
 
 /// 5b §5.D.1 — `execute_pick` repeated identical keys: cold once,
-/// warm N-1. The underlying dispatch is `Instantiate { pick_decl,
-/// args, body_mode }` so we probe the counter against that key.
+/// warm N-1. The underlying dispatch is `Instantiate { base: pick slot,
+/// args, context }` so we probe the counter against that key.
 #[test]
 fn cache_discipline_execute_pick_repeated_keys_warm() {
     let host = build_test_host();

@@ -17,8 +17,9 @@
 //!
 //! The structural R6 guard at
 //! `tests/r6_query_identity_keys_content_free.rs` independently pins
-//! the key shape (content-free `DeclKey`). This test pins the
-//! coexistence behaviour the key shape alone does not guarantee.
+//! the key shape (the env-bearing content-free `ResolvedDeclSlotIdentity`
+//! slot). This test pins the coexistence behaviour the key shape alone
+//! does not guarantee.
 
 use std::sync::Arc;
 

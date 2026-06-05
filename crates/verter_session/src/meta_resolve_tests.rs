@@ -6663,14 +6663,15 @@ defineProps<Props<T>>()
 }
 
 // ===========================================================================
-// Step 1 FAIL-FIRST #5 — `Instantiate` memo splits per body_mode.
+// Step 1 FAIL-FIRST #5 — `Instantiate` memo splits per projection mode.
 //
-// Validates D1.4: extending `SemanticQueryKey::Instantiate` with `body_mode`
-// (and projecting the family-slot mapping through `mode_to_slot(body_mode)`)
+// Validates D1.4: carrying the projection mode on
+// `SemanticQueryKey::Instantiate.context.projection_reduction.mode`
+// (and projecting the family-slot mapping through `mode_to_slot(mode)`)
 // produces structurally distinct memo entries for the same `(base, args)`
-// pair under different body_modes. Pre-Step-1 the key was mode-free
+// pair under different projection modes. Pre-Step-1 the key was mode-free
 // (`Single` slot); post-Step-1 the same `(base, args)` triggers two
-// distinct lowerings depending on the caller's body_mode.
+// distinct lowerings depending on the caller's projection mode.
 // ===========================================================================
 
 /// Constructs a fixture where `Wrapper<Inner>` is an alias to its `T`
@@ -6722,13 +6723,13 @@ defineProps<Wrapper<Inner>>()
 
     // Assertion 1: distinct SemanticNodeIds. Pre-Step-1 the family
     // memo collapsed both modes onto one entry; post-Step-1 the
-    // `mode_to_slot(body_mode)` projection in
+    // `mode_to_slot(mode)` projection in
     // `semantic_query_memo::family_and_slot` splits the slot, so the
     // two lowerings produce structurally distinct nodes.
     assert_ne!(
         lowered_expanded, lowered_navigate,
-        "Instantiate memo must split per body_mode; same node id across \
-         body_modes means the key change at semantic_query.rs:747 is \
+        "Instantiate memo must split per projection mode; same node id across \
+         modes means the context.projection_reduction.mode change is \
          not flowing through to the family-slot projection"
     );
 

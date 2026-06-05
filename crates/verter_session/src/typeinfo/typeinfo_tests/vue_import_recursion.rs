@@ -2,8 +2,13 @@
 //! `Instantiate(.vue default)` query.
 //!
 //! A `.vue` component's PUBLIC instance surface (`{ $props, $emit, $slots }`)
-//! is a first-class `SemanticQueryKey::Instantiate { base: DeclIdentity(canonical,
-//! whole_hash, "default"), args: [] }` query — the SAME keyed identity both
+//! is a first-class `SemanticQueryKey::Instantiate { base, args: [], context }`
+//! query whose `base` is the env-bearing content-free `ResolvedDeclSlotIdentity`
+//! slot for the `.vue` `"default"` decl (`defining_canonical = canonical`,
+//! `merged_symbol_name = "default"`, `symbol_space = Type`). Per R6 the slot is
+//! content-free — the live `whole_hash` is re-sourced at value-compute time via
+//! `ensure_indexed_ready(base.defining_canonical).whole_hash`, NOT carried in the
+//! key. It is the SAME keyed identity both
 //! [`crate::VerterHost::resolve_vue_public_type`] (the public API) and a
 //! `.vue`-importing-`.vue` reference resolve through. There is NO second resolver
 //! and NO depth bound: termination is by query identity. Two distinct

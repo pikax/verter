@@ -92,12 +92,13 @@ pub static TYPE_EXPR_OPERATOR_NODE_COUNT_SUM: AtomicU64 = AtomicU64::new(0);
 /// `EXECUTE_COOPERATIVE_COLD_BUILDS` gives the mean ns per cold build.
 pub static EXECUTE_COOPERATIVE_BUILD_NS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-/// Outer-call counter for `Instantiate { body_mode: Expanded }`
-/// dispatch.
+/// Outer-call counter for an Expanded-mode `Instantiate`
+/// (`context.projection_reduction.mode == Expanded`) dispatch.
 ///
 /// Incremented at the entry of
 /// `ProjectSemanticDispatch::build_instantiate` whenever the requested
-/// `body_mode` is `Expanded`. Cold dispatches bump the counter; warm
+/// projection mode (`context.mode`) is `Expanded`. Cold dispatches bump the
+/// counter; warm
 /// cache hits skip the build path entirely and leave the counter
 /// unchanged.
 ///

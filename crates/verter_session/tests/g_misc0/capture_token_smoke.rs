@@ -251,13 +251,14 @@ fn dispatch_log_records_under_active_token() {
 
 #[test]
 fn key_family_matches_instantiate_expanded_for_resolved_name() {
-    // Mode-aware Instantiate gating used by the Phase 4 field-level
+    // Mode-aware Instantiate gating used by the field-level
     // fast-path counterfixtures. The variant must match
-    // `body_mode == Expanded` and reject `Skeleton` / `Shallow` for
-    // the same name, plus reject other names entirely.
+    // `context.projection_reduction.mode == Expanded` and reject
+    // `Skeleton` / `Shallow` for the same name, plus reject other names
+    // entirely.
     use verter_session::semantic_query::ProjectionMode;
 
-    // body_mode == Expanded → matches when name matches.
+    // mode == Expanded → matches when name matches.
     let key_expanded = SemanticQueryKey::Instantiate {
         base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
         args: Arc::new([]),
@@ -272,10 +273,10 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
     assert!(!KeyFamily::InstantiateExpandedForResolvedName("OtherName").matches(&key_expanded));
     // Distinguishing from mode-agnostic InstantiateForResolvedName: the
     // unrestricted family also matches the Expanded key (its semantics
-    // do not gate on body_mode).
+    // do not gate on the projection mode).
     assert!(KeyFamily::InstantiateForResolvedName("UIMessage").matches(&key_expanded));
 
-    // body_mode == Skeleton → must NOT match the Expanded family.
+    // mode == Skeleton → must NOT match the Expanded family.
     let key_skeleton = SemanticQueryKey::Instantiate {
         base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
         args: Arc::new([]),
@@ -290,7 +291,7 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
     // Correct family for Skeleton still matches.
     assert!(KeyFamily::SkeletonForResolvedName("UIMessage").matches(&key_skeleton));
 
-    // body_mode == Shallow → must NOT match the Expanded family.
+    // mode == Shallow → must NOT match the Expanded family.
     let key_shallow = SemanticQueryKey::Instantiate {
         base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
         args: Arc::new([]),

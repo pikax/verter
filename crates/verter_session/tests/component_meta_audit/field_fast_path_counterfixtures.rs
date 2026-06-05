@@ -7,8 +7,9 @@
 //! lists). The cold-time regression the fast path addresses is
 //! the `defineProps<ChatMessageProps>() extends UIMessage from
 //! 'ai'` shape: when `ChatMessageProps extends UIMessage<...>`,
-//! the slow parent-projection lower would dispatch
-//! `Instantiate { base = UIMessage, body_mode = Expanded }` for
+//! the slow parent-projection lower would dispatch an Expanded-mode
+//! `Instantiate` (`base.merged_symbol_name == UIMessage`,
+//! `context.projection_reduction.mode == Expanded`) for
 //! every primitive field, which fans out into the third-party
 //! `ai` package's declaration graph.
 //!
@@ -17,7 +18,8 @@
 //! without lowering the parent shell. The two observable
 //! consequences asserted here:
 //!
-//! 1. `Instantiate { base = UIMessage, body_mode = Expanded }`
+//! 1. the Expanded-mode `Instantiate` (`base.merged_symbol_name ==
+//!    UIMessage`, `context.projection_reduction.mode == Expanded`)
 //!    must NOT be dispatched during the request — counter == 0.
 //!    NB: the production wiring that records dispatches into the
 //!    capture token's `dispatch_log` is added by the B-Bm Phase
@@ -103,8 +105,9 @@ defineProps<ChatMessageProps<TMetadata, TDataParts, TTools>>()
 
 /// field-fast-path gate — sub-assertion 1 + sub-assertion 2.
 ///
-/// Sub-assertion 1: the request must NOT dispatch `Instantiate
-/// { base = UIMessage, body_mode = Expanded }` for any of
+/// Sub-assertion 1: the request must NOT dispatch the Expanded-mode
+/// `Instantiate` (`base.merged_symbol_name == UIMessage`,
+/// `context.projection_reduction.mode == Expanded`) for any of
 /// `ChatMessageProps`'s primitive fields. The field-level fast
 /// path ELIMINATES the parent-shell `Expanded` lower entirely
 /// for fields whose parsed expression doesn't reference any
@@ -149,7 +152,8 @@ fn fast_path_skips_expanded_dispatch_and_heritage_load() {
         snapshot.dispatch_count(KeyFamily::InstantiateExpandedForResolvedName("UIMessage"));
     assert_eq!(
         expanded_ui_message, 0,
-        "field-fast-path gate: Instantiate {{ UIMessage, body_mode = Expanded }} must not be dispatched \
+        "field-fast-path gate: the Expanded-mode Instantiate {{ base.merged_symbol_name == UIMessage, \
+         context.projection_reduction.mode == Expanded }} must not be dispatched \
          when the fast path is taking primitive fields through `exact_concrete(parsed)`. \
          Got {expanded_ui_message} dispatches.",
     );

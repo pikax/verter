@@ -248,24 +248,27 @@ pub trait CacheKeyFilter {
 /// caller never touches a runtime `DeclId`.
 #[derive(Debug, Clone)]
 pub enum KeyFamily {
-    /// Match `Instantiate { base.decl_name == name, .. }` regardless of
-    /// projection mode and arguments.
+    /// Match `Instantiate { base.merged_symbol_name == name, .. }`
+    /// regardless of projection mode and arguments.
     InstantiateForResolvedName(&'static str),
     /// Match `ProjectPath { mode == Navigate }` whose terminal segment
     /// matches the listed alias hops. Empty hops match any `Navigate`
     /// projection rooted at any base.
     NavigateForAlias(&'static str, Vec<&'static str>),
-    /// Match `Instantiate { base.decl_name == name, body_mode == Shallow }`.
+    /// Match `Instantiate { base.merged_symbol_name == name,
+    /// context.projection_reduction.mode == Shallow }`.
     ShallowForResolvedName(&'static str),
-    /// Match `Instantiate { base.decl_name == name, body_mode == Skeleton }`.
+    /// Match `Instantiate { base.merged_symbol_name == name,
+    /// context.projection_reduction.mode == Skeleton }`.
     SkeletonForResolvedName(&'static str),
-    /// Match `Instantiate { base.decl_name == name, body_mode == Expanded }`.
+    /// Match `Instantiate { base.merged_symbol_name == name,
+    /// context.projection_reduction.mode == Expanded }`.
     ///
     /// Used by the field-level fast path counterfixtures
     /// to assert that, for a fast-path-eligible field, the macro
     /// shell is NOT dispatched in `Expanded` mode (the cold-time
-    /// regression that the fast path eliminates is the
-    /// `Instantiate { base = UIMessage, body_mode = Expanded }`
+    /// regression that the fast path eliminates is the Expanded-mode
+    /// `Instantiate` whose `base.merged_symbol_name == UIMessage`
     /// dispatch driven by `defineProps<ChatMessageProps extends
     /// UIMessage<...>>()` carriers — counter == 0 after the fast
     /// path takes the field through `exact_concrete(parsed)`).

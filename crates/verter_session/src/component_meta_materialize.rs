@@ -2259,16 +2259,18 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
     /// child refs at this hop because of conditional collapse).
     ///
     /// **NOTE:** the BFS in the present commit (F-prep) still uses
-    /// `body_mode: Navigate`. This test asserts the EXPECTED post-F
-    /// behavior. F-prep on its own does NOT make this test pass — F is
-    /// where the BFS body switches to `body_mode: Skeleton`. Until then,
+    /// `context.projection_reduction.mode = Navigate`. This test asserts
+    /// the EXPECTED post-F behavior. F-prep on its own does NOT make this
+    /// test pass — F is where the BFS body switches to
+    /// `context.projection_reduction.mode = Skeleton`. Until then,
     /// this test will fail at the discriminating assertion. The test is
     /// placed here to exercise the helper infrastructure; F's per-commit
     /// gate is where it must pass for real.
     ///
     /// To avoid this test failing F-prep's per-commit gate, we use the
-    /// Skeleton mode DIRECTLY (lowering DotPathKeys's body via
-    /// `Instantiate { body_mode: Skeleton }`) and verify
+    /// Skeleton mode DIRECTLY (lowering DotPathKeys's body via an
+    /// `Instantiate` whose `context.projection_reduction.mode = Skeleton`)
+    /// and verify
     /// `collect_ref_identities_node` finds the recursive ref. This is a
     /// strictly stronger test than what the BFS does, since the BFS
     /// hardcodes `Navigate` until F lands.
@@ -2335,8 +2337,8 @@ export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
         assert!(
             !child_refs.is_empty(),
             "BFS at DotPathKeys hop must observe ≥1 child ref via Skeleton mode. \
-             Pre-rev-10 with body_mode=Navigate produced 0 (conditional collapse). \
-             Post-rev-10 with body_mode=Skeleton produces ≥1 (TypeParam shells \
+             Pre-rev-10 in Navigate mode produced 0 (conditional collapse). \
+             Post-rev-10 in Skeleton mode produces ≥1 (TypeParam shells \
              preserve Conditional branches → recursive DotPathKeys ref visible)."
         );
         let names: Vec<&str> = child_refs

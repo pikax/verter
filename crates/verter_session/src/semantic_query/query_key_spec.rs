@@ -503,10 +503,13 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
         },
-        // Instantiate { base, args, context } — instantiates a generic decl
-        // body after substitution; resolves imported type-argument references
-        // (§2.1 tier-2: `R T L J`, no parsed-body-skeleton read at query time)
-        // and branches on the reduction context.
+        // Instantiate { base, args, context: InstantiateContext {
+        // projection_reduction, resolve_env_hash } } — instantiates a generic
+        // decl body after substitution; resolves imported type-argument
+        // references (§2.1 tier-2: `R T L J`, no parsed-body-skeleton read at
+        // query time) and branches on the reduction context. The `base` is the
+        // env-bearing content-free `ResolvedDeclSlotIdentity` slot (J/T/L); the
+        // `R` dim rides the dedicated `InstantiateContext`.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::Instantiate,
             lifecycle: KeyLifecycle::Live,
@@ -691,11 +694,14 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             admission: AdmissionSpec::RelationMemo,
         },
         // ResolveMacroPayload { owner, macro_index, macro_kind, type_args,
-        // mode } — resolves a Vue macro payload to its effective type; resolves
-        // the SFC owner's imports and reads the `AnalyzedMacro` sidecar (no AST
-        // re-walk, §2.1 tier-2: `R T L J`). The `mode` selects a projection rung
-        // for downstream lowering, so the family branches on the axes the
-        // `mode` spans.
+        // context: MacroPayloadContext { resolve_env_hash, mode } } — resolves
+        // a Vue macro payload to its effective type; resolves the SFC owner's
+        // imports and reads the `AnalyzedMacro` sidecar (no AST re-walk, §2.1
+        // tier-2: `R T L J`). The `owner` is the env-bearing content-free
+        // `ResolvedDeclSlotIdentity` slot (J/T/L); the `R` dim rides the
+        // dedicated `MacroPayloadContext`. The context's `mode` selects a
+        // projection rung for downstream lowering, so the family branches on
+        // the axes the `mode` spans.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::ResolveMacroPayload,
             lifecycle: KeyLifecycle::Live,

@@ -1002,7 +1002,8 @@ fn node_arena_invalidation_preserves_global_scope() {
 /// the family-key shape — `Instantiate` carries semantic-node ids, not
 /// canonicals — the dep-sig walk is the single invalidation authority.
 ///
-/// Post-D1.4: `Instantiate` is mode-slot aware (`body_mode`). A write
+/// Post-D1.4: `Instantiate` is mode-slot aware (the projection mode on
+/// `context.projection_reduction.mode`). A write
 /// at `Expanded` backfills `Shallow` / `Navigate` / `Identity` per
 /// §7.11; all four slots carry the same dep-sig and the sweep evicts
 /// every one that references the touched canonical.

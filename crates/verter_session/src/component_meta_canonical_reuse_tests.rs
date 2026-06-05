@@ -20,8 +20,10 @@
 //!
 //! Acceptance per §4.3A:
 //! - On `CompB` under capture: `SemanticQueryKey::Instantiate
-//!   { target_decl: WorkspaceLocalInterface_decl, args: [],
-//!     body_mode: Expanded }` `dispatch_misses == 0` AND
+//!   { base: WorkspaceLocalInterface slot, args: [],
+//!     context: InstantiateContext { projection_reduction, resolve_env_hash } }`
+//!   with `context.projection_reduction.mode = Expanded`
+//!   `dispatch_misses == 0` AND
 //!   `dispatch_count >= 1`. Strict `count == 1` is forbidden; the
 //!   harness does not control exact lookup-path count.
 
@@ -141,7 +143,8 @@ fn workspace_local_interface_canonical_cache_reuse_across_components() {
     let snapshot = guard.end();
 
     // Issue #11 acceptance — focus on the SHARED canonical entries:
-    // 1. `Instantiate { decl_name: "WorkspaceLocalInterface", body_mode: Expanded }`
+    // 1. `Instantiate { base.merged_symbol_name == "WorkspaceLocalInterface",
+    //    context.projection_reduction.mode == Expanded }`
     //    MUST appear at least once on CompB AND have no misses (CompA
     //    warmed it). Per §4.3A: misses == 0 AND hits >= 1.
     // 2. `ResolveDecl { name: "WorkspaceLocalInterface" }` MUST appear
@@ -183,7 +186,8 @@ fn workspace_local_interface_canonical_cache_reuse_across_components() {
     assert!(
         instantiate_count >= 1,
         "Issue #11: on CompB after CompA warmed the canonical entry, \
-         `Instantiate {{ decl_name: \"WorkspaceLocalInterface\", body_mode: Expanded }}` \
+         `Instantiate {{ base.merged_symbol_name == \"WorkspaceLocalInterface\", \
+         context.projection_reduction.mode == Expanded }}` \
          MUST appear at least once in the dispatch log; got \
          {instantiate_count}. A count of 0 indicates the workspace-local \
          ref still preserves symbolic — the helper's \

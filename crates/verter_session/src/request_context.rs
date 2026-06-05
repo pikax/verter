@@ -495,7 +495,8 @@ pub struct RequestContext {
     // semantics; the per-request mirrors below let attribution tests
     // assert per-request synthesis events without false positives
     // from peer dispatches.
-    /// `Instantiate { body_mode: Expanded }` dispatches observed against
+    /// Expanded-mode `Instantiate` (`context.projection_reduction.mode ==
+    /// Expanded`) dispatches observed against
     /// the active request. Mirrors host-global
     /// `SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS`; surfaces on
     /// [`verter_audit::ComponentMetaPayload::expanded_instantiate_calls`].
@@ -512,7 +513,8 @@ pub struct RequestContext {
     /// it even on early return). `> 0` means an `Instantiate` dispatch is
     /// attributable to slot-binding synthesis.
     pub synthesis_active_depth: AtomicU64,
-    /// `Instantiate { body_mode: Expanded }` dispatches observed WHILE
+    /// Expanded-mode `Instantiate` (`context.projection_reduction.mode ==
+    /// Expanded`) dispatches observed WHILE
     /// [`Self::synthesis_active_depth`] `> 0` — the synthesis-attributable
     /// subset of [`Self::expanded_instantiate_calls`]. The slot-binding
     /// eagerness guard `enrich_does_not_eagerly_instantiate_carrier`

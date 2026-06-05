@@ -221,7 +221,8 @@ fn count_type_expr_nodes(ty: &TypeExpr) -> usize {
 // The graph-native synthesis walks a bounded shallow surface and
 // publishes `IndexedAccess` / `Ref` shells, not full materialiser-
 // driven expansions. A naive replacement that drove the carrier
-// through `Instantiate { body_mode: Expanded }` would compound
+// through an Expanded-mode `Instantiate`
+// (`context.projection_reduction.mode = Expanded`) would compound
 // heritage hops into huge operator trees and exceed the 256-node
 // aggregate budget on the 4-layer fixture.
 #[test]
@@ -290,7 +291,8 @@ defineSlots<Slots>()
 // ---------------------------------------------------------------------------
 //
 // Verifies the synthesis path stays in `Navigate` mode and never issues
-// an `Instantiate { body_mode: Expanded }` from the slot-binding-carrier
+// an Expanded-mode `Instantiate`
+// (`context.projection_reduction.mode = Expanded`) from the slot-binding-carrier
 // shallow walker. The
 // `SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS` counter is bumped by
 // `project_semantic_dispatch::build::build_instantiate` whenever an

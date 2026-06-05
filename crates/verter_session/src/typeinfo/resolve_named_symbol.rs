@@ -381,8 +381,9 @@ fn resolve_named_symbol_inner(
     // that `ResolveDecl` may legitimately return an
     // `Opaque(DeclPlaceholder { … })` carrier when the symbol
     // exists but its body has not been materialised yet — that is
-    // a *signal* to dispatch through `Instantiate { args: [],
-    // body_mode }`, NOT a miss (per `QueryError::DeclPlaceholder`
+    // a *signal* to dispatch through `Instantiate { base, args: [],
+    // context }` (with `context.projection_reduction.mode` the chosen
+    // projection mode), NOT a miss (per `QueryError::DeclPlaceholder`
     // contract: "Walk/enumerate code treats this as 'expandable via
     // Instantiate' rather than 'not found.'").
     let resolve_decl_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -410,14 +411,16 @@ fn resolve_named_symbol_inner(
 
     // Always dispatch through `Instantiate` so the body materialises
     // in the chosen mode. This is the path that lifts a
-    // `DeclPlaceholder` into a concrete body. Build the
-    // DeclIdentity from the file-scope and the decl name using the
-    // file's current whole_hash; two callers in the same file
-    // generation produce the same identity and therefore the same
-    // memo key.
+    // `DeclPlaceholder` into a concrete body. Build the env-bearing
+    // content-free `ResolvedDeclSlotIdentity` base from the file-scope
+    // and the decl name via `dispatch.type_slot_for(...)` (R6 — the slot
+    // carries no whole_hash; the live whole_hash is re-sourced at
+    // value-compute time); two callers in the same file generation
+    // produce the same slot identity and therefore the same memo key.
     //
-    // Alias-unwrap policy:
-    // - `Identity`: dispatch with `body_mode: Identity`, return the
+    // Alias-unwrap policy (the projection mode rides
+    // `context.projection_reduction.mode`):
+    // - `Identity`: dispatch in `Identity` mode, return the
     //   resolved alias-shell verbatim (do NOT unwrap).
     // - `Navigate` / `Expanded` / `Shallow`: dispatch with the
     //   chosen mode, unwrap one `SemanticNodeData::Alias(inner)`
