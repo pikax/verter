@@ -192,6 +192,48 @@ impl Drop for MaterializeForceOverflowGuard<'_> {
     }
 }
 
+/// Arm the per-host relation-memo fact-injection knob and return an RAII
+/// guard that zeroes it on drop. Mirrors
+/// [`materialize_force_overflow_observations_for_tests`] for the relation
+/// engine's overflow-refusal path.
+pub fn relation_force_overflow_observations_for_tests(
+    host: &crate::VerterHost,
+    n: usize,
+) -> RelationForceOverflowGuard<'_> {
+    RelationForceOverflowGuard::arm(host, n)
+}
+
+/// Host-scoped RAII guard that arms and clears the per-host relation-memo
+/// fact-injection knob
+/// [`crate::VerterHost::relation_force_overflow_observations`].
+///
+/// When the knob is set to `N > 0`, the relation engine's cold-compute path
+/// observes `N` synthetic `FileWholeHash` facts before finalising the
+/// read-set, deterministically forcing overflow (when `N > FACT_SIGNATURE_CAP`)
+/// so the overflow-returns-result-without-admission test discriminates without
+/// a pathological multi-file fixture. The knob is zeroed on drop so a panicking
+/// test never leaks the forced state into a concurrent relation on another host.
+pub struct RelationForceOverflowGuard<'h> {
+    host: &'h crate::VerterHost,
+}
+
+impl<'h> RelationForceOverflowGuard<'h> {
+    /// Set `host`'s forced observation count to `n` and return the guard.
+    fn arm(host: &'h crate::VerterHost, n: usize) -> Self {
+        host.relation_force_overflow_observations
+            .store(n, std::sync::atomic::Ordering::Relaxed);
+        Self { host }
+    }
+}
+
+impl Drop for RelationForceOverflowGuard<'_> {
+    fn drop(&mut self) {
+        self.host
+            .relation_force_overflow_observations
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Arm `host`'s compile-tier test-only fact-injection knob with `n`
 /// synthetic `FileWholeHash` observations per cold-compute call. When
 /// `n > FACT_SIGNATURE_CAP` (1024), the cold compute's installed fact

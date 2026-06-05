@@ -282,7 +282,7 @@ pub(super) enum FamilyKey {
     ///
     /// The `RelateMemoKey` payload is BOXED (mirroring
     /// [`Self::ResolvedNamedType`]'s `Arc<HostResolvedNamedTypeKey>`): a Rust
-    /// enum is sized to its largest variant, and `RelateMemoKey` is ~130B, so
+    /// enum is sized to its largest variant, and `RelateMemoKey` is 144B, so
     /// embedding it BY VALUE would inflate EVERY entry key of the hot
     /// single-node `FamilyKey → FamilySlots` keyspace — for a variant that is
     /// NEVER admitted in production. `Box<RelateMemoKey>` is 8 bytes and

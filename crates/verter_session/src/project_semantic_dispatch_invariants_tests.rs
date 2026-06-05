@@ -1490,10 +1490,11 @@ fn relation_memo_overflow_returns_result_without_admission() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
     // Arm the overflow knob: observe CAP+1 synthetic facts during the cold
-    // compute so the read-set finalises `Overflow`.
-    host.relation_force_overflow_observations.store(
+    // compute so the read-set finalises `Overflow`. The RAII guard zeroes the
+    // knob on drop (panic-safe) so the forced state never leaks past the test.
+    let _overflow_guard = crate::for_tests::relation_force_overflow_observations_for_tests(
+        &host,
         crate::resolver_core::FACT_SIGNATURE_CAP + 1,
-        std::sync::atomic::Ordering::Relaxed,
     );
 
     let before = graph.relation_memo_count();
@@ -1518,9 +1519,6 @@ fn relation_memo_overflow_returns_result_without_admission() {
             .is_none(),
         "OVERFLOW: no warm entry may be reachable for the overflowed relation"
     );
-
-    host.relation_force_overflow_observations
-        .store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 // ============================================================================

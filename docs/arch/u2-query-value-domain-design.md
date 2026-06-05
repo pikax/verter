@@ -22,7 +22,12 @@
 > declaration SITE but NEITHER `resolve_env_hash` NOR `parse_env_hash`. `Instantiate{base}` /
 > `ResolveMacroPayload{owner}` (`SemanticQueryKey` L1599 / family.rs L125,204) today key on a
 > content-free `DeclKey {canonical_id, decl_name}` with NO env hashes (env validity is purely
-> `ReadSetSignature`). `Relate {source,target}` (L1698) is the bare unsound shape. `ProjectionMode`
+> `ReadSetSignature`). The relation key is the full `RelateMemoKey` (`semantic_query.rs:2682`):
+> `{source, target, relation: RelationKind, policy: RelationPolicy, source_freshness: FreshnessKey,
+> inference_context: Option<InferenceContextKey>, context: RelationContext}`, where
+> `RelationContext` (`:2616`) carries the `R T L J` env dims (`resolve_env_hash`, `type_env_hash`,
+> `lib_env_hash`, `project_identity`) plus `substitution` + `projection_reduction`; the public
+> relation result is `SemanticQueryValue::Relation(RelationPayload)` (`:1726`). `ProjectionMode`
 > (L608) is the coarse five-rung enum; `ReductionDemand` (L646) is Published/StructuralTransit/
 > MacroObjectSurface; `ModeSlot` (family.rs L224) is the per-slot selector. `SemanticSymbolSpace`
 > (L265) is `Type|Value` only. `QueryError` (L1443) carries `Miss / UnsupportedIntrinsic /

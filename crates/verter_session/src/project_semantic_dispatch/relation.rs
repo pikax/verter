@@ -102,7 +102,7 @@ enum RecordTargetShape {
 
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Relate `source` against `target`. Returns the tri-state
-    /// [`RelationResult`] under + §3 Change S rules.
+    /// relation judgement as a [`RelationResult`].
     ///
     /// All three outcomes memoise with dep-signature fencing via
     /// [`SemanticGraphStore::insert_relation`]. Warm hits short-circuit
@@ -1067,7 +1067,7 @@ fn expand_pair(
 
 /// Build and push the worklist fan-out for a source / target distribution
 /// whose reducer is AND-all. Empty members push a direct `Assignable`
-/// (vacuous truth — matches the pre-C8 accumulator initial state).
+/// (vacuous truth — matches the accumulator's initial all-true state).
 fn distribute_and<F>(
     work: &mut Vec<RelateWork>,
     results: &mut Vec<RelationResult>,
@@ -1096,7 +1096,7 @@ fn distribute_and<F>(
 
 /// Build and push the worklist fan-out for a source / target distribution
 /// whose reducer is OR-any. Empty members push a direct `NotAssignable`
-/// (matches the pre-C8 accumulator initial state).
+/// (matches the accumulator's initial all-false state).
 fn distribute_or<F>(
     work: &mut Vec<RelateWork>,
     results: &mut Vec<RelationResult>,

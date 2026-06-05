@@ -176,28 +176,35 @@ This design is part of the ONE resolver. The relation engine is one node of the 
 engine. #1 and #2 are ONE design problem: the reentry/assumption stack is exactly what decides whether a
 relation result is stable enough to admit.
 
-### 0.1 What the current code does wrong (the thing being deleted)
+### 0.1 The baseline this design corrects (historical + future-RI deletions)
 
-Today (`crates/verter_session/src/semantic_query.rs:1945`,
-`crates/verter_session/src/project_semantic_dispatch/relation.rs:104`,
-`crates/verter_session/src/semantic_query_memo/budgeted_caches.rs`):
+This section names the pre-`U2.RELATION_INFER` baseline the design addresses. Two of the three defects are
+already corrected on the current tree by the value-domain-shape block; the third (the entry-point + cycle
+guard) still stands and is slated for deletion in later RI work — see the **Current state** paragraph under
+Decision 5. Concretely:
 
-1. `SemanticQueryKey::Relate { source, target }` is a **bare pair** — not a sound cache identity. The same
-   pair relates differently under a different `RelationKind`, excess/variance `RelationPolicy`, source
-   freshness, inference setup, or env/substitution; today they all collide on one memo slot.
+1. The relation memo key was once a **bare pair** `{ source, target }` — not a sound cache identity, since
+   the same pair relates differently under a different `RelationKind`, excess/variance `RelationPolicy`,
+   source freshness, inference setup, or env/substitution, all colliding on one memo slot. **Corrected:** the
+   landed `RelateMemoKey` (`semantic_query.rs:2682`) carries the full identity (source/target/`RelationKind`/
+   `RelationPolicy`/`FreshnessKey`/`Option<InferenceContextKey>`/`RelationContext`), and
+   `SemanticQueryKey::Relate` (`:2875`) mirrors it.
 2. `RELATION_IN_FLIGHT` is a **process-global** (`thread_local!`) cycle guard with
-   `enter_/exit_relation_guard`, returning `RelationResult::Unknown` on re-entry.
-3. **`relate_nodes` MEMOIZES `Unknown`.** The `RelationResult` doc states *"Unknown is included so repeated
-   cyclic re-entry short-circuits"*; the cold path inserts the result unconditionally when a carrier exists.
-   A genuinely-recursive `interface A { next: A }` vs `interface B { next: B }` is mis-decided `Unknown`
-   **and the `Unknown` is cached** as a warm, fact-validated, persistent entry — the relation analogue of
-   admitting a flow-cycle sentinel.
+   `enter_/exit_relation_guard`, returning `RelationResult::Unknown` on re-entry. **Still present** on the
+   current tree (now keyed on the full `RelateMemoKey`); the `relate_nodes(source, target)` entry point and
+   this thread-local guard are the future-RI deletions tracked under Decision 5.
+3. The cold path once **MEMOIZED `Unknown`** — a genuinely-recursive `interface A { next: A }` vs
+   `interface B { next: B }` was mis-decided `Unknown` and that sentinel was cached as a warm,
+   fact-validated, persistent entry (the relation analogue of admitting a flow-cycle sentinel). **Corrected:**
+   the public `RelationOutcome` (`semantic_query.rs:1841`) has no `Unknown` arm, and overflow / cycle / budget
+   edges route through `ReturnOnly` so no sentinel is ever warm-admitted.
 
-The new design therefore: (a) full-identity keys; (b) a coinductive SCC that publishes a *valid* recursive
-relation as `Assignable + CoinductiveCycle`; (c) NEVER warm-admits `Unknown` / open-assumption / budget /
-cycle sentinel — those route through `ReturnOnly`. `RELATION_IN_FLIGHT`, `enter_/exit_relation_guard`, the
-bare-pair memo key, the bare-pair `relate_nodes` signature, and the memoized `RelationResult::Unknown` arm
-are all DELETED (per-block legacy-deletion lists, §6).
+The design therefore targets: (a) full-identity keys (landed); (b) a coinductive SCC that publishes a *valid*
+recursive relation as `Assignable + CoinductiveCycle`; (c) NEVER warm-admitting `Unknown` / open-assumption /
+budget / cycle sentinel — those route through `ReturnOnly`. `RELATION_IN_FLIGHT`, `enter_/exit_relation_guard`,
+and the bare-pair `relate_nodes(source, target)` signature are the remaining future-RI deletions (per-block
+legacy-deletion lists, §6); the bare-pair memo key and the memoized `RelationResult::Unknown` arm are already
+gone.
 
 ---
 
