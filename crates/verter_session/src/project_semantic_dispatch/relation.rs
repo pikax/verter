@@ -176,34 +176,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// The full relation-memo key for `(source, target)` under the current
-    /// engine's identity: [`RelationKind::Assignable`], default policy, regular
-    /// source freshness, no inference context, and the live `R T L J` env. This
-    /// is the SINGLE key constructor `relate_nodes` uses to read and write the
-    /// relation memo — tests reconstruct the exact key through it.
-    ///
-    /// [`RelationKind::Assignable`]: crate::semantic_query::RelationKind::Assignable
+    /// engine's identity: assignability, default policy, regular source
+    /// freshness, no inference context, and the live `R T L J` env (sourced from
+    /// the host view; `project_identity` is the live `ProjectIdentity` hash).
+    /// The env keys the memo so a tsconfig / lib / project change isolates
+    /// judgements (belt-and-suspenders with the `validated_at_generation` gate,
+    /// and the design's env-on-key rule). The SINGLE key constructor
+    /// `relate_nodes` uses to read and write the relation memo — tests
+    /// reconstruct the exact key through it.
     pub(crate) fn relate_memo_key(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> crate::semantic_query::RelateMemoKey {
-        crate::semantic_query::RelateMemoKey::assignable(source, target, self.relation_context())
-    }
-
-    /// The live `R T L J` env the relation outcome depends on, sourced from the
-    /// host view. `relate_nodes` keys the relation memo under this so a
-    /// tsconfig / lib / project change isolates judgements (belt-and-suspenders
-    /// with the `validated_at_generation` gate, and the design's env-on-key
-    /// rule). `project_identity` is the live `ProjectIdentity` hash.
-    fn relation_context(&self) -> crate::semantic_query::RelationContext {
         let host = self.ctx.host_for_fact_tracer_install();
         let env = host.host_view_env_hashes();
-        crate::semantic_query::RelationContext {
+        let context = crate::semantic_query::RelationContext {
             resolve_env_hash: env.resolve_env_hash,
             type_env_hash: env.type_env_hash,
             lib_env_hash: env.lib_env_hash,
             project_identity: host.host_view_project_identity().0,
-        }
+        };
+        crate::semantic_query::RelateMemoKey::assignable(source, target, context)
     }
 
     /// Dispatch-aware relation entry. Runs the Object-vs-Record arm
