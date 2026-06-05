@@ -7,7 +7,8 @@
 //! policy / source freshness / inference context / env+substitution+
 //! projection-reduction context), with dep-signature fencing. The current
 //! engine computes [`RelationKind::Assignable`]; the other identity axes carry
-//! their fixed default (per-axis algorithms land in U2.RELATION_INFER).
+//! their fixed default (per-axis algorithms land with the relation-inference
+//! reducer, not yet implemented).
 //!
 //! All three [`RelationResult`] variants cache-with-fence:
 //! `Assignable`/`NotAssignable`/`Unknown`. `Unknown` covers genuinely
@@ -40,7 +41,8 @@ thread_local! {
     /// Keying on the full identity keeps two in-flight goals over the same
     /// nodes but a different relation kind / policy / freshness / inference
     /// context distinct, so the cycle guard does not over-merge them when the
-    /// per-axis algorithms land in U2.RELATION_INFER.
+    /// per-axis algorithms land with the relation-inference reducer (not yet
+    /// implemented).
     ///
     /// Stack-safety is provided iteratively: structural fan-out
     /// (Alias unwrap, Union / Intersection distribution, Array /
@@ -118,7 +120,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // ASSIGNABILITY under the live `R T L J` env, with default policy /
         // regular source freshness / no inference context. The relation kind /
         // policy / freshness / inference axes become live discriminators with
-        // U2.RELATION_INFER; today they take their fixed default so the memo is
+        // the relation-inference reducer (not yet implemented); today they take
+        // their fixed default so the memo is
         // keyed on the full identity rather than the bare `(source, target)`
         // pair.
         let key = self.relate_memo_key(source, target);
@@ -226,7 +229,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// engine's identity: assignability, default policy, regular source
     /// freshness, no inference context, the WORKSPACE-GLOBAL `R T L J` env
     /// (host-view sourced — the established one-engine convention; per-judgement
-    /// env threading is a U2.RELATION_INFER concern, not done here), the EMPTY
+    /// env threading is a relation-inference-reducer concern (not yet
+    /// implemented), not done here), the EMPTY
     /// canonical substitution, and the structural-transit reduction context. The
     /// SINGLE constructor `relate_nodes` uses to read/write the memo.
     pub(crate) fn relate_memo_key(

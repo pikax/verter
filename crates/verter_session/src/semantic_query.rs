@@ -1801,8 +1801,9 @@ pub struct DeclarationAnalysisValue {
 /// SHAPE only: no live `execute` producer fills it yet —
 /// `ProjectSemanticDispatch::execute` returns `Miss` for `Relate`, and the
 /// production authority `relate_nodes` emits the engine's transient
-/// [`RelationResult`] into the dedicated relation memo. The relation reducer
-/// (U2.RELATION_INFER) populates this payload and its proof table once it lands.
+/// [`RelationResult`] into the dedicated relation memo. The relation-inference
+/// reducer (not yet implemented) populates this payload and its proof table
+/// once it lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationPayload {
     /// The public relation outcome — `Assignable`, `NotAssignable`, or
@@ -1857,8 +1858,9 @@ pub enum RelationOutcome {
 ///
 /// When a relate fails for several reasons the relation engine selects the
 /// highest-priority (earliest-declared) code as the
-/// [`RelationProof::NotAssignable`] entry's `reason`. SHAPE only: the relation
-/// engine (U2.RELATION_INFER) populates these and OWNS the taxonomy; the
+/// [`RelationProof::NotAssignable`] entry's `reason`. SHAPE only: the
+/// relation-inference reducer (not yet implemented) populates these and OWNS
+/// the taxonomy; the
 /// declared variants are the currently-known failure reasons and their order is
 /// the architectural priority contract consumers branch on. The enum is
 /// `#[non_exhaustive]` so the relation reducer can add further reasons without a
@@ -1891,8 +1893,8 @@ pub enum RelationFailureCode {
 }
 
 /// Which budget tripped a [`RelationOutcome::BudgetExceeded`] (design Decision 4
-/// admission row 4). SHAPE only: the budget accounting substrate is
-/// U2.RELATION_INFER.
+/// admission row 4). SHAPE only: the budget accounting substrate is the
+/// relation-inference reducer (not yet implemented).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BudgetExceededKind {
     /// The relation worklist budget (deep structural recursion / conditional
@@ -1918,7 +1920,8 @@ pub struct RelateKeyId(pub u32);
 
 /// One entry of a payload-side [`RelationProofTable`], addressed by an opaque
 /// [`RelationProofId`]. FOUR shapes (design "Decision 4"). SHAPE only: the
-/// proof-search substrate is U2.RELATION_INFER.
+/// proof-search substrate is the relation-inference reducer (not yet
+/// implemented).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelationProof {
     /// Positive structural derivation: which sub-relations held, member by
@@ -1944,16 +1947,16 @@ pub enum RelationProof {
 
 /// The payload-side table of relation proofs. A [`RelationPayload`] references
 /// exactly one entry by [`RelationProofId`]; the table is the durable typed
-/// carrier the relation reducer (U2.RELATION_INFER) populates. SHAPE only —
-/// population is the reducer's job; this declares the carrier.
+/// carrier the relation-inference reducer (not yet implemented) populates.
+/// SHAPE only — population is the reducer's job; this declares the carrier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationProofTable {
     pub proofs: Arc<[RelationProof]>,
 }
 
 /// Positive-derivation witness: the structural sub-relations that held to
-/// discharge a relation, in structural order. SHAPE only: U2.RELATION_INFER
-/// fills it.
+/// discharge a relation, in structural order. SHAPE only: the
+/// relation-inference reducer (not yet implemented) fills it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DerivationTree {
     pub sub_derivations: Arc<[SubRelationRef]>,
@@ -1971,8 +1974,8 @@ pub struct SubRelationRef {
 }
 
 /// The structural axis a [`SubRelationRef`] relates at. Forward-declared,
-/// reducer-extensible: the relation reducer (U2.RELATION_INFER) owns this
-/// taxonomy and the declared variants are the currently-known structural
+/// reducer-extensible: the relation-inference reducer (not yet implemented)
+/// owns this taxonomy and the declared variants are the currently-known structural
 /// positions. The enum is `#[non_exhaustive]` so the reducer can add further
 /// positions without a breaking change for downstream crates — match arms
 /// outside this crate must carry a wildcard. SHAPE only.
@@ -1992,8 +1995,8 @@ pub enum SubRelationPosition {
 }
 
 /// The budget / recursion cap that stopped a relate. Rides
-/// [`RelationProof::BudgetExceeded`]. SHAPE only: U2.RELATION_INFER owns the
-/// accounting.
+/// [`RelationProof::BudgetExceeded`]. SHAPE only: the relation-inference
+/// reducer (not yet implemented) owns the accounting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RecursionOrBudgetCap {
     /// Which budget tripped.
@@ -2338,8 +2341,8 @@ pub struct ProgramAnalysisContext {
 /// The relation kind is part of relation IDENTITY: `S` assignable-to `T` is a
 /// genuinely different question from `S` identical-to `T`, and the two must
 /// occupy distinct memo slots. SHAPE only — the per-kind relation algorithm is
-/// U2.RELATION_INFER. The current `relate_nodes` engine computes
-/// [`RelationKind::Assignable`].
+/// the relation-inference reducer (not yet implemented). The current
+/// `relate_nodes` engine computes [`RelationKind::Assignable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RelationKind {
     /// `S` is assignable to `T` — the default relation TS checks at
@@ -2370,7 +2373,7 @@ impl Default for RelationKind {
 /// bivariance). Two judgements over the same nodes that differ in any policy
 /// axis can reach a different OUTCOME / bindings, so they are DISTINCT and must
 /// not share a memo slot. SHAPE only: the policy-driven comparison substrate is
-/// U2.RELATION_INFER.
+/// the relation-inference reducer (not yet implemented).
 ///
 /// `report_errors` is deliberately ABSENT: error elaboration is a diagnostic
 /// side-effect, not a relation-identity axis — it does not change the
@@ -2389,7 +2392,8 @@ pub struct RelationPolicy {
 
 /// How an overloaded callee's signatures are selected during a relation
 /// (§2.7:705 overload-selection axis). Closed enum, content-free (R6). SHAPE
-/// only: the overload-resolution substrate is U2.RELATION_INFER.
+/// only: the overload-resolution substrate is the relation-inference reducer
+/// (not yet implemented).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum OverloadSelectionPolicy {
     /// Relate against the WHOLE overload set — every target call/construct
@@ -2407,7 +2411,8 @@ pub enum OverloadSelectionPolicy {
 /// the policy flag the relation reads to decide method-parameter variance,
 /// rather than a scattered per-call-site special-case. Closed enum,
 /// content-free (R6). SHAPE only: the variance-driven comparison substrate is
-/// U2.RELATION_INFER. NOTE: this names the policy REGIME, not the MEASURED
+/// the relation-inference reducer (not yet implemented). NOTE: this names the
+/// policy REGIME, not the MEASURED
 /// variance of a generic parameter (which §4.1's relation measures separately
 /// via the marker-probe fixed point).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -2427,8 +2432,8 @@ pub enum VariancePolicy {
 /// A FRESH object-literal type is subject to excess-property checking against
 /// its target; a widened (REGULAR) source is not. The same `(source, target)`
 /// nodes therefore relate differently depending on freshness, so it is a key
-/// discriminator. SHAPE only: the freshness-tracking substrate is
-/// U2.RELATION_INFER.
+/// discriminator. SHAPE only: the freshness-tracking substrate is the
+/// relation-inference reducer (not yet implemented).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FreshnessKey {
     /// The source is a fresh literal / object-literal type — excess-property
@@ -2458,7 +2463,8 @@ impl Default for FreshnessKey {
 /// **Content-free (R6).** Every axis is a node-set interning identity, a closed
 /// enum, or a small occurrence-local mask — never an env / content / parse /
 /// version hash and never a `fact_dep_signature`. SHAPE only: the
-/// inference-session substrate is U2.RELATION_INFER.
+/// inference-session substrate is the relation-inference reducer (not yet
+/// implemented).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct InferenceContextKey {
     /// Which type parameters are open / inferable in this session.
@@ -2484,7 +2490,8 @@ pub struct InferenceContextKey {
 /// the same content-free realisation the graph uses for node sets elsewhere
 /// (e.g. [`SemanticQueryKey::NormalizeUnion`]) — never a content/version hash
 /// (R6). `Default` / [`empty`](Self::empty) is the empty set (no open
-/// parameters). SHAPE only: the interning substrate is U2.RELATION_INFER.
+/// parameters). SHAPE only: the interning substrate is the relation-inference
+/// reducer (not yet implemented).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InferableParamSetId(pub Arc<[SemanticNodeId]>);
 
@@ -2608,7 +2615,8 @@ pub enum ContextualInferenceMode {
 /// **Env-sourcing note.** `relate_nodes` populates the env fields from the
 /// WORKSPACE-GLOBAL host view (the established one-engine dispatch convention),
 /// not per-canonical: per-judgement multi-project env threading is a
-/// cross-cutting concern owned by U2.RELATION_INFER, not introduced here. The
+/// cross-cutting concern owned by the relation-inference reducer (not yet
+/// implemented), not introduced here. The
 /// fields ARE real env hashes (e.g. `project_identity` is the live
 /// [`crate::file_artifact_store::ProjectIdentity`] hash), but isolation is at
 /// workspace-env granularity, not per-judgement.
@@ -2652,7 +2660,8 @@ impl Default for RelationContext {
 /// canonical hash of the EMPTY substitution (no ambient type-parameter
 /// bindings) — the absence of any substitution is itself a canonical value, not
 /// a missing axis. The relation key carries THIS hash, never raw `type_args`.
-/// SHAPE only: the substitution-canonicalisation substrate is U2.RELATION_INFER.
+/// SHAPE only: the substitution-canonicalisation substrate is the
+/// relation-inference reducer (not yet implemented).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct SubstitutionCanonicalHash(pub HashValue);
 
@@ -2703,7 +2712,8 @@ impl RelateMemoKey {
     ///
     /// This is the identity `relate_nodes` keys the memo under today — the
     /// relation engine computes assignability; the kind / policy / freshness /
-    /// inference axes become live discriminators with U2.RELATION_INFER.
+    /// inference axes become live discriminators with the relation-inference
+    /// reducer (not yet implemented).
     #[must_use]
     pub fn assignable(
         source: SemanticNodeId,
@@ -2865,7 +2875,8 @@ pub enum SemanticQueryKey {
     /// `relate_nodes`, which emits the engine's [`RelationResult`] into the
     /// relation memo. The per-kind / per-policy / inference-aware relation
     /// algorithm — and the reducer that fills the `RelationPayload` outcome /
-    /// proof / budget carrier — is U2.RELATION_INFER. Until then the engine
+    /// proof / budget carrier — is the relation-inference reducer (not yet
+    /// implemented). Until then the engine
     /// computes [`RelationKind::Assignable`] and the kind / policy / freshness /
     /// inference axes are identity discriminators with a fixed default value.
     ///
