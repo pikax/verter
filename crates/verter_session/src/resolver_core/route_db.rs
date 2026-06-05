@@ -11,8 +11,16 @@
 //! into the resolved export surface for a provider canonical. The
 //! `effective_export_sets` sister table caches the post-augmentation
 //! result keyed by `(provider, project_identity, resolve_env_hash,
-//! lib_env_hash)` (R21 — route surface depends on libs because module
-//! augmentations live in libs).
+//! lib_env_hash, session_scope)` (R21 — route surface depends on libs
+//! because module augmentations live in libs). The `session_scope`
+//! dimension is the CONTENT-FREE [`EffectiveExportSetScope`]
+//! (`Base` / `Session(session_scope_id)`, derived from
+//! `StoreView::compat_token().session`); the overlay-set content
+//! fingerprint NEVER enters this query-identity key (R6) — overlay
+//! content identity is validated on the VALUE via the
+//! `ModuleAugmentationIndexShape` fingerprint fact. The
+//! `effective_export_set` submodule holds the authoritative key
+//! composition.
 //!
 //! Concurrent cold requests for the same barrel surface or route key coalesce
 //! via singleflight.
@@ -102,7 +110,10 @@ pub struct RouteDb {
     barrel_singleflight: SingleflightGroup<String, Arc<BarrelRouteSurface>, ()>,
     /// Per-provider effective export surface (post-augmentation
     /// stitching) keyed by `(provider, project_identity,
-    /// resolve_env_hash, lib_env_hash)` (R15 + R21 + R29).
+    /// resolve_env_hash, lib_env_hash, session_scope)` (R15 + R21 + R29).
+    /// `session_scope` is the CONTENT-FREE [`EffectiveExportSetScope`]
+    /// (R6); the overlay-set content fingerprint is matched on the value,
+    /// never in this key.
     effective_export_sets: ValidatedFactCache<EffectiveExportSetKey, EffectiveExportSetEntry>,
     effective_export_singleflight:
         SingleflightGroup<EffectiveExportSetKey, Arc<EffectiveExportSetEntry>, ()>,
