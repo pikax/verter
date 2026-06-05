@@ -267,19 +267,36 @@ info live on the cached value.
 The `SemanticGraphStore` family memo applies R6 to its
 `SemanticQueryKey::Instantiate.base` and
 `SemanticQueryKey::ResolveMacroPayload.owner` fields (mirrored on the
-`FamilyKey` memo identity). These carry a content-free
-`DeclKey { canonical_id, decl_name }` — the versioned `DeclIdentity`
+`FamilyKey` memo identity). Since U2B.9 FORK-A these carry the
+env-bearing, content-free `ResolvedDeclSlotIdentity`
+(`defining_canonical`, `merged_symbol_name`, `symbol_space` + the
+`project_identity` / `type_env_hash` / `lib_env_hash` ENV dims —
+`Instantiate` / `ResolveMacroPayload` base/owner are always
+`symbol_space = Type`). The extra `resolve_env_hash` (`R`) dim rides on
+a dedicated per-key `InstantiateContext { projection_reduction,
+resolve_env_hash }` / `MacroPayloadContext { resolve_env_hash, mode }`
+(NOT the shared `ProjectionReductionContext`, which stays a pure
+projection-demand identity — §2.6 per-key-context rule); `provenance` +
+`merge_role` stay at FAMILY-IDENTITY on `FamilyKey`. The slot is
+**content-free** — its `T,L,J` env dims are KEY dims, but content/version
+hashes (`whole_hash` / `content_hash` / `parse_stable_hash` /
+`fact_dep_signature`) are FORBIDDEN; the versioned `DeclIdentity`
 type (`{ canonical_id, whole_hash, decl_name }`) survives as a
 value-side payload for `SemanticNodeData::{TypeParam, DeclRef,
 InstantiationRef}` and `ShallowDiagnostic`, but is forbidden inside
-any derived-`Hash` query-identity key. The cold-build path
+any derived-`Hash` query-identity key (the retired content-free `DeclKey`
+query-key struct must NOT be reintroduced). The cold-build path
 (`build_instantiate`, `build_resolve_macro_payload`) re-sources the
 live file content version from
-`ResolverContext::ensure_indexed_ready(canonical_id).whole_hash` at
-value-compute time and rolls it into the published `MemoEntry`'s
-`ReadSetSignature.facts` + `self_root_canonicals` rails. Non-file
-bases (`__builtin__`, empty global, `<synthetic>`) do NOT fabricate a
-`FileWholeHash` self-root — they root via `args` nodes only. A
+`ResolverContext::ensure_indexed_ready(base.defining_canonical).whole_hash`
+at value-compute time and rolls it into the published `MemoEntry`'s
+`ReadSetSignature.facts` + `self_root_canonicals` rails. The slot is
+U2-DERIVED at query-key construction via
+`ProjectSemanticDispatch::type_slot_for` (reads the live host env);
+test fixtures use the env-agnostic `ResolvedDeclSlotIdentity::type_slot_unscoped`.
+Non-file bases (`__builtin__`, empty global, `<synthetic>`) do NOT
+fabricate a `FileWholeHash` self-root — they root via `args` nodes
+only. A
 real-file base whose `ensure_indexed_ready` returns `None` is a stale
 key and returns `cache_suppress = true`. Each `(family, slot)` in
 `FamilySlots` holds a candidate list capped at

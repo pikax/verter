@@ -731,11 +731,28 @@ fn ax_hybrid_three_keys_carry_reduction_context() {
         );
     }
 
-    for variant_anchor in [
-        "Instantiate {\n        base: DeclKey,",
-        "KeyOf {\n        base: SemanticNodeId,",
-        "MappedType {\n        source: SemanticNodeId,",
-        "ProjectPath {\n        base: SemanticNodeId,",
+    // Each context-bearing variant must embed a reduction context. Since
+    // U2B.9 FORK-A, `Instantiate` carries an `InstantiateContext` that
+    // EMBEDS a `projection_reduction: ProjectionReductionContext` (plus the
+    // `resolve_env_hash` env dim); `KeyOf` / `MappedType` / `ProjectPath`
+    // carry the bare shared `ProjectionReductionContext`.
+    for (variant_anchor, expected_context) in [
+        (
+            "Instantiate {\n        base: ResolvedDeclSlotIdentity,",
+            "context: InstantiateContext",
+        ),
+        (
+            "KeyOf {\n        base: SemanticNodeId,",
+            "context: ProjectionReductionContext",
+        ),
+        (
+            "MappedType {\n        source: SemanticNodeId,",
+            "context: ProjectionReductionContext",
+        ),
+        (
+            "ProjectPath {\n        base: SemanticNodeId,",
+            "context: ProjectionReductionContext",
+        ),
     ] {
         let pos = src.find(variant_anchor).unwrap_or_else(|| {
             panic!("AX-hybrid Q6.1: variant anchor not found: {variant_anchor}")
@@ -746,11 +763,21 @@ fn ax_hybrid_three_keys_carry_reduction_context() {
             .unwrap_or(src.len());
         let body = &src[pos..close];
         assert!(
-            body.contains("context: ProjectionReductionContext"),
+            body.contains(expected_context),
             "AX-hybrid Q6.1: variant at `{variant_anchor}` MUST embed \
-             `context: ProjectionReductionContext`. Body:\n{body}"
+             `{expected_context}`. Body:\n{body}"
         );
     }
+
+    // The `Instantiate` context carrier itself must embed a
+    // `projection_reduction: ProjectionReductionContext` (the FORK-A
+    // wrapper keeps the reduction-demand identity, adds only `resolve_env_hash`).
+    assert!(
+        src.contains("pub struct InstantiateContext")
+            && src.contains("pub projection_reduction: ProjectionReductionContext"),
+        "AX-hybrid Q6.1: `InstantiateContext` MUST embed \
+         `projection_reduction: ProjectionReductionContext`."
+    );
 }
 
 /// AX-hybrid Q6.2 — the relation engine unwraps under `StructuralTransit`.

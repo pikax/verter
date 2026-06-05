@@ -620,11 +620,21 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
 
     // And the inner sub-queries the dual-space algorithm composes are
     // themselves warm in the shared memo: Instance warmed the
-    // Instantiate(type DeclKey) slot.
+    // Instantiate(type slot) slot. The composed key matches
+    // `build_class_surface` exactly — the class slot canonicalized to the
+    // TYPE symbol space, and an `InstantiateContext` whose `resolve_env_hash`
+    // is derived from the defining canonical's live host env (U2B.9 FORK-A).
+    let inner_resolve_env = host
+        .host_view_env_hashes_for(&decl_slot.defining_canonical)
+        .resolve_env_hash;
     let inner_instantiate = SemanticQueryKey::Instantiate {
-        base: verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical), Arc::from("Foo")),
+        base: decl_slot
+            .with_symbol_space(verter_session::semantic_query::SemanticSymbolSpace::Type),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::new(ProjectionReductionContext::published(ProjectionMode::Shallow), Default::default()),
+        context: verter_session::semantic_query::InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Shallow),
+            inner_resolve_env,
+        ),
     };
     assert!(
         graph.slot_candidate_count_for_tests(&inner_instantiate) > 0,

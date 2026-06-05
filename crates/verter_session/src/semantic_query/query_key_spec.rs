@@ -510,7 +510,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::Instantiate,
             lifecycle: KeyLifecycle::Live,
-            context_shape: "ProjectionReductionContext",
+            context_shape: "InstantiateContext",
             value_domain: SemanticQueryValueTag::TypeNode,
             env_dims: env_resolve(),
             allowed_demand: reduction_axes,
@@ -699,7 +699,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::ResolveMacroPayload,
             lifecycle: KeyLifecycle::Live,
-            context_shape: "(owner,macro_index,macro_kind,type_args,mode)",
+            context_shape: "MacroPayloadContext",
             value_domain: SemanticQueryValueTag::TypeNode,
             env_dims: env_resolve(),
             allowed_demand: mode_axes,

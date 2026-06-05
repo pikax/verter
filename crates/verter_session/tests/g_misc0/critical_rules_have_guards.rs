@@ -133,7 +133,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "r6_semantic_query_key_resolve_macro_payload_owner_is_content_free_decl_key",
             "r6_semantic_query_key_variants_carry_no_version_hash_in_source",
             "r6_family_key_variants_carry_no_version_hash_in_source",
-            "r6_decl_key_struct_is_content_free_in_source",
+            "r6_decl_slot_struct_is_content_free_in_source",
         ],
     ),
     (

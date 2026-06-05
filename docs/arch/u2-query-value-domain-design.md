@@ -392,9 +392,17 @@ revalidation rather than key separation — keying on the slot makes that differ
 difference, which is strictly more correct and avoids candidate-slot churn.
 *Alternative (rejected):* keep `DeclKey` + add an `InstantiateEnvContext`. Rejected because it
 duplicates the slot's three dims in a second struct and reintroduces the `DeclKey↔slot` mapping the
-migration is meant to delete. **`Instantiate` additionally carries `resolve_env_hash` on its
-`ProjectionReductionContext`** because instantiation can resolve imported type-argument references;
-`ResolveMacroPayload` carries `resolve_env_hash` (macro payload resolves imports) + `mode`.
+migration is meant to delete. **`Instantiate` additionally carries `resolve_env_hash` (`R`) on a
+dedicated per-key `InstantiateContext { projection_reduction: ProjectionReductionContext,
+resolve_env_hash }`** because instantiation can resolve imported type-argument references — the `R`
+dim rides on this wrapper, NOT mutated into the shared `ProjectionReductionContext` (which stays a
+pure projection-demand identity carried unchanged by `KeyOf` / `MappedType` / `ProjectPath`, per
+§2.6's per-key-context rule; this mirrors how `RelationContext` / `CallResolutionContext` embed a
+`projection_reduction: ProjectionReductionContext` field). `ResolveMacroPayload` carries a dedicated
+`MacroPayloadContext { resolve_env_hash, mode }` (macro payload resolves imports). The `T,L,J` dims
+come from the env-bearing `ResolvedDeclSlotIdentity` base/owner. (FORK-A scope: KeyOf / MappedType /
+ProjectPath / RelationContext and the shared `ProjectionReductionContext` are UNTOUCHED — their env
+migration is a separate later block.)
 *This is the one place the migration is breaking — `FamilyKey::Instantiate` / `ResolveMacroPayload`
 change their `base`/`owner` field type from `DeclKey` to `ResolvedDeclSlotIdentity`. **FORK-A
 breaking-change CONDITION (locked):** the existing `provenance` + `merge_role` discriminators STAY
@@ -421,8 +429,8 @@ adds the marked extras. All keys: NO content/version hash, NO `fact_dep_signatur
 | `ApparentType` | `base: SemanticNodeId` | `ApparentTypeContext` {L,T,J} — **NO slot, NO parse/resolve** | T L J | `TypeNode` | r: `LibIntrinsic`, lib-wrapper member facts | `MemberDemand`, subst | `ApparentType` | lib member index | `GraphTypeNode` |
 | `TemplateLiteralReduce` | `pattern` + `args` | `TemplateLiteralReduceContext` {R,T,L,J} (NO parse_env) + subst | R T L J | `TypeNode` | r: intrinsic (`Uppercase`…) facts | subst | `TemplateLiteralReduce` | template reducer | `GraphTypeNode` |
 | `Relate` (UPGRADE) | `{source,target,relation: RelationKind, policy: RelationPolicy, source_freshness: FreshnessKey, inference_context: Option<InferenceContextKey>}` | `RelationContext` {R,T,L,J} + subst + proj | R T L J | **`Relation(RelationPayload)`** | r: `Member`/`MemberPresence`, `TypeEnvOptions`, `LibIntrinsic` (the relation outcome reads lib intrinsics, so `L` is in identity); coinductive proof rides the payload-side proof table off-surface | `RelationKind`, `RelationPolicy`, `FreshnessKey`, `InferenceContextKey`, subst | `Relate` (full-identity) | relation engine (U2.RELATION_INFER) | `RelationPayload` |
-| `Instantiate` (MIGRATE base→slot) | `base: ResolvedDeclSlotIdentity` + `args` + `provenance` + `merge_role` (the last two stay FAMILY-IDENTITY on `FamilyKey`, NOT demoted into `*Context` — FORK-A) | `ProjectionReductionContext` {R} + subst | R T L J | `TypeNode` | r: decl body, member facts | `(ProjectionDemand,EvalPolicy)`, subst, provenance, merge_role | `Instantiate` | instantiation reducer | `GraphTypeNode` |
-| `ResolveMacroPayload` (MIGRATE owner→slot) | `owner: ResolvedDeclSlotIdentity` + `macro_index` + `macro_kind` + `type_args` | `MacroPayloadContext` {R} + `mode` | R T L J | `TypeNode` | r: `AnalyzedMacro` sidecar | `mode`, subst | `ResolveMacroPayload` | Vue macro resolver | `GraphTypeNode` |
+| `Instantiate` (MIGRATE base→slot) | `base: ResolvedDeclSlotIdentity` + `args` + `provenance` + `merge_role` (the last two stay FAMILY-IDENTITY on `FamilyKey`, NOT demoted into `*Context` — FORK-A) | `InstantiateContext { projection_reduction, resolve_env_hash }` ({R} + proj-reduction; subst rides on `args`) | R T L J | `TypeNode` | r: decl body, member facts | `(ProjectionDemand,EvalPolicy)`, subst, provenance, merge_role | `Instantiate` | instantiation reducer | `GraphTypeNode` |
+| `ResolveMacroPayload` (MIGRATE owner→slot) | `owner: ResolvedDeclSlotIdentity` + `macro_index` + `macro_kind` + `type_args` | `MacroPayloadContext { resolve_env_hash, mode }` ({R} + `mode`) | R T L J | `TypeNode` | r: `AnalyzedMacro` sidecar | `mode`, subst | `ResolveMacroPayload` | Vue macro resolver | `GraphTypeNode` |
 
 `InferenceContextKey` is the content-free projection of the active `InferenceSession` (parent §4.2;
 SHAPE only here, substrate in U2.RELATION_INFER): `{inferable_params, variance_phase,
