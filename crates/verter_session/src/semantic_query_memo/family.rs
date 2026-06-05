@@ -279,8 +279,18 @@ pub(super) enum FamilyKey {
     /// keeps the family identity faithful to the relation memo's own key, so two
     /// `Relate` keys differing in any relation-identity axis map to distinct
     /// family identities.
+    ///
+    /// The `RelateMemoKey` payload is BOXED (mirroring
+    /// [`Self::ResolvedNamedType`]'s `Arc<HostResolvedNamedTypeKey>`): a Rust
+    /// enum is sized to its largest variant, and `RelateMemoKey` is ~130B, so
+    /// embedding it BY VALUE would inflate EVERY entry key of the hot
+    /// single-node `FamilyKey → FamilySlots` keyspace — for a variant that is
+    /// NEVER admitted in production. `Box<RelateMemoKey>` is 8 bytes and
+    /// delegates `Hash`/`Eq`/`Clone` to the inner key, so the family IDENTITY
+    /// (and `variant_label`) is UNCHANGED — two `Relate` keys differing in any
+    /// relation-identity axis still map to distinct family identities.
     Relate {
-        key: crate::semantic_query::RelateMemoKey,
+        key: Box<crate::semantic_query::RelateMemoKey>,
     },
     /// Mode-erased `ApparentType` identity. `ApparentType` has no slot, so
     /// its R21 env dims (`type_env_hash` = `T`, `lib_env_hash` = `L`,
@@ -1029,7 +1039,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             context,
         } => (
             FamilyKey::Relate {
-                key: crate::semantic_query::RelateMemoKey {
+                key: Box::new(crate::semantic_query::RelateMemoKey {
                     source: *source,
                     target: *target,
                     relation: *relation,
@@ -1037,7 +1047,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                     source_freshness: *source_freshness,
                     inference_context: inference_context.clone(),
                     context: *context,
-                },
+                }),
             },
             ModeSlot::Single,
         ),

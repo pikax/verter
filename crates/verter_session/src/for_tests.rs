@@ -35,6 +35,11 @@ pub use crate::semantic_query_memo::{BatchExpandError, SemanticGraphStore};
 /// `IndexedAccess`) without exposing the `pub(super)` `FamilyKey` taxonomy.
 pub use crate::semantic_query_memo::family_variant_label_for_tests;
 
+/// Re-export the `FamilyKey` size probe so the U2B.8 `g_block` guards can pin
+/// the keyspace size discipline (the `Relate` payload must stay boxed, never
+/// embedded by value) without exposing the `pub(super)` taxonomy.
+pub use crate::semantic_query_memo::family_key_size_for_tests;
+
 /// Re-export the canonical display projection so the `g_block` integration
 /// guards can call it. `display` is `pub` (forced by E0364: it lives in a
 /// `pub mod display`, so it cannot be more private than its enclosing module);

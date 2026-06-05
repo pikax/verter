@@ -110,6 +110,18 @@ pub fn family_variant_label_for_tests(
     family.variant_label()
 }
 
+/// Test-only: `std::mem::size_of::<FamilyKey>()`. Lets the U2B.8 size-discipline
+/// guard pin that the hot single-node `FamilyKey → FamilySlots` keyspace is NOT
+/// inflated by embedding the ~130B `RelateMemoKey` by value — without exposing
+/// the `pub(super)` `FamilyKey` taxonomy outside the crate. The `Relate` payload
+/// must stay BOXED (see [`family::FamilyKey::Relate`]).
+#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
+#[must_use]
+pub fn family_key_size_for_tests() -> usize {
+    std::mem::size_of::<family::FamilyKey>()
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // (NodeArena moved to `arena.rs` — see that module for the structural-
 // interning sharded dedup hot path.)

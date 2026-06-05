@@ -20,7 +20,9 @@
 
 use std::sync::Arc;
 
-use verter_session::for_tests::{family_variant_label_for_tests, ReadSetSignature};
+use verter_session::for_tests::{
+    family_key_size_for_tests, family_variant_label_for_tests, ReadSetSignature,
+};
 use verter_session::semantic_query::query_key_spec::semantic_query_key_specs;
 use verter_session::semantic_query::{
     CoinductiveProof, ConstParamPolicy, ContextualInferenceMode, FreshnessKey, IndexKey,
@@ -715,4 +717,46 @@ fn relate_maps_to_dedicated_relate_family_not_indexed_access() {
     // Sanity: the IndexedAccess key still maps to its own family (so the
     // assert_ne above is not vacuous).
     assert_eq!(family_variant_label_for_tests(&indexed), "IndexedAccess");
+}
+
+// ---------------------------------------------------------------------------
+// (7) KEYSPACE SIZE DISCIPLINE: the `Relate` payload is BOXED, never embedded
+//     by value. A Rust enum is sized to its largest variant, so embedding the
+//     ~144B `RelateMemoKey` BY VALUE would inflate EVERY entry key of the hot
+//     single-node `FamilyKey → FamilySlots` keyspace — for a variant that is
+//     NEVER admitted in production. `Box<RelateMemoKey>` is 8 bytes, keeping the
+//     enum driven by the legitimately-present env-heavy variants (`FamilyKey` is
+//     112B with the boxed payload). DISCRIMINATES against the inline shape: with
+//     `RelateMemoKey` embedded by value the enum is >= 144B + discriminant
+//     (>= 152B) and this bound FAILS; boxed it is 112B and the bound PASSES.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn family_key_does_not_embed_relate_memo_key_by_value() {
+    let family_key = family_key_size_for_tests();
+    let relate_memo = std::mem::size_of::<RelateMemoKey>();
+
+    // The bound (128B) is derived from the env-heavy variants that legitimately
+    // drive the enum size (boxed `FamilyKey` measures 112B), with a small margin
+    // for incidental growth — but well BELOW the inline `RelateMemoKey` size
+    // (144B) + discriminant. An inline `Relate` payload pushes the enum past this
+    // bound; the boxed payload stays under it.
+    const FAMILY_KEY_KEYSPACE_BOUND: usize = 128;
+
+    assert!(
+        family_key <= FAMILY_KEY_KEYSPACE_BOUND,
+        "FamilyKey is {family_key}B (> {FAMILY_KEY_KEYSPACE_BOUND}B bound): the \
+         Relate payload (RelateMemoKey is {relate_memo}B) must be BOXED, not \
+         embedded by value — an inline payload re-imports the node-memo keyspace \
+         inflation the relation memo was separated out to AVOID"
+    );
+
+    // Cross-check the discipline is real (not vacuous): the inline shape really
+    // is larger than the bound, so this guard genuinely discriminates.
+    assert!(
+        relate_memo > FAMILY_KEY_KEYSPACE_BOUND,
+        "RelateMemoKey ({relate_memo}B) must exceed the keyspace bound \
+         ({FAMILY_KEY_KEYSPACE_BOUND}B) — otherwise embedding it by value would \
+         not inflate the enum and this guard would not discriminate"
+    );
 }
