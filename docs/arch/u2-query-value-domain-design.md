@@ -429,6 +429,15 @@ candidate_priority, no_infer_mask, const_param_policy, contextual_inference_mode
 `Relate`'s identity iff `inference_context = Some` (binding-producing); `None` for pure
 assignability. NO env/content fields (R6/R21).
 
+`FlowNarrowingKey` / `ContextualTypingKey` are likewise content-free SHAPE-only projections
+(newtypes over an interned `Arc<[SemanticNodeId]>` set, mirroring `InferableParamSetId`;
+substrate in U6). They are PER-VARIANT key fields — `FlowNarrowingAt` carries `flow`,
+`ContextualTypeAt` carries `contextual` — NOT folded into the shared `ProgramAnalysisContext`,
+so neither variant carries the other's dead axis (the `*Context` column's "+ flow + contextual"
+shorthand denotes the family identity each row carries, refined per row by the Allowed-demand-axes
+column). The shared `substitution` axis stays on `ProgramAnalysisContext` (both variants depend on
+it). NO env/content fields (R6/R21).
+
 `SemanticSymbolSpace` gains `Namespace` `[mined: producer-discriminator + SymbolSpace::Namespace]`:
 `enum SemanticSymbolSpace { Type, Value, Namespace }` — NEVER a `BothTypeValue` arm. A
 namespace-only declaration (`namespace N {}` with no value/type half) keys on a slot with

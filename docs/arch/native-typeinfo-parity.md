@@ -784,8 +784,8 @@ ResolveMergedDeclaration { decl_slot, type_args, demand: MemberDemand, context: 
 ResolveAmbientNamespace  { namespace_slot, type_args, demand: MemberDemand, context: AmbientNamespaceContext }
 ResolveOverloadSet       { callee, type_args, context: OverloadSetContext }
 ResolveEnum              { enum_slot, context: EnumContext }
-FlowNarrowingAt          { point: ProgramPointId, context: ProgramAnalysisContext }
-ContextualTypeAt         { point: ProgramPointId, context: ProgramAnalysisContext }
+FlowNarrowingAt          { point: ProgramPointId, flow: FlowNarrowingKey, context: ProgramAnalysisContext }
+ContextualTypeAt         { point: ProgramPointId, contextual: ContextualTypingKey, context: ProgramAnalysisContext }
 ```
 
 `MergedDeclarationContext` and `AmbientNamespaceContext` carry the split env
@@ -793,7 +793,12 @@ ContextualTypeAt         { point: ProgramPointId, context: ProgramAnalysisContex
 projection/reduction. `OverloadSetContext` and `EnumContext` omit `parse_env_hash`
 (they read already-lowered signatures / enum members); `EnumContext` carries no
 substitution axis (an enum declaration is not generic). `ProgramAnalysisContext` is
-the program-analysis context covering env + flow + contextual + substitution:
+the SHARED program-analysis env context covering env + substitution. The flow /
+contextual demand axis is NOT folded into this shared context — it lives as a
+PER-VARIANT key field so neither variant carries the other's dead axis:
+`FlowNarrowingAt` carries `flow: FlowNarrowingKey`, `ContextualTypeAt` carries
+`contextual: ContextualTypingKey` (design §417/418 demand-axes column). The shared
+`substitution` axis stays on the context (both variants depend on it):
 
 ```rust
 struct ProgramAnalysisContext {
@@ -802,14 +807,17 @@ struct ProgramAnalysisContext {
     type_env_hash: TypeEnvHash,             // strict / exact-optional / index-access options that change narrowing
     lib_env_hash: LibEnvHash,
     project_identity: ProjectIdentity,
-    substitution: SubstitutionCanonicalHash, // same hash as the flow/call/relation keys
-    flow_narrowing: FlowNarrowingKey,        // the flow-in facts in scope at the queried point
-    contextual_typing: ContextualTypingKey,  // the contextual target / expected-type propagation at the point
-    projection_reduction: ProjectionReductionContext,
+    substitution: SubstitutionCanonicalHash, // shared — same hash as the flow/call/relation keys
 }
+// per-variant demand axes (NOT on the shared context — no dead axis):
+//   FlowNarrowingAt { point, flow: FlowNarrowingKey, context }
+//   ContextualTypeAt { point, contextual: ContextualTypingKey, context }
 ```
 
-`FlowNarrowingKey` and `ContextualTypingKey` are the same axis identities the
+`FlowNarrowingKey` and `ContextualTypingKey` are content-free SHAPE-only newtypes
+over an interned `Arc<[SemanticNodeId]>` set (mirroring `InferableParamSetId`),
+forward-declared for the deferred U6 flow / contextual reducers. They are the same
+axis identities the
 `ResolveCall` context-sensitive-arg identity and `CallResolutionContext` carry —
 there is one flow/narrowing axis space and one contextual-typing axis space shared
 across the call, flow-return, and program-analysis keys. `ContextualTypeAt` and
@@ -866,15 +874,15 @@ discipline as the oracle rows, the proof registry, and the row-test wrapper).
 | `ResolveMacroPayload` | live (Vue-macro payload key, distinct from the typeinfo macro story) | `MacroPayloadContext` (content-free `DeclKey` owner; split env + `mode`) | `TypeNode` | `resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on overflow/cancel |
 | `ResolveMergedDeclaration` | planned (U2-MODULE) | `MergedDeclarationContext` | `TypeNode` | `resolve_merged_declaration_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on budget/cycle |
 | `ResolveDeclarationAugmentation` | planned (U2-MODULE; generalizes `ResolveModuleAugmentation`) | `DeclarationAnalysisContext` (incl. `parse_env_hash`) | `DeclarationAnalysis(DeclarationAnalysisValue)` | `declaration_augmentation_key_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on overflow/cancel |
-| `ResolveAmbientNamespace` | planned (U2B.5) | `AmbientNamespaceContext` | `TypeNode` | `resolve_ambient_namespace_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on budget/cycle |
-| `ResolveOverloadSet` | planned (U2B.5) | `OverloadSetContext` | `OverloadSet(Arc<[SignatureRef]>)` | `resolve_overload_set_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on overflow |
-| `ResolveEnum` | planned (U2B.5) | `EnumContext` | `TypeNode` | `resolve_enum_same_site_different_env_or_context_do_not_warm_hit` | singleflight; `ReturnOnly` on overflow |
-| `FlowNarrowingAt` | planned (U2B.7) | `ProgramAnalysisContext` (env + flow + contextual + substitution) | `ProgramAnalysis(ProgramAnalysisValue)` | `flow_narrowing_at_same_point_different_env_flow_or_substitution_do_not_warm_hit` | `FlowSliceBudget`; `ReturnOnly` on budget/cycle |
-| `ContextualTypeAt` | planned (U2B.7) | `ProgramAnalysisContext` | `ProgramAnalysis(ProgramAnalysisValue)` | `contextual_type_at_same_point_different_env_contextual_or_substitution_do_not_warm_hit` | `FlowSliceBudget`; `ReturnOnly` on budget/cycle |
+| `ResolveAmbientNamespace` | live (added — U2B.5; reducer deferred, `execute` returns `Miss`) | `AmbientNamespaceContext` (`{P,R}` incl. `parse_env_hash` + `mode`) | `TypeNode` | `resolve_ambient_namespace_do_not_warm_hit` + `resolve_ambient_namespace_identity_covers_parse_env_axis` / `_mode_axis` | `NonProducingPendingReducer` |
+| `ResolveOverloadSet` | live (added — U2B.5; reducer deferred, `execute` returns `Miss`) | `OverloadSetContext` (`{R}`) | `OverloadSet(Arc<[SignatureRef]>)` | `resolve_overload_set_do_not_warm_hit` + `resolve_overload_set_key_covers_context` | `NonProducingPendingReducer` |
+| `ResolveEnum` | live (added — U2B.5; reducer deferred, `execute` returns `Miss`) | `EnumContext` (`{R}`) | `TypeNode` | `resolve_enum_do_not_warm_hit` + `resolve_enum_key_covers_context` | `NonProducingPendingReducer` |
+| `FlowNarrowingAt` | live (added — U2B.7; flow engine deferred to U6, `execute` returns `Miss`) | `ProgramAnalysisContext` (env `{P,R,T,L,J}` + shared `substitution`) + per-variant `flow: FlowNarrowingKey` | `ProgramAnalysis(ProgramAnalysisValue)` | `flow_narrowing_at_do_not_warm_hit` + `flow_narrowing_at_identity_covers_flow_axis` / `_substitution_axis` + `flow_narrowing_at_key_covers_full_env_and_point` | `NonProducingPendingReducer` |
+| `ContextualTypeAt` | live (added — U2B.7; contextual engine deferred to U6, `execute` returns `Miss`) | `ProgramAnalysisContext` (env `{P,R,T,L,J}` + shared `substitution`) + per-variant `contextual: ContextualTypingKey` | `ProgramAnalysis(ProgramAnalysisValue)` | `contextual_type_at_do_not_warm_hit` + `contextual_type_at_identity_covers_contextual_axis` / `_substitution_axis` + `contextual_type_at_key_covers_full_env_and_point` | `NonProducingPendingReducer` |
 | `FlowReturn` | planned (U6) | `FlowReturnContext` + `demand`(`ReturnProjectionDemand`) + `input`(`FlowInputContext`) | `FlowReturn(Arc<FlowReturnResult>)` | `flow_return_key_covers_input_context_and_projection_demand` | `FlowSliceBudget`; flow-cycle sentinel `ReturnOnly` |
-| `ResolveClassSurface` | planned (U2B.5) | `ClassSurfaceContext` (incl. `parse_env_hash`) | `TypeNode` | `resolve_class_surface_key_covers_side_demand_type_args_and_context` | singleflight; `ReturnOnly` on budget |
-| `ApparentType` | planned (U2B.6) | `ApparentTypeContext` | `TypeNode` | `apparent_type_key_covers_lib_env_demand_and_context` | apparent-type member-demand budget; whole-lib materialization is `BudgetExceeded`/`ReturnOnly` |
-| `TemplateLiteralReduce` | planned (U2B.6) | `TemplateLiteralReduceContext` | `TypeNode` | `template_literal_reduce_key_covers_context` | `KeyspaceBudget`; `ReturnOnly` on overflow |
+| `ResolveClassSurface` | live (added — U2B.5; decorator-reading reducer deferred) | `ClassSurfaceContext` (`{P,R}` incl. `parse_env_hash` + `mode`) | `TypeNode` | `resolve_class_surface_do_not_warm_hit` + `resolve_class_surface_key_covers_side_demand_type_args_and_context` + `resolve_class_surface_identity_covers_parse_env_axis` / `_mode_axis` / `_canonicalizes_decl_slot_symbol_space` | singleflight; `ReturnOnly` on budget |
+| `ApparentType` | live (added — U2B.6; lib-member-index reducer deferred) | `ApparentTypeContext` (`{T,L,J}`) | `TypeNode` | `apparent_type_do_not_warm_hit` + `apparent_type_key_covers_lib_env_demand_and_context` | `NonProducingPendingReducer` |
+| `TemplateLiteralReduce` | live (added — U2B.6; LIVE producer) | `TemplateLiteralReduceContext` (`{R,T,L,J}`) | `TypeNode` | `template_literal_reduce_do_not_warm_hit` + `template_literal_reduce_key_covers_context` | `KeyspaceBudget`; `ReturnOnly` on overflow |
 | `ResolveCall` | planned (U6) | `CallResolutionContext` (+ `ContextSensitiveExprKey` per arg) | `ResolvedCall(Arc<ResolvedCallResult>)` | `resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit` | `CallResolutionBudget`; `ReturnOnly` on `BudgetExceeded` |
 
 In the generated `SemanticQueryKeySpec` table on any committed tree, no live variant
