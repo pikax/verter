@@ -345,7 +345,7 @@ Legacy deletions:
 - Any `starts_with("Pick<")`-style shape sniff or type-text splitter inside the utility path (Typed-IR-Only Resolver Rule).
 - No projection-repair path remains for utilities.
 
-SemanticQueryKey/facts touched: `Instantiate`, `IndexedAccess`, `KeyOf`, `MappedType`, `Conditional` (utility reductions); consumes `Relate` bindings (variadic concat / conditional utilities). Facts read: `Member` / `MemberPresence`, `LibIntrinsic` (intrinsic registry facts), `TypeEnvOptions`. Admission: `KeyspaceBudget` on mapped/template-driven utilities (`Required`/`Partial`/`Readonly` keyspaces); `ReturnOnly` on overflow.
+SemanticQueryKey/facts touched: `Instantiate`, `IndexedAccess`, `KeyOf`, `MappedType`, `Conditional` (utility reductions); consumes `Relate` bindings (variadic concat / conditional utilities). Facts read: `Member` / `MemberPresence`, `LibIntrinsic` (intrinsic registry facts), `TypeEnvOptions`. Admission: `Singleflight` for these keys per the generated `SemanticQueryKeySpec` (mapped/template-driven utilities — `Required`/`Partial`/`Readonly` keyspaces — guarded by the planned `KeyspaceBudget` reducer; `ReturnOnly` on overflow).
 
 Exact test rows lifted (capability `UtilityComposition`, `indexed_utilities.rs` / `utility_composition.rs` / `utility_edge.rs` / `utility_top_bottom.rs`; capability `TupleFeatures`, `tuple_labels.rs` / `variadic_tuples.rs`):
 - indexed_utilities.rs::direct_parameters_payload_extracts_function_argument
@@ -439,7 +439,7 @@ Legacy deletions:
 - Any sibling-key materialization during path projection (path-precision: only the walked hops load).
 - No projection-repair path remains for indexed access.
 
-SemanticQueryKey/facts touched: `IndexedAccess`, `KeyOf`, `ProjectPath`, `ProjectMember` (canonicalized to length-1 `ProjectPath`), `NormalizeUnion` (union-key distribution). Facts read: `Member` / `MemberPresence`, `TypeEnvOptions` (unchecked-indexed-access option), project-generation facts. Admission: `KeyspaceBudget`; `ReturnOnly` on overflow.
+SemanticQueryKey/facts touched: `IndexedAccess`, `KeyOf`, `ProjectPath`, `ProjectMember` (canonicalized to length-1 `ProjectPath`), `NormalizeUnion` (union-key distribution). Facts read: `Member` / `MemberPresence`, `TypeEnvOptions` (unchecked-indexed-access option), project-generation facts. Admission: `Singleflight` for these keys per the generated `SemanticQueryKeySpec` (keyspace-explosion guarded by the planned `KeyspaceBudget` reducer; `ReturnOnly` on overflow).
 
 Exact test rows lifted (capability `IndexSignatures`, `index_signatures.rs`; capability `UnionDistribution`, `union_key_access.rs`; capability `PathProjection`, `deep_path.rs` / `wide_deep.rs`):
 - index_signatures.rs::index_signatures_numeric_index_publishes_signature
@@ -508,7 +508,7 @@ Legacy deletions:
 - Any hand-rolled template-text splitter / `split_top_level_*` inside the template path (Typed-IR-Only Resolver Rule — walk the typed IR).
 - No projection-repair path remains for mapped / template.
 
-SemanticQueryKey/facts touched: `MappedType`, `TemplateLiteralReduce` (value domain `TypeNode`); consumes `Relate` bindings (`infer` splitting). Facts read: `Member` / `MemberPresence` (the two-component split), `LibIntrinsic` (the four casing intrinsics), `TypeEnvOptions`. Admission: `KeyspaceBudget`; `ReturnOnly` on overflow.
+SemanticQueryKey/facts touched: `MappedType`, `TemplateLiteralReduce` (value domain `TypeNode`); consumes `Relate` bindings (`infer` splitting). Facts read: `Member` / `MemberPresence` (the two-component split), `LibIntrinsic` (the four casing intrinsics), `TypeEnvOptions`. Admission: `Singleflight` (keyspace-explosion guarded by the planned `KeyspaceBudget` reducer; `ReturnOnly` on overflow) — matches the generated `SemanticQueryKeySpec` row for both keys.
 
 Exact test rows lifted (capability `MappedTypes`, `mapped_modifiers.rs` / `mapped_template.rs`; capability `TemplateLiteralInference`, `template_literal_inference.rs`):
 - mapped_modifiers.rs::mapped_modifier_minus_optional_strips_optional_and_undefined

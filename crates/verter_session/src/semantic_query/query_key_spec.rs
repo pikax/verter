@@ -989,8 +989,10 @@ mod tests {
     fn env_dim_mask_renders_in_canonical_order() {
         assert_eq!(env_resolve().render(), "R T L J");
         assert_eq!(env_structural().render(), "T L J");
-        // The full five-hash render still works when a `P`-bearing mask is
-        // constructed directly (no current row carries it — §2.1 tier-2).
+        // The full five-hash render still works for a `P`-bearing mask. The
+        // U2B.5/6/7 spine rows (`ResolveClassSurface`, `ResolveAmbientNamespace`,
+        // `FlowNarrowingAt`, `ContextualTypeAt`) carry `P` (forward-declared);
+        // here the mask is constructed directly to exercise the render.
         assert_eq!(
             EnvDimMask::from_dims(&[
                 EnvDim::Parse,
