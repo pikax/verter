@@ -10,8 +10,8 @@
 //! fingerprint).
 //!
 //! This module owns the `EffectiveExportSet` cache-key/scope/entry types, the
-//! cold-compute + augmentation-stitch orchestrator, and the per-target fact-key
-//! + audit-event constructors. The bare-route surface and barrel surface live
+//! cold-compute augmentation-stitch orchestrator, and the per-target fact-key
+//! and audit-event constructors. The bare-route surface and barrel surface live
 //! in the parent [`super`] module; the two share the parent's private
 //! `effective_export_sets` storage through ancestor-module visibility.
 

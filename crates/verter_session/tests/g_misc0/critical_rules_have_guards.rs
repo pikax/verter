@@ -1015,7 +1015,9 @@ fn no_effective_export_set_base_only_session_assert() {
         .join("crates/verter_session/src/resolver_core/route_db/effective_export_set.rs");
     if submodule.is_file() {
         src.push('\n');
-        src.push_str(&fs::read_to_string(&submodule).expect("read route_db/effective_export_set.rs"));
+        src.push_str(
+            &fs::read_to_string(&submodule).expect("read route_db/effective_export_set.rs"),
+        );
     }
 
     // The retired assert pinned `session.is_none()` with the "base-only"
