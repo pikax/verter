@@ -482,7 +482,9 @@ with the guard `no_depth_sentinel_on_flow_return_path`.
 
 **Required escape clause (verified against the tree):** the live depth guards are `MAX_RESOLVE_DEPTH = 128`
 (`session/types.rs:2148`, external type resolution), `HostConfig.depth_budget` (defaults to
-`component_meta_materialize::MAX_DEPTH = 4096`), `RELATION_MAX_DEPTH = 192` (relation stack-safety); **no
+`component_meta_materialize::MAX_DEPTH = 4096`), and the relation engine's iterative work budget
+(`10 × graph.node_count()`, 4096 floor, yields `Unknown` on runaway — not a per-frame recursion cap; the
+former `RELATION_MAX_DEPTH = 192` recursion cap is retired); **no
 `flow_depth` / `depth_sentinel` symbol exists today**. If, on implementation, the only live `depth_budget` is the
 generic path-projection / component-meta-materialize / external-resolution guard and it is provably **NOT** on
 the flow-return cycle path, the U6.FLOW_RETURN_SUBSTRATE contract MUST state so explicitly and record that there

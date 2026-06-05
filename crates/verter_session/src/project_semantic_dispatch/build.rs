@@ -4308,13 +4308,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
-        // Phase D §3 Change S: conditionals route through the shared
-        // relation authority. The shallow path handles the trivial
-        // primitive/identity cases inline for hot-path efficiency; any
-        // non-trivial pair falls through to the full relation engine
-        // for memoised assignability. `relate_nodes` internally guards
-        // cyclic re-entry and caps structural descent at
-        // `RELATION_MAX_DEPTH` as a stack-safety rail.
+        // Conditionals route through the shared relation authority. The
+        // shallow path handles the trivial primitive/identity cases
+        // inline for hot-path efficiency; any non-trivial pair falls
+        // through to the full relation engine for memoised
+        // assignability. `relate_nodes` internally guards cyclic
+        // re-entry and bounds structural descent with an iterative
+        // heap-backed worklist plus a graph-size work budget
+        // (`10 × graph.node_count()`, 4096 floor) that yields `Unknown`
+        // on runaway — there is no per-frame recursion cap.
         let relation = self.shallow_relation_check(check, extends);
         let (result, branch, is_deferred) = match relation {
             ShallowRelation::Assignable => (true_branch, BranchSelection::True, false),

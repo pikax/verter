@@ -5350,10 +5350,10 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
 
 /// The iterative relation engine handles structurally-novel deeply
 /// nested distribution without a per-frame stack-safety cap. A
-/// recursive form capped at `RELATION_MAX_DEPTH = 192` would return
-/// `Unknown` on anything deeper; the iterative form runs the work
-/// on a heap-backed stack and only fires the budget on genuine
-/// runaway (budget = `10 × graph.node_count()`), not on
+/// fixed per-frame recursion cap would have returned `Unknown` on
+/// anything deeper; the iterative form runs the work on a
+/// heap-backed worklist and only fires the work budget on genuine
+/// runaway (budget = `10 × graph.node_count()`, 4096 floor), not on
 /// reasonably-deep nesting.
 ///
 /// Discriminator: build a 500-deep **readonly** nested array chain
@@ -5374,8 +5374,9 @@ fn relation_handles_deeply_nested_arrays_beyond_pre_c8_depth_cap() {
 
     // Build 500 levels of `readonly T[]` nesting with distinct inner
     // primitives so the two chains don't alias under C7 structural
-    // dedup. Pre-C8 the linear 500-deep forward descent exceeded
-    // `RELATION_MAX_DEPTH = 192`.
+    // dedup. Pre-C8 the linear 500-deep forward descent exceeded the
+    // per-frame recursion cap; the iterative engine bounds itself on
+    // the graph-size work budget instead.
     fn nest_readonly_array(
         graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
         base: PrimitiveKind,
