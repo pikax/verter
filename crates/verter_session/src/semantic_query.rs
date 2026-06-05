@@ -2057,6 +2057,71 @@ pub struct TemplateLiteralReduceContext {
     pub project_identity: u32,
 }
 
+/// A point in a program — the identity core of
+/// [`SemanticQueryKey::FlowNarrowingAt`] and
+/// [`SemanticQueryKey::ContextualTypeAt`].
+///
+/// A program point names a SOURCE LOCATION inside a canonical file: the
+/// position at which a flow-narrowed or contextually-expected type is being
+/// asked for (e.g. the use-site of an identifier under a sequence of
+/// type-guard branches, or an argument position whose contextual type is
+/// the parameter type of the called signature).
+///
+/// **Content-free (R6).** The identity is `(canonical_id, offset)` only — a
+/// position, never a content/version hash. The file's live content version
+/// is re-sourced at value-compute time (when the U6 flow / contextual
+/// reducer lands) and rooted on the cached value via `ReadSetSignature`, NOT
+/// folded into this key. Carries no projection mode: flow narrowing and
+/// contextual typing are not projection-rung operations.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProgramPointId {
+    /// Canonical id of the file the program point lives in.
+    pub canonical_id: Arc<str>,
+    /// Byte offset of the program point within the file.
+    pub offset: u32,
+}
+
+/// Env a [`SemanticQueryKey::FlowNarrowingAt`] / [`ContextualTypeAt`] value
+/// depends on (env dims `P R T L J` — the full set).
+///
+/// [`ContextualTypeAt`]: SemanticQueryKey::ContextualTypeAt
+///
+/// Both keys have NO slot (their identity core is the
+/// [`ProgramPointId`]), so the R21 env dimensions ride here IN the context.
+/// Program analysis is the WIDEST-env operation in the key surface — unlike
+/// the structural reducers it genuinely depends on every dimension:
+///
+/// - `parse_env_hash` (`P`) — flow narrowing and contextual typing walk the
+///   program point's parsed body / control-flow skeleton, so the value is a
+///   function of the parse env (the lowered statement/expression structure
+///   the analysis traverses), not just already-interned nodes.
+/// - `resolve_env_hash` (`R`) — the narrowed/contextual surface resolves
+///   imported references on its own step (a guard against an imported type,
+///   a contextual parameter type from an imported signature).
+/// - `type_env_hash` (`T`) — narrowing is governed by the type env
+///   (`strictNullChecks` decides whether `x` narrows out `null`).
+/// - `lib_env_hash` (`L`) — guards and contextual surfaces reach lib types
+///   (`Array`, `Promise`, the global `this`).
+/// - `project_identity` (`J`) — project isolation.
+///
+/// The substitution axis is NOT carried here — a program point is already
+/// instantiated in its enclosing context. This is the only context that
+/// carries the full `P R T L J` set: it is `EnvDimMask::all()`, not a
+/// structural / resolve subset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProgramAnalysisContext {
+    /// Parse-env dimension (`P`).
+    pub parse_env_hash: HashValue,
+    /// Import / name-resolution dimension (`R`).
+    pub resolve_env_hash: HashValue,
+    /// Type-env dimension (`T`).
+    pub type_env_hash: HashValue,
+    /// Lib-env dimension (`L`).
+    pub lib_env_hash: HashValue,
+    /// Project-isolation dimension (`J`).
+    pub project_identity: u32,
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Canonical semantic key surface
 // ──────────────────────────────────────────────────────────────────────────
