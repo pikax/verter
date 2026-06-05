@@ -5047,6 +5047,64 @@ mod foundations_guards {
                 }
             }
         }
+        // `FORK-<UPPER>` — the orchestrator's per-fork code-name
+        // (`FORK-A`, `FORK-B`). Project-management vocabulary from the
+        // staged-fork plan that must not survive into final-state prose.
+        // The trailing token must be an uppercase ASCII letter at a word
+        // boundary so identifiers like `fork-aware` (lowercase) or
+        // `FORK-AHEAD` (multi-letter) are NOT the single-letter marker
+        // form — only `FORK-<single uppercase letter>` flags.
+        {
+            let needle = "FORK-";
+            let bytes = line.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(needle) {
+                let abs = search_from + rel;
+                let after = abs + needle.len();
+                if after < bytes.len() && bytes[after].is_ascii_uppercase() {
+                    let trailing_idx = after + 1;
+                    let is_single_letter_marker = trailing_idx >= bytes.len()
+                        || !(bytes[trailing_idx].is_ascii_alphanumeric()
+                            || bytes[trailing_idx] == b'_');
+                    if is_single_letter_marker {
+                        return true;
+                    }
+                }
+                search_from = abs + needle.len();
+            }
+        }
+        // `U<digit>B`-anchored plan-block tokens — the staged-overhaul
+        // plan's block ids (`U2B.9`, `U2B9`, `U2B.5`, `U2B.8`). The
+        // `U`-prefixed digit-bearing block name is project-management
+        // vocabulary referencing the plan's block taxonomy; production
+        // source must read as final-state. The discriminator is `U` +
+        // ASCII digit + `B` + (`.` or ASCII digit) at a word boundary,
+        // which never appears in legitimate identifiers (`u32`/`U64`
+        // lack the `B` separator; the leading word boundary excludes
+        // mid-identifier matches).
+        {
+            let bytes = line.as_bytes();
+            let mut idx = 0usize;
+            while idx < bytes.len() {
+                if bytes[idx] == b'U' {
+                    let is_word_start = idx == 0
+                        || !(bytes[idx - 1].is_ascii_alphanumeric() || bytes[idx - 1] == b'_');
+                    if is_word_start
+                        && idx + 2 < bytes.len()
+                        && bytes[idx + 1].is_ascii_digit()
+                        && bytes[idx + 2] == b'B'
+                    {
+                        let after = idx + 3;
+                        if after < bytes.len()
+                            && (bytes[after] == b'.' || bytes[after].is_ascii_digit())
+                        {
+                            return true;
+                        }
+                    }
+                }
+                idx += 1;
+            }
+        }
         // `plan §` / `Plan §` — explicit reference to a plan section.
         // Mirrors the broader D111 guard (guard 7-bis) which already
         // catches the same pattern. Production source must read as
@@ -5631,13 +5689,28 @@ mod foundations_guards {
             "cluster ",                  // Cluster [A-Z]
             "/ fix ",                    // / Fix [A-Z]
             "fix-",                      // Fix-[A-Z] / pre-Fix- / post-Fix-
+            "fork-",                     // FORK-[A-Z] staged-fork code-name
         ];
         let lower = src.to_ascii_lowercase();
         if LOWER_ROOTS.iter().any(|r| lower.contains(r)) {
             return true;
         }
         // Uppercase-anchored `PE\d+` branch: check raw text.
-        src.contains("PE")
+        if src.contains("PE") {
+            return true;
+        }
+        // `U<digit>B`-anchored plan-block branch: case-sensitive (the
+        // marker is uppercase `U…B`). A necessary condition is the
+        // literal `B` preceded by a digit preceded by `U` somewhere in
+        // the file; the per-line scan applies the word-boundary + tail
+        // discriminator. The cheap necessary check is the `U` byte
+        // followed by a digit followed by `B`.
+        {
+            let bytes = src.as_bytes();
+            (0..bytes.len().saturating_sub(2)).any(|i| {
+                bytes[i] == b'U' && bytes[i + 1].is_ascii_digit() && bytes[i + 2] == b'B'
+            })
+        }
     }
 
     /// Walk the production tree and return `(rel_path, line_no, line)`
@@ -5837,6 +5910,17 @@ mod foundations_guards {
             "/// Project isolation prevents cross-project poisoning (Codex P0.1).",
             "// known_miss_generation (Codex P2.2): read the owner's tag",
             "// the Codex-P2.2 fix lives alongside it",
+            // FORK-<UPPER> — staged-fork orchestrator code-names.
+            "// U2B.9 FORK-A: the key carries an InstantiateContext.",
+            "/// base/owner slot (FORK-A): reads the defining file's env.",
+            "// per the design §2.1 FORK-B note, provenance is family-identity.",
+            // U<digit>B-anchored plan-block tokens (`U2B.9`, `U2B9`,
+            // `U2B.5`, `U2B.8`) — the staged-overhaul plan's block ids.
+            "// U2B.9 — env-scoped key-identity guards.",
+            "/// every U2B.5/6/7 spine row (class-surface / ambient-namespace).",
+            "// Test-only probe; lets the U2B.8 size-discipline guards pin the cap.",
+            "/// base/owner slot (U2B.9): reads the defining file's per-canonical env.",
+            "// the U2B9 cutover collapsed the split shape caches.",
         ];
         for line in cases {
             assert!(
@@ -5944,6 +6028,22 @@ mod foundations_guards {
             "// the lookup is scoped to the canonical id.",
             "// codex provides a second opinion on the design.", // `codex p` + non-digit
             "// Codex passes the diff to the reviewer.",
+            // FORK negatives — lowercase, multi-letter trailing token,
+            // or non-letter trailing token must NOT flag the single-
+            // letter staged-fork marker form.
+            "// `fork-aware` scheduling splits the worker pool.", // lowercase
+            "// FORK-AHEAD prefetch heuristic walks the next batch.", // multi-letter trailing
+            "// fork the resolver onto a dedicated thread.",      // no hyphen marker
+            // U-token negatives — `u32`/`U64` (no `B`), `U2`/`U6`/`U1`
+            // forward-reference reducer prose (no `B` after the digit),
+            // and `UB` without a leading digit must NOT flag the
+            // `U<digit>B`-anchored plan-block form.
+            "// cast the accumulator to u32 before the XOR-fold.",
+            "// the U6 contextual-typing reducer is not yet implemented.",
+            "// lands in U6, so the execute arm returns Miss.",
+            "// production producer is U7; here we submit by hand.",
+            "// UB-free arithmetic on the wrapping counter.", // `UB` not preceded by digit
+            "// SUB-expression lowering walks the operand list.", // `UB` mid-identifier
         ];
         for line in allowed {
             assert!(

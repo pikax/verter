@@ -358,10 +358,10 @@ pub struct SemanticQueryKeySpec {
     /// Which [`DemandAxis`] this family branches on.
     pub allowed_demand: AxisMask,
     /// The per-key `*_do_not_warm_hit` cross-context guard name — populated for
-    /// every U2B.5/6/7 spine row (class-surface / ambient-namespace / enum /
-    /// overload-set / apparent-type / template-literal-reduce / flow-narrowing /
-    /// contextual-type — each carries its dedicated `*_do_not_warm_hit` guard)
-    /// and empty (`—`) for the rest.
+    /// every spine row whose query identity carries an env or context dimension
+    /// (class-surface / ambient-namespace / enum / overload-set / apparent-type /
+    /// template-literal-reduce / flow-narrowing / contextual-type — each carries
+    /// its dedicated `*_do_not_warm_hit` guard) and empty (`—`) for the rest.
     pub cross_context_guard: &'static str,
     /// The admission / budget discriminant for the cold build.
     pub admission: AdmissionSpec,
@@ -445,8 +445,8 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
     // family branches on the UNION of the axes those rungs differ on.
     let mode_axes = mode_demand_axes();
     // `ProjectionReductionContext` carries `mode` PLUS `provenance` +
-    // `merge_role` + `demand` (verified on `ProjectionReductionContext`). Per
-    // the design §2.1 FORK-A note, provenance + merge_role are family-identity
+    // `merge_role` + `demand` (verified on `ProjectionReductionContext`).
+    // provenance + merge_role are family-identity
     // discriminators (which merge arm / provenance regime this reduction
     // answers), so the family branches on them via `DemandAxis::Provenance` /
     // `DemandAxis::MergeRole` below.
@@ -990,8 +990,9 @@ mod tests {
         assert_eq!(env_resolve().render(), "R T L J");
         assert_eq!(env_structural().render(), "T L J");
         // The full five-hash render still works for a `P`-bearing mask. The
-        // U2B.5/6/7 spine rows (`ResolveClassSurface`, `ResolveAmbientNamespace`,
-        // `FlowNarrowingAt`, `ContextualTypeAt`) carry `P` (forward-declared);
+        // parse-env-bearing spine rows (`ResolveClassSurface`,
+        // `ResolveAmbientNamespace`, `FlowNarrowingAt`, `ContextualTypeAt`) carry
+        // `P` (forward-declared);
         // here the mask is constructed directly to exercise the render.
         assert_eq!(
             EnvDimMask::from_dims(&[

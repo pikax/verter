@@ -30,12 +30,12 @@ pub use crate::capture_token::{
 /// `crate::semantic_query_memo::SemanticGraphStore` directly.
 pub use crate::semantic_query_memo::{BatchExpandError, SemanticGraphStore};
 
-/// Re-export the family-domain mapping probe so the U2B.8 `g_block` guards can
+/// Re-export the family-domain mapping probe so the `g_block` guards can
 /// assert `Relate` maps to a DEDICATED `FamilyKey::Relate` (never aliasing
 /// `IndexedAccess`) without exposing the `pub(super)` `FamilyKey` taxonomy.
 pub use crate::semantic_query_memo::family_variant_label_for_tests;
 
-/// Re-export the `FamilyKey` size probe so the U2B.8 `g_block` guards can pin
+/// Re-export the `FamilyKey` size probe so the `g_block` guards can pin
 /// the keyspace size discipline (the `Relate` payload must stay boxed, never
 /// embedded by value) without exposing the `pub(super)` taxonomy.
 pub use crate::semantic_query_memo::family_key_size_for_tests;

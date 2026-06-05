@@ -159,8 +159,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// for the declaration `name` defined in `canonical`.
     ///
     /// This is the SINGLE production derivation point for an
-    /// `Instantiate` / `ResolveMacroPayload` base/owner slot (U2B.9
-    /// FORK-A): it reads the DEFINING file's per-canonical env
+    /// `Instantiate` / `ResolveMacroPayload` base/owner slot: it reads
+    /// the DEFINING file's per-canonical env
     /// (`type_env_hash` = `T`, `lib_env_hash` = `L`) and folds the project
     /// identity (`J`) from `host_view_project_identity_for`, building the
     /// slot DIRECTLY (no `DeclKey` ↔ slot adapter). `symbol_space` is

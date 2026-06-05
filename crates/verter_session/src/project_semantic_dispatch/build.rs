@@ -900,7 +900,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         args: &Arc<[SemanticNodeId]>,
         instantiate_context: crate::semantic_query::InstantiateContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        // U2B.9 FORK-A: the key carries an `InstantiateContext` (embedded
+        // The key carries an `InstantiateContext` (embedded
         // projection-reduction identity + the `resolve_env_hash` env dim).
         // Destructure into the embedded `ProjectionReductionContext` so the
         // rest of the lowering pipeline keeps consulting `context`

@@ -110,7 +110,7 @@ pub fn family_variant_label_for_tests(
     family.variant_label()
 }
 
-/// Test-only: `std::mem::size_of::<FamilyKey>()`. Lets the U2B.8 size-discipline
+/// Test-only: `std::mem::size_of::<FamilyKey>()`. Lets the size-discipline
 /// guard pin that the hot single-node `FamilyKey → FamilySlots` keyspace is NOT
 /// inflated by embedding the ~130B `RelateMemoKey` by value — without exposing
 /// the `pub(super)` `FamilyKey` taxonomy outside the crate. The `Relate` payload

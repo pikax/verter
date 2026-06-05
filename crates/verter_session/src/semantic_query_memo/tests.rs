@@ -7196,16 +7196,16 @@ fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
     );
 }
 
-/// U2B.9 FORK-A — env-scoped key-identity guards.
+/// Env-scoped key-identity guards.
 ///
-/// These pin the migration of `Instantiate.base` / `ResolveMacroPayload.owner`
-/// from the retired content-free, env-FREE `DeclKey` to the env-bearing,
-/// content-free `ResolvedDeclSlotIdentity`, plus the env-scoping of the
+/// These pin that `Instantiate.base` / `ResolveMacroPayload.owner` key on the
+/// env-bearing, content-free `ResolvedDeclSlotIdentity` (not a content-free,
+/// env-FREE declaration key), plus the env-scoping of the
 /// `HostResolvedNamedTypeKey` resolved-named-type artifact identity. Each is
-/// DISCRIMINATING: on the pre-migration content-free key the two compared
-/// queries collapsed onto ONE family slot (a warm-hit collision); post-migration
-/// the env dim enters the `FamilyKey` identity so they occupy distinct slots.
-mod u2b9_fork_a_key_migration_guards {
+/// DISCRIMINATING: with an env-FREE key the two compared queries would collapse
+/// onto ONE family slot (a warm-hit collision); because the env dim enters the
+/// `FamilyKey` identity they occupy distinct slots.
+mod env_scoped_key_identity_guards {
     use super::super::family::{family_and_slot, FamilyKey};
     use crate::semantic_query::{
         HashValue, InstantiateContext, MacroPayloadContext, ProjectionMode,
