@@ -2,14 +2,20 @@
 //!
 //! Host-owned memo table keyed by [`SemanticQueryKey`] that deduplicates reusable
 //! type-resolution work across all higher-level requests. This is the shared
-//! substrate component-meta and the resolver are migrating onto as part of the
-//! project-global cache overhaul.
+//! substrate component-meta and the resolver resolve through — the single
+//! query-time type-resolution engine of the project-global cache.
 //!
 //! ## Contract
 //!
 //! - **Identity is semantic meaning**, not request identity or source text.
-//! - Query keys are **version-rooted** via [`ScopeId::canonical_id`] and any
-//!   enclosing whole-hash carried in resolved node data.
+//! - Query-identity keys are **content-free (R6)**: they carry semantic
+//!   identity plus the split env dimensions only (the env-bearing
+//!   [`ResolvedDeclSlotIdentity`] slot for `T`/`L`/`J`, the per-key `*Context`
+//!   for the extra dims), and NEVER a content hash, version hash, whole-hash,
+//!   or `fact_dep_signature`. Version-rooting lives EXCLUSIVELY on the cached
+//!   VALUE via `ReadSetSignature.facts` + `self_root_canonicals`, revalidated
+//!   on every warm read; the live content version (whole-hash) is re-sourced at
+//!   value-compute time (via `ensure_indexed_ready`), never carried in the key.
 //! - Semantic nodes are **immutable**; file changes create new node identities
 //!   rather than mutating existing nodes in place.
 //! - Shared semantic entries **never retain borrowed OXC AST pointers** — they
@@ -20,9 +26,9 @@
 //!   and perform limited normalization, but any reusable semantic work must
 //!   enter through [`SemanticQueryApi::execute`].
 //!
-//! This module introduces the type surface; the implementation that binds
-//! it to [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore)
-//! lives in the `project_type_store` consumers.
+//! This module defines the type surface; the implementation that binds it to
+//! [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore) lives in
+//! the `project_type_store` consumers.
 
 use std::sync::Arc;
 
