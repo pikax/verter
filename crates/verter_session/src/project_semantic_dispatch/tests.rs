@@ -6474,6 +6474,156 @@ fn resolve_macro_payload_dedups_via_interning() {
     );
 }
 
+/// **Non-file / stale-owner guard — no warm-publish of a
+/// `FileWholeHash(owner, 0)`-rooted entry.** Mirrors the
+/// `build_instantiate` non-file/stale-base guard for
+/// `build_resolve_macro_payload`.
+///
+/// Sub-case (b): a REAL-FILE-shaped owner canonical that is unknown to
+/// the live view (never upserted) is a stale key —
+/// `ensure_indexed_ready` returns `None`. The build must NOT publish a
+/// cacheable entry self-rooted on the sentinel `whole_hash = 0` (which
+/// could later serve stale); it must suppress admission so the next
+/// caller cold-recomputes. The result value still flows.
+///
+/// Discriminating: pre-fix `build_resolve_macro_payload` unconditionally
+/// fabricated `owner_whole_hash = 0` and published the simple-arm result,
+/// so `entry_read_set_signature_for_tests` returned `Some(..)` after the
+/// query AND a second identical query warm-hit. Post-fix the build sets
+/// `cache_suppress = true` for the stale real-file owner, so no entry is
+/// published (`None`) and the second query MISSES.
+#[test]
+fn resolve_macro_payload_stale_real_file_owner_does_not_warm_publish() {
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    // A real-file-shaped owner path that is NEVER upserted — unknown to
+    // the live view, so `ensure_indexed_ready` yields `None`. Use a
+    // passthrough arm (`DefineExpose`, 1 arg) so the result is a Value
+    // candidate for publication.
+    let owner = synthetic_macro_owner(&host, "/never-upserted-owner.vue");
+    let key = SemanticQueryKey::ResolveMacroPayload {
+        owner,
+        macro_index: 0,
+        macro_kind: AnalyzedMacroKind::DefineExpose,
+        type_args: Arc::from(vec![arg].into_boxed_slice()),
+        context: crate::semantic_query::MacroPayloadContext::new(
+            Default::default(),
+            ProjectionMode::Expanded,
+        ),
+    };
+
+    let stats_before = graph.stats_snapshot();
+    let first = dispatch.execute_type_node(key.clone());
+    let stats_mid = graph.stats_snapshot();
+    let second = dispatch.execute_type_node(key.clone());
+    let stats_after = graph.stats_snapshot();
+
+    // The result value still flows (passthrough of the single arg).
+    match (first, second) {
+        (
+            QueryResult::Value(SemanticQueryOutput { value: a, .. }),
+            QueryResult::Value(SemanticQueryOutput { value: b, .. }),
+        ) => {
+            assert_eq!(a, arg, "DefineExpose passthrough must return the arg");
+            assert_eq!(b, arg, "second passthrough must return the arg");
+        }
+        other => panic!("expected two passthrough values, got {other:?}"),
+    }
+
+    // Discriminating (1): no cacheable entry was published for the stale
+    // owner key — the suppress gate refused memo insertion.
+    assert!(
+        graph.entry_read_set_signature_for_tests(&key).is_none(),
+        "stale real-file owner (ensure_indexed_ready == None) must NOT warm-publish a \
+         FileWholeHash(owner, 0)-rooted entry; found a published entry"
+    );
+
+    // Discriminating (2): the second identical query is NOT a warm hit.
+    // Pre-fix the hash-0-rooted entry would warm-hit; post-fix the
+    // suppressed build re-runs (a fresh miss, no hit delta).
+    let first_miss_delta = stats_mid.misses.saturating_sub(stats_before.misses);
+    let second_miss_delta = stats_after.misses.saturating_sub(stats_mid.misses);
+    let hit_delta = stats_after.hits.saturating_sub(stats_mid.hits);
+    assert!(
+        first_miss_delta >= 1,
+        "first stale-owner query must produce >=1 miss; got {first_miss_delta}"
+    );
+    assert!(
+        second_miss_delta >= 1 && hit_delta == 0,
+        "second stale-owner query must MISS (no warm hit) because admission was suppressed; \
+         second_miss_delta={second_miss_delta} hit_delta={hit_delta}"
+    );
+}
+
+/// **Non-file owner guard — no fabricated `FileWholeHash(owner, 0)`
+/// self-root fact.** Sub-case (a): a NON-FILE owner canonical
+/// (`<synthetic>`, `__builtin__`, or the empty sentinel) has no file
+/// content version. The published entry's `ReadSetSignature.facts` must
+/// NOT carry a `FileWholeHash` fact for that owner canonical — the
+/// carrier roots its version through `type_args` nodes only, mirroring
+/// the `build_instantiate` non-file-base rule.
+///
+/// Discriminating: pre-fix `build_resolve_macro_payload` pushed
+/// `(owner.defining_canonical, owner_whole_hash = 0)` into both the local
+/// fence AND `observed_self_roots` unconditionally, so the published
+/// signature carried `FileWholeHash { canonical_id: "<synthetic>",
+/// hash: 0 }`. Post-fix the non-file owner contributes no file-side
+/// self-root, so no such fact appears.
+#[test]
+fn resolve_macro_payload_non_file_owner_has_no_filewholehash_self_root() {
+    use crate::resolver_core::FactVersionRef;
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    // A file-derived arg so the carrier has a legitimate non-empty
+    // self-root set to root through (its own canonical), while the
+    // NON-FILE owner must NOT contribute a FileWholeHash fact.
+    let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    // `<synthetic>` is one of the three non-file sentinels (alongside
+    // `""` and `__builtin__`).
+    let owner = synthetic_macro_owner(&host, "<synthetic>");
+    let key = SemanticQueryKey::ResolveMacroPayload {
+        owner,
+        macro_index: 0,
+        macro_kind: AnalyzedMacroKind::DefineExpose,
+        type_args: Arc::from(vec![arg].into_boxed_slice()),
+        context: crate::semantic_query::MacroPayloadContext::new(
+            Default::default(),
+            ProjectionMode::Expanded,
+        ),
+    };
+
+    let result = dispatch.execute_type_node(key.clone());
+    match result {
+        QueryResult::Value(SemanticQueryOutput { value: v, .. }) => {
+            assert_eq!(v, arg, "DefineExpose passthrough must return the arg")
+        }
+        other => panic!("expected Value, got {other:?}"),
+    }
+
+    let sig = graph
+        .entry_read_set_signature_for_tests(&key)
+        .expect("non-file owner with a value result must publish (rooted via args)");
+    let fabricated_owner_root = sig.facts.iter().any(|f| {
+        matches!(
+            f,
+            FactVersionRef::FileWholeHash { canonical_id, .. }
+                if canonical_id == "<synthetic>"
+        )
+    });
+    assert!(
+        !fabricated_owner_root,
+        "non-file owner `<synthetic>` must NOT fabricate a FileWholeHash self-root; \
+         published facts: {:?}",
+        sig.facts
+    );
+}
+
 /// **Interning hit/miss test (A9 (c)) — DISTINCT family entries.** Two
 /// `ResolveMacroPayload` queries that differ in `macro_kind` must
 /// produce DISTINCT family memo entries (mode-erased family identity

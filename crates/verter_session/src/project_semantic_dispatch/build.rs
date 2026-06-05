@@ -4637,35 +4637,54 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // R6 / R20: the key is content-free. Re-source the owning
         // SFC's content version from the live indexed view at
         // value-build time so the cached `MemoEntry` self-roots on
-        // the current generation's whole_hash. When the owner has no
-        // live `IndexedReady` (e.g. a synthetic test-only owner whose
-        // canonical was never upserted), fall back to a sentinel hash
-        // `0` for the simple arms (DefineProps / WithDefaults 0-1
-        // args, DefineExpose, DefineOptions) which read no
-        // owner-side macro data — those arms operate purely on
-        // `type_args`. Snapshot-consuming arms (DefineEmits /
-        // DefineSlots / DefineModel) re-check below and refuse
-        // admission with `cache_suppress = true` when the snapshot
-        // is missing.
-        let owner_indexed = self
-            .ctx
-            .ensure_indexed_ready(owner.defining_canonical.as_ref());
+        // the current generation's whole_hash. Three classes of
+        // non-file owner exist and must NOT invent a synthetic
+        // `FileWholeHash` (mirrors the `build_instantiate` non-file
+        // base rule):
+        //  - the global / structural sentinel (`canonical_id == ""`);
+        //  - built-in utility carriers (`canonical_id == "__builtin__"`);
+        //  - synthetic test identities (`canonical_id == "<synthetic>"`).
+        // These owners root self-version through their `type_args`
+        // nodes only (no file fact in the fence or the self-root set).
+        // A real-file owner whose `ensure_indexed_ready` returns `None`
+        // (the file is unknown to the live view) is a STALE KEY: the
+        // build still hands the value to the caller but marks the
+        // output non-cacheable (`cache_suppress`) rather than publishing
+        // a result self-rooted on the sentinel hash `0`, which could
+        // later serve stale.
+        let owner_canonical_str = owner.defining_canonical.as_ref();
+        let is_non_file_owner = owner_canonical_str.is_empty()
+            || owner_canonical_str == "__builtin__"
+            || owner_canonical_str == "<synthetic>";
+        let owner_indexed: Option<Arc<crate::project_type_store::IndexedReady>> =
+            if is_non_file_owner {
+                None
+            } else {
+                self.ctx.ensure_indexed_ready(owner_canonical_str)
+            };
+        // A real-file owner unknown to the live view is a stale key —
+        // suppress admission so the next caller cold-recomputes.
+        let stale_real_file_owner = !is_non_file_owner && owner_indexed.is_none();
         let owner_whole_hash: crate::semantic_query::HashValue = owner_indexed
             .as_ref()
             .map(|indexed| indexed.whole_hash)
             .unwrap_or_default();
 
-        // Seed local fence with the macro's owning canonical and the
-        // re-sourced content version. This is also the memo entry's
-        // self-root: a content edit to the owning SFC shifts the
-        // whole-hash, the strict warm-read validator rejects the
-        // stored signature, and the cold build re-runs.
+        // Seed the local fence with the macro's owning canonical and
+        // the re-sourced content version — but ONLY for a real-file
+        // owner. A non-file owner has no `FileWholeHash` to root on;
+        // recording `(non_file_canonical, 0)` would fabricate a content
+        // version for a builtin/structural carrier. The non-file owner
+        // roots entirely through its `type_args` (the same rule
+        // `build_instantiate` applies to a non-file base).
         let mut local_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-        local_fence.push((
-            Arc::clone(&owner.defining_canonical),
-            crate::semantic_query::DepVersion::WholeHash(owner_whole_hash),
-        ));
-        // Also pin the project-generation so the fence catches
+        if !is_non_file_owner {
+            local_fence.push((
+                Arc::clone(&owner.defining_canonical),
+                crate::semantic_query::DepVersion::WholeHash(owner_whole_hash),
+            ));
+        }
+        // Always pin the project-generation so the fence catches
         // workspace-wide changes that could invalidate the lowering
         // basis (mirrors `dep_signature_for` semantics).
         let project_gen = self.ctx.project_type_store().project_generation();
@@ -4780,8 +4799,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // SFC OR to any type argument's originating file misses the warm
         // read. Structural type args (`Global`-scoped primitives) and an
         // empty `type_args` set contribute nothing.
-        let mut observed_self_roots =
-            vec![(Arc::clone(&owner.defining_canonical), owner_whole_hash)];
+        //
+        // Non-file owner fork: when the owner names no file (the
+        // structural sentinel `""`, the builtin carrier `"__builtin__"`,
+        // or the synthetic test sentinel `"<synthetic>"`), there is no
+        // `FileWholeHash` to root on — `owner_whole_hash` is the default
+        // sentinel `0`. Skip the file-side self-root in those cases and
+        // rely entirely on the `type_args` self-roots (the same rule the
+        // `build_instantiate` non-file base path applies).
+        let mut observed_self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)> =
+            if is_non_file_owner {
+                Vec::new()
+            } else {
+                vec![(Arc::clone(&owner.defining_canonical), owner_whole_hash)]
+            };
         for arg_root in self.observed_self_roots_from_nodes(type_args.iter().copied()) {
             if !observed_self_roots
                 .iter()
@@ -4790,11 +4821,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 observed_self_roots.push(arg_root);
             }
         }
-        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+        let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
             result,
             fence_to_dep_signature(local_fence),
         ))
-        .with_observed_self_roots(observed_self_roots)
+        .with_observed_self_roots(observed_self_roots);
+        // Stale real-file owner: the key names a file unknown to the
+        // live view (`ensure_indexed_ready == None`). The value flows to
+        // the caller, but the entry is non-cacheable — never publish a
+        // result self-rooted on the sentinel hash `0`.
+        if stale_real_file_owner {
+            output.cache_suppress = true;
+        }
+        output
     }
 
     pub(super) fn intern_normalized_union_or_intersection(
