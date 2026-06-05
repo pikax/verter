@@ -250,7 +250,7 @@ fn relate_key_covers_relation_kind_policy_freshness_and_context() {
         ),
         "a different projection-reduction context must be a DISTINCT key"
     );
-    // Source / target nodes are identity.
+    // Source node is identity (mutate ONLY source).
     assert_ne!(
         base,
         relate_key(
@@ -263,6 +263,22 @@ fn relate_key_covers_relation_kind_policy_freshness_and_context() {
             relation_context(0, 0, 0, 0),
         ),
         "a different source node must be a DISTINCT key"
+    );
+    // Target node is identity (mutate ONLY target). DISCRIMINATES against a
+    // key whose `Eq`/`Hash` dropped `target`: that mutation would make this
+    // same-source / different-target pair compare EQUAL and FAIL here.
+    assert_ne!(
+        base,
+        relate_key(
+            s,
+            SemanticNodeId(8),
+            RelationKind::Assignable,
+            RelationPolicy::default(),
+            FreshnessKey::Regular,
+            None,
+            relation_context(0, 0, 0, 0),
+        ),
+        "a different target node must be a DISTINCT key"
     );
 }
 

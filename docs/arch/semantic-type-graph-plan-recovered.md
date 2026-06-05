@@ -213,7 +213,11 @@ A type's role is determined by which framework macro consumed it (Vue: `definePr
 
 ### 2.14 Relation Engine Is Public
 
-`relate(source, target) -> RelationResult` is a public typeinfo query. Every consumer that needs "is X assignable to Y?" calls `relate`; no projection re-implements assignability, narrowing, or subtyping locally. The relation engine lives on `SemanticGraphStore` (the full-identity `Relate` `SemanticQueryKey` variant — source / target / relation kind / policy / source freshness / inference context / env+substitution+projection-reduction context, memoised under the matching `RelateMemoKey`), is memoised with `ReadSetSignature.facts` fencing, and is exposed through the public typeinfo session API. Guard: `typeinfo_exposes_relate_query`.
+The relation query is a public typeinfo query whose value is `SemanticQueryValue::Relation(RelationPayload)` (Decision 4; see `u2-query-value-domain-design.md:417-425`). `RelationPayload` carries `outcome: RelationOutcome` (`Assignable` / `NotAssignable` / `BudgetExceeded` — NEVER `Unknown`), `bindings: Arc<[InferBinding]>` (the `infer` captures a binding-producing relation surfaces), and `relation_proof: RelationProofId` (an opaque index into the off-surface payload-side proof table). Every consumer that needs "is X assignable to Y?" reads this value; no projection re-implements assignability, narrowing, or subtyping locally.
+
+The transient `RelationResult` tri-state (`Assignable { bindings } | NotAssignable | Unknown`) is the INTERNAL relation-engine result threaded through `relate_nodes` / the relation memo and the deferred reducer plumbing; it is NOT the public value. The public surface collapses the undecidable `Unknown` into the engine's internal control flow and publishes only the three decidable outcomes through `RelationPayload`.
+
+The relation engine lives on `SemanticGraphStore` (the full-identity `Relate` `SemanticQueryKey` variant — source / target / relation kind / policy / source freshness / inference context / env+substitution+projection-reduction context, memoised under the matching `RelateMemoKey`), is memoised with `ReadSetSignature.facts` fencing, and is exposed through the public typeinfo session API. Guard: `typeinfo_exposes_relate_query`.
 
 ### 2.15 Origin-Edge Taxonomy Is Normative
 

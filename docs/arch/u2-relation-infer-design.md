@@ -990,13 +990,22 @@ while the gate keeps it ReturnOnly.
 
 ## Decision 5 — Consistency with landed CRITICAL invariants (second-engine forbiddances)
 
-The relation engine remains ONE node of the single `SemanticGraphStore` dispatch. **The bare-pair
-`relate_nodes(source, target)` function is DELETED.** There is exactly one relation entry point:
-`ProjectSemanticDispatch::execute(SemanticQueryKey::Relate { full §2.7 identity })`. An ergonomic
-caller-facing helper MAY exist **only** if it (i) takes or constructs the **full** `Relate` key (it must NOT
-re-expose a bare `(source, target)` signature), (ii) owns **ZERO** memoization, cycle, assumption, or
-admission logic, and (iii) is a pure delegation whose entire body is `execute(Relate { … })`. Such a helper
-is a constructor, not an engine — it has no behavior to diverge. (No-dual-path / no-shim rule.)
+The relation engine remains ONE node of the single `SemanticGraphStore` dispatch.
+
+**Target end-state (deferred to RI work — NOT the current tree).** There is to be exactly one relation
+entry point: `ProjectSemanticDispatch::execute(SemanticQueryKey::Relate { full §2.7 identity })`, and the
+bare-pair `relate_nodes(source, target)` is to be DELETED. An ergonomic caller-facing helper MAY then exist
+**only** if it (i) takes or constructs the **full** `Relate` key (it must NOT re-expose a bare
+`(source, target)` signature), (ii) owns **ZERO** memoization, cycle, assumption, or admission logic, and
+(iii) is a pure delegation whose entire body is `execute(Relate { … })`. Such a helper is a constructor, not
+an engine — it has no behavior to diverge. (No-dual-path / no-shim rule.)
+
+**Current state.** The `execute(SemanticQueryKey::Relate)` family arm is intentionally degenerate — it owns
+no relation logic and always yields `Opaque(Miss)`, fenced on the project generation. The live relation
+entry point is still `ProjectSemanticDispatch::relate_nodes(source, target)`, which constructs the full
+`RelateMemoKey` and owns warm lookup, the cycle guard, fact tracing, and relation-memo admission. The
+`execute(Relate)` cutover above (folding that ownership into the family dispatch and deleting `relate_nodes`)
+is later RI work, not this value-domain-shape block.
 
 Every place this design *risks* a second relation engine / a query-time re-walk / a private matcher, and the
 forbiddance:

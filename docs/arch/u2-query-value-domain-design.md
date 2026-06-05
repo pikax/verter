@@ -520,7 +520,7 @@ fn display(value: &SemanticQueryValue, needs: DisplayNeeds) -> DisplayString {
     match value {
         TypeNode(id)            => display_type_node(graph.node(*id), needs),
         OverloadSet(sigs)       => join("; ", sigs.iter().map(|s| display_signature(s, needs))),
-        Relation(payload)       => display_relation(payload, needs),   // outcome + (optional) proof
+        Relation(payload)       => display_relation(payload),          // outcome only
         DeclarationAnalysis(d)  => display_declaration_analysis(d, needs),
         ProgramAnalysis(p)      => display_program_analysis(p, needs),
         FlowReturn(r)           => display_type_node(r.return_node, needs),   // U6
@@ -558,9 +558,10 @@ compute).
   ExpandAliases` is absent; renders the inlined body when both say expand. A `Shallow` value
   displays shallow (member names, bodies as `…`/`Ref`); an `Expanded` value displays expanded.
 - **`OverloadSet`** — each `SignatureRef` rendered; ordering preserved (first-applicable order).
-- **`Relation`** — `display_relation` renders the `RelationPayload` outcome (`Assignable` /
-  `NotAssignable` / `BudgetExceeded`) and, when `DisplayFacet::IncludeProof`, the coinductive-cycle
-  proof keys. The proof is rendered FROM the payload, never recomputed.
+- **`Relation`** — `display_relation` renders the `RelationPayload` outcome ONLY (`Assignable` /
+  `NotAssignable` / `BudgetExceeded`). The payload-side proof table is OFF the display surface — a
+  consumer that wants derivation / failure / cycle detail dereferences the proof table by
+  `RelationProofId` directly; it is never rendered into a display string.
 - **`DeclarationAnalysis`** — renders augmentation contributor list / merged-part provenance.
 - **`ProgramAnalysis`** — renders the narrowed type at the point / the contextual type; the flow
   facts are rendered, not re-walked.

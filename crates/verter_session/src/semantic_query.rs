@@ -1851,17 +1851,22 @@ pub enum RelationOutcome {
     BudgetExceeded(BudgetExceededKind),
 }
 
-/// Closed set of codes a relation provably fails with, in DETERMINISTIC
-/// PRIORITY ORDER: declaration order IS priority, fastest-reject /
-/// most-specific first.
+/// Forward-declared, reducer-extensible set of codes a relation provably fails
+/// with, in DETERMINISTIC PRIORITY ORDER: declaration order IS priority,
+/// fastest-reject / most-specific first.
 ///
 /// When a relate fails for several reasons the relation engine selects the
 /// highest-priority (earliest-declared) code as the
 /// [`RelationProof::NotAssignable`] entry's `reason`. SHAPE only: the relation
-/// engine (U2.RELATION_INFER) populates these; the closed set and its order are
-/// the architectural contract consumers branch on. This code rides ONLY the
-/// payload-side proof table — never the public [`RelationOutcome`].
+/// engine (U2.RELATION_INFER) populates these and OWNS the taxonomy; the
+/// declared variants are the currently-known failure reasons and their order is
+/// the architectural priority contract consumers branch on. The enum is
+/// `#[non_exhaustive]` so the relation reducer can add further reasons without a
+/// breaking change for downstream crates — match arms outside this crate must
+/// carry a wildcard. This code rides ONLY the payload-side proof table — never
+/// the public [`RelationOutcome`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RelationFailureCode {
     /// Disagreeing primitive kinds (e.g. a string-literal `"a"` vs `number`).
     PrimitiveKindMismatch,
@@ -1965,8 +1970,14 @@ pub struct SubRelationRef {
     pub position: SubRelationPosition,
 }
 
-/// The structural axis a [`SubRelationRef`] relates at. SHAPE only.
+/// The structural axis a [`SubRelationRef`] relates at. Forward-declared,
+/// reducer-extensible: the relation reducer (U2.RELATION_INFER) owns this
+/// taxonomy and the declared variants are the currently-known structural
+/// positions. The enum is `#[non_exhaustive]` so the reducer can add further
+/// positions without a breaking change for downstream crates — match arms
+/// outside this crate must carry a wildcard. SHAPE only.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SubRelationPosition {
     /// The root obligation between two whole types.
     Root,
