@@ -90,18 +90,59 @@ pub struct BarrelRouteSurface {
     pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
+/// Content-free session-scope dimension for [`EffectiveExportSetKey`] (R6).
+///
+/// [`EffectiveExportSetKey`] is a QUERY-IDENTITY cache key, so R6 forbids any
+/// content/version-derived value in it: overlay CONTENT identity is rooted on
+/// the VALUE via the `ModuleAugmentationIndexShape` augmenter-set fingerprint
+/// fact + per-contributor `FileWholeHash` anchors, revalidated against the live
+/// view on every warm hit. This dimension carries ONLY the orthogonal,
+/// content-free SCOPE identity — `Base` for a base read, `Session(scope_id)`
+/// for a session read (the content-free [`crate::resolver_core::StoreViewCompatToken::session`]).
+///
+/// It keeps base and session reads in DISTINCT slots (a base warm entry can
+/// never satisfy a session lookup, and vice-versa) WITHOUT smuggling the
+/// overlay-set content fingerprint into the key. That fingerprint legitimately
+/// keys the CONTENT-ADDRESSED augmentation index
+/// ([`crate::file_artifact_store::AugmentationPopulation::Session`]) — a
+/// content-addressed compute cache, not a query-identity cache — and flows into
+/// the cold producer only as a compute input (the index scan + discriminator),
+/// never into this query-identity key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EffectiveExportSetScope {
+    /// Base read — no session overlay.
+    Base,
+    /// Session read, keyed by the content-free session scope id
+    /// ([`crate::resolver_core::StoreViewCompatToken::session`]).
+    Session(u64),
+}
+
+impl EffectiveExportSetScope {
+    /// Derive the content-free scope from a view's `compat_token().session`:
+    /// `None` → [`Self::Base`], `Some(id)` → [`Self::Session`]. This is the
+    /// SINGLE derivation the cold producer and the route-surface validator
+    /// share so they always agree on a session's slot.
+    #[must_use]
+    pub fn from_session(session: Option<u64>) -> Self {
+        match session {
+            Some(id) => Self::Session(id),
+            None => Self::Base,
+        }
+    }
+}
+
 /// Key for the per-provider effective export surface (R29 + R21).
 ///
-/// Scoped to `(provider, project, resolve_env, lib_env, population)`.
+/// Scoped to `(provider, project, resolve_env, lib_env, session_scope)`.
 /// `lib_env_hash` enters because module augmentations live in libs (R21).
-/// `population` (overlay isolation) keeps a base read's augmenter set
-/// (`Base`) in a distinct slot from a session read's (`Session(overlay-set
-/// fingerprint)`, base ∪ overlay) — without it a base-populated warm entry
-/// would satisfy a session lookup (the "base-as-session" hazard) on a
-/// shared `RouteDb`. It is a content-free R21 env/scope dimension (R6),
-/// derived once through
-/// [`crate::session_view::augmentation_population_for_view`] — the SINGLE
-/// derivation the cold producer and the route-surface validator share.
+/// `session_scope` (overlay isolation) keeps a base read's augmenter set
+/// (`Base`) in a distinct slot from a session read's (`Session(scope_id)`,
+/// base ∪ overlay) — without it a base-populated warm entry would satisfy a
+/// session lookup (the "base-as-session" hazard) on a shared `RouteDb`. It is a
+/// CONTENT-FREE scope dimension (R6): the overlay-set content fingerprint is
+/// NEVER in this key — overlay content identity is validated on the VALUE's
+/// `fact_dep_signature` (the `ModuleAugmentationIndexShape` fingerprint fact +
+/// per-contributor `FileWholeHash` anchors), revalidated on every warm hit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EffectiveExportSetKey {
     /// Canonical id of the provider whose surface this is.
@@ -112,8 +153,8 @@ pub struct EffectiveExportSetKey {
     pub resolve_env_hash: Hash16,
     /// Lib-env hash dimension (R21).
     pub lib_env_hash: Hash16,
-    /// Augmentation-index population dimension (overlay isolation).
-    pub population: crate::file_artifact_store::AugmentationPopulation,
+    /// Content-free session-scope dimension (overlay isolation, R6).
+    pub session_scope: EffectiveExportSetScope,
 }
 
 /// One contribution from an augmenter into a provider's effective
@@ -705,14 +746,17 @@ impl RouteDb {
     /// hook used for the `ResolvedRelativeCanonical` target archetype.
     ///
     /// `session_view` is the active overlay-bearing view (or `None` for a
-    /// base read). The augmentation-index population identity + overlay
-    /// discriminator are derived from it through the shared
+    /// base read). The CONTENT-ADDRESSED augmentation-index population identity
+    /// plus the overlay discriminator are derived from it through the shared
     /// [`crate::session_view::augmentation_population_for_view`] — the SAME
     /// derivation the body stitch uses — so a session read scans its own
     /// overlay augmenters (matched by the session overlay discriminator)
-    /// UNIONED with base, keyed under `Session(overlay-set fingerprint)`. A
-    /// `None` (or overlay-free) view stays base-only. The session branch never
-    /// returns a base-only augmenter set presented under a session key.
+    /// UNIONED with base. The QUERY-IDENTITY `EffectiveExportSetKey` slot is
+    /// keyed by the CONTENT-FREE session scope (`view.compat_token().session`),
+    /// NOT the overlay fingerprint (R6); overlay content identity is validated
+    /// on the value's facts. A `None` (or overlay-free) view stays base-only.
+    /// The session branch never returns a base-only augmenter set presented
+    /// under a session scope.
     pub fn get_or_compute_effective_export_set<V, FH, RR>(
         &self,
         key: EffectiveExportSetKey,
@@ -728,24 +772,31 @@ impl RouteDb {
         FH: Fn(&str) -> Option<Hash16>,
         RR: Fn(&str, &str) -> Option<Arc<str>>,
     {
-        // Population identity (overlay-aware augmentation index): derived from
-        // the active overlay-bearing view through the shared
-        // `augmentation_population_for_view`, the SAME derivation the body
-        // stitch uses. A session view keys its augmenter set under
+        // CONTENT-ADDRESSED population identity (overlay-aware augmentation
+        // index): derived from the active overlay-bearing view through the
+        // shared `augmentation_population_for_view`, the SAME derivation the
+        // body stitch uses. A session view keys its augmenter set under
         // `Session(overlay-set fingerprint)` and the cold scan unions the
         // session's overlay augmenters (matched by the overlay discriminator)
         // with base; a base/overlay-free view stays `Base` with a `None`
-        // discriminator. This makes the session branch genuinely
-        // overlay-correct — never a base-only set under a session key.
+        // discriminator. This fingerprint is a COMPUTE INPUT ONLY — it keys the
+        // content-addressed `AugmentationTargetKey` index and matches overlay
+        // artifacts; it NEVER enters the query-identity `EffectiveExportSetKey`
+        // (R6).
         let (population, overlay_discriminator) =
             crate::session_view::augmentation_population_for_view(session_view);
 
-        // Population is OWNED by the derivation, never the caller:
-        // overwrite it so the cache slot, the warm lookup, and the
-        // augmentation-index scan all agree, keeping base and session
-        // reads in distinct `EffectiveExportSetKey` slots.
+        // The QUERY-IDENTITY slot dimension is the CONTENT-FREE session scope
+        // (R6): the orthogonal session identity (`compat_token().session`),
+        // never the overlay-set content fingerprint. Overwrite it (the scope is
+        // OWNED by the derivation, never the caller) so the cache slot, the warm
+        // lookup, and the route-surface validator all agree, keeping base and
+        // session reads in distinct `EffectiveExportSetKey` slots. Overlay
+        // CONTENT identity is rooted on the value's `fact_dep_signature`
+        // (the `ModuleAugmentationIndexShape` fingerprint fact + per-contributor
+        // `FileWholeHash` anchors), revalidated on every warm hit.
         let mut key = key;
-        key.population = population;
+        key.session_scope = EffectiveExportSetScope::from_session(view.compat_token().session);
 
         if let Some(existing) = self.effective_export_sets.get_if_valid(&key, view) {
             return existing;

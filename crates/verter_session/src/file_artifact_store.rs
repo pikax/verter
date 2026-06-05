@@ -391,19 +391,29 @@ pub struct AugmentationTargetKey {
 }
 
 /// Population identity for an [`AugmentationTargetKey`]: which artifact set the
-/// augmentation index was scanned over.
+/// CONTENT-ADDRESSED augmentation index was scanned over.
 ///
 /// A `Base` index scans only base ([`FileArtifactKey::is_legacy`]) artifacts; a
-/// `Session(id)` index scans the session's overlay (non-legacy) artifacts
-/// UNIONED with base, keyed under the session id so two sessions (and the base)
-/// never share an augmenter set. Overlay results are NEVER written into a
-/// `Base`-keyed entry.
+/// `Session` index scans the session's overlay (non-legacy) artifacts UNIONED
+/// with base. The `Session` discriminant carries the overlay-set CONTENT
+/// fingerprint ([`crate::session_view::SessionView::fingerprint`], derived once
+/// through [`crate::session_view::augmentation_population_for_view`]) — NOT a
+/// raw session id. This index is a content-addressed compute cache, so the
+/// fingerprint IS part of its content view identity: it keeps two sessions
+/// (and the base) on distinct augmenter sets AND makes the slot self-invalidate
+/// when overlay content/membership changes (a new fingerprint → a fresh scan).
+/// Overlay results are NEVER written into a `Base`-keyed entry.
+///
+/// This is the CONTENT-ADDRESSED population — distinct from the query-identity
+/// [`crate::resolver_core::route_db::EffectiveExportSetScope`], which keys the
+/// `RouteDb` `EffectiveExportSet` slot by the CONTENT-FREE session scope id
+/// (R6) and roots overlay content on the value's facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AugmentationPopulation {
     /// Base resolve-domain population — base artifacts only.
     Base,
-    /// Session-overlay population, keyed by the session id
-    /// ([`crate::resolver_core::StoreViewCompatToken::session`]).
+    /// Session-overlay population, keyed by the overlay-set content
+    /// fingerprint ([`crate::session_view::SessionView::fingerprint`]).
     Session(u64),
 }
 

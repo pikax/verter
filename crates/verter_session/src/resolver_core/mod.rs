@@ -60,7 +60,7 @@ pub use fuses::{FuseBudgets, FuseState, FuseTrip};
 pub use imported_root_db::{ImportedRootDb, ImportedRootResult};
 pub use route_db::{
     BarrelRouteSurface, EffectiveExportEntry, EffectiveExportSetEntry, EffectiveExportSetKey,
-    RouteDb, RouteResult,
+    EffectiveExportSetScope, RouteDb, RouteResult,
 };
 
 pub type ResolverHash16 = verter_semantic::analysis::Hash16;

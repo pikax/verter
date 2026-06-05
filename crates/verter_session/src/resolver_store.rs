@@ -197,10 +197,13 @@ pub struct HostStoreView {
     /// `RouteSurfaceFactRef` with `FactKey::EffectiveExportSet`
     /// composes
     /// `EffectiveExportSetKey { provider_canonical, project_identity,
-    /// resolve_env_hash, lib_env_hash }` from the fact's
-    /// `canonical_id` plus the view's `project_identity` and
-    /// `env_hashes`, then compares the cached entry's
-    /// `augmenter_set_fingerprint` to `expected_hash`.
+    /// resolve_env_hash, lib_env_hash, session_scope }` from the fact's
+    /// `canonical_id` plus the view's `project_identity`, `env_hashes`,
+    /// and CONTENT-FREE session scope
+    /// (`EffectiveExportSetScope::from_session(session_id)`), then
+    /// compares the cached entry's `augmenter_set_fingerprint` to
+    /// `expected_hash` (the overlay content identity lives on the value,
+    /// not the key — R6).
     ///
     /// One `Arc` clone at view-build time; reads thereafter are
     /// wait-free against concurrent writers.
@@ -1463,11 +1466,13 @@ impl crate::resolver_core::StoreView for HostStoreView {
     ///
     /// `EffectiveExportSet` → compose
     /// `EffectiveExportSetKey { provider_canonical,
-    /// project_identity, resolve_env_hash, lib_env_hash }` from the
-    /// fact's `canonical_id` plus the view's `project_identity` +
-    /// `env_hashes`, look up the cached entry in the captured
-    /// `RouteDb` handle, and compare the entry's
-    /// `augmenter_set_fingerprint` to `fact.expected_hash`.
+    /// project_identity, resolve_env_hash, lib_env_hash, session_scope }`
+    /// from the fact's `canonical_id` plus the view's `project_identity`,
+    /// `env_hashes`, and CONTENT-FREE session scope (R6), look up the
+    /// cached entry in the captured `RouteDb` handle, and compare the
+    /// entry's `augmenter_set_fingerprint` to `fact.expected_hash` (the
+    /// overlay content identity is matched here on the VALUE, never in
+    /// the key).
     fn validates_route_surface_domain(
         &self,
         fact: &crate::resolver_core::RouteSurfaceFactRef,
@@ -1487,13 +1492,18 @@ impl crate::resolver_core::StoreView for HostStoreView {
                         .as_ref()
                         .map(|s| s.as_ref().to_owned()),
                     wildcard_pattern: wildcard_pattern.as_ref().map(|s| s.as_ref().to_owned()),
-                    // Population-aware validation: a session view
-                    // validates against the `Session(fingerprint)`
-                    // augmenter-set fingerprint, a base view against the
-                    // `Base` one. The fact carries no population (it is a
-                    // content-free target shape); the population is the
-                    // VIEW's, derived through the SAME single derivation
-                    // as the producer.
+                    // CONTENT-ADDRESSED population: a session view validates
+                    // against the `Session(overlay-set fingerprint)` augmenter
+                    // set, a base view against `Base`. This is the
+                    // augmentation-INDEX population (the fingerprint IS its
+                    // content view identity), deliberately DISTINCT from the
+                    // `EffectiveExportSet` arm below, which composes the
+                    // CONTENT-FREE `EffectiveExportSetScope` (R6). The index
+                    // snapshot is fresh per fingerprint, so a session
+                    // membership/content change moves the fingerprint and the
+                    // validated lookup misses. The fact carries no population
+                    // (a content-free target shape); the population is the
+                    // VIEW's, via the SAME derivation as the producer.
                     population: self.augmentation_population(),
                 };
                 match self.route_surface_index_fingerprints.get(&key) {
@@ -1527,10 +1537,16 @@ impl crate::resolver_core::StoreView for HostStoreView {
                     project_identity: self.project_identity,
                     resolve_env_hash: self.env_hashes.resolve_env_hash,
                     lib_env_hash: self.env_hashes.lib_env_hash,
-                    // Compose the view's augmentation population so a
-                    // session consumer validates against the session
-                    // slot's fingerprint, never the base slot's.
-                    population: self.augmentation_population(),
+                    // Compose the view's CONTENT-FREE session scope (R6) so a
+                    // session consumer validates against the session slot, a
+                    // base consumer against the base slot. The overlay content
+                    // fingerprint is NOT in this key — it is matched separately
+                    // on the value via the `augmenter_set_fingerprint` compared
+                    // below.
+                    session_scope:
+                        crate::resolver_core::route_db::EffectiveExportSetScope::from_session(
+                            self.session_id,
+                        ),
                 };
                 route_db.lookup_effective_export_set_fingerprint(&target_key)
                     == Some(fact.expected_hash)

@@ -27,13 +27,14 @@ use rustc_hash::FxHashMap;
 use verter_semantic::facts::registry::{InternedGlobPattern, InternedSpecifier};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::{
-    AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey,
-    FileArtifactStore, FileArtifacts, ProjectIdentity, LEGACY_PARSER_VERSION,
+    AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, FileArtifactStore,
+    FileArtifacts, ProjectIdentity, LEGACY_PARSER_VERSION,
 };
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 use verter_session::resolver_core::{
-    EffectiveExportSetKey, FactVersionRef, RouteDb, StoreView, StoreViewCompatToken,
+    EffectiveExportSetKey, EffectiveExportSetScope, FactVersionRef, RouteDb, StoreView,
+    StoreViewCompatToken,
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -239,7 +240,7 @@ fn augmentation_external_specifier_stitches() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
     let effective = route_db.get_or_compute_effective_export_set(
         key,
@@ -287,7 +288,7 @@ fn augmentation_resolved_relative_canonical_stitches() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
     let effective = route_db.get_or_compute_effective_export_set(
         key,
@@ -336,7 +337,7 @@ fn augmentation_wildcard_ambient_stitches() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
     let effective = route_db.get_or_compute_effective_export_set(
         key,
@@ -376,7 +377,7 @@ fn augmentation_global_stitches() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
     let effective = route_db.get_or_compute_effective_export_set(
         key,
@@ -485,7 +486,7 @@ fn augmenter_set_refresh_invalidates_downstream() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
 
     // Cold compute under view A; captures the initial fingerprint.
@@ -649,7 +650,7 @@ fn edit_augmenting_file_invalidates_consumer() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
 
     // Cold compute records contributor_whole_hash = original_hash.
@@ -749,7 +750,7 @@ fn edit_unrelated_file_does_not_invalidate_consumer() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
 
     let _ = route_db.get_or_compute_effective_export_set(
@@ -867,7 +868,7 @@ fn rekeyed_augmenter_with_unchanged_skeleton_is_not_dropped() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
 
     // Cold compute on the first RouteDb — this populates the
@@ -1165,7 +1166,7 @@ fn effective_export_set_session_view_stitches_overlay_augmenter() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
     let whole_hash = |c: &str| match c {
         "/aug-base.ts" => Some([11u8; 16]),
@@ -1268,10 +1269,21 @@ fn session_overlay_augmenter_isolated_from_base_index() {
     );
 
     // Session-overlay augmenter: a DIFFERENT file, keyed under a non-legacy
-    // overlay discriminator `D` (the `parse_env_hash` dimension). It augments
-    // the same `"vue"` target but exists ONLY in this session's overlay.
+    // overlay discriminator `D` (the `parse_env_hash` dimension) derived from
+    // the overlay-set fingerprint. It augments the same `"vue"` target but
+    // exists ONLY in this session's overlay.
+    //
+    // Two distinct things both derive from the overlay-set fingerprint and must
+    // not be conflated: (a) the CONTENT-ADDRESSED augmentation-index population
+    // KEY `AugmentationPopulation::Session(fingerprint)`, and (b) the scan
+    // DISCRIMINATOR (the `parse_env_hash` byte tag) that matches overlay
+    // artifacts. Both use the SAME fingerprint here so the index slot and the
+    // matched artifacts agree — this is NOT a raw session id.
+    let overlay_fingerprint: u64 = 7;
     let overlay_discriminator =
-        verter_session::session_view::overlay_artifact_discriminator_for_fingerprint(7);
+        verter_session::session_view::overlay_artifact_discriminator_for_fingerprint(
+            overlay_fingerprint,
+        );
     let raw = fixture("module_augmentation_external.ts");
     let indexed = build_indexed_with_source(&raw, [99u8; 16]);
     let emission = emit_parse_facts(&indexed);
@@ -1305,7 +1317,10 @@ fn session_overlay_augmenter_isolated_from_base_index() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: AugmentationPopulation::Session(42),
+        // CONTENT-ADDRESSED index population: keyed by the overlay-set
+        // fingerprint (the SAME value the scan discriminator above derives
+        // from), NOT a raw session id.
+        population: AugmentationPopulation::Session(overlay_fingerprint),
         target,
     };
 
@@ -1440,7 +1455,7 @@ fn effective_export_set_warm_base_entry_does_not_satisfy_session_lookup() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
 
     let route_db = RouteDb::new();
@@ -1449,7 +1464,7 @@ fn effective_export_set_warm_base_entry_does_not_satisfy_session_lookup() {
     let base_store_view = AcceptAllView::new(1);
     let base_effective = route_db.get_or_compute_effective_export_set(
         EffectiveExportSetKey {
-            population: verter_session::file_artifact_store::AugmentationPopulation::Base,
+            session_scope: EffectiveExportSetScope::Base,
             ..key.clone()
         },
         target.clone(),
@@ -1479,9 +1494,9 @@ fn effective_export_set_warm_base_entry_does_not_satisfy_session_lookup() {
     };
     let session_effective = route_db.get_or_compute_effective_export_set(
         EffectiveExportSetKey {
-            population: verter_session::file_artifact_store::AugmentationPopulation::Session(
-                fingerprint,
-            ),
+            // Content-free session scope (the producer overwrites this from
+            // the view's `compat_token().session`); set for documentation.
+            session_scope: EffectiveExportSetScope::Session(42),
             ..key
         },
         target,
@@ -1523,7 +1538,7 @@ fn effective_export_set_warm_session_entry_does_not_satisfy_base_lookup() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
 
     let route_db = RouteDb::new();
@@ -1537,9 +1552,9 @@ fn effective_export_set_warm_session_entry_does_not_satisfy_base_lookup() {
     };
     let session_effective = route_db.get_or_compute_effective_export_set(
         EffectiveExportSetKey {
-            population: verter_session::file_artifact_store::AugmentationPopulation::Session(
-                fingerprint,
-            ),
+            // Content-free session scope (overwritten by the producer from
+            // the view's `compat_token().session`); set for documentation.
+            session_scope: EffectiveExportSetScope::Session(42),
             ..key.clone()
         },
         target.clone(),
@@ -1564,7 +1579,7 @@ fn effective_export_set_warm_session_entry_does_not_satisfy_base_lookup() {
     let base_store_view = AcceptAllView::new(1);
     let base_effective = route_db.get_or_compute_effective_export_set(
         EffectiveExportSetKey {
-            population: verter_session::file_artifact_store::AugmentationPopulation::Base,
+            session_scope: EffectiveExportSetScope::Base,
             ..key
         },
         target,
@@ -1588,6 +1603,241 @@ fn effective_export_set_warm_session_entry_does_not_satisfy_base_lookup() {
     assert!(
         base_contributors.contains(&"/aug-base.ts"),
         "base read must include the base augmenter; got {base_contributors:?}"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════
+// R6 — `EffectiveExportSetKey` is keyed by a CONTENT-FREE session
+// scope, NOT the overlay-set content fingerprint.
+//
+// `EffectiveExportSetKey` is a QUERY-IDENTITY cache key, so R6 forbids
+// any content/version-derived value in it. The session-scope dimension
+// (`EffectiveExportSetScope { Base, Session(scope_id) }`) carries ONLY
+// the orthogonal, content-free session identity
+// (`StoreViewCompatToken::session`). Overlay CONTENT identity is rooted
+// on the VALUE via the per-contributor `FileWholeHash` anchors + the
+// `ModuleAugmentationIndexShape` augmenter-set fingerprint fact,
+// revalidated against the live view on every warm hit.
+//
+// The two tests below pin the two halves of that contract:
+//   1. A within-session overlay CONTENT edit invalidates the warm entry
+//      THROUGH the value's facts (not through a different key).
+//   2. An UNRELATED session change (the overlay-set fingerprint moves
+//      but the augmenter content is unchanged) WARM-HITS the same slot
+//      — proving the content fingerprint is NOT smuggled into the key.
+// ════════════════════════════════════════════════════════════════
+
+/// A session-scoped `StoreView` (`compat_token().session == Some(id)`)
+/// that validates `FileWholeHash` facts against a caller-supplied
+/// `(canonical → whole_hash)` map and accepts every other fact
+/// (`RouteSurface` augmenter-set-shape facts validate trivially: the
+/// augmenter SET membership is unchanged in these tests, only CONTENT
+/// moves). A `FileWholeHash` for a canonical absent from the map is
+/// refused, so every referenced contributor MUST appear in the map.
+#[derive(Debug)]
+struct SessionContentView {
+    session: u64,
+    whole_hashes: FxHashMap<String, [u8; 16]>,
+}
+
+impl StoreView for SessionContentView {
+    fn compat_token(&self) -> StoreViewCompatToken {
+        StoreViewCompatToken {
+            epoch: 1,
+            session: Some(self.session),
+        }
+    }
+    fn validates(&self, fact: &FactVersionRef) -> bool {
+        match fact {
+            FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                self.whole_hashes.get(canonical_id) == Some(hash)
+            }
+            // RouteSurface (`ModuleAugmentationIndexShape`) accepted: the
+            // augmenter SET is unchanged here, so its fingerprint fact
+            // would validate anyway — the discriminator is the
+            // per-contributor `FileWholeHash` content rail.
+            _ => true,
+        }
+    }
+}
+
+/// FIX A part 1 — within the SAME content-free session scope, editing
+/// the overlay augmenter's CONTENT invalidates the warm
+/// `EffectiveExportSet` through the value's `FileWholeHash` fact rail.
+///
+/// The cold read stores the entry under `Session(42)` and records a
+/// `FileWholeHash(/aug-overlay.ts, [99;16])` anchor. A second view with
+/// the SAME session scope (42) but a NEW overlay content hash for
+/// `/aug-overlay.ts` warm-looks-up the SAME slot — and MUST miss,
+/// because the recorded anchor no longer validates.
+///
+/// Discriminates: if the per-contributor `FileWholeHash` anchor were
+/// dropped (or warm validation became accept-all), the stale warm entry
+/// would be returned and this assert FAILS. The lookup hitting the same
+/// slot under the SAME `Session(42)` key (despite the content change)
+/// is exactly the content-free-key property — overlay CONTENT is rooted
+/// on the value, not the key.
+#[test]
+fn effective_export_set_same_session_overlay_content_edit_invalidates_via_facts() {
+    let store = FileArtifactStore::new();
+    let fingerprint: u64 = 7;
+    let _overlay_discriminator = seed_base_and_overlay_augmenters(&store, fingerprint);
+
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let key = EffectiveExportSetKey {
+        provider_canonical: "vue".to_owned(),
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        // Overwritten by the producer from the view's content-free
+        // session scope; set here for documentation.
+        session_scope: EffectiveExportSetScope::Session(42),
+    };
+
+    let route_db = RouteDb::new();
+
+    // Cold read under session scope 42 (overlay fingerprint 7): stores
+    // the base ∪ overlay surface under `Session(42)` with a
+    // `FileWholeHash(/aug-overlay.ts, [99;16])` anchor.
+    let session_store_view = SessionScopedView::new(1, 42);
+    let overlay_session = OverlayFingerprintView {
+        fingerprint,
+        project_identity: ProjectIdentity([1u8; 16]),
+        env_hashes: verter_session::session_view::EnvHashes::default(),
+    };
+    let cold = route_db.get_or_compute_effective_export_set(
+        key.clone(),
+        target.clone(),
+        &session_store_view,
+        Some(&overlay_session),
+        &store,
+        aug_whole_hash,
+        |_, _| None,
+    );
+    let cold_contributors: Vec<&str> = cold
+        .entries
+        .iter()
+        .map(|e| e.contributor_canonical.as_ref())
+        .collect();
+    assert!(
+        cold_contributors.contains(&"/aug-overlay.ts"),
+        "cold session read must stitch the overlay augmenter; got {cold_contributors:?}"
+    );
+
+    // Warm lookup with the SAME session scope (42) but the overlay
+    // augmenter edited to a NEW content hash. Same `Session(42)` slot,
+    // but the recorded `FileWholeHash(/aug-overlay.ts, [99;16])` anchor
+    // no longer validates → the warm entry MUST be refused.
+    let mut edited_hashes = FxHashMap::default();
+    edited_hashes.insert("/aug-base.ts".to_owned(), [11u8; 16]);
+    edited_hashes.insert("/aug-overlay.ts".to_owned(), [77u8; 16]); // edited
+    let edited_view = SessionContentView {
+        session: 42,
+        whole_hashes: edited_hashes,
+    };
+    let warm = route_db.get_effective_export_set(&key, &edited_view);
+    assert!(
+        warm.is_none(),
+        "a within-session overlay CONTENT edit MUST invalidate the warm \
+         EffectiveExportSet through the per-contributor FileWholeHash fact \
+         rail — a stale prior-overlay value must NOT be returned"
+    );
+}
+
+/// FIX A part 2 — the key is content-free: an UNRELATED session change
+/// (the overlay-set fingerprint moves, but the augmenter CONTENT is
+/// unchanged) WARM-HITS the same `Session(scope)` slot instead of
+/// cold-recomputing a different fingerprint slot.
+///
+/// Read 1 cold-computes under session scope 42 with overlay fingerprint
+/// 7 (the overlay augmenter is seeded under fingerprint-7's
+/// discriminator) and stores the base ∪ overlay surface under
+/// `Session(42)`. Read 2 drives the producer again under the SAME
+/// session scope 42 but a DIFFERENT overlay fingerprint (999 — no
+/// overlay augmenter is seeded under its discriminator). The augmenter
+/// CONTENT is unchanged, so read 2's view validates read 1's facts and
+/// WARM-HITS — returning the base ∪ overlay surface.
+///
+/// Discriminates: were the overlay-set content fingerprint smuggled
+/// into the key (the pre-fix R6 violation), read 2's distinct
+/// fingerprint would key a DIFFERENT slot, miss the warm entry, and
+/// cold-rescan under fingerprint-999's discriminator — which finds NO
+/// overlay augmenter, so the result would NOT contain `/aug-overlay.ts`.
+/// Asserting the overlay augmenter survives proves the content-free key.
+#[test]
+fn effective_export_set_content_free_key_warm_hits_across_unrelated_fingerprint_change() {
+    let store = FileArtifactStore::new();
+    let fingerprint_a: u64 = 7;
+    let _overlay_discriminator = seed_base_and_overlay_augmenters(&store, fingerprint_a);
+
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let key = EffectiveExportSetKey {
+        provider_canonical: "vue".to_owned(),
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        session_scope: EffectiveExportSetScope::Session(42),
+    };
+
+    let route_db = RouteDb::new();
+
+    // Read 1 — cold under session scope 42, overlay fingerprint 7.
+    let session_store_view = SessionScopedView::new(1, 42);
+    let overlay_a = OverlayFingerprintView {
+        fingerprint: fingerprint_a,
+        project_identity: ProjectIdentity([1u8; 16]),
+        env_hashes: verter_session::session_view::EnvHashes::default(),
+    };
+    let _ = route_db.get_or_compute_effective_export_set(
+        key.clone(),
+        target.clone(),
+        &session_store_view,
+        Some(&overlay_a),
+        &store,
+        aug_whole_hash,
+        |_, _| None,
+    );
+
+    // Read 2 — SAME session scope 42 but a DIFFERENT overlay fingerprint
+    // (999). Augmenter content unchanged, so the recorded facts still
+    // validate. A `SessionContentView` (session 42) reports the
+    // unchanged whole-hashes so the warm validation passes.
+    let mut unchanged_hashes = FxHashMap::default();
+    unchanged_hashes.insert("/aug-base.ts".to_owned(), [11u8; 16]);
+    unchanged_hashes.insert("/aug-overlay.ts".to_owned(), [99u8; 16]);
+    let read2_view = SessionContentView {
+        session: 42,
+        whole_hashes: unchanged_hashes,
+    };
+    let overlay_b = OverlayFingerprintView {
+        fingerprint: 999, // unrelated overlay edit moved the fingerprint
+        project_identity: ProjectIdentity([1u8; 16]),
+        env_hashes: verter_session::session_view::EnvHashes::default(),
+    };
+    let read2 = route_db.get_or_compute_effective_export_set(
+        key,
+        target,
+        &read2_view,
+        Some(&overlay_b),
+        &store,
+        aug_whole_hash,
+        |_, _| None,
+    );
+    let read2_contributors: Vec<&str> = read2
+        .entries
+        .iter()
+        .map(|e| e.contributor_canonical.as_ref())
+        .collect();
+    assert!(
+        read2_contributors.contains(&"/aug-overlay.ts"),
+        "a content-free session-scope key must WARM-HIT the prior slot when \
+         only an unrelated overlay-set fingerprint moved (augmenter content \
+         unchanged) — the overlay augmenter must survive, NOT be dropped by a \
+         cold rescan under a fingerprint-keyed slot; got {read2_contributors:?}"
+    );
+    assert!(
+        read2_contributors.contains(&"/aug-base.ts"),
+        "warm-hit surface must still include the base augmenter; got {read2_contributors:?}"
     );
 }
 

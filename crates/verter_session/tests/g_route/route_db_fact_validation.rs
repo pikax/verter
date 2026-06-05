@@ -33,7 +33,8 @@ use verter_session::file_artifact_store::{
 };
 use verter_session::resolver_core::{
     BarrelRouteSurface, EffectiveExportEntry, EffectiveExportSetEntry, EffectiveExportSetKey,
-    FactVersionRef, RouteDb, RouteResult, RouteSurfaceFactRef, StoreView, StoreViewCompatToken,
+    EffectiveExportSetScope, FactVersionRef, RouteDb, RouteResult, RouteSurfaceFactRef, StoreView,
+    StoreViewCompatToken,
 };
 
 /// Build an [`AugmenterEntry`] for `canonical` carrying the given
@@ -179,7 +180,7 @@ fn syntactic_export_set_differs_from_effective_export_set() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
     let effective = route_db.get_or_compute_effective_export_set(
         key.clone(),
@@ -275,7 +276,7 @@ fn paths_edit_invalidates_route_db() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16], // env A
         lib_env_hash: [3u8; 16],
-        population: AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
     let key_b = EffectiveExportSetKey {
         resolve_env_hash: [4u8; 16], // env B (paths edited)
@@ -331,7 +332,7 @@ fn lib_env_hash_change_invalidates_route_db_effective_set() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [10u8; 16], // lib A
-        population: AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
     let key_lib_b = EffectiveExportSetKey {
         lib_env_hash: [11u8; 16], // lib B
@@ -442,7 +443,7 @@ fn effective_export_set_carries_fact_dep_signature() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
+        population: AugmentationPopulation::Base,
         target: target.clone(),
     };
     artifact_store.populate_augmenter_set(
@@ -458,7 +459,7 @@ fn effective_export_set_carries_fact_dep_signature() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
 
     let effective = db.get_or_compute_effective_export_set(
@@ -521,7 +522,7 @@ fn effective_export_set_invalidates_when_augmenter_set_fingerprint_changes() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: verter_session::file_artifact_store::AugmentationPopulation::Base,
+        population: AugmentationPopulation::Base,
         target: target.clone(),
     };
     let initial_fp = [99u8; 16];
@@ -538,7 +539,7 @@ fn effective_export_set_invalidates_when_augmenter_set_fingerprint_changes() {
         project_identity: ProjectIdentity([1u8; 16]),
         resolve_env_hash: [2u8; 16],
         lib_env_hash: [3u8; 16],
-        population: AugmentationPopulation::Base,
+        session_scope: EffectiveExportSetScope::Base,
     };
 
     // Compute under initial fingerprint with an accepting view.
