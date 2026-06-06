@@ -28,7 +28,7 @@ importers:
         specifier: ^0.2.6
         version: 0.2.6(esbuild@0.28.0)
       '@typescript/native-preview':
-        specifier: latest
+        specifier: 7.0.0-dev.20260526.1
         version: 7.0.0-dev.20260526.1
       '@vscode/vsce':
         specifier: ^3.9.1
