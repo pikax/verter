@@ -1688,6 +1688,130 @@ fn semantic_query_name_mirror_matches_live_tag_set() {
     );
 }
 
+/// §11.5 — `key_owning_block` is LIVE authority: the block-DAG guard
+/// (`typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_prereqs`)
+/// consumes it to check that every key a row consumes is produced by a prereq
+/// block. But several `SemanticQueryName` keys (the apparent-type / class-surface
+/// / enum / ambient-namespace / overload-set / flow / contextual reducer keys)
+/// appear in NO row's `semantic_queries`, so their `key_owning_block` arms are
+/// reached ONLY by compile-time match-exhaustiveness — a WRONG owner
+/// (e.g. `ContextualTypeAt => U2QueryValueDomain`) would still COMPILE and every
+/// other test would still pass. This test is the CLOSED-SET, DISCRIMINATING pin
+/// that catches a mis-mapped owner: it asserts, for EVERY `SemanticQueryName`
+/// variant, that `key_owning_block` returns the EXACT owning block the §11.5
+/// mechanism-first layering assigns it (the block whose dominant mechanism
+/// PRODUCES that key's result). The expected table is the closed source of truth
+/// taken from the `key_owning_block` doc comment + the §10.4.1 mechanism→block
+/// partition; a wrong arm FAILS this test even though it compiles.
+///
+/// Closed-set completeness: the expected table's key set is asserted EQUAL to
+/// `SEMANTIC_QUERY_NAME_ALL`, so adding a new `SemanticQueryName` variant
+/// without a table entry here FAILS the set-equality assertion (in addition to
+/// the wildcard-free `key_owning_block` match forcing a new arm to compile).
+/// Each expected owner is also asserted to exist in `TYPEINFO_PARITY_BLOCKS`.
+#[test]
+fn key_owning_block_owner_mapping_is_pinned_closed_set() {
+    use SemanticQueryName::*;
+    use TypeInfoParityBlockId::*;
+
+    // EXPECTED (key → owning block) — the §11.5 mechanism-first layering.
+    // The block whose dominant mechanism PRODUCES the key's result, NOT where
+    // the key's shape was first declared. Encoded explicitly so a wrong arm in
+    // `key_owning_block` FAILS even when match-exhaustiveness alone passes.
+    let expected: &[(SemanticQueryName, TypeInfoParityBlockId)] = &[
+        // Foundational decl/value keys + the lib-fact apparent-member lookup
+        // (no dedicated reducer block) at U2.QUERY_VALUE_DOMAIN.
+        (ResolveDecl, U2QueryValueDomain),
+        (TypeOf, U2QueryValueDomain),
+        (NormalizeUnion, U2QueryValueDomain),
+        (NormalizeIntersection, U2QueryValueDomain),
+        (ResolvedNamedType, U2QueryValueDomain),
+        (ApparentType, U2QueryValueDomain),
+        // Relation / instantiation / conditional at U2.RELATION_INFER.
+        (Relate, U2RelationInfer),
+        (Instantiate, U2RelationInfer),
+        (Conditional, U2RelationInfer),
+        // Indexed-access / keyof / member / path at U2.INDEXED_ACCESS.
+        (IndexedAccess, U2IndexedAccess),
+        (KeyOf, U2IndexedAccess),
+        (ProjectMember, U2IndexedAccess),
+        (ProjectPath, U2IndexedAccess),
+        // Mapped + template-literal reduction at U2.MAPPED_TEMPLATE.
+        (MappedType, U2MappedTemplate),
+        (TemplateLiteralReduce, U2MappedTemplate),
+        // Class-surface projection at U2.CLASS_SURFACES.
+        (ResolveClassSurface, U2ClassSurfaces),
+        // Enum value/type duality at U2.ENUMS.
+        (ResolveEnum, U2Enums),
+        // Ambient-namespace (JSX foundation) at U2.JSX_FOUNDATIONS.
+        (ResolveAmbientNamespace, U2JsxFoundations),
+        // Overload-set / call dispatch at U6.CALL_RESOLVE.
+        (ResolveOverloadSet, U6CallResolve),
+        // Flow narrowing on the flow-frame substrate at
+        // U6.FLOW_RETURN_SUBSTRATE.
+        (FlowNarrowingAt, U6FlowReturnSubstrate),
+        // Contextual typing at U6.CONTEXTUAL_CALLBACK.
+        (ContextualTypeAt, U6ContextualCallback),
+        // Macro payload at U14.MACRO_ADAPTER.
+        (ResolveMacroPayload, U14MacroAdapter),
+    ];
+
+    // DISCRIMINATING per-key pin: a wrong `key_owning_block` arm FAILS here.
+    let mut mismatches: Vec<String> = Vec::new();
+    for (key, expected_owner) in expected {
+        let actual = key_owning_block(*key);
+        if actual != *expected_owner {
+            mismatches.push(format!(
+                "{key:?}: key_owning_block returned {actual:?}, expected {expected_owner:?}",
+            ));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "key_owning_block owner mapping diverged from the §11.5 pinned table \
+         ({} mismatch(es)):\n  {}",
+        mismatches.len(),
+        mismatches.join("\n  "),
+    );
+
+    // CLOSED-SET completeness: the expected table's key set == the full
+    // `SemanticQueryName` mirror set. A newly-added key with no table entry
+    // FAILS here (and the wildcard-free `key_owning_block` match also forces a
+    // new arm to compile, so an added key cannot silently inherit an owner).
+    let expected_keys: BTreeSet<SemanticQueryName> = expected.iter().map(|(k, _)| *k).collect();
+    let all_keys: BTreeSet<SemanticQueryName> = SEMANTIC_QUERY_NAME_ALL.iter().copied().collect();
+    assert_eq!(
+        expected_keys.len(),
+        expected.len(),
+        "the expected key→owner table contains a duplicate key — each key \
+         must be pinned exactly once",
+    );
+    let missing_from_table: Vec<&SemanticQueryName> = all_keys.difference(&expected_keys).collect();
+    let extra_in_table: Vec<&SemanticQueryName> = expected_keys.difference(&all_keys).collect();
+    assert!(
+        missing_from_table.is_empty() && extra_in_table.is_empty(),
+        "the pinned key→owner table is not a closed set over \
+         `SEMANTIC_QUERY_NAME_ALL` — add a table entry for every new key (and \
+         a `key_owning_block` arm) in the same change.\n  \
+         keys missing from the table: {missing_from_table:?}\n  \
+         table keys with no mirror variant: {extra_in_table:?}",
+    );
+
+    // Each pinned owner must be a real block in the DAG.
+    let known_blocks: BTreeSet<TypeInfoParityBlockId> =
+        TYPEINFO_PARITY_BLOCKS.iter().map(|b| b.block_id).collect();
+    let unknown_owners: Vec<String> = expected
+        .iter()
+        .filter(|(_, owner)| !known_blocks.contains(owner))
+        .map(|(key, owner)| format!("{key:?} → {owner:?} (not in TYPEINFO_PARITY_BLOCKS)"))
+        .collect();
+    assert!(
+        unknown_owners.is_empty(),
+        "pinned owner block(s) absent from `TYPEINFO_PARITY_BLOCKS`:\n  {}",
+        unknown_owners.join("\n  "),
+    );
+}
+
 /// §9 / §11.5 — every `BlockContractRow` CARRIES its contract metadata: a
 /// non-empty `required_guards` list (the §11.5 done-predicate keys off these
 /// labels) and a non-empty `verification_labels` list, with no empty /
