@@ -418,7 +418,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// The audit footprint regression (ChatMessages cold-seq
     /// `outputSchema|execute = 62`) traced to the implicit-Expanded
     /// default surviving on intermediate-base lowering sites; the
-    /// fix is rule-3 of the codex-hybrid spec.
+    /// fix is rule-3 of the demand-driven reducer spec.
     pub fn lower_type_expr_in_scope_with_mode(
         &self,
         scope_canonical_id: &str,
@@ -981,7 +981,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // On `Overflow` the build is marked `cache_suppress = true` so
         // the memo refuses to admit the entry — caller cold-recomputes
         // on the next request.
-        // Phase C telemetry: detect whether the cold-build closure
+        // Telemetry: detect whether the cold-build closure
         // actually ran so the per-kind cold/warm counters reflect what
         // happened inside `execute_cooperative` (warm hits short-
         // circuit before `traced_build` fires).
@@ -1006,7 +1006,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             finalise_traced_build_output(output, finalise, &provenance)
         };
         let cache_read = graph.execute_cooperative(self.ctx, key.clone(), sentinel, traced_build);
-        // Phase C: attribute the dispatch by `SemanticQueryKey` kind +
+        // Attribute the dispatch by `SemanticQueryKey` kind +
         // cold/warm. Cold = the `traced_build` closure ran. Warm = the
         // memo short-circuited before the closure fired.
         let is_cold = cold_build_ran.load(std::sync::atomic::Ordering::Relaxed);
@@ -1069,7 +1069,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 // ResolveDecl, NormalizeUnion, NormalizeIntersection,
                 // ResolvedNamedType, Relate, ResolveMacroPayload —
-                // not in Phase C's focused counter set.
+                // not in the focused counter set.
                 _ => None,
             };
             if let Some(event) = event {
@@ -1554,7 +1554,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `SemanticNodeId` alongside the raised `TypeExpr`. The audit-record
     /// assembly in `compute_evaluated_types` consumes the production-path
     /// identity directly (no audit-only re-lowering — per the
-    /// codex-hybrid spec).
+    /// demand-driven reducer spec).
     pub fn project_slot_binding_member_with_terminal_id(
         &self,
         base: SemanticNodeId,
@@ -1814,7 +1814,7 @@ impl<'a> SessionDispatchHost<'a> {
     ) {
         match self.base_scope(base) {
             NodeScopeId::File { canonical_id, .. } => {
-                // Phase G instrumentation: callsite attribution for
+                // Instrumentation: callsite attribution for
                 // `prepared_decl_bundle_warm` reads. The four
                 // `DispatchHost` trait callbacks
                 // (`resolve_prepared_type_decl`, `root_identity`,

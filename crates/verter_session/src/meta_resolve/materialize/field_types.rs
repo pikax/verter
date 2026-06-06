@@ -450,16 +450,16 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 /// tracer + `DISPATCH_DEP_SIGNATURE_ACCUMULATOR`, mirroring the
 /// TypeExpr entry's contract.
 /// Context-explicit per-member graph-native reducer entry
-/// (codex-hybrid spec).
+/// (demand-driven reducer spec).
 ///
 /// The caller supplies the publication
 /// [`crate::semantic_query::ProjectionReductionContext`] that flows
 /// through every operator dispatch and through the iterative reducer's
 /// demand-traversal selection. `Published(Navigate)` is the per-prop
 /// publication boundary that keeps the demanded terminal shallow;
-/// `Published(Expanded)` is the whole-surface mode. The pre-AX
+/// `Published(Expanded)` is the whole-surface mode. The earlier
 /// `reduce_member_value_graph_native(_, _, _, ProjectionMode)` entry
-/// was retired — there is one behaviour path and one entry point.
+/// is gone — there is one behaviour path and one entry point.
 pub(crate) fn reduce_member_value_graph_native_with_context(
     ctx: &dyn crate::resolver_core::ResolverContext,
     _scope_canonical_id: &str,
@@ -475,8 +475,8 @@ pub(crate) fn reduce_member_value_graph_native_with_context(
     // `raise_and_reduce_with_context` internally:
     //   1. `reduce_graph_node_iterative(member_value, context, …)` —
     //      top-down demand-driven worklist that pushes ONLY the
-    //      children the demand context requires (per the codex-hybrid
-    //      traversal rules).
+    //      children the demand context requires (per the demand-driven
+    //      reducer traversal rules).
     //   2. `raise_node_to_type_expr(reduced)` — single terminal raise.
     //   3. Returns `MaterializedTypeExpr { node_id, type_expr,
     //      dep_signature }`.

@@ -761,7 +761,7 @@ impl From<ProjectionMode> for verter_audit::ProjectionModeTag {
     }
 }
 
-/// Reduction-demand axis (codex-hybrid spec).
+/// Reduction-demand axis (demand-driven reducer spec).
 ///
 /// Distinguishes whether the query result is going to be *published*
 /// (a consumer of the projector pipeline will read it on the final
@@ -808,7 +808,7 @@ pub enum ReductionDemand {
     MacroObjectSurface,
 }
 
-/// Surface-provenance axis — codex BINDING design.
+/// Surface-provenance axis — by design.
 ///
 /// Records whether the surface members produced by a lowering /
 /// instantiation reached the surface as the **macro type-argument's own
@@ -941,7 +941,7 @@ impl ProjectionReductionContext {
     }
 
     /// Construct a `Published` context entering the macro
-    /// type-argument's OWN body — codex BINDING design.
+    /// type-argument's OWN body — by design.
     ///
     /// Used by the macro-payload projector entry points
     /// (`defineProps<T>()` / `withDefaults`) so the object members
@@ -992,7 +992,7 @@ impl ProjectionReductionContext {
     /// engine, deferred-shell evaluator, and other internal transit
     /// callers that need the structural shape but never publish the
     /// result. `mode` is `Shallow` for transit callers per the
-    /// codex-hybrid spec.
+    /// demand-driven reducer spec.
     pub const fn structural_transit() -> Self {
         Self {
             mode: ProjectionMode::Shallow,
@@ -1212,7 +1212,7 @@ impl MacroPayloadContext {
     }
 }
 
-/// Carrier-stop predicate (codex-hybrid spec).
+/// Carrier-stop predicate (demand-driven reducer spec).
 ///
 /// Returns `true` exactly when an operator (`keyof T`, `{ [K in S]: V }`)
 /// should reduce — i.e. the caller is on the publication path.
@@ -1220,7 +1220,7 @@ impl MacroPayloadContext {
 /// ([`SemanticNodeData::KeyOf`] / [`SemanticNodeData::Mapped`])
 /// without enumerating keys or materialising produced members.
 ///
-/// **Implementation note (codex-hybrid amendment).** The codex spec
+/// **Implementation note (demand-driven reducer amendment).** The spec
 /// originally added `&& matches!(ctx.mode, ProjectionMode::Expanded)`
 /// to the predicate. Empirically that mode restriction is too tight:
 /// it carrier-stops the macro projector's `Published + Navigate`
@@ -1340,7 +1340,7 @@ pub struct SurfaceMember {
     /// for the structural definition. Propagated through the prepared-surface
     /// walker and `surface_member_to_expanded_field`.
     pub declared_in_macro_type_arg: bool,
-    /// Surface-merge role (codex BINDING design for the type-resolution
+    /// Surface-merge role (by design, for the type-resolution
     /// unification). Distinguishes a member declared in the consuming
     /// declaration's OWN body ([`MemberMergeRole::OwnBody`]) from one reached
     /// via REAL interface/class `extends`/`implements` heritage
@@ -3963,7 +3963,7 @@ pub enum SemanticNodeData {
     /// [`HostResolvedNamedTypeKey`]), so reads are self-validating within
     /// one project generation.
     VueMacroElements(Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>),
-    // §5.6 WIP-L — function shape.
+    // §5.6 Function shape.
     ///
     /// Classes / interfaces lower to `SemanticNodeData::Object` with heritage
     /// merged; only function signatures have distinct semantics (call
@@ -4218,7 +4218,7 @@ impl PartialEq for SemanticNodeData {
                 },
                 // Spans participate in identity: provenance-aware interning so
                 // an identical same-file signature shape at a different source
-                // location does not alias another node's spans (codex BINDING).
+                // location does not alias another node's spans.
             ) => ap == bp && ar == br && atp == btp && asig == bsig && aret == bret,
             (Self::DeclRef { identity: a }, Self::DeclRef { identity: b }) => a == b,
             (

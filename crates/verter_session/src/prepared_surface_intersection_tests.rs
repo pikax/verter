@@ -91,7 +91,7 @@ fn get_meta(
         .expect("get_component_meta should return metadata")
 }
 
-/// Phase C Class A — positive regression characterization for the
+/// Class A — positive regression characterization for the
 /// non-fatal-unsupported intersection merge: heritage chain to an
 /// unresolvable external type + explicit body members.
 ///
@@ -102,7 +102,7 @@ fn get_meta(
 /// exposed the bug).
 ///
 /// See the module docstring for the discrimination caveat: the
-/// truly discriminating proof of the Phase C fix is the
+/// truly discriminating proof of the prepared-surface intersection fix is the
 /// 177-component bench gate, since synthetic single-component
 /// fixtures often hit the analyzer-side rescue path before the
 /// prepared-surface intersection runs.
@@ -171,19 +171,19 @@ defineEmits<{ submit: [event: Event] }>()
 
     assert!(
         prop_names.contains(&"onSubmit"),
-        "Phase C Class A: explicit body member `onSubmit` MUST be \
+        "Class A: explicit body member `onSubmit` MUST be \
          published when the heritage arm is unresolvable. \
          Got props: {prop_names:?}"
     );
     assert!(
         prop_names.contains(&"title"),
-        "Phase C Class A: sibling body member `title` MUST also \
+        "Class A: sibling body member `title` MUST also \
          be published — proves the merge keeps the Object arm's \
          full surface. Got props: {prop_names:?}"
     );
 }
 
-/// Phase C Class B — positive regression characterization for the
+/// Class B — positive regression characterization for the
 /// `Omit<Unresolvable, K>` heritage + explicit body re-introduction
 /// of the omitted keys. Mirrors nuxt-ui `Table.vue`'s
 /// `TableOptions` shape.
@@ -256,7 +256,7 @@ defineProps<TablePropsCarrier<string>>()
     for name in &["state", "onStateChange", "renderFallbackValue"] {
         assert!(
             prop_names.contains(name),
-            "Phase C Class B: explicit body re-introduction `{name}` \
+            "Class B: explicit body re-introduction `{name}` \
              MUST be published when the `Omit<Unresolvable, ...>` \
              heritage arm is unresolvable. Got props: {prop_names:?}"
         );

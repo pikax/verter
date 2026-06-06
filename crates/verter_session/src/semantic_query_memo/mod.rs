@@ -1911,7 +1911,7 @@ impl SemanticGraphStore {
 
     /// Builder-side counter helpers. Builders increment these as they emit
     /// reusable work; the per-builder semantics are documented in plan
-    /// §3 Phase C (where the real builders land).
+    /// §3 (where the real builders land).
     pub fn record_instantiate(&self) {
         self.stats.instantiate_count.fetch_add(1, Ordering::Relaxed);
     }

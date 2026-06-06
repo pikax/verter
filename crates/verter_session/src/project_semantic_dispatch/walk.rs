@@ -469,7 +469,7 @@ pub(super) struct PathWalker<'a, 'b> {
     /// invocation. `SmallVec` because alias chains are overwhelmingly
     /// short; spills to heap only for pathological fixtures.
     visited_aliases: smallvec::SmallVec<[AliasCycleIdentity; 8]>,
-    /// Phase D §5.3 WIP-R: per-call cycle-guard over visited
+    /// §5.3 per-call cycle-guard over visited
     /// [`SemanticNodeId`]s. Replaces the
     /// retired `max_depth = 64` rail — the set grows only on genuine
     /// re-entry, so linear-chain walks cost O(n) set inserts, not O(n^2)
@@ -794,7 +794,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         self.context.mode
     }
 
-    /// Surface-provenance accessor (codex BINDING design). The macro
+    /// Surface-provenance accessor (by design). The macro
     /// type-argument own-body entry context flows from the
     /// `ProjectPath`'s context onto the walker; the `DeclPlaceholder`
     /// expansion below preserves it onto its `Instantiate` dispatch so
@@ -1743,7 +1743,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 //     case keeps the lazy `Ref` shape.
                 //   - Expanded: dispatch Instantiate, recurse on result.
                 SemanticNodeData::InstantiationRef { base, args } => {
-                    // Codex Q4 — IA path-precision.
+                    // IA path-precision.
                     // "Intermediate hops are navigate-only, terminal uses
                     // caller mode." When there is still a `PathSegment`
                     // ahead of us, the InstantiationRef is an
@@ -1752,12 +1752,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // pattern-match on the body's surface. When the
                     // walker reaches a USERLAND InstantiationRef at the
                     // terminal hop under Navigate, it stays terminal
-                    // (the codex carrier-preservation contract for
+                    // (the carrier-preservation contract for
                     // generic-application bodies under shallow-by-
                     // default publication). Builtin utility types (
                     // `Pick`/`Omit`/`Partial`/…, `canonical_id ==
                     // "__builtin__"`) ALWAYS unwrap even under
-                    // Navigate per codex Q4 ("the demanded
+                    // Navigate ("the demanded
                     // instantiation is reduced as the terminal").
                     let still_more_path = index < path.len();
                     let is_builtin = base.canonical_id.as_ref() == "__builtin__";
@@ -1774,7 +1774,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let args_clone = Arc::clone(args);
                     drop(data);
                     // Intermediate-hop demand
-                    // demotion (codex spec). An InstantiationRef
+                    // demotion (the spec). An InstantiationRef
                     // unwrapped with a path segment still pending is
                     // an INTERMEDIATE hop — dispatch under
                     // `structural_transit()` so the body lowers in
@@ -2095,7 +2095,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
                 drop(data);
                 // Preserve the walker's surface provenance onto the
-                // `Instantiate` expansion (codex BINDING design): when
+                // `Instantiate` expansion (by design): when
                 // the empty-path `ProjectPath` macro-payload surface read
                 // entered under `MacroTypeArgOwnBody`, the unwrapped
                 // declaration's own-body members must be stamped
@@ -2507,7 +2507,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             provenance_override,
                         });
                     }
-                    // Per-arm role override (codex BINDING design): a
+                    // Per-arm role override (by design): a
                     // heritage-overlay body's REFERENCE-carrier arms are
                     // `extends`/`implements` heritage — visit them with
                     // `Some(Heritage)` so their inherited members (which the
@@ -2657,7 +2657,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             SemanticNodeData::Object(view) => {
                 let mut surface = ShallowSurface::from_object(view);
                 drop(data);
-                // Apply the heritage role override (codex BINDING design):
+                // Apply the heritage role override (by design):
                 // when this Object was reached through a consuming
                 // declaration's `extends`/`implements` heritage carrier, its
                 // members (which the base lowered as its OWN body) become
@@ -2739,7 +2739,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // synthesis to keep generic helpers' Conditional-arm
                 // distribution intact.
                 //
-                // Preserve the walker's surface provenance (codex BINDING design)
+                // Preserve the walker's surface provenance (by design)
                 // (continued): `defineProps<Foo<Bar>>()` makes `Foo`'s
                 // OWN-body members macro-T own-body. `Bar` is a generic
                 // argument substituted INTO `Foo`'s body and is lowered
@@ -2823,7 +2823,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 };
                 drop(data);
                 // Preserve the walker's surface provenance onto the
-                // DeclPlaceholder unwrap (codex BINDING design): the
+                // DeclPlaceholder unwrap (by design): the
                 // mode/demand stay transit-Navigate (carrier-stop
                 // semantics for the shallow surface walk), but a
                 // `MacroTypeArgOwnBody` walker stamps the unwrapped
@@ -3238,7 +3238,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         // for mapped types whose source is a deferred shell
         // (`Opaque(DeclPlaceholder)` from an imported interface,
         // `InstantiationRef` from a generic alias body, etc.). The
-        // pre-AX walker bailed on these cases via a `collect_literal_keys`-only
+        // earlier walker bailed on these cases via a `collect_literal_keys`-only
         // fallback, which left imported `[K in keyof Foo]?: V` mapped
         // arms unenumerated under empty-path Shallow.
         // `key_names_from_base_node` is the same enumerator
@@ -3264,7 +3264,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         if !collected {
             // The shared enumerator on the SOURCE handles
             // `Opaque(DeclPlaceholder)` / `Object` / `Intersection` /
-            // `Union` uniformly. Codex-binding —
+            // `Union` uniformly:
             // empty-path Shallow with an imported mapped carrier MUST
             // enumerate just like the Expanded path's MappedType
             // dispatch.
@@ -3272,8 +3272,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             match self.dispatch.key_names_from_base_node(source) {
                 Some(enumerated) => keys = enumerated,
                 None => {
-                    // Transit-Shallow Publication (codex Q1
-                    // #2 / Q3): the source is a `DeclRef` /
+                    // Transit-Shallow Publication: the source is a `DeclRef` /
                     // `InstantiationRef` carrier under
                     // `StructuralTransit(Navigate)` lowering and the
                     // global `key_names_from_base_node` deliberately
@@ -3326,7 +3325,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         let optionality = mapper.optionality;
         let readonly_mod = mapper.readonly;
         // Identity-mapper fast path detection.
-        // Transit-Shallow Publication (codex Q1 #3): when
+        // Transit-Shallow Publication: when
         // `mapper.kind == Identity` (the canonical
         // `[K in keyof T]: T[K]` shape under `Readonly` / `Partial` /
         // `Required`) AND the source enumeration yielded a usable
@@ -3504,7 +3503,7 @@ enum Frame {
     Visit {
         node: SemanticNodeId,
         target: BufferTarget,
-        /// Surface-merge role override (codex BINDING design for the
+        /// Surface-merge role override (by design, for the
         /// type-resolution unification): when `Some(role)`, every member of
         /// the Object surface this node yields is stamped `role`, overriding
         /// the role baked at lowering. Set to `Some(Heritage)` for a
@@ -4099,7 +4098,7 @@ fn merge_union_surfaces(
 ///
 /// A prop / slot present in ANY union arm is part of the component macro
 /// surface (`defineProps<FixedProps | BubbleProps>()` declares every
-/// arm's props). Per the codex BINDING ruling:
+/// arm's props). Per the binding ruling:
 ///
 /// - A member survives iff it is present (by name) in AT LEAST ONE arm.
 /// - Its value is the UNION of the per-arm member values for the arms

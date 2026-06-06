@@ -1104,8 +1104,8 @@ pub struct ShapeDemand {
     /// narrow this at the publication boundary.
     pub(crate) path: Arc<[crate::semantic_query::PathSegment]>,
     /// Terminal-hop projection / reduction context. `(mode, demand)`
-    /// keyed disjointly so cache slots split per the codex Q3-V
-    /// finding ("ShapeCacheKey must carry the complete demand/context,
+    /// keyed disjointly so cache slots split per the disjoint-slot
+    /// rule ("ShapeCacheKey must carry the complete demand/context,
     /// not a Navigate boolean").
     pub(crate) terminal_context: crate::semantic_query::ProjectionReductionContext,
     /// Key filter at the terminal hop (Pick/Omit narrowing, etc.).

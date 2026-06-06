@@ -45,7 +45,7 @@ type AugmentationContributions = (
 );
 
 /// Encode a [`ProjectionReductionContext`] as a compact u32 bit
-/// pattern used in the Phase G mapped-member-materialization
+/// pattern used in the mapped-member-materialization
 /// identity tuple. Layout: bits 0–1 (demand tag) and 2+ (mode tag).
 #[inline]
 pub(super) fn encode_projection_reduction_context_bits(
@@ -267,7 +267,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         value_root: &ValueRootKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        // Phase C: telemetry for the typeof traversal site (gemini's
+        // Telemetry for the typeof traversal site (the
         // HIGH-confidence direction; brief site `build.rs:162`).
         if let Some(observer) = verter_audit::current_observer() {
             observer.record_event(verter_audit::AuditEvent::BuildTypeofCall);
@@ -286,7 +286,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         {
             Some(indexed) => indexed,
             None => {
-                // Phase C: prepared-value miss site.
+                // Telemetry: prepared-value miss site.
                 if let Some(observer) = verter_audit::current_observer() {
                     observer.record_event(verter_audit::AuditEvent::BuildTypeofPreparedValueMiss);
                 }
@@ -920,7 +920,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `Instantiate` sub-key this build re-emits via
         // `instantiate_context_for`.
         let context = instantiate_context.projection_reduction;
-        // Codex-hybrid spec: the call-site provides
+        // demand-driven reducer spec: the call-site provides
         // the publication / structural-transit context. `body_mode` is
         // shorthand for `context.mode` everywhere the existing lowering
         // pipeline consults it; the demand axis flows through to
@@ -1076,8 +1076,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // strict warm-read validator. Structural args (`Global`-scoped
             // primitives, literal-union key sets) contribute nothing.
             let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
-            // Builtin-utility results are NEVER macro-T own-body (codex
-            // BINDING design): `defineProps<Omit<Vendor, K>>()` surfaces
+            // Builtin-utility results are NEVER macro-T own-body (by
+            // design): `defineProps<Omit<Vendor, K>>()` surfaces
             // members that came from `Vendor` via the utility, none of
             // which the author wrote in the macro T body. Downgrade the
             // provenance to structural so the utility's produced members
@@ -1138,7 +1138,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // expression, lower the default in the decl's scope and bind
         // it — mirrors the solver's `resolve_type_parameters_in_body`
         // behaviour at solve.rs:2580.
-        // Phase G instrumentation: callsite attribution for
+        // Instrumentation: callsite attribution for
         // `prepared_decl_bundle_warm` reads from `build_instantiate`.
         if let Some(obs) = verter_audit::current_observer() {
             obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleCallsiteBuildInstantiate);
@@ -1169,8 +1169,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // survives. The legacy `body_mode`-only wrapper at
                 // [`Self::shallow_lower_type_expr`] rebuilds
                 // `Published(mode)` and would clobber the demand axis.
-                // Provenance downgrades to structural (codex BINDING Stage
-                // 1): a type-parameter default is a substituted value, not
+                // Provenance downgrades to structural: a type-parameter default is a substituted value, not
                 // the macro-T own body.
                 self.shallow_lower_type_expr_with_context(
                     default,
@@ -1225,7 +1224,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // bodies that reference other declarations produce proper
         // sub-Instantiate shells instead of opaque placeholders.
         //
-        // Phase D recursive-ref guard: push `(decl_canonical, decl_name)`
+        // Recursive-ref guard: push `(decl_canonical, decl_name)`
         // onto the dispatcher's `instantiate_active` stack before body
         // lowering. A nested `TypeExpr::Ref` resolving back to the same
         // identity — e.g. `type TreeNode = { children: TreeNode[] }` —
@@ -1256,8 +1255,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // along the decl body would then reach the publication-edge
         // loops and emit the spurious member edges that the
         // ChatMessages `outputSchema|execute` leak captured.
-        // Surface-provenance handling for the declaration body (codex
-        // BINDING design — own-body vs reference discrimination). The bit
+        // Surface-provenance handling for the declaration body (by
+        // design — own-body vs reference discrimination). The bit
         // is stamped only for members lowered from an INLINE object
         // literal that is the macro-T own body; members reached through a
         // REFERENCE arm decay to structural. See
@@ -1839,8 +1838,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Lower a prepared declaration's `body` carrying the macro-surface
-    /// provenance with own-body-vs-heritage discrimination (codex
-    /// BINDING design).
+    /// provenance with own-body-vs-heritage discrimination (by
+    /// design).
     ///
     /// - **Alias**: the body is the author-written macro type argument
     ///   (`defineProps<A & B>()` → `A & B`). Every member is own-body, so
@@ -1895,8 +1894,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
-        // Member-merge role for this declaration's REFERENCE arms (codex
-        // BINDING design for the type-resolution unification). A reference arm
+        // Member-merge role for this declaration's REFERENCE arms (by
+        // design, for the type-resolution unification). A reference arm
         // of an interface/class body is REAL `extends`/`implements` heritage —
         // its inherited members are `Heritage` and SHADOWED by the own-body
         // members. A reference arm of a type-alias body is an AUTHORED
@@ -2041,7 +2040,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         // `member_index` is the declaration's OWN-body direct-member
-        // index (codex BINDING design — authoritative own-member
+        // index (by design — authoritative own-member
         // overlay). `PreparedTypeDecl::build_member_index` populates it
         // from direct Object members only, skipping heritage `extends`
         // `Ref` arms. So a member present in `member_index` is
@@ -2403,7 +2402,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // path walker.
             let value_expr = self.opaque(QueryError::Miss);
             // Synthesise a TypeParam binder node for the utility
-            // mapper's `K`. Phase G fix: the param_index is the
+            // mapper's `K`: the param_index is the
             // source SemanticNodeId itself (truncated to u16) so
             // two utility invocations on the SAME source share
             // the SAME binder identity → same `MapperKey` → same
@@ -2506,7 +2505,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // paths set `key_space = K` and `value_expr = V`.
                 // Synthesise a TypeParam binder node id for `P`.
                 //
-                // Phase G fix: the param_index is derived from
+                // The param_index is derived from
                 // (key_arg, value_arg) so two `Record<K, V>`
                 // invocations on the same K, V share the SAME
                 // binder identity → same `MapperKey` → same
@@ -3023,7 +3022,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let fence = self.project_generation_signature();
         self.graph().record_path_length(path.len() as u32);
         // Longest-prefix-first peek. Skip when path.len() < 2.
-        // Codex-2 r3 fix: prefix entries are cached as Navigate regardless
+        // Prefix entries are cached as Navigate regardless
         // of the caller's mode (path-precise rule — intermediate hops are
         // Navigate, terminal hop is the caller's mode).
         let (start_base, start_index) = if path.len() < 2 {
@@ -3105,7 +3104,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // parent's authoritative path-precise fact signature. Publishing
         // here before the tracer finalises would attach a legacy-only
         // signature derived from the fence (the pre-carrier behaviour
-        // codex flagged in `publish_warm_if_absent`).
+        // flagged in `publish_warm_if_absent`).
         let pending_prefix_backfills =
             collect_prefix_backfills(start_base, &walker_path, &walker.intermediate_nodes);
         // §3.4 materialised-record set for the TERMINAL entry: the
@@ -3167,7 +3166,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let data = self.graph().node_data(base);
         let fence = self.project_generation_signature();
-        // Codex-hybrid carrier-stop: when the
+        // demand-driven reducer carrier-stop: when the
         // caller's context is not a publication-mode-Expanded demand,
         // return a deferred `KeyOf { base }` carrier instead of
         // reifying the keyspace as a literal-anchor union with one
@@ -3400,7 +3399,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let observed_self_roots =
             self.observed_self_roots_from_nodes([source, mapper.key_space, mapper.value_expr]);
 
-        // Codex-hybrid carrier-stop: outside a
+        // demand-driven reducer carrier-stop: outside a
         // publication-mode-Expanded demand the build returns a
         // deferred `Mapped { source, mapper }` carrier without
         // enumerating the source's key space or emitting per-member
@@ -3764,7 +3763,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .intern_node(SemanticNodeData::Literal(LiteralValue::String(
                 key_name.to_string(),
             )));
-        // Phase G instrumentation — classify this per-K call as
+        // Instrumentation — classify this per-K call as
         // unique or repeated based on the identity tuple a typed
         // mapped-member materialization cache would key on. The
         // classifier records the tuple in the per-request observed
@@ -3838,7 +3837,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the caller's `StructuralTransit(Navigate)` demand. The C11a
     /// binding then closes the conditional to a `Function`.
     ///
-    /// Codex Q1 dispatch chain (slot fixture):
+    /// dispatch chain (slot fixture):
     /// ```text
     /// DefineSlots payload lowered StructuralTransit(Navigate)
     ///   → ProjectPath([], Published(Shallow))
@@ -3903,7 +3902,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
         self.graph().record_mapped_per_k_materialization();
-        // Phase G instrumentation — selected-key variant.
+        // Instrumentation — selected-key variant.
         if let Some(ctx) = crate::request_context::current_request_context() {
             ctx.classify_mapped_member_materialization(
                 crate::request_context::MappedMemberIdentity {
@@ -4087,7 +4086,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// **`context` parameter**: carries the caller's
     /// `ProjectionReductionContext` for telemetry / cache scoping
     /// alignment — the internal dispatch is fixed at
-    /// `Published(Shallow)` per the codex contract (Q3). Callers
+    /// `Published(Shallow)` per the contract. Callers
     /// passing a non-Published context to this helper are calling
     /// out-of-contract; only `synthesise_mapped_surface` (running
     /// under publication demand) is meant to drive it.
@@ -4951,7 +4950,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 /// memoized. Returns `None` when no prefix is warm — caller falls back
 /// to walking the full path from `base`.
 ///
-/// **Codex-2 r3 fix.** The lookup forces `mode: Navigate` regardless of
+/// The lookup forces `mode: Navigate` regardless of
 /// the caller's mode because intermediate path hops MUST be cached as
 /// Navigate per the path-precise rule (CLAUDE.md "Macro Type Traversal
 /// Rule"). The terminal hop keeps the caller's mode and is published by

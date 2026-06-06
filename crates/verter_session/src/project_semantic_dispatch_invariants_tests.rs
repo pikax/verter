@@ -9,7 +9,7 @@
 #![allow(dead_code)]
 
 // ============================================================================
-// §6.1 Guard contract (8 tests) — un-ignored in §5.3 WIP-R
+// §6.1 Guard contract (8 tests) — un-ignored in §5.3
 // ============================================================================
 //
 // Verify the per-function recursion-guard contract from The
@@ -894,10 +894,10 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
 }
 
 // ============================================================================
-// §6.3 Relation engine (8 tests) — un-ignored in §5.4 WIP-S
+// §6.3 Relation engine (8 tests) — un-ignored in §5.4
 // ============================================================================
 //
-// Real discriminating bodies for the Phase D relation engine. Each test
+// Real discriminating bodies for the relation engine. Each test
 // constructs SemanticNodeData fixtures directly on the shared graph and
 // exercises `ProjectSemanticDispatch::relate_nodes` against them. A
 // characterization test body must FAIL against the pre-cutover tree
@@ -1951,7 +1951,7 @@ fn relation_engine_has_exactly_one_implementation() {
 
 #[test]
 fn type_expr_lowering_has_exactly_one_path() {
-    // Codex-hybrid spec: the lowering path now
+    // Demand-driven reducer spec: the lowering path now
     // exposes TWO entry points that share ONE body —
     // `shallow_lower_type_expr` (legacy `mode`-only wrapper) and
     // `shallow_lower_type_expr_with_context` (context-explicit, takes
@@ -2217,7 +2217,7 @@ fn contains_variant_decl(src: &str, variant_name: &str) -> bool {
 }
 
 // ============================================================================
-// §6.5 D5 grep (5 tests) — un-ignored in §5.9 WIP-D5
+// §6.5 D5 grep (5 tests) — un-ignored in §5.9
 // ============================================================================
 //
 // Each test asserts that a specific retired-cache symbol is absent
@@ -3161,7 +3161,7 @@ fn instantiate_local_generic_ref_callers_route_through_dispatch() {
 }
 
 // ============================================================================
-// Codex-hybrid demand-bounded carrier-stop tests.
+// Demand-bounded carrier-stop tests.
 // ============================================================================
 //
 // These tests build hermetic SemanticNodeData fixtures and dispatch the
@@ -3171,7 +3171,7 @@ fn instantiate_local_generic_ref_callers_route_through_dispatch() {
 // `StructuralTransit` context MUST return a carrier shell with NO
 // per-key `ProjectMember` edges emitted into the audit footprint.
 //
-// Discriminating against a pre-AX-hybrid tree (where the keys had no
+// Discriminating against a earlier tree (where the keys had no
 // `context` field and the build unconditionally reified):
 //   * Pre-fix: a single `MappedType` cache slot, both contexts share
 //     the materialised result, per-member edges emit unconditionally.
@@ -3394,7 +3394,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
     // as the builtin `Pick<T, K>`. Under `StructuralTransit` BOTH
     // carrier-stop; under `Published + Expanded` BOTH materialise.
     //
-    // This locks the structural-not-nominal invariant the codex-hybrid
+    // This locks the structural-not-nominal invariant the demand-driven reducer
     // mandates. A regression that resurrects the `BuiltinUtility::from_name`
     // discriminator would break here: the userland mapped would
     // materialise under transit (or fail to materialise under publish),
@@ -3485,7 +3485,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
 #[test]
 fn ax_hybrid_may_reduce_operator_predicate_is_purely_structural() {
     // AX-hybrid amended predicate: `Published` (any mode) reduces;
-    // `StructuralTransit` (any mode) carrier-stops. The codex spec's
+    // `StructuralTransit` (any mode) carrier-stops. The spec's
     // original `&& mode == Expanded` restriction was over-restrictive
     // for the macro projector's `Published + Navigate` publication
     // boundary (broke userland-MyPick structural equivalence — the

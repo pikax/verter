@@ -479,8 +479,8 @@ pub(crate) fn macro_expansion_for_cycle(
     }
 }
 
-/// Surface-provenance for a macro payload's own-body members (codex
-/// BINDING design).
+/// Surface-provenance for a macro payload's own-body members (by
+/// design).
 ///
 /// `defineProps<T>()` and `withDefaults(defineProps<T>(), …)` resolve a
 /// PROP surface whose members the author literally wrote in the macro
@@ -536,8 +536,8 @@ pub(crate) fn resolve_macro_payload(
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) -> Option<SemanticNodeId> {
     let parsed_arg = mac.parsed_type_argument.as_ref()?;
-    // Surface-provenance for the macro type argument's own body (codex
-    // BINDING design). Props / withDefaults carry the macro-T own-body
+    // Surface-provenance for the macro type argument's own body (by
+    // design). Props / withDefaults carry the macro-T own-body
     // provenance so members written directly in `defineProps<T>()`'s `T`
     // surface with `declared_in_macro_type_arg = true`. Emits / slots /
     // options / model / expose are structural — their
@@ -675,7 +675,7 @@ pub(crate) fn resolve_payload_surface(
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) -> Option<SemanticNodeId> {
     // The empty-path `ProjectPath` carries the macro's surface
-    // provenance (codex BINDING design): for a props payload that
+    // provenance (by design): for a props payload that
     // resolved to a `DeclRef` carrier (`defineProps<FooProps>()`), the
     // walker's `DeclPlaceholder` expansion preserves the
     // `MacroTypeArgOwnBody` provenance onto its `Instantiate`, so
@@ -757,7 +757,7 @@ pub(crate) fn resolve_payload_surface(
 ///     today (`type_expr_has_package_backed_object_like_root` +
 ///     `lowered_root_reaches_transitive_cycle` +
 ///     `type_expr_contains_reducible_operator`). The gates stay
-///     TypeExpr-keyed in this block per the codex caveat — migrating
+///     TypeExpr-keyed here per the noted caveat — migrating
 ///     them to graph-native predicates widens blast radius into the
 ///     cycle module and is punted to a follow-up.
 ///  3. **Gate-rejected outcomes do NOT admit.** The raised TypeExpr

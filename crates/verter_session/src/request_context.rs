@@ -618,7 +618,7 @@ pub struct RequestContext {
     pub prepared_decl_bundle_reject_import_route_mismatch: AtomicU64,
     /// Bundle warm-read rejection — unattributed (must stay 0).
     pub prepared_decl_bundle_reject_other: AtomicU64,
-    // Phase C focused semantic-query counters ---------------------------
+    // Focused semantic-query counters -----------------------------------
     // Each is per-request, bumped from `ProjectSemanticDispatch`. The
     // mining surface in `ResolverHotPathCounters` carries the `u32`
     // snapshot.
@@ -670,8 +670,8 @@ pub struct RequestContext {
     /// `build_typeof` calls where `ensure_indexed_ready` returned
     /// `None`.
     pub build_typeof_prepared_value_misses: AtomicU64,
-    // Phase G focused mapped-member materialization counters
-    // -------------------------------------------------------
+    // Mapped-member materialization counters
+    // --------------------------------------
     /// Calls to `materialize_mapped_member_value_for_key` whose
     /// identity tuple is FIRST-SEEN in the active request.
     pub mapped_member_plain_unique: AtomicU64,
@@ -695,9 +695,9 @@ pub struct RequestContext {
     /// Mapper-binder-ordinal collisions: the same mapper source
     /// triple interned at different ordinals within one request.
     pub mapped_binder_ordinal_collision: AtomicU64,
-    // Phase H focused recursive-substitution counters
-    // -----------------------------------------------
-    // Codex BINDING insight: the recursive helper
+    // Recursive-substitution counters
+    // -------------------------------
+    // Key insight: the recursive helper
     // `substitute_with_change_tracking` (substitute.rs:99-104)
     // BYPASSES the top-level `substitute_memo` even though
     // `(node, parameter_node, arg)` is a complete identity. These
@@ -760,7 +760,7 @@ pub struct RequestContext {
         parking_lot::Mutex<rustc_hash::FxHashMap<MapperSourceIdentity, u16>>,
 }
 
-/// Identity tuple for the Phase G mapped-member materialization
+/// Identity tuple for the mapped-member materialization
 /// unique/repeated classifier. Pairs the mapper binder + value
 /// expression + key + reduction context — what a typed cache key
 /// for the materialization result would look like.
@@ -781,7 +781,7 @@ pub struct MappedMemberIdentity {
     pub variant: u8,
 }
 
-/// Identity tuple for the Phase G mapper-binder-ordinal collision
+/// Identity tuple for the mapper-binder-ordinal collision
 /// classifier. The source triple is what `lower.rs` uses to
 /// construct the binder's `DeclIdentity`; if the same triple
 /// produces two different `param_index` ordinals across calls,
@@ -799,7 +799,7 @@ pub struct MapperSourceIdentity {
     pub display_name: Arc<str>,
 }
 
-/// Identity tuple for the Phase H recursive-substitution
+/// Identity tuple for the recursive-substitution
 /// unique/repeated classifier. The triple matches the existing
 /// top-level `substitute_memo` key composition
 /// (`(value_expr, parameter_node, arg)`) so the classifier output
@@ -1144,7 +1144,7 @@ impl RequestContext {
     /// `(mapper.value_expr, mapper.parameter_node, key_node, context,
     /// variant)`. Bumps the appropriate `mapped_member_*_unique` /
     /// `mapped_member_*_repeated` counter via
-    /// [`verter_audit::current_observer`] — paired so a Phase G
+    /// [`verter_audit::current_observer`] — paired so an
     /// investigator can compute the unique/repeated ratio that
     /// determines whether a typed mapped-member cache would close
     /// the K-loop cross product.
@@ -1172,8 +1172,8 @@ impl RequestContext {
     /// DIFFERENT ordinal earlier in this request, bumps
     /// `mapped_binder_ordinal_collision` (mapper-identity-instability).
     ///
-    /// Phase G mapper-identity-stability gate. A non-zero count
-    /// confirms codex's mapper-identity-instability concern at
+    /// Mapper-identity-stability gate. A non-zero count
+    /// confirms the mapper-identity-instability concern at
     /// `lower.rs:976` — the same mapper source triple receiving
     /// different ordinals from different dispatcher instances will
     /// hash to distinct `SemanticNodeData::TypeParam` interns and

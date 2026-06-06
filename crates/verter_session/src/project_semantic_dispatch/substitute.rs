@@ -42,7 +42,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         parameter_node: SemanticNodeId,
         arg: SemanticNodeId,
     ) -> SemanticNodeId {
-        // Phase C: top-level substitute-call telemetry. Bumped at the
+        // Top-level substitute-call telemetry. Bumped at the
         // entry of `substitute_semantic_type_param` (the public
         // surface), so the snapshot reflects the number of distinct
         // top-level substitutions issued for this request — NOT the
@@ -103,9 +103,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         parameter_node: SemanticNodeId,
         arg: SemanticNodeId,
     ) -> (SemanticNodeId, bool) {
-        // Phase H classification + recursive hash-cons memo probe.
+        // Classification + recursive hash-cons memo probe.
         //
-        // Codex BINDING insight: the recursive helper BYPASSES the
+        // Key insight: the recursive helper BYPASSES the
         // top-level `substitute_memo` even though
         // `(node, parameter_node, arg)` is a complete identity for
         // the substitution result. Wiring the existing store-owned
@@ -141,8 +141,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 observer.record_event(verter_audit::AuditEvent::RecursiveSubstituteMemoHit);
             }
             // The memo stores the substitution RESULT. `changed` is
-            // recovered cheaply from `result != node` — codex
-            // confirmed this is safe because substitution is a pure
+            // recovered cheaply from `result != node` — this is
+            // safe because substitution is a pure
             // function of its three inputs and `intern_preserving_scope`
             // already dedups structurally-equivalent rebuilds back
             // to the same `SemanticNodeId`. A stored result that
@@ -510,7 +510,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             SemanticNodeData::Mapped { source, mapper } => {
-                // Phase C: codex-prescribed "mapped descents" counter.
+                // "mapped descents" counter.
                 if let Some(observer) = verter_audit::current_observer() {
                     observer.record_event(verter_audit::AuditEvent::SubstituteMappedTypeDescend);
                 }
@@ -543,7 +543,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !any_changed {
                     return (node, false);
                 }
-                // Phase H: codex-prescribed "Mapped rebuilt" counter.
+                // "Mapped rebuilt" counter.
                 // Distinct from `SubstituteMappedTypeDescend` (every
                 // visit) — fires only on the rebuild branch after at
                 // least one descendant sub-tree changed.
@@ -583,7 +583,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // unchanged with `changed = false` — the caller skips the
                 // rebuild + re-intern entirely.
                 //
-                // Phase C: codex-prescribed "opaque TypeOf returns"
+                // "opaque TypeOf returns"
                 // counter (brief site `substitute.rs:452`).
                 if let Some(observer) = verter_audit::current_observer() {
                     observer.record_event(verter_audit::AuditEvent::SubstituteTypeOfOpaque);
@@ -597,7 +597,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 false_branch_ref,
                 distributive,
             } => {
-                // Phase C: codex-prescribed "conditional descents"
+                // "conditional descents"
                 // counter — every visit of the Conditional arm
                 // descends into its four sub-trees, regardless of
                 // whether the rebuild ultimately fires.
@@ -615,7 +615,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !(cc || ec || tc || fc) {
                     return (node, false);
                 }
-                // Phase H: codex-prescribed "Conditional rebuilt"
+                // "Conditional rebuilt"
                 // counter. Distinct from `SubstituteConditionalDescend`
                 // (every visit) — fires only on the rebuild branch.
                 if let Some(observer) = verter_audit::current_observer() {

@@ -20,7 +20,7 @@
 //! `MapperKey` cache keys → the `SemanticQueryKey::MappedType`
 //! cache MISSES on what should be a HIT.
 //!
-//! For ChatMessages.vue (Phase G empirical measurement) this
+//! For ChatMessages.vue (empirical measurement) this
 //! produces 258,546 ordinal collisions ≈ 258,611 cold MappedType
 //! builds — a 258K-fold cross product over what should be ONE
 //! computation per distinct mapper.
@@ -107,7 +107,7 @@ use verter_type_expr::{
 /// `mapped_type_cold` on ChatMessages.vue (99.96% of cold builds
 /// were pointer-aliased duplicates of the same logical mapper).
 ///
-/// Codex BINDING (R16 semantic fingerprint, R27 stack-safe, R7
+/// (R16 semantic fingerprint, R27 stack-safe, R7
 /// cross-owner reusable identity).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct MapperFingerprint(u64);

@@ -5001,6 +5001,12 @@ mod foundations_guards {
             // and hyphen variants all trip — see the
             // `case_insensitive_codex_vocabulary` block.
             "AX-WIP",
+            // `pre-AX` / `post-AX` — the orchestrator's `AX` work
+            // codename in its before/after narrative form. The reversed
+            // `AX-WIP` is the needle above; these are the temporal
+            // variants that leak the codename into final-state prose.
+            "pre-AX",
+            "post-AX",
             // Scope-lock plan vocabulary — `SCOPE-LOCK <n>` markers from the
             // orchestrator's block plan. Project-management nouns that never
             // appear in legitimate final-state prose.
@@ -5030,7 +5036,8 @@ mod foundations_guards {
                 .chars()
                 .map(|c| if c == '-' { ' ' } else { c })
                 .collect();
-            const CODEX_VOCAB: &[&str] = &["codex audit", "codex finding", "codex observed"];
+            const CODEX_VOCAB: &[&str] =
+                &["codex audit", "codex finding", "codex observed", "codex re review"];
             for needle in CODEX_VOCAB {
                 if normalised.contains(needle) {
                     return true;
@@ -5644,6 +5651,104 @@ mod foundations_guards {
                 search_from = abs + needle.len();
             }
         }
+        // `Phase [A-Z]` / `Phase-[A-Z]` — LETTERED plan-phase labels
+        // (`Phase C`, `Phase D`, `Phase G`, `Phase H`). The trailing
+        // token must be a SINGLE uppercase letter at a word boundary,
+        // mirroring the `Commit XY` / `FORK-<UPPER>` single-letter
+        // discriminator: `Phase Complete` / `Phase Foo` (a capitalised
+        // WORD) does NOT flag because the byte after the letter is a
+        // lowercase alpha; only the bare letter-label form trips. The
+        // numeric `Phase \d+` scan above handles `Phase 5`; this is its
+        // lettered sibling. Case-sensitive on the leading `Phase` so
+        // legitimate prose like "compile phase" / "phase angle"
+        // (lowercase, or followed by a lowercase word) is preserved.
+        for prefix in ["Phase ", "Phase-"] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                if after < bytes.len() && bytes[after].is_ascii_uppercase() {
+                    let trailing_idx = after + 1;
+                    let is_single_letter_marker = trailing_idx >= bytes.len()
+                        || !(bytes[trailing_idx].is_ascii_alphanumeric()
+                            || bytes[trailing_idx] == b'_');
+                    if is_single_letter_marker {
+                        return true;
+                    }
+                }
+                search_from = abs + prefix.len();
+            }
+        }
+        // `WIP-[A-Z]` — orchestrator work-in-progress phase markers
+        // (`WIP-L`, `WIP-R`, `WIP-P`). Single uppercase letter at a word
+        // boundary after the `WIP-` prefix, mirroring the lettered-Phase
+        // discriminator (so `WIP-ABLE` multi-letter does NOT flag). The
+        // companion reversed form `AX-WIP` is a fixed needle above.
+        {
+            let needle = "WIP-";
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(needle) {
+                let abs = search_from + rel;
+                let after = abs + needle.len();
+                if after < bytes.len() && bytes[after].is_ascii_uppercase() {
+                    let trailing_idx = after + 1;
+                    let is_single_letter_marker = trailing_idx >= bytes.len()
+                        || !(bytes[trailing_idx].is_ascii_alphanumeric()
+                            || bytes[trailing_idx] == b'_');
+                    if is_single_letter_marker {
+                        return true;
+                    }
+                }
+                search_from = abs + needle.len();
+            }
+        }
+        // Agent-attribution markers — review/consult provenance that
+        // names the agent rather than the mechanism: `codex's`,
+        // `gemini's`, `CC's` (possessives), the `codex BINDING` /
+        // `codex-hybrid` / `codex-prescribed` / `codex spec` design-label
+        // phrases, and `codex Q<digit>` review-question markers. The
+        // substantive description belongs in the comment WITHOUT the
+        // agent label. Normalised: lowercase + `-`→space so every
+        // capitalisation / separator variant trips one pass.
+        {
+            let normalised: String = line
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c == '-' { ' ' } else { c })
+                .collect();
+            let norm_bytes = normalised.as_bytes();
+            // Possessives — leading word-boundary so `llc's` / `acc's`
+            // (substring `cc's`) and similar are not false-flagged.
+            for needle in ["codex's", "gemini's", "cc's"] {
+                let mut from = 0usize;
+                while let Some(rel) = normalised[from..].find(needle) {
+                    let abs = from + rel;
+                    let leading_ok = abs == 0
+                        || !(norm_bytes[abs - 1].is_ascii_alphanumeric()
+                            || norm_bytes[abs - 1] == b'_');
+                    if leading_ok {
+                        return true;
+                    }
+                    from = abs + needle.len();
+                }
+            }
+            // Design-label phrases — all contain `codex`, so no
+            // false-positive risk against ordinary prose.
+            const ATTRIBUTION_PHRASES: &[&str] =
+                &["codex binding", "codex hybrid", "codex prescribed", "codex spec"];
+            for needle in ATTRIBUTION_PHRASES {
+                if normalised.contains(needle) {
+                    return true;
+                }
+            }
+            // `codex q<digit>` — codex review-question markers (Q1/Q3/Q4).
+            if let Some(pos) = normalised.find("codex q") {
+                let after = &norm_bytes[pos + "codex q".len()..];
+                if after.first().is_some_and(u8::is_ascii_digit) {
+                    return true;
+                }
+            }
+        }
         false
     }
 
@@ -5675,6 +5780,11 @@ mod foundations_guards {
             "audit-infrastructure-plan", // audit-plan archaeology (hyphenated)
             "cache-runtime overhaul",    // cache-runtime plan archaeology
             "ax-wip",                    // orchestrator codename
+            "pre-ax",                    // pre-AX / post-AX codename narrative
+            "post-ax",                   // pre-AX / post-AX codename narrative
+            "wip-",                      // WIP-[A-Z] phase markers
+            "gemini",                    // gemini's attribution
+            "cc's",                      // CC's attribution
             "codex",                     // codex vocab + Codex Nth-consult
             "§",                         // plan § / decimal-section refs
             "slice",                     // Slice \d
@@ -5920,6 +6030,35 @@ mod foundations_guards {
             "// Test-only probe; lets the U2B.8 size-discipline guards pin the cap.",
             "/// base/owner slot (U2B.9): reads the defining file's per-canonical env.",
             "// the U2B9 cutover collapsed the split shape caches.",
+            // LETTERED plan-phase labels (`Phase C/D/G/H`) — the single
+            // uppercase-letter marker form. Distinct from the numeric
+            // `Phase \d+` family above.
+            "// Phase C focused semantic-query counters.",
+            "/// Identity tuple for the Phase G mapped-member materialization.",
+            "// Phase H classification + recursive hash-cons memo probe.",
+            "// Phase D recursive-ref guard pushes the canonical pair.",
+            "// Builder Phase C owns the second pass.",
+            "// Codex BINDING Phase G direction (Hypothesis A).",
+            // WIP-[A-Z] orchestrator work-in-progress markers.
+            "// §5.6 WIP-L — function shape.",
+            "/// Phase D §5.3 WIP-R: per-call cycle-guard over visited nodes.",
+            // Agent-attribution provenance — possessives, design-label
+            // phrases, and codex review-question markers.
+            "// Calls to `build_typeof` (gemini's HIGH-confidence direction).",
+            "// confirms codex's mapper-identity-instability concern.",
+            "/// Gemini's CRITICAL PERFORMANCE finding and CC's M1.",
+            "/// Reduction-demand axis (codex-hybrid spec).",
+            "// Phase C: codex-prescribed \"mapped descents\" counter.",
+            "// Codex Q4 — IA path-precision.",
+            "// the codex spec mandates carrier-stop here.",
+            "/// Codex's 3-way consult identified the from_host entry.",
+            // pre-AX / post-AX orchestrator codename narrative.
+            "// the pre-AX walker bailed on imported mapped arms.",
+            "/// (matches the pre-AX behaviour).",
+            "// post-AX the entry point is unified.",
+            // Hyphenated `codex re-review` review-provenance label.
+            "// Flag-after-insert race fix (codex re-review P2):",
+            "/// Strict ordering (codex re-review): the writer sets the flag.",
         ];
         for line in cases {
             assert!(
@@ -5937,7 +6076,19 @@ mod foundations_guards {
             "/// Returns the projected surface for a given semantic node.",
             "// `find_matching_angle` is no longer required because the dispatch resolver owns it.",
             "// Phase angle in radians for the easing curve.", // legitimate "phase" usage
-            "// Builder Phase C owns the second pass.",        // 'Phase C' is a letter, not a digit
+            // Lettered-Phase negatives: a capitalised WORD after
+            // `Phase ` (not a single letter) is prose, and lowercase
+            // `phase X` is a legitimate lifecycle/compile-phase mention.
+            "// Phase Complete once the queue drains.", // capitalised word, not a letter label
+            "// the compile phase reorders the lowered passes.",
+            "// a lifecycle phase boundary flushes the cache.",
+            // WIP-[A-Z] negative: a multi-letter trailing token is a
+            // real word, not the single-letter marker form.
+            "// the WIP-ABLE feature flag toggles the draft surface.",
+            // Agent-attribution negatives: `codex`/`gemini` used as a
+            // common noun without the possessive/label/Q-marker form.
+            "// the codex of lowering rules lives in the skill doc.",
+            "// gemini constellation layout for the diagnostic graph.",
             // Algorithm-phase carve-out (colon-prefixed verb describes
             // an algorithm step rather than a plan-phase reference).
             "// Phase 1: collect import statements.",

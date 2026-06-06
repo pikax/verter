@@ -491,7 +491,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::VueMacroElements(_) => TypeExpr::Unknown {
                 raw: "VueMacroElements".to_string(),
             },
-            // Phase D §5.6 WIP-L / §3 Change L — canonical Function shape
+            // Canonical Function shape
             // converts back to `TypeExpr::Function`. Session 4 lowered
             // `TypeExpr::Function` → `SemanticNodeData::Function`; this
             // conversion completes the round-trip so alias bodies that
@@ -666,7 +666,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Context-explicit variant of [`Self::raise_and_reduce`]
-    /// (codex-hybrid spec).
+    /// (demand-driven reducer spec).
     ///
     /// The caller supplies the publication
     /// [`ProjectionReductionContext`] that flows into every operator
@@ -697,8 +697,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Top-down demand-driven graph reducer (codex-hybrid,
-    /// codex-hybrid spec — stack-safe).
+    /// Top-down demand-driven graph reducer
+    /// (demand-driven reducer spec — stack-safe).
     ///
     /// Replaces the legacy bottom-up topological reducer. The
     /// pre-walk visited the ENTIRE reachable subgraph and then reduced
@@ -822,7 +822,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Push child frames for `data` onto `stack` according to the
-    /// codex-hybrid demand traversal rules.
+    /// demand-driven traversal rules.
     ///
     /// The rules are:
     ///
@@ -857,7 +857,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   `Intersection` arms, `Tuple` elements, `Array` element,
     ///   `Function` params / return / type-param constraints/defaults)
     ///   are pushed ONLY under whole-surface `Published(Expanded)`.
-    ///   Per the codex spec, per-prop `Published(Navigate)` /
+    ///   Per the spec, per-prop `Published(Navigate)` /
     ///   `Published(Shallow)` and `StructuralTransit` callers do NOT
     ///   traverse composite children — the parent IS the demand
     ///   terminal. This is the structural leak fix: a per-member
@@ -988,7 +988,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Conditional { check, extends, .. } => {
                 // Check / extends reduce structurally so the conditional
                 // dispatch can decide the selected branch. The branches
-                // themselves are NOT pre-pushed — codex-hybrid: only the
+                // themselves are NOT pre-pushed — demand-driven: only the
                 // SELECTED branch is reduced (via the dispatch result).
                 stack.push(ReduceFrame::descend(
                     *check,
@@ -1041,7 +1041,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `context` carries the publication / structural-transit demand;
     /// child lookups in `state.mapping` are keyed by
     /// `(child_node, child_context)` where `child_context` is derived
-    /// per the codex-hybrid traversal rules (see
+    /// per the demand-driven traversal rules (see
     /// [`Self::push_demand_children`]).
     ///
     /// Per-shape table:
@@ -1059,7 +1059,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   `Array` / `Tuple` / `Function`) rebuild via
     ///   `intern_preserving_scope` when any child reduced; else return
     ///   `node` unchanged. Child reductions only land in `mapping`
-    ///   under whole-surface `Published(Expanded)` (codex demand rule)
+    ///   under whole-surface `Published(Expanded)` (demand rule)
     ///   — so non-whole-surface contexts return the parent verbatim.
     /// - `TemplateLiteral` / `Infer` hard-stops have no dispatch
     ///   variant and become `Unknown { raw: "<…>" }`.
@@ -1230,7 +1230,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // Branches are NOT pre-pushed — the dispatch picks the
                 // selected branch and `dispatch_operator_with_recurse`
                 // reduces only that branch under the caller's context
-                // (codex-hybrid: "reduce only the selected branch").
+                // (demand-driven: "reduce only the selected branch").
                 let true_branch = *true_branch_ref;
                 let false_branch = *false_branch_ref;
                 let distributive = *distributive;
@@ -1300,7 +1300,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 if matches!(context.demand, ReductionDemand::StructuralTransit) {
-                    // Codex-hybrid: an InstantiationRef inspected by a
+                    // Demand-driven: an InstantiationRef inspected by a
                     // structural-transit caller stays terminal —
                     // structural observation only; do not reify the
                     // body.
@@ -1310,13 +1310,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     && base.canonical_id.as_ref() != "__builtin__"
                     && userland_instantiation_body_is_closed_object(self.ctx, base)
                 {
-                    // Codex Q4 + ChatMessages leak verdict: a
+                    // ChatMessages leak verdict: a
                     // userland `InstantiationRef` at a
                     // `Published(Navigate)` publication terminal
                     // STAYS TERMINAL **when its declared body is a
                     // closed Object surface** (a generic interface
                     // like `Tool<INPUT, OUTPUT> { outputSchema:
-                    // ..., execute: ... }`). The pre-AX
+                    // ..., execute: ... }`). The earlier
                     // `Pub(Expanded)` hardcoding eagerly unwrapped
                     // these and fired
                     // `ProjectMember(outputSchema|execute)` audit
@@ -1325,7 +1325,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // Userland generic HELPERS whose body is
                     // operator-shaped (`Lookup<M, I> = M[I]`,
                     // `MyPick<X, K> = { [P in K]: X[P] }`, etc.)
-                    // DO reduce even under Navigate per codex Q4 —
+                    // DO reduce even under Navigate —
                     // the type-arg substitution into an operator
                     // body is the "demanded instantiation is
                     // reduced as the terminal" case. Closed-object
@@ -1357,7 +1357,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // --- composite rebuilds via intern_preserving_scope ---
             //
             // Composite children are only reduced under whole-surface
-            // `Published(Expanded)` (codex demand traversal rule). For
+            // `Published(Expanded)` (demand traversal rule). For
             // per-prop `Published(Navigate)` / `Published(Shallow)` and
             // `StructuralTransit`, the composite parent is the demand
             // terminal — the `rebuild_*` helpers see no child entries
@@ -1495,7 +1495,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // The dispatch produced a new node not yet in
                     // `mapping`. Drive it through the iterative
                     // reducer's worklist so its demanded children are
-                    // selectively reduced under `context` (the codex
+                    // selectively reduced under `context` (the
                     // demand-traversal rule). Cycle protection: the
                     // shared `visited` set deduplicates re-entry.
                     self.reduce_subtree(result, context, state)
@@ -1565,7 +1565,7 @@ impl ReduceFrame {
     }
 }
 
-/// `true` when `ctx` is the codex-hybrid whole-surface publication
+/// `true` when `ctx` is the demand-driven whole-surface publication
 /// demand (`Published + Expanded`). Composite-child traversal pushes
 /// descend frames ONLY in this case; per-prop `Published(Navigate)` /
 /// `Published(Shallow)` and any `StructuralTransit` walk treat the
@@ -1579,7 +1579,7 @@ fn is_whole_surface_published(ctx: ProjectionReductionContext) -> bool {
 /// Derive the `IndexedAccess.object` operand context from the parent
 /// IndexedAccess's reduction context.
 ///
-/// The codex spec ("`Foo['a']['b']`: intermediate hops are
+/// The demand-driven reducer spec ("`Foo['a']['b']`: intermediate hops are
 /// navigate-only, terminal uses caller mode") describes the
 /// PATH-WALK semantics inside the dispatch's `ProjectPath` builder.
 /// At the iterative-reducer layer the object operand must be REDUCED
@@ -1929,7 +1929,7 @@ impl ReduceState {
 /// When the body cannot be peeked cheaply (no prepared decl,
 /// resolution miss), the function returns `false` — the reducer
 /// proceeds with the `Instantiate` dispatch as the safe default
-/// (matches the pre-AX behaviour).
+/// (matches the earlier behaviour).
 #[allow(dead_code)] // wired by InstantiationRef Navigate-terminal gate.
 fn userland_instantiation_body_is_closed_object(
     ctx: &dyn crate::resolver_core::ResolverContext,

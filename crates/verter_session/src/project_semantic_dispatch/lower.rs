@@ -96,7 +96,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Context-explicit variant of [`Self::shallow_lower_type_expr`]
-    /// (codex-hybrid spec). Accepts the full
+    /// (demand-driven reducer spec). Accepts the full
     /// [`ProjectionReductionContext`] so callers can thread
     /// `StructuralTransit` through nested lowering. The legacy
     /// `mode`-only overload above wraps `mode` in `Published` so
@@ -502,7 +502,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let Some((resolved_canonical, resolved_name)) = resolved_root else {
                     return self.opaque(QueryError::Miss);
                 };
-                // Phase D recursive-ref guard: if the resolved root is
+                // Recursive-ref guard: if the resolved root is
                 // currently being materialised by an enclosing
                 // `build_instantiate` frame, emit `Opaque(RecursiveRef)`
                 // as the back-edge. This handles `type T = { kids: T[] }`
@@ -563,7 +563,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         );
                     } else {
                         // Type arguments are NOT the macro-T own body
-                        // (codex BINDING design): `defineProps<Foo<Bar>>()`
+                        // (by design): `defineProps<Foo<Bar>>()`
                         // has `Bar` as a generic argument substituted into
                         // `Foo`'s body — `Foo`'s own members are own-body,
                         // `Bar`'s members are not. Lower args structurally.
@@ -620,7 +620,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else {
                     // Type arguments lower structurally — they are
                     // substituted INTO the decl body, never the macro-T
-                    // own body themselves (codex BINDING design). The
+                    // own body themselves (by design). The
                     // `Instantiate` itself keeps the caller's provenance:
                     // `build_instantiate` stamps the (non-utility) decl's
                     // OWN-body members with it and downgrades to
@@ -717,7 +717,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     match member {
                         ObjectMember::Property(prop) => {
                             // Member VALUE lowering downgrades to
-                            // structural provenance (codex BINDING Stage
+                            // structural provenance (Stage
                             // 1): a nested object inside this member's
                             // type (`{ outer: { inner: T } }`) is NOT the
                             // macro-T own body — only THIS object's
@@ -769,7 +769,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 declared_in_macro_type_arg: reduction_context
                                     .is_macro_type_arg_own_body(),
                                 // Leaf stamping of the surface-merge role from
-                                // the threaded context (codex BINDING design):
+                                // the threaded context (by design):
                                 // an interface/class own `Object` arm flows
                                 // `OwnBody`, a heritage reference arm flows
                                 // `Heritage`, everything else stays `Authored`.
@@ -1087,7 +1087,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         decl_name: Arc::from("<mapper-param>"),
                     },
                 };
-                // Phase G fix: resolve the `param_index` ordinal
+                // Fix: resolve the `param_index` ordinal
                 // through the host-owned
                 // [`MapperBinderRegistry`](crate::mapper_binder_registry::MapperBinderRegistry)
                 // keyed by `(canonical, display_name,
@@ -1102,8 +1102,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // This replaces the per-dispatcher counter
                 // (`ProjectSemanticDispatch::next_mapped_binder_ordinal`)
                 // which destabilised mapper identity across
-                // dispatcher instances — codex's BINDING Phase G
-                // concern empirically confirmed (258,546 ordinal
+                // dispatcher instances — the concern empirically
+                // confirmed (258,546 ordinal
                 // collisions ≈ 258,611 cold MappedType builds on
                 // ChatMessages.vue).
                 let fingerprint = crate::mapper_binder_registry::MapperFingerprint::from_components(
@@ -1125,7 +1125,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // same display-name slot landed in different
                 // [`MapperFingerprint`] entries.
                 //
-                // Dual meaning (Phase H clarification): a non-zero
+                // Dual meaning: a non-zero
                 // count does NOT necessarily mean the host-owned
                 // registry is "failing to stabilise mapper identity"
                 // — the registry only deduplicates fingerprints that

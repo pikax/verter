@@ -13,7 +13,7 @@
 //! it). Every subsequent warm-read validation of the bundle's stored
 //! `(FileWholeHash, ImportRoute)` facts then routes through the base
 //! view's untracked-canonical reject and triggers a cold rebuild
-//! every probe — the leak codex's Option C closes.
+//! every probe — the leak overlay promotion closes.
 //!
 //! ## Discriminating contract
 //!

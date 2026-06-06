@@ -467,7 +467,7 @@ defineProps<ButtonProps>()
     );
 }
 
-/// Resolve-imports overlay-routing test (codex re-review B6.C-rfx2 P2 #2).
+/// Resolve-imports overlay-routing regression test.
 ///
 /// When `ensure_loaded` / `ensure_indexed_ready` promotes a canonical
 /// after the request-entry base view was built, the canonical's
@@ -643,11 +643,11 @@ fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical()
          the fact via the overlay's content hash; pre-fix it delegated to the base \
          view, which rejected the fact through its untracked-file arm despite the \
          shared ResolvedImportFactsDb being populated under the overlay-recorded \
-         content hash. This is the codex re-review B6.C-rfx2 P2 #2 regression."
+         content hash. This is the overlay-routing regression."
     );
 }
 
-/// Overlay flag-ordering arch guard (codex re-review B6.C-rfx2 P2 #1).
+/// Overlay flag-ordering arch guard.
 ///
 /// Source-grep guard verifying the strict-ordering invariant in
 /// [`crate::resolver_core::request_store_view::CanonicalCompletionOverlay::write_completion_entry`]:
@@ -749,7 +749,7 @@ fn write_completion_entry_flag_set_under_write_lock() {
             window.contains(pat),
             "write_completion_entry MUST bind each write-lock guard to a named \
              variable and store the corresponding `_nonempty` flag under the \
-             same critical section (codex re-review B6.C-rfx2 P2 #1). Missing \
+             same critical section. Missing \
              pattern:\n{pat}\n\nWindow:\n{window}"
         );
     }

@@ -4069,7 +4069,7 @@ fn resolution_depth_is_bounded_per_call_chain() {
 
 #[test]
 fn parser_syntactic_depth_limit_blocks_excessive_chain_cleanly() {
-    // Phase D §5.10 WIP-P — assert the 256 cap holds: a chain of
+    // Assert the 256 cap holds: a chain of
     // `Foo<Foo<...>>` with depth 300 (> PARSER_SYNTACTIC_DEPTH_LIMIT)
     // must terminate cleanly without stack overflow. Resolution is
     // allowed to truncate; the invariant is termination + no panic.
@@ -4091,7 +4091,7 @@ fn parser_syntactic_depth_limit_blocks_excessive_chain_cleanly() {
 
 #[test]
 fn parser_syntactic_depth_limit_records_structured_failure_shape() {
-    // Phase D §5.10 WIP-P / Change H — the depth guard emits a
+    // The depth guard emits a
     // structured `ResolutionBudgetExceeded { limit, actual, context }`
     // record (NOT a silent `None` followed by an `Applied` stub from the
     // retired solver). A deep type-alias chain forces

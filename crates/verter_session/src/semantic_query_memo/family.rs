@@ -452,7 +452,7 @@ impl FamilyKey {
 /// for mode-bearing variants one of `Identity` / `Navigate` / `Shallow` /
 /// `Expanded` is selected from the key's `ProjectionMode`.
 ///
-/// Codex-hybrid spec: the `Instantiate` / `KeyOf` /
+/// Demand-driven reducer spec: the `Instantiate` / `KeyOf` /
 /// `MappedType` families carry a [`ProjectionReductionContext`] in
 /// their key, not just a `ProjectionMode`. Their slots are picked from
 /// the `TransitShallow` / `TransitNavigate` / `TransitIdentity` /
@@ -472,7 +472,7 @@ pub(super) enum ModeSlot {
     /// modes.
     Skeleton,
     /// `StructuralTransit` variants of the four publication modes —
-    /// Codex-hybrid spec. Distinct from the
+    /// demand-driven reducer spec. Distinct from the
     /// publication slots; do NOT backfill the publication slots and
     /// are not backfilled by them.
     TransitIdentity,
@@ -553,7 +553,7 @@ pub(super) struct FamilySlots {
     /// Navigate/Expanded; does NOT participate in backfill.
     skeleton: CandidateList,
     /// `StructuralTransit` slot mirrors of the four publication slots —
-    /// Codex-hybrid spec. Independent from the publication slots. Transit
+    /// demand-driven reducer spec. Independent from the publication slots. Transit
     /// backfill shares the SAME directional candidate ordering as the
     /// publication slots (`TransitExpanded → TransitShallow →
     /// TransitNavigate → TransitIdentity`), but every clone into a narrower
@@ -1048,7 +1048,7 @@ pub(super) fn context_to_slot(ctx: ProjectionReductionContext) -> ModeSlot {
             ProjectionMode::Shallow => ModeSlot::TransitShallow,
             ProjectionMode::Expanded => ModeSlot::TransitExpanded,
             // Skeleton has its own slot — distinct semantics (open-
-            // generic preservation) that the codex-hybrid leaves
+            // generic preservation) that the demand-driven reducer leaves
             // outside the reduction-demand axis.
             ProjectionMode::Skeleton => ModeSlot::Skeleton,
         },

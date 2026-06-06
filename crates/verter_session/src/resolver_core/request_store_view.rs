@@ -130,7 +130,7 @@ pub(crate) struct CanonicalCompletionOverlay {
     /// empty overlay (validations that fire before any
     /// `complete_canonical` has run for the request).
     ///
-    /// **Strict ordering (codex re-review B6.C-rfx2):** the writer
+    /// **Strict ordering:** the writer
     /// sets the flag under the same write lock as the corresponding
     /// map insert (see [`Self::write_completion_entry`]). The lock is
     /// released only AFTER the flag has been stored. This pairs with
@@ -214,7 +214,7 @@ impl CanonicalCompletionOverlay {
     /// call [`Self::complete_canonical_with_session_view`] instead so
     /// the completion overlay records the session-overlay hash (not the
     /// base scheduler hash) for canonicals the session has masked. See
-    /// the codex review fix (B6.C-rfx) for the contract.
+    /// [`Self::write_completion_entry`] for the strict-ordering contract.
     pub(crate) fn complete_canonical(
         &self,
         host: &crate::VerterHost,
@@ -335,7 +335,7 @@ impl CanonicalCompletionOverlay {
             return;
         }
 
-        // Session-overlay precedence (codex review B6.C-rfx fix):
+        // Session-overlay precedence:
         // if a session view is present and carries explicit overlay
         // state for the canonical, that state is the request-scoped
         // authority — NOT the base scheduler. Without this branch the
@@ -411,7 +411,7 @@ impl CanonicalCompletionOverlay {
         whole_hash: crate::types::Hash16,
         file_artifacts: Option<Arc<crate::file_artifact_store::FileArtifacts>>,
     ) {
-        // Flag-after-insert race fix (codex re-review P2 of b30005ed0):
+        // Flag-after-insert race fix:
         // the `_nonempty` flag MUST be set BEFORE the write lock is
         // released, otherwise a concurrent reader can observe
         // `_nonempty == false` (and skip the overlay via the
@@ -471,8 +471,8 @@ impl CanonicalCompletionOverlay {
                 // variants per canonical. Flag-set is performed under
                 // the same lock so a reader observing `_nonempty == false`
                 // is guaranteed to also observe the map as still empty
-                // for the canonical (codex re-review P2 fix — same race
-                // as the `whole_hashes` / `file_facts` paths above).
+                // for the canonical (same race as the `whole_hashes` /
+                // `file_facts` paths above).
                 let mut derived = self.derived_hashes.write();
                 let entry = derived.entry(canonical.to_owned()).or_default();
                 if let Some(h) = route_hash {
@@ -533,8 +533,8 @@ impl CanonicalCompletionOverlay {
     /// flag. Bypasses [`Self::complete_canonical`]'s host-state
     /// lookups + the epoch guard so a test can stage the exact
     /// overlay shape it needs without driving the full
-    /// `ensure_loaded` flow. Used by the codex re-review B6.C-rfx2
-    /// P2 #2 discriminating test in `block_6c_view_hoist_tests`.
+    /// `ensure_loaded` flow. Used by the overlay-shape discriminating
+    /// test in `block_6c_view_hoist_tests`.
     #[cfg(test)]
     pub(crate) fn insert_whole_hash_for_tests(&self, canonical: &str, whole_hash: Hash16) {
         let mut whole = self.whole_hashes.write();
@@ -761,7 +761,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
         // and overlay paths. Concurrent completion writers update the
         // shared DB directly.
         //
-        // Overlay-promoted canonicals (codex re-review B6.C-rfx2): when
+        // Overlay-promoted canonicals: when
         // `ensure_loaded` / `ensure_indexed_ready` promotes a canonical
         // that the request-entry base view did not track, the overlay
         // carries the authoritative whole hash but the base view's

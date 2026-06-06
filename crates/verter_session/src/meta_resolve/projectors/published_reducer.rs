@@ -10,7 +10,7 @@
 //! Historical note: the retired `field_reduce.rs` module hosted the
 //! same two helpers plus a projector-side name-predicate carrier
 //! check (`is_builtin_utility_instantiation`,
-//! `generic_instantiation_body_is_object`). The codex-hybrid retires
+//! `generic_instantiation_body_is_object`). The demand-driven reducer retires
 //! the projector-side carrier check by routing carrier-stop through
 //! the dispatch demand context — only the type-shape predicate and
 //! the field-type reducer remain.

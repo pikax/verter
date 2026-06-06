@@ -769,7 +769,7 @@ pub mod cache_keys {
     /// resolved prop carries a `declared_in_macro_type_arg` fact whose
     /// value depends on the caller's `from_root_body` position. Without
     /// this dimension a single cache slot would erroneously serve both
-    /// positions (Codex's "cache-incomplete F1" risk).
+    /// positions (the "cache-incomplete" risk).
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct ResolvedNamedTypeCacheKey {
         pub name: Box<[u8]>,

@@ -72,7 +72,7 @@ pub(crate) fn project_props(
             MacroExpansionKind::DefineProps,
             // Props payload surface carries macro-T own-body provenance
             // so the DeclPlaceholder unwrap stamps own-body members
-            // `declared_in_macro_type_arg = true` (codex BINDING design).
+            // `declared_in_macro_type_arg = true` (by design).
             super::macro_payload_surface_provenance(AnalyzedMacroKind::DefineProps),
             diag_sink,
         ) {

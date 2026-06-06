@@ -154,7 +154,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // callers (the bounded reducer, mapper value substitution,
         // conditional check evaluation, builtin-utility argument
         // resolution) all need operator dispatches to terminate at
-        // their fully-reduced surface. The codex-hybrid retires the
+        // their fully-reduced surface. The demand-driven reducer retires the
         // *implicit* Expanded unwrap by exposing
         // [`Self::evaluate_deferred_semantic_node_with_context`] so
         // structural-transit callers (relation engine identity-
@@ -167,8 +167,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Context-explicit variant of
-    /// [`Self::evaluate_deferred_semantic_node`] (codex-hybrid,
-    /// codex-hybrid). The caller supplies the
+    /// [`Self::evaluate_deferred_semantic_node`]
+    /// (demand-driven reducer). The caller supplies the
     /// [`ProjectionReductionContext`] that flows into every operator
     /// re-dispatch (`KeyOf`, `MappedType`, decl-placeholder
     /// `Instantiate`) so a `StructuralTransit` walk does not reify
@@ -368,7 +368,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let base = self.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
                     let owner_canonical = Arc::clone(canonical_id);
                     drop(data);
-                    // Codex-hybrid spec: the
+                    // Demand-driven reducer spec: the
                     // declaration-placeholder unwrap inherits the
                     // caller's reduction context. The implicit
                     // `Published + Expanded` unwrap was the path that

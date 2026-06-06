@@ -499,7 +499,7 @@ pub struct ResolverHotPathCounters {
     /// non-zero count means the bundle is admitting fact variants the
     /// per-rejection attribution does not yet cover.
     pub prepared_decl_bundle_reject_other: u32,
-    // Phase C focused semantic-query counters --------------------------
+    // Focused semantic-query counters --------------------------
     // Attribute `ProjectSemanticDispatch::execute` calls by
     // `SemanticQueryKey` variant + cold-vs-warm to localise pathological
     // cost (ChatMessages.vue's >30s timeout). Producers in
@@ -541,22 +541,22 @@ pub struct ResolverHotPathCounters {
     /// Hits on the `substitute_memo_get` fast path.
     pub substitute_memo_hits: u32,
     /// `substitute_with_change_tracking` returns from the `TypeOf`
-    /// opaque-return arm (codex-prescribed).
+    /// opaque-return arm.
     pub substitute_typeof_opaque: u32,
     /// `substitute_with_change_tracking` descents into the
-    /// `Conditional` arm (codex-prescribed).
+    /// `Conditional` arm.
     pub substitute_conditional_descend: u32,
     /// `substitute_with_change_tracking` descents into the `MappedType`
-    /// arm (codex-prescribed).
+    /// arm.
     pub substitute_mapped_type_descend: u32,
-    /// Calls to `build_typeof` (gemini's HIGH-confidence direction).
+    /// Calls to `build_typeof` (the HIGH-confidence direction).
     pub build_typeof_calls: u32,
     /// `build_typeof` calls where `ensure_indexed_ready` returned
     /// `None` (the brief's prepared-value miss site).
     pub build_typeof_prepared_value_misses: u32,
-    // Phase G focused mapped-member materialization counters
+    // Mapped-member materialization counters
     // -------------------------------------------------------
-    // Codex BINDING Phase G direction (Hypothesis A): a typed
+    // Direction (Hypothesis A): a typed
     // mapped-member materialization cache should collapse the K-loop
     // cross product. These counters confirm whether the K-loop is
     // re-computing distinct identity tuples (cache helps) or
@@ -586,14 +586,14 @@ pub struct ResolverHotPathCounters {
     /// Mapper-identity-instability signal: same mapper source
     /// triple received DIFFERENT `mapped_binder_ordinal` ordinals
     /// from different dispatcher instances during this request.
-    /// Non-zero count means codex's mapper-identity-instability
+    /// Non-zero count means the mapper-identity-instability
     /// concern is confirmed — the typed mapped-member cache would
     /// MISS on what should be a HIT until ordinal assignment is
     /// stabilised.
     pub mapped_binder_ordinal_collision: u32,
-    // Phase H focused recursive-substitution counters
+    // Recursive-substitution counters
     // -----------------------------------------------
-    // Codex BINDING insight: the recursive helper
+    // Key insight: the recursive helper
     // `substitute_with_change_tracking` at `substitute.rs:99-104`
     // BYPASSES the top-level `substitute_memo` even though
     // `(node, parameter_node, arg)` is a complete identity. These

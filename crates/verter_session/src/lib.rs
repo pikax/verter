@@ -67,7 +67,7 @@ pub mod component_meta_audit;
 mod component_meta_cache_discipline_tests;
 pub mod host_audit_runtime;
 #[cfg(test)]
-mod phase_d_overlay_promotion_tests;
+mod overlay_promotion_isolation_tests;
 #[cfg(test)]
 mod prepared_decl_import_route_hash_alignment_tests;
 #[cfg(test)]

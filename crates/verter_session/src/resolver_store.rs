@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 /// surfaces as `host_store_view_from_host_builds` per-Button counts in
 /// the audit-record diagnostic counters. To attribute those builds
 /// back to specific warm-hit validator call sites (the Bug 2 hypothesis
-/// codex's 3-way consult identified), every entry into `from_host`
+/// the 3-way consult identified), every entry into `from_host`
 /// records `std::panic::Location::caller()` and bumps a per-site
 /// counter. The `#[track_caller]` rail on `from_host`,
 /// `VerterHost::resolver_store_view`, the
@@ -1034,7 +1034,7 @@ impl HostStoreView {
     /// `content_hash` rather than `self.whole_hashes[canonical]`. Used
     /// by [`crate::resolver_core::RequestStoreView`] when a canonical
     /// was promoted into the per-request completion overlay after the
-    /// base view was built (codex re-review B6.C-rfx2). All other key
+    /// base view was built. All other key
     /// dimensions (`parse_env_hash`, `resolve_env_hash`,
     /// `resolver_version`, `known_miss_generation`) compose against
     /// the base view's snapshot unchanged.
@@ -1696,7 +1696,7 @@ impl HostStoreView {
     /// its `whole_hashes` entry (so the `FileWholeHash` / resolve-
     /// imports validators see it as untracked) but retains all other
     /// snapshot state (`resolved_import_facts`, `env_hashes`, etc.).
-    /// Used by the codex re-review B6.C-rfx2 P2 #2 discriminating
+    /// Used by the discriminating
     /// test to simulate a base view that pre-dates a mid-request
     /// `ensure_loaded` promotion of the canonical.
     pub(crate) fn forget_whole_hash_for_tests(&mut self, canonical: &str) {
@@ -1704,7 +1704,7 @@ impl HostStoreView {
     }
 
     /// Test-only: peek the view's `whole_hashes` entry for a canonical
-    /// id. The codex re-review B6.C-rfx2 P2 #2 discriminating test
+    /// id. The discriminating test
     /// reads the owner's authoritative content hash here so it can
     /// stage the overlay's `whole_hashes` entry with the same hash
     /// the producer admitted under.

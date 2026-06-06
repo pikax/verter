@@ -149,11 +149,11 @@ pub enum AuditEvent {
     /// fact variants the per-rejection attribution does not yet cover
     /// and the diagnosis is incomplete.
     PreparedDeclBundleRejectOther,
-    /// Phase C focused semantic-query counters
-    /// ----------------------------------------
+    /// Focused semantic-query counters
+    /// --------------------------------
     /// These attribute each `ProjectSemanticDispatch::execute` call by
-    /// `SemanticQueryKey` variant + cold-vs-warm so a Phase C
-    /// investigator can attribute pathological-fixture cost (e.g.
+    /// `SemanticQueryKey` variant + cold-vs-warm so an investigator
+    /// can attribute pathological-fixture cost (e.g.
     /// ChatMessages.vue's >30s timeout) to a specific query kind.
     /// Cold = the cold-build closure ran. Warm = the cache served the
     /// result without running the closure. Bumped at the
@@ -203,8 +203,8 @@ pub enum AuditEvent {
     /// One return of `(node, false)` from
     /// `substitute_with_change_tracking`'s `SemanticNodeData::TypeOf`
     /// arm — the substitute did NOT descend into the TypeOf, treating
-    /// it as opaque. The brief flags this as the codex-prescribed site
-    /// for the "opaque TypeOf returns" counter.
+    /// it as opaque. This is the site for the "opaque TypeOf returns"
+    /// counter.
     SubstituteTypeOfOpaque,
     /// One return from `substitute_with_change_tracking`'s
     /// `Conditional` arm that descended into the conditional branches
@@ -214,21 +214,20 @@ pub enum AuditEvent {
     /// One return from `substitute_with_change_tracking`'s
     /// `MappedType` arm that descended into the mapper's
     /// constraint / source / value_expr (a non-identity recursive
-    /// walk). The brief flags this as the codex-prescribed site for
-    /// the "Mapped descents" counter.
+    /// walk). This is the site for the "Mapped descents" counter.
     SubstituteMappedTypeDescend,
     /// One call to `build_typeof` (the `typeof`-rooted declaration
-    /// lookup at `build.rs:162`). The brief flags this as a primary
-    /// suspect: gemini's HIGH-confidence direction.
+    /// lookup at `build.rs:162`). Flagged as a primary cost suspect:
+    /// the HIGH-confidence direction.
     BuildTypeofCall,
     /// One `build_typeof` call where the value-root scope returned
     /// `None` from `ensure_indexed_ready` (the prepared-value miss
     /// the brief flags at `build.rs:162`).
     BuildTypeofPreparedValueMiss,
-    /// Phase G focused mapped-member materialization counters
-    /// ------------------------------------------------------
-    /// Per-K mapped-member materialization is the codex BINDING
-    /// Phase G hot path: `build_mapped_type` (`build.rs:1968`) +
+    /// Focused mapped-member materialization counters
+    /// -----------------------------------------------
+    /// Per-K mapped-member materialization is the measured
+    /// hot path: `build_mapped_type` (`build.rs:1968`) +
     /// `synthesise_mapped_surface` (`walk.rs:2550`) iterate
     /// enumerated keys and call into
     /// `materialize_mapped_member_value_for_key` (plain Expanded
@@ -283,13 +282,13 @@ pub enum AuditEvent {
     /// instances, preventing the typed cache from collapsing what
     /// SHOULD be cache hits.
     MappedBinderOrdinalCollision,
-    /// Phase H focused recursive-substitution counters
-    /// -----------------------------------------------
-    /// Codex BINDING Phase H insight: the recursive helper at
+    /// Focused recursive-substitution counters
+    /// ----------------------------------------
+    /// Key insight: the recursive helper at
     /// `substitute.rs:99-104`
     /// (`substitute_with_change_tracking`) BYPASSES the top-level
     /// `substitute_memo` even though `(node, parameter_node, arg)`
-    /// is a complete identity. Phase G refuted Hypothesis A (the
+    /// is a complete identity. Measurement refuted Hypothesis A (the
     /// per-K mapped-member helpers are NOT the bottleneck — they
     /// run 0-1 times). The true cost is
     /// `substitute_with_change_tracking` rebuilding `Mapped` and

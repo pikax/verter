@@ -3282,7 +3282,7 @@ defineProps<{
         .find(|p| p.name == "searchTool")
         .expect("searchTool prop must be published");
 
-    // Codex-hybrid spec: an EXPLICITLY-published
+    // Demand-driven reducer spec: an EXPLICITLY-published
     // parameterised reference (`searchTool: Tool<...>` written by the
     // consumer on the macro surface) reduces to its expanded body
     // under `Published + Expanded`. The dispatch retired the
@@ -3300,7 +3300,7 @@ defineProps<{
     // verifies `grep -cE "outputSchema|execute"` stays at 0 for
     // components that do NOT explicitly publish a `Tool<...>` member
     // (e.g., ChatMessages reaches `Tool` only through inference-time
-    // binding, which the codex-hybrid `StructuralTransit` relation-
+    // binding, which the demand-driven reducer `StructuralTransit` relation-
     // engine plug closes).
     match &search_tool.type_expr {
         TypeExpr::Ref {
@@ -3319,7 +3319,7 @@ defineProps<{
             );
         }
         TypeExpr::Object(object) => {
-            // Codex-hybrid behavior: `Tool` reduces to its Object
+            // Demand-driven reducer behavior: `Tool` reduces to its Object
             // surface. The structural shape MUST include `Tool`'s
             // declared members; this proves the demand-context
             // reduction terminated correctly rather than carrier-
@@ -3335,7 +3335,7 @@ defineProps<{
             assert!(
                 member_names.contains(&"outputSchema"),
                 "AX-hybrid: reduced `Tool<...>` surface MUST include \
-                 `outputSchema` (the codex-hybrid reduces explicit \
+                 `outputSchema` (the demand-driven reducer reduces explicit \
                  parameterised publications). Got members: {member_names:?}"
             );
         }
@@ -3347,7 +3347,7 @@ defineProps<{
 
     // The macro-shape mirror (`evaluated_types.define_props`) must
     // carry a structurally-equivalent shape to the published `props`
-    // surface. Under codex-hybrid the equivalence accepts either Ref
+    // surface. Under the demand-driven reducer the equivalence accepts either Ref
     // or Object — whichever the dispatch produced for the props slot.
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
@@ -3365,7 +3365,7 @@ defineProps<{
             );
         }
         TypeExpr::Object(_) => {
-            // Codex-hybrid behavior — define_props mirror reduces the
+            // Demand-driven reducer behavior — define_props mirror reduces the
             // explicit parameterised publication to its Object body.
         }
         other => panic!(

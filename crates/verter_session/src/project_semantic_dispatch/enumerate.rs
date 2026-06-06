@@ -215,7 +215,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // shape (Object members, Union arms, etc.) — Expanded
                     // is required so the next Expand frame can read keys
                     // off the unwrapped surface, not a lazy Ref shell.
-                    // Codex-hybrid spec: key
+                    // Demand-driven reducer spec: key
                     // enumeration is a legitimate publication-grade
                     // demand (the keyspace is the explicit consumer
                     // surface), so the context stays `Published +
@@ -395,7 +395,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Chain X closure (codex Q1-X) —
+    /// Chain X closure (Q1-X) —
     /// **non-emitting** key-domain membership predicate for path
     /// admission.
     ///
@@ -771,8 +771,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Chain X closure (codex 6th-consult
-    /// Q1-X BINDING) — non-emitting member-presence admission backed
+    /// Chain X closure (Q1-X) — non-emitting member-presence admission backed
     /// by the parse-fact `FactKey::MemberPresence` substrate.
     ///
     /// Looks up the file artifact for `(canonical, observed_hash)` and

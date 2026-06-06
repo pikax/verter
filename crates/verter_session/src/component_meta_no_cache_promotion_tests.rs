@@ -166,7 +166,7 @@ fn request_projection_budget_caps_distinct_dispatch_cold_builds() {
 /// Post-trip projection-op queries MUST early-exit at the dispatcher
 /// entry without entering the `execute_cooperative` admission machinery.
 ///
-/// Empirical motivation (ChatMessages.vue Phase F): 99.2% of the
+/// Empirical motivation (ChatMessages.vue): 99.2% of the
 /// 255,038 cold MappedType builds in a single component-meta request
 /// were rejected by the projection-op budget *after* the fuse tripped.
 /// Each rejected build still paid the cooperative-admission cost — the

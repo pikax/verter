@@ -459,8 +459,8 @@ impl EdgeStore {
     }
 
     /// Surgically remove all state for a file. O(canonical_union +
-    /// active_stems) per removal — no global iteration. Closes
-    /// Gemini's CRITICAL PERFORMANCE finding and CC's M1.
+    /// active_stems) per removal — no global iteration: the
+    /// critical-performance contract for per-file invalidation.
     pub fn remove_file(&mut self, canonical_id: &str) {
         if let Some(state) = self.files.remove(canonical_id) {
             // Canonical-axis: clean using the pre-removal union (every dep
