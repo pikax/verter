@@ -9004,4 +9004,36 @@ fn path_walk_materialized_set_records_linear_navhops_and_stops_at_arm_split() {
         !got_split.points().contains(&navhop(2)),
         "the navhop run must NOT record a hop past the arm-split position",
     );
+
+    // (3) warm-prefix-extended run: `start_index = 1` means a prior walk
+    // already established the linear prefix `[c]` (position 0), and the
+    // CURRENT walk covers full-path positions 1..=2 — so `intermediates`
+    // holds the position-1 hop plus the terminal slot (length
+    // `walker_path_len = n - start_index = 2`). The contiguous linear run
+    // is `start_index + walked_linear = 1 + 1 = 2` hops, so BOTH
+    // `Navigate@[c]` (from the warm prefix) AND `Navigate@[c,full]` (from
+    // the current walk) are recorded. This pins the `start_index +` term:
+    // a mutation computing `linear_hops` from `walked_linear` alone would
+    // drop the warm-prefix hop `Navigate@[c,full]` (linear_hops = 1) and
+    // FAIL the equality below.
+    let warm_extended = vec![Some(SemanticNodeId(2)), Some(SemanticNodeId(3))];
+    let got_warm = super::build::path_walk_materialized_set(
+        &path,
+        ProjectionMode::Expanded,
+        1,
+        &warm_extended,
+    );
+    let expected_warm = MaterializedSet::from_points(vec![terminal.clone(), navhop(1), navhop(2)]);
+    assert_eq!(
+        got_warm, expected_warm,
+        "a warm-prefix-extended walk (start_index = 1) records the warm-prefix hop \
+         AND the current-walk hop — the `start_index +` term must contribute",
+    );
+    // Positive assertion: the warm-prefix-derived hop `Navigate@[c,full]`
+    // (k = 2, only reachable because start_index pushed linear_hops to 2)
+    // must be present — a dropped `start_index` term would omit it.
+    assert!(
+        got_warm.points().contains(&navhop(2)),
+        "the warm-prefix `start_index` contribution must extend the recorded navhop run",
+    );
 }
