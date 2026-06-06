@@ -996,7 +996,7 @@ is produced at its rescope session (§3.2) before it implements.
 | S5.B4 | LANDED | `runtime_constructors_from_type_expr` (`typeinfo/adapters/vue/runtime_ctor.rs`) |
 | S5.B5 | RESCOPE-GATE-PENDING | macro-surface gate; `resolve_macro_surfaces_for` not wired; compat matrix is a gate deliverable; ← U2 |
 | S5.B6–B12 | NOT-STARTED | consumer switch + parser-spans-only + legacy `resolve_type/` deletion; ← S5.B5 |
-| U0 | PARTLY-LANDED | `AuditedResult` carrier landed; host-API wiring + two-table ledger extension remain |
+| U0 | PARTLY-LANDED (U0-FINISH-A done) | `AuditedResult` carrier + the two-table 13-column ledger (362 `IgnoredTestRow`s + closed 7-row `AdditionalProofRow`) + `TYPEINFO_PARITY_BLOCKS` DAG (per-block `required_guards`/`verification_labels`) + the `SemanticQueryName`⇔live-tag mirror + the pinned `@typescript/native-preview` oracle toolchain are LANDED under U0-FINISH-A. REMAINING (U0-FINISH-B): the per-row executable `ProofRequirement` registry + typed row-test wrapper, the row-exact capability→mechanism→proof coverage GATE that DEFINES completeness, the TS7 oracle harness, and the host-API wiring |
 | U1 | LANDED | `TaskKind` split + `CacheNode` + executor surface + `try_submit_cpu` CPU dispatch + wired `CacheNode` routing (`dispatch_ready_job_to_executor` → `execute_cache_node`) + discriminating tests all landed; the remaining host-side cache-node materializer / `execute_cache_node` override is U7/U9 session-bridge scope |
 | U2.QUERY_VALUE_DOMAIN | NOT-STARTED | the typed `SemanticQueryValue` value-domain layer (convergence gate) |
 | U2.RELATION_INFER | RESCOPE-GATE-PENDING | the relation/inference/variance core; ← U2.QUERY_VALUE_DOMAIN |

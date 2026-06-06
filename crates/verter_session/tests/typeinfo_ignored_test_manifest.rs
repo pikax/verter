@@ -328,12 +328,18 @@ macro_rules! semantic_query_names {
         /// mirror omits (or invents) any live tag, so the mirror can never
         /// silently drift behind the live key surface and the block-DAG guard's
         /// consumed-key check (`key_owning_block`) can never false-pass for a
-        /// key the mirror does not yet name. This enum, its witness array
-        /// [`SEMANTIC_QUERY_NAME_ALL`], and the exhaustive
-        /// [`semantic_query_name_str`] source are all generated from the SAME
-        /// `semantic_query_names!` variant list, so adding a variant here
-        /// without adding it to the array is impossible — there is no second
-        /// place to forget. Later U-blocks that add keys extend the single
+        /// key the mirror does not yet name. That guard verifies EXACTLY ONE
+        /// thing — the mirror name set ([`SEMANTIC_QUERY_NAME_ALL`] mapped
+        /// through [`semantic_query_name_str`]) is bijective with the live
+        /// `SemanticQueryKeyTag::ALL` name set. It does NOT, on its own, detect
+        /// an enum variant that exists but is missing from the array (two
+        /// distinct protections cover that): the `semantic_query_names!` macro
+        /// generates this enum, its witness array, and `semantic_query_name_str`
+        /// from the SAME variant token list, so a variant present in the enum but
+        /// absent from the array is impossible by construction — there is no
+        /// second place to forget; and the exhaustive (wildcard-free)
+        /// [`key_owning_block`] match forces a new arm for every added variant
+        /// or fails to compile. Later U-blocks that add keys extend the single
         /// `semantic_query_names!` invocation (and add a `key_owning_block`
         /// arm).
         #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
