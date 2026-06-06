@@ -414,6 +414,12 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "component_meta_owner_local_shallow_substituted_alias_body",
     "walk_substitute_typeexpr",
     "component_meta_substitute_typeexpr",
+    // §3.4 materialised-record-point satisfaction: the unconditional
+    // enum-rank backfill fan-out helper `backfill_targets` was replaced
+    // by the directional + `cached_satisfies`-gated `slot_domain_siblings`.
+    // Re-introducing the enum-rank fan-out would resurrect the
+    // lattice-unsound `Shallow → Navigate` clone the §3.4 gate rejects.
+    "backfill_targets",
 ];
 
 /// File names whose presence at the head of the path should make us

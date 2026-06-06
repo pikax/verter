@@ -140,6 +140,13 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // env-bearing `type_slot_for` / `builtin_type_slot`; the
             // zero-env fixture-only constructors are a forbidden bypass.
             "no_production_caller_of_zero_env_slot_constructors",
+            // §3.4 materialised-record-point satisfaction: the two-gate
+            // warm hit keys on a candidate's RECORDED `satisfied_projection`
+            // (path-exact dominance), never its nominal slot mode; backfill
+            // clones only RECORDED materialised points into directional +
+            // `cached_satisfies`-gated narrower sibling slots.
+            "cache_satisfaction_is_materialized_point_not_nominal_demand",
+            "backfill_writes_only_recorded_materialized_points",
         ],
     ),
     (
