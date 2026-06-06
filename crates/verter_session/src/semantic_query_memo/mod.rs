@@ -2763,6 +2763,7 @@ impl SemanticGraphStore {
             dep_signature,
             walker_diagnostics,
             cache_suppress,
+            taint: _, // §18 taint already consumed upstream by `admit_decision`.
             observed_self_roots: _,
             graph_carrier,
             self_root_canonicals,

@@ -87,6 +87,7 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 //   - `substitute`— generic type-parameter substitution into the graph.
 //   - `relation`  — the authoritative semantic-node assignability engine.
 // `mod.rs` retains the dispatch entry points and shared dispatcher state.
+pub(crate) mod absorb;
 pub(crate) mod build;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
@@ -1160,8 +1161,32 @@ fn finalise_traced_build_output(
                 &merged_facts,
             ) {
                 Some(carrier) => {
-                    output.graph_carrier = Some(Box::new(carrier));
-                    output.self_root_canonicals = Arc::from(self_root_canonicals);
+                    // §18.2 fact-rooted admission: a sound self-version-rooted
+                    // carrier is the FIRST gate (a torn / unrootable self-root
+                    // already routed to the `None` arm below, and an overflowed
+                    // tracer to the `Overflow` arm). `admit_decision` applies
+                    // the SECOND, taint-narrowed gate: a `Clean` result over a
+                    // sound carrier is `Warm` (the pre-gate publish behavior
+                    // verbatim — every build currently emits `Clean` because the
+                    // taint producers are U0/out-of-scope, §18.4); a partial
+                    // result is `Warm` only when ITS invalidation fact is on the
+                    // carrier, else `ReturnOnly`.
+                    match crate::semantic_query::admit::admit_decision(output.taint, &carrier) {
+                        crate::semantic_query::admit::Admission::Warm => {
+                            output.graph_carrier = Some(Box::new(carrier));
+                            output.self_root_canonicals = Arc::from(self_root_canonicals);
+                        }
+                        crate::semantic_query::admit::Admission::ReturnOnly => {
+                            // Non-admission: the value flows to the caller but
+                            // the memo refuses to publish it. Broadcast the
+                            // (valid) traced facts on a NON-ADMITTED carrier so
+                            // a cooperative-admission joiner inherits the
+                            // transitive dependency facts, exactly as the
+                            // unrootable `None` arm does.
+                            output.cache_suppress = true;
+                            output.graph_carrier = Some(Box::new(carrier));
+                        }
+                    }
                 }
                 None => {
                     // Non-cacheable: refuse memo admission (the value

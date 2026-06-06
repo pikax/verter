@@ -138,6 +138,19 @@ pub struct QueryBuildOutput {
     pub dep_signature: DepSignature,
     pub walker_diagnostics: Vec<ShallowDiagnostic>,
     pub cache_suppress: bool,
+    /// The §18 provenance taint of this build's value: how trustworthy the
+    /// inputs that produced it were. Defaults to
+    /// [`ResultTaint::Clean`](crate::semantic_query::ResultTaint::Clean) —
+    /// every build the dispatch currently produces is `Clean` because the
+    /// taint PRODUCERS (parser error-recovery, the resolver degrading an
+    /// unresolved reference, the completion fence's torn-read detection)
+    /// are a U0/foundation responsibility (§18.4) that has not landed yet.
+    /// The shared cold-build helper feeds this to
+    /// [`admit_decision`](crate::semantic_query::admit::admit_decision):
+    /// the §18.2 non-admission rule gates `Warm` on the rooting FACT in
+    /// the `ReadSetSignature`, narrowed by this taint class. A `Clean`
+    /// taint over a soundly-rooted carrier publishes exactly as before.
+    pub taint: crate::semantic_query::ResultTaint,
     /// Every `(canonical, observed_hash)` self-root the cold build
     /// captured at the value source — the keyed canonical for
     /// `ResolveDecl` / `TypeOf` / `Instantiate` / `ResolveMacroPayload`,
@@ -208,6 +221,7 @@ impl From<(QueryResult<SemanticNodeId>, DepSignature)> for QueryBuildOutput {
             dep_signature,
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
+            taint: crate::semantic_query::ResultTaint::Clean,
             observed_self_roots: Vec::new(),
             graph_carrier: None,
             self_root_canonicals: Arc::from([]),
@@ -4141,7 +4155,7 @@ fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
 
 /// Empty `SurfaceView` used when the synthesiser has nothing to
 /// contribute (e.g., open conditional with no branch chosen).
-fn empty_surface_view() -> SurfaceView {
+pub(crate) fn empty_surface_view() -> SurfaceView {
     SurfaceView {
         members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
         call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),

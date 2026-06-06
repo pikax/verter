@@ -66,6 +66,14 @@ pub mod display;
 /// generator binary writes and the diff-test re-checks. See the module for the
 /// generator-is-sole-writer contract.
 pub mod query_key_spec;
+
+/// The §18.2 cache-admission decision for an error-tolerant semantic result:
+/// [`admit_decision`](admit::admit_decision) maps a result's
+/// [`ResultTaint`] + its [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
+/// to [`Warm`](admit::Admission::Warm) / [`ReturnOnly`](admit::Admission::ReturnOnly),
+/// gating `Warm` on the presence of the rooting FACT — never on the taint
+/// enum class as a proxy.
+pub mod admit;
 pub use demand::{
     apply_mask, backfill_points, cached_satisfies, demand_at_hop, relevant_demand_axes,
     AliasPreservation, AxisMask, CarrierStopPolicy, Demand, DemandAxis, DisplayFacet, DisplayNeeds,
@@ -1710,6 +1718,53 @@ pub enum QueryError {
     },
 }
 
+impl QueryError {
+    /// Whether this `Opaque(QueryError)` carrier is the §22 ERROR TYPE — a
+    /// genuine "this type IS an error" result — as opposed to a transient
+    /// CONTROL / recursion sentinel.
+    ///
+    /// The §22 error type rides `Opaque(QueryError)` and (a) relates
+    /// bidirectionally like `any` in the relation engine (so a broken
+    /// sub-result never cascades spurious `NotAssignable`), and (b) is the
+    /// dominating operand of the §22 absorption fast-reject. Only the
+    /// genuine-error variants qualify:
+    ///
+    /// - [`Other`](Self::Other) — a text-bearing failure surfaced to the caller.
+    /// - [`UnsupportedIntrinsic`](Self::UnsupportedIntrinsic) — the declaration
+    ///   resolved to an intrinsic the registry cannot compute.
+    /// - [`ValueDomainMismatch`](Self::ValueDomainMismatch) — a genuine
+    ///   value-domain type error.
+    ///
+    /// The CONTROL / recursion sentinels are NOT the error type and keep their
+    /// existing semantics — the walker / raiser / relation engine interpret
+    /// them specially, and treating them as the error type would corrupt
+    /// recursion handling and resolution control flow:
+    ///
+    /// - [`Miss`](Self::Miss) — "no result yet" (the cache-miss / not-found
+    ///   carrier), NOT an error type.
+    /// - [`DeclPlaceholder`](Self::DeclPlaceholder) — an EXPANDABLE declaration
+    ///   carrier (the relation engine unwraps it via the identity-carrier path).
+    /// - [`RecursiveRef`](Self::RecursiveRef) / [`AliasCycle`](Self::AliasCycle)
+    ///   — recursion / cycle back-edge sentinels the raiser converts to
+    ///   `TypeExpr::RecursiveRef` to STOP the walk.
+    /// - [`BudgetExceeded`](Self::BudgetExceeded) / [`UnstableState`](Self::UnstableState)
+    ///   — resource / completion-fence control (`ReturnOnly`-routed).
+    #[must_use]
+    pub(crate) fn is_error_type(&self) -> bool {
+        match self {
+            QueryError::Other(_)
+            | QueryError::UnsupportedIntrinsic { .. }
+            | QueryError::ValueDomainMismatch { .. } => true,
+            QueryError::Miss
+            | QueryError::BudgetExceeded(_)
+            | QueryError::UnstableState { .. }
+            | QueryError::AliasCycle { .. }
+            | QueryError::RecursiveRef { .. }
+            | QueryError::DeclPlaceholder { .. } => false,
+        }
+    }
+}
+
 // `SemanticNodeData` structurally interns under a compound
 // `(payload, scope)` key, so every field transitively reachable from
 // a variant must implement `Hash` / `Eq`. `QueryError::BudgetExceeded`
@@ -2212,6 +2267,80 @@ pub enum BrokenInputClass {
     TornRead,
     /// A required dependency was absent.
     MissingDependency,
+}
+
+impl BrokenInputClass {
+    /// Severity rank WITHIN a taint level — higher is more severe.
+    ///
+    /// Order (§18.3, locked): `MissingDependency < UnresolvedReference <
+    /// IncompleteDeclaration < SyntaxError < TornRead`. The fact-rooted
+    /// classes (`MissingDependency` / `UnresolvedReference`) rank lowest
+    /// because they carry an invalidation rail and are admission-eligible;
+    /// the unstable-shape classes rank highest. The taint join keeps the
+    /// more-severe class when two same-level taints meet.
+    #[must_use]
+    pub fn severity(self) -> u8 {
+        match self {
+            BrokenInputClass::MissingDependency => 0,
+            BrokenInputClass::UnresolvedReference => 1,
+            BrokenInputClass::IncompleteDeclaration => 2,
+            BrokenInputClass::SyntaxError => 3,
+            BrokenInputClass::TornRead => 4,
+        }
+    }
+
+    /// The more-severe of two classes by [`Self::severity`].
+    #[must_use]
+    fn more_severe(self, other: Self) -> Self {
+        if other.severity() > self.severity() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+impl ResultTaint {
+    /// Lattice level of this taint on the chain `Clean ⊑ Partial ⊑ Broken`.
+    /// `Clean = 0`, `Partial = 1`, `Broken = 2`.
+    #[must_use]
+    pub fn level(self) -> u8 {
+        match self {
+            ResultTaint::Clean => 0,
+            ResultTaint::Partial(_) => 1,
+            ResultTaint::Broken(_) => 2,
+        }
+    }
+
+    /// Join over the lattice `Clean ⊑ Partial ⊑ Broken` (§18.3).
+    ///
+    /// Propagates the MAX taint level (so any `Broken` dependency taints
+    /// the consumer `Broken`; a `Partial` dep with a `Clean` self stays
+    /// `Partial`). When both operands sit at the SAME level, the joined
+    /// [`BrokenInputClass`] is the more-severe one (`Broken` classes
+    /// dominate `Partial` classes by virtue of the higher level; ties
+    /// within a level break by [`BrokenInputClass::severity`]). Monotone
+    /// and finite — taint only ever moves UP, so propagation terminates.
+    #[must_use]
+    pub fn join(self, other: ResultTaint) -> ResultTaint {
+        use std::cmp::Ordering;
+        match self.level().cmp(&other.level()) {
+            Ordering::Greater => self,
+            Ordering::Less => other,
+            Ordering::Equal => match (self, other) {
+                (ResultTaint::Clean, ResultTaint::Clean) => ResultTaint::Clean,
+                (ResultTaint::Partial(a), ResultTaint::Partial(b)) => {
+                    ResultTaint::Partial(a.more_severe(b))
+                }
+                (ResultTaint::Broken(a), ResultTaint::Broken(b)) => {
+                    ResultTaint::Broken(a.more_severe(b))
+                }
+                // Unreachable: equal `level()` implies the same discriminant
+                // (level 0 ⇔ Clean, 1 ⇔ Partial, 2 ⇔ Broken). Defensive.
+                _ => self,
+            },
+        }
+    }
 }
 
 /// Narrow a domain-agnostic query result to the [`TypeNode`] domain.

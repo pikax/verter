@@ -3012,6 +3012,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         path: &Arc<[PathSegment]>,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // §22 fast-reject for the `?[K]` indexed-access shape: `any[K]=any`,
+        // `never[K]=never`, `unknown[K]`=UNCONDITIONAL error, `error[K]=error`.
+        // Member projection (`.foo`) is a distinct surface left to the walker.
+        if Self::project_path_is_indexed_access(path) {
+            if let Some(absorbed) = self.absorb_indexed_access(base) {
+                return absorbed;
+            }
+        }
         let fence = self.project_generation_signature();
         self.graph().record_path_length(path.len() as u32);
         // Longest-prefix-first peek. Skip when path.len() < 2.
@@ -3060,6 +3068,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 dep_signature: fence,
                 walker_diagnostics,
                 cache_suppress,
+                taint: crate::semantic_query::ResultTaint::Clean,
                 observed_self_roots: Vec::new(),
                 graph_carrier: None,
                 self_root_canonicals: Arc::from([]),
@@ -3125,6 +3134,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             dep_signature: fence,
             walker_diagnostics,
             cache_suppress,
+            taint: crate::semantic_query::ResultTaint::Clean,
             observed_self_roots,
             graph_carrier: None,
             self_root_canonicals: Arc::from([]),
@@ -3148,6 +3158,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         base: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // §22 fast-reject: `keyof any`/`keyof never` = `string|number|symbol`,
+        // `keyof unknown` = `never`, `keyof error` = `error`. A lattice-extreme
+        // base resolves to a fully-determined keyspace regardless of mode, so
+        // this runs before the carrier-stop and the structural keyspace walk.
+        if let Some(absorbed) = self.absorb_key_of(base) {
+            return absorbed;
+        }
         let data = self.graph().node_data(base);
         let fence = self.project_generation_signature();
         // Codex-hybrid carrier-stop: when the
@@ -3368,6 +3385,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mapper: &crate::semantic_query::MapperKey,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // §22 fast-reject on the mapped SOURCE: over `any` ⇒ `any`; over
+        // `never` ⇒ `{}`; over `error` ⇒ `error`; a direct mapping over
+        // `unknown` is illegal ⇒ error. Runs before key-space enumeration.
+        if let Some(absorbed) = self.absorb_mapped(source) {
+            return absorbed;
+        }
         let graph = self.graph();
         let fence = self.project_generation_signature();
         // Self-version rooting: the mapped result depends on the
@@ -4160,6 +4183,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         false_branch: SemanticNodeId,
         distributive: bool,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // §22 fast-reject: `error extends T` ⇒ `error` (both branches
+        // tainted). The `any`-distributes-both-branches and distributive-
+        // `never`-collapses cases are handled by the branch logic below.
+        if let Some(absorbed) = self.absorb_conditional(check) {
+            return absorbed;
+        }
         let graph = self.graph();
         let fence = self.project_generation_signature();
         // Self-version rooting: the conditional's resolution depends on
@@ -4481,6 +4510,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         members: &Arc<[SemanticNodeId]>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // §22 fast-reject: `X|any=any`, `X|never=X`, `X|unknown=unknown`,
+        // `X|error=error`. Runs BEFORE structural normalization.
+        if let Some(absorbed) = self.absorb_union(members) {
+            return absorbed;
+        }
         let node = self.intern_normalized_union_or_intersection(members, /* is_union */ true);
         let fence = self.project_generation_signature();
         if members.len() > 1 {
@@ -4512,6 +4546,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         members: &Arc<[SemanticNodeId]>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // §22 fast-reject: `X&never=never`, `X&any=any`, `X&unknown=X`,
+        // `X&error=error`. Runs BEFORE structural normalization.
+        if let Some(absorbed) = self.absorb_intersection(members) {
+            return absorbed;
+        }
         let node = self.intern_normalized_union_or_intersection(members, /* is_union */ false);
         let fence = self.project_generation_signature();
         if members.len() > 1 {

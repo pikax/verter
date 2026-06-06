@@ -797,7 +797,29 @@ fn expand_pair(
         return;
     }
 
-    // ── Opaque / VueMacroElements carriers → Unknown ───────────────────
+    // ── Error type (§22.3): an `Opaque(QueryError)` ERROR-TYPE carrier relates
+    //    BIDIRECTIONALLY (like `any`), so a broken sub-result does not cascade
+    //    spurious assignability failures. The error type carries §18 taint and
+    //    is `ReturnOnly`-prone, but RELATION-wise it is wildcard. Only the
+    //    genuine error-type variants qualify (`QueryError::is_error_type`) —
+    //    the control / recursion sentinels (`Miss`, `RecursiveRef`,
+    //    `AliasCycle`, `BudgetExceeded`, `UnstableState`, `DeclPlaceholder`)
+    //    keep their `Unknown` relation so recursion / resolution control flow
+    //    is preserved. ──
+    if matches!(
+        &*source_data,
+        SemanticNodeData::Opaque(err) if err.is_error_type()
+    ) || matches!(
+        &*target_data,
+        SemanticNodeData::Opaque(err) if err.is_error_type()
+    ) {
+        results.push(assignable(bindings));
+        return;
+    }
+
+    // ── Remaining opaque carriers (control / recursion sentinels) /
+    //    VueMacroElements → Unknown (not the error type; relation cannot
+    //    decide) ─────────────────────────────────────────────────────────────
     if matches!(
         &*source_data,
         SemanticNodeData::Opaque(_) | SemanticNodeData::VueMacroElements(_)

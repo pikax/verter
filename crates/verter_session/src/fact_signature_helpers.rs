@@ -855,6 +855,67 @@ impl ReadSetSignature {
         })
     }
 
+    /// Whether this carrier records the invalidation rail that roots a
+    /// `Partial(MissingDependency)` result — the §18.2 admission narrowing.
+    ///
+    /// A missing-dependency result (`import { X } from './missing'` where
+    /// `./missing` does not yet exist) is fact-rooted-cacheable ONLY when
+    /// the producer recorded the import-route rail: when the dependency
+    /// later appears, the `DerivedFactKind::ImportRoute` rail's hash shifts
+    /// and the warm read misses (lazy cross-file invalidation, the normal
+    /// rail). The bare presence of arbitrary file facts is NOT sufficient —
+    /// a positive `FileWholeHash` would warm-admit a degraded result with
+    /// no rail that the dependency's appearance can invalidate. The
+    /// `admit_decision` rule consults THIS, never the taint enum class, to
+    /// decide `Warm` vs `ReturnOnly` for `Partial(MissingDependency)`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn records_missing_dependency_fact(&self) -> bool {
+        self.facts.iter().any(|fact| {
+            matches!(
+                fact,
+                FactVersionRef::DerivedFactHash {
+                    kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// Whether this carrier records the negative-resolution rail that roots
+    /// a `Partial(UnresolvedReference)` result — the §18.2 admission
+    /// narrowing.
+    ///
+    /// An unresolved reference over well-formed syntax is
+    /// fact-rooted-cacheable ONLY when the resolver recorded the negative
+    /// resolved-import fact — a `ResolvedImportClause` / `ResolvedReexportBinding`
+    /// whose `resolved_canonical` is the
+    /// [`UNRESOLVED_SENTINEL`](crate::resolved_import_facts_producer::UNRESOLVED_SENTINEL).
+    /// When the reference later resolves, the producer records a real
+    /// canonical, the fact's hash shifts, and the warm read misses. A
+    /// POSITIVE `ResolveImports` fact must NOT qualify — it carries no
+    /// negative rail, so trusting it would warm-admit a degraded result.
+    /// `admit_decision` consults THIS, never the taint enum class.
+    #[inline]
+    #[must_use]
+    pub(crate) fn records_negative_resolution_fact(&self) -> bool {
+        self.facts.iter().any(|fact| match fact {
+            FactVersionRef::ResolveImports(r) => match &r.key {
+                FactKey::ResolvedImportClause {
+                    resolved_canonical, ..
+                }
+                | FactKey::ResolvedReexportBinding {
+                    resolved_canonical, ..
+                } => {
+                    resolved_canonical.as_ref()
+                        == crate::resolved_import_facts_producer::UNRESOLVED_SENTINEL
+                }
+                _ => false,
+            },
+            _ => false,
+        })
+    }
+
     /// Bubble the path-precise fact set into every active outer
     /// tracer on the current TLS stack. No-op when the tracer stack
     /// is empty or `facts` is empty.

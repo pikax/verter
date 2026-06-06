@@ -1,0 +1,333 @@
+//! §22 type-lattice absorption — the reducers' FIRST fast-reject.
+//!
+//! Each `absorb_*` helper is a SEPARABLE entry hook a reducer calls before
+//! any structural work (`docs/arch/u2-query-value-domain-design.md` §22.2):
+//! when an operand is one of the lattice extremes (`any` / `never` /
+//! `unknown` / `error`), the absorption rule short-circuits the whole
+//! operator to its absorbed result, removing the structural recursion. The
+//! helpers are INTENTIONALLY isolated from the reducer bodies — each reducer
+//! adds exactly one `if let Some(out) = self.absorb_*(...) { return out; }`
+//! line at entry, so the §22 behavior never tangles with the per-arm reducer
+//! logic the key-surface spine also touches.
+//!
+//! ## Discipline (all helpers)
+//!
+//! - **Cheap `node_data` peek ONLY.** No `execute`, no `evaluate_deferred`,
+//!   no resolver work. The peek follows transparent [`Alias`](crate::semantic_query::SemanticNodeData::Alias)
+//!   redirects (a pure arena hop) up to [`ALIAS_PEEK_HOPS`] but never reduces
+//!   an operator or resolves a declaration.
+//! - **`any` / `never` / `unknown` results are `Clean`** (legitimately
+//!   cacheable). **`error` rides [`Opaque(QueryError)`](crate::semantic_query::SemanticNodeData::Opaque)**
+//!   and carries §18 taint — it is `ReturnOnly`-prone. To keep that taint
+//!   from being hidden, an `error` operand DOMINATES every other absorber
+//!   (the absorbed result is the `error` carrier itself), so a broken
+//!   sub-result never collapses into a `Clean` `any`/`never`/`unknown` that
+//!   would warm-cache the broken-ness away.
+//! - **`Opaque(QueryError::DeclPlaceholder)` is NOT the error type** — it is
+//!   an expandable declaration carrier, so it is excluded from the `error`
+//!   classification (mirrors the relation engine's identity-carrier unwrap).
+
+use std::sync::Arc;
+
+use crate::project_semantic_dispatch::walk::QueryBuildOutput;
+use crate::semantic_query::{
+    IndexKey, PathSegment, PrimitiveKind, QueryError, QueryResult, SemanticNodeData, SemanticNodeId,
+};
+
+use super::ProjectSemanticDispatch;
+
+/// Maximum transparent [`Alias`](SemanticNodeData::Alias) hops the fast-reject
+/// peek follows before giving up. Absorption is an optimisation + a
+/// correctness fix for DIRECT lattice-extreme operands; a longer alias chain
+/// falls through to the structural reducer, which resolves it via the normal
+/// machinery. The bound keeps the peek O(1) and immune to alias cycles.
+const ALIAS_PEEK_HOPS: usize = 8;
+
+/// A lattice-extreme operand the §22 absorption table reacts to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpecialKind {
+    Any,
+    Never,
+    Unknown,
+    /// The error type (`Opaque(QueryError)`, excluding `DeclPlaceholder`).
+    Error,
+}
+
+impl ProjectSemanticDispatch<'_> {
+    /// Classify `id` as a lattice extreme, following transparent `Alias`
+    /// redirects (bounded by [`ALIAS_PEEK_HOPS`]). Returns the kind AND the
+    /// resolved node id (so an `error` operand can be reused verbatim as the
+    /// absorbed result, preserving its `QueryError` payload + §18 taint).
+    fn peek_special(&self, id: SemanticNodeId) -> Option<(SpecialKind, SemanticNodeId)> {
+        let mut cur = id;
+        // At most ALIAS_PEEK_HOPS hops; a longer chain / alias cycle → None.
+        // bounded-loop: ALIAS_PEEK_HOPS transparent Alias redirects.
+        for _ in 0..ALIAS_PEEK_HOPS {
+            let data = self.graph().node_data(cur)?;
+            match &*data {
+                SemanticNodeData::Alias(inner) => {
+                    let next = *inner;
+                    drop(data);
+                    cur = next;
+                    continue;
+                }
+                SemanticNodeData::Primitive(PrimitiveKind::Any) => {
+                    return Some((SpecialKind::Any, cur))
+                }
+                SemanticNodeData::Primitive(PrimitiveKind::Never) => {
+                    return Some((SpecialKind::Never, cur))
+                }
+                SemanticNodeData::Primitive(PrimitiveKind::Unknown) => {
+                    return Some((SpecialKind::Unknown, cur))
+                }
+                SemanticNodeData::Opaque(err) if err.is_error_type() => {
+                    return Some((SpecialKind::Error, cur))
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// Intern a bare primitive node.
+    fn primitive_node(&self, kind: PrimitiveKind) -> SemanticNodeId {
+        self.graph().intern_node(SemanticNodeData::Primitive(kind))
+    }
+
+    /// `string | number | symbol` — the `keyof any` / `keyof never` keyspace.
+    fn string_number_symbol(&self) -> SemanticNodeId {
+        let s = self.primitive_node(PrimitiveKind::String);
+        let n = self.primitive_node(PrimitiveKind::Number);
+        let sym = self.primitive_node(PrimitiveKind::Symbol);
+        self.intern_normalized_union_or_intersection(&[s, n, sym], /* is_union */ true)
+    }
+
+    /// `{}` — the empty object surface (`keyof unknown = never` mapped, mapped
+    /// over `never`).
+    fn empty_object(&self) -> SemanticNodeId {
+        self.graph()
+            .intern_node(SemanticNodeData::Object(super::walk::empty_surface_view()))
+    }
+
+    /// Wrap an absorbed result node into a `QueryBuildOutput` rooted on the
+    /// operand(s) the absorption read. The absorbed value is a function of
+    /// the operands' file content, so the published memo entry must miss when
+    /// any operand's file is edited.
+    fn absorbed_output(
+        &self,
+        node: SemanticNodeId,
+        roots_from: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> QueryBuildOutput {
+        let observed = self.observed_self_roots_from_nodes(roots_from);
+        QueryBuildOutput::from((
+            QueryResult::Value(node),
+            self.project_generation_signature(),
+        ))
+        .with_observed_self_roots(observed)
+    }
+
+    // ── Union ───────────────────────────────────────────────────────────
+    /// §22.2 union absorption: `X | any = any`, `X | unknown = unknown`,
+    /// `X | never = X` (drop every `never` arm; all-`never` ⇒ `never`),
+    /// `X | error = error` (taint-preserving, dominates).
+    pub(crate) fn absorb_union(&self, members: &[SemanticNodeId]) -> Option<QueryBuildOutput> {
+        let mut has_any = false;
+        let mut has_unknown = false;
+        let mut error_node: Option<SemanticNodeId> = None;
+        let mut has_never = false;
+        for &m in members {
+            match self.peek_special(m) {
+                Some((SpecialKind::Any, _)) => has_any = true,
+                Some((SpecialKind::Unknown, _)) => has_unknown = true,
+                Some((SpecialKind::Error, id)) => {
+                    if error_node.is_none() {
+                        error_node = Some(id);
+                    }
+                }
+                Some((SpecialKind::Never, _)) => has_never = true,
+                None => {}
+            }
+        }
+        // Error dominates so the §18 taint is never hidden behind a Clean
+        // `any`/`unknown`.
+        if let Some(err) = error_node {
+            return Some(self.absorbed_output(err, members.iter().copied()));
+        }
+        if has_any {
+            return Some(self.absorbed_output(
+                self.primitive_node(PrimitiveKind::Any),
+                members.iter().copied(),
+            ));
+        }
+        if has_unknown {
+            return Some(self.absorbed_output(
+                self.primitive_node(PrimitiveKind::Unknown),
+                members.iter().copied(),
+            ));
+        }
+        if has_never {
+            // `X | never = X`: drop the `never` arms and re-normalise the
+            // remainder. An all-`never` union folds to `never`
+            // (`intern_*` interns `Never` for an empty member set).
+            let kept: Vec<SemanticNodeId> = members
+                .iter()
+                .copied()
+                .filter(|&m| !matches!(self.peek_special(m), Some((SpecialKind::Never, _))))
+                .collect();
+            let node =
+                self.intern_normalized_union_or_intersection(&kept, /* is_union */ true);
+            return Some(self.absorbed_output(node, members.iter().copied()));
+        }
+        None
+    }
+
+    // ── Intersection ──────────────────────────────────────────────────────
+    /// §22.2 intersection absorption: `X & never = never`, `X & any = any`,
+    /// `X & unknown = X` (drop every `unknown` arm; all-`unknown` ⇒ `unknown`),
+    /// `X & error = error` (taint-preserving, dominates).
+    pub(crate) fn absorb_intersection(
+        &self,
+        members: &[SemanticNodeId],
+    ) -> Option<QueryBuildOutput> {
+        let mut has_any = false;
+        let mut has_never = false;
+        let mut has_unknown = false;
+        let mut error_node: Option<SemanticNodeId> = None;
+        for &m in members {
+            match self.peek_special(m) {
+                Some((SpecialKind::Any, _)) => has_any = true,
+                Some((SpecialKind::Never, _)) => has_never = true,
+                Some((SpecialKind::Unknown, _)) => has_unknown = true,
+                Some((SpecialKind::Error, id)) => {
+                    if error_node.is_none() {
+                        error_node = Some(id);
+                    }
+                }
+                None => {}
+            }
+        }
+        // Error dominates so the §18 taint is never hidden.
+        if let Some(err) = error_node {
+            return Some(self.absorbed_output(err, members.iter().copied()));
+        }
+        if has_never {
+            return Some(self.absorbed_output(
+                self.primitive_node(PrimitiveKind::Never),
+                members.iter().copied(),
+            ));
+        }
+        if has_any {
+            return Some(self.absorbed_output(
+                self.primitive_node(PrimitiveKind::Any),
+                members.iter().copied(),
+            ));
+        }
+        if has_unknown {
+            // `X & unknown = X`: drop the `unknown` arms. An all-`unknown`
+            // intersection is `unknown`.
+            let kept: Vec<SemanticNodeId> = members
+                .iter()
+                .copied()
+                .filter(|&m| !matches!(self.peek_special(m), Some((SpecialKind::Unknown, _))))
+                .collect();
+            if kept.is_empty() {
+                return Some(self.absorbed_output(
+                    self.primitive_node(PrimitiveKind::Unknown),
+                    members.iter().copied(),
+                ));
+            }
+            let node =
+                self.intern_normalized_union_or_intersection(&kept, /* is_union */ false);
+            return Some(self.absorbed_output(node, members.iter().copied()));
+        }
+        None
+    }
+
+    // ── keyof ───────────────────────────────────────────────────────────
+    /// §22.2 `keyof` absorption: `keyof any = string | number | symbol`,
+    /// `keyof never = string | number | symbol` (TS quirk),
+    /// `keyof unknown = never`, `keyof error = error`.
+    pub(crate) fn absorb_key_of(&self, base: SemanticNodeId) -> Option<QueryBuildOutput> {
+        match self.peek_special(base)? {
+            (SpecialKind::Any | SpecialKind::Never, _) => {
+                Some(self.absorbed_output(self.string_number_symbol(), [base]))
+            }
+            (SpecialKind::Unknown, _) => {
+                Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Never), [base]))
+            }
+            (SpecialKind::Error, err) => Some(self.absorbed_output(err, [base])),
+        }
+    }
+
+    // ── Indexed access ────────────────────────────────────────────────────
+    /// §22.2 indexed-access absorption for the `?[K]` shape:
+    /// `any[K] = any`, `never[K] = never`,
+    /// `unknown[K] = ` UNCONDITIONAL error for ALL `K` (`unknown` has no index
+    /// signatures — an illegal index is an `Opaque(QueryError)`, NOT per-K and
+    /// NOT a crash), `error[K] = error`.
+    pub(crate) fn absorb_indexed_access(&self, object: SemanticNodeId) -> Option<QueryBuildOutput> {
+        match self.peek_special(object)? {
+            (SpecialKind::Any, _) => {
+                Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Any), [object]))
+            }
+            (SpecialKind::Never, _) => {
+                Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Never), [object]))
+            }
+            (SpecialKind::Unknown, _) => {
+                let err = self.opaque(QueryError::Other(Arc::from(
+                    "indexed access into `unknown` (no index signatures)",
+                )));
+                Some(self.absorbed_output(err, [object]))
+            }
+            (SpecialKind::Error, err) => Some(self.absorbed_output(err, [object])),
+        }
+    }
+
+    /// Whether a `ProjectPath` is the single-segment indexed-access shape
+    /// (`?[K]`). §22 indexed-access absorption applies only to this shape;
+    /// member projection (`.foo`) is a distinct surface left to the walker.
+    pub(crate) fn project_path_is_indexed_access(path: &[PathSegment]) -> bool {
+        matches!(
+            path,
+            [PathSegment::Index(
+                IndexKey::String(_) | IndexKey::Number(_) | IndexKey::TypeNode(_)
+            )]
+        )
+    }
+
+    // ── Mapped ──────────────────────────────────────────────────────────
+    /// §22.2 mapped-type absorption on the mapped SOURCE:
+    /// over `any` ⇒ `any`; over `never` ⇒ `{}`; over `error` ⇒ `error`; a
+    /// DIRECT mapping over `unknown` (`{ [K in unknown] }`, `K` not constrained
+    /// to a key set) is illegal ⇒ error. (The COMMON `{ [K in keyof unknown] }`
+    /// path arrives here as source = `never` — `keyof unknown` already reduced
+    /// to `never` — and folds to `{}`.)
+    pub(crate) fn absorb_mapped(&self, source: SemanticNodeId) -> Option<QueryBuildOutput> {
+        match self.peek_special(source)? {
+            (SpecialKind::Any, _) => {
+                Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Any), [source]))
+            }
+            (SpecialKind::Never, _) => Some(self.absorbed_output(self.empty_object(), [source])),
+            (SpecialKind::Unknown, _) => {
+                let err = self.opaque(QueryError::Other(Arc::from(
+                    "mapped type over `unknown` (not a key set)",
+                )));
+                Some(self.absorbed_output(err, [source]))
+            }
+            (SpecialKind::Error, err) => Some(self.absorbed_output(err, [source])),
+        }
+    }
+
+    // ── Conditional ───────────────────────────────────────────────────────
+    /// §22.2 conditional absorption on the CHECK type: `error extends T`
+    /// ⇒ `error` (both branches tainted). `any` (distributes both branches +
+    /// unions them) and distributive `never` (collapses to `never`) are
+    /// handled by the conditional reducer's own branch logic, so this hook
+    /// only fast-rejects the error-check case.
+    pub(crate) fn absorb_conditional(&self, check: SemanticNodeId) -> Option<QueryBuildOutput> {
+        match self.peek_special(check)? {
+            (SpecialKind::Error, err) => Some(self.absorbed_output(err, [check])),
+            _ => None,
+        }
+    }
+}
