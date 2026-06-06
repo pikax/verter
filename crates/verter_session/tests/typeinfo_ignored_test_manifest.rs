@@ -56,6 +56,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use verter_session::semantic_query::SemanticQueryKeyTag;
+
 fn workspace_root() -> PathBuf {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     crate_root
@@ -304,8 +306,15 @@ enum TypeInfoParityBlockId {
 
 /// The live `SemanticQueryKey` variant set, mirrored as a name-only
 /// closed enum (the U0 ledger keys queries by NAME — no payloads). Kept
-/// in sync with `verter_session::semantic_query::SemanticQueryKey`;
-/// later U-blocks that add keys (e.g. `ResolveCall`) extend this set.
+/// in sync — variant-for-variant — with the live
+/// [`verter_session::semantic_query::SemanticQueryKeyTag`] discriminant set
+/// (`SemanticQueryKeyTag::ALL`). The
+/// `semantic_query_name_mirror_matches_live_tag_set` guard FAILS if this
+/// mirror omits (or invents) any live tag, so the mirror can never silently
+/// drift behind the live key surface and the block-DAG guard's consumed-key
+/// check (`key_owning_block`) can never false-pass for a key the mirror does
+/// not yet name. Later U-blocks that add keys extend BOTH this enum and
+/// [`SEMANTIC_QUERY_NAME_ALL`] in the same change.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
 #[allow(dead_code)]
 enum SemanticQueryName {
@@ -323,7 +332,47 @@ enum SemanticQueryName {
     ResolvedNamedType,
     Relate,
     ResolveMacroPayload,
+    ResolveClassSurface,
+    ResolveAmbientNamespace,
+    ResolveEnum,
+    ResolveOverloadSet,
+    ApparentType,
+    TemplateLiteralReduce,
+    FlowNarrowingAt,
+    ContextualTypeAt,
 }
+
+/// Every [`SemanticQueryName`] mirror variant, in live-tag declaration order.
+/// This is the witness the `semantic_query_name_mirror_matches_live_tag_set`
+/// guard diffs against `SemanticQueryKeyTag::ALL`: a live tag missing here (or
+/// an entry here with no live tag) FAILS the guard. Adding a
+/// `SemanticQueryName` variant without listing it here leaves it out of the
+/// set the guard builds, so the set inequality FAILS too — the array and the
+/// enum stay aligned by the guard, not by convention.
+const SEMANTIC_QUERY_NAME_ALL: &[SemanticQueryName] = &[
+    SemanticQueryName::ResolveDecl,
+    SemanticQueryName::Instantiate,
+    SemanticQueryName::ProjectMember,
+    SemanticQueryName::IndexedAccess,
+    SemanticQueryName::KeyOf,
+    SemanticQueryName::MappedType,
+    SemanticQueryName::Conditional,
+    SemanticQueryName::TypeOf,
+    SemanticQueryName::NormalizeUnion,
+    SemanticQueryName::NormalizeIntersection,
+    SemanticQueryName::ProjectPath,
+    SemanticQueryName::ResolvedNamedType,
+    SemanticQueryName::Relate,
+    SemanticQueryName::ResolveMacroPayload,
+    SemanticQueryName::ResolveClassSurface,
+    SemanticQueryName::ResolveAmbientNamespace,
+    SemanticQueryName::ResolveEnum,
+    SemanticQueryName::ResolveOverloadSet,
+    SemanticQueryName::ApparentType,
+    SemanticQueryName::TemplateLiteralReduce,
+    SemanticQueryName::FlowNarrowingAt,
+    SemanticQueryName::ContextualTypeAt,
+];
 
 /// Deterministic identifier for a generated TS7 oracle snapshot. Closed
 /// set: one per oracle-backed capability family.
@@ -491,21 +540,38 @@ struct BlockContractRow {
 }
 
 /// The single block that OWNS (produces) each `SemanticQueryName`
-/// (§11.5). The live keys' owners follow the mechanism-first layering:
-/// foundational decl/value keys at `U2.QUERY_VALUE_DOMAIN`, relation /
-/// instantiation / conditional at `U2.RELATION_INFER`, indexed-access /
-/// keyof / member / path at `U2.INDEXED_ACCESS`, mapped at
-/// `U2.MAPPED_TEMPLATE`, macro payload at `U14.MACRO_ADAPTER`.
+/// (§11.5). Owners follow the mechanism-first layering — the block whose
+/// dominant mechanism PRODUCES the key's result, NOT where the key's shape
+/// was first declared:
+/// - foundational decl/value keys at `U2.QUERY_VALUE_DOMAIN` (incl.
+///   `ApparentType`, the lib-fact apparent-member lookup that has no dedicated
+///   reducer block);
+/// - relation / instantiation / conditional at `U2.RELATION_INFER`;
+/// - indexed-access / keyof / member / path at `U2.INDEXED_ACCESS`;
+/// - mapped + template-literal reduction at `U2.MAPPED_TEMPLATE`;
+/// - class-surface projection at `U2.CLASS_SURFACES`;
+/// - enum value/type duality at `U2.ENUMS`;
+/// - ambient-namespace (JSX foundation) at `U2.JSX_FOUNDATIONS`;
+/// - overload-set / call dispatch at `U6.CALL_RESOLVE`;
+/// - flow narrowing at `U6.FLOW_RETURN_SUBSTRATE` (the flow-frame substrate
+///   every narrowing mechanism composes on);
+/// - contextual typing at `U6.CONTEXTUAL_CALLBACK`;
+/// - macro payload at `U14.MACRO_ADAPTER`.
 fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
     use SemanticQueryName::*;
     use TypeInfoParityBlockId::*;
     match key {
-        ResolveDecl | TypeOf | NormalizeUnion | NormalizeIntersection | ResolvedNamedType => {
-            U2QueryValueDomain
-        }
+        ResolveDecl | TypeOf | NormalizeUnion | NormalizeIntersection | ResolvedNamedType
+        | ApparentType => U2QueryValueDomain,
         Relate | Instantiate | Conditional => U2RelationInfer,
         IndexedAccess | KeyOf | ProjectMember | ProjectPath => U2IndexedAccess,
-        MappedType => U2MappedTemplate,
+        MappedType | TemplateLiteralReduce => U2MappedTemplate,
+        ResolveClassSurface => U2ClassSurfaces,
+        ResolveEnum => U2Enums,
+        ResolveAmbientNamespace => U2JsxFoundations,
+        ResolveOverloadSet => U6CallResolve,
+        FlowNarrowingAt => U6FlowReturnSubstrate,
+        ContextualTypeAt => U6ContextualCallback,
         ResolveMacroPayload => U14MacroAdapter,
     }
 }
@@ -1525,6 +1591,50 @@ fn typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_pre
          consistency FAILED (§11.5):\n  {}",
         failures.join("\n  "),
     );
+}
+
+/// §11.5 — the manifest's `SemanticQueryName` mirror is BIJECTIVE with the
+/// live `SemanticQueryKeyTag::ALL` discriminant set. The mirror keys queries
+/// by NAME for the block-DAG guard's consumed-key check; if it drifts behind
+/// the live key surface, a row could consume a live key the mirror does not
+/// name (so `key_owning_block` could not be exercised for it) and the DAG
+/// guard's consumed-key prerequisite check would silently never fire for that
+/// key — a false pass. This guard pins the two sets equal so that can never
+/// happen: a live tag absent from the mirror (or a mirror name with no live
+/// tag) FAILS here, naming the exact offenders.
+#[test]
+fn semantic_query_name_mirror_matches_live_tag_set() {
+    let live: BTreeSet<String> = SemanticQueryKeyTag::ALL
+        .iter()
+        .map(|tag| tag.name().to_string())
+        .collect();
+    let mirror: BTreeSet<String> = SEMANTIC_QUERY_NAME_ALL
+        .iter()
+        .map(|name| format!("{name:?}"))
+        .collect();
+
+    let missing_from_mirror: Vec<&String> = live.difference(&mirror).collect();
+    let extra_in_mirror: Vec<&String> = mirror.difference(&live).collect();
+
+    assert!(
+        missing_from_mirror.is_empty() && extra_in_mirror.is_empty(),
+        "the manifest `SemanticQueryName` mirror has drifted from the live \
+         `SemanticQueryKeyTag::ALL` set. Extend BOTH the `SemanticQueryName` \
+         enum AND `SEMANTIC_QUERY_NAME_ALL` (and add a `key_owning_block` arm) \
+         for every added live key in the same change.\n  \
+         live tags missing from the mirror: {missing_from_mirror:?}\n  \
+         mirror names with no live tag: {extra_in_mirror:?}",
+    );
+
+    // Sanity floor: the live set is non-empty and the mirror array has no
+    // duplicate names (a duplicated variant would shrink the set and could
+    // mask a missing one).
+    assert_eq!(
+        mirror.len(),
+        SEMANTIC_QUERY_NAME_ALL.len(),
+        "`SEMANTIC_QUERY_NAME_ALL` contains duplicate variants",
+    );
+    assert!(!live.is_empty(), "`SemanticQueryKeyTag::ALL` must be non-empty");
 }
 
 // ──────────────────────────────────────────────────────────────────
