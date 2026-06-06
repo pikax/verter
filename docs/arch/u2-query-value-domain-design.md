@@ -1088,9 +1088,9 @@ rule below, not an optional follow-up.
 
 ## Locked decisions
 
-The design panel (codex best-arch + harsh-reviewer) confirmed the core architecture best-possible
-(two-tier env model, regime-stratified meet-semilattice, display-as-projection, fact-rooted error
-line) and LOCKED all four forks. These are DECISIONS, not open questions:
+The core architecture is confirmed best-possible (two-tier env model, regime-stratified
+meet-semilattice, display-as-projection, fact-rooted error line) and all four forks are LOCKED.
+These are DECISIONS, not open questions:
 
 - **Slot-keyed `Instantiate`/`ResolveMacroPayload`.** `Instantiate`/`ResolveMacroPayload` key
   `base`/`owner` on the env-bearing, content-free `ResolvedDeclSlotIdentity` (one identity type,

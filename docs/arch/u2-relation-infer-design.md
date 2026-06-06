@@ -13,146 +13,49 @@
 > SHAPE — both live at qvd §2.2; the `CheckerTransaction` / `InferenceSession` substrate is the parent
 > `native-typeinfo-parity.md §4.2` cited above, not a qvd §4.2).
 >
-> Status: **DESIGN-LOCKED.** Adjudicated by a two-panelist design panel (codex gpt-5.5/xhigh + a claude
-> reviewer), reconciled by an independent adjudicator. Panel artifacts: `/tmp/mom/RELATION-INFER/PANEL.md`,
-> `panel-codex.txt`, `panel-claude.md`, `ADJUDICATION.md`. A subsequent max-mandate confirm-gate (codex + an
-> independent claude reviewer) returned precision findings (P1-A non-cyclic `Unknown` admission row; P1-B
-> in-flight binding-`Relate` reentry identity; P1-C transient `RelationComputeResult`; P1-E negative-SCC fact
-> set; P2-D the live `GraphTypeNode.relation_proof = 28` wire migration into RI-2; P3-F singleflight lifetime;
-> P3-G mini-DAG art) which are folded in below. A SECOND max-mandate confirm-gate (round 2) then returned two
-> REAL findings — **P1-2** (`BudgetExceeded` restored to the PUBLIC `RelationPayload` / `display_relation`
-> surface as a `ReturnOnly`-but-public outcome via `RelationOutcome::BudgetExceeded`; warm admission stays
-> binary `Assignable`/`NotAssignable` at the gate, never by deleting the variant) and **P1-3** (RI-8 rescoped
-> to the U2-available substrate: build the shared `CheckerReentryStack` + retire `RefCycleResultDb` + wire only
-> `Relate`; defer `FlowReturn`/`ResolveCall`/`ContextualTypeAt`/`FlowNarrowingAt` routing AND the flow
-> depth-sentinel retirement to U6, dropping the RI-6 dep) plus two P3 wording polishes (§2.4 §4.1-protocol
-> scope + R-c cross-ref; mini-DAG art) — all folded in below — precision/sequencing fixes layered on the locked
-> core, NOT a redesign; no invariant weakened. A THIRD max-mandate confirm-gate (round 3) then returned one
-> P1 + two P2 (all VERIFIED real) — folded in below: **P1-RI3** (the RI-3 guard
-> `checker_reentry_graph_spans_flow_call_contextual_narrowing` asserts a cross-engine reentry span over
-> `FlowReturn`/`ResolveCall`/`ContextualTypeAt`/`FlowNarrowingAt` that is U6-deferred: the `FlowReturn` /
-> `ResolveCall` variants are NOT pre-registered at U2 (the standing
-> `semantic_query_key_spec_table_equals_enum` meta-guard rejects any U2 tree referencing them), and although
-> `ContextualTypeAt` / `FlowNarrowingAt` ARE registered at U2 as non-producing shells, none of the four is
-> WIRED onto the reentry stack at U2 (Relate-only) — so the span guard
-> could not land TDD-first at U2; SAME class as P1-3 — rescoped RI-3's U2 guard to the U2-live
-> `checker_reentry_stack_substrate_built_and_relate_wired` and DEFERRED the full cross-engine span assertion to
-> a **U6-owned** `checker_reentry_graph_spans_flow_call_contextual_narrowing`), **P2-Dec4-guard** (the parent
-> value-domain guard `relate_query_value_carries_relation_proof_and_budget_state` was neither NAMED nor OWNED
-> here, and round-2's fold dropped the literal `budget_state` field — reconciled by keeping the folded
-> `RelationOutcome::BudgetExceeded` form: the public `RelationPayload` carries BOTH the `relation_proof` AND the
-> budget state typed INTO the outcome arm, satisfying the guard in intent and matching the parent's own prose
-> ["the public `RelationPayload` … plus a typed `BudgetExceeded` non-admission", native-typeinfo-parity.md:1057]
-> + qvd three-valued `display_relation`; OWNERSHIP assigned — U2.QUERY_VALUE_DOMAIN owns the guard over the
-> value-domain shape, RI-2 exercises/satisfies it), and **P2-remap** (the positive-SCC `CoinductiveCycle { keys }`
-> proof's `keys` set is now stated to be remapped from in-flight transient `SessionId` identities to completed
-> full §2.7 `Relate` keys BEFORE any durable proof construction/publish — a durably-published proof never carries
-> a transient `SessionId`) — precision/consistency fixes layered on the locked core, no invariant weakened. A FOURTH
-> max-mandate confirm-gate (round 4) then returned three REAL-MUST-FIX findings (all folded in below): **P1**
-> (§2.3 step 4 published binding-`Relate` SCC members at SCC-close on the false premise that their enclosing
-> session is `CompletedDeterministic` by then — SCC-close and inference-session completion are two INDEPENDENT
-> convergence axes, so a binding member's relation SCC can close while its session is still `InProgress`; the
-> cure is a per-session **`SessionAdmissionLedger`** that DEFERS binding-member admission, proof-key remap, and
-> `CoinductiveCycle` slot-fill to session-close, dropping the member to `ReturnOnly` if the session ends
-> `Abandoned`), **P2-pred** (Decision 3 / §3.3 now makes the admission predicate for a binding SCC member an
-> explicit conjunction gated on the LATER event — `admit(Kᵢ) ⇔ (SCC closed POSITIVE ∨ publishable-NEGATIVE) ∧
-> (session == CompletedDeterministic)` — and pins the session-local *delta* (always `ReturnOnly`, row 7) and the
-> binding member's *final re-keyed `RelationPayload`* (admitted at session-close) as DISTINCT objects), and
-> **P2-RI8** (the mini-DAG had RI-3 AND RI-8 both "build … and wire `Relate`" onto the shared substrate — a
-> forked-second-substrate hazard; RI-3 is now the SOLE builder + `Relate`-wirer and RI-8 is reworded
-> CONSUME-ONLY: reuse the RI-3 substrate + retire `RefCycleResultDb`). The new `SessionAdmissionLedger` is
-> assigned to RI-6 (session substrate owner), populated by RI-4's `SccLedger` at SCC-close, drained at
-> session-close by RI-6, pinned by the deferred guard `binding_relate_scc_member_admits_only_at_session_close`
-> (RI-6) — precision/sequencing fixes layered on the locked core, no invariant weakened. A FIFTH max-mandate
-> confirm-gate (round 5) returned a CONVERGENT send-back (codex + claude, no disagreement) — all four REAL,
-> all folded in below: **P1-mixed-SCC** (the round-4 `SessionAdmissionLedger` deferral did NOT propagate to a
-> deeper facet of the same defect — in a MIXED positive SCC (≥1 binding + ≥1 non-binding member) every member's
-> published payload carries the SHARED `CoinductiveCycle { keys: S }` proof, and `S` references the binding
-> members whose slots are UNFILLED until session-close, so a POSITIVE non-binding member ALSO cannot publish at
-> SCC-close; the publish/singleflight gate is now made to depend on SCC COMPOSITION not member class alone — a
-> pure non-binding SCC publishes at SCC-close, a mixed SCC defers its WHOLE positive batch (binding AND
-> non-binding) to the LATER of {SCC-close, last binding member's session-close}, while a NEGATIVE non-binding
-> member (`NotAssignable`, no `keys: S`) still publishes at SCC-close even in a mixed SCC (round 7 NARROWS this
-> last clause — see the round-7 note below — to a NEGATIVE non-binding member whose transitive consumed-verdict
-> closure contains no binding member); applied to §2.3
-> step 3/4, the §2.3 header, §3.3, admission row 14, residual risk 6, and the §0/obligation-1/coupling
-> summaries), **P2-EXACT-header** (the §2.3 "EXACT" rule header overclaimed SCC-close as the admission instant
-> — reworded: SCC-close is the admission instant only for a pure non-binding SCC, and is necessary-not-sufficient
-> when any binding member participates), **P2-binding-singleflight** (a binding member has NO joinable
-> cross-transaction mid-flight singleflight key — its per-transaction transient `SessionId` is private and its
-> final §2.7 key does not exist until session-close; corrected to: cross-transaction sharing happens only on the
-> FINAL published slot, a separate transaction recomputes deterministically in its own session, recorded as a
-> bounded PERF residual in risk 6), and **P2-RI3-builder** (a stale §7/Rescope + residual-risk-5 line still read
-> "substrate RI-8 builds" — reworded to "RI-3 builds (RI-8 reuses; RI-8 wires no `Relate`)" consistent with the
-> RI-3/RI-8 table rows + §2.4) — precision/consistency fixes layered on the locked core, no invariant weakened.
-> Subsequent max-mandate confirm-gate rounds (6 → 7) tightened the binding/SCC admission area further. The round-7
-> gate (codex + an independent claude reviewer) returned three REAL findings + one P3 — all folded in below:
-> **P1-neg-verdict** (the round-5/6 NEGATIVE non-binding mixed-SCC carve-out was sound only on the IDENTITY-leak
-> axis — a `NotAssignable { reason, failing_sub }` proof carries no `keys: S` — but UNSOUND on the
-> VERDICT-DEPENDENCY axis: a negative non-binding member whose verdict transitively CONSUMED a binding sibling's
-> not-yet-converged verdict warm-published a negative that the content-fact rail cannot invalidate when that
-> binding session later FLIPs to POSITIVE or `Abandon`s (inference convergence is not a content edit). The cure
-> GENERALIZES the deferral predicate — a NEGATIVE non-binding member publishes at SCC-close ONLY when its transitive
-> consumed-verdict closure contains NO binding member; otherwise it rides the SAME deferred batch as the positive
-> members to the LATER of {SCC-close, that binding sibling's session-close}, dropping to `ReturnOnly` on `Abandon`
-> — superseding the unconditional round-5/6 negative carve-out at line ~69, applied to §0/obligation-1/§2.3
-> step 3/§2.3 step 4/§3.3/admission rows 13–14/risk 6), **P2-Abandon-exit** (the deferred batch's two exits were
-> under-specified — the `Abandon` branch now spells out RELEASE-WITHOUT-PUBLISH: the held singleflight registration
-> is released with no entry / no fact signature / no backfill / no reverse-index metadata, and any concurrent
-> joiner blocked on it then RECOMPUTES since it cannot validate an entry that will never exist — added to §2.3
-> step 4 and admission rows 13/14), and **P2-RI8-wires** (a stale "RI-8 wires only `Relate`" at §Rescope
-> contradicted the RI-3-sole-builder reframe — reworded to "RI-3 wires only `Relate`; RI-8 wires nothing onto the
-> substrate"), plus **P3-failing-sub** (`SubRelationRef` / `failing_sub` pinned content-free — a `(source-node,
-> target-node, sub-position)` descriptor that EXCLUDES any session-bearing full `Relate` key, so a published
-> `NotAssignable` never leaks a transient `SessionId`; Decision 4 proof table) — precision/consistency fixes
-> layered on the locked core, no invariant weakened. A round-8 confirm-gate (codex CONFIRM-LAND-BEST; an
-> independent claude reviewer SEND-BACK) returned one REAL P2 + one P3 — both folded in below: **P2-drain-signflip**
-> (the §2.3 step-4 deferred-batch session-close drain handled only TWO outcomes — `CompletedDeterministic` ⇒
-> publish-recorded-verdict, `Abandon` ⇒ release-without-publish — and so lacked a sound exit for the
-> **converged-but-SIGN-FLIPPED** sub-case: a binding sibling's SCC-close verdict is PROVISIONAL and can FLIP sign
-> before its session's `CompletedDeterministic` (parent §4.2:1413–1415 re-measures across fixation iterations), so
-> publishing the dependent member's *recorded* verdict at session-close re-introduces the stale-verdict defect —
-> a stale false-NEGATIVE for a binding-consuming negative member whose sibling flipped to `Assignable`, AND a
-> stale false-POSITIVE for a held positive non-binding member whose binding sibling flipped to `NotAssignable` —
-> relocated from SCC-close to session-close; the same fold also carried a proof-category mismatch where the
-> unified deferred-members paragraph applied a `CoinductiveCycle` slot-fill + "now-complete proof" to deferred
-> NEGATIVE members, which carry a slotless `NotAssignable { reason, failing_sub }` proof with no `keys: S` slot to
-> fill — contradicting the already-correct §2.3 step-3 negative-close. The cure makes the drain a THREE-outcome
-> gate stated as a VALUE re-evaluation — (1) `CompletedDeterministic` AND every consumed binding-sibling verdict
-> converged to the SAME sign held at SCC-close ⇒ publish (positive members get the proof-key remap +
-> `CoinductiveCycle` slot-fill, binding-consuming negative members publish their slotless `NotAssignable` with NO
-> slot-fill); (2) `CompletedDeterministic` BUT a consumed sibling verdict FLIPPED sign ⇒ release-without-publish →
-> `ReturnOnly` → joiners recompute; (3) `Abandon` ⇒ release-without-publish → recompute — applied to §2.3 step-3/
-> step-4/the coupling paragraph/§3.3/admission rows 13–14/risk 6/the RI-4 + RI-6 mini-DAG rows + Decision 4
-> proof bullet), plus **P3-bold** (a malformed overlapping `**…**…**` bold span in the coupling paragraph
-> rendered "and verdict-dependency" un-bold — collapsed to a single bold run) — precision/consistency fixes
-> layered on the locked core, no invariant weakened. A round-9 confirm-gate (codex + an independent claude
-> reviewer, CONVERGENT SEND-BACK) returned one REAL P2 + one P3 — both folded in below: **P2-converged-re-discharge**
-> (round 8's drain re-confirmed only consumed-sibling SIGNS — necessary but NOT sufficient: two escape cases still
-> published a stale SCC-close snapshot — (a) a deferred BINDING member's OWN verdict can flip at its session's
-> `CompletedDeterministic` with NO consumed sibling, so the sibling-sign check never fires; and (b) even on an
-> unchanged sign the converged `bindings`/`relation_proof` may differ from the snapshot, shipping stale
-> bindings/proof. The cure is the DEFINITIVE general close of the deferred-publish staleness class: the SCC-close
-> verdict/bindings/proof recorded for ANY deferred member is **PROVISIONAL** — a caller-return value + deferral
-> metadata, NEVER the published payload; at the batched-publish instant (the LATER of all relevant sessions'
-> closes) the member's cold compute COMPLETES by RE-DISCHARGING the SCC against the fully-converged state through
-> the same `execute(Relate{K})` dispatch — the one engine finishing once its session inputs are final, NOT a
-> second engine — and the published `RelationPayload` IS that re-discharge result, so a stale snapshot is
-> impossible by construction. The consumed-sibling "same-sign" check becomes a NAMED SPECIAL CASE of "the
-> re-discharge yields a stable publishable outcome." Also fixed the §3.3 R-c FORMAL biconditional (~L720), which
-> still asserted the two-conjunct `admit ⇔ (SCC closed) ∧ (session complete)` and was literally FALSIFIED by the
-> round-8 sign-flip case — a third conjunct "yields a STABLE determined publishable outcome" was added and the
-> "must require BOTH" framing changed to "must require all of: SCC-close, session-completion, AND a stable
-> converged re-discharge"; applied to §2.3 step-3/step-4/the coupling paragraph/§3.3/admission rows 13–14/risk 6/
-> the RI-4 + RI-6 mini-DAG rows + Decision 4 proof bullet, keeping the proof-category split intact (positive ⇒
-> `CoinductiveCycle` slot-fill; negative ⇒ slotless `NotAssignable`)), plus **P3-qvd-ref** (the header cited a
-> non-existent `qvd §4.2` for the content-free `InferenceSession` projection shape — that shape lives at qvd
-> §2.2; corrected at the header line and the two other `§2.2/§4.2` value-domain-shape citations, leaving the
-> correct parent `native-typeinfo-parity.md §4.2` references untouched) — precision/consistency fixes layered on
-> the locked core, no invariant weakened.
-> This is a PLAN block: it locks the design and the
-> implementation mini-DAG; it does NOT build the relation engine. Implementation is sequenced AFTER the U2
-> value-domain spine via the RI-1..RI-10 sub-blocks below.
+> Status: **DESIGN-LOCKED.** This block locks the design and the implementation mini-DAG; it does NOT
+> build the relation engine. Implementation is sequenced AFTER the U2 value-domain spine via the
+> RI-1..RI-10 sub-blocks below. The following decisions are locked:
+>
+> - **Cache vs. transient state.** `Relate` is a PERSISTENT, cross-request, fact-validated
+>   query-identity cache keyed by the full §2.7 identity. The in-flight comparison/assumption stack
+>   and the mutable inference session are TRANSIENT per-`CheckerTransaction` state and are NEVER a
+>   cache key.
+> - **Coinductive termination.** Recursion terminates through a coinductive SCC: a clean positive
+>   close publishes `Assignable + CoinductiveCycle`; a negative non-assumptive obligation publishes a
+>   `NotAssignable`; any `Unknown`/cancel/budget edge routes through `ReturnOnly`.
+> - **Public budget outcome.** `BudgetExceeded` is a public `RelationPayload` / `display_relation`
+>   outcome via `RelationOutcome::BudgetExceeded` (a `ReturnOnly`-but-public outcome); warm admission
+>   stays binary `Assignable`/`NotAssignable` at the gate. The public `RelationPayload` carries both
+>   the `relation_proof` and the budget state typed into the outcome arm.
+> - **Batched admission.** Admission is batched at SCC-close for a pure non-binding SCC, and for a
+>   NEGATIVE non-binding member of a mixed SCC whose transitive consumed-verdict closure contains no
+>   binding member. A binding member — and any POSITIVE non-binding member of a MIXED SCC — defers its
+>   admission, proof-key remap, and `CoinductiveCycle` slot-fill to the LATER of {SCC-close, the
+>   relevant session-close}, via a per-session `SessionAdmissionLedger`. SCC-close is the admission
+>   instant only for a pure non-binding SCC and is necessary-not-sufficient when any binding member
+>   participates.
+> - **Deferred-publish staleness close.** The SCC-close verdict/bindings/proof recorded for ANY
+>   deferred member is PROVISIONAL — a caller-return value plus deferral metadata, NEVER the published
+>   payload. At the batched-publish instant the member's cold compute completes by RE-DISCHARGING the
+>   SCC against the fully-converged state through the same `execute(Relate{K})` dispatch (the one
+>   engine finishing once its session inputs are final, NOT a second engine), so a stale snapshot is
+>   impossible by construction. The admission biconditional requires all of: SCC-close,
+>   session-completion, AND a stable converged re-discharge. An `Abandon`ed session releases the held
+>   singleflight registration without publishing (no entry, no fact signature, no backfill, no
+>   reverse-index metadata); blocked joiners then recompute.
+> - **Content-free proofs.** A durably-published proof never carries a transient `SessionId`. The
+>   positive `CoinductiveCycle { keys }` set is remapped from transient `SessionId` identities to
+>   completed full §2.7 `Relate` keys before any durable proof construction. `SubRelationRef` /
+>   `failing_sub` is a content-free `(source-node, target-node, sub-position)` descriptor that
+>   excludes any session-bearing full `Relate` key, so a published `NotAssignable` leaks no
+>   `SessionId`.
+> - **One builder for the reentry substrate.** RI-3 is the SOLE builder of the shared
+>   `CheckerReentryStack` and the SOLE wirer of `Relate` onto it; RI-8 reuses the RI-3 substrate and
+>   retires `RefCycleResultDb`, wiring nothing new onto the substrate. Routing of
+>   `FlowReturn`/`ResolveCall`/`ContextualTypeAt`/`FlowNarrowingAt` and the flow depth-sentinel
+>   retirement are deferred to U6. The content-free `InferenceSession` projection shape lives at qvd
+>   §2.2.
 
 ---
 
@@ -454,7 +357,7 @@ requires the relevant enclosing session(s) to reach `CompletedDeterministic`, so
          consumed). In BOTH cases the content-fact rail CANNOT catch it — inference convergence is NOT a content
          edit, so this member's `ReadSetSignature.facts` (even the transitive consumed-verdict closure including the
          sibling's content facts) still validates. Warm-publishing the negative then would warm-admit work that did
-         not converge on every axis (the §3.3 / risk 6 prohibition — the SAME defect class round 5 fixed for
+         not converge on every axis (the §3.3 / risk 6 prohibition — the same defect class that affects
          positive members, on the complementary NEGATIVE sign, surfacing through verdict CONSUMPTION rather than
          shared-proof completeness).
      **Unified rule (a non-binding member of a mixed SCC):** it publishes at SCC-close ONLY when it is NEGATIVE
@@ -1106,8 +1009,8 @@ non-cyclic `Relate` that bottoms out in a deferred shell / opaque carrier can NE
 the `RelationResult::Unknown` memoization this design deletes cannot re-enter via the table. Row 4 enforces the
 complementary "`BudgetExceeded` is PUBLIC but never warm": a `RelationOutcome::BudgetExceeded` payload is a
 legitimate `SemanticQueryValue::Relation` (rendered by `display_relation`) yet is `ReturnOnly` because row 4
-precedes rows 13–15. Only a `Decided` result with a **binary** `Assignable`/`NotAssignable` outcome (P1-C /
-Decision 4) is eligible for rows 13–15.
+precedes rows 13–15. Only a `Decided` result with a **binary** `Assignable`/`NotAssignable` outcome
+(Decision 4) is eligible for rows 13–15.
 
 ---
 
@@ -1174,7 +1077,7 @@ Goal: `relate(A, B)` (is `A` assignable to `B`?).
    binding sibling's verdict, that member would instead defer to the binding session's close.) Future requests
    warm-hit the negative.
 
-> **Collapsed-back-edge fact set (P1-E).** Here `relate(B,A)`'s own `tag` obligation is also negative, so it
+> **Collapsed-back-edge fact set.** Here `relate(B,A)`'s own `tag` obligation is also negative, so it
 > would publish a correct fact set even per-member. But the general rule must cover the case where a member
 > is `NotAssignable` SOLELY because a collapsed back-edge dragged it down — e.g. if `B.tag` had been `string`
 > (so `relate(B.tag=string, A.tag="a")` is positive: `"a"` is assignable to `string`), `relate(B,A)`'s only
@@ -1316,7 +1219,7 @@ The deferred-guard→owner registry (the mini-DAG table) is the gate's landable 
    closure reaches a binding sibling: that sibling's SCC-close verdict is provisional until session-close (it may
    FLIP to `Assignable` or `Abandon`, and inference convergence is not a content edit the fact rail catches), so
    warm-publishing the negative at SCC-close would warm a verdict that did not converge on every axis (the
-   stale-false-negative class, the complement of the positive defect round 5 fixed). **The SCC-close
+   stale-false-negative class, the complement of the positive staleness defect). **The SCC-close
    verdict/bindings/proof recorded for any deferred member is PROVISIONAL — caller-return + deferral metadata,
    NEVER the published payload; the published payload is the session-converged RE-DISCHARGE.** The session-close
    drain is a THREE-outcome gate (§2.3 step 4): when every relevant session reaches `CompletedDeterministic` it
