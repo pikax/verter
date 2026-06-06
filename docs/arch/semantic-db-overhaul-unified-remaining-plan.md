@@ -2116,10 +2116,15 @@ guards**. Sequence is faithful to §A; do not reorder.
      `GraphTypeNode` arm). This is an existing-slot generalization, NOT a sixth U2
      variant — the END-STATE slot count stays **seven** and the added-key count
      stays exactly **five** (below). Same-name declaration merge and cross-file
-     ambient augmentation are produced today by the live `MergedDecl` peer-merge
+     ambient augmentation already work TODAY via the live `MergedDecl` peer-merge
      reducer over `SemanticNodeData::MergedDecl` (CLAUDE.md "Declaration Merging /
-     Augmentation (CRITICAL)"), so the augmentation parity rows lift in the later
-     reducer block with NO new query key required. Every variant routes through
+     Augmentation (CRITICAL)") — so the value-bearing merged / ambient type-value
+     surfaces exist now. The forward-planned `ResolveMergedDeclaration` /
+     `ResolveDeclarationAugmentation` query keys AND the formal augmentation parity
+     rows — which resolve to the in-process `SemanticQueryValue::DeclarationAnalysis`
+     value domain — land together later in `U2.MODULE_AUGMENTATION`
+     (`native-typeinfo-parity-u2-reducers.md` §746); the rows do NOT lift without
+     that new key. Every variant routes through
      `ProjectSemanticDispatch::execute` (the one-engine rule). This finalizes the
      identity SHAPE — later ADDITIVE variants land in that same slot-identity shape
      with NO cache re-key; adding a later variant is additive, not a second
@@ -2155,10 +2160,11 @@ guards**. Sequence is faithful to §A; do not reorder.
      Same-name declaration merge and cross-file ambient augmentation are LANDED via
      the live `MergedDecl` peer-merge reducer over `SemanticNodeData::MergedDecl` (the
      §9.5 cross-file-merge work), NOT a dedicated query key. The forward-planned
-     `DeclarationAnalysisGraph` (module + global augmentation) facts that
-     `ResolveDeclarationAugmentation` resolves to — declaration/environment-mutation
-     facts are NOT smuggled into `GraphTypeNode` (parent §1.3, §3) — land with that
-     forward-planned key in `U2.MODULE_AUGMENTATION`, where `ResolveDeclarationAugmentation`
+     module + global augmentation facts that `ResolveDeclarationAugmentation` resolves
+     to — the in-process `SemanticQueryValue::DeclarationAnalysis` value domain (whose
+     ON-THE-WIRE home stays `GraphTypeNode` kinds 23/25); declaration/environment-mutation
+     facts are NOT smuggled into `GraphTypeNode` as TYPE values (parent §1.3, §3) — land
+     with that forward-planned key in `U2.MODULE_AUGMENTATION`, where `ResolveDeclarationAugmentation`
      rides `FileArtifactStore::augmentation_index` (landed) with its
      `AugmentationTargetKey` derived from `DeclarationAnalysisContext` at execution time.
   3. Enumerate the remaining B4 caches onto `ArtifactNode` / `QueryNode` against
@@ -2903,13 +2909,18 @@ What U2 fixes once is the identity model every variant keys on:
    facts share ONE concrete identity (parent `native-typeinfo-parity.md` §2.1–§2.2).
    This is an existing-slot generalization, **not a sixth U2 variant** — the
    END-STATE slot count stays seven. Today, same-name declaration merge and
-   cross-file ambient augmentation are produced by the live `MergedDecl`
+   cross-file ambient augmentation already work via the live `MergedDecl`
    peer-merge reducer over `SemanticNodeData::MergedDecl` (CLAUDE.md "Declaration
    Merging / Augmentation (CRITICAL)") — NOT a dedicated query key — so the
-   augmentation parity rows lift in the later reducer block with no new key.
-   When the forward-planned augmentation work lands, its type-value /
-   `DeclarationAnalysisGraph` producers land with it (§9.5 cross-file merge
-   completeness).
+   value-bearing merged / ambient type-value surfaces exist now. The
+   forward-planned `ResolveMergedDeclaration` / `ResolveDeclarationAugmentation`
+   query keys AND the formal augmentation parity rows — which resolve to the
+   in-process `SemanticQueryValue::DeclarationAnalysis` value domain (wire home
+   stays `GraphTypeNode` kinds 23/25) — land together later in the reducer block
+   (`U2.MODULE_AUGMENTATION`); the rows do NOT lift without that new key. When
+   the forward-planned augmentation work lands, its type-value /
+   `SemanticQueryValue::DeclarationAnalysis` producers land with it (§9.5
+   cross-file merge completeness).
 
    **Five added keys beyond the seven (parent §2.3) — register them in this same
    slot-identity shape.** `ResolveClassSurface`, `ApparentType`, and
