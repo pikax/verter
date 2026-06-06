@@ -644,14 +644,14 @@ fn every_critical_rule_in_docs_has_registered_guard() {
         "R6 META-GUARD — every `(CRITICAL)` section in \
          CLAUDE.md and `.claude/skills/*/SKILL.md` MUST be registered \
          in `CRITICAL_RULE_GUARDS` (in \
-         `crates/verter_session/tests/critical_rules_have_guards.rs`) \
+         `crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs`) \
          with at least one guard reference. Prose-only CRITICAL rules \
          are documentation that nothing enforces. Codex Round-2 Rule 6 \
          (BINDING): every CRITICAL rule needs a static architecture \
          guard OR a discriminating test in the same change that adds \
          the rule. Missing registry entries:\n\n{list}\n\n\
          To fix: open \
-         `crates/verter_session/tests/critical_rules_have_guards.rs`, \
+         `crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs`, \
          add a row to `CRITICAL_RULE_GUARDS` for each missing title, \
          and reference the guard(s) that pin the invariant.",
         list = missing.join("\n")

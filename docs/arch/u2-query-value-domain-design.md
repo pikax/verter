@@ -426,11 +426,17 @@ pure projection-demand identity carried unchanged by `KeyOf` / `MappedType` / `P
 come from the env-bearing `ResolvedDeclSlotIdentity` base/owner. KeyOf / MappedType /
 ProjectPath / RelationContext and the shared `ProjectionReductionContext` are SEPARATE — their env
 identity is unaffected by this slot/context shape.
-*`FamilyKey::Instantiate` / `ResolveMacroPayload` carry the `base`/`owner` as a
-`ResolvedDeclSlotIdentity`. The `provenance` + `merge_role` discriminators STAY
-at FAMILY-IDENTITY level (carried on `FamilyKey` alongside `base`), NOT demoted into a `*Context`.
-They are query-identity discriminators (which merge arm / which provenance regime this instantiation
-answers), not env dimensions, so they belong on the family key, not the env context.*
+*Two distinct `FamilyKey` axes (verified against `semantic_query_memo/family.rs`). (a) **Env-bearing
+slot core:** `FamilyKey::Instantiate` and `FamilyKey::ResolveMacroPayload` carry their `base`/`owner`
+as a `ResolvedDeclSlotIdentity` (`FamilyKey::KeyOf` / `MappedType` / `ProjectPath` root on a bare
+`SemanticNodeId`, not a slot). (b) **`provenance` + `merge_role` discriminators:** these ride at
+FAMILY-IDENTITY level on ALL FOUR `ProjectionReductionContext`-carrying families — `FamilyKey::Instantiate`,
+`KeyOf`, `MappedType`, and `ProjectPath` — NOT demoted into a `*Context` (for `Instantiate` they are
+sourced from the key's `InstantiateContext.projection_reduction`; for the other three from the key's
+`ProjectionReductionContext` directly). `ResolveMacroPayload` does NOT carry them — its
+`MacroPayloadContext { resolve_env_hash, mode }` has no provenance/merge_role axis. They are
+query-identity discriminators (which merge arm / which provenance regime this projection answers),
+not env dimensions, so they belong on the family key, not the env context.*
 
 ### 2.2 Per-key identity table
 
@@ -441,7 +447,7 @@ adds the marked extras. All keys: NO content/version hash, NO `fact_dep_signatur
 | Key | IdentityCore | `*Context` (extra env beyond slot) | Env dims | Value domain | Facts read / written | Allowed demand axes | Family | Producer | Wire target |
 |---|---|---|---|---|---|---|---|---|---|
 | `ResolveMergedDeclaration` | `decl_slot: ResolvedDeclSlotIdentity` + `type_args` | `MergedDeclarationContext` {P,R} + subst + proj-reduction | P R T L J | `TypeNode` | r: `Member`/`MemberPresence`, merge-contributor provenance | `MemberDemand`, subst | `ResolveMergedDeclaration` | `verter_semantic::analysis` merge | `GraphTypeNode` |
-| `ResolveDeclarationAugmentation{target: Module\|Global}` | `DeclarationAugmentationTarget` (env-FREE) | `DeclarationAnalysisContext` {R,L,J} — the `AugmentationTargetKey{J,R,L,target}` folds project+resolve+lib; parse_env enters ONLY via the analysis-body read, not the target key | R L J (parse_env via body read only) | **`DeclarationAnalysis`** | r/w: `module_augmentations`/`global_augmentations` via `AugmentationTargetKey{J,R,L,target}` derived from context | none (analysis key) | `ResolveDeclarationAugmentation` | declaration analysis | `DeclarationAnalysisGraph` (NOT GraphTypeNode) |
+| `ResolveDeclarationAugmentation{target: Module\|Global}` | `DeclarationAugmentationTarget` (env-FREE) | `DeclarationAnalysisContext` {R,L,J} — the `AugmentationTargetKey{J,R,L,target}` folds project+resolve+lib; parse_env enters ONLY via the analysis-body read, not the target key | R L J (parse_env via body read only) | **`DeclarationAnalysis`** | r/w: `module_augmentations`/`global_augmentations` via `AugmentationTargetKey{J,R,L,target}` derived from context | none (analysis key) | `ResolveDeclarationAugmentation` | declaration analysis | `GraphTypeNode` kinds 21–25 (`GraphModuleAugmentation` / `GraphGlobalAugmentation`) — a separate `DeclarationAnalysisGraph` wire message was adjudicated **REJECTED**; the merge/augmentation wire home already exists in the closed contract (see `/type-resolution`) |
 | `ResolveAmbientNamespace` | `namespace_slot` (slot, `SymbolSpace::Namespace`) + `type_args` | `AmbientNamespaceContext` {P,R} + `mode` (substitution rides on the key's `type_args`) | P R T L J | `TypeNode` | r: namespace member facts | `MemberDemand`, subst | `ResolveAmbientNamespace` | `verter_semantic` namespace analysis | `GraphTypeNode` |
 | `ResolveOverloadSet` | `callee: SemanticNodeId` + `type_args` | `OverloadSetContext` {R} (NO parse_env) + subst | R T L J | **`OverloadSet(Arc<[SignatureRef]>)`** | r: signature facts | subst | `ResolveOverloadSet` | signature lowering | `GraphTypeNode` signature list |
 | `ResolveEnum` | `enum_slot` (slot) | `EnumContext` {R} (NO parse_env, NO subst) | R T L J | `TypeNode` | r: enum-member facts | none | `ResolveEnum` | enum analysis | `GraphTypeNode` |
@@ -522,8 +528,10 @@ rail (parent §9.5 of the superseded plan, re-expressed):
   target}`, derived from `DeclarationAnalysisContext` at execute time) provides inverse lookup:
   "which files augment module/global M". This is the SOLE source of the augmentation-target env, so
   the query-key env and the index env cannot diverge (guard
-  `declaration_augmentation_target_is_env_free_env_comes_from_context`). The fact domain for an
-  augmentation result is `DeclarationAnalysisGraph`, NEVER `GraphTypeNode`.
+  `declaration_augmentation_target_is_env_free_env_comes_from_context`). The wire/graph home for a
+  merge/augmentation result is `GraphTypeNode` kinds 21–25 (`GraphModuleAugmentation` /
+  `GraphGlobalAugmentation`); a proposed separate `DeclarationAnalysisGraph` wire message was
+  adjudicated **REJECTED** (the home already exists in the closed contract — see `/type-resolution`).
 
 ### 2.5 `SemanticQueryKeySpec` table sketch (live variants only)
 

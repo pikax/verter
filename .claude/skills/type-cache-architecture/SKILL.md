@@ -737,7 +737,7 @@ Hard rules:
   hits); `ReadSetSignature::overflow()` is not.
 
 The new guards are registered in
-[`CRITICAL_RULE_GUARDS`](../../crates/verter_session/tests/critical_rules_have_guards.rs)
+[`CRITICAL_RULE_GUARDS`](../../crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs)
 under the `Typed SignatureAdmission gate` entry.
 
 ## Error-Tolerance Non-Admission + §22 Absorption (CRITICAL)

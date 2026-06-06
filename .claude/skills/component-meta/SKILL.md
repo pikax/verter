@@ -320,7 +320,7 @@ All type expansion for component-meta goes through `ProjectSemanticDispatch::exe
 // Post-cutover:
 let base = dispatch.shallow_lower_type_expr(&expr, &env, &scope_node, &name_resolution, &mut substitutions);
 let path: Arc<[PathSegment]> = Arc::from([]);
-dispatch.execute(SemanticQueryKey::ProjectPath { base, path, mode: Expanded });
+dispatch.execute(SemanticQueryKey::ProjectPath { base, path, context: ProjectionReductionContext::published(Expanded) });
 // Then `semantic_node_to_type_expr(host, result)` to round-trip to TypeExpr.
 ```
 
@@ -328,16 +328,16 @@ dispatch.execute(SemanticQueryKey::ProjectPath { base, path, mode: Expanded });
 
 **Retired identifiers** (per plan §9 / §5.7 WIP-C):
 
-- `owner_engine.solve_scoped(...)` / `.solve(...)` → `dispatch.execute(ProjectPath { ..., mode: Expanded })`
+- `owner_engine.solve_scoped(...)` / `.solve(...)` → `dispatch.execute(ProjectPath { ..., context: ProjectionReductionContext::published(Expanded) })`
 - `owner_engine.project_expr_surface_as_type_expr(...)` → same as above
 - `engine.solve_expr_type_expr(...)` → same as above
-- `engine.project_expr_surface_shape(...)` → `dispatch.execute(ProjectPath { ..., mode: Shallow })` + surface-shape reader helper
-- `engine.expand_local_generic_ref_expr(...)` → `dispatch.execute(SemanticQueryKey::Instantiate { base, args })`
+- `engine.project_expr_surface_shape(...)` → `dispatch.execute(ProjectPath { ..., context: ProjectionReductionContext::published(Shallow) })` + surface-shape reader helper
+- `engine.expand_local_generic_ref_expr(...)` → `dispatch.execute(SemanticQueryKey::Instantiate { base, args, context })`
 - `TypeSurfaceDb::{get, publish, evict_*}` → DELETED; identity lives in `SemanticGraphStore`'s node memo
 - `TypeSolverHost`, `EvalEnvSolverHost`, `SessionSolverHost` traits/structs → DELETED; dispatch called directly
 - `TypeQueryEngine` → DELETED; `ProjectSemanticDispatch::new(host)` replaces
 
-**Phase 5 query-planner contract.** `ComponentMetaQueryEngine` no longer owns any resolver state. For every Vue macro call site (`defineProps`, `defineEmits`, `defineSlots`, `defineModel`, `defineExpose`, `defineOptions`, `withDefaults`) the engine builds a `SemanticQueryKey::ResolveMacroPayload { owner, macro_index, macro_kind, type_args, mode }` (the SOLE new variant added in Phase 5 §5.0) and dispatches through `ProjectSemanticDispatch::execute`. `ResolveMacroPayload` reuses the sidecar `AnalyzedMacro` (no AST re-walk per §A14) and lowers the body using the existing `Instantiate` / `NormalizeIntersection` / `Object` builders.
+**Phase 5 query-planner contract.** `ComponentMetaQueryEngine` no longer owns any resolver state. For every Vue macro call site (`defineProps`, `defineEmits`, `defineSlots`, `defineModel`, `defineExpose`, `defineOptions`, `withDefaults`) the engine builds a `SemanticQueryKey::ResolveMacroPayload { owner, macro_index, macro_kind, type_args, context }` (where `context` is a `MacroPayloadContext { resolve_env_hash, mode }`; the SOLE new variant added in Phase 5 §5.0) and dispatches through `ProjectSemanticDispatch::execute`. `ResolveMacroPayload` reuses the sidecar `AnalyzedMacro` (no AST re-walk per §A14) and lowers the body using the existing `Instantiate` / `NormalizeIntersection` / `Object` builders.
 
 The 3 originally-proposed variants — `MaterializeSurface`, `ResolvePublicInstance`, `ResolveFallthroughSurface` — landed as **non-variant dispatch helpers** that compose existing `SemanticQueryKey` variants and read the `ComponentMetaResultDb<ComponentMetaAnalysis>` sidecar. They are not enum variants on `SemanticQueryKey`. The cache-shape rule ("every `SemanticQueryKey` variant dispatches through `SemanticGraphStore::execute_cooperative`") therefore still holds with one new variant added.
 

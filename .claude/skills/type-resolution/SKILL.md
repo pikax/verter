@@ -214,7 +214,7 @@ The shared semantic query system has exactly five modes. Every caller picks one;
 
 Path projection is the default shape of every semantic query. Whole-surface expansion is a degenerate case of projecting the empty path; single-hop `ProjectMember` / `IndexedAccess` are sugar for `ProjectPath` with length 1.
 
-- **Path queries are first-class semantic queries.** `SemanticQueryKey::ProjectPath { base, path, mode }` is the canonical form.
+- **Path queries are first-class semantic queries.** `SemanticQueryKey::ProjectPath { base, path, context }` is the canonical form (`context` is a `ProjectionReductionContext { mode, demand }`; the terminal projection mode rides on `context.mode`).
 - **Materialize only subpaths needed for the requested path.** Sibling members and unrelated branches are not touched.
 - **Mode cascades along the path.** Intermediate hops run in `Navigate`; only the terminal hop runs in the caller's requested mode (`Shallow`, `Expanded`, or `Identity`).
 - **Intersection contribution rule.** When projecting a path through `A & B`, only arms that contribute to the next path segment are projected; non-contributing arms are ignored for that path (not rewritten to `never`). If multiple arms contribute, the projected results of the contributing arms are intersected. Zero contributors is a projection miss.
