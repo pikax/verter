@@ -411,7 +411,7 @@ pub struct SemanticGraphStore {
     /// the production cooperative-wait path is unchanged.
     #[cfg(any(test, debug_assertions))]
     joiner_on_condvar_count: std::sync::atomic::AtomicUsize,
-    /// Γ.B reverse index. For each canonical id,
+    /// Reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
     /// dep_signature references it, paired with the dep_signature
     /// `Arc` that was registered. `invalidate_canonical` consults
@@ -504,7 +504,7 @@ pub struct SemanticGraphStore {
     >,
 }
 
-/// Γ.B reverse-index type alias. See
+/// Reverse-index type alias. See
 /// [`SemanticGraphStore::canonical_to_entries`] for the contract.
 ///
 /// The per-canonical shard maps each
@@ -555,7 +555,7 @@ impl SemanticGraphStore {
     }
 
     /// Test-only — number of distinct outer shards currently resident
-    /// in the Γ.B `canonical_to_entries` reverse index (one shard per
+    /// in the `canonical_to_entries` reverse index (one shard per
     /// canonical that has, or has had, a registration). A budget
     /// eviction that empties a shard's inner map must drop the outer
     /// shard, so this count tracks the surviving canonicals — not the
@@ -1092,7 +1092,7 @@ impl SemanticGraphStore {
         // of `execute_cooperative`. The completed sentinel wakes any
         // joiner whose wait predicate only checks `completed`.
         //
-        // `affected_pairs` is populated from the Γ.B drained set —
+        // `affected_pairs` is populated from the reverse-index drained set —
         // even slots that the ptr_eq step rejected (because a fresh
         // post-publish write replaced the registered Arc) are included
         // so any in-flight entry under that pair still aborts correctly.
@@ -3222,7 +3222,7 @@ impl SemanticGraphStore {
         if family_was_new && !populated_slots.is_empty() {
             self.record_family_admission_locked(&mut entries, &family);
         }
-        // Γ.B reverse-index registration. Register each populated slot
+        // Reverse-index registration. Register each populated slot
         // under EVERY canonical the entry depends on — the UNION of
         // the carrier's path-precise `facts` rail (`canonical_ids()`
         // — `Parse(...)`, `ResolveImports(...)`, `RouteSurface(...)`,

@@ -2388,11 +2388,11 @@ pub struct MetaProvenance {
     /// `NodeArena::push_impl` total call count (every push, exempt or not).
     pub node_arena_pushes: std::sync::atomic::AtomicU64,
     /// `NodeArena::push_impl` calls that allocated a new arena slot
-    /// (always equal to `node_arena_pushes` pre-C7, diverges once
-    /// structural interning lands).
+    /// (equal to `node_arena_pushes` while every push allocates; diverges
+    /// once structural interning serves a push from an existing slot).
     pub node_arena_intern_miss: std::sync::atomic::AtomicU64,
     /// Time spent waiting on `ArenaInner` mutex acquisition during pushes
-    /// (C17 observability per Pass C17).
+    /// (lock-contention observability counter).
     pub node_arena_inner_write_wait_ns: std::sync::atomic::AtomicU64,
     /// Scheduler submission count (mirrored from
     /// `verter_scheduler::scheduler::SchedulerCounters::submit_count` via

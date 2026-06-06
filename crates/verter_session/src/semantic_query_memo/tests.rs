@@ -483,7 +483,7 @@ fn invalidate_canonical_removes_only_matching_scope_keys() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// DepSignatureInterner (Γ.C)
+// DepSignatureInterner
 // ──────────────────────────────────────────────────────────────────
 
 /// Interner returns the SAME
@@ -635,7 +635,7 @@ fn family_map_publish_registers_canonical_to_entries_reverse_index() {
     assert!(
         store.canonical_to_entries_count("/w/a.ts") >= 1,
         "publish must register the (family, slot) → dep_signature mapping \
-         in canonical_to_entries[\"/w/a.ts\"] (Γ.B reverse index)"
+         in canonical_to_entries[\"/w/a.ts\"] (reverse index)"
     );
     assert_eq!(
         store.canonical_to_entries_count("/w/missing.ts"),
@@ -728,7 +728,7 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     assert!(
         store.canonical_to_entries_count("/w/helper_test.ts") >= 1,
         "warm_publish_one must register the (family, slot) → dep_signature \
-         mapping in canonical_to_entries[\"/w/helper_test.ts\"] (Γ.B reverse index)"
+         mapping in canonical_to_entries[\"/w/helper_test.ts\"] (reverse index)"
     );
 
     // Negative: an unrelated canonical must have NO reverse-index
@@ -798,20 +798,20 @@ fn family_map_invalidate_canonical_propagates_cross_canonical_cleanup() {
         store.canonical_to_entries_count("/w/a.ts"),
         0,
         "/w/a.ts reverse-index shard must be drained by invalidate_canonical \
-         (Γ.B step 1 drain)"
+         (reverse-index shard drain)"
     );
     assert_eq!(
         store.canonical_to_entries_count("/w/b.ts"),
         0,
         "/w/b.ts reverse-index entry for the evicted (family, slot) must be \
-         cleaned up by cross-canonical cleanup (Γ.B step 3); pre-fix \
-         this entry would dangle and bloat the reverse index over time"
+         cleaned up by cross-canonical cleanup; without it this entry \
+         would dangle and bloat the reverse index over time"
     );
 }
 
 /// `invalidate_canonical` evicts the warm entry whose
-/// dep_signature references the canonical (no behavioural change
-/// from pre-Γ.B), but now via the reverse-index path. Existing
+/// dep_signature references the canonical via the reverse-index
+/// path, with no behavioural change to eviction. Existing
 /// `invalidate_canonical_removes_only_matching_scope_keys` test
 /// already covers correctness on the warm-slot side; this one
 /// adds a pure regression guard against the reverse-index path
@@ -876,8 +876,7 @@ fn family_map_invalidate_canonical_uses_reverse_index_to_find_affected_pairs() {
     );
 }
 
-/// Γ.A (component-meta cold-path long-tail)
-/// — Mandatory test gate. `invalidate_canonical(c)` must drop
+/// Mandatory test gate. `invalidate_canonical(c)` must drop
 /// `NodeArena` shard-dedup entries whose origin scope is
 /// `NodeScopeId::File { canonical_id: c, .. }` while preserving:
 ///   1. `NodeScopeId::Global` entries (purely structural nodes).
@@ -968,7 +967,7 @@ fn node_arena_invalidation_preserves_global_scope() {
         "pre-invalidation File(/w/b.ts) re-intern must dedup"
     );
 
-    // Invalidate /w/a.ts. Per §1.10 Γ.A: only File { canonical_id:
+    // Invalidate /w/a.ts. Only File { canonical_id:
     // /w/a.ts, .. } shard entries are dropped. Global entries and
     // File { canonical_id: /w/b.ts, .. } entries are preserved.
     let _ = store.invalidate_canonical(canonical_a.as_ref());
@@ -981,12 +980,12 @@ fn node_arena_invalidation_preserves_global_scope() {
     assert_eq!(
         global_id_post, global_id_first,
         "Global-scope shard entry must SURVIVE invalidate_canonical \
-         (Γ.A invariant — invalidation does NOT drop Global)"
+         (invariant — invalidation does NOT drop Global)"
     );
     assert_eq!(
         file_b_id_post, file_b_id_first,
         "File(/w/b.ts) shard entry must SURVIVE invalidation of /w/a.ts \
-         (Γ.A invariant — invalidation drops only the matching canonical's File scope)"
+         (invariant — invalidation drops only the matching canonical's File scope)"
     );
     assert_ne!(
         file_a_id_post, file_a_id_first,
@@ -4245,7 +4244,7 @@ fn record_path_length_and_projection_depth_drive_percentiles() {
 /// collapse into a single `[1, 2, …, 10]`-edge list on one node.
 ///
 /// The rewrite interns ten structurally-distinct payloads so the
-/// post-C7 implementation still produces ten result nodes with a
+/// implementation produces ten result nodes with a
 /// `(1, 2, …, 10)` edge distribution. The assertion-intent — that
 /// `origin_edges_per_node_p50/p95` derive correctly across N
 /// distinct result nodes — is preserved; only the setup technique

@@ -2295,13 +2295,11 @@ fn open_conditional_stays_deferred_with_shell_branch_refs_not_expanded_bodies() 
     // conditional stays deferred and exercises the shell-branch /
     // path-distribution authority below.
     //
-    // Pre-Path-C4 this fixture used `resolve_decl_anchor` and relied on
-    // the now-retired `DeclAnchor → Unknown` short-circuit in
-    // `decide_relation_inner`. C4's identity-carrier unwrap correctly
-    // instantiates two distinct decl anchors and reports
-    // `NotAssignable`, which would close the conditional and defeat
-    // the test's purpose. The TypeParam shells preserve the test's
-    // intent (deferred Conditional path projection) on the post-C4
+    // Using `resolve_decl_anchor` here would let the relation engine's
+    // identity-carrier unwrap instantiate two distinct decl anchors and
+    // report `NotAssignable`, which would close the conditional and
+    // defeat the test's purpose. The TypeParam shells preserve the
+    // test's intent (deferred Conditional path projection) on the
     // relation engine.
     let foo = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("Foo"),
@@ -3303,14 +3301,13 @@ fn open_conditional_distributes_path_into_both_branches_via_execute_not_private_
 
     // Bare `TypeParam` shells keep the conditional deferred — the
     // relation engine reports `Unknown` for two distinct type
-    // parameters (relation.rs:454-468). Pre-Path-C4 this fixture used
-    // `resolve_decl_anchor` and relied on the now-retired
-    // `DeclAnchor → Unknown` short-circuit; C4's identity-carrier
-    // unwrap correctly instantiates two distinct decl anchors and
-    // reports `NotAssignable`, which would close the conditional and
-    // defeat the test's path-distribution-via-execute assertions
-    // below. The TypeParam shells preserve the test intent without
-    // depending on the pre-C4 short-circuit.
+    // parameters (relation.rs:454-468). Using `resolve_decl_anchor`
+    // here would let the relation engine's identity-carrier unwrap
+    // instantiate two distinct decl anchors and report `NotAssignable`,
+    // which would close the conditional and defeat the test's
+    // path-distribution-via-execute assertions below. The TypeParam
+    // shells preserve the test intent without depending on a
+    // short-circuit.
     let a = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("A"),
         param_index: 0,
@@ -3742,8 +3739,7 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
     assert_ne!(r2, r3, "different modifier tuples must not collapse");
 }
 
-/// Mapped-type values are lazy placeholders at shell time — the
-/// Per C6 (completed in WIP 3-bis, post-C7):
+/// Mapped-type values are lazy placeholders at shell time:
 /// `build_mapped_type` projects member values from the source object
 /// directly for the common `{ [K in keyof T]: T[K] }` shape. When
 /// the source has a visible member named `K`, the mapped result's
@@ -5194,20 +5190,18 @@ fn solver_error_publishes_as_opaque_query_error() {
 
 /// Lowering two distinct mapped types in the same file must produce
 /// two binders with distinct `(decl, param_index)` identity tuples.
-/// Pre-C6a both binders default to `param_index: 0` + `decl_name:
-/// "<mapper-param>"` so their identity tuples are identical. Under
-/// C7's structural dedup they would alias, collapsing two
-/// semantically-distinct binders into one `SemanticNodeId` — which
-/// was the root cause of the parent-plan test 7 regression. C6a
-/// items 1-3 make them distinct via per-dispatcher / per-owning-
-/// scope ordinal.
+/// If both binders defaulted to `param_index: 0` + `decl_name:
+/// "<mapper-param>"`, their identity tuples would be identical and
+/// structural dedup would alias them, collapsing two
+/// semantically-distinct binders into one `SemanticNodeId`. A
+/// per-dispatcher / per-owning-scope ordinal keeps them distinct.
 ///
 /// Discrimination strategy: the test walks the arena, collects
 /// every interned `TypeParam` with `decl_name == "<mapper-param>"`,
 /// and asserts that the collected identity tuples are all distinct.
-/// Pre-C6a every mapped binder is `(file, hash, "<mapper-param>",
-/// param_index=0)` — any two mapped binders produce a duplicate.
-/// Post-C6a ordinals differ, so the tuples are distinct.
+/// Without per-scope ordinals every mapped binder would be `(file,
+/// hash, "<mapper-param>", param_index=0)` and any two mapped binders
+/// would duplicate; the ordinals make the tuples distinct.
 #[test]
 fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
     let host = host();
@@ -5287,9 +5281,9 @@ fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
 /// shell-rebuild arm.
 ///
 /// Observability: upsert a generic type, instantiate it, and read
-/// the result's `node_scope`. Pre-C6a the post-substitution shells
-/// come back as `NodeScopeId::Global` (or None if any VueMacro
-/// exemption traverses). Post-C6a they carry the origin's File scope.
+/// the result's `node_scope`. The post-substitution shells must
+/// carry the origin's File scope rather than collapsing to
+/// `NodeScopeId::Global` (or None if any VueMacro exemption traverses).
 #[test]
 fn substitute_preserves_scope_on_shell_rebuilds() {
     let host = host();
@@ -5328,22 +5322,15 @@ fn substitute_preserves_scope_on_shell_rebuilds() {
 }
 
 /// Two unresolved `TypeParameter` references in the same file with
-/// the same name should alias to one identity ( item 2
-/// file-scoped name-keyed identity). Pre-C6a, each lowering
-/// interns a fresh `TypeParam` payload with
-/// `decl_name = reference.name` (the ref's name) — but in the
-/// current implementation the unresolved path goes through
-/// `DeclIdentity::from_scope(scope, display_name)` which uses
-/// `display_name` as the decl_name. Two intern_node calls create
-/// distinct SemanticNodeIds pre-C7 (append-only) → assertion fails.
-///
-/// Post-C6a item 2 explicitly uses `reference.name` as `decl_name`
-/// (even when display_name matches) — same identity tuple.
-/// Combined with C7's dedup, both references resolve to the same
-/// SemanticNodeId.
-///
-/// Compound-key structural interning closes the aliasing property
-/// this test characterises (an append-only allocator would fail it).
+/// the same name must alias to one identity (file-scoped name-keyed
+/// identity). The unresolved path goes through
+/// `DeclIdentity::from_scope(scope, display_name)`; using
+/// `reference.name` as the `decl_name` (even when `display_name`
+/// matches) yields the same identity tuple, and compound-key
+/// structural interning then dedups both references to the same
+/// `SemanticNodeId`. An append-only allocator would instead mint
+/// distinct ids and fail this test, so it characterises the aliasing
+/// property of the structural interner.
 #[test]
 fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
     let host = host();
@@ -5589,12 +5576,12 @@ fn substitute_recurses_into_function_params_and_return_type() {
             );
             assert_eq!(
                 *return_type, string_node,
-                "C11a: substitute must recurse into Function return_type; expected string node"
+                "substitute must recurse into Function return_type; expected string node"
             );
         }
         other => panic!(
             "substitute over Function must return Function, got {other:?}. \
-             Catch-all left Function unchanged (pre-C11a bug) iff this arm returns the original."
+             A catch-all that returned the original would leave Function unchanged."
         ),
     }
 }
@@ -5661,10 +5648,10 @@ fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
         }
         SemanticNodeData::KeyOf { .. } => {
             panic!(
-                "post-C10 `keyof (Object & TypeParam)` must enumerate \
+                "`keyof (Object & TypeParam)` must enumerate \
                  Object's keys, not fall through to a deferred KeyOf \
-                 shell. Pre-C10 would have produced this shape via the \
-                 `?` propagation; post-C10 must accumulate."
+                 shell via `?` propagation; the intersection arm keys \
+                 must accumulate."
             );
         }
         other => panic!("expected Union or Literal(String), got {other:?}"),
@@ -5674,7 +5661,7 @@ fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
     assert_eq!(
         names_sorted,
         vec!["a".to_string(), "b".to_string()],
-        "post-C10 Intersection key accumulation must surface keys from \
+        "Intersection key accumulation must surface keys from \
          the enumerable arm (Object) even when a coexisting arm \
          (TypeParam) is unresolvable",
     );

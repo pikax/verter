@@ -255,8 +255,8 @@ fn key_names_from_base_node_returns_unresolvable_on_cyclic_intersection() {
         enumerate_src.contains("Intersection"),
         "key_names_from_base_node must handle Intersection structurally"
     );
-    // Worklist driver expands arms iteratively (replaces the pre-C10
-    // recursive self-call).
+    // Worklist driver expands arms iteratively rather than via a
+    // recursive self-call.
     assert!(
         enumerate_src.contains("KeyNamesFrame::Expand"),
         "key_names_from_base_node must dispatch arm expansion through the iterative KeyNamesFrame worklist"

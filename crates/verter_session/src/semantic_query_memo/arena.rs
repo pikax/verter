@@ -247,7 +247,7 @@ impl NodeArena {
     }
 
     /// Drop shard-dedup entries for the given canonical id.
-    /// Γ.A invariant: invalidation does NOT drop `NodeScopeId::Global`
+    /// Invariant: invalidation does NOT drop `NodeScopeId::Global`
     /// — only `File { canonical_id: c, .. }` matches. Entries keyed at
     /// any other `File` canonical also survive.
     ///
@@ -281,7 +281,7 @@ impl NodeArena {
                 .unwrap_or(std::time::Duration::ZERO);
             crate::host_manage::record_node_arena_lock_acquisition(lock_wait);
             shard.index.retain(|(_, scope), _| match scope {
-                // Γ.A explicit invariant: Global never drops.
+                // Invariant: Global scope is never dropped on invalidation.
                 NodeScopeId::Global => true,
                 NodeScopeId::File {
                     canonical_id: c, ..

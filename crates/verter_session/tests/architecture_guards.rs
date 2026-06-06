@@ -4943,6 +4943,10 @@ mod foundations_guards {
     //     noun used by the fact-based cache refactor's stage list).
     //   - `deleted in 5[a-z]` — deletion history from the 5-series plan.
     //   - `retired in` — retirement history of any kind.
+    //   - `Γ.A` / `Γ.B` / any Greek capital + `.<alnum>` — bare
+    //     Greek-letter plan-phase codenames.
+    //   - `pre-C\d` / `post-C\d` / `Pass C\d` — pre/post/Pass narrative
+    //     forms of the cutover `C<n>` codename.
 
     /// Predicate: returns `true` when `line` contains a forbidden
     /// phase-archaeology pattern. Implemented with case-sensitive
@@ -5786,6 +5790,73 @@ mod foundations_guards {
                 }
             }
         }
+        // Bare Greek-letter phase codenames — `Γ.A`, `Γ.B`, `Δ.1`, etc.
+        // The orchestrator labels plan phases with a Greek capital
+        // followed by `.` and an alphanumeric token (`Γ.A invariant`,
+        // `Γ.B reverse index`). A Greek capital letter is never part of
+        // legitimate Rust source prose, so any occurrence followed by
+        // `.<alnum>` is the phase-codename marker.
+        {
+            let mut chars = line.char_indices().peekable();
+            while let Some((_, c)) = chars.next() {
+                // Greek and Coptic uppercase block: U+0391..=U+03A9.
+                if ('\u{0391}'..='\u{03A9}').contains(&c) {
+                    // Skip a possible `.` then require an alphanumeric.
+                    if let Some(&(_, next)) = chars.peek() {
+                        if next == '.' {
+                            chars.next();
+                            if let Some(&(_, after_dot)) = chars.peek() {
+                                if after_dot.is_ascii_alphanumeric() {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // `pre-C<digit>` / `post-C<digit>` / `pre_C<digit>` /
+        // `preC<digit>` (and `post` variants) — pre/post-cutover plan
+        // markers anchored on the cutover `C<n>` codename (e.g. `pre-C7`,
+        // `post-C17`). Case-insensitive on the leading verb; the `C`
+        // immediately followed by an ASCII digit is the discriminator.
+        // Ordinary prose (`pre-commit`, `preconfigured`) lacks the bare
+        // `C<digit>` tail and is preserved.
+        {
+            let normalised: String = line
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c == '-' || c == '_' { ' ' } else { c })
+                .collect();
+            let norm_bytes = normalised.as_bytes();
+            for prefix in ["pre c", "prec", "post c", "postc"] {
+                let mut from = 0usize;
+                while let Some(rel) = normalised[from..].find(prefix) {
+                    let abs = from + rel;
+                    let after = abs + prefix.len();
+                    if after < norm_bytes.len() && norm_bytes[after].is_ascii_digit() {
+                        return true;
+                    }
+                    from = abs + prefix.len();
+                }
+            }
+        }
+        // `Pass C<digit>` — the cutover plan's `Pass C<n>` codename
+        // (e.g. `Pass C17`). Case-sensitive on the leading `Pass ` to
+        // avoid flagging the ordinary verb/noun "pass"; the literal
+        // `C` + ASCII digit after the space is the marker.
+        {
+            let needle = "Pass C";
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(needle) {
+                let abs = search_from + rel;
+                let after = abs + needle.len();
+                if after < bytes.len() && bytes[after].is_ascii_digit() {
+                    return true;
+                }
+                search_from = abs + needle.len();
+            }
+        }
         false
     }
 
@@ -5837,6 +5908,13 @@ mod foundations_guards {
             "/ fix ",                    // / Fix [A-Z]
             "fix-",                      // Fix-[A-Z] / pre-Fix- / post-Fix-
             "fork-",                     // FORK-[A-Z] staged-fork code-name
+            "pre-c",                     // pre-C<digit> cutover marker
+            "pre_c",                     // pre_C<digit> cutover marker
+            "prec",                      // preC<digit> cutover marker
+            "post-c",                    // post-C<digit> cutover marker
+            "post_c",                    // post_C<digit> cutover marker
+            "postc",                     // postC<digit> cutover marker
+            "pass c",                    // Pass C<digit> cutover marker
         ];
         let lower = src.to_ascii_lowercase();
         if LOWER_ROOTS.iter().any(|r| lower.contains(r)) {
@@ -5844,6 +5922,13 @@ mod foundations_guards {
         }
         // Uppercase-anchored `PE\d+` branch: check raw text.
         if src.contains("PE") {
+            return true;
+        }
+        // Bare Greek-letter phase-codename branch: a Greek capital
+        // (U+0391..=U+03A9) is never part of legitimate source prose, so
+        // its mere presence is the necessary condition for the per-line
+        // `Γ.<alnum>` scan to fire.
+        if src.chars().any(|c| ('\u{0391}'..='\u{03A9}').contains(&c)) {
             return true;
         }
         // `U<digit>B`-anchored plan-block branch: case-sensitive (the
@@ -5911,7 +5996,8 @@ mod foundations_guards {
              insights belong in `.claude/skills/*` or `docs/arch/`, not in source comments.\n\n\
              Forbidden patterns: `d-cutover`, `post-cutover`, `pre-Phase`, `pre-Stage`,\n\
              `post-Stage`, `phase \\d+`, `phase-\\d+`, `Stage \\d+`, `Stage-\\d+`,\n\
-             `deleted in 5[a-z]`, `deletion in 5[a-z]`, `retired in`.\n\n\
+             `deleted in 5[a-z]`, `deletion in 5[a-z]`, `retired in`, bare Greek-letter\n\
+             phase codenames (`Γ.A`, `Γ.B`), `pre-C\\d`, `post-C\\d`, `Pass C\\d`.\n\n\
              Violations:\n  {}",
             violations
                 .iter()
@@ -6106,6 +6192,19 @@ mod foundations_guards {
             "// hover died. This is the exact P0 both codex reviewers flagged.",
             "// gemini diagnosis: keyspace enumeration stalls the dispatch.",
             "// see consult #5 for the numbered-consult rationale.",
+            // Bare Greek-letter phase codenames — `Γ.A`, `Γ.B`, `Δ.1`.
+            // A Greek capital followed by `.<alnum>` is the orchestrator
+            // phase-codename marker and never legitimate source prose.
+            "/// Γ.A invariant: invalidation does NOT drop Global.",
+            "// Γ.B reverse index registration for each canonical.",
+            "// the Δ.2 step folds the augmenter contributions.",
+            // pre-C<digit> / post-C<digit> / Pass C<digit> — the cutover
+            // plan's `C<n>` codename in pre/post/Pass narrative form.
+            "// always equal to node_arena_pushes pre-C7, diverges later.",
+            "/// the pre_C7 counter relationship holds until interning lands.",
+            "// post-C17 the lock-wait counter is wired into the audit ctx.",
+            "// preC7 the two counters are identical.",
+            "/// (C17 observability per Pass C17).",
         ];
         for line in cases {
             assert!(
@@ -6253,6 +6352,23 @@ mod foundations_guards {
             "// the workspace diagnostic graph layout uses gemini constellations.", // agent + `diagnostic`, not `diagnosis`
             "// see issue #5 for the keyspace-enumeration rationale.", // `#5` not preceded by `consult `
             "// consult the contributing guide for the commit convention.", // `consult` no agent, no `#`
+            // pre-C / post-C / Pass C negatives — the verb-prefix forms
+            // must be followed by a bare `C<digit>` to be the cutover
+            // marker. Ordinary prose lacks the digit tail and the
+            // case-sensitive `Pass C<digit>` form does not flag lowercase
+            // or word-tailed variants.
+            "// precompute the content hash before the lookup.",
+            "// run the pre-commit hook before staging the diff.",
+            "// the preconfigured resolver budget bounds the walk.",
+            "// post-condition: the queue is drained.",
+            "// Pass Complete once the queue drains.", // `Pass C` + letter word, not a digit
+            "// pass class metadata down to the projector.", // lowercase `pass c`, not `Pass C<digit>`
+            "// the second pass collapses the redundant chunks.",
+            // Greek-letter negative — a Greek capital that is NOT
+            // immediately followed by `.<alnum>` (a standalone symbol in
+            // a formula, e.g. a summation) is not the phase-codename
+            // marker form.
+            "// the weight Σ accumulates across the visited nodes.",
         ];
         for line in allowed {
             assert!(
