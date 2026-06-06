@@ -554,20 +554,32 @@ struct AdditionalProofRow {
 /// `consumed_mechanisms`, plus the §9 contract metadata the parent requires
 /// (`native-typeinfo-parity.md` §9): the `required_guards` the block must
 /// carry green before it lands and the `verification_labels` (verification
-/// command labels) it runs. `required_guards` is the COMPLETE
-/// forward-declared required-guard set transcribed VERBATIM from the
-/// "Required new guards" section of the block's owning subplan doc — NOT a
-/// representative subset or arbitrary truncation. For a not-yet-landed block
-/// these are forward declarations (the block FINALIZES and verifies them
-/// live+green when it lands, via the deferred §11.5
-/// `landed_typeinfo_blocks_have_required_guards` done-predicate — that
-/// landing-enforcement guard itself lands in a later substrate block). The
-/// list is authored in `scripts/gen-typeinfo-ignore-manifest.py`
+/// command labels) it runs. `required_guards` is the set of verbatim-named
+/// structural / done-predicate guards from the block's documented "Required
+/// new guards" section that are OWNED AND LANDABLE AT THIS BLOCK'S SCOPE — it
+/// is NOT a claim of completeness or verbatim totality over the doc's full
+/// guard list. Two scoping rules make this honest:
+/// (a) A block intentionally scopes to the guards it owns at its own
+///     boundary; guards a doc explicitly attributes to another owning block,
+///     or that belong to a later substrate block, are forward-declared
+///     elsewhere and excluded here. Concretely, `U0` scopes its
+///     `required_guards` to its FINISH-A schema guards (its broader
+///     documented set — proof / coverage / landing predicates — is owned by
+///     `U0-FINISH-B` / `U15` and forward-declared there, not restated in this
+///     field), and `U2.QUERY_VALUE_DOMAIN` omits the doc's ellipsized
+///     guard-name prefixes that are not verbatim-copyable identifiers.
+/// (b) Live existence + green is NOT enforced HERE. For a not-yet-landed
+///     block these are forward declarations; the block FINALIZES and verifies
+///     them live+green at landing via the deferred §11.5
+///     `landed_typeinfo_blocks_have_required_guards` done-predicate (that
+///     landing-enforcement guard itself lands in a later substrate block).
+/// The list is authored in `scripts/gen-typeinfo-ignore-manifest.py`
 /// (`BLOCK_TO_REQUIRED_GUARDS`) and regenerated into
 /// `manifest_data/typeinfo_parity_blocks.rs`; row/test names and
 /// doc-marked-not-landed phantom names are excluded. The
 /// `every_block_contract_row_carries_required_guards` guard here pins only
-/// that every block CARRIES non-empty, deduplicated labels.
+/// that every block CARRIES non-empty, deduplicated labels — it does NOT
+/// verify completeness against the doc, nor live existence/green.
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
 struct BlockContractRow {

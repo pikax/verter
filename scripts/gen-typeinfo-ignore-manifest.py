@@ -384,17 +384,24 @@ BLOCK_TO_ORGAN: dict[str, str] = {
 
 # ── Per-block REQUIRED GUARDS (§9 / §11.5) ──
 #
-# `BlockContractRow.required_guards` is the COMPLETE forward-declared
-# required-guard set a block must carry green before it lands, transcribed
-# VERBATIM from the "Required new guards" (or equivalently-named guard
-# list) section of the block's OWNING SUBPLAN DOC. It is NOT a
-# representative subset / arbitrary truncation: the full documented list is
-# reproduced so the metadata stays FAITHFUL to the authoritative plan. For a
+# `BlockContractRow.required_guards` is the set of verbatim-named structural
+# / done-predicate guards from the "Required new guards" (or equivalently-
+# named guard list) section of the block's OWNING SUBPLAN DOC that are OWNED
+# AND LANDABLE AT THIS BLOCK'S SCOPE. It is NOT a claim of completeness or
+# verbatim totality over the doc's full guard list: a block scopes to the
+# guards it owns at its own boundary, and guards a doc attributes to another
+# owning block — or that belong to a later substrate block — are forward-
+# declared THERE and excluded here. Concretely, U0 scopes to its FINISH-A
+# schema guards (its broader documented proof / coverage / landing predicates
+# are owned by U0-FINISH-B / U15 and forward-declared there), and
+# U2.QUERY_VALUE_DOMAIN omits the doc's ellipsized guard-name prefixes that
+# are not verbatim-copyable identifiers (see the per-block notes below). For a
 # not-yet-landed block these are forward declarations (consistent with the
 # AdditionalProofRow RowTestGuard forward-declarations); the block FINALIZES
 # and verifies them live+green when it lands, via the deferred §11.5
 # `landed_typeinfo_blocks_have_required_guards` done-predicate (that landing
-# enforcement guard itself lands in a later substrate block).
+# enforcement guard itself lands in a later substrate block). Live existence /
+# green is NOT enforced at generation time.
 #
 # Transcription rules:
 # - Copy guard names VERBATIM (a guard is a snake_case identifier appearing
