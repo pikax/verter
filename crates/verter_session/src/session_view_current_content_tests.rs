@@ -586,7 +586,7 @@ fn overlay_artifact_downstream_reachable_for_normalised_js() {
     );
 
     // Drive the content-pinned read through the session context — the
-    // downstream reader that codex named as a genuine miss site.
+    // downstream reader that is a genuine miss site.
     let session_store_view = host
         .resolver_store_view()
         .with_session_overlay(&host, &view);
@@ -757,7 +757,7 @@ fn observe_materialize_scope_recovers_parse_facts_for_normalised_js_overlay() {
     );
 
     // Drive the materialize-scope observation through the session
-    // context — the codex-named parse-fact-recovery site.
+    // context — the parse-fact-recovery site.
     let session_store_view = host
         .resolver_store_view()
         .with_session_overlay(&host, &view);
@@ -946,7 +946,7 @@ fn shallow_file_state_observes_overlay_for_normalised_js() {
     );
 
     // Drive the shallow-state read through the session context — the
-    // codex-named miss site (`shallow_file_state_with_context`
+    // miss site (`shallow_file_state_with_context`
     // normalises before the overlay-aware reads).
     let session_store_view = host
         .resolver_store_view()

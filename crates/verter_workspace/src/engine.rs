@@ -619,7 +619,7 @@ impl Engine {
     /// `ExternalSrc`) WITHOUT consulting `exact_resolutions` and WITHOUT
     /// writing `lazy_resolved` side effects. Used exclusively by
     /// [`Engine::record_parsed_edges`] (R5: parsed-edge resolver bypasses
-    /// exacts — closes Codex 2 #1).
+    /// exacts).
     ///
     /// The R4 lifecycle requires that parsed-edge resolution is parser-
     /// driven, not bundler-driven: bundler-injected exacts dampen unresolved

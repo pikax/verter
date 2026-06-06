@@ -425,7 +425,7 @@ fn public_accessor_projects_full_surface_with_flags_and_roles() {
 // even if the implementation accidentally expanded a member into an object. A
 // nested-object member discriminates: it WOULD become an `Object` node under an
 // eager / Expanded projection, and must stay a shallow `DeclRef`-style carrier
-// under the Shallow projection. (codex#2 P2)
+// under the Shallow projection.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -488,7 +488,7 @@ fn nested_object_member_stays_shallow_reference_not_materialized() {
 }
 
 // ---------------------------------------------------------------------------
-// (9) DECLARATION-ORIGIN span loss (codex#1 P1): a member whose VALUE type is an
+// (9) DECLARATION-ORIGIN span loss: a member whose VALUE type is an
 //     UNRESOLVED (scope-less) node still reports its REAL declaration spans,
 //     anchored to its DECLARATION file — NOT `None`.
 //
@@ -553,7 +553,7 @@ fn member_with_unresolved_value_type_keeps_real_declaration_spans() {
 }
 
 // ---------------------------------------------------------------------------
-// (10) INDEX-SIGNATURE declaration-origin span loss (codex#1 P1): an index
+// (10) INDEX-SIGNATURE declaration-origin span loss: an index
 //      signature whose key AND value nodes are SCOPE-LESS (`Global`) still
 //      reports its real decl / key / value spans anchored to its DECLARATION
 //      file, taken from `IndexSignature::declaration_origin`.
@@ -966,7 +966,7 @@ export class C {
 }
 
 // NOTE on the prepared-member append path (`build.rs`
-// `backfill_member_index_surface`, the codex#2 P1 / Claude P2-b front): the
+// `backfill_member_index_surface`): the
 // overlay's APPEND branch (which copies each `PreparedMember`'s `spans` +
 // `declaration_origin` onto the appended `SurfaceMember`) is exercised
 // directly by `project_semantic_dispatch::tests`'

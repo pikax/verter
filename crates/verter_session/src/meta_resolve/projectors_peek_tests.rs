@@ -520,9 +520,8 @@ fn h1_reduce_bare_alias_does_not_poison_expanded_typeexpr_cache_slot() {
 //
 //    DISCRIMINATION strategy: this is a race condition; standard
 //    unit-test setups cannot easily reproduce the actual time-of-
-//    check/time-of-use window. Per the codex review's verification
-//    options, this characterisation test asserts the gate's
-//    SOURCE-LEVEL structural invariants:
+//    check/time-of-use window. This characterisation test asserts
+//    the gate's SOURCE-LEVEL structural invariants:
 //
 //      1. The fence-collection arm of
 //         `type_expr_has_package_backed_object_like_root_with_fence`

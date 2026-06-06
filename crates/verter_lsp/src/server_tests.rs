@@ -5704,7 +5704,7 @@ async fn preserve_open_unresolved_vue_jsx_flip_failed_tsx_sync_retains_prior_liv
     // Pre-unification the failed-sync branch ran `drop_unloaded_ide_path()` on
     // the failed `.tsx` (loaded=false), committing `ide_path = None` while the
     // `.jsx` stayed physically open → `active_ide_path_for_uri` returned None →
-    // hover died. This is the exact P0 both codex reviewers flagged.
+    // hover died. This is the exact regression this test pins.
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let service = make_hover_test_service(type_provider);

@@ -5756,6 +5756,35 @@ mod foundations_guards {
                     return true;
                 }
             }
+            // Review/consult verdict provenance — `codex flagged`,
+            // `codex consult`, `gemini diagnosis`, and the numbered
+            // `consult #<digit>` marker. These name WHO raised a point
+            // (or cite a numbered consult round) instead of describing
+            // the mechanism; the substantive description belongs in the
+            // comment without the review-agent provenance.
+            //
+            // The agent+verb pair requires BOTH a review-agent token
+            // (`codex`/`gemini`) AND a full provenance verb on the same
+            // line, so legitimate prose mentioning only one is preserved:
+            // `the codex review came back green` (agent, no verb) and
+            // `gemini constellation diagnostic graph` (agent + the
+            // distinct word `diagnostic`, not `diagnosis`) do NOT flag.
+            // `consult #<digit>` is agent-agnostic: a numbered consult is
+            // project-management provenance regardless of which agent it
+            // cites.
+            const REVIEW_AGENTS: &[&str] = &["codex", "gemini"];
+            const PROVENANCE_VERBS: &[&str] = &["flagged", "consult", "diagnosis"];
+            if REVIEW_AGENTS.iter().any(|a| normalised.contains(a))
+                && PROVENANCE_VERBS.iter().any(|v| normalised.contains(v))
+            {
+                return true;
+            }
+            if let Some(pos) = normalised.find("consult #") {
+                let after = &norm_bytes[pos + "consult #".len()..];
+                if after.first().is_some_and(u8::is_ascii_digit) {
+                    return true;
+                }
+            }
         }
         false
     }
@@ -6067,6 +6096,16 @@ mod foundations_guards {
             // Hyphenated `codex re-review` review-provenance label.
             "// Flag-after-insert race fix (codex re-review P2):",
             "/// Strict ordering (codex re-review): the writer sets the flag.",
+            // Review/consult verdict provenance — `codex flagged`,
+            // `codex consult`, `<agent> diagnosis`, and the numbered
+            // `consult #<digit>` marker. Each names the review agent or a
+            // numbered consult round rather than the mechanism.
+            "// the mapper-identity-instability signal codex flagged.",
+            "/// is the SINGLE conversion point (codex consult) — route here.",
+            "// bug fix (codex consult #3 diagnosis): the previous arg.",
+            "// hover died. This is the exact P0 both codex reviewers flagged.",
+            "// gemini diagnosis: keyspace enumeration stalls the dispatch.",
+            "// see consult #5 for the numbered-consult rationale.",
         ];
         for line in cases {
             assert!(
@@ -6202,6 +6241,18 @@ mod foundations_guards {
             "// production producer is U7; here we submit by hand.",
             "// UB-free arithmetic on the wrapping counter.", // `UB` not preceded by digit
             "// SUB-expression lowering walks the operand list.", // `UB` mid-identifier
+            // Review/consult provenance negatives — the agent+verb rule
+            // requires BOTH a review-agent token AND a full provenance
+            // verb on the line; the numbered `consult #<digit>` marker
+            // requires the literal `consult #` immediately before a
+            // digit. A verb without an agent, an agent without a verb,
+            // the distinct word `diagnostic` (not `diagnosis`), and a
+            // bare `#<digit>` issue reference must all be preserved.
+            "// the resolver consulted the cache twice before falling back.", // verb-like, no agent
+            "// run the diagnosis pass before lowering the IR.",              // verb, no agent
+            "// the workspace diagnostic graph layout uses gemini constellations.", // agent + `diagnostic`, not `diagnosis`
+            "// see issue #5 for the keyspace-enumeration rationale.", // `#5` not preceded by `consult `
+            "// consult the contributing guide for the commit convention.", // `consult` no agent, no `#`
         ];
         for line in allowed {
             assert!(

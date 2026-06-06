@@ -693,7 +693,7 @@ fn evaluate_scratch_uri_differs_by_scope() {
     let uri_b = compute_scratch_uri("/scope_b.ts", "{ x: number }", &[]);
     assert_ne!(
         uri_a, uri_b,
-        "different scope canonical ids must produce different scratch URIs (Gemini P1-1)"
+        "different scope canonical ids must produce different scratch URIs"
     );
 }
 

@@ -461,8 +461,7 @@ impl VerterHost {
         // [`ViewBoundRequestHost`](crate::host_manage::component_meta_request_impl::ViewBoundRequestHost)
         // adapter. Pre-Shape-1 each call allocated `Arc::new(CCO::new())`
         // — a fresh empty overlay per cold compute — and paid the
-        // shadowing write cost without cross-call accumulation
-        // (codex consult #3 diagnosis).
+        // shadowing write cost without cross-call accumulation.
         let store_view = self.resolver_store_view().with_session_overlay(self, view);
         self.compute_component_meta_state_with_session_view_and_base(
             canonical,
@@ -589,8 +588,7 @@ impl VerterHost {
     /// [`SessionRequestHost::compute_component_meta`](crate::host_manage::component_meta_request_impl::SessionRequestHost).
     /// Pre-Shape-1 the bare-host path constructed no overlay at all —
     /// every cold compute call paid the per-call workspace sweep cost
-    /// without any cross-call accumulation benefit (codex consult #3
-    /// diagnosis).
+    /// without any cross-call accumulation benefit.
     pub(crate) fn compute_component_meta_state_with_overlay(
         &self,
         canonical: &str,

@@ -23,8 +23,8 @@ use crate::semantic_query::ProjectionMode;
 // ---------------------------------------------------------------------------
 
 /// The *amount of meaning* a typeinfo query asks the host to compute for a
-/// declaration — the typeinfo unification's query-identity axis (codex
-/// BINDING `TypeInfoQueryLevel`).
+/// declaration — the typeinfo unification's query-identity axis
+/// (`TypeInfoQueryLevel`).
 ///
 /// This is **query identity, NOT an env-hash dimension** (R21 — the five env
 /// hashes `parse_env_hash` / `resolve_env_hash` / `type_env_hash` /

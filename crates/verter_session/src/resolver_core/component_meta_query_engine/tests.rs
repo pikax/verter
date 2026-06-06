@@ -1873,9 +1873,9 @@ type Wrapper<T> = { value: T; label: string }
 /// Legacy `substitute_function_expr` (surface.rs) removed the function's
 /// OWN type parameters from the substitution map before substituting the
 /// params/return, so an inner `<T>` that SHADOWS the outer generic `T`
-/// was preserved (not replaced by the outer argument). codex flagged
-/// dispatch's function-lowering (`lower.rs` `TypeExpr::Function`) as a
-/// possible gap because it lowers params/return with the OUTER `env`
+/// was preserved (not replaced by the outer argument). Dispatch's
+/// function-lowering (`lower.rs` `TypeExpr::Function`) is a possible
+/// gap because it lowers params/return with the OUTER `env`
 /// unchanged.
 ///
 /// Fixture: `type F<T> = <T>(x: T) => T` instantiated as `F<string>`.

@@ -71,7 +71,7 @@ defineProps<ButtonProps>()
     (host, canonical)
 }
 
-/// View-build count test (codex / brief §"Discriminating tests" #1).
+/// View-build count test.
 ///
 /// A single resolver-tier read pattern under a `HostResolverContext`
 /// must drive STRICTLY FEWER `HostStoreView::from_host` calls than
@@ -125,8 +125,7 @@ fn view_build_count_drops_under_hosted_request() {
     );
 }
 
-/// Repeated `prepared_type_decl` test (codex / brief §"Discriminating
-/// tests" #2).
+/// Repeated `prepared_type_decl` test.
 ///
 /// After the first `prepared_type_decl` on a dep warms the bundle,
 /// every subsequent `prepared_type_decl(dep, sym)` call on the same
@@ -174,8 +173,7 @@ fn repeated_prepared_type_decl_no_view_rebuild() {
     );
 }
 
-/// Mid-request epoch invalidation test (codex / brief §"Discriminating
-/// tests" #3, refinement #5).
+/// Mid-request epoch invalidation test.
 ///
 /// `CanonicalCompletionOverlay::complete_canonical` is epoch-guarded:
 /// when the host's `current_store_view_epoch` no longer matches the
@@ -235,8 +233,7 @@ fn complete_canonical_is_no_op_when_epoch_superseded() {
     );
 }
 
-/// Session-overlay rooting test (codex / brief §"Discriminating tests"
-/// #4).
+/// Session-overlay rooting test.
 ///
 /// A request with a session overlay constructs its
 /// `SessionResolverContext` once at the request entry — supplying a
@@ -340,7 +337,7 @@ fn session_overlay_rooting_runs_once_per_request() {
     );
 }
 
-/// Session-overlay completion test (codex review B6.C-rfx fix).
+/// Session-overlay completion test.
 ///
 /// When a `SessionResolverContext` calls `complete_canonical` for a
 /// canonical the session view has overlaid, the canonical completion

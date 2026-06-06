@@ -81,7 +81,7 @@ pub use crate::cache_runtime::singleflight::ComputeAdmission;
 /// Constructs `ComputeAdmission::Failed` for the
 /// `compute_admission_failed_variant_is_constructible` discriminator
 /// in `tests/block_1_i_discriminators.rs`. The Failed variant is
-/// part of the codex three-variant contract for
+/// part of the three-variant contract for
 /// `cooperative_admit_with_post_publish`; this helper proves it is
 /// constructible so the variant cannot be silently dropped.
 pub fn cooperative_admission_failed_variant_for_tests(
@@ -451,7 +451,7 @@ pub fn component_meta_result_signature_for_owner(
 /// Returns `None` when the owner does not resolve to a component.
 /// Integration tests use this to assert the published
 /// `ComponentMetaResultEntry` signature EQUALS the finalized
-/// tracer read set (codex item 3 — tracer-owned signature).
+/// tracer read set (the tracer-owned signature).
 pub fn component_meta_cold_traced_read_set_for_tests(
     host: &crate::VerterHost,
     owner_canonical: &str,

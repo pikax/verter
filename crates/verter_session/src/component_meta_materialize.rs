@@ -954,8 +954,8 @@ pub(crate) fn materialize_component_meta_structure(
             match &extraction.route {
                 RouteDemand::Pick(keys) | RouteDemand::Omit(keys) => {
                     // Step A: instantiate the actual root with its
-                    // original args (preserves generic carriers per
-                    // Codex2 P0 #3).
+                    // original args (preserves generic carriers via
+                    // root_args per R8-2).
                     let body_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
                         base: dispatch.type_slot_for(
                             Arc::clone(&extraction.root_identity.canonical_id),
@@ -2062,7 +2062,7 @@ export type Recur = { kids: Recur[] | null }
         );
         assert!(
             extraction.root_args.is_empty(),
-            "Recur is a bare DeclRef so root_args is empty (Codex2 P0 #3 \
+            "Recur is a bare DeclRef so root_args is empty (R8-2 \
              only populates root_args for InstantiationRef args[0])"
         );
         // Cycle guard would fire on Recur (productive recursion is

@@ -276,8 +276,8 @@ pub enum AuditEvent {
     /// One observed collision where the SAME mapper source AST
     /// (`(canonical_id, whole_hash, display_name)` triple) was
     /// interned at DIFFERENT `mapped_binder_ordinal` values within
-    /// a single request — the mapper-identity-instability signal
-    /// codex flagged. Non-zero count means the per-dispatcher
+    /// a single request — the mapper-identity-instability signal.
+    /// Non-zero count means the per-dispatcher
     /// counter is destabilising mapper identity across dispatch
     /// instances, preventing the typed cache from collapsing what
     /// SHOULD be cache hits.

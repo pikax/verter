@@ -132,7 +132,7 @@ impl<'a> HostResolverContext<'a> {
     }
 
     /// Idempotently promote a newly-loaded canonical into the overlay
-    /// (epoch-guarded; codex refinement #5).
+    /// (epoch-guarded).
     ///
     /// Called from `ensure_loaded` / `ensure_indexed_ready` success
     /// paths so subsequent self-root fact validation observes the
@@ -162,7 +162,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         // `CanonicalCompletionOverlay` in front of the base) so cache
         // validation consults the overlay-shadowed view rather than
         // bypassing it via `self.view.base()`. The overlay-bypass
-        // bug fix (codex consult #3 diagnosis): the previous
+        // bug fix: the previous
         // `self.view.base()` argument made every prepared-decl bundle
         // warm-read pay the request-level snapshot cost without
         // observing canonicals promoted by mid-request `ensure_loaded`.
@@ -196,7 +196,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
     fn ensure_indexed_ready(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
         let result = crate::VerterHost::ensure_indexed_ready(self.inner, canonical_id);
         if result.is_some() {
-            // Eager canonical completion (codex refinement #3 / #5):
+            // Eager canonical completion:
             // promote the freshly-loaded canonical's per-canonical
             // facts into the request overlay so subsequent self-root
             // validation does not false-miss on a canonical the

@@ -126,7 +126,7 @@ impl<'a> SessionResolverContext<'a> {
     }
 
     /// Idempotently promote a newly-loaded canonical into the overlay
-    /// (epoch-guarded; codex refinement #5).
+    /// (epoch-guarded).
     ///
     /// Called from `ensure_loaded` / `ensure_indexed_ready` success
     /// paths so subsequent self-root fact validation observes the
@@ -200,7 +200,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
             canonical_id,
         );
         if result.is_some() {
-            // Eager canonical completion (codex refinement #3 / #5):
+            // Eager canonical completion:
             // promote the freshly-loaded canonical's per-canonical
             // facts into the request overlay so subsequent self-root
             // validation does not false-miss on a canonical the

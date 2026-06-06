@@ -145,7 +145,7 @@ fn negative_import_route_reopens_after_target_file_appears() {
         "after './late_dep.ts' is upserted, resolve_type_dependency_canonical \
          MUST reopen the route and resolve to {late_dep}. Pre-fix the stale \
          IndexedReady.import_routes known-miss snapshot is served and the \
-         import stays unresolvable forever — the exact codex item-2 defect.",
+         import stays unresolvable forever — the exact stale-known-miss-snapshot defect.",
     );
 }
 

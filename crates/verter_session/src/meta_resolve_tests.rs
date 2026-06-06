@@ -8174,7 +8174,7 @@ mod node_predicates_tests {
         assert_eq!(
             extraction.root_args.len(),
             1,
-            "root_args must preserve the generic [T] carrier (Codex2 P0 #3)"
+            "root_args must preserve the generic [T] carrier"
         );
         assert_eq!(extraction.root_args[0], t_ref);
     }

@@ -5943,7 +5943,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
         .into_boxed_slice(),
     );
 
-    // Codex-2 r3: prefix entries are cached as Navigate regardless of
+    // Prefix entries are cached as Navigate regardless of
     // the caller's mode (path-precise rule).
     let prefix_key = SemanticQueryKey::ProjectPath {
         base: table_obj,

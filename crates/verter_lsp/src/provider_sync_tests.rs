@@ -978,7 +978,7 @@ fn open_unresolved_commit_row9_live_diff_ext_sync_err() {
     //
     // Pre-unification `drop_unloaded_ide_path` dropped the failed .tsx AND
     // committed ide_path=None while the .jsx stayed physically open → hover
-    // dies (the exact P0 both codex reviewers flagged).
+    // dies (the exact regression this test pins).
     let prev = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Unresolved,
         ide_path: Some("/workspace/src/App.vue.jsx".to_string()),

@@ -1010,8 +1010,7 @@ mod tests {
         // `PreparedMember`. The macro-surface overlay
         // (`backfill_member_index_surface` in verter_session) reads these so an
         // appended own-body member reaches the graph `SurfaceMember` span-rich
-        // instead of `MemberSpans::default()` (the codex#2 P1 / Claude P2-b
-        // finding).
+        // instead of `MemberSpans::default()`.
         //
         // Discrimination: before the fix `PreparedMember` had no `spans` field
         // (it could not carry them) and no `declaration_origin`; the producer

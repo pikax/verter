@@ -44,7 +44,7 @@
 //! optimisation that does not change project-wide identity.
 //!
 //! [`CanonicalCompletionOverlay::complete_canonical`] is **epoch-
-//! guarded** (codex refinement #5): if the host's
+//! guarded**: if the host's
 //! `current_store_view_epoch()` no longer matches the base view's
 //! `mutation_epoch()` at the time of the completion call, the call
 //! returns without writing to the overlay. The outer stable executor
@@ -121,7 +121,7 @@ pub(crate) struct CanonicalCompletionOverlay {
     /// owned tuple allocation).
     derived_hashes: RwLock<FxHashMap<String, RouteDerivedHashes>>,
     file_facts: RwLock<FxHashMap<String, Arc<FileFacts>>>,
-    /// Per-map monotonic "non-empty" flags (codex shape 1 read-path
+    /// Per-map monotonic "non-empty" flags (read-path
     /// hygiene). Set to `true` (Release) when the corresponding map
     /// receives its first insert; never flip back to `false` within a
     /// request (the overlay is append-only). Readers `load(Acquire)`
@@ -202,7 +202,7 @@ impl CanonicalCompletionOverlay {
     /// re-running the call after a prior completion is a no-op when the
     /// state has not changed.
     ///
-    /// **Epoch guard (codex refinement #5):** if the host's current
+    /// **Epoch guard:** if the host's current
     /// `store_view_epoch` no longer matches `base.mutation_epoch()`, the
     /// call returns without writing to the overlay. The outer stable
     /// executor will retry the request with a fresh view; mutating an

@@ -108,7 +108,7 @@ pub struct CapturedComponentMetaInputs {
 /// `compute_component_meta_state_*_with_view` helper call — that
 /// allocated a fresh empty overlay per cold compute and paid the
 /// shadowing write overhead with zero cross-call accumulation
-/// benefit, regressing the bench by +49% (codex consult #3
+/// benefit, regressing the bench by +49% (per an earlier profiling
 /// diagnosis). Hoisting the overlay onto the adapter struct closes
 /// the gap by letting `compute_component_meta_state_*_with_view`
 /// borrow the shared `Arc` instead of `Arc::new()`-ing one per call.

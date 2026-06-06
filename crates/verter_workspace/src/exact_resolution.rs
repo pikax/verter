@@ -385,9 +385,9 @@ impl EdgeStore {
             .unwrap_or_default()
     }
 
-    /// Single union query (R4 hot-path optimised — closes Gemini/Codex
-    /// CRITICAL PERFORMANCE / F19): when only one bucket hits, return its
-    /// contents directly without allocating a `BTreeSet` for dedup.
+    /// Single union query (R4 hot-path optimised — F19): when only one
+    /// bucket hits, return its contents directly without allocating a
+    /// `BTreeSet` for dedup.
     pub fn reverse_deps_for_target(
         &self,
         target: &str,

@@ -546,7 +546,7 @@ fn reverse_deps_for_target_unions_canonical_and_stem_axes() {
 // ── Test #19 ──
 #[test]
 fn reverse_deps_for_target_dedupes_when_owner_in_both_axes() {
-    // Gemini #1: same importer in canonical AND stem returns once.
+    // Same importer in canonical AND stem returns once.
     let mut store = EdgeStore::new();
     store.replace_parsed_edges(
         "/src/Comp.vue",
@@ -930,7 +930,7 @@ fn record_parsed_edges_followed_by_set_exact_round_trip() {
 // ── Test #34 (R5: replaces deleted #33) ──
 #[test]
 fn dampening_restricted_to_codegen_blocker_phase() {
-    // R5 (Codex 2 #6): a ProviderGraph-only exact does NOT dampen a
+    // R5: a ProviderGraph-only exact does NOT dampen a
     // parsed-unresolved CodegenBlocker stem.
     let mut store = EdgeStore::new();
     store.replace_parsed_edges(

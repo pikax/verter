@@ -237,7 +237,7 @@ fn route_derived_fact_hash_ignores_stale_artifact_route_hash() {
         "current_derived_fact_hash(Route) MUST NOT surface the planted stale \
          artifact's route_hash. A `get_any`-based oracle returns the stale \
          hash here, confirming a stale dependent cache entry as valid — the \
-         exact codex item-1 defect.",
+         exact stale-artifact-served-as-valid defect.",
     );
     // The pinned recompute must agree with the genuine current route
     // surface (the fresh artifact's route hash, or a recompute of the
@@ -286,7 +286,7 @@ fn import_route_derived_fact_hash_ignores_stale_artifact_hash() {
         "current_derived_fact_hash(ImportRoute) MUST NOT surface the planted \
          stale artifact's import_route_hash. Pre-fix the `get_any` oracle \
          returns the stale hash, confirming a stale dependent cache entry as \
-         valid — the exact codex item-1 defect.",
+         valid — the exact stale-artifact-served-as-valid defect.",
     );
 
     // Now re-materialise the genuine current `IndexedReady` (the stale

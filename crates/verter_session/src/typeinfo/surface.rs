@@ -72,7 +72,7 @@ impl CanonicalSpan {
 }
 
 /// How a [`TypeInfoSurfaceMember`] arrived on the surface — the typed origin +
-/// merge role (codex `SurfaceMemberOrigin`).
+/// merge role (the `SurfaceMemberOrigin` typed origin).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SurfaceMemberOrigin {
     /// The canonical file the member's DECLARATION lives in — its `name` /

@@ -174,9 +174,9 @@ fn prop_names(
 
 /// Plant a `route_owned_shallow` entry for the OWNER via a genuine
 /// route-only read BEFORE the owner has an `IndexedReady`, then cold
-/// `resolve_component_meta`. This reproduces the codex precondition
-/// ("an owner already has a `route_owned_shallow` entry from an earlier
-/// route-only read") that dual-sources the owner Route hash.
+/// `resolve_component_meta`. This reproduces the precondition where an
+/// owner already has a `route_owned_shallow` entry from an earlier
+/// route-only read, which dual-sources the owner Route hash.
 fn prime_with_route_owned(host: &VerterHost) {
     let route_owned = host.ensure_route_owned_shallow_entry(OWNER);
     assert!(

@@ -35,7 +35,7 @@ fn normalize_relative_specifier_trims_trailing_slash() {
 
 #[test]
 fn normalize_relative_specifier_directory_style_imports() {
-    // Closes Gemini/Codex #3 — directory-style imports must not collide
+    // Directory-style imports must not collide
     // pathologically with file imports.
     assert_eq!(normalize_relative_specifier("./pkg/"), "./pkg");
     assert_eq!(normalize_relative_specifier("./pkg/index"), "./pkg/index");

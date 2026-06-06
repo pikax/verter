@@ -101,7 +101,7 @@ impl ProjectIdentity {
     /// bytes (four little-endian `u32` lanes XOR-combined) so two distinct
     /// project identities keep distinct folds with overwhelming
     /// probability while keeping the key field a compact `u32`. The fold
-    /// is the SINGLE conversion point (codex consult) — callers building a
+    /// is the SINGLE conversion point — callers building a
     /// slot from `host_view_project_identity_for(..)` route through here
     /// rather than re-deriving a fold inline.
     #[must_use]

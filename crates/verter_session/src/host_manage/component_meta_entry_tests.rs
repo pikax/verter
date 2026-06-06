@@ -37,8 +37,10 @@
 //!
 //! `repeated_query_with_route_owned_entry_is_warm_hit` plants a
 //! `route_owned_shallow` entry for the owner via a genuine route-only
-//! read BEFORE the owner has an `IndexedReady` (the codex
-//! precondition), then runs `get_component_meta` and asserts:
+//! read BEFORE the owner has an `IndexedReady` (the
+//! precondition: an owner already has a `route_owned_shallow`
+//! entry from an earlier route-only read), then runs
+//! `get_component_meta` and asserts:
 //!
 //! 1. **Pre/post discriminator.** The published `ComponentMetaResultEntry`
 //!    signature does NOT contain `DerivedFactHash { canonical_id ==
@@ -139,14 +141,14 @@ fn repeated_query_with_route_owned_entry_is_warm_hit() {
     // materialiser aborts NEW publishes when `IndexedReady` already
     // exists for the canonical, so this must happen first; the entry
     // then persists once `get_component_meta` builds `IndexedReady`.
-    // This reproduces the codex precondition exactly: "an owner
+    // This reproduces the precondition exactly: "an owner
     // already has a `route_owned_shallow` entry from an earlier
     // route-only read".
     let route_owned = host.ensure_route_owned_shallow_entry("/src/Comp.vue");
     assert!(
         route_owned.is_some(),
         "route-only read must materialise a route_owned_shallow entry \
-         for the owner SFC — the codex precondition",
+         for the owner SFC — the route-only-read precondition",
     );
     assert!(
         host.project_type_store()
@@ -250,8 +252,8 @@ fn editing_route_dep_still_invalidates_with_route_owned_entry() {
     upsert(&host, "/src/types.ts", TYPES_TS, FileKind::NonSfc);
     upsert(&host, "/src/Comp.vue", OWNER_VUE, FileKind::VueSfc);
 
-    // Plant the owner's route_owned_shallow entry first (codex
-    // precondition), then prime the component-meta cache.
+    // Plant the owner's route_owned_shallow entry first (the
+    // route-only-read precondition), then prime the component-meta cache.
     let _ = host.ensure_route_owned_shallow_entry("/src/Comp.vue");
     let prime = host.get_component_meta("/src/Comp.vue");
     assert!(prime.is_some(), "prime call must resolve");

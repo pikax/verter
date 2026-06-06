@@ -60,7 +60,7 @@ pub(crate) struct RouteExtraction {
 ///   `base.decl_name == "Pick"`, `args.len() == 2`, arg[1] is a
 ///   string-literal or a union of string-literals (must yield ≥ 1
 ///   key). arg[0] may be a bare `DeclRef` OR an `InstantiationRef`
-///   (generic root preserved via `root_args` per Codex2 P0 #3 / R8-2).
+///   (generic root preserved via `root_args` per R8-2).
 /// - `Omit<X, 'a' | 'b' | …>` — same shape with `decl_name == "Omit"`.
 /// - `Foo['a']['b']…` — chained `IndexedAccess` whose innermost
 ///   `object` is a bare `DeclRef` OR `InstantiationRef`, with every
@@ -205,7 +205,7 @@ pub(crate) fn build_keys_union_node(
 /// Helper: walk an `IndexedAccess` chain and produce a
 /// `RouteExtraction` whose route is `RouteDemand::MemberPath`.
 /// Innermost root may be a bare `DeclRef` OR `InstantiationRef`;
-/// generic carriers are preserved via `root_args` per Codex2 P0 #3.
+/// generic carriers are preserved via `root_args` per R8-2.
 pub(crate) fn extract_indexed_access_route(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: crate::semantic_query::SemanticNodeId,
@@ -244,7 +244,7 @@ pub(crate) fn extract_indexed_access_route(
                 });
             }
             SemanticNodeData::InstantiationRef { base, args } => {
-                // Codex2 P0 #3 — preserve generic root carriers like
+                // R8-2 — preserve generic root carriers like
                 // `Foo<T>['a']`.
                 hops_reverse.reverse();
                 return Some(RouteExtraction {

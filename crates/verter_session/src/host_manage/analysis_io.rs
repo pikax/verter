@@ -1389,8 +1389,8 @@ impl VerterHost {
         }
 
         // notify_delete fires EdgeStore::remove_file (surgical per-owner
-        // canonical-axis + active-stem cleanup; closes Gemini CRITICAL
-        // PERFORMANCE).
+        // canonical-axis + active-stem cleanup; avoids a full-graph
+        // rescan on delete).
         self.ws().notify_delete(&canonical);
         // File deletion drops all three D48 sub-states at once.
         self.drop_all_per_canonical_compile_caches(&canonical);
