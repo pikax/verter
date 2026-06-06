@@ -3625,11 +3625,12 @@ fn arm_is_object_surface(graph: &SemanticGraphStore, arm: SemanticNodeId) -> boo
 /// - **Distinct** members union.
 /// - Call / construct / index signatures concatenate across contributors in
 ///   source order; the keyspace is the first contributor's keyspace.
-/// Peer-merge contributor own-body surfaces into an interned `ShallowSurface`.
-/// Computes the shared, non-interning surface via
-/// [`merge_declaration_surfaces_core`], then interns each accumulated
-/// same-name method overload group into an `Intersection` value node (a
-/// single-signature method or an ordinary property keeps its verbatim value).
+///
+/// Implementation: the rules above are computed once by the non-interning
+/// [`merge_declaration_surfaces_core`] (shared with the display projection);
+/// this wrapper then interns each accumulated same-name method overload group
+/// into an `Intersection` value node, while a single-signature method or an
+/// ordinary property keeps its verbatim value.
 fn merge_declaration_surfaces(
     graph: &SemanticGraphStore,
     contributor_surfaces: &[ShallowSurface],

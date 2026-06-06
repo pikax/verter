@@ -5036,8 +5036,12 @@ mod foundations_guards {
                 .chars()
                 .map(|c| if c == '-' { ' ' } else { c })
                 .collect();
-            const CODEX_VOCAB: &[&str] =
-                &["codex audit", "codex finding", "codex observed", "codex re review"];
+            const CODEX_VOCAB: &[&str] = &[
+                "codex audit",
+                "codex finding",
+                "codex observed",
+                "codex re review",
+            ];
             for needle in CODEX_VOCAB {
                 if normalised.contains(needle) {
                     return true;
@@ -5734,8 +5738,12 @@ mod foundations_guards {
             }
             // Design-label phrases — all contain `codex`, so no
             // false-positive risk against ordinary prose.
-            const ATTRIBUTION_PHRASES: &[&str] =
-                &["codex binding", "codex hybrid", "codex prescribed", "codex spec"];
+            const ATTRIBUTION_PHRASES: &[&str] = &[
+                "codex binding",
+                "codex hybrid",
+                "codex prescribed",
+                "codex spec",
+            ];
             for needle in ATTRIBUTION_PHRASES {
                 if normalised.contains(needle) {
                     return true;

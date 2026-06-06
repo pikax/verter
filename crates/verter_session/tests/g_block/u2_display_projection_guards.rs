@@ -911,7 +911,8 @@ fn merged_decl_display_matches_graph_reduction_and_is_non_mutating() {
 
     // Canonical reduction through the single mutating peer-merge engine
     // (interns the reduced `Object` + the accumulated overload `Intersection`).
-    let reduced = verter_session::for_tests::reduce_merged_decl_to_graph_node(&store, &contributors);
+    let reduced =
+        verter_session::for_tests::reduce_merged_decl_to_graph_node(&store, &contributors);
     let graph_render = render(&store, reduced);
     let count_after_reduction = store.node_count();
 
@@ -996,7 +997,8 @@ fn merged_decl_display_preserves_heritage_arms_like_graph_reduction() {
         contributors: Arc::from(contributors),
     });
 
-    let reduced = verter_session::for_tests::reduce_merged_decl_to_graph_node(&store, &contributors);
+    let reduced =
+        verter_session::for_tests::reduce_merged_decl_to_graph_node(&store, &contributors);
     let graph_render = render(&store, reduced);
     let count_after_reduction = store.node_count();
 
