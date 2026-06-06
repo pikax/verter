@@ -7,7 +7,9 @@
 //! (`docs/arch/u2-query-value-domain-design.md` §18.2):
 //!
 //! - A `Clean` result over a soundly self-version-rooted carrier publishes
-//!   warm exactly as it did before this gate landed.
+//!   warm. `taint` is currently always `Clean`; non-`Clean` taint is produced
+//!   by the §18.4 input-degradation producers, and the partial/broken arms
+//!   below are exercised by this module's `admit_decision` unit tests.
 //! - A `Partial(MissingDependency)` / `Partial(UnresolvedReference)` is
 //!   `Warm` ONLY when its invalidation rail (the missing-dependency /
 //!   negative-resolution FACT) was actually recorded on the signature; if the
@@ -68,15 +70,23 @@ pub enum Admission {
 /// non-fact-rooted broken class — `IncompleteDeclaration`, `SyntaxError`,
 /// `TornRead`, and any `Broken` severity — is `ReturnOnly`.
 ///
+/// Forward note (§18.4): the gate keys on the presence of the rooting fact
+/// KIND on `sig` ([`records_missing_dependency_fact`](ReadSetSignature::records_missing_dependency_fact)
+/// = a `DerivedFactKind::ImportRoute` fact present;
+/// [`records_negative_resolution_fact`](ReadSetSignature::records_negative_resolution_fact)
+/// = a negative `ResolvedImportClause` / `ResolvedReexportBinding`
+/// `UNRESOLVED_SENTINEL` fact present). It does NOT correlate that fact to the
+/// SPECIFIC degraded reference that produced the taint — reference-specific
+/// rooting is a §18.4 follow-up once the taint producers emit the degraded
+/// reference identity alongside the fact.
+///
 /// Precondition: `sig` is the sound carrier the cold-build helper produced;
 /// callers route overflow / unrootable results to `ReturnOnly` before reaching
-/// here. A `Clean` taint therefore always returns `Warm` (preserving the
-/// pre-gate publish behavior exactly).
+/// here. A `Clean` taint therefore always returns `Warm`.
 #[must_use]
 pub fn admit_decision(taint: ResultTaint, sig: &ReadSetSignature) -> Admission {
     match taint {
-        // Normal publish: a clean result over a sound carrier is the
-        // pre-gate behavior verbatim.
+        // Normal publish: a clean result over a sound carrier publishes warm.
         ResultTaint::Clean => Admission::Warm,
         // Fact-rooted partial: cacheable IFF the invalidation rail is on
         // the signature (§18.2.1).

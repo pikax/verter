@@ -1166,11 +1166,11 @@ fn finalise_traced_build_output(
                     // already routed to the `None` arm below, and an overflowed
                     // tracer to the `Overflow` arm). `admit_decision` applies
                     // the SECOND, taint-narrowed gate: a `Clean` result over a
-                    // sound carrier is `Warm` (the pre-gate publish behavior
-                    // verbatim — every build currently emits `Clean` because the
-                    // taint producers are U0/out-of-scope, §18.4); a partial
-                    // result is `Warm` only when ITS invalidation fact is on the
-                    // carrier, else `ReturnOnly`.
+                    // sound carrier is `Warm`. `taint` is currently always
+                    // `Clean`; non-`Clean` taint is produced by the §18.4
+                    // input-degradation producers, so today every build
+                    // publishes warm. A partial result is `Warm` only when ITS
+                    // invalidation fact is on the carrier, else `ReturnOnly`.
                     match crate::semantic_query::admit::admit_decision(output.taint, &carrier) {
                         crate::semantic_query::admit::Admission::Warm => {
                             output.graph_carrier = Some(Box::new(carrier));

@@ -745,8 +745,8 @@ closed, fact-rooted contract (`docs/arch/u2-query-value-domain-design.md`
    (§18.2).** [`admit_decision(taint, sig)`](../../crates/verter_session/src/semantic_query/admit.rs)
    maps a result's [`ResultTaint`] + its sound
    [`ReadSetSignature`](../../crates/verter_session/src/fact_signature_helpers.rs)
-   to `Admission::{Warm, ReturnOnly}`. `Clean` ⇒ `Warm` (the pre-gate publish
-   behavior verbatim). `Partial(MissingDependency)` ⇒ `Warm` **iff**
+   to `Admission::{Warm, ReturnOnly}`. `Clean` ⇒ `Warm`.
+   `Partial(MissingDependency)` ⇒ `Warm` **iff**
    `sig.records_missing_dependency_fact()` (a `DerivedFactKind::ImportRoute`
    rail) else `ReturnOnly`; `Partial(UnresolvedReference)` ⇒ `Warm` **iff**
    `sig.records_negative_resolution_fact()` (a `ResolvedImportClause` /
@@ -755,11 +755,13 @@ closed, fact-rooted contract (`docs/arch/u2-query-value-domain-design.md`
    `Broken(SyntaxError)`, and `Broken(TornRead)` are always `ReturnOnly`. The
    bare taint discriminant NEVER licenses a warm publish — the signature is the
    authority for whether the invalidation rail IS present. `admit_decision` is
-   the sole replacement for the inline `Some/None` admission gate in
-   `finalise_traced_build_output` (one cutover, no dual path). Taint PRODUCERS
-   (parser error-recovery, resolver degradation, completion-fence torn-read)
-   are a U0/foundation responsibility (§18.4); every build currently emits
-   `Clean`, so the live publish behavior is unchanged.
+   the sole admission gate in `finalise_traced_build_output`. The gate keys on
+   the rooting fact KIND on the signature; correlating that fact to the
+   SPECIFIC degraded reference is a §18.4 follow-up. Taint PRODUCERS (parser
+   error-recovery, resolver degradation, completion-fence torn-read) are
+   produced by the §18.4 producers; `taint` is currently always `Clean`, so
+   the live publish behavior is unchanged and the partial/broken arms are
+   exercised by the `admit_decision` unit tests.
 
 2. **Taint join is monotone over `Clean ⊑ Partial ⊑ Broken` (§18.3).**
    [`ResultTaint::join`](../../crates/verter_session/src/semantic_query.rs)
@@ -781,13 +783,22 @@ closed, fact-rooted contract (`docs/arch/u2-query-value-domain-design.md`
    `keyof any/never = string|number|symbol`, `keyof unknown = never`; mapped
    over `never`=`{}`, direct mapped over `unknown`=error. `any`/`never`/`unknown`
    are `Clean` (legitimately cacheable). **`error` rides
-   `SemanticNodeData::Opaque(QueryError)` + §18 taint** (no new
-   `GraphTypeNode` wire arm): it DOMINATES every other absorber so the taint is
-   never hidden behind a `Clean` extreme, relates **bidirectionally like
-   `any`** in `relate_nodes` (so a broken sub-result never cascades spurious
-   `NotAssignable`), and is `ReturnOnly`-prone via §18 admission.
-   `QueryError::DeclPlaceholder` is an expandable carrier, NOT the error type,
-   and is excluded from both the absorption and the relation flip.
+   `SemanticNodeData::Opaque(QueryError)`** (no new `GraphTypeNode` wire arm):
+   an `error` operand **carrier-dominates** every other absorber, so the error
+   CARRIER (node identity + `QueryError` payload) is never hidden behind a
+   `Clean` extreme — relation/display keep seeing the error type. This is
+   carrier-dominating, NOT taint-propagating: the absorbed `QueryBuildOutput`'s
+   `taint` defaults to `Clean` and absorption does NOT join any operand's §18
+   taint onto it. That is sound today because no producer emits non-`Clean`
+   taint, so every absorbed type error is deterministic (`unknown[K]`,
+   `keyof error`, …) and legitimately cacheable. An error becomes
+   `ReturnOnly`-prone only when it is INPUT-DEGRADED — a §18.4 property routed
+   through `admit_decision` once taint producers land (see the `TODO(§18.4)` in
+   `absorbed_output`). `error` relates **bidirectionally like `any`** in
+   `relate_nodes` (so a broken sub-result never cascades spurious
+   `NotAssignable`). `QueryError::DeclPlaceholder` is an expandable carrier,
+   NOT the error type, and is excluded from both the absorption and the
+   relation flip.
 
 Guards (registered in `CRITICAL_RULE_GUARDS` under
 `Error-Tolerance Non-Admission + §22 Absorption`):

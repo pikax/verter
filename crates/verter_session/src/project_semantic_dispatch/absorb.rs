@@ -17,12 +17,20 @@
 //!   redirects (a pure arena hop) up to [`ALIAS_PEEK_HOPS`] but never reduces
 //!   an operator or resolves a declaration.
 //! - **`any` / `never` / `unknown` results are `Clean`** (legitimately
-//!   cacheable). **`error` rides [`Opaque(QueryError)`](crate::semantic_query::SemanticNodeData::Opaque)**
-//!   and carries §18 taint — it is `ReturnOnly`-prone. To keep that taint
-//!   from being hidden, an `error` operand DOMINATES every other absorber
-//!   (the absorbed result is the `error` carrier itself), so a broken
-//!   sub-result never collapses into a `Clean` `any`/`never`/`unknown` that
-//!   would warm-cache the broken-ness away.
+//!   cacheable). **`error` rides [`Opaque(QueryError)`](crate::semantic_query::SemanticNodeData::Opaque)**:
+//!   an `error` operand DOMINATES every other absorber, so the absorbed
+//!   result is the `error` CARRIER itself — its node identity + `QueryError`
+//!   payload survive, so relation/display still see the error type instead of
+//!   a `Clean` `any`/`never`/`unknown` that erased the error. This is
+//!   *carrier-dominating*, NOT taint-propagating: the absorbed
+//!   [`QueryBuildOutput`] is built via [`QueryBuildOutput::from`], whose
+//!   `taint` defaults to [`Clean`](crate::semantic_query::ResultTaint::Clean) —
+//!   absorption does NOT join any operand's §18 taint onto the output. That is
+//!   sound today because no producer emits non-`Clean` taint, so every
+//!   absorbed type error is deterministic (`unknown[K]`, `keyof error`, …) and
+//!   legitimately cacheable. See [`absorbed_output`](Self::absorbed_output) for
+//!   the §18.4 follow-up that joins the dominating operand's taint once taint
+//!   producers land.
 //! - **`Opaque(QueryError::DeclPlaceholder)` is NOT the error type** — it is
 //!   an expandable declaration carrier, so it is excluded from the `error`
 //!   classification (mirrors the relation engine's identity-carrier unwrap).
@@ -57,7 +65,8 @@ impl ProjectSemanticDispatch<'_> {
     /// Classify `id` as a lattice extreme, following transparent `Alias`
     /// redirects (bounded by [`ALIAS_PEEK_HOPS`]). Returns the kind AND the
     /// resolved node id (so an `error` operand can be reused verbatim as the
-    /// absorbed result, preserving its `QueryError` payload + §18 taint).
+    /// absorbed result, preserving its `QueryError` payload + node identity —
+    /// the error CARRIER).
     fn peek_special(&self, id: SemanticNodeId) -> Option<(SpecialKind, SemanticNodeId)> {
         let mut cur = id;
         // At most ALIAS_PEEK_HOPS hops; a longer chain / alias cycle → None.
@@ -119,6 +128,11 @@ impl ProjectSemanticDispatch<'_> {
         roots_from: impl IntoIterator<Item = SemanticNodeId>,
     ) -> QueryBuildOutput {
         let observed = self.observed_self_roots_from_nodes(roots_from);
+        // TODO(follow-up, §18.4): once taint producers land and per-operand
+        // taint is available, join the dominating error operand's taint into
+        // the absorbed output here so an INPUT-DEGRADED error becomes
+        // ReturnOnly-prone rather than Clean. Deterministic type errors
+        // (unknown[K], keyof error) stay Clean/cacheable.
         QueryBuildOutput::from((
             QueryResult::Value(node),
             self.project_generation_signature(),
@@ -129,7 +143,7 @@ impl ProjectSemanticDispatch<'_> {
     // ── Union ───────────────────────────────────────────────────────────
     /// §22.2 union absorption: `X | any = any`, `X | unknown = unknown`,
     /// `X | never = X` (drop every `never` arm; all-`never` ⇒ `never`),
-    /// `X | error = error` (taint-preserving, dominates).
+    /// `X | error = error` (carrier-dominating).
     pub(crate) fn absorb_union(&self, members: &[SemanticNodeId]) -> Option<QueryBuildOutput> {
         let mut has_any = false;
         let mut has_unknown = false;
@@ -148,8 +162,8 @@ impl ProjectSemanticDispatch<'_> {
                 None => {}
             }
         }
-        // Error dominates so the §18 taint is never hidden behind a Clean
-        // `any`/`unknown`.
+        // Error dominates so the error CARRIER is never hidden behind a Clean
+        // `any`/`unknown` (relation/display keep seeing the error type).
         if let Some(err) = error_node {
             return Some(self.absorbed_output(err, members.iter().copied()));
         }
@@ -184,7 +198,7 @@ impl ProjectSemanticDispatch<'_> {
     // ── Intersection ──────────────────────────────────────────────────────
     /// §22.2 intersection absorption: `X & never = never`, `X & any = any`,
     /// `X & unknown = X` (drop every `unknown` arm; all-`unknown` ⇒ `unknown`),
-    /// `X & error = error` (taint-preserving, dominates).
+    /// `X & error = error` (carrier-dominating).
     pub(crate) fn absorb_intersection(
         &self,
         members: &[SemanticNodeId],
@@ -206,7 +220,7 @@ impl ProjectSemanticDispatch<'_> {
                 None => {}
             }
         }
-        // Error dominates so the §18 taint is never hidden.
+        // Error dominates so the error CARRIER is never hidden.
         if let Some(err) = error_node {
             return Some(self.absorbed_output(err, members.iter().copied()));
         }
@@ -320,7 +334,7 @@ impl ProjectSemanticDispatch<'_> {
 
     // ── Conditional ───────────────────────────────────────────────────────
     /// §22.2 conditional absorption on the CHECK type: `error extends T`
-    /// ⇒ `error` (both branches tainted). `any` (distributes both branches +
+    /// ⇒ `error` (the error carrier dominates both branches). `any` (distributes both branches +
     /// unions them) and distributive `never` (collapses to `never`) are
     /// handled by the conditional reducer's own branch logic, so this hook
     /// only fast-rejects the error-check case.

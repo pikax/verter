@@ -138,7 +138,7 @@ fn error_tolerance_broken_input_is_returnonly_fact_rooted_error_is_cacheable() {
         Admission::ReturnOnly,
     );
 
-    // Clean over a sound carrier publishes (the pre-gate behavior verbatim).
+    // Clean over a sound carrier publishes warm.
     assert_eq!(
         admit_decision(ResultTaint::Clean, &sig(vec![])),
         Admission::Warm

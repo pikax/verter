@@ -140,16 +140,16 @@ pub struct QueryBuildOutput {
     pub cache_suppress: bool,
     /// The §18 provenance taint of this build's value: how trustworthy the
     /// inputs that produced it were. Defaults to
-    /// [`ResultTaint::Clean`](crate::semantic_query::ResultTaint::Clean) —
-    /// every build the dispatch currently produces is `Clean` because the
-    /// taint PRODUCERS (parser error-recovery, the resolver degrading an
-    /// unresolved reference, the completion fence's torn-read detection)
-    /// are a U0/foundation responsibility (§18.4) that has not landed yet.
-    /// The shared cold-build helper feeds this to
-    /// [`admit_decision`](crate::semantic_query::admit::admit_decision):
-    /// the §18.2 non-admission rule gates `Warm` on the rooting FACT in
-    /// the `ReadSetSignature`, narrowed by this taint class. A `Clean`
-    /// taint over a soundly-rooted carrier publishes exactly as before.
+    /// [`ResultTaint::Clean`](crate::semantic_query::ResultTaint::Clean).
+    /// `taint` is currently always `Clean`; non-`Clean` taint is produced by
+    /// the §18.4 input-degradation producers (parser error-recovery, the
+    /// resolver degrading an unresolved reference, the completion fence's
+    /// torn-read detection), and the admission arms for it are exercised by
+    /// the [`admit_decision`](crate::semantic_query::admit::admit_decision)
+    /// unit tests. The shared cold-build helper feeds this field to
+    /// `admit_decision`: the §18.2 non-admission rule gates `Warm` on the
+    /// rooting FACT in the `ReadSetSignature`, narrowed by this taint class.
+    /// A `Clean` taint over a soundly-rooted carrier publishes warm.
     pub taint: crate::semantic_query::ResultTaint,
     /// Every `(canonical, observed_hash)` self-root the cold build
     /// captured at the value source — the keyed canonical for
