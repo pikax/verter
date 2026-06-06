@@ -20,10 +20,10 @@
 //!
 //! This is the R21 scoping rule in code.
 
+use std::sync::OnceLock;
 use verter_session::file_artifact_store::{
     AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, ProjectIdentity,
 };
-use std::sync::OnceLock;
 
 use verter_workspace::env_hash::EnvHashInputs;
 use verter_workspace::module_resolution::{ConditionSet, ModuleResolutionMode};

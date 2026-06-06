@@ -110,7 +110,11 @@ mod tests {
         let set = ConditionSet::new(["types", "import", "default", "import"]);
         assert_eq!(
             set.conditions(),
-            &["types".to_string(), "import".to_string(), "default".to_string()],
+            &[
+                "types".to_string(),
+                "import".to_string(),
+                "default".to_string()
+            ],
             "first-seen order preserved, later duplicate `import` dropped"
         );
         assert!(!set.is_empty());
@@ -125,6 +129,9 @@ mod tests {
 
     #[test]
     fn module_resolution_mode_default_is_bundler() {
-        assert_eq!(ModuleResolutionMode::default(), ModuleResolutionMode::Bundler);
+        assert_eq!(
+            ModuleResolutionMode::default(),
+            ModuleResolutionMode::Bundler
+        );
     }
 }
