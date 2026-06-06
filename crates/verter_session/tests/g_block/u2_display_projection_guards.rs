@@ -291,6 +291,18 @@ fn member(name: &str, value: SemanticNodeId, is_method: bool) -> SurfaceMember {
     }
 }
 
+fn member_with_role(
+    name: &str,
+    value: SemanticNodeId,
+    is_method: bool,
+    merge_role: MemberMergeRole,
+) -> SurfaceMember {
+    SurfaceMember {
+        merge_role,
+        ..member(name, value, is_method)
+    }
+}
+
 /// An object surface with the given members / call / construct signatures.
 fn object(
     store: &SemanticGraphStore,
@@ -845,33 +857,70 @@ fn declaration_analysis_contributors_apply_intersection_precedence() {
 
 // ----------------------------------------------------------------------
 // GUARD 10 — a `MergedDecl` carrier renders its ACTUAL peer-merged surface
-// (the member union of all contributors), NOT a placeholder/constant and NOT
-// just the first contributor. A `todo!()` / stub arm would panic; a
-// single-contributor or constant arm would drop the second contributor's
-// member. This proves the display arm reduces through the real
-// declaration-merge reducer.
+// (member union, accumulated overloads, own-body shadowing heritage), NOT a
+// placeholder/constant and NOT just the first contributor. It is also a pure
+// display projection: rendering must not intern a reduced Object/Intersection
+// into the shared semantic graph.
 // ----------------------------------------------------------------------
 
 #[test]
-fn merged_decl_renders_peer_merged_member_union() {
+fn merged_decl_display_is_non_mutating_and_renders_peer_merged_surface() {
     let store = SemanticGraphStore::new();
     let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let boolean_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let method_number_to_string = func_node(&store, &[("value", number_id)], string_id);
+    let method_string_to_number = func_node(&store, &[("value", string_id)], number_id);
 
-    // Two same-name `interface` contributors in source order:
-    //   interface Foo { x: number }   interface Foo { y: string }
-    let part_x = object(&store, vec![member("x", number_id, false)], vec![], vec![]);
-    let part_y = object(&store, vec![member("y", string_id, false)], vec![], vec![]);
+    let heritage = object(
+        &store,
+        vec![member_with_role(
+            "shadowed",
+            string_id,
+            false,
+            MemberMergeRole::Heritage,
+        )],
+        vec![],
+        vec![],
+    );
+    let part_x = object(
+        &store,
+        vec![
+            member_with_role("shadowed", boolean_id, false, MemberMergeRole::OwnBody),
+            member("x", number_id, false),
+            member("m", method_number_to_string, true),
+        ],
+        vec![],
+        vec![],
+    );
+    let part_y = object(
+        &store,
+        vec![
+            member("y", string_id, false),
+            member("m", method_string_to_number, true),
+        ],
+        vec![],
+        vec![],
+    );
 
     let merged = store.intern_node(SemanticNodeData::MergedDecl {
-        contributors: Arc::from([part_x, part_y]),
+        contributors: Arc::from([heritage, part_x, part_y]),
     });
+    let count_before_display = store.node_count();
 
-    // DISCRIMINATING: the merged surface must expose BOTH members. A stub arm
-    // (`todo!()`) panics; a constant/placeholder arm renders neither; a
-    // first-contributor-only arm drops `y`.
+    // DISCRIMINATING: current mutating display interns a reduced Object (and an
+    // overload Intersection), so `node_count` grows. A pure display projection
+    // renders from a local surface and leaves the graph unchanged.
     let r = render(&store, merged);
-    assert_eq!(r, "{ x: number; y: string }");
+    assert_eq!(
+        store.node_count(),
+        count_before_display,
+        "display(MergedDecl) must not intern reduced graph nodes"
+    );
+    assert_eq!(
+        r,
+        "{ shadowed: boolean; x: number; m(value: number): string; m(value: string): number; y: string }"
+    );
     assert!(
         r.contains("x: number"),
         "first contributor member missing: {r}"
@@ -881,6 +930,10 @@ fn merged_decl_renders_peer_merged_member_union() {
         "second contributor member missing: {r}"
     );
     assert_ne!(r, "{ x: number }", "must not be first-contributor-only");
+    assert!(
+        !r.contains("shadowed: string"),
+        "own-body member must shadow the heritage-tagged member: {r}"
+    );
 
     // NEGATIVE: a `MergedDecl` is atomic (`{…}`) — as an array element it must
     // NOT parenthesise (a non-Atom precedence arm would wrap it).
@@ -889,11 +942,32 @@ fn merged_decl_renders_peer_merged_member_union() {
         readonly: false,
     });
     let ra = render(&store, arr);
-    assert_eq!(ra, "{ x: number; y: string }[]");
+    assert_eq!(ra, format!("{r}[]"));
     assert!(
         !ra.contains("({"),
         "merged decl is atomic — must not parenthesise: {ra}"
     );
+}
+
+#[test]
+fn display_source_does_not_call_graph_interning_or_dispatch() {
+    let display_rs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("semantic_query")
+        .join("display.rs");
+    let source = std::fs::read_to_string(&display_rs)
+        .unwrap_or_else(|err| panic!("read {}: {err}", display_rs.display()));
+    for forbidden in [
+        "intern_node(",
+        "reduce_merged_decl_with_graph",
+        "execute_type_node(",
+        "execute_cooperative(",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "display.rs must be a read-only projection; found forbidden `{forbidden}`"
+        );
+    }
 }
 
 // ----------------------------------------------------------------------

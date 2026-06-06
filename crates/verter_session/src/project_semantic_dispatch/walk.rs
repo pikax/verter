@@ -519,6 +519,26 @@ impl<'a> super::ProjectSemanticDispatch<'a> {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MergedDeclDisplaySurface {
+    pub(crate) heritage_arms: Vec<SemanticNodeId>,
+    pub(crate) own_surface: MergedDeclDisplayOwnSurface,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MergedDeclDisplayOwnSurface {
+    pub(crate) members: Vec<MergedDeclDisplayMember>,
+    pub(crate) call_signatures: Vec<SemanticNodeId>,
+    pub(crate) construct_signatures: Vec<SemanticNodeId>,
+    pub(crate) index_signatures: Vec<crate::semantic_query::IndexSignature>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MergedDeclDisplayMember {
+    pub(crate) member: ShallowSurfaceMember,
+    pub(crate) values: Vec<SemanticNodeId>,
+}
+
 /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
 /// node (graph-only entry point; the dispatch method delegates here).
 ///
@@ -561,6 +581,23 @@ pub(crate) fn reduce_merged_decl_with_graph(
     graph.intern_node(SemanticNodeData::Intersection(Arc::from(
         arms.into_boxed_slice(),
     )))
+}
+
+/// Compute the peer-merged declaration surface for display without interning
+/// the reduced `Object` / `Intersection` into the shared graph arena.
+pub(crate) fn reduce_merged_decl_display_surface(
+    graph: &SemanticGraphStore,
+    contributors: &[SemanticNodeId],
+) -> MergedDeclDisplaySurface {
+    let mut own_surfaces: Vec<ShallowSurface> = Vec::with_capacity(contributors.len());
+    let mut heritage_arms: Vec<SemanticNodeId> = Vec::new();
+    for contributor in contributors {
+        collect_merged_contributor_arms(graph, *contributor, &mut own_surfaces, &mut heritage_arms);
+    }
+    MergedDeclDisplaySurface {
+        heritage_arms,
+        own_surface: merge_declaration_surfaces_for_display(&own_surfaces),
+    }
 }
 
 /// Split one merged-declaration contributor into its OWN-body surface(s) and
@@ -616,6 +653,110 @@ fn object_surface_view(graph: &SemanticGraphStore, node: SemanticNodeId) -> Opti
             object_surface_view(graph, target)
         }
         _ => None,
+    }
+}
+
+fn merge_declaration_surfaces_for_display(
+    contributor_surfaces: &[ShallowSurface],
+) -> MergedDeclDisplayOwnSurface {
+    struct Accum {
+        first: ShallowSurfaceMember,
+        first_own_body: Option<ShallowSurfaceMember>,
+        saw_heritage: bool,
+        method_values: Vec<SemanticNodeId>,
+    }
+
+    let mut by_name: indexmap::IndexMap<Arc<str>, Accum> = indexmap::IndexMap::new();
+    for surface in contributor_surfaces {
+        for member in &surface.members {
+            match by_name.get_mut(&member.name) {
+                None => {
+                    let first_own_body = matches!(
+                        member.merge_role,
+                        crate::semantic_query::MemberMergeRole::OwnBody
+                    )
+                    .then(|| member.clone());
+                    by_name.insert(
+                        Arc::clone(&member.name),
+                        Accum {
+                            first: member.clone(),
+                            first_own_body,
+                            saw_heritage: matches!(
+                                member.merge_role,
+                                crate::semantic_query::MemberMergeRole::Heritage
+                            ),
+                            method_values: vec![member.value],
+                        },
+                    );
+                }
+                Some(accum) => {
+                    if matches!(
+                        member.merge_role,
+                        crate::semantic_query::MemberMergeRole::Heritage
+                    ) {
+                        accum.saw_heritage = true;
+                    }
+                    if matches!(
+                        member.merge_role,
+                        crate::semantic_query::MemberMergeRole::OwnBody
+                    ) && accum.first_own_body.is_none()
+                    {
+                        accum.first_own_body = Some(member.clone());
+                    }
+                    if member.is_method
+                        && accum.first.is_method
+                        && !accum.method_values.contains(&member.value)
+                    {
+                        accum.method_values.push(member.value);
+                    }
+                }
+            }
+        }
+    }
+
+    let members = by_name
+        .into_values()
+        .map(|accum| {
+            let member = if !accum.first.is_method && accum.saw_heritage {
+                accum.first_own_body.unwrap_or(accum.first)
+            } else {
+                accum.first
+            };
+            let values = if member.is_method {
+                accum.method_values
+            } else {
+                vec![member.value]
+            };
+            MergedDeclDisplayMember { member, values }
+        })
+        .collect();
+
+    let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
+    let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
+    let mut index_signatures: Vec<crate::semantic_query::IndexSignature> = Vec::new();
+    for surface in contributor_surfaces {
+        for sig in &surface.call_signatures {
+            if !call_signatures.contains(sig) {
+                call_signatures.push(*sig);
+            }
+        }
+        for sig in &surface.construct_signatures {
+            if !construct_signatures.contains(sig) {
+                construct_signatures.push(*sig);
+            }
+        }
+        for sig in &surface.index_signatures {
+            if !index_signatures.contains(sig) {
+                index_signatures.push(sig.clone());
+            }
+        }
+    }
+
+    MergedDeclDisplayOwnSurface {
+        members,
+        call_signatures,
+        construct_signatures,
+        index_signatures,
     }
 }
 

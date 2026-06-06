@@ -40,6 +40,10 @@ use super::{
     ProgramAnalysisValue, ReadonlyMod, RelationOutcome, RelationPayload, SemanticNodeData,
     SemanticNodeId, SemanticQueryValue, SignatureRef, TypeParamDecl,
 };
+use crate::project_semantic_dispatch::walk::{
+    MergedDeclDisplayMember, MergedDeclDisplayOwnSurface, MergedDeclDisplaySurface,
+    ShallowSurfaceMember,
+};
 use crate::semantic_query_memo::SemanticGraphStore;
 use std::fmt;
 
@@ -249,21 +253,16 @@ pub(crate) fn display_type_node(
                 .collect();
             rendered.join(" & ")
         }
-        // A same-name merged declaration renders its ACTUAL peer-merged surface
-        // (member union + accumulated overload groups), not the bare contributor
-        // list — reduce through the single declaration-merge reducer every other
-        // MergedDecl consumer routes through, then display the resulting Object.
-        // This keeps display structural (it only reads the reduced graph node)
-        // and consistent with raise/expand/relation, which see the same surface.
+        // A same-name merged declaration renders a peer-merged surface from a
+        // transient projection. Display stays read-only: semantic consumers that
+        // need a graph node materialize through the reducer before rendering.
         SemanticNodeData::MergedDecl { contributors } => {
-            let reduced = crate::project_semantic_dispatch::walk::reduce_merged_decl_with_graph(
-                store,
-                contributors,
-            );
-            // The reduced node is a fresh `Object`; render it under the same
-            // depth budget. `visited` already contains this MergedDecl id, so a
-            // self-referential contributor still terminates via the cycle break.
-            display_type_node(store, reduced, needs, child_depth, visited).0
+            let surface =
+                crate::project_semantic_dispatch::walk::reduce_merged_decl_display_surface(
+                    store,
+                    contributors,
+                );
+            render_merged_decl_surface(store, &surface, needs, child_depth, visited)
         }
         SemanticNodeData::Primitive(kind) => primitive_keyword(*kind).to_string(),
         SemanticNodeData::Literal(value) => literal_token(value),
@@ -460,6 +459,137 @@ pub(crate) fn display_type_node(
     };
     visited.pop();
     DisplayString(out)
+}
+
+fn render_merged_decl_surface(
+    store: &SemanticGraphStore,
+    surface: &MergedDeclDisplaySurface,
+    needs: DisplayNeeds,
+    depth: usize,
+    visited: &mut Vec<SemanticNodeId>,
+) -> String {
+    let own = render_merged_decl_own_surface(store, &surface.own_surface, needs, depth, visited);
+    if surface.heritage_arms.is_empty() {
+        return own;
+    }
+    let mut rendered: Vec<String> = surface
+        .heritage_arms
+        .iter()
+        .map(|arm| render_operand(store, *arm, needs, depth, visited, Prec::Intersection))
+        .collect();
+    rendered.push(own);
+    rendered.join(" & ")
+}
+
+fn render_merged_decl_own_surface(
+    store: &SemanticGraphStore,
+    surface: &MergedDeclDisplayOwnSurface,
+    needs: DisplayNeeds,
+    depth: usize,
+    visited: &mut Vec<SemanticNodeId>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for member in &surface.members {
+        parts.extend(render_merged_decl_member(
+            store, member, needs, depth, visited,
+        ));
+    }
+    for sig in surface.call_signatures.iter() {
+        parts.push(render_signature_colon(
+            store, *sig, "", needs, depth, visited,
+        ));
+    }
+    for sig in surface.construct_signatures.iter() {
+        parts.push(render_signature_colon(
+            store, *sig, "new ", needs, depth, visited,
+        ));
+    }
+    for index in surface.index_signatures.iter() {
+        let mut s = String::new();
+        if index.readonly && needs.contains(DisplayFacet::IncludeReadonlyModifier) {
+            s.push_str("readonly ");
+        }
+        s.push_str(&format!(
+            "[key: {}]: {}",
+            display_type_node(store, index.key_type, needs, depth, visited).0,
+            display_type_node(store, index.value_type, needs, depth, visited).0
+        ));
+        parts.push(s);
+    }
+    if parts.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{ {} }}", parts.join("; "))
+    }
+}
+
+fn render_merged_decl_member(
+    store: &SemanticGraphStore,
+    merged: &MergedDeclDisplayMember,
+    needs: DisplayNeeds,
+    depth: usize,
+    visited: &mut Vec<SemanticNodeId>,
+) -> Vec<String> {
+    let member = &merged.member;
+    if member.is_method
+        && merged.values.len() > 1
+        && merged
+            .values
+            .iter()
+            .all(|value| resolves_to_function(store, *value))
+    {
+        return merged
+            .values
+            .iter()
+            .map(|value| {
+                let mut s = member_prefix(member, needs);
+                s.push_str(&render_signature_colon(
+                    store, *value, "", needs, depth, visited,
+                ));
+                s
+            })
+            .collect();
+    }
+
+    let mut s = member_prefix(member, needs);
+    match merged.values.as_slice() {
+        [value] if member.is_method && resolves_to_function(store, *value) => {
+            s.push_str(&render_signature_colon(
+                store, *value, "", needs, depth, visited,
+            ));
+        }
+        [value] => {
+            s.push_str(": ");
+            s.push_str(&display_type_node(store, *value, needs, depth, visited).0);
+        }
+        [] => {
+            s.push_str(": ");
+            s.push_str(TRUNCATION_TOKEN);
+        }
+        values => {
+            s.push_str(": ");
+            let rendered: Vec<String> = values
+                .iter()
+                .map(|value| {
+                    render_operand(store, *value, needs, depth, visited, Prec::Intersection)
+                })
+                .collect();
+            s.push_str(&rendered.join(" & "));
+        }
+    }
+    vec![s]
+}
+
+fn member_prefix(member: &ShallowSurfaceMember, needs: DisplayNeeds) -> String {
+    let mut s = String::new();
+    if member.readonly && needs.contains(DisplayFacet::IncludeReadonlyModifier) {
+        s.push_str("readonly ");
+    }
+    s.push_str(&member_name_token(&member.name));
+    if member.optional {
+        s.push('?');
+    }
+    s
 }
 
 /// Render one overload signature (a graph node, typically a
