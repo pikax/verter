@@ -272,3 +272,85 @@ pub enum SemanticQueryKey {
          yield an empty set, not variants of an unrelated enum."
     );
 }
+
+/// The two augmentation query keys named in the parent's seven-variant spine —
+/// `ResolveMergedDeclaration` and `ResolveDeclarationAugmentation` — are
+/// **forward-planned**, NOT live `SemanticQueryKey` variants. Of the parent
+/// seven-variant spine (`native-typeinfo-parity.md` §2.1) FIVE are landed
+/// (`ResolveAmbientNamespace`, `ResolveOverloadSet`, `ResolveEnum`,
+/// `FlowNarrowingAt`, `ContextualTypeAt`) and these TWO are not in the enum or
+/// the spec table. Same-name declaration merge and cross-file ambient
+/// augmentation are produced by the `MergedDecl` peer-merge reducer over the
+/// graph carrier `SemanticNodeData::MergedDecl` (CLAUDE.md "Declaration Merging
+/// (CRITICAL)" / "Declaration Augmentation (CRITICAL)") — NOT by a dedicated
+/// query key. The matching value-domain shell `SemanticQueryValue::
+/// DeclarationAnalysis` is therefore non-live: NO live spec row resolves to it.
+///
+/// This guard pins that fork mechanically: it FAILS the day either augmentation
+/// name is added to `SemanticQueryKeyTag::ALL`, or any live spec row is wired to
+/// the `DeclarationAnalysis` value domain, without the deliberate block that
+/// retires the forward-planned status. It is the executable anchor for the
+/// "five landed, two forward-planned" reconciliation, complementary to
+/// `semantic_query_key_spec_table_equals_enum` (which would stay green for a
+/// both-enum-and-table addition — exactly the case this guard catches).
+#[test]
+fn forward_planned_augmentation_keys_are_not_live_and_declaration_analysis_is_a_shell() {
+    use verter_session::semantic_query::SemanticQueryValueTag;
+
+    const FORWARD_PLANNED: [&str; 2] =
+        ["ResolveMergedDeclaration", "ResolveDeclarationAugmentation"];
+
+    // (1) Neither forward-planned augmentation key is a live tag.
+    let live_names: BTreeSet<String> = SemanticQueryKeyTag::ALL
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect();
+    for forbidden in FORWARD_PLANNED {
+        assert!(
+            !live_names.contains(forbidden),
+            "`{forbidden}` is a FORWARD-PLANNED key (parent §2.1: five landed, \
+             two forward-planned) — it must NOT be a live `SemanticQueryKeyTag`. \
+             Same-name merge / cross-file augmentation is produced by the \
+             `MergedDecl` peer-merge reducer over `SemanticNodeData::MergedDecl`, \
+             not a dedicated query key. If this key is being landed \
+             deliberately, update this guard and the parent contract together."
+        );
+    }
+
+    // (2) No live spec row resolves to the non-live `DeclarationAnalysis` shell.
+    let specs = semantic_query_key_specs();
+    for spec in &specs {
+        assert_ne!(
+            spec.value_domain,
+            SemanticQueryValueTag::DeclarationAnalysis,
+            "live spec row `{}` resolves to `DeclarationAnalysis`, but that \
+             value domain is a NON-LIVE shell — the live merged-declaration / \
+             augmentation carrier is the graph node `SemanticNodeData::MergedDecl`, \
+             never a `SemanticQueryValue::DeclarationAnalysis` produced by a live key.",
+            spec.variant.name()
+        );
+    }
+
+    // Discrimination proof (non-vacuity): the same two checks applied to a
+    // synthetic VIOLATING input must trip. Mirrors `enum_variant_scanner_
+    // discriminates`' injected-drift proof so neither assertion can pass
+    // vacuously.
+    let mut drifted_names = live_names.clone();
+    drifted_names.insert("ResolveMergedDeclaration".to_string());
+    assert!(
+        FORWARD_PLANNED.iter().any(|f| drifted_names.contains(*f)),
+        "discrimination self-test: a synthetic live set containing a \
+         forward-planned key was NOT detected — check (1) would be vacuous."
+    );
+    let synthetic_domains = [
+        SemanticQueryValueTag::TypeNode,
+        SemanticQueryValueTag::DeclarationAnalysis,
+    ];
+    assert!(
+        synthetic_domains
+            .iter()
+            .any(|d| *d == SemanticQueryValueTag::DeclarationAnalysis),
+        "discrimination self-test: a synthetic spec-domain set containing \
+         `DeclarationAnalysis` was NOT detected — check (2) would be vacuous."
+    );
+}
