@@ -804,7 +804,7 @@ Guards (registered in `CRITICAL_RULE_GUARDS` under
 `Error-Tolerance Non-Admission + §22 Absorption`):
 `error_tolerance_broken_input_is_returnonly_fact_rooted_error_is_cacheable`,
 `error_any_never_propagation_lattice`,
-`error_type_taints_and_is_returnonly_prone_any_is_cacheable`
+`error_type_is_returnonly_prone_any_is_cacheable`
 (`crates/verter_session/src/error_propagation_lattice_tests.rs`).
 
 ### Environment & GC

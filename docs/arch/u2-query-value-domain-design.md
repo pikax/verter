@@ -880,10 +880,12 @@ deliberately *outside* the partial order (it relates both directions), modeled a
 `GraphTypeNode::Any` that the relation engine short-circuits. `error` does **NOT** get a new
 `GraphTypeNode` wire arm — introducing `GraphTypeNode::ErrorType` would violate the wire-purity
 closure + closed-enum discipline (parent §1.3/§1.4). The error type rides the EXISTING carrier:
-`SemanticNodeData::Opaque(QueryError)` (in `semantic_query.rs`) plus the §18 `ResultTaint` provenance
-taint. Relation-wise an `Opaque(QueryError)` error node behaves like `any` (relates both directions
-so a broken sub-result does not cascade spurious assignability failures), but it carries the §18
-taint via `ResultProvenance` and follows §18 admission. No wire-arm addition; no schema_version bump.
+`SemanticNodeData::Opaque(QueryError)` (in `semantic_query.rs`); in the §18.4 target it also carries
+the §18 `ResultTaint` provenance taint. Relation-wise an `Opaque(QueryError)` error node behaves
+like `any` (relates both directions so a broken sub-result does not cascade spurious assignability
+failures); in the §18.4 target it carries the §18 taint via `ResultProvenance` and follows §18
+admission (the current realization is carrier-dominating — see §22.2). No wire-arm addition; no
+schema_version bump.
 
 ### 22.2 Absorption rules (per reducer)
 
@@ -899,16 +901,31 @@ taint via `ResultProvenance` and follows §18 admission. No wire-arm addition; n
 
 These absorption rules are the reducers' FIRST check (a fast-reject discriminator, parent §6.2
 "fast-reject discriminators first") before structural work. `any`/`never`/`unknown` are
-LEGITIMATELY CACHEABLE results (they are `Clean`); `error` taints and follows §18 admission.
+LEGITIMATELY CACHEABLE results (they are `Clean`); the `(taint)` annotations above mark where, in
+the §18.4 target, the error operand's taint is joined onto the absorbed output so the result
+follows §18 admission.
+
+**Current realization (U2B.12):** the absorption fast-reject is *carrier-dominating*, not yet
+taint-propagating. An `error` operand dominates so the absorbed result is the error CARRIER itself
+(its `Opaque(QueryError)` node identity + payload survive, so relation/display still see the error
+type), but the absorbed `QueryBuildOutput`'s `taint` is `Clean` — the operand's `ResultTaint` is
+NOT yet joined onto the output. This is sound today because no producer emits non-`Clean` taint
+(every build is `Clean`), so every absorbed type error is deterministic (`unknown[K]`, `keyof
+error`, …) and legitimately cacheable. Joining the dominating operand's taint (the `(taint)`
+annotations) is the §18.4 follow-up, tracked at `absorb.rs::absorbed_output`. `admit_decision`
+itself — the gate that maps a non-`Clean` taint to `ReturnOnly` — is implemented and unit-tested
+now; only the taint PRODUCERS and the absorption taint-join are §18.4.
 
 ### 22.3 `error` vs `any` (the distinguishing rule)
 
 - `any` is a `Clean`, fully cacheable type. A query that legitimately produces `any` (e.g.
   `noImplicitAny: false` untyped param) warm-admits normally.
-- `error` carries §18 taint. An `error` produced by a tracked fact (`MissingDependency`) is
-  fact-rooted-cacheable (§18.2.1); an `error` produced by a torn/broken input is `ReturnOnly`.
-- Relation treats both as bidirectionally-relating (so neither cascades spurious failures), but only
-  `error` propagates taint. Guard: `error_type_taints_and_is_returnonly_prone_any_is_cacheable`.
+- `error` is `ReturnOnly`-prone when input-degraded (the §18.4 target). An `error` produced by a
+  tracked fact (`MissingDependency`) is fact-rooted-cacheable (§18.2.1); an `error` produced by a
+  torn/broken input is `ReturnOnly`. Today (carrier-dominating, see §22.2) the error carrier is
+  preserved but its taint is not yet joined onto the absorbed output.
+- Relation treats both as bidirectionally-relating (so neither cascades spurious failures); in the
+  §18.4 target only `error` propagates taint. Guard: `error_type_is_returnonly_prone_any_is_cacheable`.
 
 ### 22.4 Tie-back
 
@@ -1035,7 +1052,7 @@ rule below, not an optional follow-up.
 | **Canonical display is projection, not stored/re-parsed string** | display is computed at publish from the cached typed value; `display_needs` is display-only and never drives resolution | `canonical_display_is_projection_not_stored_string` + `display_needs_is_display_only_never_drives_resolution` |
 | **Error-tolerance ReturnOnly non-admission** | a result over torn/broken input or a torn read is `ReturnOnly`; a fact-rooted error (missing-dep) is cacheable | `error_tolerance_broken_input_is_returnonly_fact_rooted_error_is_cacheable` |
 | **Module-resolution keys on resolve_env** | a module-resolution result keys on `resolve_env_hash` (+ `project_identity`), the dimension folding moduleResolution/exports-conditions/paths/symlink-policy | `module_resolution_keys_on_resolve_env_not_type_or_lib` |
-| **Error/any/never propagation lattice** | `any`/`never`/`unknown` absorb per the §22 table and are cacheable; `error` relates bidirectionally but taints + is ReturnOnly-prone | `error_any_never_propagation_lattice` (+ `error_type_taints_and_is_returnonly_prone_any_is_cacheable`) |
+| **Error/any/never propagation lattice** | `any`/`never`/`unknown` absorb per the §22 table and are cacheable; `error` relates bidirectionally and is ReturnOnly-prone when input-degraded (§18.4) | `error_any_never_propagation_lattice` (+ `error_type_is_returnonly_prone_any_is_cacheable`) |
 | **Per-key `*Context` R21/R6-clean env discipline (two-tier)** | the slot carries its 3 intrinsic dims; each `*Context` adds ONLY the extra dims the QUERY depends on; no bundled config hash, no content/version/fact_dep on any key | `semantic_query_key_spec_table_equals_enum` (mechanical closure) + `cache_key_axes_are_minimal_and_normalized` |
 | **Path-materialised-point satisfaction** | a warm hit serves a request ONLY iff dominated by a RECORDED materialised `(path, point)`; backfill writes ONLY recorded materialised points, never a meet-derived or nominal-request point | `cache_satisfaction_is_materialized_point_not_nominal_demand` (+ `backfill_writes_only_recorded_materialized_points`) |
 | **Display-axis minimality** | `display_needs` is NOT a typed-value semantic axis; it is masked out of every typed-value family key and carried only on the display/publish key; two queries differing only in `display_needs` hit the SAME typed-value slot | `display_needs_is_display_only_never_drives_resolution` (+ `display_needs_masked_out_of_typed_value_family_key`) |

@@ -32,11 +32,13 @@
 //! warm entry safe to publish?
 //!
 //! The error TYPE (`X is the error type`, §22) rides
-//! [`SemanticNodeData::Opaque(QueryError)`](crate::semantic_query::SemanticNodeData::Opaque)
-//! plus this taint: an `error` rooted on a tracked fact
-//! (`MissingDependency` / `UnresolvedReference`) is fact-rooted-cacheable; an
-//! `error` produced by a torn / broken input is `ReturnOnly`-prone. `any` /
-//! `never` / `unknown` are `Clean` and cacheable.
+//! [`SemanticNodeData::Opaque(QueryError)`](crate::semantic_query::SemanticNodeData::Opaque);
+//! `admit_decision` consumes its §18 [`ResultTaint`] to decide admission: an
+//! `error` rooted on a tracked fact (`MissingDependency` / `UnresolvedReference`)
+//! is fact-rooted-cacheable; an `error` produced by a torn / broken input is
+//! `ReturnOnly`-prone. `any` / `never` / `unknown` are `Clean` and cacheable.
+//! (The taint PRODUCERS that emit non-`Clean` taint are §18.4; the gate here
+//! is implemented and unit-tested.)
 
 use crate::fact_signature_helpers::ReadSetSignature;
 use crate::semantic_query::{BrokenInputClass, ResultTaint};

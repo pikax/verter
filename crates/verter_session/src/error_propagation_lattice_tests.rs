@@ -351,16 +351,16 @@ fn error_any_never_propagation_lattice() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Guard 3 — error taints + is ReturnOnly-prone; any/never/unknown are Clean.
+// Guard 3 — error is ReturnOnly-prone; any/never/unknown are Clean.
 // ─────────────────────────────────────────────────────────────────────────
 
-/// The §18.3 taint join is monotone over `Clean ⊑ Partial ⊑ Broken`; the error
-/// type taints and is `ReturnOnly`-prone, while `any`/`never`/`unknown` are
-/// `Clean` and warm-cacheable. Relation-wise an error carrier relates
-/// bidirectionally like `any` (so a broken sub-result does not cascade
-/// spurious assignability failures).
+/// The §18.3 taint join is monotone over `Clean ⊑ Partial ⊑ Broken`; an error
+/// rooted on a broken input is `ReturnOnly`-prone via `admit_decision`, while
+/// `any`/`never`/`unknown` are `Clean` and warm-cacheable. Relation-wise an
+/// error carrier relates bidirectionally like `any` (so a broken sub-result
+/// does not cascade spurious assignability failures).
 #[test]
-fn error_type_taints_and_is_returnonly_prone_any_is_cacheable() {
+fn error_type_is_returnonly_prone_any_is_cacheable() {
     // ── taint join lattice ──────────────────────────────────────────────
     use BrokenInputClass::*;
     use ResultTaint::*;

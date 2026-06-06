@@ -4183,8 +4183,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         false_branch: SemanticNodeId,
         distributive: bool,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        // §22 fast-reject: `error extends T` ⇒ `error` (both branches
-        // tainted). The `any`-distributes-both-branches and distributive-
+        // §22 fast-reject: `error extends T` ⇒ `error` (the error carrier
+        // dominates both branches). The `any`-distributes-both-branches and distributive-
         // `never`-collapses cases are handled by the branch logic below.
         if let Some(absorbed) = self.absorb_conditional(check) {
             return absorbed;

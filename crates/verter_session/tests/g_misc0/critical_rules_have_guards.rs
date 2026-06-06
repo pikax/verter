@@ -156,12 +156,13 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         // skill). `admit_decision` keys `Warm` on the rooting FACT, never the
         // taint enum class; the §22 absorption table runs as the reducers'
         // FIRST fast-reject via separable `absorb_*` hooks; the error type
-        // rides `Opaque(QueryError)` + taint and relates bidirectionally.
+        // rides `Opaque(QueryError)`, relates bidirectionally, and is
+        // `ReturnOnly`-prone when input-degraded (a §18.4 property).
         "Error-Tolerance Non-Admission + §22 Absorption",
         &[
             "error_tolerance_broken_input_is_returnonly_fact_rooted_error_is_cacheable",
             "error_any_never_propagation_lattice",
-            "error_type_taints_and_is_returnonly_prone_any_is_cacheable",
+            "error_type_is_returnonly_prone_any_is_cacheable",
         ],
     ),
     (
