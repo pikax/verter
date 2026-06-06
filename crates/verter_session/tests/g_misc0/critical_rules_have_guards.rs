@@ -146,6 +146,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // clones only RECORDED materialised points into directional +
             // `cached_satisfies`-gated narrower sibling slots.
             "cache_satisfaction_is_materialized_point_not_nominal_demand",
+            "cache_satisfaction_requires_path_exact_not_prefix",
             "backfill_writes_only_recorded_materialized_points",
         ],
     ),

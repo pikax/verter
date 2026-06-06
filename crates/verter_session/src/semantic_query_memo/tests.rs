@@ -1249,6 +1249,83 @@ fn cache_satisfaction_is_materialized_point_not_nominal_demand() {
     );
 }
 
+/// §3.4 PATH-AXIS discrimination: `cached_satisfies` is path-EXACT, never
+/// prefix-containment. A DEEP recorded materialised point
+/// (`A['c']['full']['bar']`) must NOT satisfy a request at a strict PREFIX
+/// of that path (`A['c']`), and a SHALLOW recorded point must NOT satisfy
+/// a DEEPER request.
+///
+/// This pins the §3.4 silent-warm-hit crux the MODE-axis guard
+/// `cache_satisfaction_is_materialized_point_not_nominal_demand` does NOT
+/// cover: that guard records AND requests the SAME `[foo]` path, so it
+/// exercises only the mode axis and would STILL PASS under a
+/// prefix-dominance `cached_satisfies`.
+///
+/// Why this is a PURE-FUNCTION probe, not a store-level publish: at the
+/// memo level a prefix request maps to a DIFFERENT `FamilyKey` (the
+/// projection path is part of the family identity — see
+/// `FamilyKey::ProjectPath { path, .. }`), so a store-level probe can
+/// never reach the deep entry's slot to begin with. The path-exactness of
+/// the predicate is only observable on `cached_satisfies` itself, which
+/// BOTH the warm-hit gate and the directional backfill gate consult.
+///
+/// DISCRIMINATING: FAILS against a `cached_satisfies` mutated to
+/// `requested.path().is_prefix_of(m.path())` (or to drop the path clause
+/// entirely). Under either mutant the deep `Expanded@[c,full,bar]` record
+/// would dominate the shallow `Expanded@[c]` request — the mode is equal
+/// and `[c]` is a prefix of `[c,full,bar]`, which the internal
+/// `semantically_dominates` path check (`requested.path` is-prefix-of
+/// `recorded.path`) already accepts — so the first assertion below would
+/// wrongly hold. PASSES against the landed path-EXACT predicate
+/// (`m.path() == requested.path()`).
+#[test]
+fn cache_satisfaction_requires_path_exact_not_prefix() {
+    use crate::semantic_query::demand::{
+        cached_satisfies, Demand, MaterializedPoint, MaterializedSet, ProjectionPath,
+    };
+
+    let deep = ProjectionPath::from_segments([
+        PathSegment::Member(Arc::from("c")),
+        PathSegment::Member(Arc::from("full")),
+        PathSegment::Member(Arc::from("bar")),
+    ]);
+    let shallow_prefix = ProjectionPath::from_segments([PathSegment::Member(Arc::from("c"))]);
+
+    let expanded_at = |path: ProjectionPath| {
+        let mut d = Demand::from(ProjectionMode::Expanded);
+        d.projection.path = path;
+        MaterializedPoint::new(d)
+    };
+
+    // A DEEP recorded `Expanded` point must NOT satisfy a SHALLOW request
+    // at a strict PREFIX of the deep path. Under a prefix-dominance mutant
+    // this would wrongly HIT (the bug class: a deep compute's record
+    // serving a shallow surface it never materialised at that path).
+    let deep_record = MaterializedSet::single(expanded_at(deep.clone()));
+    let shallow_request = expanded_at(shallow_prefix.clone());
+    assert!(
+        !cached_satisfies(&deep_record, &shallow_request),
+        "a DEEP recorded point must NOT satisfy a SHALLOW (strict-prefix) request — \
+         cached_satisfies is path-EXACT, never prefix-containment",
+    );
+
+    // Vice-versa: a SHALLOW recorded point must NOT satisfy a DEEPER
+    // request (the shallow record never reached the deep path).
+    let shallow_record = MaterializedSet::single(expanded_at(shallow_prefix.clone()));
+    let deep_request = expanded_at(deep.clone());
+    assert!(
+        !cached_satisfies(&shallow_record, &deep_request),
+        "a SHALLOW recorded point must NOT satisfy a DEEPER request",
+    );
+
+    // POSITIVE CONTROL: an EXACT-path request at a dominated mode HITS —
+    // proves the misses above are path-exactness, not a blanket reject.
+    assert!(
+        cached_satisfies(&deep_record, &expanded_at(deep.clone())),
+        "an EXACT-path request at a dominated mode MUST hit",
+    );
+}
+
 /// §3.4 GUARD — same-family backfill writes ONLY the RECORDED materialised
 /// points (verbatim), and ONLY into a sibling slot a recorded point
 /// dominates — never by enum rank, never a synthesised/meet point.
