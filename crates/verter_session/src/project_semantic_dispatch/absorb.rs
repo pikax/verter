@@ -333,15 +333,120 @@ impl ProjectSemanticDispatch<'_> {
     }
 
     // ── Conditional ───────────────────────────────────────────────────────
-    /// §22.2 conditional absorption on the CHECK type: `error extends T`
-    /// ⇒ `error` (the error carrier dominates both branches). `any` (distributes both branches +
-    /// unions them) and distributive `never` (collapses to `never`) are
-    /// handled by the conditional reducer's own branch logic, so this hook
-    /// only fast-rejects the error-check case.
-    pub(crate) fn absorb_conditional(&self, check: SemanticNodeId) -> Option<QueryBuildOutput> {
+    /// §22.2 conditional absorption on the CHECK type. Three rows, in
+    /// dominance order:
+    ///
+    /// 1. `error extends T` ⇒ `error` (the error CARRIER dominates any/never
+    ///    and both branches — stays FIRST).
+    /// 2. `any extends T ? X : Y` ⇒ `X | Y` — the union of BOTH branches,
+    ///    mode-INDEPENDENT (distributive and non-distributive alike). Built
+    ///    via [`intern_normalized_union_or_intersection`](Self::intern_normalized_union_or_intersection)
+    ///    (the `NormalizeUnion` intern) so `X | X` folds to `X` with canonical
+    ///    dedup/order — NOT a raw `Union`. The relation engine would instead
+    ///    pick the TRUE branch for an `any` check, so this row MUST live here.
+    ///    SKIPPED when `extends` is an `infer` pattern: the true branch would
+    ///    bind the infer, so unioning both branches verbatim would leak an
+    ///    unbound [`Infer`](SemanticNodeData::Infer) — those fall through to
+    ///    the infer-binding path in `build_conditional`.
+    /// 3. DISTRIBUTIVE naked-`never` check (`distributive == true`) ⇒ `never`
+    ///    (the empty distribution). GATED on `distributive`: a
+    ///    non-distributive `never extends T ? X : Y` is the TRUE branch `X`
+    ///    (never is assignable to everything) and is decided by the relation
+    ///    path in `build_conditional` — collapsing it to `never` here would be
+    ///    UNSOUND.
+    ///
+    /// Everything else (distributive `Union` distribution, the `infer`-binding
+    /// paths, ordinary relation selection) is handled below the fast-reject in
+    /// `build_conditional`.
+    pub(crate) fn absorb_conditional(
+        &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+        true_branch: SemanticNodeId,
+        false_branch: SemanticNodeId,
+        distributive: bool,
+    ) -> Option<QueryBuildOutput> {
+        let roots = [check, extends, true_branch, false_branch];
         match self.peek_special(check)? {
-            (SpecialKind::Error, err) => Some(self.absorbed_output(err, [check])),
+            // (1) error dominates any/never and both branches.
+            (SpecialKind::Error, err) => Some(self.absorbed_output(err, roots)),
+            // (2) `any extends T ? X : Y` ⇒ `X | Y`, unless an infer binding
+            //     would be involved (then fall through to the infer path).
+            (SpecialKind::Any, _) if !self.extends_is_infer_pattern(extends) => {
+                let union = self
+                    .intern_normalized_union_or_intersection(&[true_branch, false_branch], true);
+                Some(self.absorbed_output(union, roots))
+            }
+            // (3) distributive naked-`never` ⇒ `never` (empty distribution).
+            (SpecialKind::Never, _) if distributive => {
+                Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Never), roots))
+            }
             _ => None,
         }
+    }
+
+    /// Whether `extends` syntactically carries an `infer` placeholder anywhere
+    /// the conditional infer-binding path would bind it. Used to keep the §22
+    /// `any`-row from unioning both branches when the true branch would
+    /// otherwise bind an `infer` (unioning verbatim leaks an unbound
+    /// [`Infer`](SemanticNodeData::Infer)). Conservative: a bounded structural
+    /// scan of `node_data` peeks only (no resolver/execute work) that errs
+    /// toward reporting infer — when the scan budget runs out it assumes infer
+    /// may be present, so the caller falls through rather than risking a leak.
+    fn extends_is_infer_pattern(&self, extends: SemanticNodeId) -> bool {
+        // bounded-loop: at most SCAN_BUDGET node_data peeks; budget exhaustion
+        // is treated conservatively as "infer may be present".
+        const SCAN_BUDGET: usize = 64;
+        let graph = self.graph();
+        let mut stack = vec![extends];
+        let mut budget = SCAN_BUDGET;
+        while let Some(id) = stack.pop() {
+            if budget == 0 {
+                return true;
+            }
+            budget -= 1;
+            let Some(data) = graph.node_data(id) else {
+                continue;
+            };
+            match &*data {
+                SemanticNodeData::Infer { .. } => return true,
+                SemanticNodeData::Alias(inner) => stack.push(*inner),
+                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                    stack.extend(members.iter().copied());
+                }
+                SemanticNodeData::Array { element, .. } => stack.push(*element),
+                SemanticNodeData::Tuple { elements, .. } => {
+                    stack.extend(elements.iter().map(|e| e.value));
+                }
+                SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                    stack.extend(expressions.iter().copied());
+                }
+                SemanticNodeData::KeyOf { base } => stack.push(*base),
+                SemanticNodeData::IndexedAccess { object, .. } => stack.push(*object),
+                SemanticNodeData::Mapped { source, .. } => stack.push(*source),
+                SemanticNodeData::Conditional {
+                    check,
+                    extends,
+                    true_branch_ref,
+                    false_branch_ref,
+                    ..
+                } => {
+                    stack.push(*check);
+                    stack.push(*extends);
+                    stack.push(*true_branch_ref);
+                    stack.push(*false_branch_ref);
+                }
+                SemanticNodeData::Function {
+                    params,
+                    return_type,
+                    ..
+                } => {
+                    stack.extend(params.iter().map(|p| p.ty));
+                    stack.push(*return_type);
+                }
+                _ => {}
+            }
+        }
+        false
     }
 }

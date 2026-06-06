@@ -4183,10 +4183,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         false_branch: SemanticNodeId,
         distributive: bool,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        // §22 fast-reject: `error extends T` ⇒ `error` (the error carrier
-        // dominates both branches). The `any`-distributes-both-branches and distributive-
-        // `never`-collapses cases are handled by the branch logic below.
-        if let Some(absorbed) = self.absorb_conditional(check) {
+        // §22 fast-reject (runs BEFORE the distributive-`Union` distribution,
+        // the `infer`-binding paths, and `shallow_relation_check`): `error
+        // extends T` ⇒ `error` (carrier dominates), `any extends T ? X : Y` ⇒
+        // `X | Y` (union of both branches, mode-independent), and DISTRIBUTIVE
+        // naked-`never` ⇒ `never` (empty distribution). Non-distributive
+        // `never` and every other check fall through to the branch logic below
+        // — see `absorb_conditional`.
+        if let Some(absorbed) =
+            self.absorb_conditional(check, extends, true_branch, false_branch, distributive)
+        {
             return absorbed;
         }
         let graph = self.graph();

@@ -333,10 +333,11 @@ fn error_any_never_propagation_lattice() {
         "direct mapped over unknown = error"
     );
 
-    // conditional: error check => the error carrier dominates both branches.
+    // conditional: error check => the error carrier dominates both branches
+    // (error stays FIRST — dominates any/never).
     let c = absorbed_node(
         dispatch
-            .absorb_conditional(error)
+            .absorb_conditional(error, string, number, string, false)
             .expect("error-check absorbs"),
     );
     assert_eq!(
@@ -345,8 +346,122 @@ fn error_any_never_propagation_lattice() {
     );
     // A non-special check does NOT fast-reject (the branch logic decides).
     assert!(
-        dispatch.absorb_conditional(string).is_none(),
+        dispatch
+            .absorb_conditional(string, number, string, number, false)
+            .is_none(),
         "an ordinary conditional check must not fast-reject"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Guard 2b — §22 CONDITIONAL absorption: `any` ⇒ union of both branches,
+// distributive `never` ⇒ `never`, non-distributive `never` ⇒ true branch.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// `any extends T ? X : Y` ⇒ `X | Y` (the union of BOTH branches),
+/// mode-INDEPENDENT (both distributive and non-distributive). Built via
+/// `NormalizeUnion([X, Y])` so the result is a canonical `Union` node, not a
+/// raw one. The relation engine would instead pick the TRUE branch for an
+/// `any` check, so the §22 fast-reject must own this row.
+#[test]
+fn conditional_any_check_unions_both_branches() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+    let extends = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    // Two distinct branches standing in for `1` / `2`.
+    let t_branch = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let f_branch = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol));
+
+    let assert_unions_both = |distributive: bool| {
+        let node = absorbed_node(
+            dispatch
+                .absorb_conditional(any, extends, t_branch, f_branch, distributive)
+                .expect("any-check must absorb to a union of both branches"),
+        );
+        match graph.node_data(node).map(|d| (*d).clone()) {
+            Some(SemanticNodeData::Union(members)) => {
+                assert!(
+                    members.contains(&t_branch) && members.contains(&f_branch),
+                    "any extends string ? T : F = T | F, got {members:?}"
+                );
+                assert_eq!(members.len(), 2, "exactly the two branches, deduped");
+            }
+            other => panic!("any-check must produce a Union of both branches, got {other:?}"),
+        }
+    };
+    // Mode-independent: both distributive and non-distributive union the branches.
+    assert_unions_both(false);
+    assert_unions_both(true);
+
+    // `X | X` folds to `X` via NormalizeUnion (canonical dedup), not a raw
+    // 2-member union of identical nodes.
+    let same = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let folded = absorbed_node(
+        dispatch
+            .absorb_conditional(any, extends, same, same, false)
+            .expect("any-check absorbs"),
+    );
+    assert_eq!(
+        graph.node_data(folded).map(|d| (*d).clone()),
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)),
+        "any extends T ? B : B folds to B (X|X = X)"
+    );
+
+    // INFER TRAP: `any extends infer U ? U : never` must NOT union both
+    // branches verbatim (that would leak an unbound `Infer`). The §22 row
+    // falls through so the infer-binding path in `build_conditional` binds U.
+    let infer_u = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("U"),
+    });
+    let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+    assert!(
+        dispatch
+            .absorb_conditional(any, infer_u, infer_u, never, false)
+            .is_none(),
+        "any extends `infer U` must fall through to the infer-binding path, not union"
+    );
+}
+
+/// A DISTRIBUTIVE conditional whose check is naked `never` ⇒ `never` (the
+/// empty distribution). A NON-distributive `never extends T ? X : Y` ⇒ the
+/// TRUE branch `X` (never is assignable to everything) and MUST NOT collapse
+/// to `never` — that is the trap-discriminating negative against an unsound
+/// unconditional `never ⇒ never` patch.
+#[test]
+fn conditional_never_check_is_distributive_gated() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+    let extends = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let t_branch = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let f_branch = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol));
+
+    // Distributive naked-`never` check ⇒ `never`.
+    let collapsed = absorbed_node(
+        dispatch
+            .absorb_conditional(never, extends, t_branch, f_branch, true)
+            .expect("distributive never-check must absorb to never"),
+    );
+    assert_eq!(
+        graph.node_data(collapsed).map(|d| (*d).clone()),
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+        "distributive never extends T ? X : Y = never (empty distribution)"
+    );
+
+    // NON-distributive `never extends T` must NOT be absorbed to `never`:
+    // the §22 row returns None so the relation path selects the TRUE branch
+    // (never is assignable to everything). An unsound unconditional
+    // `never ⇒ never` patch would wrongly return Some(never) here.
+    assert!(
+        dispatch
+            .absorb_conditional(never, extends, t_branch, f_branch, false)
+            .is_none(),
+        "non-distributive never-check must NOT collapse to never (true branch wins)"
     );
 }
 

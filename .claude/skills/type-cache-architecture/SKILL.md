@@ -781,7 +781,13 @@ closed, fact-rooted contract (`docs/arch/u2-query-value-domain-design.md`
    `X|unknown=unknown`; `X&never=never`, `X&any=any`, `X&unknown=X`;
    `any[K]=any`, `never[K]=never`, `unknown[K]`=UNCONDITIONAL error,
    `keyof any/never = string|number|symbol`, `keyof unknown = never`; mapped
-   over `never`=`{}`, direct mapped over `unknown`=error. `any`/`never`/`unknown`
+   over `never`=`{}`, direct mapped over `unknown`=error; conditional
+   `any extends T ? X : Y = X|Y` (union of BOTH branches via `NormalizeUnion`,
+   mode-independent, except when `extends` is an `infer` pattern → fall through
+   to the infer-binding path), DISTRIBUTIVE `never extends T = never`,
+   NON-distributive `never extends T = ` true branch (the fast-reject gates the
+   collapse on `distributive`), `error extends T = error` (carrier-dominating,
+   FIRST). `any`/`never`/`unknown`
    are `Clean` (legitimately cacheable). **`error` rides
    `SemanticNodeData::Opaque(QueryError)`** (no new `GraphTypeNode` wire arm):
    an `error` operand **carrier-dominates** every other absorber, so the error

@@ -895,7 +895,7 @@ schema_version bump.
 | intersection `X & ?` | `X & any = any` | `X & never = never` | `X & unknown = X` | `X & error = error` (taint) |
 | indexed access `?[K]` | `any[K] = any` | `never[K] = never` | `unknown[K]` = **UNCONDITIONAL error** for ALL K (`unknown` has no index signatures — illegal index ⇒ `Opaque(QueryError)`, not per-K, not crash) | `error[K] = error` |
 | `keyof ?` | `keyof any = string\|number\|symbol` | `keyof never = string\|number\|symbol` (TS quirk) | `keyof unknown = never` | `keyof error = error` |
-| conditional `? extends T` | `any` distributes BOTH branches and unions them (parent §4.3) | distributive `never` collapses to `never` | reduces per relation | `error` ⇒ `error` (both branches tainted) |
+| conditional `? extends T` | `any extends T ? X : Y = X \| Y` (union of BOTH branches via `NormalizeUnion`, mode-independent; §22 fast-reject, except when `extends` is an `infer` pattern — then the infer-binding path binds it) | DISTRIBUTIVE `never` ⇒ `never` (empty distribution); NON-distributive `never extends T ? X : Y` ⇒ the TRUE branch `X` (never ⊑ everything) — the fast-reject gates the collapse on `distributive` | reduces per relation | `error` ⇒ `error` (carrier-dominating) |
 | mapped `{ [K in ?] }` | over `any`: `any` | over `never`: `{}` | over `unknown`: **`{ [K in keyof unknown] }` = `{ [K in never] }` = `{}`** (the COMMON path — mapping over `keyof unknown = never`); a DIRECT mapping over `unknown` itself (`{ [K in unknown] }`, K not constrained to a key set) is **illegal ⇒ error** | over `error`: `error` |
 | template-literal segment of `?` | `` `${any}` = string `` | `` `${never}` = never `` | error (not lexable) | `error` |
 
@@ -905,8 +905,14 @@ LEGITIMATELY CACHEABLE results (they are `Clean`); the `(taint)` annotations abo
 the §18.4 target, the error operand's taint is joined onto the absorbed output so the result
 follows §18 admission.
 
-**Current realization (U2B.12):** the absorption fast-reject is *carrier-dominating*, not yet
-taint-propagating. An `error` operand dominates so the absorbed result is the error CARRIER itself
+**Current realization (U2B.12):** the conditional `any` row (⇒ union of both branches) and the
+distributive-`never` row (⇒ `never`) are IMPLEMENTED in the §22 fast-reject (`absorb_conditional`),
+not deferred to the branch logic: the `any` row builds `NormalizeUnion([true_branch, false_branch])`
+(falling through to the infer-binding path when `extends` carries an `infer`), and the `never` row
+is gated on `distributive` so a non-distributive `never extends T` still selects the true branch via
+the relation path. The remaining seam is purely about TAINT: the absorption fast-reject is
+*carrier-dominating*, not yet taint-propagating. An `error` operand dominates so the absorbed result
+is the error CARRIER itself
 (its `Opaque(QueryError)` node identity + payload survive, so relation/display still see the error
 type), but the absorbed `QueryBuildOutput`'s `taint` is `Clean` — the operand's `ResultTaint` is
 NOT yet joined onto the output. This is sound today because no producer emits non-`Clean` taint

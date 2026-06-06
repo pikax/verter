@@ -162,6 +162,8 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         &[
             "error_tolerance_broken_input_is_returnonly_fact_rooted_error_is_cacheable",
             "error_any_never_propagation_lattice",
+            "conditional_any_check_unions_both_branches",
+            "conditional_never_check_is_distributive_gated",
             "error_type_is_returnonly_prone_any_is_cacheable",
         ],
     ),
