@@ -23,10 +23,18 @@
 use verter_session::file_artifact_store::{
     AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, ProjectIdentity,
 };
+use std::sync::OnceLock;
+
 use verter_workspace::env_hash::EnvHashInputs;
+use verter_workspace::module_resolution::{ConditionSet, ModuleResolutionMode};
 use verter_workspace::resolver::{
     IdeProjectCompilerOptions, IdeProjectConfig, ProjectMembership, WorkspaceAlias,
 };
+
+fn baseline_conditions() -> &'static ConditionSet {
+    static C: OnceLock<ConditionSet> = OnceLock::new();
+    C.get_or_init(|| ConditionSet::new(["types", "import", "default"]))
+}
 
 fn baseline_cfg() -> IdeProjectConfig {
     let mut cfg = IdeProjectConfig::new(
@@ -55,6 +63,8 @@ fn baseline_inputs() -> EnvHashInputs<'static> {
         type_no_implicit_any: true,
         lib_names: &["lib.dom.d.ts", "lib.es2022.d.ts"],
         type_roots: &["/ws/node_modules/@types"],
+        module_resolution_mode: ModuleResolutionMode::Bundler,
+        export_conditions: baseline_conditions(),
         ambient_corpus_fingerprint: 0x1234,
     }
 }

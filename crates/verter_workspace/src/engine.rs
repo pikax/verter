@@ -12,6 +12,7 @@ use crate::ambient_lib::AmbientLibsByProject;
 use crate::changes::{ChangeResult, WorkspaceChange};
 use crate::dir_index::DirIndex;
 use crate::env_hash::EnvHashInputs;
+use crate::module_resolution::{ConditionSet, ModuleResolutionMode};
 use crate::exact_resolution::{DependencySnapshotView, EdgeStore};
 use crate::memory::MemorySnapshot;
 use crate::overlay::OverlayStore;
@@ -959,6 +960,18 @@ const WORKSPACE_PARSER_FLAGS: &[&str] = &["verter-parser-v1"];
 /// "no lib data".
 const WORKSPACE_AMBIENT_FINGERPRINT: u64 = 0xC0DE_BABE_0000_0001;
 
+/// Workspace-default `exports`/`imports` condition set mixed into every
+/// project's `resolve_env_hash`. This is the resolve-domain default the
+/// composer feeds until the published project payload carries the project's
+/// own `moduleResolution` / conditions (the full per-project resolution
+/// matrix is a U0 `resolver_core` concern — see
+/// `docs/arch/native-typeinfo-parity-u2-reducers.md` →
+/// `U0.RESOLVER_CORE_FOUNDATIONS`). The default mirrors the TS provider-graph
+/// condition order so the composed `resolve_env_hash` is deterministic.
+fn workspace_default_export_conditions() -> ConditionSet {
+    ConditionSet::new(["types", "import", "default"])
+}
+
 /// Compose per-project `[parse, resolve, type_, lib]` env-hash arrays
 /// and project-identity hashes from the published `OwnershipProject`s.
 ///
@@ -981,6 +994,7 @@ pub(crate) fn compose_env_hash_tables(
     FxHashMap<ProjectId, Hash16>,
 ) {
     let extensions_refs: Vec<&str> = resolve_extensions.iter().map(String::as_str).collect();
+    let export_conditions = workspace_default_export_conditions();
     let inputs = EnvHashInputs {
         parser_flags: WORKSPACE_PARSER_FLAGS,
         resolve_extensions: &extensions_refs,
@@ -988,6 +1002,8 @@ pub(crate) fn compose_env_hash_tables(
         type_no_implicit_any: false,
         lib_names: &[],
         type_roots: &[],
+        module_resolution_mode: ModuleResolutionMode::default(),
+        export_conditions: &export_conditions,
         ambient_corpus_fingerprint: WORKSPACE_AMBIENT_FINGERPRINT,
     };
 
@@ -1051,6 +1067,7 @@ fn ide_project_config_from_ownership(project: &OwnershipProject) -> IdeProjectCo
 pub(crate) fn workspace_default_env_hash_array_for_engine(engine: &Engine) -> ProjectEnvHashArray {
     let extensions = engine.default_resolve_extensions.load_full();
     let extensions_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
+    let export_conditions = workspace_default_export_conditions();
     let inputs = EnvHashInputs {
         parser_flags: WORKSPACE_PARSER_FLAGS,
         resolve_extensions: &extensions_refs,
@@ -1058,6 +1075,8 @@ pub(crate) fn workspace_default_env_hash_array_for_engine(engine: &Engine) -> Pr
         type_no_implicit_any: false,
         lib_names: &[],
         type_roots: &[],
+        module_resolution_mode: ModuleResolutionMode::default(),
+        export_conditions: &export_conditions,
         ambient_corpus_fingerprint: WORKSPACE_AMBIENT_FINGERPRINT,
     };
     let config = IdeProjectConfig::new(String::new(), String::new(), None);

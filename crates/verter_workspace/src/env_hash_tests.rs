@@ -13,10 +13,20 @@
 //! See `docs/arch/fact-based-cache.md` for the audit table that maps every
 //! [`IdeProjectConfig`] field to its env-hash dimension.
 
+use std::sync::OnceLock;
+
 use super::EnvHashInputs;
+use crate::module_resolution::{ConditionSet, ModuleResolutionMode};
 use crate::resolver::{
     IdeProjectCompilerOptions, IdeProjectConfig, ProjectMembership, WorkspaceAlias,
 };
+
+/// Baseline `exports`/`imports` condition set, materialised as a `'static`
+/// borrow so the baseline `EnvHashInputs` can carry `&'static ConditionSet`.
+fn baseline_conditions() -> &'static ConditionSet {
+    static C: OnceLock<ConditionSet> = OnceLock::new();
+    C.get_or_init(|| ConditionSet::new(["types", "import", "default"]))
+}
 
 /// Helper to construct a baseline `(IdeProjectConfig, EnvHashInputs)` pair.
 fn baseline() -> (IdeProjectConfig, EnvHashInputs<'static>) {
@@ -46,6 +56,8 @@ fn baseline() -> (IdeProjectConfig, EnvHashInputs<'static>) {
         type_no_implicit_any: true,
         lib_names: &["lib.dom.d.ts", "lib.es2022.d.ts"],
         type_roots: &["/ws/node_modules/@types"],
+        module_resolution_mode: ModuleResolutionMode::Bundler,
+        export_conditions: baseline_conditions(),
         ambient_corpus_fingerprint: 0x0123_4567_89ab_cdef,
     };
     (cfg, inputs)
@@ -164,6 +176,124 @@ fn resolve_env_hash_changes_when_references_changes() {
     assert_ne!(
         h0, h1,
         "project references edit MUST change resolve_env_hash"
+    );
+}
+
+// ── Module-Resolution Keying (CRITICAL) guards ──
+
+/// CRITICAL `### Module-Resolution Keying` guard.
+///
+/// A module-resolution ENV input (the `moduleResolution` mode, or the active
+/// `exports`/`imports` condition set) is a `resolve_env_hash` dimension and
+/// ONLY that dimension. Flipping it MUST change `resolve_env_hash` and MUST
+/// NOT change `type_env_hash` or `lib_env_hash`.
+///
+/// Discriminating: against a wrong impl that fails to hash `module_resolution_mode`
+/// / `export_conditions` into `resolve_env_hash`, the `assert_ne!` on
+/// `resolve_env_hash` fails (the hash would not move). Against a wrong impl
+/// that folds the mode/conditions into `type_env_hash` / `lib_env_hash`, the
+/// `assert_eq!` guards fail.
+#[test]
+fn module_resolution_keys_on_resolve_env_not_type_or_lib() {
+    let (cfg, baseline_inputs) = baseline();
+    let r0 = cfg.resolve_env_hash(&baseline_inputs);
+    let t0 = cfg.type_env_hash(&baseline_inputs);
+    let l0 = cfg.lib_env_hash(&baseline_inputs);
+
+    // (1) Flip the module-resolution mode.
+    let mut mode_inputs = baseline_inputs;
+    mode_inputs.module_resolution_mode = ModuleResolutionMode::NodeNext;
+    assert_ne!(
+        r0,
+        cfg.resolve_env_hash(&mode_inputs),
+        "moduleResolution mode change MUST change resolve_env_hash"
+    );
+    assert_eq!(
+        t0,
+        cfg.type_env_hash(&mode_inputs),
+        "moduleResolution mode change MUST NOT change type_env_hash"
+    );
+    assert_eq!(
+        l0,
+        cfg.lib_env_hash(&mode_inputs),
+        "moduleResolution mode change MUST NOT change lib_env_hash (R21: resolve vs lib are orthogonal)"
+    );
+
+    // (2) Flip the active export/import condition set (order is significant).
+    let reordered = ConditionSet::new(["import", "types", "default"]);
+    let mut cond_inputs = baseline_inputs;
+    cond_inputs.export_conditions = &reordered;
+    assert_ne!(
+        r0,
+        cfg.resolve_env_hash(&cond_inputs),
+        "export/import condition set change MUST change resolve_env_hash"
+    );
+    assert_eq!(
+        t0,
+        cfg.type_env_hash(&cond_inputs),
+        "condition set change MUST NOT change type_env_hash"
+    );
+    assert_eq!(
+        l0,
+        cfg.lib_env_hash(&cond_inputs),
+        "condition set change MUST NOT change lib_env_hash"
+    );
+}
+
+/// CRITICAL `### Module-Resolution Keying` guard.
+///
+/// The lib corpus (TS lib selection, `typeRoots`, the ambient-corpus
+/// fingerprint) is NEVER folded into `resolve_env_hash` (R21 scoping rule):
+/// `resolve_env` and `lib_env` are orthogonal dimensions. Flipping a lib-only
+/// input MUST move `lib_env_hash` and MUST leave `resolve_env_hash` untouched.
+///
+/// Discriminating: against a folded impl that mixes any lib input into
+/// `resolve_env_hash`, the `assert_eq!` on `resolve_env_hash` fails.
+#[test]
+fn resolve_env_does_not_fold_lib_dims() {
+    let (cfg, baseline_inputs) = baseline();
+    let r0 = cfg.resolve_env_hash(&baseline_inputs);
+
+    // lib_names change → lib_env moves, resolve_env stays.
+    let mut lib_inputs = baseline_inputs;
+    lib_inputs.lib_names = &["lib.dom.d.ts", "lib.es2023.d.ts"];
+    assert_ne!(
+        cfg.lib_env_hash(&baseline_inputs),
+        cfg.lib_env_hash(&lib_inputs),
+        "lib_names change MUST change lib_env_hash"
+    );
+    assert_eq!(
+        r0,
+        cfg.resolve_env_hash(&lib_inputs),
+        "R21: lib_names change MUST NOT be folded into resolve_env_hash"
+    );
+
+    // typeRoots change → lib_env moves, resolve_env stays.
+    let mut roots_inputs = baseline_inputs;
+    roots_inputs.type_roots = &["/ws/node_modules/@types", "/ws/extra-types"];
+    assert_ne!(
+        cfg.lib_env_hash(&baseline_inputs),
+        cfg.lib_env_hash(&roots_inputs),
+        "typeRoots change MUST change lib_env_hash"
+    );
+    assert_eq!(
+        r0,
+        cfg.resolve_env_hash(&roots_inputs),
+        "R21: typeRoots change MUST NOT be folded into resolve_env_hash"
+    );
+
+    // ambient corpus fingerprint change → lib_env moves, resolve_env stays.
+    let mut corpus_inputs = baseline_inputs;
+    corpus_inputs.ambient_corpus_fingerprint = 0xdead_beef_dead_beef;
+    assert_ne!(
+        cfg.lib_env_hash(&baseline_inputs),
+        cfg.lib_env_hash(&corpus_inputs),
+        "ambient corpus fingerprint change MUST change lib_env_hash"
+    );
+    assert_eq!(
+        r0,
+        cfg.resolve_env_hash(&corpus_inputs),
+        "R21: ambient corpus change MUST NOT be folded into resolve_env_hash"
     );
 }
 

@@ -7,7 +7,7 @@
 //! | Dimension          | Captures                                                                              |
 //! |--------------------|---------------------------------------------------------------------------------------|
 //! | `parse_env_hash`   | Parser/SFC/compiler feature flags, syntax mode, language target.                      |
-//! | `resolve_env_hash` | `base_url`, `paths`, workspace aliases, project references, resolution mode, extension order. |
+//! | `resolve_env_hash` | `base_url`, `paths`, workspace aliases, project references, `moduleResolution` mode, `exports`/`imports` condition set, extension order. |
 //! | `type_env_hash`    | TS semantic options that change type meaning (`strict`, `noImplicitAny`, ...).        |
 //! | `lib_env_hash`     | TS built-in lib selection, `types`, `typeRoots`, ambient corpus identity.             |
 //! | `project_identity` | Project root, tsconfig path, provider root, workspace root, membership.               |
@@ -43,6 +43,7 @@
 use verter_scheduler::invalidation::Hash16;
 use xxhash_rust::xxh3::xxh3_128;
 
+use crate::module_resolution::{ConditionSet, ModuleResolutionMode};
 use crate::resolver::{IdeProjectCompilerOptions, IdeProjectConfig, ProjectMembership};
 
 /// Per-call inputs to the env-hash functions that are NOT part of
@@ -82,6 +83,18 @@ pub struct EnvHashInputs<'a> {
 
     /// TS `typeRoots` — directories scanned for ambient `@types` packages.
     pub type_roots: &'a [&'a str],
+
+    /// TS `moduleResolution` strategy. A resolve-domain ENV input — changing
+    /// it changes where a bare/relative specifier resolves, so it hashes into
+    /// `resolve_env_hash` (and NEVER into `lib_env_hash` / `type_env_hash`).
+    pub module_resolution_mode: ModuleResolutionMode,
+
+    /// Ordered, deduplicated `package.json` `exports`/`imports` condition set
+    /// consulted during resolution (e.g. `["types", "import", "default"]`).
+    /// A resolve-domain ENV input — different active condition orderings
+    /// resolve a conditional `exports` map to different targets — so it hashes
+    /// into `resolve_env_hash` ONLY. Orthogonal to the lib dimension (R21).
+    pub export_conditions: &'a ConditionSet,
 
     /// Fingerprint of the resolved ambient library corpus (the set of
     /// `lib*.d.ts` declarations, ambient `@types`, registered globals, and
@@ -124,11 +137,15 @@ impl IdeProjectConfig {
     }
 
     /// `resolve_env_hash` — captures `base_url`, `paths`, workspace aliases,
-    /// project references, module resolution mode, package `exports`/`imports`,
-    /// default extension order.
+    /// project references, default extension order, the `moduleResolution`
+    /// mode ([`ModuleResolutionMode`]), and the active `exports`/`imports`
+    /// condition set ([`ConditionSet`]).
     ///
-    /// Does NOT include lib data (R21 scoping rule). A TS lib update MUST
-    /// NOT change this hash.
+    /// Does NOT include lib data (R21 scoping rule). The lib corpus
+    /// (`lib_names` / `typeRoots` / ambient corpus) is NEVER folded into this
+    /// hash — `resolve_env` and `lib_env` are orthogonal dimensions. A TS lib
+    /// update MUST NOT change this hash. See `### Module-Resolution Keying
+    /// (CRITICAL)` in the `/type-cache-architecture` skill.
     ///
     /// Bound by: `ResolvedImportFacts` (NOT `lib_env_hash`), `RouteDb`
     /// (combined with `lib_env_hash` because of module augmentations).
@@ -159,6 +176,20 @@ impl IdeProjectConfig {
 
         // resolve extensions (order matters)
         write_str_slice(&mut buf, inputs.resolve_extensions);
+
+        // module resolution mode (TS `moduleResolution`) — a resolve-domain
+        // input that changes where bare/relative specifiers resolve.
+        buf.push(inputs.module_resolution_mode as u8);
+        buf.push(SEP);
+
+        // active `exports`/`imports` condition set (order is significant —
+        // a different ordering resolves a conditional `exports` map to a
+        // different target). NEVER mixes lib data (R21).
+        for condition in inputs.export_conditions.conditions() {
+            buf.extend_from_slice(condition.as_bytes());
+            buf.push(SEP);
+        }
+        buf.push(SEP);
 
         compute_hash16(&buf)
     }

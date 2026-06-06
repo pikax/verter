@@ -77,6 +77,7 @@ pub mod filesystem;
 pub mod intrinsic_library;
 pub mod membership;
 pub mod memory;
+pub mod module_resolution;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_fs;
 pub mod normalized_glob;
