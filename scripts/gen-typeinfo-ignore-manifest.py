@@ -961,6 +961,7 @@ KEY_OWNING_BLOCK: dict[str, str] = {
     "NormalizeUnion": "U2QueryValueDomain",
     "NormalizeIntersection": "U2QueryValueDomain",
     "ResolvedNamedType": "U2QueryValueDomain",
+    "ApparentType": "U2QueryValueDomain",
     "Relate": "U2RelationInfer",
     "Instantiate": "U2RelationInfer",
     "Conditional": "U2RelationInfer",
@@ -969,6 +970,13 @@ KEY_OWNING_BLOCK: dict[str, str] = {
     "ProjectMember": "U2IndexedAccess",
     "ProjectPath": "U2IndexedAccess",
     "MappedType": "U2MappedTemplate",
+    "TemplateLiteralReduce": "U2MappedTemplate",
+    "ResolveClassSurface": "U2ClassSurfaces",
+    "ResolveEnum": "U2Enums",
+    "ResolveAmbientNamespace": "U2JsxFoundations",
+    "ResolveOverloadSet": "U6CallResolve",
+    "FlowNarrowingAt": "U6FlowReturnSubstrate",
+    "ContextualTypeAt": "U6ContextualCallback",
     "ResolveMacroPayload": "U14MacroAdapter",
 }
 
