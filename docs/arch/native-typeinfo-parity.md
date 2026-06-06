@@ -2511,12 +2511,20 @@ is created. Both tables live in this one module.
 > block_id/semantic_queries/proof/status/mechanism_id/consumed_mechanisms/unblocker), the
 > closed 7-row `AdditionalProofRow` table, and the `TYPEINFO_PARITY_BLOCKS` DAG (each
 > `BlockContractRow` carrying `required_guards` + `verification_labels`). The §10.4.1
-> row→`block_id` partition table (all 362 rows) is HAND-AUTHORED authoritative input — it
-> lives in the BEGIN/END coverage block in §10.4.1, and the Python manifest generator's
-> `parse_partition` READS it (it does not emit it) to derive each row's `block_id` for the
-> three checked-in manifest-data files (`typeinfo_ignored_test_manifest_rows.rs`,
-> `typeinfo_additional_proof_rows.rs`, `typeinfo_parity_blocks.rs`); `--check` regenerates
-> those three files from this partition and byte-compares. What remains for the oracle/proof
+> row→`block_id` partition table (all 362 rows) is HAND-AUTHORED authoritative input, but its
+> authority is SCOPED: it is the source ONLY for the row→`block_id` PARTITION the generator
+> READS to assign each `IgnoredTestRow`'s `block_id` (joined with the live `#[ignore]`
+> discovery + the Capability Map). It lives in the BEGIN/END coverage block in §10.4.1, and
+> the Python manifest generator's `parse_partition` READS it (it does not emit it) to derive
+> each `IgnoredTestRow`'s `block_id`. The OTHER two manifest-data files are NOT derived from
+> §10.4.1: the `AdditionalProofRow` table (`typeinfo_additional_proof_rows.rs`) is built from
+> the generator's own Python maps (`build_additional_rows`, e.g. `JSX_NO_NEW_KEY_ROWS`), and
+> the `TYPEINFO_PARITY_BLOCKS` DAG (`typeinfo_parity_blocks.rs`) — including each block's
+> `required_guards`/`verification_labels`/prereqs/mechanisms — is authored in the generator's
+> own block maps (`emit_block_rows`, `BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`,
+> the prereq/mechanism maps), NOT from §10.4.1. `--check` regenerates all three files
+> (`typeinfo_ignored_test_manifest_rows.rs`, `typeinfo_additional_proof_rows.rs`,
+> `typeinfo_parity_blocks.rs`) from these inputs and byte-compares. What remains for the oracle/proof
 > gate (U0-FINISH-B, NOT yet built) is the executable proof registry, the row-test wrapper,
 > the reverse `cargo run` coverage-table generator, the §10.4 row-exact
 > capability→mechanism→proof coverage GATE (the registry + checking guards that DEFINE
