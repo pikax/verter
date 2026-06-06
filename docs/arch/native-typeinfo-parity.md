@@ -4201,11 +4201,14 @@ landing/accept/rollback boundary those guards used to police.
 
 # Deliverables / legacy
 
-- **Pin the oracle toolchain — DONE (U0-FINISH-A).** `package.json` pins `"@typescript/native-preview"` to the exact oracle
-  version `7.0.0-dev.20260526.1` (resolved identically in `pnpm-lock.yaml`); the floating `"latest"` range was removed. `"latest"`
-  was not a durable oracle contract, so the manifest dependency is now pinned to the exact oracle version.
+- **Pin the `@typescript/native-preview` npm dependency — DONE (U0-FINISH-A).** `package.json` + `pnpm-lock.yaml` pin the
+  `@typescript/native-preview` npm dependency to `7.0.0-dev.20260526.1`; the floating `"latest"` range was removed and the
+  lockfile resolves identically. `"latest"` was not a durable oracle contract, so the npm dependency is now pinned to the exact
+  oracle version. End-to-end oracle-TOOLCHAIN enforcement — CI prewarm + runtime tsgo-binary-version enforcement and the
+  `tsgo`-forbidden / default-test guard — remains U0-FINISH-B (the oracle execution path does not yet honor the pin).
 - **The oracle row generator** (deterministic `OracleId`, checked-in normalized snapshots, feature/env-gated regeneration) is a
-  required deliverable; the `tsgo`-execution-forbidden guard for runtime/default tests is a required deliverable.
+  required deliverable — U0-FINISH-B; the `tsgo`-execution-forbidden guard for runtime/default tests is a required deliverable —
+  U0-FINISH-B.
 - **The git/CI landing protocol** (§11) is the required execution-framework deliverable: the per-block branch discipline, the CI
   gate (the full Rust+JS workspace gate + the coverage/proof/required/DAG guards), the branch-protection three-reviewer LAND
   required approval, and the squash-merge `Typeinfo-Block:` trailer convention. There is NO tracked `.cutover-state.typeinfo_parity`
