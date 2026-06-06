@@ -766,8 +766,32 @@ fn expand_pair(
         return;
     }
 
-    // ── Top / bottom ────────────────────────────────────────────────────
+    // ── Top / bottom + error-type wildcard ─────────────────────────────────
+    //
+    // §22.3: an `Opaque(QueryError)` ERROR-TYPE carrier relates BIDIRECTIONALLY
+    // (like `any`), so a broken sub-result does not cascade spurious
+    // assignability failures. The error type is `ReturnOnly`-prone when
+    // input-degraded (a §18.4 property); RELATION-wise it is wildcard.
+    //
+    // The error arms MUST sit AHEAD of the `(_, Never)` bottom arm: `relate(any,
+    // never)` is Assignable (the `(Any, _)` arm), so to relate error truly
+    // bidirectionally like `any`, `relate(error, never)` must also be
+    // Assignable — placing the error wildcard after `(_, Never)` would let the
+    // bottom arm wrongly fire first. Placing it ahead of `is_deferred` is sound
+    // because `is_deferred` never matches `Opaque`, and `is_error_type()`
+    // excludes the control / recursion sentinels (`Miss`, `RecursiveRef`,
+    // `AliasCycle`, `BudgetExceeded`, `UnstableState`, `DeclPlaceholder`), which
+    // fall through to the `Unknown`-relation block below so recursion /
+    // resolution control flow is preserved.
     match (&*source_data, &*target_data) {
+        (SemanticNodeData::Opaque(err), _) if err.is_error_type() => {
+            results.push(assignable(bindings));
+            return;
+        }
+        (_, SemanticNodeData::Opaque(err)) if err.is_error_type() => {
+            results.push(assignable(bindings));
+            return;
+        }
         (SemanticNodeData::Primitive(PrimitiveKind::Never), _) => {
             results.push(assignable(bindings));
             return;
@@ -794,26 +818,6 @@ fn expand_pair(
     // ── Deferred shells on either side → Unknown ───────────────────────
     if is_deferred(&source_data) || is_deferred(&target_data) {
         results.push(RelationResult::Unknown);
-        return;
-    }
-
-    // ── Error type (§22.3): an `Opaque(QueryError)` ERROR-TYPE carrier relates
-    //    BIDIRECTIONALLY (like `any`), so a broken sub-result does not cascade
-    //    spurious assignability failures. The error type is `ReturnOnly`-prone
-    //    when input-degraded (a §18.4 property); RELATION-wise it is wildcard.
-    //    Only the genuine error-type variants qualify (`QueryError::is_error_type`) —
-    //    the control / recursion sentinels (`Miss`, `RecursiveRef`,
-    //    `AliasCycle`, `BudgetExceeded`, `UnstableState`, `DeclPlaceholder`)
-    //    keep their `Unknown` relation so recursion / resolution control flow
-    //    is preserved. ──
-    if matches!(
-        &*source_data,
-        SemanticNodeData::Opaque(err) if err.is_error_type()
-    ) || matches!(
-        &*target_data,
-        SemanticNodeData::Opaque(err) if err.is_error_type()
-    ) {
-        results.push(assignable(bindings));
         return;
     }
 

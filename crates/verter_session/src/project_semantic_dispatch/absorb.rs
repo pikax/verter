@@ -385,14 +385,34 @@ impl ProjectSemanticDispatch<'_> {
         }
     }
 
-    /// Whether `extends` syntactically carries an `infer` placeholder anywhere
-    /// the conditional infer-binding path would bind it. Used to keep the §22
-    /// `any`-row from unioning both branches when the true branch would
-    /// otherwise bind an `infer` (unioning verbatim leaks an unbound
-    /// [`Infer`](SemanticNodeData::Infer)). Conservative: a bounded structural
-    /// scan of `node_data` peeks only (no resolver/execute work) that errs
-    /// toward reporting infer — when the scan budget runs out it assumes infer
-    /// may be present, so the caller falls through rather than risking a leak.
+    /// Whether `extends` carries an `infer` placeholder ANYWHERE in its node
+    /// subtree (the positions the conditional infer-binding path could bind).
+    /// Used to keep the §22 `any`-row from unioning both branches when the true
+    /// branch would otherwise bind an `infer` (unioning verbatim leaks an
+    /// unbound [`Infer`](SemanticNodeData::Infer)).
+    ///
+    /// The scan is EXHAUSTIVE over [`SemanticNodeData`]: it recurses into every
+    /// child [`SemanticNodeId`] of every composite carrier — including a
+    /// generic application's args ([`InstantiationRef`](SemanticNodeData::InstantiationRef),
+    /// e.g. `Wrapper<infer U>`), an [`Object`](SemanticNodeData::Object)
+    /// surface's member / signature / keyspace node ids, a
+    /// [`Mapped`](SemanticNodeData::Mapped) source + mapper node ids, a
+    /// [`TypeParam`](SemanticNodeData::TypeParam) constraint/default, a
+    /// [`MergedDecl`](SemanticNodeData::MergedDecl)'s contributors, and a
+    /// [`Function`](SemanticNodeData::Function)'s param / return / type-param
+    /// node ids. The match has NO catch-all: leaf carriers
+    /// ([`Primitive`](SemanticNodeData::Primitive), literals,
+    /// [`Opaque`](SemanticNodeData::Opaque),
+    /// [`TypeOf`](SemanticNodeData::TypeOf),
+    /// [`VueMacroElements`](SemanticNodeData::VueMacroElements),
+    /// [`DeclRef`](SemanticNodeData::DeclRef)) hold no nested infer-bearing node
+    /// id and stop the walk explicitly, so a future variant addition forces a
+    /// compile error here rather than silently regressing the guard.
+    ///
+    /// Cheap `node_data` peeks only (no resolver/execute work), bounded by
+    /// `SCAN_BUDGET` for cycle safety. Budget exhaustion is conservative — it
+    /// returns `true` ("infer may be present") so the caller falls through to
+    /// the infer-binding path rather than risking a leak.
     fn extends_is_infer_pattern(&self, extends: SemanticNodeId) -> bool {
         // bounded-loop: at most SCAN_BUDGET node_data peeks; budget exhaustion
         // is treated conservatively as "infer may be present".
@@ -409,10 +429,26 @@ impl ProjectSemanticDispatch<'_> {
                 continue;
             };
             match &*data {
+                // The target: an `infer X` placeholder anywhere in the subtree.
                 SemanticNodeData::Infer { .. } => return true,
+
+                // ── Composite carriers: recurse into EVERY child node id. ──
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
                 SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
                     stack.extend(members.iter().copied());
+                }
+                SemanticNodeData::MergedDecl { contributors } => {
+                    stack.extend(contributors.iter().copied());
+                }
+                SemanticNodeData::Object(surface) => {
+                    stack.extend(surface.members.iter().map(|m| m.value));
+                    stack.extend(surface.call_signatures.iter().copied());
+                    stack.extend(surface.construct_signatures.iter().copied());
+                    for sig in surface.index_signatures.iter() {
+                        stack.push(sig.key_type);
+                        stack.push(sig.value_type);
+                    }
+                    stack.extend(surface.keyspace);
                 }
                 SemanticNodeData::Array { element, .. } => stack.push(*element),
                 SemanticNodeData::Tuple { elements, .. } => {
@@ -422,8 +458,27 @@ impl ProjectSemanticDispatch<'_> {
                     stack.extend(expressions.iter().copied());
                 }
                 SemanticNodeData::KeyOf { base } => stack.push(*base),
-                SemanticNodeData::IndexedAccess { object, .. } => stack.push(*object),
-                SemanticNodeData::Mapped { source, .. } => stack.push(*source),
+                SemanticNodeData::IndexedAccess { object, index } => {
+                    stack.push(*object);
+                    if let IndexKey::TypeNode(idx) = index {
+                        stack.push(*idx);
+                    }
+                }
+                SemanticNodeData::Mapped { source, mapper } => {
+                    stack.push(*source);
+                    stack.push(mapper.parameter_node);
+                    stack.push(mapper.key_space);
+                    stack.push(mapper.value_expr);
+                    stack.extend(mapper.name_remap);
+                }
+                SemanticNodeData::TypeParam {
+                    constraint,
+                    default,
+                    ..
+                } => {
+                    stack.extend(*constraint);
+                    stack.extend(*default);
+                }
                 SemanticNodeData::Conditional {
                     check,
                     extends,
@@ -439,12 +494,30 @@ impl ProjectSemanticDispatch<'_> {
                 SemanticNodeData::Function {
                     params,
                     return_type,
+                    type_parameters,
                     ..
                 } => {
                     stack.extend(params.iter().map(|p| p.ty));
                     stack.push(*return_type);
+                    for tp in type_parameters.iter() {
+                        stack.extend(tp.constraint);
+                        stack.extend(tp.default);
+                    }
                 }
-                _ => {}
+                SemanticNodeData::InstantiationRef { args, .. } => {
+                    stack.extend(args.iter().copied());
+                }
+
+                // ── Leaf carriers: no child node id can hold a nested `infer`
+                //    (TS rejects `infer` outside conditional `extends`, and
+                //    these variants carry no infer-bearing node id). Explicit —
+                //    no catch-all — so a new variant forces a compile error. ──
+                SemanticNodeData::Primitive(_)
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::Opaque(_)
+                | SemanticNodeData::TypeOf { .. }
+                | SemanticNodeData::VueMacroElements(_)
+                | SemanticNodeData::DeclRef { .. } => {}
             }
         }
         false

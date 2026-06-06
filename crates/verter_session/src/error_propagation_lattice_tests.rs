@@ -425,6 +425,92 @@ fn conditional_any_check_unions_both_branches() {
     );
 }
 
+/// `extends_is_infer_pattern` must scan EVERY composite carrier for a nested
+/// `infer`, not just the hand-picked subset. An `infer` reachable through an
+/// `InstantiationRef` arg (`Wrapper<infer U>`, reachable via `Awaited<any>` /
+/// `UnwrapRef<any>`) or an `Object` property value (`{ x: infer U }`) must
+/// keep the §22 `any`-row from firing — unioning both branches verbatim would
+/// leak an unbound `Infer`. The conditional must fall through to the
+/// infer-binding path (`absorb_conditional` returns `None`).
+#[test]
+fn conditional_any_check_detects_nested_infer_patterns() {
+    use crate::semantic_query::{DeclIdentity, SurfaceMember, SurfaceView};
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+    let infer_u = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("U"),
+    });
+    let y_branch = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Symbol));
+
+    // (1) infer nested inside an `InstantiationRef` arg:
+    //     `any extends Wrapper<infer U> ? U : Y`.
+    let wrapper = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: DeclIdentity::synthetic("Wrapper"),
+        args: Arc::from(vec![infer_u].into_boxed_slice()),
+    });
+    assert!(
+        dispatch
+            .absorb_conditional(any, wrapper, infer_u, y_branch, false)
+            .is_none(),
+        "infer nested in InstantiationRef<infer U> must fall through to the \
+         infer-binding path, not union both branches"
+    );
+
+    // (2) infer nested inside an `Object` property value:
+    //     `any extends { x: infer U } ? U : Y`.
+    let obj_surface = SurfaceView {
+        members: Arc::from(
+            vec![SurfaceMember {
+                visibility: verter_type_expr::MemberVisibility::Public,
+                name: Arc::from("x"),
+                value: infer_u,
+                optional: false,
+                readonly: false,
+                is_method: false,
+                declared_in_macro_type_arg: false,
+                merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                spans: Default::default(),
+                declaration_origin: None,
+            }]
+            .into_boxed_slice(),
+        ),
+        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    };
+    let obj = graph.intern_node(SemanticNodeData::Object(obj_surface));
+    assert!(
+        dispatch
+            .absorb_conditional(any, obj, infer_u, y_branch, false)
+            .is_none(),
+        "infer nested in an Object property value must fall through to the \
+         infer-binding path, not union both branches"
+    );
+
+    // Discriminating positive (kept here too): a NON-infer `extends` still
+    // unions both branches — the fall-through is infer-specific, not blanket.
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let t_branch = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let node = absorbed_node(
+        dispatch
+            .absorb_conditional(any, string, t_branch, y_branch, false)
+            .expect("any extends string ? T : Y must union both branches"),
+    );
+    match graph.node_data(node).map(|d| (*d).clone()) {
+        Some(SemanticNodeData::Union(members)) => assert!(
+            members.contains(&t_branch) && members.contains(&y_branch),
+            "any extends string ? T : Y = T | Y, got {members:?}"
+        ),
+        other => panic!("expected a Union of both branches, got {other:?}"),
+    }
+}
+
 /// A DISTRIBUTIVE conditional whose check is naked `never` ⇒ `never` (the
 /// empty distribution). A NON-distributive `never extends T ? X : Y` ⇒ the
 /// TRUE branch `X` (never is assignable to everything) and MUST NOT collapse
@@ -553,6 +639,31 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
     // any likewise relates both directions.
     assert!(is_assignable(any, string));
     assert!(is_assignable(string, any));
+
+    // §22.3: the error carrier relates bidirectionally like `any` against the
+    // OTHER lattice extremes too — including a `never` / `any` / `unknown`
+    // target/source. `relate(any, never)` is Assignable, so `relate(error,
+    // never)` MUST be Assignable as well (the regression: the `(_, Never)`
+    // bottom arm fired before the error wildcard, so `error <: never` wrongly
+    // resolved NotAssignable while `any <: never` resolved Assignable).
+    let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+    let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+    for &other in &[never, unknown, any] {
+        assert!(
+            is_assignable(error, other),
+            "error must relate to a {other:?} target bidirectionally like any"
+        );
+        assert!(
+            is_assignable(other, error),
+            "a {other:?} source must relate to error bidirectionally like any"
+        );
+    }
+    // Cross-check the `any` baseline this mirrors: `any <: never` is Assignable.
+    assert!(
+        is_assignable(any, never),
+        "any <: never is Assignable (mirror)"
+    );
+
     // Discriminating negative: the error flip is specifically the error
     // carrier — a plain incompatible primitive pair is still NotAssignable.
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -562,5 +673,21 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
             RelationResult::NotAssignable
         ),
         "string <: number must stay NotAssignable — the bidirectional flip is error-specific"
+    );
+
+    // Control-sentinel negative: a `RecursiveRef` (a recursion back-edge
+    // sentinel, NOT the error type — `is_error_type()` excludes it) must NOT
+    // pick up the wildcard. It keeps its `Unknown` relation so recursion
+    // control flow is preserved — never Assignable.
+    let recursive = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
+        name: Arc::from("Self"),
+    }));
+    assert!(
+        !is_assignable(recursive, string),
+        "a RecursiveRef control sentinel must NOT get the error wildcard (stays Unknown)"
+    );
+    assert!(
+        !is_assignable(recursive, never),
+        "a RecursiveRef control sentinel must NOT relate to never via the wildcard"
     );
 }
