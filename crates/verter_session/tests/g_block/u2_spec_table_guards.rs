@@ -273,26 +273,21 @@ pub enum SemanticQueryKey {
     );
 }
 
-/// The two augmentation query keys named in the parent's seven-variant spine —
-/// `ResolveMergedDeclaration` and `ResolveDeclarationAugmentation` — are
-/// **forward-planned**, NOT live `SemanticQueryKey` variants. Of the parent
-/// seven-variant spine (`native-typeinfo-parity.md` §2.1) FIVE are landed
-/// (`ResolveAmbientNamespace`, `ResolveOverloadSet`, `ResolveEnum`,
-/// `FlowNarrowingAt`, `ContextualTypeAt`) and these TWO are not in the enum or
-/// the spec table. Same-name declaration merge and cross-file ambient
-/// augmentation are produced by the `MergedDecl` peer-merge reducer over the
-/// graph carrier `SemanticNodeData::MergedDecl` (CLAUDE.md "Declaration Merging
-/// (CRITICAL)" / "Declaration Augmentation (CRITICAL)") — NOT by a dedicated
-/// query key. The matching value-domain shell `SemanticQueryValue::
-/// DeclarationAnalysis` is therefore non-live: NO live spec row resolves to it.
+/// `ResolveMergedDeclaration` and `ResolveDeclarationAugmentation` are RESERVED
+/// query-key names — they are NOT live `SemanticQueryKey` variants and appear in
+/// neither `SemanticQueryKeyTag::ALL` nor the spec table. Live same-name
+/// declaration merge and cross-file ambient augmentation are carried by the
+/// `MergedDecl` peer-merge reducer over the graph node
+/// `SemanticNodeData::MergedDecl` (CLAUDE.md "Declaration Merging (CRITICAL)" /
+/// "Declaration Augmentation (CRITICAL)"), never by a dedicated query key. The
+/// matching value domain `SemanticQueryValue::DeclarationAnalysis` is a NON-LIVE
+/// shell: no live spec row resolves to it. (native-typeinfo-parity.md §2.1.)
 ///
-/// This guard pins that fork mechanically: it FAILS the day either augmentation
-/// name is added to `SemanticQueryKeyTag::ALL`, or any live spec row is wired to
-/// the `DeclarationAnalysis` value domain, without the deliberate block that
-/// retires the forward-planned status. It is the executable anchor for the
-/// "five landed, two forward-planned" reconciliation, complementary to
-/// `semantic_query_key_spec_table_equals_enum` (which would stay green for a
-/// both-enum-and-table addition — exactly the case this guard catches).
+/// This guard pins that invariant mechanically: it FAILS if either reserved name
+/// becomes a live tag in `SemanticQueryKeyTag::ALL`, or if any live spec row is
+/// wired to the `DeclarationAnalysis` value domain. It is complementary to
+/// `semantic_query_key_spec_table_equals_enum`, which stays green for a
+/// both-enum-and-table addition — exactly the case this guard catches.
 #[test]
 fn forward_planned_augmentation_keys_are_not_live_and_declaration_analysis_is_a_shell() {
     const FORWARD_PLANNED: [&str; 2] =
@@ -307,13 +302,11 @@ fn forward_planned_augmentation_keys_are_not_live_and_declaration_analysis_is_a_
         .collect();
     assert!(
         !live_set_contains_forward_planned(&live_names, &FORWARD_PLANNED),
-        "a FORWARD-PLANNED augmentation key (parent §2.1: five landed, two \
-         forward-planned) is present in `SemanticQueryKeyTag::ALL` — \
-         {forward:?} must NOT be live tags. Same-name merge / cross-file \
-         augmentation is produced by the `MergedDecl` peer-merge reducer over \
-         `SemanticNodeData::MergedDecl`, not a dedicated query key. If a key is \
-         being landed deliberately, update this guard and the parent contract \
-         together.",
+        "a RESERVED augmentation key is present in `SemanticQueryKeyTag::ALL` — \
+         {forward:?} must NOT be live `SemanticQueryKeyTag`s \
+         (native-typeinfo-parity.md §2.1). Same-name merge / cross-file \
+         augmentation is carried by the `MergedDecl` peer-merge reducer over \
+         `SemanticNodeData::MergedDecl`, not a dedicated query key.",
         forward = FORWARD_PLANNED,
     );
 
@@ -333,14 +326,19 @@ fn forward_planned_augmentation_keys_are_not_live_and_declaration_analysis_is_a_
     // inputs and assert each predicate returns `true` (i.e. it would TRIP on
     // drift). This mirrors `enum_variant_scanner_discriminates`' injected-drift
     // proof: the check is run against a known violation, not re-asserted as a
-    // tautology, so neither (1) nor (2) above can pass vacuously.
-    let mut drifted_live = live_names.clone();
-    drifted_live.insert("ResolveMergedDeclaration".to_string());
-    assert!(
-        live_set_contains_forward_planned(&drifted_live, &FORWARD_PLANNED),
-        "non-vacuity proof: `live_set_contains_forward_planned` did NOT trip on \
-         a live set carrying a forward-planned key — check (1) is vacuous."
-    );
+    // tautology, so neither (1) nor (2) above can pass vacuously. Each reserved
+    // name is injected independently into a fresh clone of the real live set, so
+    // check (1) is proven to trip on a single-name violation for every name.
+    for reserved in FORWARD_PLANNED {
+        let mut drifted_live = live_names.clone();
+        drifted_live.insert(reserved.to_string());
+        assert!(
+            live_set_contains_forward_planned(&drifted_live, &FORWARD_PLANNED),
+            "non-vacuity proof: `live_set_contains_forward_planned` did NOT trip \
+             on a live set carrying the reserved key `{reserved}` — check (1) is \
+             vacuous for that name."
+        );
+    }
     let drifted_specs = specs_with_synthetic_declaration_analysis_row(&specs);
     assert!(
         any_spec_resolves_to_declaration_analysis(&drifted_specs),
