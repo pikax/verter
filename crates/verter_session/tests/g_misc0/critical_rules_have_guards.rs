@@ -151,6 +151,20 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // §18 fact-rooted error-tolerant admission + §18.3 taint join +
+        // §22 type-lattice absorption (owned by the `/type-cache-architecture`
+        // skill). `admit_decision` keys `Warm` on the rooting FACT, never the
+        // taint enum class; the §22 absorption table runs as the reducers'
+        // FIRST fast-reject via separable `absorb_*` hooks; the error type
+        // rides `Opaque(QueryError)` + taint and relates bidirectionally.
+        "Error-Tolerance Non-Admission + §22 Absorption",
+        &[
+            "error_tolerance_broken_input_is_returnonly_fact_rooted_error_is_cacheable",
+            "error_any_never_propagation_lattice",
+            "error_type_taints_and_is_returnonly_prone_any_is_cacheable",
+        ],
+    ),
+    (
         "Macro Type Traversal Rule",
         &[
             "no_macro_string_heuristics_in_resolver_core",

@@ -735,6 +735,67 @@ The new guards are registered in
 [`CRITICAL_RULE_GUARDS`](../../crates/verter_session/tests/critical_rules_have_guards.rs)
 under the `Typed SignatureAdmission gate` entry.
 
+## Error-Tolerance Non-Admission + §22 Absorption (CRITICAL)
+
+The error-tolerant admission decision and the type-lattice absorption are a
+closed, fact-rooted contract (`docs/arch/u2-query-value-domain-design.md`
+§18.2–18.3, §22). Three invariants:
+
+1. **Admission keys on the rooting FACT, not the taint enum class
+   (§18.2).** [`admit_decision(taint, sig)`](../../crates/verter_session/src/semantic_query/admit.rs)
+   maps a result's [`ResultTaint`] + its sound
+   [`ReadSetSignature`](../../crates/verter_session/src/fact_signature_helpers.rs)
+   to `Admission::{Warm, ReturnOnly}`. `Clean` ⇒ `Warm` (the pre-gate publish
+   behavior verbatim). `Partial(MissingDependency)` ⇒ `Warm` **iff**
+   `sig.records_missing_dependency_fact()` (a `DerivedFactKind::ImportRoute`
+   rail) else `ReturnOnly`; `Partial(UnresolvedReference)` ⇒ `Warm` **iff**
+   `sig.records_negative_resolution_fact()` (a `ResolvedImportClause` /
+   `ResolvedReexportBinding` whose `resolved_canonical` is the
+   `UNRESOLVED_SENTINEL`) else `ReturnOnly`. `Partial(IncompleteDeclaration)`,
+   `Broken(SyntaxError)`, and `Broken(TornRead)` are always `ReturnOnly`. The
+   bare taint discriminant NEVER licenses a warm publish — the signature is the
+   authority for whether the invalidation rail IS present. `admit_decision` is
+   the sole replacement for the inline `Some/None` admission gate in
+   `finalise_traced_build_output` (one cutover, no dual path). Taint PRODUCERS
+   (parser error-recovery, resolver degradation, completion-fence torn-read)
+   are a U0/foundation responsibility (§18.4); every build currently emits
+   `Clean`, so the live publish behavior is unchanged.
+
+2. **Taint join is monotone over `Clean ⊑ Partial ⊑ Broken` (§18.3).**
+   [`ResultTaint::join`](../../crates/verter_session/src/semantic_query.rs)
+   propagates the MAX level; within a level it keeps the more-severe
+   `BrokenInputClass` (severity order `MissingDependency < UnresolvedReference
+   < IncompleteDeclaration < SyntaxError < TornRead`). Finite + monotone —
+   taint only moves up, so propagation terminates.
+
+3. **§22 absorption is the reducers' FIRST fast-reject, as separable
+   helpers.** [`absorb_*`](../../crates/verter_session/src/project_semantic_dispatch/absorb.rs)
+   (`absorb_union`/`absorb_intersection`/`absorb_key_of`/`absorb_indexed_access`/`absorb_mapped`/`absorb_conditional`)
+   are isolated entry hooks each reducer calls with ONE
+   `if let Some(out) = self.absorb_*(...) { return out; }` line BEFORE its
+   structural body — never invasive per-arm edits. They do **cheap `node_data`
+   peeks only** (bounded transparent `Alias` unwrap; no `execute` /
+   `evaluate_deferred` / resolver work). Table: `X|any=any`, `X|never=X`,
+   `X|unknown=unknown`; `X&never=never`, `X&any=any`, `X&unknown=X`;
+   `any[K]=any`, `never[K]=never`, `unknown[K]`=UNCONDITIONAL error,
+   `keyof any/never = string|number|symbol`, `keyof unknown = never`; mapped
+   over `never`=`{}`, direct mapped over `unknown`=error. `any`/`never`/`unknown`
+   are `Clean` (legitimately cacheable). **`error` rides
+   `SemanticNodeData::Opaque(QueryError)` + §18 taint** (no new
+   `GraphTypeNode` wire arm): it DOMINATES every other absorber so the taint is
+   never hidden behind a `Clean` extreme, relates **bidirectionally like
+   `any`** in `relate_nodes` (so a broken sub-result never cascades spurious
+   `NotAssignable`), and is `ReturnOnly`-prone via §18 admission.
+   `QueryError::DeclPlaceholder` is an expandable carrier, NOT the error type,
+   and is excluded from both the absorption and the relation flip.
+
+Guards (registered in `CRITICAL_RULE_GUARDS` under
+`Error-Tolerance Non-Admission + §22 Absorption`):
+`error_tolerance_broken_input_is_returnonly_fact_rooted_error_is_cacheable`,
+`error_any_never_propagation_lattice`,
+`error_type_taints_and_is_returnonly_prone_any_is_cacheable`
+(`crates/verter_session/src/error_propagation_lattice_tests.rs`).
+
 ### Environment & GC
 
 **R21.** Environment hashes split into **five** orthogonal dimensions
