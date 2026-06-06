@@ -1864,6 +1864,15 @@ guards**. Sequence is faithful to §A; do not reorder.
 
 ---
 
+### XH — Deferred repo-wide phase-archaeology hygiene pass (tracked, not yet scheduled)
+
+- **Scope:** all multi-block plan-pass / plan-rule labels in `crates/*/src/**` non-test comments left over from OTHER blocks of this refactor — the `\b[A-FR][0-9]+[a-z]?\b` family (cache-runtime F-passes, scheduler/semantic B-blocks `B4`/`B7d`…, R-rules `R6`/`R21`…) plus `C-phase`/`Pass C\d` pass labels. ~138 production comment labels repo-wide (count is indicative, not binding — the pass rederives it).
+- **Goal:** rewrite every such comment as a final-state description (durable insight → `.claude/skills/*` or `docs/arch/`, per the No-phase-archaeology rule), then extend the existing `no_phase_archaeology_in_production_code` guard (`crates/verter_session/tests/architecture_guards.rs`) with ONE comprehensive branch catching the F/B/R/C-phase / plan-letter forms, backed by discriminating positive fixtures AND false-positive negatives (e.g. legitimate identifiers like `R21`-the-rule-name in a docs link, `B4`-in-a-hex-literal, `F32`/`C99`-in-type-or-std names) so the branch flags archaeology without flagging real code.
+- **Why one pass, not per-block:** the labels are cross-cutting (a single file carries labels from several blocks), and a single guard branch with one fixture set is the only way to get non-overlapping, discriminating coverage; per-block scrubs would leave gaps and re-introduce drift. This pass is INTENTIONALLY out of U2 scope (codex scope decision B) and runs once the U-block sequence settles.
+- **Done-when:** zero `[A-FR][0-9]+`/`C-phase` plan-label comments remain in `crates/*/src/**` non-test files; the extended guard is green and its negatives prove it does not flag legitimate identifiers.
+
+---
+
 ### U0 — Finish Typeinfo Contract Gaps  **(NEXT primary block)**
 
 - **Source track:** semantic-graph (R-0a).
