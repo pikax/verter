@@ -99,15 +99,19 @@ Internal type meaning lives in `SemanticNodeData`; boundary / projection carrier
 live in `TypeExpr`; published transport values live in `GraphTypeNode`.
 `GraphTypeNode` contains **type values only**. Flow facts, contextual-typing
 facts, and narrowing facts live in `ProgramAnalysisGraph`, never as published
-type nodes. Declaration / environment-mutation facts live in
-`DeclarationAnalysisGraph`, never as published type nodes.
+type nodes. Declaration / environment-mutation facts are an in-process VALUE
+domain (`SemanticQueryValue::DeclarationAnalysis`), distinct from the wire: on
+the wire, module / global augmentation REMAIN `GraphTypeNode` arms (kinds 23 / 25
+— see §1.3). There is no `DeclarationAnalysisGraph` wire message; the proposed
+relocation of the augmentation arms off `GraphTypeNode` was **rejected**.
 
 Consequently the query engine's result domain is **typed**, not uniformly
 `SemanticNodeId`: each `SemanticQueryKey` resolves to its correct value domain via
 the typed `SemanticQueryValue` layer (see §3), so flow / contextual keys return
-`ProgramAnalysisGraph` values and augmentation keys return
-`DeclarationAnalysisGraph` values rather than type nodes, and no non-type value is
-smuggled into `GraphTypeNode`.
+`ProgramAnalysisGraph` values and augmentation keys return the in-process
+`SemanticQueryValue::DeclarationAnalysis` value domain rather than smuggling a
+non-type value into `GraphTypeNode` — while the augmentation graph nodes
+themselves stay on the wire as `GraphTypeNode` kinds 23 / 25.
 
 ### 1.1 `SemanticNodeData` coverage
 
@@ -220,8 +224,8 @@ The DTO end-state shape is:
 ```
 TypeInfoGraphPayload {
     graph,                  // the GraphTypeNode type-values / topology surface
+                            // (module/global augmentation are GraphTypeNode arms 23/25 — NOT a side surface)
     program_analysis,       // ProgramAnalysisGraph { flow_narrowings, contextual_types }
-    declaration_surfaces,   // DeclarationAnalysisGraph { module_augmentations, global_augmentations }
     diagnostics,
     diagnostic_directives,
     relation_proofs,        // payload-side proof table, referenced by proof id
@@ -246,40 +250,45 @@ surface with the moved-concept end-state, under the Typeinfo Wire Contract
   never reused (§1.5).
 - **(b) Every field/arm representing a relocated/retired concept is retired +
   `reserved` + relocated.** Diagnostics + diagnostic directives, relation proofs,
-  flow narrowing, contextual type, the declaration/environment-mutation
-  augmentation facts (module + global), `no_infer` type-parameter metadata, and any
+  flow narrowing, contextual type, `no_infer` type-parameter metadata, and any
   other relocated/retired concept is, wherever it appears, retired (its tag + name
   in the enclosing message's `reserved` list, never reused) and relocated to its
-  end-state home (`ProgramAnalysisGraph` for program-analysis facts,
-  `DeclarationAnalysisGraph` on `TypeInfoGraphPayload.declaration_surfaces` for
-  declaration/environment-mutation facts, a `TypeInfoGraphPayload` side table such
-  as `diagnostics` / `diagnostic_directives` / `relation_proofs`, a
-  `RelationPayload`, or an occurrence-local node), or removed outright where it has
-  no end-state value (`no_infer`).
+  end-state home (`ProgramAnalysisGraph` for program-analysis facts, a
+  `TypeInfoGraphPayload` side table such as `diagnostics` / `diagnostic_directives`
+  / `relation_proofs`, a `RelationPayload`, or an occurrence-local node), or removed
+  outright where it has no end-state value (`no_infer`). Module / global
+  augmentation are NOT in this set: their relocation off `GraphTypeNode` was
+  **rejected** — they REMAIN value-bearing `GraphTypeNode` arms 23 / 25 on the wire
+  (§1.3), with `SemanticQueryValue::DeclarationAnalysis` as the in-process
+  value-side counterpart (no wire side surface).
 
-Two guards close the wire-surface-purity class:
+The wire-surface-purity class is closed by the landed guards:
 
-- **`typeinfo_wire_surface_has_no_retired_concept_fields`** — scans the whole proto
-  against a denylist of retired-concept field/arm names (`flow_narrowing`,
-  `contextual_type`, `relation_proof`, `diagnostics`/`diagnostic_directives` on
-  type-value messages, `module_augmentation`, `global_augmentation`, `no_infer`,
-  and every other relocated/retired concept) and asserts none remains live on any
-  type-value message (`GraphTypeNode`, `SemanticTypeGraph`, `GraphTypeParameter`,
-  and the other type-value messages). Each denylisted name must appear only in the
-  enclosing message's `reserved` list (or, for embeddings, only behind a registered
-  versioned downgrade encoder).
+- **`node_taxonomy_complete`** (`crates/verter_session/tests/g_block/typeinfo_graph_contract_guards.rs`)
+  — pins the EXACT 32-arm `GraphTypeNode` `oneof kind` set (INCLUDING
+  `module_augmentation` 23 and `global_augmentation` 25 as live arms) plus the
+  additive `reserved 33 to 100;` window. This is the single enumerating assertion
+  that closes the `GraphTypeNode` taxonomy; it treats arms 23 / 25 as valid live
+  graph state, never as retired/relocated.
 - **`all_public_semantic_type_graph_embeddings_are_payload_wrapped`** — the
   whole-class embedding guard (§1.5).
 
-Together with `graph_type_node_oneof_contains_only_type_value_arms` and
-`graph_type_node_allowlist_arms_have_type_value_classification`, these close the
-entire public-wire-surface-purity class.
+NOTE — NOT LANDED: the earlier-planned denylist guard
+`typeinfo_wire_surface_has_no_retired_concept_fields` and the two split
+`GraphTypeNode` guards `graph_type_node_oneof_contains_only_type_value_arms` /
+`graph_type_node_allowlist_arms_have_type_value_classification` were never landed
+(they do not exist in `crates/`). The single exact-set `node_taxonomy_complete`
+assertion subsumes them, and it must NOT denylist `module_augmentation` /
+`global_augmentation` — those arms are live wire state.
 
 ### 1.5 `SemanticTypeGraph` embeddings and the response landing
 
 `SemanticTypeGraph` carries graph topology and type values **only**; diagnostics,
-relation proofs, flow/contextual facts, and declaration/environment facts belong to
-the payload, not the graph.
+relation proofs, and flow/contextual facts belong to the payload, not the graph.
+(Module / global augmentation are value-bearing `GraphTypeNode` arms 23 / 25 and
+therefore DO live on the graph — see §1.3; only their in-process VALUE-domain
+counterpart `SemanticQueryValue::DeclarationAnalysis` is off-graph, and it is not
+a wire surface.)
 
 - **Diagnostics ownership migration.** `SemanticTypeGraph.diagnostics` (tag 9) is
   retired — tag `9` + name `diagnostics` move into `SemanticTypeGraph`'s `reserved`
@@ -454,10 +463,13 @@ spine variant.
 
 The `target` is **env-free** — the env lives on `DeclarationAnalysisContext`, not
 duplicated on the target. The `FileArtifactStore`
-`AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, target }`
-is DERIVED from `DeclarationAnalysisContext` at execution time, so the
-augmentation-target env has exactly one source — the context — and cannot diverge
-from the query-key env:
+`AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, population, target }`
+has its `{R, L, J}` env dims DERIVED from `DeclarationAnalysisContext` at execution
+time (so the augmentation-target env has exactly one source — the context — and
+cannot diverge from the query-key env), while its `population: AugmentationPopulation
+{Base, Session(overlay-set fingerprint)}` dim is derived from the active SESSION
+view (NOT from `DeclarationAnalysisContext`) and provides the Base/Session overlay
+isolation:
 
 ```rust
 ResolveDeclarationAugmentation {
@@ -476,32 +488,36 @@ struct DeclarationAnalysisContext {
     lib_env_hash: LibEnvHash,          // lib-declared global/ambient surfaces a global augmentation mutates       — L
     project_identity: ProjectIdentity, // project isolation (derives AugmentationTargetKey.project_identity)        — J
     // Exactly the `{R, L, J}` axes that the landed
-    // `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, target }`
-    // folds. NO parse_env_hash / type_env_hash KEY DIM, NO project_config_hash (R21),
+    // `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, population, target }`
+    // folds (the extra `population` dim is the session-view overlay identity, not a
+    // context axis). NO parse_env_hash / type_env_hash KEY DIM, NO project_config_hash (R21),
     // NO content hash / parse_stable_hash, NO fact_dep_signature (R6).
 }
 ```
 
-Both `target` variants map to exactly `SemanticQueryValue::DeclarationAnalysis`
-(the `DeclarationAnalysisGraph` fact domain — module facts lower to
-`module_augmentations`, global facts to `global_augmentations`), NEVER
-`SemanticQueryValue::TypeNode` and NEVER a `GraphTypeNode` arm. The context carries
-the `{R, L, J}` env axes ONLY — exactly the dims the landed `AugmentationTargetKey`
-folds. Parse env (and type env) are NOT key dimensions: a parse-option /
+Both `target` variants map to exactly the in-process `SemanticQueryValue::DeclarationAnalysis`
+VALUE domain (the declaration-environment-mutation fact domain — module facts and
+global facts), NEVER `SemanticQueryValue::TypeNode`. This is the in-process VALUE
+counterpart, distinct from the WIRE: on the wire, module / global augmentation
+graph nodes REMAIN `GraphTypeNode` arms 23 / 25 (§1.3) — there is no
+`DeclarationAnalysisGraph` wire message (that relocation was rejected). The context
+carries the `{R, L, J}` env axes ONLY — exactly the dims the landed
+`AugmentationTargetKey` folds (plus its session-view `population` dim). Parse env (and type env) are NOT key dimensions: a parse-option /
 parser-version change is reflected through the VALUE-side body read (the cold
 compute re-sources the augmenter bodies from live parser output and roots the value
 on the contributing files' `FileWholeHash` self-roots), not through the
 content-free query-identity key (R6). This matches `u2-query-value-domain-design.md`
 §2.2 and `semantic-type-graph-plan-recovered.md`.
 
-Guards: **`global_augmentation_query_has_declaration_analysis_identity`** (global
-declaration-environment-mutation facts are reachable through the generalized
+Forward-planned guards (land with the generalized key): **`global_augmentation_query_has_declaration_analysis_identity`**
+(global declaration-environment-mutation facts are reachable through the generalized
 `ResolveDeclarationAugmentation { target: Global(GlobalEnvScope), .. }` key — a
 concrete `SemanticQueryKey` identity, not an identity-less side product — resolving
 to `SemanticQueryValue::DeclarationAnalysis`); and
 **`declaration_augmentation_target_is_env_free_env_comes_from_context`** (the query
-`target` is env-free, the `AugmentationTargetKey` is derived from
-`DeclarationAnalysisContext` at execution time, the derived target env equals the
+`target` is env-free, the `AugmentationTargetKey`'s `{R, L, J}` env dims are derived
+from `DeclarationAnalysisContext` at execution time — the `population` dim comes
+from the active session view, not the context — the derived target env equals the
 context env, and no public constructor can create a target/context env mismatch).
 
 ### 2.3 The five added keys
@@ -1080,7 +1096,7 @@ typed):
 enum SemanticQueryValue {
     TypeNode(SemanticNodeId),                // type-value keys (NOT ResolveDeclarationAugmentation)
     ProgramAnalysis(ProgramAnalysisValue),   // FlowNarrowingAt, ContextualTypeAt — ProgramAnalysisGraph facts
-    DeclarationAnalysis(DeclarationAnalysisValue), // ResolveDeclarationAugmentation (Module + Global) — DeclarationAnalysisGraph facts
+    DeclarationAnalysis(DeclarationAnalysisValue), // ResolveDeclarationAugmentation (Module + Global) — in-process declaration-analysis VALUE domain (wire home stays GraphTypeNode arms 23/25)
     OverloadSet(Arc<[SignatureRef]>),        // ResolveOverloadSet — ordered overload signatures
     FlowReturn(Arc<FlowReturnResult>),       // FlowReturn — demand-sliced return/body flow result
     ResolvedCall(Arc<ResolvedCallResult>),   // ResolveCall — reusable call-resolution result
@@ -3854,10 +3870,18 @@ introduces lands with at least one named guard here.
 
 ## Type IR — `GraphTypeNode` / wire-surface purity
 
-- `graph_type_node_oneof_contains_only_type_value_arms`
-- `graph_type_node_allowlist_arms_have_type_value_classification`
+- `node_taxonomy_complete` (LANDED — the single enumerating assertion that pins the
+  EXACT 32-arm `GraphTypeNode` `oneof kind` set, INCLUDING `module_augmentation` (23)
+  and `global_augmentation` (25) as live arms, plus the additive `reserved 33 to 100;`
+  window; `crates/verter_session/tests/g_block/typeinfo_graph_contract_guards.rs`)
+- `graph_type_node_oneof_contains_only_type_value_arms` (NOT LANDED — phantom; never
+  landed in `crates/`; subsumed by `node_taxonomy_complete`)
+- `graph_type_node_allowlist_arms_have_type_value_classification` (NOT LANDED —
+  phantom; never landed in `crates/`; subsumed by `node_taxonomy_complete`)
 - `no_non_type_value_smuggled_into_graph_type_node`
-- `typeinfo_wire_surface_has_no_retired_concept_fields`
+- `typeinfo_wire_surface_has_no_retired_concept_fields` (NOT LANDED — phantom; never
+  landed in `crates/`. It must NOT denylist `module_augmentation` / `global_augmentation`:
+  those are live `GraphTypeNode` arms 23/25, not retired concepts)
 - `flow_contextual_facts_not_graph_type_nodes`
 - `program_analysis_graph_exposes_flow_contextual_queries`
 - `flow_contextual_doc_and_wire_placement_match_program_analysis_graph`

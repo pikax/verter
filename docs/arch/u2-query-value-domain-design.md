@@ -454,7 +454,7 @@ end-state shape only.
 | Key | IdentityCore | `*Context` (extra env beyond slot) | Env dims | Value domain | Facts read / written | Allowed demand axes | Family | Producer | Wire target |
 |---|---|---|---|---|---|---|---|---|---|
 | `ResolveMergedDeclaration` *(forward-planned)* | `decl_slot: ResolvedDeclSlotIdentity` + `type_args` | `MergedDeclarationContext` {P,R} + subst + proj-reduction | P R T L J | `TypeNode` | r: `Member`/`MemberPresence`, merge-contributor provenance | `MemberDemand`, subst | `ResolveMergedDeclaration` | `verter_semantic::analysis` merge | `GraphTypeNode` |
-| `ResolveDeclarationAugmentation{target: Module\|Global}` *(forward-planned)* | `DeclarationAugmentationTarget` (env-FREE) | `DeclarationAnalysisContext` {R,L,J} — the `AugmentationTargetKey{J,R,L,target}` folds project+resolve+lib; parse_env enters ONLY via the analysis-body read, not the target key | R L J (parse_env via body read only) | **`DeclarationAnalysis`** | r/w: `module_augmentations`/`global_augmentations` via `AugmentationTargetKey{J,R,L,target}` derived from context | none (analysis key) | `ResolveDeclarationAugmentation` | declaration analysis | `GraphTypeNode` kinds 21–25 (`GraphModuleAugmentation` / `GraphGlobalAugmentation`) — a separate `DeclarationAnalysisGraph` wire message was adjudicated **REJECTED**; the merge/augmentation wire home already exists in the closed contract (see `/type-resolution`) |
+| `ResolveDeclarationAugmentation{target: Module\|Global}` *(forward-planned)* | `DeclarationAugmentationTarget` (env-FREE) | `DeclarationAnalysisContext` {R,L,J} — the `AugmentationTargetKey{J,R,L,population,target}` folds project+resolve+lib + the session-view `population` dim; parse_env enters ONLY via the analysis-body read, not the target key | R L J + `population` (parse_env via body read only) | **`DeclarationAnalysis`** | r/w: `module_augmentations`/`global_augmentations` via `AugmentationTargetKey{J,R,L,population,target}` ({J,R,L} derived from context, `population` from the active session view) | none (analysis key) | `ResolveDeclarationAugmentation` | declaration analysis | `GraphTypeNode` kinds 21–25 (`GraphModuleAugmentation` / `GraphGlobalAugmentation`) — a separate `DeclarationAnalysisGraph` wire message was adjudicated **REJECTED**; the merge/augmentation wire home already exists in the closed contract (see `/type-resolution`) |
 | `ResolveAmbientNamespace` | `namespace_slot` (slot, `SymbolSpace::Namespace`) + `type_args` | `AmbientNamespaceContext` {P,R} + `mode` (substitution rides on the key's `type_args`) | P R T L J | `TypeNode` | r: namespace member facts | `MemberDemand`, subst | `ResolveAmbientNamespace` | `verter_semantic` namespace analysis | `GraphTypeNode` |
 | `ResolveOverloadSet` | `callee: SemanticNodeId` + `type_args` | `OverloadSetContext` {R} (NO parse_env) + subst | R T L J | **`OverloadSet(Arc<[SignatureRef]>)`** | r: signature facts | subst | `ResolveOverloadSet` | signature lowering | `GraphTypeNode` signature list |
 | `ResolveEnum` | `enum_slot` (slot) | `EnumContext` {R} (NO parse_env, NO subst) | R T L J | `TypeNode` | r: enum-member facts | none | `ResolveEnum` | enum analysis | `GraphTypeNode` |
@@ -532,10 +532,12 @@ rail (parent §9.5 of the superseded plan, re-expressed):
   overload to one part invalidates only consumers that observed THAT part's facts (slot-level fact
   validation is the oracle).
 - The augmentation index (`AugmentationTargetKey {project_identity, resolve_env_hash, lib_env_hash,
-  target}`, derived from `DeclarationAnalysisContext` at execute time) provides inverse lookup:
-  "which files augment module/global M". This is the SOLE source of the augmentation-target env, so
-  the query-key env and the index env cannot diverge (guard
-  `declaration_augmentation_target_is_env_free_env_comes_from_context`). The wire/graph home for a
+  population, target}`, whose `{R,L,J}` env dims are derived from `DeclarationAnalysisContext` at
+  execute time and whose `population: AugmentationPopulation {Base, Session(overlay-set fingerprint)}`
+  dim is derived from the active session view — NOT from `DeclarationAnalysisContext`) provides
+  inverse lookup: "which files augment module/global M", with Base/Session overlay isolation. The
+  context is the SOLE source of the `{R,L,J}` env dims, so the query-key env and the index env cannot
+  diverge (guard `declaration_augmentation_target_is_env_free_env_comes_from_context`). The wire/graph home for a
   merge/augmentation result is `GraphTypeNode` kinds 21–25 (`GraphModuleAugmentation` /
   `GraphGlobalAugmentation`); a proposed separate `DeclarationAnalysisGraph` wire message was
   adjudicated **REJECTED** (the home already exists in the closed contract — see `/type-resolution`).
