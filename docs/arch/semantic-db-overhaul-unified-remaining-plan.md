@@ -22,7 +22,7 @@ contextual-callback / reverse-mapped), measured variance, control-flow narrowing
 conditional / mapped / template-literal reduction, overload resolution, and the
 cross-engine recursion that binds them. This is an **honest multi-person-year
 scope**, not a flow-return patch. The bounded near-term lifts this plan sequences —
-the **363-row ledger** plus the Vue-macro / component-meta / IDE surfaces — are the
+the **362-row ledger** plus the Vue-macro / component-meta / IDE surfaces — are the
 **first measurable increments** toward that target, not the target itself.
 
 **The full endgoal is Verter as a complete TypeScript replacement** (project model,
@@ -34,13 +34,13 @@ compilation, and `.d.ts` / `.d.ts.map` declaration emit (a CodeTransform produce
 facts) — and permanently DEFERS general, type-independent TS/JS transpile emit to
 `tsc` / swc / esbuild / bundlers.
 
-**The 363-row ledger tracks COVERAGE / wiring, NOT semantic tsc-parity.** A green
-363 proves every row has an owner block, an executable proof, and a wired mechanism
+**The 362-row ledger tracks COVERAGE / wiring, NOT semantic tsc-parity.** A green
+362 proves every row has an owner block, an executable proof, and a wired mechanism
 (coverage completeness — "detects un-wired"). It does **not** prove the engine
 agrees with `tsc`/`tsgo` on the SEMANTICS of those families (semantic completeness —
 "detects wrong"). Semantic tsc-parity is gated separately by the **differential
 `tsgo`-parity oracle** (§3.2 / parent `native-typeinfo-parity.md` §6.3), baselined
-at each hard phase's rescope gate. State `363-green` and "tsc-parity" as two
+at each hard phase's rescope gate. State `362-green` and "tsc-parity" as two
 distinct claims; never read one as the other.
 
 ### Native-typeinfo-parity doc set (indexed here)
@@ -95,7 +95,7 @@ stated there (§3.1.2).
 `docs/arch/native-checker.md` is a **sibling follow-up** (non-parity): native
 TypeScript-grade diagnostics as a LATER layer over the SAME resolver
 (`SemanticQueryKey → ProjectSemanticDispatch::execute → SemanticGraphStore`),
-sequenced AFTER the U0–U15 typeinfo-parity blocks. It is NOT part of the 363-row
+sequenced AFTER the U0–U15 typeinfo-parity blocks. It is NOT part of the 362-row
 parity scope and does not change the U-blocks; it only consumes the seams the parity
 blocks reserve (`SemanticQueryValue::DiagnosticAnalysis`, the `Check*` query names,
 the `ExecutableRegionId` region abstraction, the `ProgramAnalysisContributor` seam).
@@ -110,7 +110,7 @@ the gate, depending on the parity blocks (U2/U6) it layers over.
 
 This section frames the **endgoal**, the **ownership model**, and the **new foundation /
 language-service / emit blocks** that complete it. It **EXTENDS** this plan; it does **not**
-replace the 363-row typeinfo-parity scope (§Scope) or the rescope-gate governing process
+replace the 362-row typeinfo-parity scope (§Scope) or the rescope-gate governing process
 (§3.2). The existing `U0`–`U15` backlog (§4) is the **typeinfo-parity INCREMENT** toward the
 endgoal — the first measurable lifts — and the new blocks named here (`B.1`, `U0.RESOLVER_CORE`,
 `B.4`, `B.13`, the emit boundary, `N0`, `N1`, `B.7`, `B.8`, `B.5`, `B.10`, `B.11`, `B.14`)
@@ -397,7 +397,7 @@ is the mechanized form of this same partition.
 by construction" is a reasoning argument, not an enforced gate — a concrete public surface
 (`linkedEditingRange` / `prepareRename` / folding-range / selection-range / `implementation`) could be
 silently omitted while the prose still "reads complete". The plan applies bijective-manifest rigor
-everywhere else (the 363-row manifest, `checker_diagnostic_manifest_bijection`, the typeinfo wire
+everywhere else (the 362-row manifest, `checker_diagnostic_manifest_bijection`, the typeinfo wire
 taxonomy-parity tests); LS surfaces get the SAME machinery: a **generated `language_service_api_manifest`**
 that ENUMERATES every public `ts.LanguageService` method (pinned to the §3.4 / `B.4` TS version) and maps
 each to its role-owner (`N0` / `N1` / `B.7` / `B.8` / `B.5` — the diagnostic methods
@@ -725,9 +725,9 @@ each pair is stated ONCE here.
   is DELETED (no dual path, no belt-and-suspenders union). Diagnostics are the checker-role surface
   in the §0.5.2 per-surface deletion-ownership rule — `B.5` owns this deletion because it owns the
   native diagnostic producer. (The diagnostic-ROW manifest itself: new `Check*` keys beyond the
-  reserved set need a `schema_version` bump and must NOT merge into the 363-row typeinfo manifest.)
+  reserved set need a `schema_version` bump and must NOT merge into the 362-row typeinfo manifest.)
 - **Guards (at its land):** `checker_diagnostic_manifest_bijection` (manifest↔emitted bijection,
-  DISTINCT from the 363 guard) + the NET-NEW `native_checker_replaces_ts_diagnostics_path` (asserts
+  DISTINCT from the 362 guard) + the NET-NEW `native_checker_replaces_ts_diagnostics_path` (asserts
   published diagnostics come from the native checker and no tsgo `get_diagnostics` /
   `publish_merged_diagnostics` runtime path survives — the bijection guard is compatible with a
   still-merging tsgo path, so a SEPARATE deletion guard is required; registered at the `B.5` gate per
@@ -1014,7 +1014,7 @@ is produced at its rescope session (§3.2) before it implements.
 | U13 | NOT-STARTED | projection; ← U12 |
 | U14 | NOT-STARTED | Vue adapter; ← U13 + U11 |
 | U15 | NOT-STARTED | integration/bench/final lift; ← all code blocks |
-| native-checker | RESCOPE-GATE-PENDING | sibling/future diagnostics layer (out of 363 scope); own rescope gate |
+| native-checker | RESCOPE-GATE-PENDING | sibling/future diagnostics layer (out of 362 scope); own rescope gate |
 
 ---
 
@@ -1550,7 +1550,7 @@ effort weights in §3.3):
   block contract).
 - **The native checker** (`docs/arch/native-checker.md`) — the sibling/future
   diagnostics layer. **RESCOPE-GATE-REQUIRED before its `Check*` queries implement**
-  (it is out of the 363-row parity scope, but its `Check*` algorithm-depth design is
+  (it is out of the 362-row parity scope, but its `Check*` algorithm-depth design is
   produced at its own rescope session).
 - **`U7`** (the scheduler cache-node DAG, `submit_dag`) — **RESCOPE-GATE-REQUIRED with
   an explicit "justify against MEASURED workload or CUT" question**: a model-checked
@@ -1833,7 +1833,7 @@ sequencing/process pointer): run a corpus — a **TS-conformance slice + propert
 type fixtures** — through **Verter AND the pinned `tsgo`**, diff the **STRUCTURED**
 results, and gate on a **per-family divergence budget**.
 
-- **It replaces the 363 proxy as the SEMANTIC gate.** 363-green proves wiring/coverage
+- **It replaces the 362 proxy as the SEMANTIC gate.** 362-green proves wiring/coverage
   completeness (every row owned + executably proven); the oracle proves the engine
   agrees with `tsgo` on the families' SEMANTICS. The oracle is **produced / baselined at
   each hard phase's rescope gate (§3.2(b))** and gates THAT phase's acceptance — it
@@ -1885,14 +1885,14 @@ guards**. Sequence is faithful to §A; do not reorder.
     ledger end-state, do NOT create a second one.** A0a already landed the manifest
     as a Rust test, not a doc:
     `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs` +
-    `tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs` (363 rows,
-    `EXPECTED_TOTAL_IGNORED_COUNT = 363`), with ~10 backing guards. U0 keeps that
+    `tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs` (362 rows,
+    `EXPECTED_TOTAL_IGNORED_COUNT = 362`), with ~10 backing guards. U0 keeps that
     same in-repo `.rs` test as the single ledger (there is no separate
     `typeinfo_tests_unignore_plan.md` doc and no second manifest at a competing
     path) and EXTENDS it to the **two-table ledger** the parent architecture
     requires (`native-typeinfo-parity.md` §10):
-    - **`IgnoredTestRow`** holds EXACTLY the 363 ignored test-site rows — count-guarded
-      at 363 and bijective with the source `#[ignore]`s — with the extended row schema
+    - **`IgnoredTestRow`** holds EXACTLY the 362 ignored test-site rows — count-guarded
+      at 362 and bijective with the source `#[ignore]`s — with the extended row schema
       (`substrate: TargetSubstrate`, `capability`, `organ`, `owning_u_block`,
       `block_id`, `semantic_queries`, `proof: ProofRequirement`, `status: IgnoreStatus`,
       `unblocker`).
@@ -1915,7 +1915,7 @@ guards**. Sequence is faithful to §A; do not reorder.
     Do NOT migrate to a competing `target_phase` / `target_substrate` / `unblocked_by`
     schema at a different path — the landed `substrate` / `unblocker` columns are
     preserved and extended in place. See `native-typeinfo-parity.md` §10 for the full
-    two-table ledger schema, the proof model, and the exact-363 count/bijection
+    two-table ledger schema, the proof model, and the exact-362 count/bijection
     contract (cited, not duplicated here).
   - **Landing protocol — git/CI, no tracked cursor (U0 deliverable).** Typeinfo
     parity blocks land through git/CI, not a tracked orchestration cursor: branch per
@@ -1988,7 +1988,7 @@ guards**. Sequence is faithful to §A; do not reorder.
     `manifest_length_matches_documented_total`,
     `per_file_ignored_test_counts_match_manifest`, plus the two reason-quality
     guards), kept green under the reconciled schema. Plus the EXTENDED two-table-ledger
-    guards: `ignored_test_row_table_holds_exactly_363_rows` (binding-total + table
+    guards: `ignored_test_row_table_holds_exactly_362_rows` (binding-total + table
     disjointness), `additional_proof_row_table_holds_exactly_7_rows` (the closed
     coverage-only table), and the git/CI landing-protocol DAG guard
     `typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_prereqs`
@@ -2776,7 +2776,7 @@ bridge.
   `docs/arch/native-typeinfo-parity.md` (terminal acceptance §10.5 / §12).
 - **Scope:** Zod/schema client helpers; LSP hover→graph+display,
   completion→framework-surface, MCP `typeinfo.*` / `component-meta.*` tools,
-  playground type explorer; lift **EVERY one of the 363 `IgnoredTestRow`s to
+  playground type explorer; lift **EVERY one of the 362 `IgnoredTestRow`s to
   `Lifted`** on the U0 manifest schedule — **zero remaining parity `#[ignore]`s**.
   - **Hover / completion / signature-help delegation STAYS near-term.** U15 keeps
     delegating hover / completion / signature-help to tsserver/tsgo for the editor surface;
@@ -2786,11 +2786,11 @@ bridge.
     see §0.5.4 (`B.7`) and the succession note §0.5.5.
   The ONLY permitted residual `#[ignore]`s are the registered Svelte/React
   STOP-gate files (`svelte_adapter_stop_gate.rs`, `react_adapter_stop_gate.rs`),
-  which are NOT among the 363. The binding total is exactly 363 `IgnoredTestRow`s
+  which are NOT among the 362. The binding total is exactly 362 `IgnoredTestRow`s
   (count-guarded + bijective with the source `#[ignore]`s; the ~384 figure is the
   raw `#[ignore]` SITES before macro-family collapse, and `AdditionalProofRow`
   coverage fixtures are excluded from the count); do NOT hard-code a stale absolute,
-  and do NOT settle for a majority/fraction — terminal acceptance requires all 363
+  and do NOT settle for a majority/fraction — terminal acceptance requires all 362
   `Lifted` (parent §10.5 / §12 `all_typeinfo_parity_rows_lifted_except_stop_gates`).
   Plus the B12 typed bench schema: `BenchResultRow`
   (`packages/benchmark/src/cache-runtime-bench.ts`) reporting cache mode /
@@ -2819,14 +2819,14 @@ bridge.
 - **Required deletions:** any remaining legacy entry-point names surfaced by the
   final sweep.
 - **Guards:** the extended two-table-ledger guards (the backing guards on the
-  A0a-landed `typeinfo_ignored_test_manifest.rs`): `ignored_test_row_table_holds_exactly_363_rows`
-  (binding-total + table disjointness), the exact-363 count/bijection guards
+  A0a-landed `typeinfo_ignored_test_manifest.rs`): `ignored_test_row_table_holds_exactly_362_rows`
+  (binding-total + table disjointness), the exact-362 count/bijection guards
   (`total_ignored_typeinfo_test_count_matches_expected` +
   `manifest_length_matches_documented_total` track the DERIVED live
   `count(status == Ignored)` row state, not a hard-coded stale absolute and not a
   tracked-cursor/lease transaction), and the terminal
   **`all_typeinfo_parity_rows_lifted_except_stop_gates`** (asserting every one of the
-  363 `IgnoredTestRow`s is `Lifted` and the only residual `#[ignore]`s are the
+  362 `IgnoredTestRow`s is `Lifted` and the only residual `#[ignore]`s are the
   registered Svelte/React STOP-gates); `merged_interfaces_across_files` 5-property
   test (§9.5) green; Svelte/React STOP-gate guards
   (`svelte_adapter_stop_gate_is_registered_out_of_scope`,
@@ -3098,13 +3098,13 @@ The unified effort is "done" when ALL of the following hold:
   docs) ship; `TypeDescriptor` is a projection; descriptor-bridge deleted.
 - [ ] **`@verter/component-meta`** is a thin `FrameworkSurfacePayload` adapter over
   the graph; the 4 known Vue mismatches are fixed; no second resolver/expander.
-- [ ] **Ignored-test lift:** ALL 363 `IgnoredTestRow`s are `Lifted` (zero remaining
+- [ ] **Ignored-test lift:** ALL 362 `IgnoredTestRow`s are `Lifted` (zero remaining
   parity `#[ignore]`s) per the U0 manifest schedule — NOT a majority/fraction. The
-  binding total is exactly 363 (A0a baseline, count-guarded + bijective; not a
+  binding total is exactly 362 (A0a baseline, count-guarded + bijective; not a
   hard-coded stale absolute and not the ~384 raw `#[ignore]` SITES). The only
   permitted residual `#[ignore]`s are the registered Svelte/React STOP-gate files
-  (not among the 363). The extended two-table-ledger guards assert it
-  (`ignored_test_row_table_holds_exactly_363_rows` +
+  (not among the 362). The extended two-table-ledger guards assert it
+  (`ignored_test_row_table_holds_exactly_362_rows` +
   `all_typeinfo_parity_rows_lifted_except_stop_gates`); Svelte/React STOP-gate files
   present.
 - [ ] **Bench schema:** `BenchResultRow` reports cache mode / source-map policy /
@@ -3126,7 +3126,7 @@ The unified effort is "done" when ALL of the following hold:
 ## 10. Full-replacement terminal acceptance (the ENDGOAL done-bar)
 
 **Fenced from §9 (binding).** **§9 is the typeinfo-parity INCREMENT done-bar** (the
-`U0`–`U15` blocks + the 363-row lift); **§10 is the full-TypeScript-replacement done-bar**
+`U0`–`U15` blocks + the 362-row lift); **§10 is the full-TypeScript-replacement done-bar**
 (the §0.5 foundation / language-service / emit blocks). **Neither loosens the other:** §9
 passing does NOT imply §10 passes, and §10 does NOT relax any §9 gate. §10 is reached only
 AFTER §9 is green AND the native checker + `N1` language service + emit blocks have landed.

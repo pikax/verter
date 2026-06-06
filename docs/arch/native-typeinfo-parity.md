@@ -22,7 +22,7 @@
 > the `SemanticQueryValue::DiagnosticAnalysis(CheckResult)` value arm + the `Check*`
 > query names (§3), the `ExecutableRegionId` / `ExecutableRegionKind::Function` region
 > abstraction, and the `ProgramAnalysisContributor` injection seam (§5) — but do **not**
-> build the checker. It is **not** part of the 363-row parity blocks.
+> build the checker. It is **not** part of the 362-row parity blocks.
 
 The end state is a full native checker-grade typeinfo engine — not a larger
 flow-return patch. It has **one resolver**:
@@ -34,8 +34,8 @@ front-end only.
 **The target is FULL TypeScript-checker-grade type parity** — relation /
 assignability, inference, measured variance, control-flow narrowing, conditional /
 mapped / template reduction, overload resolution, and the cross-engine recursion —
-an **honest multi-person-year scope** (sequencing authority §"Scope"). The **363-row
-ledger (PART 2 §10) tracks COVERAGE / wiring, NOT semantic tsc-parity**: 363-green
+an **honest multi-person-year scope** (sequencing authority §"Scope"). The **362-row
+ledger (PART 2 §10) tracks COVERAGE / wiring, NOT semantic tsc-parity**: 362-green
 proves every row is owned + executably proven + wired ("detects un-wired"), it does
 **not** prove the engine agrees with `tsc`/`tsgo` on the families' SEMANTICS
 ("detects wrong"). **Semantic tsc-parity is gated separately by the differential
@@ -1127,7 +1127,7 @@ block would land on, so that future block is a clean ADDITION rather than a re-s
   diagnostic engine beside those, no diagnostic projection-repair, and no TS
   text-based diagnostic path.
 - **HARD RULE — typeinfo must NOT route through whole-body checking.** The reserved
-  arm / names exist only so a future checker is clean; typeinfo parity (the 363-row
+  arm / names exist only so a future checker is clean; typeinfo parity (the 362-row
   scope) NEVER depends on them. No typeinfo query — `FlowReturn`, `ResolveCall`,
   `ContextualTypeAt`, member projection, or any U2/U6 reducer — may dispatch a
   `Check*` query or whole-body type-check a region to answer a typeinfo request.
@@ -1772,7 +1772,7 @@ shallow-by-default slice cheap at the build boundary, not just at the query boun
   returns it dominates (a `finally` without return preserves them).
 
 **Reserved region abstraction (`ExecutableRegionId` / `ExecutableRegionKind::Function`
-— NON-LIVE beyond functions).** The 363 parity rows need function-body flow plus the
+— NON-LIVE beyond functions).** The 362 parity rows need function-body flow plus the
 existing top-level expression lowering only; the flow graph is NOT generalized to a
 whole `ExecutableRegionGraph` now. The architecture RESERVES a region abstraction so
 `FunctionFlowGraph` is documented as ONE region kind — `ExecutableRegionKind::Function`,
@@ -2222,7 +2222,7 @@ that rule is cross-referenced here, unchanged.
 
 The §6.2 benches gate the COST shape (fallback-count / cache-mode / warm-hit). They do
 **not** gate semantic agreement with TypeScript. **Semantic tsc-parity is gated by the
-differential `tsgo`-parity oracle** — distinct from, and additive to, the 363-row
+differential `tsgo`-parity oracle** — distinct from, and additive to, the 362-row
 coverage ledger (PART 2 §10) and the §6.2 performance benches.
 
 **What it is.** A harness that runs a corpus through **Verter AND the pinned `tsgo`**,
@@ -2244,10 +2244,10 @@ divergence budget**:
   budget is per family (so one family cannot hide behind another's agreement), against
   the pinned `tsgo`.
 
-**Why it replaces the 363 proxy as the semantic gate.** A green 363 ledger proves
+**Why it replaces the 362 proxy as the semantic gate.** A green 362 ledger proves
 **coverage** (every row owned + executably proven + wired — "detects un-wired"). The
 oracle proves **semantic completeness** (the engine computes what `tsc`/`tsgo`
-computes — "detects **wrong**"). Stating `363-green` as tsc-parity is the proxy error
+computes — "detects **wrong**"). Stating `362-green` as tsc-parity is the proxy error
 the oracle closes: the two are distinct claims. The behavioral guards stay (they detect
 un-wired); the oracle is the net-new semantic gate on top.
 
@@ -2262,7 +2262,7 @@ alongside the algorithm-depth design, rather than landing as one monolith.
 the same pinned `tsgo` but gate COST (fallback count / cache mode); the §6.3 oracle
 gates SEMANTIC agreement (per-family divergence). Both ride the pinned `tsgo`; they are
 separate gates. Terminal acceptance (PART 2 §12) requires both green, in addition to the
-363 lift.
+362 lift.
 
 ---
 
@@ -2356,8 +2356,8 @@ substrate:
 
 These six rows add no query keys and no dedicated JSX `GraphTypeNode`. They land as
 `AdditionalProofRow`s (the coverage-only table — they grow JSX coverage beyond the
-original 363 and carry their own coverage-table rows + `ProofRequirement`s, but are
-excluded from the ignored-count + bijection guards, so the binding 363 `IgnoredTestRow`
+original 362 and carry their own coverage-table rows + `ProofRequirement`s, but are
+excluded from the ignored-count + bijection guards, so the binding 362 `IgnoredTestRow`
 total is unchanged). Where a submatrix fixture corresponds to an existing ignored
 `JsxResolution` row it stays in that `IgnoredTestRow` rather than being duplicated.
 
@@ -2472,17 +2472,17 @@ is created. Both tables live in this one module.
 > has only file/function/substrate/unblocker fields — no block/status/proof/guard fields.
 > This architecture does not imply the extended schema already exists.
 
-### 10.1 Two SEPARATE tables: the binding 363 vs additional coverage
+### 10.1 Two SEPARATE tables: the binding 362 vs additional coverage
 
-The binding manifest total is EXACTLY 363 ignored rows. Full-parity coverage adds a
+The binding manifest total is EXACTLY 362 ignored rows. Full-parity coverage adds a
 CLOSED set of exactly 7 coverage-only `AdditionalProofRow`s = the 6 JSX no-new-key
 submatrix rows (owned by `U2.JSX_FOUNDATIONS`) + the 1 mapped companion
 `mapped_modifier_minus_optional_preserves_explicit_undefined_on_required_property`
 (owned by `U2.MAPPED_TEMPLATE`). The set is closed, not growing. Those two facts are
-incoherent if the binding 363 and the additional fixtures share ONE table and ONE
-`EXPECTED_TOTAL_IGNORED_COUNT` — additional rows would either break the exact 363
+incoherent if the binding 362 and the additional fixtures share ONE table and ONE
+`EXPECTED_TOTAL_IGNORED_COUNT` — additional rows would either break the exact 362
 count/bijection or be untracked. The ledger therefore SPLITS into two tables:
-`IgnoredTestRow` holds EXACTLY the 363 ignored test-site rows (count-guarded at 363,
+`IgnoredTestRow` holds EXACTLY the 362 ignored test-site rows (count-guarded at 362,
 bijective with the source `#[ignore]`s), and a SEPARATE coverage-only `AdditionalProofRow`
 table holds EXACTLY the 7 closed coverage rows above. `AdditionalProofRow`s are EXCLUDED
 from the ignored-count + bijection guards (they are not source-`#[ignore]` test sites, so
@@ -2494,7 +2494,7 @@ existing ignored row stays in that `IgnoredTestRow` (it is not duplicated); only
 genuinely NEW fixtures above are `AdditionalProofRow`s.
 
 ```rust
-struct IgnoredTestRow {              // EXACTLY the 363 ignored test-site rows (count-guarded, bijective with source #[ignore]s)
+struct IgnoredTestRow {              // EXACTLY the 362 ignored test-site rows (count-guarded, bijective with source #[ignore]s)
     file: &'static str,
     function: &'static str,
     substrate: TargetSubstrate,
@@ -2612,7 +2612,7 @@ aggregation:
 ### 10.4 U0 row-exact capability→mechanism→proof coverage table (DEFINES completeness)
 
 The proof guards prove a row's declared proof EXISTS, RUNS, and is CONSUMED — but NOT that
-the row is wired to the architecture MECHANISM intended to lift it. To make 363-row
+the row is wired to the architecture MECHANISM intended to lift it. To make 362-row
 full-parity completeness MECHANICAL, U0 GENERATES and CHECKS a row-exact coverage table that
 maps EVERY manifest row through its full mechanism chain:
 
@@ -2632,15 +2632,15 @@ row (file::function)
   dedicated `cargo run` generator and checked in (same discipline as the oracle rows, the
   proof registry, and the row-test wrapper). One coverage row per manifest row; a row whose
   `mechanism_id` cannot be resolved (or resolves to a placeholder) fails generation. The
-  authoritative `row → block_id` projection of this table over all 363 `IgnoredTestRow`s is
+  authoritative `row → block_id` projection of this table over all 362 `IgnoredTestRow`s is
   enumerated in full in §10.4.1; each subplan's `Exact test rows lifted` list is the
   per-block slice of that partition.
-- **Completeness is DEFINED by this table over the 363 `IgnoredTestRow`s PLUS every
+- **Completeness is DEFINED by this table over the 362 `IgnoredTestRow`s PLUS every
   `AdditionalProofRow`.** Full-parity completeness IS this row-exact coverage table being
   complete and non-placeholder over all rows in both tables. A "missing TS rule" is exactly
   one of two mechanically-detectable things: (a) a row (in either table) whose `mechanism_id`
   the guard REJECTS as a placeholder (an unimplemented / `todo` / `unknown` mechanism — a
-  genuine gap), or (b) a genuinely NEW fixture not among the 363, handled by the SEPARATE
+  genuine gap), or (b) a genuinely NEW fixture not among the 362, handled by the SEPARATE
   `AdditionalProofRow` table. There is no third "we think it's covered" state.
 - **Gate: a block's rows cannot flip to `Lifted` until their coverage is complete +
   non-placeholder.** The coverage table is a CI PRECONDITION on every block branch: the
@@ -2675,13 +2675,13 @@ coverage guard set): the guard FAILS — and so fails CI on the block's branch, 
 merge — for any block whose rows are flipped `Lifted` while their coverage is not complete +
 non-placeholder.
 
-This closes the completeness class: 363-row full parity is not probed by sampling — it is the
+This closes the completeness class: 362-row full parity is not probed by sampling — it is the
 mechanical property "the generated coverage table is complete and non-placeholder over every
 manifest row in both tables, each mapped to the expected capability mechanism, before any
-block's rows lift" — while the binding 363 total stays a separate, exact count/bijection over
+block's rows lift" — while the binding 362 total stays a separate, exact count/bijection over
 the `IgnoredTestRow` table alone.
 
-### 10.4.1 The authoritative U0 row → `block_id` partition (all 363 rows)
+### 10.4.1 The authoritative U0 row → `block_id` partition (all 362 rows)
 
 **Framing — the numbering is the coverage layering; the architecture is mechanism-first.**
 The `U0`–`U15` block numbering is the **execution / coverage bucket** layering — the
@@ -2701,9 +2701,9 @@ bucket is split into per-mechanism sub-blocks (`U6.NARROW_*`).
 
 This is the **authoritative, exhaustive** `row → block_id` map the U0 coverage-table
 generator emits and `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`
-checks. It is a total function over the 363 `IgnoredTestRow`s: **every** row appears exactly
+checks. It is a total function over the 362 `IgnoredTestRow`s: **every** row appears exactly
 once under exactly one owning `block_id`, no row is owned by two blocks, and the union is
-exactly the 363 manifest rows. Each subplan's `Exact test rows lifted` list is the projection
+exactly the 362 manifest rows. Each subplan's `Exact test rows lifted` list is the projection
 of this partition onto that block — the two must agree row-for-row, enforced by
 `capability_rows_map_to_expected_query_fact_mechanisms` (each row's owning block matches its
 capability's expected mechanism) and the bijection/count guards (§10.5).
@@ -2713,23 +2713,23 @@ The owning `block_id` for each row is its **dominant mechanism** per the Capabil
 a capability, and the capability's row-level mechanism (a `mechanism_id` such as
 `Relate.coinductive_scc`, `IndexedAccess.union_distribution`, `ReturnPathPeeker.two_frontier`,
 `ResolveDeclarationAugmentation.declaration_analysis`, `ResolveAmbientNamespace.jsx_namespace`)
-fixes the single owning block. The per-block counts (summing to 363) are:
+fixes the single owning block. The per-block counts (summing to 362) are:
 
 | Owning `block_id` | Rows | Owning `block_id` | Rows |
 |---|---:|---|---:|
 | `U2.RELATION_INFER` | 20 | `U6.NARROW_*` (8 sub-blocks, below) | 104 |
 | `U2.UTILITIES` | 42 | `U6.PREDICATE_ASSERTION` | 3 |
-| `U2.INDEXED_ACCESS` | 16 | `U6.CALL_RESOLVE` | 19 |
+| `U2.INDEXED_ACCESS` | 16 | `U6.CALL_RESOLVE` | 21 |
 | `U2.MAPPED_TEMPLATE` | 16 | `U6.CONTEXTUAL_CALLBACK` | 15 |
 | `U2.CLASS_SURFACES` | 52 | `U6.VALUE_INFERENCE` | 1 |
 | `U2.ENUMS` | 7 | `U6.ASYNC_GENERATOR` | 1 |
-| `U2.MODULE_AUGMENTATION` | 11 | `U6.CROSS_FILE` | 6 |
+| `U2.MODULE_AUGMENTATION` | 8 | `U6.CROSS_FILE` | 6 |
 | `U2.JSX_FOUNDATIONS` | 9 | `U6.LOOP_CLOSURE` | 3 |
 | `U6.FLOW_RETURN_SUBSTRATE` | 7 | `U3.CACHE_FACT_MODEL` | 3 |
 | `U10.RESULT_DB` | 13 | `U11.PUBLIC_RELATION_SESSION` | 9 |
 | `U14.MACRO_ADAPTER` | 1 | `U15.FINAL_LIFT` | 5 |
 
-Sum = 363 (the `U6.NARROW_*` bucket contributes its 104 rows as the sum of the eight
+Sum = 362 (the `U6.NARROW_*` bucket contributes its 104 rows as the sum of the eight
 sub-blocks below). The narrowing bucket is split per-mechanism (mechanism-first
 framing, above) into eight `U6.NARROW_*` sub-blocks; each of the former
 `U6.NARROWING` block's 104 rows is assigned to exactly ONE sub-block by its dominant
@@ -2756,7 +2756,7 @@ they build substrate (ledger / keys / wire / exporter / projection) the owning b
 their rows through; their `Exact test rows lifted` is explicitly `none`.
 
 The complete partition (each entry `file::function — substrate`):
-<!-- BEGIN U0 row→block coverage table (363 rows). Generated by the U0 coverage-table generator from
+<!-- BEGIN U0 row→block coverage table (362 rows). Generated by the U0 coverage-table generator from
      crates/verter_session/tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs; do not hand-edit. -->
 
 **`U2.RELATION_INFER`** (20 rows):
@@ -2930,14 +2930,11 @@ The complete partition (each entry `file::function — substrate`):
 - `enums.rs::enum_string_member_resolves_to_branded_string_literal` — `EnumResolution`
 - `enums.rs::enum_template_literal_over_string_enum_produces_value_union` — `EnumResolution`
 
-**`U2.MODULE_AUGMENTATION`** (11 rows):
+**`U2.MODULE_AUGMENTATION`** (8 rows):
 
 - `modern_ts_features.rs::import_attribute_simulated_resolves_imported_json_shape` — `ModernTsFeatures`
 - `modern_ts_features.rs::import_attribute_simulated_string_literal_indexed_member` — `ModernTsFeatures`
 - `module_features.rs::module_features_cjs_export_equals_resolves_to_carrier` — `ModuleFeatures`
-- `module_features.rs::module_features_declare_global_merges_two_blocks` — `ModuleFeatures`
-- `module_features.rs::module_features_external_module_augmentation_merges_config` — `ModuleFeatures`
-- `module_features.rs::module_features_module_augmentation_merges_plugin_surface` — `ModuleFeatures`
 - `module_features.rs::module_features_namespace_geometry_vector_aliases_point` — `ModuleFeatures`
 - `module_features.rs::module_features_namespace_interface_merge_namespace_value_resolves_to_literal` — `ModuleFeatures`
 - `module_features.rs::module_features_typeof_import_default_resolves_value_shape` — `ModuleFeatures`
@@ -3100,7 +3097,7 @@ The complete partition (each entry `file::function — substrate`):
 - `substitution_types.rs::substitution_types_sb09_asserts_x_is_string_on_generic` — `TypeParameterFeatures`
 - `substitution_types.rs::substitution_types_sb10_x_is_t_predicate_on_generic` — `TypeParameterFeatures`
 
-**`U6.CALL_RESOLVE`** (19 rows):
+**`U6.CALL_RESOLVE`** (21 rows):
 
 - `call_resolution.rs::call_resolution_extracted_prototype_method_call_returns_declared_return` — `CallResolution`
 - `call_resolution.rs::call_resolution_generic_infers_from_callback_return_type` — `CallResolution`
@@ -3108,6 +3105,8 @@ The complete partition (each entry `file::function — substrate`):
 - `call_resolution.rs::call_resolution_generic_infers_object_literal_including_excess_properties` — `CallResolution`
 - `call_resolution.rs::call_resolution_optional_overload_picks_first_arity_matching_signature` — `CallResolution`
 - `call_resolution.rs::call_resolution_optional_overload_picks_two_arg_signature_when_required` — `CallResolution`
+- `call_resolution.rs::call_resolution_rest_overload_picks_rest_signature_when_required` — `CallResolution`
+- `call_resolution.rs::call_resolution_union_argument_picks_union_compatible_overload` — `CallResolution`
 - `call_resolution.rs::call_resolution_specific_literal_argument_picks_matching_overload_first` — `CallResolution`
 - `call_resolution.rs::call_resolution_specific_literal_argument_skips_non_matching_first_overload` — `CallResolution`
 - `call_resolution.rs::call_resolution_this_receiver_method_call_returns_declared_return` — `CallResolution`
@@ -3208,12 +3207,12 @@ The complete partition (each entry `file::function — substrate`):
 - `message_list_like.rs::message_list_like_extracts_pick_from_inferred_array_element` — `CompositeSurfaces`
 - `message_list_like.rs::message_list_like_slot_remaps_payload_with_message_context` — `CompositeSurfaces`
 - `table_like.rs::table_like_dynamic_slot_projection_uses_template_literal_keys` — `CompositeSurfaces`
-<!-- END U0 row→block coverage table. Union = 363 unique IgnoredTestRows, each owned by exactly one block_id. -->
+<!-- END U0 row→block coverage table. Union = 362 unique IgnoredTestRows, each owned by exactly one block_id. -->
 
-### 10.5 The exact-363 count and bijection
+### 10.5 The exact-362 count and bijection
 
 `EXPECTED_TOTAL_IGNORED_COUNT` is ALWAYS exactly `count(IgnoredTestRow where status ==
-Ignored)`; it is 363 at U0. It is NOT a frozen constant that lags the row states — it is the
+Ignored)`; it is 362 at U0. It is NOT a frozen constant that lags the row states — it is the
 live count of `Ignored` `IgnoredTestRow`s, and the block branch that changes how many are
 `Ignored` updates it IN THE SAME BRANCH (and so in the same squash-merge) so the count guard
 never observes a disagreement in any committed state. The count and bijection are over the
@@ -3237,12 +3236,12 @@ exactly equal `IgnoredTestRow`s with `status == Ignored`, and that set must also
 
 The two-table split is pinned by a dedicated binding-total count guard:
 
-- **`ignored_test_row_table_holds_exactly_363_rows`** — asserts the `IgnoredTestRow` table holds
-  EXACTLY 363 rows (the binding manifest total), DISJOINT from the `AdditionalProofRow` table; no
+- **`ignored_test_row_table_holds_exactly_362_rows`** — asserts the `IgnoredTestRow` table holds
+  EXACTLY 362 rows (the binding manifest total), DISJOINT from the `AdditionalProofRow` table; no
   `AdditionalProofRow` participates in `EXPECTED_TOTAL_IGNORED_COUNT` or the bijection; and the two
   tables are disjoint (no `(file, function)` identity in both — a submatrix/additional fixture
   corresponding to an existing ignored row stays an `IgnoredTestRow`, never duplicated). An
-  `IgnoredTestRow` count other than 363, an `AdditionalProofRow` counted toward the ignored total
+  `IgnoredTestRow` count other than 362, an `AdditionalProofRow` counted toward the ignored total
   or bijection, or a `(file, function)` in both tables, FAILS.
 
 - **`additional_proof_row_table_holds_exactly_7_rows`** — asserts the `AdditionalProofRow` table
@@ -3763,20 +3762,20 @@ driving orchestrator, so it does not trip the R6 meta-guard (which requires a gu
 
 # Capability Map
 
-The binding total is **363** `IgnoredTestRow`s. (Stale/non-authoritative counts: 356 and 371; 384 is the raw `#[ignore]` line
-count including macro/body/non-site lines. U0 rederives 363 with the manifest parser; the manifest is authoritative.) The
-substrate row counts below are the `IgnoredTestRow` rows per substrate (they sum to 363). Additional coverage is the CLOSED set
+The binding total is **362** `IgnoredTestRow`s. (Stale/non-authoritative counts: 356 and 371; 384 is the raw `#[ignore]` line
+count including macro/body/non-site lines. U0 rederives 362 with the manifest parser; the manifest is authoritative.) The
+substrate row counts below are the `IgnoredTestRow` rows per substrate (they sum to 362). Additional coverage is the CLOSED set
 of exactly 7 coverage-only `AdditionalProofRow`s — the 6 JSX no-new-key submatrix rows (`U2.JSX_FOUNDATIONS`) + the 1 mapped
 companion `mapped_modifier_minus_optional_preserves_explicit_undefined_on_required_property` (`U2.MAPPED_TEMPLATE`) — held in the
 SEPARATE coverage-only `AdditionalProofRow` table (pinned closed-at-7 by `additional_proof_row_table_holds_exactly_7_rows`),
-excluded from this 363 count + the source-`#[ignore]` bijection.
+excluded from this 362 count + the source-`#[ignore]` bijection.
 
 | Capability class / manifest substrate | Rows | Architecture component | Owning U-block |
 |---|---:|---|---|
 | `FlowNarrowing` | 104 | demand-sliced flow/narrowing | U6 |
 | `ContextualTyping` | 13 | contextual expected-type propagation | U6 |
 | `ValueInference` | 7 | value inference/widening | U6 |
-| `CallResolution` | 28 | overload/call/generic inference | U6, with U2 overload key |
+| `CallResolution` | 30 | overload/call/generic inference | U6, with U2 overload key |
 | `TypeParameterFeatures` | 17 | substitution/const/variance/NoInfer | row-level U2/U6 |
 | `ConditionalInfer` | 8 | conditional + relation infer | U2 |
 | `TupleFeatures` | 10 | tuple/rest/labels/infer | U2 |
@@ -3793,7 +3792,7 @@ excluded from this 363 count + the source-`#[ignore]` bijection.
 | `ClassFeatures` | 13 | class surface + method flow | row-level U2/U6 |
 | `EnumResolution` | 7 | enum value/type duality | U2 |
 | `UniqueSymbol` | 2 | nominal unique symbol | U2 |
-| `ModuleFeatures` | 9 | merge/ambient/augmentation/modules | U2 |
+| `ModuleFeatures` | 6 | merge/ambient/augmentation/modules | U2 |
 | `JsxResolution` | 9 | JSX namespace/component resolution | U2/U14 |
 | `CrossFileResolution` | 3 | route/import demand facts | U3/U6 |
 | `CacheInvalidation` | 6 | fact validation/route invalidation | U3/U10/U11 |
@@ -3804,7 +3803,7 @@ excluded from this 363 count + the source-`#[ignore]` bijection.
 | `MacroResolution` | 1 | framework macro graph adapter | U14 |
 | `CompositeSurfaces` | 5 | end-to-end adapter surfaces | U15 |
 
-## The un-ignore / guarantee protocol over the 363 rows
+## The un-ignore / guarantee protocol over the 362 rows
 
 The real un-ignore sets must be **row-exact in the manifest**, not inferred from substrate alone. Indicative file groupings:
 
@@ -3816,14 +3815,14 @@ The real un-ignore sets must be **row-exact in the manifest**, not inferred from
 - **Lifted with U3/U10/U11:** `cache_invalidation.rs`, `footprint.rs`, `demand_boundary.rs`, `mode_boundary_invariants.rs`.
 - **Finished in U14/U15:** `basic.rs`, `menu_like.rs`, `message_list_like.rs`, `table_like.rs`.
 
-The guarantee over the 363 rows is the composition of: the two-table ledger (§10) with the exact-363 count + bijection (§10.5);
+The guarantee over the 362 rows is the composition of: the two-table ledger (§10) with the exact-362 count + bijection (§10.5);
 the U0 row-exact capability→mechanism→proof coverage table (§10.4) that DEFINES completeness mechanically; the per-row executable
 `ProofRequirement` with the generated proof registry + row-test wrapper (§10.2, §10.3); the git/CI landing protocol (§11) —
 branch per block → green CI (full Rust+JS gate + coverage/proof/required/DAG guards) → three-reviewer LAND → squash-merge with
 the `Typeinfo-Block:` trailer; the no-skip guarantee (§12); and the git/manifest-driven, parallel-safe resume protocol (§14). A
 block lifts only its exact manifest rows, its rows can flip `Lifted` only after its coverage is complete + non-placeholder, and
 it reaches `Lifted` + merged trailer only after a green CI gate over the exact branch content + the three-reviewer LAND — so the
-363-row parity is mechanically tracked from `Ignored` to `Lifted`, never skipped and never vacuously satisfied.
+362-row parity is mechanically tracked from `Ignored` to `Lifted`, never skipped and never vacuously satisfied.
 
 ---
 
@@ -4020,7 +4019,7 @@ design-intent names for keys whose closure guards land alongside their reducers:
 - `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`
 - `capability_rows_map_to_expected_query_fact_mechanisms`
 - `block_rows_cannot_lift_without_complete_coverage` (a branch flipping rows `Lifted` without complete coverage fails CI)
-- `ignored_test_row_table_holds_exactly_363_rows`
+- `ignored_test_row_table_holds_exactly_362_rows`
 - `additional_proof_row_table_holds_exactly_7_rows`
 - the source-`#[ignore]` ↔ `Ignored`-rows ↔ `EXPECTED_TOTAL_IGNORED_COUNT` bijection/count guards
 - `no_landed_typeinfo_block_has_live_ignored_rows`
@@ -4075,7 +4074,7 @@ These doc-update obligations land as part of the work. The four against the
 unified-plan integration step (the U0-time reconciliation of the unified plan with
 this architecture) — have been **APPLIED**: the unified plan now indexes this
 parent and all four children, carries the two-table-ledger U0 entry, requires all
-363 `IgnoredTestRow`s `Lifted`, and registers the five added keys + the generalized
+362 `IgnoredTestRow`s `Lifted`, and registers the five added keys + the generalized
 augmentation key. The cross-references are therefore **bidirectional and accurate**:
 the unified plan links out to every subplan, and every subplan links back to the
 unified plan and to this parent. The two remaining obligations below (the U6 doc
@@ -4095,9 +4094,9 @@ unified-plan edits are applied directly in `semantic-db-overhaul-unified-remaini
     `ProofRequirement`, the proof registry + row-test wrapper, the §10.4 / §10.4.1 row-exact coverage table, and the git/CI
     landing protocol (§§11–14) — branch per block → green CI → three-reviewer LAND → squash-merge with the `Typeinfo-Block:`
     trailer (no tracked `.cutover-state.typeinfo_parity` cursor; git=log, branch-protection=accept, revert=rollback).
-  - **(c) Require ALL 363 `IgnoredTestRow`s lifted in U15 + the §9 terminal checklist (not a majority/fraction) — DONE.** The
-    unified plan's U15 + §9 terminal checklist now require EVERY one of the 363 `IgnoredTestRow`s `Lifted` (zero parity ignores),
-    with the ONLY permitted residual `#[ignore]`s being the registered Svelte/React STOP-gate files (which are not among the 363) —
+  - **(c) Require ALL 362 `IgnoredTestRow`s lifted in U15 + the §9 terminal checklist (not a majority/fraction) — DONE.** The
+    unified plan's U15 + §9 terminal checklist now require EVERY one of the 362 `IgnoredTestRow`s `Lifted` (zero parity ignores),
+    with the ONLY permitted residual `#[ignore]`s being the registered Svelte/React STOP-gate files (which are not among the 362) —
     the terminal acceptance §10.5 / §13 / `all_typeinfo_parity_rows_lifted_except_stop_gates` define.
   - **(d) Register the new query surface — DONE.** The unified plan registers all five new query keys (`FlowReturn`,
     `ResolveClassSurface`, `ApparentType`, `TemplateLiteralReduce`, `ResolveCall`) in its U2/U6 sections; registers the GENERALIZED
@@ -4125,7 +4124,7 @@ unified-plan edits are applied directly in `semantic-db-overhaul-unified-remaini
 
 ## Resolved positions (carried forward)
 
-- **Count:** 363 is binding. U0 rederives it with the manifest parser. 356/371 are stale; 384 is the raw line count.
+- **Count:** 362 is binding. U0 rederives it with the manifest parser. 356/371 are stale; 384 is the raw line count.
 - **U2 sizing:** no `U2.5`. U2 gets child blocks, but downstream U3/U8 stay blocked until the whole U2 parent is done.
 - **New query count:** exactly five beyond the U2 seven — `FlowReturn`, `ResolveClassSurface`, `ApparentType`,
   `TemplateLiteralReduce`, `ResolveCall`. `ResolveCall` is first-class because call resolution is reusable semantic work with its

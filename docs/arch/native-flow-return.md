@@ -193,7 +193,7 @@ edges are **typed**, one edge class per dependence kind:
 a future block could add other region kinds (module top-level, class static blocks,
 field / parameter initializers, decorator expressions, top-level await, template
 regions) WITHOUT re-shaping the planner. Those other kinds are NAMED as future and are
-**not implemented**: the 363 parity rows need function-body flow plus the existing
+**not implemented**: the 362 parity rows need function-body flow plus the existing
 top-level expression lowering only. The reserved `ProgramAnalysisContributor` /
 `SemanticContribution` injection seam (future typed facts `InjectedBinding` /
 `InjectedNarrowingFact` / `InjectedContextualType` / `InjectedRelation` feeding
@@ -1046,7 +1046,7 @@ Exact test rows lifted (capability `ContextualTyping`, `contextual_typing.rs`; t
 - contextual_typing.rs::contextual_typing_ct15_contextual_type_via_type_parameter_constraint
 - flow_return_catalog.rs::flow_return_ho09_keeps_unknown_declared_callback_result_opaque
 
-(15 rows: the 13 `contextual_typing.rs` manifest rows, the one `flow_return_catalog.rs` higher-order manifest row `flow_return_ho09_keeps_unknown_declared_callback_result_opaque` (the audited-degraded declared-callback case whose mechanism is the nested-callback contextual-typing frame), plus the one `call_resolution.rs` row `call_resolution_contextual_callback_return_picks_first_overload` — moved here from U2.CLASS_SURFACES because its dominant mechanism is the nested-callback contextual-typing frame (the callback's contextual return drives the outer overload selection), not a U2 SHAPE reducer. The remaining higher-order callback catalog rows in `flow_return_catalog.rs` / `flow_return_edge_catalog.rs` (`ho*`) are un-ignored as the catalog macros convert and are NOT among the 363 `IgnoredTestRow`s; §10.4.1 assigns each manifest row to exactly one `block_id` by mechanism.)
+(15 rows: the 13 `contextual_typing.rs` manifest rows, the one `flow_return_catalog.rs` higher-order manifest row `flow_return_ho09_keeps_unknown_declared_callback_result_opaque` (the audited-degraded declared-callback case whose mechanism is the nested-callback contextual-typing frame), plus the one `call_resolution.rs` row `call_resolution_contextual_callback_return_picks_first_overload` — moved here from U2.CLASS_SURFACES because its dominant mechanism is the nested-callback contextual-typing frame (the callback's contextual return drives the outer overload selection), not a U2 SHAPE reducer. The remaining higher-order callback catalog rows in `flow_return_catalog.rs` / `flow_return_edge_catalog.rs` (`ho*`) are un-ignored as the catalog macros convert and are NOT among the 362 `IgnoredTestRow`s; §10.4.1 assigns each manifest row to exactly one `block_id` by mechanism.)
 
 Required new guards (parent §§4.6, 5):
 - `callback_contextual_typing_does_not_pollute_caller_frame` — `arr.reduce((acc, item) => ({...acc, [item.k]: item.v}), {} as Record<string, V>)` fixes `acc` to `Record<string, V>` via contextual typing; the callback return does not pollute the explicit `Record<string, V>`.
@@ -1213,7 +1213,7 @@ Exact test rows lifted (capability `FlowNarrowing` cross-file subset, `flow_retu
 - flow_return_catalog.rs::flow_return_xf06_keeps_value_type_namespace_separate
 - flow_return_catalog.rs::flow_return_xf09_terminates_cross_file_recursive_returns
 
-(6 rows — the six `flow_return_catalog.rs` `xf*` cross-file value-return rows. The three `cross_file.rs` rows (`cross_file_projected_item_resolves_local_extension`, `cross_file_projected_extra_resolves_number_terminal`, `cross_file_label_parameter_resolves_local_item`) carry the `CrossFileResolution` substrate (U3/U6 split in the Capability Map) and are owned by `docs/arch/native-typeinfo-parity-cache-export-session.md::U3.CACHE_FACT_MODEL` — their dominant mechanism is the route-fact / cross-file indexed-access projection path, not the flow-return slice — so they are NOT listed here (§10.4.1). This block's `xf*` rows still route every cross-file value-symbol lookup through `resolver_core`. The path-precise `fp*` rows of `flow_return_path_contracts.rs` and the module-augmentation `mp*` parity rows are un-ignored as the path / parity macros convert and are NOT among the 363 `IgnoredTestRow`s. The `flow_return_catalog.rs` `ho09` row is owned by U6.CONTEXTUAL_CALLBACK.)
+(6 rows — the six `flow_return_catalog.rs` `xf*` cross-file value-return rows. The three `cross_file.rs` rows (`cross_file_projected_item_resolves_local_extension`, `cross_file_projected_extra_resolves_number_terminal`, `cross_file_label_parameter_resolves_local_item`) carry the `CrossFileResolution` substrate (U3/U6 split in the Capability Map) and are owned by `docs/arch/native-typeinfo-parity-cache-export-session.md::U3.CACHE_FACT_MODEL` — their dominant mechanism is the route-fact / cross-file indexed-access projection path, not the flow-return slice — so they are NOT listed here (§10.4.1). This block's `xf*` rows still route every cross-file value-symbol lookup through `resolver_core`. The path-precise `fp*` rows of `flow_return_path_contracts.rs` and the module-augmentation `mp*` parity rows are un-ignored as the path / parity macros convert and are NOT among the 362 `IgnoredTestRow`s. The `flow_return_catalog.rs` `ho09` row is owned by U6.CONTEXTUAL_CALLBACK.)
 
 Required new guards (parent §5):
 - `cross_file_flow_routes_via_resolver_core` — greps the `flow_return` module for any non-`resolver_core` cross-file lookup; fails if one appears.
@@ -1271,7 +1271,7 @@ Exact test rows lifted (capability `FlowNarrowing` loop / closure / control-flow
 - flow_invalidations.rs::flow_invalidations_fi06_finally_return_overrides_try_catch_returns
 - flow_invalidations.rs::flow_invalidations_fi07_finally_without_return_preserves_try_catch
 
-(3 rows. These three `flow_invalidations` rows are owned EXCLUSIVELY by this block (§10.4.1): `fi03` (closure capture), `fi06` / `fi07` (try / finally control-return override) — their dominant mechanism is the closure barrier / control-flow surface, not the narrowing lattice, so they are NOT listed under any `U6.NARROW_*` sub-block. The narrowing-preservation rows that are NOT loop / closure / control-flow — `fi01`, `fi02`, `fi04`, `fi05`, `fi09` — are owned by U6.NARROW_INVALIDATION (the `fi08` assertion-effect-on-dotted-path row is owned by U6.PREDICATE_ASSERTION by its dominant mechanism — §10.4.1). The loop / break / control-flow catalog rows in `flow_return_catalog.rs` / `flow_return_edge_catalog.rs` (`cf*`, `bl15` divergent-loop, `lr10`/`lr16` closure-capture) and the parity `tp08` try / finally + callback-return row are un-ignored as the catalog macros convert and are NOT among the 363 `IgnoredTestRow`s; §10.4.1 assigns each manifest row to exactly one `block_id` by mechanism.)
+(3 rows. These three `flow_invalidations` rows are owned EXCLUSIVELY by this block (§10.4.1): `fi03` (closure capture), `fi06` / `fi07` (try / finally control-return override) — their dominant mechanism is the closure barrier / control-flow surface, not the narrowing lattice, so they are NOT listed under any `U6.NARROW_*` sub-block. The narrowing-preservation rows that are NOT loop / closure / control-flow — `fi01`, `fi02`, `fi04`, `fi05`, `fi09` — are owned by U6.NARROW_INVALIDATION (the `fi08` assertion-effect-on-dotted-path row is owned by U6.PREDICATE_ASSERTION by its dominant mechanism — §10.4.1). The loop / break / control-flow catalog rows in `flow_return_catalog.rs` / `flow_return_edge_catalog.rs` (`cf*`, `bl15` divergent-loop, `lr10`/`lr16` closure-capture) and the parity `tp08` try / finally + callback-return row are un-ignored as the catalog macros convert and are NOT among the 362 `IgnoredTestRow`s; §10.4.1 assigns each manifest row to exactly one `block_id` by mechanism.)
 
 Required new guards (parent §5, §6):
 - `no_caching_of_partial_or_budget_exceeded_results` — cycle-sentinel / loop-budget / cancellation / supersession results route through `CacheAdmission` non-admission, not warmed (the loop case extends the substrate's `flow_slice_budget_exceeded_admits_nothing`).
@@ -1381,7 +1381,7 @@ through `ProgramAnalysisGraph`, and U11 surfaces the audit footprint through the
 `AuditedResult` carrier.
 
 The whole-subplan parity guarantee is the parent's composition (Capability Map →
-"the guarantee over the 363 rows"): the two-table ledger with the exact-363 count +
+"the guarantee over the 362 rows"): the two-table ledger with the exact-362 count +
 bijection (PART 2 §§10.1, 10.5); the U0 row-exact coverage table that DEFINES
 completeness (PART 2 §10.4); the per-row executable `ProofRequirement` with the
 generated proof registry + row-test wrapper (PART 2 §§10.2–10.3); the git/CI landing
@@ -1394,4 +1394,4 @@ twice — the `FlowNarrowing` (104), `ContextualTyping` (13), and `ValueInferenc
 (17), `ModernTsFeatures` (6), `TypeScriptRules` (11), `ApparentTypes` (20), and
 `ClassFeatures` (13) are row-level split with U2 (and `CrossFileResolution` (3)
 with U3) — this subplan's U6 blocks own only the rows whose coverage `block_id` is a
-U6 block, and the binding 363 total stays exact.
+U6 block, and the binding 362 total stays exact.

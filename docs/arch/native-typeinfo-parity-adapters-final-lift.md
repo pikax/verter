@@ -35,7 +35,7 @@ It owns the parity blocks landing in **U14, U15**:
    — every `IgnoredTestRow` `Lifted` (zero stale ignored rows except the explicit
    STOP-gates), every `AdditionalProofRow` covered, the unified §9 terminal
    acceptance satisfied for the parity scope, and a green full workspace (CI) gate.
-   Parent authority: the Capability Map → "The guarantee over the 363 rows", PART 2
+   Parent authority: the Capability Map → "The guarantee over the 362 rows", PART 2
    §§10–14 (the two-table ledger, the coverage table, the git/CI landing protocol, the
    no-skip guarantee, the resume protocol).
 
@@ -65,7 +65,7 @@ U14.MACRO_ADAPTER   (thin FrameworkSurfacePayload adapter + registry; compat pro
         │
         ▼
 U15.FINAL_LIFT      (LSP/MCP/playground integrations + CompositeSurfaces rows + STOP-gates + bench schema +
-                     final sweep + TERMINAL ACCEPTANCE over all 363 IgnoredTestRows)
+                     final sweep + TERMINAL ACCEPTANCE over all 362 IgnoredTestRows)
 ```
 
 `U14.MACRO_ADAPTER` consumes the U13 published `GraphTypeNode` / `TypeDescriptor`
@@ -80,7 +80,7 @@ the final acceptance that confirms every parity row is `Lifted`.
 
 These two blocks own exactly the rows whose coverage `block_id` is one of their
 blocks; no row is owned twice with any other subplan (Capability Map; PART 2
-§§10.4–10.5). The split, stated explicitly so the binding 363 `IgnoredTestRow`
+§§10.4–10.5). The split, stated explicitly so the binding 362 `IgnoredTestRow`
 total stays exact:
 
 - **`MacroResolution` (1)** — the single framework-macro graph-adapter row
@@ -105,7 +105,7 @@ These two blocks therefore lift exactly **6** `IgnoredTestRow`s combined
 partition (the generated coverage table, PART 2 §10.4) is the authority: each row
 maps to exactly one `block_id` via its `mechanism_id`, and
 `capability_rows_map_to_expected_query_fact_mechanisms` asserts the mapping is
-consistent with the capability. The binding 363 total stays exact.
+consistent with the capability. The binding 362 total stays exact.
 
 ---
 
@@ -197,17 +197,17 @@ Changes (exact files / functions):
 - `crates/verter_lsp/src/features/hover.rs` + `crates/verter_lsp/src/features/completion.rs` (the LSP hover → graph+display and completion → framework-surface providers) — wire hover to the published `TypeInfoGraphPayload` (graph + display) and completion to the `FrameworkSurfacePayload`, each a thin consumer of the U13 projection + the U14 adapter through the shared host path.
 - `crates/verter_mcp/src/server.rs` (+ a new `crates/verter_mcp/src/tools/typeinfo.rs` module) — register the MCP `typeinfo.*` / `component-meta.*` tools that expose the published surface + the framework adapter (one async native request per query; no second resolver in the tool layer). The `crates/verter_mcp_server/src/main.rs` binary mounts them unchanged.
 - New file: `packages/playground/src/components/TypeExplorer.vue` (the playground type-explorer surface) — reads the published `TypeInfoGraphPayload` structurally; wired into `packages/playground/src/App.vue`.
-- New files: `crates/verter_session/src/typeinfo/typeinfo_tests/svelte_adapter_stop_gate.rs` + `crates/verter_session/src/typeinfo/typeinfo_tests/react_adapter_stop_gate.rs` (registered in `crates/verter_session/src/typeinfo/typeinfo_tests/mod.rs`) — the Svelte/React STOP-gate files (the explicit out-of-scope adapters whose `#[ignore]`s are the only permitted residual ignored sites after the final lift; they are STOP-gates, not parity rows in the 363).
+- New files: `crates/verter_session/src/typeinfo/typeinfo_tests/svelte_adapter_stop_gate.rs` + `crates/verter_session/src/typeinfo/typeinfo_tests/react_adapter_stop_gate.rs` (registered in `crates/verter_session/src/typeinfo/typeinfo_tests/mod.rs`) — the Svelte/React STOP-gate files (the explicit out-of-scope adapters whose `#[ignore]`s are the only permitted residual ignored sites after the final lift; they are STOP-gates, not parity rows in the 362).
 - New files: `packages/benchmark/src/cache-runtime-bench.ts` (`BenchResultRow`) + the vendored component-meta corpus benches (`component_meta_cold` / `component_meta_warm`, alongside the existing `packages/benchmark/src/component-meta-artifact.ts`) + `crates/verter_session/src/test_support/timeout.rs` (`MAX_TEST_TIMEOUT`, in a new `test_support` module registered in `crates/verter_session/src/lib.rs`) — the typed bench schema reporting cache mode / source-map policy / batch shape / thread count / hit count / fallback count over VENDORED corpora (Testing-Hermeticity: no `.integration-tests/repos/<third-party>/`).
 - New files (the PART 1 §6.2 performance-contract benches — perf-regression-gated terminal acceptance): `packages/benchmark/src/verter-vs-tsgo-bench.ts` — the **Verter-vs-TS/tsgo benchmark fixtures** running Verter and TS/tsgo over the SAME semantic queries (component-meta resolution, projected typeinfo, IDE hover/completion queries, selected member expansion — `Pick`/`Omit`/a single demanded member off a large surface, and the `ReturnType<typeof f>["b"]` demand-slice case), each reported with the `BenchResultRow` contract (cache mode / source-map policy / batch shape / thread count / hit count / fallback count) so the comparison is apples-to-apples; and `crates/verter_session/src/test_support/perf_contract.rs` (registered in the `test_support` module) — the **per-family fallback-bound benches** declaring each query family's (`FlowReturn` / `ResolveCall` / `Relate` / `Instantiate` / `Conditional` / `MappedType` / `ResolveClassSurface` / `ApparentType` / `TemplateLiteralReduce` / the projection·demand-lattice families) fallback-count bound on the vendored corpus and FAILING the bench when a family's `BenchResultRow.fallback` count exceeds its bound (the governing-rule metric: fallback ENTRY rate, not fallback latency). All over VENDORED corpora (Testing-Hermeticity).
-- `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs` — the terminal-acceptance assertions over the live ledger: the `IgnoredTestRow` table is exactly 363 rows, every row's `status == Lifted` (zero `Ignored`), `EXPECTED_TOTAL_IGNORED_COUNT == count(status == Ignored) == 0` over the parity rows, the source-`#[ignore]` ↔ `Ignored` bijection holds with the only residual source `#[ignore]`s being the STOP-gate files, every `AdditionalProofRow` resolves to a non-placeholder mechanism + executable proof, and no parent/aggregate U-block token is vacuously landed.
+- `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs` — the terminal-acceptance assertions over the live ledger: the `IgnoredTestRow` table is exactly 362 rows, every row's `status == Lifted` (zero `Ignored`), `EXPECTED_TOTAL_IGNORED_COUNT == count(status == Ignored) == 0` over the parity rows, the source-`#[ignore]` ↔ `Ignored` bijection holds with the only residual source `#[ignore]`s being the STOP-gate files, every `AdditionalProofRow` resolves to a non-placeholder mechanism + executable proof, and no parent/aggregate U-block token is vacuously landed.
 
 Deliverables:
 - The host integrations: Zod/schema client helpers, LSP hover → graph+display + completion → framework-surface, the MCP `typeinfo.*` / `component-meta.*` tools, and the playground type explorer — each a thin structural consumer of the U13 projection + the U14 framework adapter.
 - The five `CompositeSurfaces` end-to-end adapter surfaces, each resolved through the shared U2 reducers + U6 flow/call solver + the U14 adapter (no composite-specific resolver).
 - The Svelte/React STOP-gate files (the explicit out-of-scope residual `#[ignore]`s) and the typed bench schema (`BenchResultRow` + vendored cm corpus benches + `MAX_TEST_TIMEOUT`).
 - The PART 1 §6.2 performance-contract benches — the Verter-vs-TS/tsgo benchmark fixtures on the same semantic queries + the per-family fallback-bound benches — perf-regression-gated as part of TERMINAL ACCEPTANCE (a family's fallback-count bound exceeded, or a missing Verter-vs-tsgo fixture, fails the bench gate), not merely the functional gate.
-- The final find-grep sweep removing every remaining legacy entry-point name, and the terminal-acceptance ledger assertions (all 363 `IgnoredTestRow`s `Lifted`; every `AdditionalProofRow` covered; no vacuous parent token).
+- The final find-grep sweep removing every remaining legacy entry-point name, and the terminal-acceptance ledger assertions (all 362 `IgnoredTestRow`s `Lifted`; every `AdditionalProofRow` covered; no vacuous parent token).
 
 Legacy deletions:
 - Any remaining legacy entry-point names surfaced by the final find-grep sweep (the last legacy resolution / projection / adapter symbol names — removed, not renamed-around).
@@ -228,15 +228,15 @@ Exact test rows lifted (capability `CompositeSurfaces`, `menu_like.rs` / `messag
 (These five `CompositeSurfaces` rows are the ONLY `IgnoredTestRow`s this block lifts. The `MacroResolution` row is owned by U14; the nine `jsx.rs` `JsxResolution` rows are owned by `U2.JSX_FOUNDATIONS`; every other substrate's rows are owned by their respective U-block. U15's lift over the FULL manifest is the terminal-acceptance assertion that every other block has already lifted its rows — see "Exact test rows lifted (terminal)" below — not a re-claim of those rows. The generated coverage table — PART 2 §10.4 — assigns each row to exactly one `block_id`.)
 
 Exact test rows lifted (terminal — the whole-manifest acceptance, NOT a re-claim):
-- The terminal-acceptance assertion over the live ledger asserts every one of the 363 `IgnoredTestRow`s carries `status == Lifted` (no `Ignored`) once every owning block has landed (its `Typeinfo-Block:` trailer merged) — `basic.rs` (U14) + every U2 / U6 / U3 / U10 / U11 substrate row + the five `CompositeSurfaces` rows (this block). The ONLY source `#[ignore]`s permitted to remain are the Svelte/React STOP-gate files (`svelte_adapter_stop_gate.rs` / `react_adapter_stop_gate.rs`), which are explicit out-of-scope gates and are NOT `IgnoredTestRow`s in the 363. This is the mechanical "done" of the whole parity effort, not an additional row claim.
+- The terminal-acceptance assertion over the live ledger asserts every one of the 362 `IgnoredTestRow`s carries `status == Lifted` (no `Ignored`) once every owning block has landed (its `Typeinfo-Block:` trailer merged) — `basic.rs` (U14) + every U2 / U6 / U3 / U10 / U11 substrate row + the five `CompositeSurfaces` rows (this block). The ONLY source `#[ignore]`s permitted to remain are the Svelte/React STOP-gate files (`svelte_adapter_stop_gate.rs` / `react_adapter_stop_gate.rs`), which are explicit out-of-scope gates and are NOT `IgnoredTestRow`s in the 362. This is the mechanical "done" of the whole parity effort, not an additional row claim.
 
-Required new guards (PART 2 §§10.5, 11.7, 11.9, 12; the Capability Map → "the guarantee over the 363 rows"; Testing-Hermeticity):
-- `all_typeinfo_parity_rows_lifted_except_stop_gates` — asserts every `IgnoredTestRow` carries `status == Lifted` and the only residual source `#[ignore]`s are the registered Svelte/React STOP-gate files (zero stale ignored parity rows). This is the terminal no-stale-ignored-rows assertion over all 363.
+Required new guards (PART 2 §§10.5, 11.7, 11.9, 12; the Capability Map → "the guarantee over the 362 rows"; Testing-Hermeticity):
+- `all_typeinfo_parity_rows_lifted_except_stop_gates` — asserts every `IgnoredTestRow` carries `status == Lifted` and the only residual source `#[ignore]`s are the registered Svelte/React STOP-gate files (zero stale ignored parity rows). This is the terminal no-stale-ignored-rows assertion over all 362.
 - `svelte_adapter_stop_gate_is_registered_out_of_scope` + `react_adapter_stop_gate_is_registered_out_of_scope` — assert each STOP-gate file is an explicit registered out-of-scope gate (not an `IgnoredTestRow`, not counted in `EXPECTED_TOTAL_IGNORED_COUNT` or the bijection).
 - `bench_result_row_reports_cache_mode_sourcemap_batch_thread_hit_fallback` — asserts `BenchResultRow` reports cache mode / source-map policy / batch shape / thread count / hit count / fallback count (the typed bench schema; benchmarks report mode + policy + batch + threads + hits + fallbacks).
 - `architecture_minimizes_fallback_entry_not_fallback_cost` — the PART 1 §6.2 governing-rule guard, landed HERE with the per-family fallback-bound benches: asserts the tracked + perf-regression-gated metric is each query family's fallback ENTRY count against its `BenchResultRow` bound (a family exceeding its bound fails the bench), and that the warm path is O(validate). The four perf-hardening guards baked into the engine sections — `flow_graph_build_is_shallow_interned_no_lowering_lazy_regions` (U6.FLOW_RETURN_SUBSTRATE), `cache_key_axes_are_minimal_and_normalized` (U2.QUERY_VALUE_DOMAIN / U3.CACHE_FACT_MODEL), `relation_negative_and_unknown_paths_are_fast` (U2.RELATION_INFER) — are EXERCISED by these benches at terminal acceptance (a regression in any surfaces as a fallback-count / build-cost / negative-path-cost bench regression here), not re-owned.
 - The Verter-vs-TS/tsgo fixtures + the per-family fallback-bound benches (PART 1 §6.2) are part of the perf-regression-gated terminal acceptance: a missing Verter-vs-tsgo fixture on the in-scope semantic queries, or a family's fallback count over its bound, fails the bench gate.
-- The carried-forward terminal guards this block keeps green at acceptance: `ignored_test_row_table_holds_exactly_363_rows`, the source-`#[ignore]` ↔ `Ignored` ↔ `EXPECTED_TOTAL_IGNORED_COUNT` bijection/count guards, `no_landed_typeinfo_block_has_live_ignored_rows`, `no_vacuous_parent_u_block_landing`, `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`, `capability_rows_map_to_expected_query_fact_mechanisms`, and `external_corpus_paths_not_present_outside_gated_tests`.
+- The carried-forward terminal guards this block keeps green at acceptance: `ignored_test_row_table_holds_exactly_362_rows`, the source-`#[ignore]` ↔ `Ignored` ↔ `EXPECTED_TOTAL_IGNORED_COUNT` bijection/count guards, `no_landed_typeinfo_block_has_live_ignored_rows`, `no_vacuous_parent_u_block_landing`, `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`, `capability_rows_map_to_expected_query_fact_mechanisms`, and `external_corpus_paths_not_present_outside_gated_tests`.
 
 Critical-rule guards: this block implements the parent's `(CRITICAL)` one-resolver rule (the integration / composite / final-lift surface routes through the one engine; the integration layer is never a second resolver), the Component-Meta Native vs Compat Rule (the composite surfaces project through the U14 thin adapter), and the Testing-Hermeticity rule (vendored bench corpora only). The STOP-gate + bench-schema + hermeticity + terminal-acceptance guards above are these rules' R6 guards. If this block lands any new `(CRITICAL)` STOP-gate / terminal-acceptance rule text in docs, it registers the corresponding guard here in the same change.
 
@@ -247,11 +247,11 @@ Exit acceptance:
 - The host integrations are live: LSP hover → graph+display + completion → framework surface, the MCP `typeinfo.*` / `component-meta.*` tools, the Zod/schema helpers, and the playground type explorer — each a thin structural consumer.
 - The Svelte/React STOP-gate files are registered out-of-scope; the typed bench schema (`BenchResultRow` + vendored cm corpus benches + `MAX_TEST_TIMEOUT`) is in place over vendored corpora; the final find-grep sweep removed every remaining legacy entry-point name.
 - The PART 1 §6.2 performance-contract benches are in place and green at the family bounds: the Verter-vs-TS/tsgo fixtures run over the same semantic queries (reported via `BenchResultRow`), and the per-family fallback-bound benches hold every family's fallback count under bound — perf-regression-gated as part of terminal acceptance (`architecture_minimizes_fallback_entry_not_fallback_cost`).
-- **Terminal acceptance (the whole parity effort):** see the dedicated terminal-acceptance section below — all 363 `IgnoredTestRow`s `Lifted` (zero stale ignored except the STOP-gates), every `AdditionalProofRow` covered + non-placeholder, no vacuous parent token, and a green full workspace gate over the exact accepted content.
+- **Terminal acceptance (the whole parity effort):** see the dedicated terminal-acceptance section below — all 362 `IgnoredTestRow`s `Lifted` (zero stale ignored except the STOP-gates), every `AdditionalProofRow` covered + non-placeholder, no vacuous parent token, and a green full workspace gate over the exact accepted content.
 
 Verification commands:
 - `cargo test --package verter_session` composite-surface / integration tests (`menu_like` / `message_list_like` / `table_like`) and the STOP-gate guards.
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (the terminal-acceptance assertions: count 363, all `Lifted` except STOP-gates, bijection, coverage, no vacuous parent).
+- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (the terminal-acceptance assertions: count 362, all `Lifted` except STOP-gates, bijection, coverage, no vacuous parent).
 - `pnpm vitest --run` the `@verter/component-meta` integration / schema specs and the LSP / MCP integration specs; the VS Code E2E suite for hover/completion (`/e2e-vscode-testing`).
 - `pnpm run build:native && pnpm run build:lsp:release && pnpm run build:mcp:release` for the bench/integration release builds (benchmarks only); the vendored cm corpus benches (`component_meta_cold` / `_warm`); the PART 1 §6.2 performance-contract benches (the Verter-vs-TS/tsgo fixtures + the per-family fallback-bound benches — perf-regression-gated, family fallback counts under bound).
 - The five lifted-row proofs via the generated wrapper (or `cargo test … -- --ignored` before the branch strips the `#[ignore]`s).
@@ -274,7 +274,7 @@ trailers + the full CI gate (PART 2 §§10.5, 11.5, 11.7, 11.9, 12), each pinned
 named guard. The parity effort is complete iff ALL hold:
 
 1. **Every `IgnoredTestRow` is `Lifted`.** The `IgnoredTestRow` table holds EXACTLY
-   363 rows (`ignored_test_row_table_holds_exactly_363_rows`), and every one carries
+   362 rows (`ignored_test_row_table_holds_exactly_362_rows`), and every one carries
    `status == Lifted` — zero `Ignored`
    (`all_typeinfo_parity_rows_lifted_except_stop_gates`). Concretely, every owning
    block has landed its row-set (its `Typeinfo-Block:` trailer merged): `U2.RELATION_INFER` / `U2.UTILITIES` /
@@ -330,13 +330,13 @@ named guard. The parity effort is complete iff ALL hold:
    hit count / fallback count
    (`bench_result_row_reports_cache_mode_sourcemap_batch_thread_hit_fallback`).
 
-This is the composition the Capability Map names as "the guarantee over the 363
-rows": the two-table ledger with the exact-363 count + bijection (PART 2 §10.5);
+This is the composition the Capability Map names as "the guarantee over the 362
+rows": the two-table ledger with the exact-362 count + bijection (PART 2 §10.5);
 the U0 row-exact capability→mechanism→proof coverage table that DEFINES completeness
 (PART 2 §10.4); the per-row executable `ProofRequirement` with the generated proof
 registry + row-test wrapper (PART 2 §§10.2–10.3); the git/CI landing protocol (PART 2
 §11); the no-skip guarantee (PART 2 §12); and the git/manifest-driven, parallel-safe
-resume protocol (PART 2 §14). When all five checks hold, the 363-row
+resume protocol (PART 2 §14). When all five checks hold, the 362-row
 parity is mechanically tracked from `Ignored` to `Lifted`, never skipped and never
 vacuously satisfied — and the native typeinfo engine is the full TypeScript-parity
 checker the parent architecture specifies, with the LSP / MCP / component-meta /

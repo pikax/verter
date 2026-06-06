@@ -110,7 +110,7 @@ the whole U2 / U6 parents — are done.
 > `SemanticTypeGraph` embeddings the parent retires (PART 1 §§1.3–1.5); the pre-U2
 > `SemanticQueryKey::Relate` was the bare `{ source, target }` tri-state-returning
 > shape (now landed as the full `RelateMemoKey` relation identity); the manifest is
-> the old four-field schema with 363 rows. This subplan does not imply the end state
+> the old four-field schema with 362 rows. This subplan does not imply the end state
 > already exists.
 
 ---
@@ -545,7 +545,7 @@ Re-entry notes: idempotent. U13 owns no `IgnoredTestRow`s, so its progress is me
 
 This subplan's blocks own only the rows whose coverage `block_id` is one of their
 blocks; no row is owned twice with any other subplan. The split, stated explicitly
-so the binding 363 `IgnoredTestRow` total stays exact (Capability Map; PART 2
+so the binding 362 `IgnoredTestRow` total stays exact (Capability Map; PART 2
 §10.4–10.5):
 
 - **`CrossFileResolution` (3)** — listed as split U3 / U6 in the Capability Map, but
@@ -589,7 +589,7 @@ so the binding 363 `IgnoredTestRow` total stays exact (Capability Map; PART 2
 In every case the parent's §10.4.1 partition (the generated coverage table, PART 2
 §10.4) is the authority: each row maps to exactly one `block_id` via its
 `mechanism_id`, and `capability_rows_map_to_expected_query_fact_mechanisms` asserts
-the mapping is consistent with the capability. The binding 363 total stays exact.
+the mapping is consistent with the capability. The binding 362 total stays exact.
 
 ---
 
@@ -611,7 +611,7 @@ and are done only when every row in the union of their child block's row-set is
 every block in this subplan — and the whole U2 / U6 parents — are done.
 
 The whole-subplan parity guarantee is the parent's composition (Capability Map →
-"The guarantee over the 363 rows"): the two-table ledger with the exact-363 count +
+"The guarantee over the 362 rows"): the two-table ledger with the exact-362 count +
 bijection (PART 2 §§10.1, 10.5); the U0 row-exact coverage table that DEFINES
 completeness (PART 2 §10.4); the per-row executable `ProofRequirement` with the
 generated proof registry + row-test wrapper (PART 2 §§10.2–10.3); the git/CI landing

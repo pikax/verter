@@ -4,7 +4,7 @@
 Emits three checked-in, generated-not-hand-maintained files:
 
 1. `crates/verter_session/tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs`
-   — the 363 `IgnoredTestRow`s, each with the full 13-column schema.
+   — the 362 `IgnoredTestRow`s, each with the full 13-column schema.
 2. `crates/verter_session/tests/manifest_data/typeinfo_additional_proof_rows.rs`
    — the CLOSED set of 7 coverage-only `AdditionalProofRow`s.
 3. `crates/verter_session/tests/manifest_data/typeinfo_parity_blocks.rs`
@@ -14,7 +14,7 @@ Emits three checked-in, generated-not-hand-maintained files:
 The per-column data (block_id, capability, mechanism_id, …) is COMPUTED
 here from the authoritative §10.4.1 row→block partition in
 `docs/arch/native-typeinfo-parity.md` joined with the live
-`#[ignore = "..."]` discovery — NOT hand-typed 363 times. The Rust
+`#[ignore = "..."]` discovery — NOT hand-typed 362 times. The Rust
 guard tests only diff/fail; they never write the generated source (repo
 rule: generators are scripts, not tests).
 
@@ -596,9 +596,11 @@ ROW_MECHANISM_OVERRIDE: dict[tuple[str, str], str] = {
     ("call_resolution.rs", "call_resolution_generic_infers_object_literal_including_excess_properties"): "ResolveCallDispatch",
     ("call_resolution.rs", "call_resolution_optional_overload_picks_first_arity_matching_signature"): "ResolveCallDispatch",
     ("call_resolution.rs", "call_resolution_optional_overload_picks_two_arg_signature_when_required"): "ResolveCallDispatch",
+    ("call_resolution.rs", "call_resolution_rest_overload_picks_rest_signature_when_required"): "ResolveCallDispatch",
     ("call_resolution.rs", "call_resolution_specific_literal_argument_picks_matching_overload_first"): "ResolveCallDispatch",
     ("call_resolution.rs", "call_resolution_specific_literal_argument_skips_non_matching_first_overload"): "ResolveCallDispatch",
     ("call_resolution.rs", "call_resolution_this_receiver_method_call_returns_declared_return"): "ResolveCallDispatch",
+    ("call_resolution.rs", "call_resolution_union_argument_picks_union_compatible_overload"): "ResolveCallDispatch",
     ("const_type_param.rs", "const_type_param_route_call_preserves_readonly_tuple_with_literal_paths"): "ResolveCallDispatch",
     ("const_type_param.rs", "const_type_param_string_call_preserves_readonly_literal_string_tuple"): "ResolveCallDispatch",
     ("function_advanced.rs", "function_advanced_constrained_generic_infers_literal_under_as_const"): "ResolveCallDispatch",
@@ -1070,7 +1072,7 @@ def main() -> int:
             print(f"  partition-only (no live ignore): {k[0]} :: {k[1]}", file=sys.stderr)
         return 4
 
-    # Build the 363 IgnoredTestRows in (file, function) sorted order.
+    # Build the IgnoredTestRows in (file, function) sorted order.
     rows: list[dict] = []
     for (file_, fn_name) in sorted(discovered):
         block_text, cap = partition[(file_, fn_name)]
@@ -1095,8 +1097,8 @@ def main() -> int:
             }
         )
 
-    if len(rows) != 363:
-        print(f"error: expected 363 IgnoredTestRows, built {len(rows)}", file=sys.stderr)
+    if len(rows) != 362:
+        print(f"error: expected 362 IgnoredTestRows, built {len(rows)}", file=sys.stderr)
         return 5
 
     # ── Generation-time self-consistency assertions (NON-circular):

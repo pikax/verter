@@ -3,10 +3,10 @@
 //!
 //! Two tables live in this one module:
 //!
-//! - `IgnoredTestRow` — EXACTLY the 363 ignored test-site rows, one
+//! - `IgnoredTestRow` — EXACTLY the 362 ignored test-site rows, one
 //!   per `#[ignore = "..."]` annotation inside
 //!   `crates/verter_session/src/typeinfo/typeinfo_tests/**/*.rs`,
-//!   bijective with the source `#[ignore]`s and count-guarded at 363.
+//!   bijective with the source `#[ignore]`s and count-guarded at 362.
 //!   Each row carries the full 13-column schema: `file`, `function`,
 //!   `substrate`, `capability`, `organ`, `owning_u_block`, `block_id`,
 //!   `semantic_queries`, `proof`, `status`, `mechanism_id`,
@@ -26,7 +26,9 @@
 //!
 //! `EXPECTED_TOTAL_IGNORED_COUNT` is DERIVED as
 //! `count(IgnoredTestRow where status == Ignored)` (§10.5), not a
-//! frozen literal; it equals 363 at U0 because U0 lifts zero rows.
+//! frozen literal; it tracks the live ignore set as blocks lift rows
+//! (and as same-file overload retention adds new ones) and currently
+//! resolves to 362.
 //!
 //! Guards:
 //!
@@ -151,7 +153,7 @@ enum TargetSubstrate {
 // ──────────────────────────────────────────────────────────────────
 // The two-table manifest ledger schema (native-typeinfo-parity §10).
 //
-// `IgnoredTestRow` carries the EXACT 363 ignored test-site rows
+// `IgnoredTestRow` carries the EXACT 362 ignored test-site rows
 // (count-guarded, bijective with the source `#[ignore]`s).
 // `AdditionalProofRow` carries the CLOSED set of 7 coverage-only rows
 // (6 JSX no-new-key submatrix + 1 mapped companion) — excluded from the
@@ -435,7 +437,7 @@ enum ProofRequirement {
     },
 }
 
-/// One manifest row per ignored typeinfo test — EXACTLY the 363
+/// One manifest row per ignored typeinfo test — EXACTLY the 362
 /// ignored test-site rows (§10.1). 13 fields.
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
@@ -575,18 +577,20 @@ const fn count_ignored_rows(rows: &[IgnoredTestRow]) -> usize {
 
 /// Total ignored typeinfo test sites — DERIVED as
 /// `count(IgnoredTestRow where status == Ignored)`, NOT a frozen
-/// literal (§10.5). It equals 363 at U0 because U0 lifts zero rows;
-/// every current `IgnoredTestRow` carries `status: Ignored`.
+/// literal (§10.5). It tracks the live ignore set — currently 362,
+/// recomputed as blocks lift rows and as same-file overload retention
+/// adds new ones; every current `IgnoredTestRow` carries
+/// `status: Ignored`.
 ///
-/// Why 363 not 384: the substrate's macro-driven test families emit
+/// Why 362 not 384: the substrate's macro-driven test families emit
 /// expanded `#[ignore = "..."]` annotations at their call sites;
 /// those expansion sites ARE counted (they are real ignore
 /// annotations). What the manifest does NOT count are the
 /// `#[ignore = $reason]` patterns INSIDE `macro_rules!` bodies —
 /// those describe how the macro expands, not the test sites
-/// themselves. The macro-defined raw count includes 21 such
+/// themselves. The macro-defined raw count includes 22 such
 /// in-macro-body lines that are not test sites; the live tree has
-/// 363 expanded test-site ignores, which is the number every guard
+/// 362 expanded test-site ignores, which is the number every guard
 /// below operates against.
 const EXPECTED_TOTAL_IGNORED_COUNT: usize = count_ignored_rows(EXPECTED_IGNORE_MANIFEST);
 
@@ -1140,11 +1144,11 @@ fn dag_row_consistency_failures(
     failures
 }
 
-/// §10.5 — the `IgnoredTestRow` table holds EXACTLY 363 rows (the
+/// §10.5 — the `IgnoredTestRow` table holds EXACTLY 362 rows (the
 /// binding manifest total), DISJOINT from the `AdditionalProofRow`
 /// table; no `AdditionalProofRow` participates in the ignored count or
 /// bijection, and no `(file, function)` identity appears in both
-/// tables. An `IgnoredTestRow` count other than 363, an
+/// tables. An `IgnoredTestRow` count other than 362, an
 /// `AdditionalProofRow` in the ignored set, or a `(file, function)` in
 /// both, FAILS.
 #[test]

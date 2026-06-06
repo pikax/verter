@@ -5,7 +5,7 @@
 > `U0`–`U15` blocks). Typeinfo parity is the **foundation**; the native checker is a
 > **later layer** over the **same** resolver
 > (`SemanticQueryKey → ProjectSemanticDispatch::execute → SemanticGraphStore`). It is
-> **not** part of the 363-row typeinfo parity blocks and does not change them.
+> **not** part of the 362-row typeinfo parity blocks and does not change them.
 >
 > **Foundation:** `docs/arch/native-typeinfo-parity.md` (the engine architecture, the
 > typed `SemanticQueryValue` value domain, the relation / call / flow / contextual
@@ -62,10 +62,10 @@ block, not a re-shape of the typeinfo engine.
 > increment; its §10 terminal acceptance gates the native checker's manifest-green criterion.
 > This doc keeps its own rescope gate and is NOT rewritten by that plan.
 
-This plan is **not** part of the 363-row parity scope (parent §10.4.1). It does not
-modify the `U0`–`U15` blocks, the 363-row partition, the seven `AdditionalProofRow`s,
+This plan is **not** part of the 362-row parity scope (parent §10.4.1). It does not
+modify the `U0`–`U15` blocks, the 362-row partition, the seven `AdditionalProofRow`s,
 or any typeinfo manifest. Diagnostic parity gets its **own** future manifest
-(§6) — the 363-row typeinfo manifest is never expanded into a checker-parity manifest.
+(§6) — the 362-row typeinfo manifest is never expanded into a checker-parity manifest.
 
 ---
 
@@ -178,7 +178,7 @@ The native checker is where the **region-graph generalization is realized**. The
 typeinfo blocks only **reserve** it: the per-function `FunctionFlowGraph` is
 documented as ONE region kind — `ExecutableRegionKind::Function`, addressable by a
 reserved `ExecutableRegionId` — and the other region kinds are named as future and not
-built, because the 363 parity rows need function-body flow plus the existing top-level
+built, because the 362 parity rows need function-body flow plus the existing top-level
 expression lowering only (parent §5, `docs/arch/native-flow-return.md`). A whole-file
 or whole-program checker needs more region kinds, so this plan builds the
 `ExecutableRegionGraph` the reservation anticipated.
@@ -247,9 +247,9 @@ execution path). tsgo is the parity ORACLE that pins the expected diagnostics in
 manifest; it is never invoked to PRODUCE a diagnostic at query time.
 
 Diagnostic parity gets its **own** future manifest, separate from the typeinfo
-manifest. The 363-row typeinfo parity manifest
+manifest. The 362-row typeinfo parity manifest
 (`crates/verter_session/tests/typeinfo_ignored_test_manifest.rs`, parent §10.4.1) is
-**not** expanded into a checker-parity manifest: the binding 363 stays an exact
+**not** expanded into a checker-parity manifest: the binding 362 stays an exact
 count/bijection over the typeinfo ignored rows, and checker diagnostics are
 characterized by a distinct manifest the checker plan owns. Mixing the two tables
 would make the typeinfo count incoherent (the same defect the typeinfo plan avoids by
@@ -322,8 +322,8 @@ the typeinfo blocks follow for their guards.
 - **No typeinfo block waits on checker diagnostics.** No typeinfo row, query, or
   reducer depends on a `Check*` query or a `CheckResult`; the reserved arm / names are
   non-live until this plan lands.
-- **No expanding the 363-row typeinfo manifest into checker parity.** Diagnostic parity
-  is a distinct manifest (§6); the binding 363 stays an exact count/bijection over the
+- **No expanding the 362-row typeinfo manifest into checker parity.** Diagnostic parity
+  is a distinct manifest (§6); the binding 362 stays an exact count/bijection over the
   typeinfo ignored rows.
 - **No parallel "diagnostic engine" beside `Relate` / `ResolveCall` / `FlowReturn` /
   `ContextualTypeAt`.** Diagnostics derive from those facts through the one resolver;
