@@ -8980,7 +8980,8 @@ fn path_walk_materialized_set_records_linear_navhops_and_stops_at_arm_split() {
         Some(SemanticNodeId(2)),
         Some(SemanticNodeId(3)),
     ];
-    let got = super::build::path_walk_materialized_set(&path, ProjectionMode::Expanded, 0, &all_some);
+    let got =
+        super::build::path_walk_materialized_set(&path, ProjectionMode::Expanded, 0, &all_some);
     let expected = MaterializedSet::from_points(vec![terminal.clone(), navhop(1), navhop(2)]);
     assert_eq!(
         got, expected,

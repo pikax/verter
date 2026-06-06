@@ -1349,7 +1349,9 @@ fn cache_satisfaction_requires_path_exact_not_prefix() {
 #[test]
 #[should_panic(expected = "sub-slot-mode terminal")]
 fn warm_publish_one_debug_asserts_against_sub_slot_mode_terminal() {
-    use crate::semantic_query::demand::{Demand, MaterializedPoint, MaterializedSet, ProjectionPath};
+    use crate::semantic_query::demand::{
+        Demand, MaterializedPoint, MaterializedSet, ProjectionPath,
+    };
 
     let host = ctx_host();
     let store = SemanticGraphStore::new();
