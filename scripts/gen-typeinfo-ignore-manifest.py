@@ -721,14 +721,22 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
 # (native-typeinfo-parity.md §11.11/§11.12 + the per-subplan "Verification
 # commands"): every block runs the manifest coverage gate plus the full
 # workspace gate (the canonical agent gate — nextest for completeness + the
-# shared-process verter_session surface + clippy + fmt). Carried as a label
-# list so the contract row records WHAT must pass, not a free-text blob.
+# shared-process verter_session surface + clippy + fmt) PLUS the JavaScript
+# half of the §11.2 CI contract (`pnpm test`; `pnpm install --frozen-lockfile`)
+# — CI is green only when BOTH the Rust and JavaScript gates pass. Carried as a
+# label list so the contract row records WHAT must pass, not a free-text blob.
+# The Rust `nextest` + `cargo test -p verter_session --tests` pair is the
+# CLAUDE.md-canonical replacement for §11.2's stale sole
+# `cargo test --workspace --tests` label (the bare form silently skips the
+# verter_session integration suite); the JS labels are §11.2 verbatim.
 BLOCK_VERIFICATION_LABELS: list[str] = [
     "cargo test -p verter_session --test typeinfo_ignored_test_manifest",
     "cargo nextest run --workspace",
     "cargo test -p verter_session --tests",
     "cargo clippy --workspace -- -D warnings",
     "cargo fmt --all --check",
+    "pnpm test",
+    "pnpm install --frozen-lockfile",
 ]
 
 # ── ROW-LEVEL mechanism, INDEPENDENT of the `block_id` column ──
