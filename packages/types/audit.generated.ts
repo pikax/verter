@@ -2072,21 +2072,21 @@ substitute_top_level_calls: number,
 substitute_memo_hits: number,
 /**
  * `substitute_with_change_tracking` returns from the `TypeOf`
- * opaque-return arm (codex-prescribed).
+ * opaque-return arm.
  */
 substitute_typeof_opaque: number,
 /**
  * `substitute_with_change_tracking` descents into the
- * `Conditional` arm (codex-prescribed).
+ * `Conditional` arm.
  */
 substitute_conditional_descend: number,
 /**
  * `substitute_with_change_tracking` descents into the `MappedType`
- * arm (codex-prescribed).
+ * arm.
  */
 substitute_mapped_type_descend: number,
 /**
- * Calls to `build_typeof` (gemini's HIGH-confidence direction).
+ * Calls to `build_typeof` (the HIGH-confidence direction).
  */
 build_typeof_calls: number,
 /**
@@ -2134,7 +2134,7 @@ prepared_decl_bundle_callsite_other: number,
  * Mapper-identity-instability signal: same mapper source
  * triple received DIFFERENT `mapped_binder_ordinal` ordinals
  * from different dispatcher instances during this request.
- * Non-zero count means codex's mapper-identity-instability
+ * Non-zero count means the mapper-identity-instability
  * concern is confirmed — the typed mapped-member cache would
  * MISS on what should be a HIT until ordinal assignment is
  * stabilised.
