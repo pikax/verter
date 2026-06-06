@@ -1418,10 +1418,12 @@ key, and no env-less uniform envelope is permitted.
   `roots` tag/name reserved at message scope). The `no_envless_semantic_query_env_key_envelope` guard
   now bans the `GraphDeclSlotRef` symbol across ALL `crates/*/src/**`, and
   `typeinfo_proto_retires_envless_decl_slot_ref` pins the proto surface.
-- **Module-resolution keys on SPLIT env.** A module-resolution result keys on `resolve_env_hash`
-  (moduleResolution / paths / baseUrl / conditions) + `lib_env_hash` (typeRoots / types corpus) +
-  `project_identity`, plus the transitive `parse_env` carried by the parsed import-specifier list.
-  Lib dimensions are NEVER folded into `resolve_env`.
+- **Module-resolution keys on SPLIT env.** Each import-resolving surface keys only on the dims it
+  consults: `ResolvedImportFacts` keys on `{parse_env_hash, resolve_env_hash}` (moduleResolution /
+  paths / baseUrl / conditions / extension order) and NEVER `lib_env_hash`; the augmentation-aware
+  `EffectiveExportSet` surface additionally keys on `lib_env_hash` (typeRoots / types corpus) +
+  `project_identity` because module augmentations stitch in. Lib dimensions are NEVER folded into
+  `resolve_env`. See `### Module-Resolution Keying (CRITICAL)`.
 - **Slot-keyed `Instantiate` / `ResolveMacroPayload`.** `SemanticQueryKey::Instantiate` /
   `ResolveMacroPayload` key their `base` / `owner` on the env-bearing, content-free
   `ResolvedDeclSlotIdentity` (the extra `resolve_env_hash` rides on the per-key `InstantiateContext`
