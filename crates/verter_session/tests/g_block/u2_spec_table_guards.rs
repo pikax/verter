@@ -295,62 +295,90 @@ pub enum SemanticQueryKey {
 /// both-enum-and-table addition — exactly the case this guard catches).
 #[test]
 fn forward_planned_augmentation_keys_are_not_live_and_declaration_analysis_is_a_shell() {
-    use verter_session::semantic_query::SemanticQueryValueTag;
-
     const FORWARD_PLANNED: [&str; 2] =
         ["ResolveMergedDeclaration", "ResolveDeclarationAugmentation"];
 
-    // (1) Neither forward-planned augmentation key is a live tag.
+    // (1) Neither forward-planned augmentation key is a live tag. The predicate
+    //     helper is the SAME code used in the non-vacuity proof below, so the
+    //     main assertion and the discrimination proof exercise one check.
     let live_names: BTreeSet<String> = SemanticQueryKeyTag::ALL
         .iter()
         .map(|t| t.name().to_string())
         .collect();
-    for forbidden in FORWARD_PLANNED {
-        assert!(
-            !live_names.contains(forbidden),
-            "`{forbidden}` is a FORWARD-PLANNED key (parent §2.1: five landed, \
-             two forward-planned) — it must NOT be a live `SemanticQueryKeyTag`. \
-             Same-name merge / cross-file augmentation is produced by the \
-             `MergedDecl` peer-merge reducer over `SemanticNodeData::MergedDecl`, \
-             not a dedicated query key. If this key is being landed \
-             deliberately, update this guard and the parent contract together."
-        );
-    }
+    assert!(
+        !live_set_contains_forward_planned(&live_names, &FORWARD_PLANNED),
+        "a FORWARD-PLANNED augmentation key (parent §2.1: five landed, two \
+         forward-planned) is present in `SemanticQueryKeyTag::ALL` — \
+         {forward:?} must NOT be live tags. Same-name merge / cross-file \
+         augmentation is produced by the `MergedDecl` peer-merge reducer over \
+         `SemanticNodeData::MergedDecl`, not a dedicated query key. If a key is \
+         being landed deliberately, update this guard and the parent contract \
+         together.",
+        forward = FORWARD_PLANNED,
+    );
 
     // (2) No live spec row resolves to the non-live `DeclarationAnalysis` shell.
+    //     Again the predicate helper is shared with the non-vacuity proof.
     let specs = semantic_query_key_specs();
-    for spec in &specs {
-        assert_ne!(
-            spec.value_domain,
-            SemanticQueryValueTag::DeclarationAnalysis,
-            "live spec row `{}` resolves to `DeclarationAnalysis`, but that \
-             value domain is a NON-LIVE shell — the live merged-declaration / \
-             augmentation carrier is the graph node `SemanticNodeData::MergedDecl`, \
-             never a `SemanticQueryValue::DeclarationAnalysis` produced by a live key.",
-            spec.variant.name()
-        );
-    }
+    assert!(
+        !any_spec_resolves_to_declaration_analysis(&specs),
+        "a live spec row resolves to `DeclarationAnalysis`, but that value \
+         domain is a NON-LIVE shell — the live merged-declaration / \
+         augmentation carrier is the graph node `SemanticNodeData::MergedDecl`, \
+         never a `SemanticQueryValue::DeclarationAnalysis` produced by a live \
+         key."
+    );
 
-    // Discrimination proof (non-vacuity): the same two checks applied to a
-    // synthetic VIOLATING input must trip. Mirrors `enum_variant_scanner_
-    // discriminates`' injected-drift proof so neither assertion can pass
-    // vacuously.
-    let mut drifted_names = live_names.clone();
-    drifted_names.insert("ResolveMergedDeclaration".to_string());
+    // Non-vacuity proof: run the SAME predicates against synthetic VIOLATING
+    // inputs and assert each predicate returns `true` (i.e. it would TRIP on
+    // drift). This mirrors `enum_variant_scanner_discriminates`' injected-drift
+    // proof: the check is run against a known violation, not re-asserted as a
+    // tautology, so neither (1) nor (2) above can pass vacuously.
+    let mut drifted_live = live_names.clone();
+    drifted_live.insert("ResolveMergedDeclaration".to_string());
     assert!(
-        FORWARD_PLANNED.iter().any(|f| drifted_names.contains(*f)),
-        "discrimination self-test: a synthetic live set containing a \
-         forward-planned key was NOT detected — check (1) would be vacuous."
+        live_set_contains_forward_planned(&drifted_live, &FORWARD_PLANNED),
+        "non-vacuity proof: `live_set_contains_forward_planned` did NOT trip on \
+         a live set carrying a forward-planned key — check (1) is vacuous."
     );
-    let synthetic_domains = [
-        SemanticQueryValueTag::TypeNode,
-        SemanticQueryValueTag::DeclarationAnalysis,
-    ];
+    let drifted_specs = specs_with_synthetic_declaration_analysis_row(&specs);
     assert!(
-        synthetic_domains
-            .iter()
-            .any(|d| *d == SemanticQueryValueTag::DeclarationAnalysis),
-        "discrimination self-test: a synthetic spec-domain set containing \
-         `DeclarationAnalysis` was NOT detected — check (2) would be vacuous."
+        any_spec_resolves_to_declaration_analysis(&drifted_specs),
+        "non-vacuity proof: `any_spec_resolves_to_declaration_analysis` did NOT \
+         trip on a spec slice carrying a `DeclarationAnalysis` row — check (2) \
+         is vacuous."
     );
+}
+
+/// Predicate behind check (1): does `live` contain ANY of the
+/// `forward_planned` augmentation key names? Shared by the main assertion and
+/// the non-vacuity proof so both exercise identical logic.
+fn live_set_contains_forward_planned(live: &BTreeSet<String>, forward_planned: &[&str]) -> bool {
+    forward_planned.iter().any(|f| live.contains(*f))
+}
+
+/// Predicate behind check (2): does ANY spec row resolve to the non-live
+/// `DeclarationAnalysis` value domain? Shared by the main assertion and the
+/// non-vacuity proof.
+fn any_spec_resolves_to_declaration_analysis(
+    specs: &[verter_session::semantic_query::query_key_spec::SemanticQueryKeySpec],
+) -> bool {
+    use verter_session::semantic_query::SemanticQueryValueTag;
+    specs
+        .iter()
+        .any(|s| s.value_domain == SemanticQueryValueTag::DeclarationAnalysis)
+}
+
+/// Build a synthetic spec slice that DOES carry a `DeclarationAnalysis` row by
+/// cloning a real row and rewriting its value domain. Used only to feed the
+/// non-vacuity proof a known violation for check (2).
+fn specs_with_synthetic_declaration_analysis_row(
+    real: &[verter_session::semantic_query::query_key_spec::SemanticQueryKeySpec],
+) -> Vec<verter_session::semantic_query::query_key_spec::SemanticQueryKeySpec> {
+    use verter_session::semantic_query::SemanticQueryValueTag;
+    let mut specs = real.to_vec();
+    if let Some(first) = specs.first_mut() {
+        first.value_domain = SemanticQueryValueTag::DeclarationAnalysis;
+    }
+    specs
 }
