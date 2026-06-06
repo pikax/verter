@@ -594,40 +594,51 @@ struct BlockContractRow {
 }
 
 /// The single block that OWNS (produces) each `SemanticQueryName`
-/// (§11.5). Owners follow the mechanism-first layering — the block whose
-/// dominant mechanism PRODUCES the key's result, NOT where the key's shape
-/// was first declared:
-/// - foundational decl/value keys at `U2.QUERY_VALUE_DOMAIN` (incl.
-///   `ApparentType`, the lib-fact apparent-member lookup that has no dedicated
-///   reducer block);
-/// - relation / instantiation / conditional at `U2.RELATION_INFER`;
-/// - indexed-access / keyof / member / path at `U2.INDEXED_ACCESS`;
-/// - mapped + template-literal reduction at `U2.MAPPED_TEMPLATE`;
-/// - class-surface projection at `U2.CLASS_SURFACES`;
-/// - enum value/type duality at `U2.ENUMS`;
-/// - ambient-namespace (JSX foundation) at `U2.JSX_FOUNDATIONS`;
-/// - overload-set / call dispatch at `U6.CALL_RESOLVE`;
+/// (§11.5). The owner is the block whose subplan "SemanticQueryKey/facts
+/// touched:" line lists the key WITH ITS VALUE DOMAIN (the PRODUCER), NOT a
+/// block that lists it under "Facts read" or among "all EXISTING keys" (a
+/// CONSUMER). The producer-based layering, with its authoritative doc line:
+/// - foundational decl/value keys (`ResolveDecl`, `TypeOf`, `NormalizeUnion`,
+///   `NormalizeIntersection`, `ResolvedNamedType`) at `U2.QUERY_VALUE_DOMAIN`
+///   (`native-typeinfo-parity-u2-reducers.md:216` — adds/upgrades the U2 key
+///   surface + value-domain arms);
+/// - relation / instantiation / conditional at `U2.RELATION_INFER`
+///   (`…u2-reducers.md:286`);
+/// - indexed-access / keyof / member / path at `U2.INDEXED_ACCESS`
+///   (`…u2-reducers.md:463`);
+/// - mapped + template-literal reduction at `U2.MAPPED_TEMPLATE`
+///   (`…u2-reducers.md:532`);
+/// - class-surface projection PLUS `ApparentType` (lib-wrapper member lookup)
+///   and `ResolveOverloadSet` (ordered-signature SHAPE) at `U2.CLASS_SURFACES`
+///   (`…u2-reducers.md:607` produces `ResolveClassSurface`, `ApparentType`,
+///   `ResolveOverloadSet`; `u6-flow-call-resolution-design.md:109,517`
+///   confirm U2.CLASS_SURFACES owns the overload-set SHAPE, U6 only CONSUMES
+///   it and produces `ResolveCall`);
+/// - enum value/type duality at `U2.ENUMS` (`…u2-reducers.md:713`);
+/// - ambient-namespace at `U2.MODULE_AUGMENTATION`
+///   (`…u2-reducers.md:771` produces `ResolveAmbientNamespace` (`TypeNode`);
+///   `…u2-reducers.md:839` lists it among "all EXISTING keys (no JSX key)" —
+///   U2.JSX_FOUNDATIONS CONSUMES it, owns nothing);
 /// - flow narrowing at `U6.FLOW_RETURN_SUBSTRATE` (the flow-frame substrate
-///   every narrowing mechanism composes on);
-/// - contextual typing at `U6.CONTEXTUAL_CALLBACK`;
+///   every narrowing mechanism composes on;
+///   `u6-flow-call-resolution-design.md:640`);
+/// - contextual typing at `U6.CONTEXTUAL_CALLBACK`
+///   (`u6-flow-call-resolution-design.md:653` owns the published
+///   `ContextualTypeAt` query);
 /// - macro payload at `U14.MACRO_ADAPTER`.
 fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
     use SemanticQueryName::*;
     use TypeInfoParityBlockId::*;
     match key {
-        ResolveDecl
-        | TypeOf
-        | NormalizeUnion
-        | NormalizeIntersection
-        | ResolvedNamedType
-        | ApparentType => U2QueryValueDomain,
+        ResolveDecl | TypeOf | NormalizeUnion | NormalizeIntersection | ResolvedNamedType => {
+            U2QueryValueDomain
+        }
         Relate | Instantiate | Conditional => U2RelationInfer,
         IndexedAccess | KeyOf | ProjectMember | ProjectPath => U2IndexedAccess,
         MappedType | TemplateLiteralReduce => U2MappedTemplate,
-        ResolveClassSurface => U2ClassSurfaces,
+        ResolveClassSurface | ApparentType | ResolveOverloadSet => U2ClassSurfaces,
         ResolveEnum => U2Enums,
-        ResolveAmbientNamespace => U2JsxFoundations,
-        ResolveOverloadSet => U6CallResolve,
+        ResolveAmbientNamespace => U2ModuleAugmentation,
         FlowNarrowingAt => U6FlowReturnSubstrate,
         ContextualTypeAt => U6ContextualCallback,
         ResolveMacroPayload => U14MacroAdapter,
@@ -1731,38 +1742,47 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
     // the key's shape was first declared. Encoded explicitly so a wrong arm in
     // `key_owning_block` FAILS even when match-exhaustiveness alone passes.
     let expected: &[(SemanticQueryName, TypeInfoParityBlockId)] = &[
-        // Foundational decl/value keys + the lib-fact apparent-member lookup
-        // (no dedicated reducer block) at U2.QUERY_VALUE_DOMAIN.
+        // Foundational decl/value keys at U2.QUERY_VALUE_DOMAIN
+        // (…u2-reducers.md:216).
         (ResolveDecl, U2QueryValueDomain),
         (TypeOf, U2QueryValueDomain),
         (NormalizeUnion, U2QueryValueDomain),
         (NormalizeIntersection, U2QueryValueDomain),
         (ResolvedNamedType, U2QueryValueDomain),
-        (ApparentType, U2QueryValueDomain),
-        // Relation / instantiation / conditional at U2.RELATION_INFER.
+        // Relation / instantiation / conditional at U2.RELATION_INFER
+        // (…u2-reducers.md:286).
         (Relate, U2RelationInfer),
         (Instantiate, U2RelationInfer),
         (Conditional, U2RelationInfer),
-        // Indexed-access / keyof / member / path at U2.INDEXED_ACCESS.
+        // Indexed-access / keyof / member / path at U2.INDEXED_ACCESS
+        // (…u2-reducers.md:463).
         (IndexedAccess, U2IndexedAccess),
         (KeyOf, U2IndexedAccess),
         (ProjectMember, U2IndexedAccess),
         (ProjectPath, U2IndexedAccess),
-        // Mapped + template-literal reduction at U2.MAPPED_TEMPLATE.
+        // Mapped + template-literal reduction at U2.MAPPED_TEMPLATE
+        // (…u2-reducers.md:532).
         (MappedType, U2MappedTemplate),
         (TemplateLiteralReduce, U2MappedTemplate),
-        // Class-surface projection at U2.CLASS_SURFACES.
+        // Class-surface projection PLUS the apparent-member lookup and the
+        // ordered-overload-set SHAPE at U2.CLASS_SURFACES (…u2-reducers.md:607
+        // produces ResolveClassSurface / ApparentType / ResolveOverloadSet;
+        // u6-flow-call-resolution-design.md:109,517 confirm U6 only CONSUMES
+        // ResolveOverloadSet).
         (ResolveClassSurface, U2ClassSurfaces),
-        // Enum value/type duality at U2.ENUMS.
+        (ApparentType, U2ClassSurfaces),
+        (ResolveOverloadSet, U2ClassSurfaces),
+        // Enum value/type duality at U2.ENUMS (…u2-reducers.md:713).
         (ResolveEnum, U2Enums),
-        // Ambient-namespace (JSX foundation) at U2.JSX_FOUNDATIONS.
-        (ResolveAmbientNamespace, U2JsxFoundations),
-        // Overload-set / call dispatch at U6.CALL_RESOLVE.
-        (ResolveOverloadSet, U6CallResolve),
+        // Ambient-namespace at U2.MODULE_AUGMENTATION (…u2-reducers.md:771
+        // produces ResolveAmbientNamespace; …u2-reducers.md:839 lists it among
+        // "all EXISTING keys (no JSX key)" — JSX_FOUNDATIONS consumes it).
+        (ResolveAmbientNamespace, U2ModuleAugmentation),
         // Flow narrowing on the flow-frame substrate at
-        // U6.FLOW_RETURN_SUBSTRATE.
+        // U6.FLOW_RETURN_SUBSTRATE (u6-flow-call-resolution-design.md:640).
         (FlowNarrowingAt, U6FlowReturnSubstrate),
-        // Contextual typing at U6.CONTEXTUAL_CALLBACK.
+        // Contextual typing at U6.CONTEXTUAL_CALLBACK
+        // (u6-flow-call-resolution-design.md:653).
         (ContextualTypeAt, U6ContextualCallback),
         // Macro payload at U14.MACRO_ADAPTER.
         (ResolveMacroPayload, U14MacroAdapter),
