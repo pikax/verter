@@ -777,17 +777,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             });
                         }
                         ObjectMember::Method(method) => {
-                            // Step 1.5 mapped+conditional infer closure:
-                            // lower methods to canonical Function nodes
-                            // (matching CallSignature handling below) so
+                            // Mapped+conditional infer closure: lower
+                            // methods to canonical Function nodes (matching
+                            // CallSignature handling below) so
                             // `PricingPlanSlots[K]` IndexedAccess can
-                            // resolve to a real Function for C11a's
-                            // Function-extends infer-binding arm. The
-                            // pre-Step-1.5 `Opaque(Miss)` placeholder
-                            // broke `IndexedAccess<I, "method-name">`
+                            // resolve to a real Function for the
+                            // Function-extends infer-binding arm. An
+                            // `Opaque(Miss)` placeholder here would break
+                            // `IndexedAccess<I, "method-name">`
                             // projection: the path walker finds the
-                            // member but its value is opaque, so
-                            // downstream C11a's `let Some(Function...) =
+                            // member but its value is opaque, so the
+                            // downstream `let Some(Function...) =
                             // graph.node_data(check_resolved)` match
                             // fails and the conditional drops to a
                             // deferred shell.

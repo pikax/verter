@@ -419,12 +419,11 @@ pub struct SemanticGraphStore {
     ///
     /// **`Arc` discrimination.** When evicting an entry the registered
     /// `dep_signature` Arc is `ptr_eq`-compared against the current
-    /// entry's dep_signature. Under Γ.C interning this Arc is
-    /// shared across equivalent dep_signatures so ptr_eq matches a
-    /// concurrent fresh write only when its content really is the
-    /// same; pre-Γ.C the registered Arc is the exact one the publish
-    /// path stored, so ptr_eq distinguishes our entry from any later
-    /// fresh build's distinct Arc.
+    /// entry's dep_signature. Because the dep_signature Arc is interned
+    /// and shared across equivalent dep_signatures, ptr_eq matches a
+    /// concurrent fresh write only when its content really is the same,
+    /// so the comparison distinguishes our entry from any later fresh
+    /// build's distinct Arc.
     ///
     /// **Lock order — `entries → canonical_to_entries shards`.** The
     /// family `entries` `Mutex` is OUTERMOST; a `canonical_to_entries`
@@ -867,8 +866,8 @@ impl SemanticGraphStore {
     }
 
     /// Invalidate every warm memo slot whose stored `DepSignature`
-    /// references `canonical_id` (plan B3 dep-signature sweep, replacing
-    /// the pre-B3 conservative `family_references_canonical` helper).
+    /// references `canonical_id` (a dep-signature sweep, narrower than a
+    /// conservative whole-family `family_references_canonical` match).
     ///
     /// Walks every `(FamilyKey, FamilySlots)` entry and, for each
     /// populated slot, drops the slot whose dep-signature names the
@@ -1830,9 +1829,8 @@ impl SemanticGraphStore {
                 // wall-clock cost only on actual ledger emissions. The
                 // dedup-skipped path bypasses both so `origin_edge_count`
                 // mirrors the ledger-write count and
-                // `record_origin_edge_total_ns` reflects the cold-path
-                // wall-clock the §4.3B benchmark gate evaluates against
-                // the post-B2 baseline.
+                // `record_origin_edge_total_ns` reflects only the
+                // cold-path wall-clock.
                 t.record_origin_edge_call(elapsed_ns);
             }
         });

@@ -131,7 +131,7 @@ impl MemoEntry {
 /// inside [`FamilySlots`]. Variants without a `mode` field (everything
 /// except [`SemanticQueryKey::ProjectMember`] /
 /// [`SemanticQueryKey::IndexedAccess`] / [`SemanticQueryKey::ProjectPath`])
-/// use only the `single` slot, exactly mirroring the pre-B1b behaviour.
+/// use only the `single` slot.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum FamilyKey {
     ResolveDecl(ResolveDeclKey),
@@ -1438,11 +1438,10 @@ pub(super) fn carrier_facts_reference_canonical(
     })
 }
 
-/// Every [`ModeSlot`] variant as a static slice. Pre-Γ.B
-/// `invalidate_canonical` linearly walked every family × every slot
-/// here. Post-Γ.B the per-canonical reverse index drives the sweep,
-/// but the constant is retained for invalidate-all and diagnostic
-/// paths that still need to enumerate all slots.
+/// Every [`ModeSlot`] variant as a static slice. The per-canonical
+/// reverse index drives `invalidate_canonical`'s slot sweep; this
+/// constant is retained for invalidate-all and diagnostic paths that
+/// need to enumerate every slot.
 #[allow(dead_code)]
 pub(super) const ALL_MODE_SLOTS: &[ModeSlot] = &[
     ModeSlot::Single,

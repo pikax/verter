@@ -527,8 +527,8 @@ pub(crate) fn type_expr_has_package_backed_object_like_root(
 ///     contributing canonical (e.g. evicted / tombstoned mid-gate).
 ///     Callers MUST refuse shared admission of any cache entry whose
 ///     validity depends on this gate verdict: rooting an admit on a
-///     stand-in hash (the pre-H2 `shallow_file_state.whole_hash`
-///     `unwrap_or_default()` was a `WholeHash(0)` sentinel that does
+///     stand-in hash (a `shallow_file_state.whole_hash`
+///     `unwrap_or_default()` `WholeHash(0)` sentinel does
 ///     not validate the actual file state) would
 ///     produce a future warm hit that returns the gate's stale verdict
 ///     against a fresh whole-hash with no invalidation rail.
@@ -591,16 +591,16 @@ pub(crate) fn type_expr_has_package_backed_object_like_root_with_fence(
         return (false, Some(empty_fence));
     }
 
-    // H2 fence collection: record each contributing canonical via
+    // Fence collection: record each contributing canonical via
     // `authoritative_current_content_hash` — the SAME oracle
     // `resolve_type_declaration`'s `get_or_compute` observes
     // (registry_decl.rs `observed_keyed_hash`) and `named_decl_body`
-    // routes through. Using a different oracle (the pre-H2
-    // `shallow_file_state(canonical).whole_hash` read) opened a race
+    // routes through. A different oracle (a plain
+    // `shallow_file_state(canonical).whole_hash` read) would open a race
     // window: a dependency edit between the gate verdict and the
     // fence read could admit the stale verdict against a fresh
-    // whole-hash; immediate revalidation then succeeded and future
-    // reads reused stale shape data.
+    // whole-hash; immediate revalidation would then succeed and future
+    // reads would reuse stale shape data.
     //
     // If any contributing canonical's authoritative current-content
     // hash is UNAVAILABLE (`None` — canonical was evicted /

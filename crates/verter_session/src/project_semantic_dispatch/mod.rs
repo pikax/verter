@@ -628,13 +628,11 @@ pub(super) fn utility_param_names(name: &str) -> &'static [&'static str] {
     }
 }
 
-// `primitive_for_literal` was the pre-C6 approximation that collapsed
-// literal types to their underlying primitive — retired when
-// `SemanticNodeData::Literal(LiteralValue)` landed in WIP 3-quater
-// Literal identity is now
-// preserved through the semantic graph; callers that need the
-// primitive kind of a literal should match on `SemanticNodeData::Literal`
-// and derive the kind inline.
+// Literal identity is preserved through the semantic graph by
+// `SemanticNodeData::Literal(LiteralValue)`, which carries the precise
+// literal value. Callers that need the primitive kind of a literal
+// should match on `SemanticNodeData::Literal` and derive the kind
+// inline rather than collapsing the literal to its underlying primitive.
 
 /// Stable-sort + dedup a list of semantic node ids. Used to canonicalize
 /// the key surface for union / intersection dispatches so

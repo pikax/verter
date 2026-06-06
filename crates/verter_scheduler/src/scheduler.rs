@@ -16827,8 +16827,8 @@ mod tests {
         /// Only AFTER the counter proves the driver dispatched the whole
         /// fan-out do we release the gates and assert completion.
         ///
-        /// Why it fails against a BLOCKING bounded `send` (the pre-B7c
-        /// regression): the driver thread itself is the caller of
+        /// Why it fails against a BLOCKING bounded `send`: the driver
+        /// thread itself is the caller of
         /// `try_submit_io`, so a blocking `send` onto a transport that
         /// fills behind the parked worker would PARK THE DRIVER THREAD
         /// mid-dispatch — the counter would stall below `N` and the

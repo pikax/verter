@@ -1770,15 +1770,15 @@ pub(crate) fn collect_component_meta_registry_refs(
             if !allow_plain_member_refs {
                 return;
             }
-            // G1 path-precision gate. The doc-comment on
+            // Path-precision gate. The doc-comment on
             // this fn promises the Conditional arm gates on
-            // `is_whole_surface()`; the pre-G1 impl unconditionally
-            // recursed into all four branches, leaking unselected
-            // type-level predicate sides into a narrowed surface.
+            // `is_whole_surface()`; recursing into all four branches
+            // unconditionally would leak unselected type-level predicate
+            // sides into a narrowed surface.
             //
             // - Whole-surface (no narrowing): walk all four (check +
             //   extends + true_type + false_type). Preserves
-            //   pre-path-precision top-level callers' refs and audit
+            //   whole-surface top-level callers' refs and audit
             //   behaviour.
             // - Narrowed (Include/Exclude/explicit-children at this
             //   hop): the cursor enumerates a value-surface; the
@@ -1839,15 +1839,15 @@ pub(crate) fn collect_component_meta_registry_refs(
             if !allow_plain_member_refs {
                 return;
             }
-            // G1 path-precision gate. The doc-comment on
+            // Path-precision gate. The doc-comment on
             // this fn promises the Mapped arm gates on
-            // `is_whole_surface()`; the pre-G1 impl unconditionally
-            // recursed into source + value + name_type, leaking the
-            // mapped-source key-domain into a narrowed surface even
-            // when only specific keys are requested.
+            // `is_whole_surface()`; recursing into source + value +
+            // name_type unconditionally would leak the mapped-source
+            // key-domain into a narrowed surface even when only specific
+            // keys are requested.
             //
             // - Whole-surface: walk source + value (+ name_type).
-            //   Preserves pre-path-precision refs.
+            //   Preserves whole-surface refs.
             // - Narrowed: walk only `value` — the published-value
             //   surface produced by `{ [K in keyof T]: V }` for the
             //   requested keys is `V`; the mapped-source `T` itself

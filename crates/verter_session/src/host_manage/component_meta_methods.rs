@@ -459,9 +459,10 @@ impl VerterHost {
         // The `overlay` parameter is the
         // request-scoped overlay owned by the
         // [`ViewBoundRequestHost`](crate::host_manage::component_meta_request_impl::ViewBoundRequestHost)
-        // adapter. Pre-Shape-1 each call allocated `Arc::new(CCO::new())`
-        // — a fresh empty overlay per cold compute — and paid the
-        // shadowing write cost without cross-call accumulation.
+        // adapter. The overlay is reused across calls so cold computes
+        // accumulate into it rather than each allocating a fresh empty
+        // `Arc::new(CCO::new())` and paying the shadowing write cost
+        // without cross-call accumulation.
         let store_view = self.resolver_store_view().with_session_overlay(self, view);
         self.compute_component_meta_state_with_session_view_and_base(
             canonical,
@@ -586,9 +587,9 @@ impl VerterHost {
     ///
     /// Used by
     /// [`SessionRequestHost::compute_component_meta`](crate::host_manage::component_meta_request_impl::SessionRequestHost).
-    /// Pre-Shape-1 the bare-host path constructed no overlay at all —
-    /// every cold compute call paid the per-call workspace sweep cost
-    /// without any cross-call accumulation benefit.
+    /// The shared overlay lets cold compute calls accumulate across the
+    /// request rather than each paying the per-call workspace sweep cost
+    /// with no cross-call accumulation benefit.
     pub(crate) fn compute_component_meta_state_with_overlay(
         &self,
         canonical: &str,

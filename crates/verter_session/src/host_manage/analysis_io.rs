@@ -610,14 +610,11 @@ impl VerterHost {
     pub(crate) fn get_whole_hash(&self, canonical: &str) -> Option<Hash16> {
         {
             use crate::host_executor::HostSourceData;
-            // Pre-1C-β semantics required a `compile_cache` entry to exist
-            // before consulting the scheduler — an entry absence meant
-            // "this canonical is not host-tracked, do not eagerly read
-            // the scheduler". Post-D48 split the same gate is "any of
-            // the three sub-state DBs has an entry AND the entry is not
-            // evicted". We use the source-content-domain DB because
-            // `evicted` lives there; absence on derived_raw_cache means
-            // the canonical is not host-tracked.
+            // The host-tracked gate is "any of the three sub-state DBs
+            // has an entry AND the entry is not evicted". We use the
+            // source-content-domain DB because `evicted` lives there;
+            // absence on derived_raw_cache means the canonical is not
+            // host-tracked, so we do not eagerly read the scheduler.
             let entry_visible = self
                 .derived_raw_cache()
                 .get(canonical)

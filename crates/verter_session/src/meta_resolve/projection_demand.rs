@@ -726,16 +726,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // `KeyFilter::UnknownDeferred` doc/impl mismatch.
-    // The variant's doc claims a debug_assert! panic on the publication
-    // boundary. The pre-F6 impl returned `true` (conservative-admit)
-    // and never panicked. F6 makes the impl panic in debug builds and
-    // return `false` in release.
+    // `KeyFilter::UnknownDeferred` admission contract.
+    // The variant's doc specifies a `debug_assert!` panic on the
+    // publication boundary: the impl panics in debug builds and returns
+    // `false` (refuse admission) in release, rather than conservatively
+    // admitting with `true`.
     // -----------------------------------------------------------------
     #[test]
     #[cfg(debug_assertions)]
     #[should_panic(expected = "Rule-5 violation site")]
-    fn key_filter_admits_panics_on_unknown_deferred_f6() {
+    fn key_filter_admits_panics_on_unknown_deferred() {
         let filter = KeyFilter::UnknownDeferred;
         let _ = filter.admits("anything");
     }

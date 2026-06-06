@@ -787,8 +787,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         }
     }
 
-    /// Derived accessor — equivalent to the pre-Commit-2 `self.mode`
-    /// field. The full demand axis lives on [`Self::context`].
+    /// Derived accessor for the projection mode. The full demand axis
+    /// lives on [`Self::context`].
     #[inline]
     fn mode(&self) -> ProjectionMode {
         self.context.mode

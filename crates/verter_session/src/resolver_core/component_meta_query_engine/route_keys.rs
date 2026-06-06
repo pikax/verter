@@ -879,10 +879,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
             _ => {
                 // Compound shapes (IndexedAccess, Conditional, Mapped,
-                // KeyOf, Intersection, Union, Parenthesized, etc.)
-                // preserve the pre-C11b two-scope retry. Inner
-                // sub-expressions come back through this function so
-                // per-shape dispatch still applies transitively.
+                // KeyOf, Intersection, Union, Parenthesized, etc.) use
+                // the two-scope retry. Inner sub-expressions come back
+                // through this function so per-shape dispatch still
+                // applies transitively.
                 let active_result = self.solve_or_project_leaf_expr_until_stable(&arg_scope, expr);
                 if !self.expr_references_prepared_scope_symbol(&decl_scope, expr) {
                     return active_result;
