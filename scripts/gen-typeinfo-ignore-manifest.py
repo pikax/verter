@@ -384,19 +384,50 @@ BLOCK_TO_ORGAN: dict[str, str] = {
 
 # ── Per-block REQUIRED GUARDS (§9 / §11.5) ──
 #
-# `BlockContractRow.required_guards` lists the named guards a block must
-# carry green before it lands (the §11.5 `landed_typeinfo_blocks_have_
-# required_guards` done-predicate keys off this list; that landing
-# enforcement guard itself lands in a later substrate block). The labels are
-# the guard NAMES the block's contract in `docs/arch/native-typeinfo-parity*`
-# / `native-flow-return.md` declares — forward-declared for not-yet-landed
-# blocks (consistent with the AdditionalProofRow RowTestGuard
-# forward-declarations). Every list leads with the universal
-# `typeinfo_parity_block_dag_…` guard, which validates EVERY block's
-# prereq/mechanism/key metadata, then the block-specific guards from its
-# contract. The eight `U6.NARROW_*` sub-blocks share the one narrowing-lattice
-# substrate's three shared guards (native-flow-return.md "Shared required new
-# guards"), cited by every sub-block rather than restated.
+# `BlockContractRow.required_guards` is the COMPLETE forward-declared
+# required-guard set a block must carry green before it lands, transcribed
+# VERBATIM from the "Required new guards" (or equivalently-named guard
+# list) section of the block's OWNING SUBPLAN DOC. It is NOT a
+# representative subset / arbitrary truncation: the full documented list is
+# reproduced so the metadata stays FAITHFUL to the authoritative plan. For a
+# not-yet-landed block these are forward declarations (consistent with the
+# AdditionalProofRow RowTestGuard forward-declarations); the block FINALIZES
+# and verifies them live+green when it lands, via the deferred §11.5
+# `landed_typeinfo_blocks_have_required_guards` done-predicate (that landing
+# enforcement guard itself lands in a later substrate block).
+#
+# Transcription rules:
+# - Copy guard names VERBATIM (a guard is a snake_case identifier appearing
+#   in a doc's "Required new guards" / guard bullet list).
+# - NEVER include a manifest ROW/test name (a `file.rs::function` row in the
+#   §10.4.1 partition or a `function: "..."` row in
+#   `typeinfo_ignored_test_manifest_rows.rs` / `typeinfo_additional_proof_rows.rs`).
+#   Notably the six JSX `jsx_*_via_ambient_namespace_*` /
+#   `jsx_*_via_existing_resolution` / `jsx_element_class_check_*` names in the
+#   U2.JSX_FOUNDATIONS "Required new guards" bullet list are AdditionalProofRow
+#   (`RowTestGuard`) row names, NOT guards — excluded.
+# - NEVER invent a name; phantom guards a doc explicitly marks as NOT landed
+#   (e.g. `module_augmentation_is_public_graph_state`,
+#   `typeinfo_wire_surface_has_no_retired_concept_fields`) are excluded.
+# - Guards a doc explicitly attributes to ANOTHER owning block and marks as
+#   "exercised / not re-owned" here are excluded.
+# - Dedup within each block; keep the universal DAG guard first.
+#
+# Authoritative docs by block family:
+# - U0* / generic: `docs/arch/native-typeinfo-parity-u2-reducers.md` (U0
+#   contract) — U0.MANIFEST_SUBSTRATE's doc explicitly states its
+#   `required_guards` carries the three schema guards directly (§§10.2–10.5).
+# - U2*: `docs/arch/native-typeinfo-parity-u2-reducers.md`.
+# - U6*: `docs/arch/native-flow-return.md` (the eight `U6.NARROW_*`
+#   sub-blocks share the one narrowing-lattice substrate's three "Shared
+#   required new guards", cited by every sub-block rather than restated).
+# - U8* / U3 / U10 / U11 / U12 / U13:
+#   `docs/arch/native-typeinfo-parity-cache-export-session.md`.
+# - U14 / U15: `docs/arch/native-typeinfo-parity-adapters-final-lift.md`.
+#
+# Every list leads with the universal `typeinfo_parity_block_dag_…` guard,
+# which validates EVERY block's prereq/mechanism/key metadata, then the
+# block-specific guards from its contract.
 _DAG = "typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_prereqs"
 _NARROW_SHARED = [
     "narrowing_facts_compose_in_predicate_keyed_frames",
@@ -404,39 +435,95 @@ _NARROW_SHARED = [
     "array_isarray_narrowing_reads_lib_intrinsic_not_text",
 ]
 BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
+    # U0.MANIFEST_SUBSTRATE: the owning doc (u2-reducers.md §134) explicitly
+    # states `BlockContractRow.required_guards` carries these three schema
+    # guards directly (the broader §§10.2–10.5 / §11.5 guard list is the
+    # block's full landing predicate, not the `required_guards` field).
     "U0ManifestSubstrate": [
         _DAG,
         "ignored_test_row_table_holds_exactly_362_rows",
         "additional_proof_row_table_holds_exactly_7_rows",
         "semantic_query_name_mirror_matches_live_tag_set",
     ],
+    # U2.QUERY_VALUE_DOMAIN (u2-reducers.md §220): the section enumerates a
+    # large guard list, mostly via ellipsized prefixes (`resolve_merged_…`)
+    # that are not verbatim-copyable identifiers; the fully-named verbatim
+    # guards are transcribed below (the demand-lattice definition pair, the
+    # spec-table meta-guard, the value-domain + Relate-identity + generalized
+    # augmentation guards, and the reserved-checker-seam guard).
     "U2QueryValueDomain": [
         _DAG,
+        "every_semantic_query_key_maps_to_exactly_one_value_domain",
+        "flow_contextual_keys_return_program_analysis_value",
+        "augmentation_keys_return_declaration_analysis_value",
+        "declaration_augmentation_facts_not_type_nodes",
+        "relate_query_value_carries_relation_proof_and_budget_state",
+        "reserved_checker_queries_are_non_live_typeinfo_does_not_whole_body_check",
+        "global_augmentation_query_has_declaration_analysis_identity",
+        "declaration_augmentation_target_is_env_free_env_comes_from_context",
+        "declaration_augmentation_doc_wire_query_placement_match",
+        "resolve_class_surface_key_covers_side_demand_type_args_and_context",
+        "apparent_type_key_covers_lib_env_demand_and_context",
+        "template_literal_reduce_key_covers_context",
+        "relate_key_covers_relation_kind_policy_freshness_and_context",
+        "relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit",
+        "relate_same_nodes_different_inference_context_do_not_warm_hit",
+        "resolved_named_type_key_identity_is_env_scoped",
         "semantic_query_key_spec_table_equals_enum",
         "query_modes_are_presets_over_projection_demand_eval_policy",
         "skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode",
+        "cache_key_axes_are_minimal_and_normalized",
     ],
     "U8WireSurfaceClosure": [
         _DAG,
         "node_taxonomy_complete",
         "no_non_type_value_smuggled_into_graph_type_node",
+        "flow_contextual_facts_not_graph_type_nodes",
+        "program_analysis_graph_exposes_flow_contextual_queries",
+        "flow_contextual_doc_and_wire_placement_match_program_analysis_graph",
+        "relation_proofs_not_graph_type_nodes",
+        "typeinfo_relate_payload_exposes_relation_proof_without_graph_type_node",
+        "no_infer_not_type_parameter_metadata",
+        "diagnostics_only_on_typeinfo_graph_payload",
+        "typeinfo_graph_response_payload_arm_is_additive_not_retyped",
+        "framework_surface_payload_graph_payload_is_additive_not_retyped",
         "all_public_semantic_type_graph_embeddings_are_payload_wrapped",
     ],
+    # U12.EXPORTER (cache-export-session.md §462): no NEW guard of its own —
+    # the doc names the five U8 wire-purity guards the exporter rides on and
+    # must keep green (they assert the exporter's OUTPUT shape).
     "U12Exporter": [
         _DAG,
         "no_non_type_value_smuggled_into_graph_type_node",
         "program_analysis_graph_exposes_flow_contextual_queries",
         "relation_proofs_not_graph_type_nodes",
+        "typeinfo_relate_payload_exposes_relation_proof_without_graph_type_node",
+        "all_public_semantic_type_graph_embeddings_are_payload_wrapped",
     ],
+    # U13.PROJECTION (cache-export-session.md §520): no NEW guard of its own;
+    # the doc names only TS-test paths (no-rawtype-reads.spec.ts, published-
+    # surface parity), not snake_case manifest guard identifiers, so the
+    # block's existing `capability_rows_map_to_expected_query_fact_mechanisms`
+    # coverage guard is kept as-is.
     "U13Projection": [
         _DAG,
         "capability_rows_map_to_expected_query_fact_mechanisms",
     ],
     "U2RelationInfer": [
         _DAG,
-        "relation_negative_and_unknown_paths_are_fast",
+        "relation_cycle_assumptions_are_scoped_to_full_relate_identity",
+        "relation_coinductive_scc_discharges_on_outgoing_obligations",
         "relation_cycle_sentinel_is_never_warm_admitted",
-        "no_infer_not_type_parameter_metadata",
+        "relation_proofs_not_graph_type_nodes",
+        "typeinfo_relate_payload_exposes_relation_proof_without_graph_type_node",
+        "relation_budget_exceeded_admits_nothing",
+        "inference_runs_in_checker_transaction_not_per_surface_matcher",
+        "only_completed_deterministic_sessions_are_admitted",
+        "inference_candidate_combination_matches_priority_and_variance",
+        "variance_is_measured_by_marker_probe_fixed_point_not_assumed",
+        "reverse_mapped_inference_is_relation_owned_in_session",
+        "freshness_tracks_per_property_spread_taint",
+        "relation_negative_and_unknown_paths_are_fast",
     ],
     "U2Utilities": [
         _DAG,
@@ -448,33 +535,67 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
     ],
     "U2MappedTemplate": [
         _DAG,
-        "template_literal_reduce_models_ts_numeric_bigint_lexing",
         "mapped_minus_optional_strips_only_optional_origin_undefined",
         "mapped_minus_optional_preserves_explicit_undefined_on_required_property",
+        "template_literal_reduce_models_ts_numeric_bigint_lexing",
+        "reverse_mapped_inference_is_relation_owned_in_session",
+        "keyspace_budget_exceeded_admits_nothing",
     ],
     "U2ClassSurfaces": [
         _DAG,
+        "decorator_identity_method_preserves_declared_return",
         "accessor_decorator_publishes_public_property",
+        "decorated_method_literal_union_return_projects",
         "accessor_decorator_identity_target_return_keeps_public_property",
+        "apparent_type_budget_exceeded_admits_nothing",
     ],
     "U2Enums": [
         _DAG,
         "resolve_enum_do_not_warm_hit",
     ],
+    # U2.MODULE_AUGMENTATION (u2-reducers.md §788): the seven enumerated
+    # guards plus `node_taxonomy_complete` (the landed taxonomy guard the
+    # "NO wire-relocation guard" bullet pins on kinds 21–25). The phantom
+    # `module_augmentation_is_public_graph_state` is excluded (the doc states
+    # it does not exist in `crates/`).
     "U2ModuleAugmentation": [
         _DAG,
+        "global_augmentation_query_has_declaration_analysis_identity",
+        "declaration_augmentation_target_is_env_free_env_comes_from_context",
+        "declaration_augmentation_facts_not_type_nodes",
+        "augmentation_keys_return_declaration_analysis_value",
+        "declaration_augmentation_doc_wire_query_placement_match",
         "declaration_merge_records_binder_overload_augmentation_order_as_facts",
         "session_overlay_augmentation_fails_closed_until_implemented",
         "node_taxonomy_complete",
     ],
+    # U2.JSX_FOUNDATIONS (u2-reducers.md §854): only three of the nine names
+    # in the bullet list are guards; the other six (`jsx_*_via_ambient_…`,
+    # `jsx_*_via_existing_resolution`, `jsx_element_class_check_*`) are
+    # AdditionalProofRow (`RowTestGuard`) row names in
+    # typeinfo_additional_proof_rows.rs and are excluded per the no-row-name
+    # rule.
     "U2JsxFoundations": [
         _DAG,
         "jsx_resolution_uses_existing_semantic_queries",
+        "jsx_intrinsic_elements_project_via_indexed_access",
         "jsx_no_dedicated_graph_type_node",
     ],
     "U6FlowReturnSubstrate": [
         _DAG,
+        "function_flow_graph_built_once_per_function_skeleton",
         "flow_slice_is_graph_reachability_not_procedural_walk",
+        "flow_graph_effect_edges_stay_live_past_value_writes",
+        "flow_graph_build_is_shallow_interned_no_lowering_lazy_regions",
+        "flow_return_routes_through_project_semantic_dispatch",
+        "flow_slice_lowered_body_does_not_compute_slice_hash",
+        "flow_slice_keys_on_body_sensitive_hash_not_parse_stable_hash",
+        "flow_return_key_covers_env_dimensions",
+        "flow_return_key_covers_input_context_and_projection_demand",
+        "flow_solver_never_slices_source_text",
+        "no_flow_slot_in_published_type_surface",
+        "flow_slice_budget_exceeded_admits_nothing",
+        "program_analysis_fact_domain_validates_flow_slice",
         "flow_slice_ir_detaches_from_oxc_arena",
         "substitution_env_canonical_hash_is_order_independent",
     ],
@@ -488,57 +609,84 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
     "U6NarrowInvalidation": [_DAG, *_NARROW_SHARED],
     "U6PredicateAssertion": [
         _DAG,
-        "predicate_assertion_effect_is_signature_metadata_not_published_type_node",
         "predicate_signature_without_body_audits_signature_only_outcome",
+        "predicate_assertion_effect_is_signature_metadata_not_published_type_node",
     ],
+    # U6.CALL_RESOLVE (native-flow-return.md §978): the six enumerated guards.
     "U6CallResolve": [
         _DAG,
+        "call_resolution_budget_exceeded_admits_nothing",
+        "flow_call_resolves_callee_via_typed_ir_not_text",
         "resolve_call_key_covers_args_this_contextual_type_overload_policy_and_context",
-        "cross_engine_cycle_discharge_admits_only_stable_deterministic_results",
+        "resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit",
         "checker_reentry_graph_spans_flow_call_contextual_narrowing",
+        "cross_engine_cycle_discharge_admits_only_stable_deterministic_results",
     ],
     "U6ContextualCallback": [
         _DAG,
-        "this_type_contextual_object_literal_binding_in_contextual_type_at",
-        "only_completed_deterministic_sessions_are_admitted",
         "callback_contextual_typing_does_not_pollute_caller_frame",
+        "contextual_callback_input_signature_differentiates_cache_candidates",
+        "this_type_contextual_object_literal_binding_in_contextual_type_at",
     ],
     "U6ValueInference": [
         _DAG,
-        "freshness_tracks_per_property_spread_taint",
         "satisfies_does_not_widen_returned_value",
+        "flow_return_spread_reduces_left_to_right_later_write_wins",
+        "freshness_tracks_per_property_spread_taint",
     ],
     "U6AsyncGenerator": [
         _DAG,
-        "async_return_wraps_in_promise_via_builtin_utility",
         "lib_env_hash_drives_generator_return_resolution",
+        "async_return_wraps_in_promise_via_builtin_utility",
     ],
+    # U6.CROSS_FILE (native-flow-return.md §1218): the three enumerated guards
+    # plus the two inherited flow-cycle-sentinel guards the Critical-rule line
+    # names as this block's R6 guards.
     "U6CrossFile": [
         _DAG,
+        "cross_file_flow_routes_via_resolver_core",
+        "cross_file_recursion_terminates_with_audit_event",
+        "value_type_namespace_split_does_not_leak",
         "flow_cycle_sentinel_is_never_admitted_as_cache_entry",
         "flow_cycle_sentinel_does_not_hide_real_base_return_contributor",
-        "cross_file_recursion_terminates_with_audit_event",
     ],
+    # U6.LOOP_CLOSURE (native-flow-return.md §1276): the four enumerated
+    # guards plus `flow_policy_differentiates_cache_candidates` (landed in
+    # U6.FLOW_RETURN_SUBSTRATE, exercised + pinned here per the Critical-rule
+    # line).
     "U6LoopClosure": [
         _DAG,
-        "flow_policy_differentiates_cache_candidates",
-        "divergent_loop_models_as_void",
         "no_caching_of_partial_or_budget_exceeded_results",
+        "closure_capture_barrier_widens_captured_mutable_slots",
+        "predicate_call_does_not_trigger_closure_barrier",
+        "divergent_loop_models_as_void",
+        "flow_policy_differentiates_cache_candidates",
     ],
     "U3CacheFactModel": [
         _DAG,
         "relation_budget_exceeded_admits_nothing",
         "keyspace_budget_exceeded_admits_nothing",
+        "call_resolution_budget_exceeded_admits_nothing",
+        "apparent_type_budget_exceeded_admits_nothing",
         "program_analysis_fact_domain_validates_flow_slice",
+        "cache_candidate_cap_is_per_family_not_uniform",
+        "family_eviction_prefers_invalid_then_lru_valid_hit",
+        "cache_keys_cover_ts_jsx_moduleresolution_decorator_lib_dimensions",
+        "instantiation_depth_policy_in_identity_and_facts",
+        "persistent_caches_never_admit_overlay_only_results",
+        "architecture_minimizes_fallback_entry_not_fallback_cost",
     ],
+    # U10.RESULT_DB (cache-export-session.md §326): the doc states this block
+    # LANDS exactly one new guard; the demand-lattice definition pair and the
+    # U3 multi-candidate-substrate guards are explicitly "land elsewhere /
+    # exercised here, not re-owned" and are excluded.
     "U10ResultDb": [
         _DAG,
         "cache_satisfaction_is_demand_lattice_not_enum_order",
-        "cache_candidate_cap_is_per_family_not_uniform",
-        "family_eviction_prefers_invalid_then_lru_valid_hit",
     ],
     "U11PublicRelationSession": [
         _DAG,
+        "relate_query_value_carries_relation_proof_and_budget_state",
         "relation_proofs_not_graph_type_nodes",
         "typeinfo_relate_payload_exposes_relation_proof_without_graph_type_node",
     ],
@@ -546,11 +694,24 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
         _DAG,
         "component_meta_is_thin_framework_adapter_no_second_resolver",
     ],
+    # U15.FINAL_LIFT (adapters-final-lift.md §233): the five enumerated new
+    # guards plus the six carried-forward terminal guards the doc names as
+    # kept green at acceptance. The §237 exercised-not-owned perf guards
+    # (`flow_graph_build_…`, `cache_key_axes_…`, `relation_negative_…`) are
+    # excluded.
     "U15FinalLift": [
         _DAG,
         "all_typeinfo_parity_rows_lifted_except_stop_gates",
-        "no_landed_typeinfo_block_has_live_ignored_rows",
+        "svelte_adapter_stop_gate_is_registered_out_of_scope",
+        "react_adapter_stop_gate_is_registered_out_of_scope",
         "bench_result_row_reports_cache_mode_sourcemap_batch_thread_hit_fallback",
+        "architecture_minimizes_fallback_entry_not_fallback_cost",
+        "ignored_test_row_table_holds_exactly_362_rows",
+        "no_landed_typeinfo_block_has_live_ignored_rows",
+        "no_vacuous_parent_u_block_landing",
+        "every_manifest_row_has_non_placeholder_mechanism_and_executable_proof",
+        "capability_rows_map_to_expected_query_fact_mechanisms",
+        "external_corpus_paths_not_present_outside_gated_tests",
     ],
 }
 

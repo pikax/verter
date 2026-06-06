@@ -548,12 +548,20 @@ struct AdditionalProofRow {
 /// `consumed_mechanisms`, plus the §9 contract metadata the parent requires
 /// (`native-typeinfo-parity.md` §9): the `required_guards` the block must
 /// carry green before it lands and the `verification_labels` (verification
-/// command labels) it runs. `required_guards` is forward-declared for
-/// not-yet-landed blocks (the §11.5 `landed_typeinfo_blocks_have_required_\
-/// guards` done-predicate — that landing-enforcement guard itself lands in a
-/// later substrate block); the
+/// command labels) it runs. `required_guards` is the COMPLETE
+/// forward-declared required-guard set transcribed VERBATIM from the
+/// "Required new guards" section of the block's owning subplan doc — NOT a
+/// representative subset or arbitrary truncation. For a not-yet-landed block
+/// these are forward declarations (the block FINALIZES and verifies them
+/// live+green when it lands, via the deferred §11.5
+/// `landed_typeinfo_blocks_have_required_guards` done-predicate — that
+/// landing-enforcement guard itself lands in a later substrate block). The
+/// list is authored in `scripts/gen-typeinfo-ignore-manifest.py`
+/// (`BLOCK_TO_REQUIRED_GUARDS`) and regenerated into
+/// `manifest_data/typeinfo_parity_blocks.rs`; row/test names and
+/// doc-marked-not-landed phantom names are excluded. The
 /// `every_block_contract_row_carries_required_guards` guard here pins only
-/// that every block CARRIES non-empty labels.
+/// that every block CARRIES non-empty, deduplicated labels.
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
 struct BlockContractRow {
