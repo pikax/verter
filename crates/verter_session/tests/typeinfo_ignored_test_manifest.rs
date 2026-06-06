@@ -1696,6 +1696,21 @@ fn every_block_contract_row_carries_required_guards() {
                 block.block_id,
             ));
         }
+        for l in block.verification_labels {
+            if l.trim().len() < MIN_LABEL_LENGTH {
+                violations.push(format!(
+                    "{:?}: verification label {l:?} is empty / too short",
+                    block.block_id,
+                ));
+            }
+        }
+        let unique_labels: BTreeSet<&str> = block.verification_labels.iter().copied().collect();
+        if unique_labels.len() != block.verification_labels.len() {
+            violations.push(format!(
+                "{:?}: duplicate verification label(s) — each label must appear once",
+                block.block_id,
+            ));
+        }
     }
     assert!(
         violations.is_empty(),
