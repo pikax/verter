@@ -4169,7 +4169,7 @@ design-intent names for keys whose closure guards land alongside their reducers:
 - `block_rows_cannot_lift_without_complete_coverage` (a branch flipping rows `Lifted` without complete coverage fails CI)
 - `ignored_test_row_table_holds_exactly_362_rows`
 - `additional_proof_row_table_holds_exactly_7_rows`
-- `semantic_query_name_mirror_matches_live_tag_set` (the `SemanticQueryName` mirror tracks the live `SemanticQueryKeyTag::ALL` variant set; carried in `U0.MANIFEST_SUBSTRATE`'s `BlockContractRow.required_guards`)
+- `semantic_query_name_mirror_matches_live_tag_set` (the `SemanticQueryName` mirror tracks the live `SemanticQueryKeyTag::ALL` variant set; carried in `U0.MANIFEST_SUBSTRATE`'s `BlockContractRow.required_guards` alongside the universal DAG guard, the two count guards `ignored_test_row_table_holds_exactly_362_rows` / `additional_proof_row_table_holds_exactly_7_rows`, and the two sibling FINISH-A structural guards `every_block_contract_row_carries_required_guards` / `typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output` — the U0-FINISH-B proof/coverage guards are NOT in U0's `required_guards`)
 - the source-`#[ignore]` ↔ `Ignored`-rows ↔ `EXPECTED_TOTAL_IGNORED_COUNT` bijection/count guards
 - `no_landed_typeinfo_block_has_live_ignored_rows`
 

@@ -454,15 +454,21 @@ _NARROW_SHARED = [
     "array_isarray_narrowing_reads_lib_intrinsic_not_text",
 ]
 BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
-    # U0.MANIFEST_SUBSTRATE: the owning doc (u2-reducers.md §134) explicitly
-    # states `BlockContractRow.required_guards` carries these three schema
-    # guards directly (the broader §§10.2–10.5 / §11.5 guard list is the
-    # block's full landing predicate, not the `required_guards` field).
+    # U0.MANIFEST_SUBSTRATE: `BlockContractRow.required_guards` carries the
+    # universal DAG guard, the two manifest count guards, and ALL THREE
+    # FINISH-A-landed structural guards (the semantic-query name mirror, the
+    # per-block required_guards-presence guard, and the manifest-file freshness
+    # guard) — these all gate U0-FINISH-A's landing. The broader §§10.2–10.5 /
+    # §11.5 guard list is the block's full landing predicate, not the
+    # `required_guards` field; the U0-FINISH-B proof/coverage guards remain
+    # forward-declared and are NOT in required_guards.
     "U0ManifestSubstrate": [
         _DAG,
         "ignored_test_row_table_holds_exactly_362_rows",
         "additional_proof_row_table_holds_exactly_7_rows",
         "semantic_query_name_mirror_matches_live_tag_set",
+        "every_block_contract_row_carries_required_guards",
+        "typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output",
     ],
     # U2.QUERY_VALUE_DOMAIN (u2-reducers.md §220): the section enumerates a
     # large guard list, mostly via ellipsized prefixes (`resolve_merged_…`)
