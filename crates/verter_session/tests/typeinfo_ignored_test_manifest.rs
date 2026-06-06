@@ -527,7 +527,15 @@ struct AdditionalProofRow {
 
 /// One block-contract row (§9 / §11.5). Pins the block prerequisite
 /// DAG (`prereqs`) + the block's dominant `mechanism_id` and
-/// `consumed_mechanisms`.
+/// `consumed_mechanisms`, plus the §9 contract metadata the parent requires
+/// (`native-typeinfo-parity.md` §9): the `required_guards` the block must
+/// carry green before it lands and the `verification_labels` (verification
+/// command labels) it runs. `required_guards` is forward-declared for
+/// not-yet-landed blocks (the §11.5 `landed_typeinfo_blocks_have_required_\
+/// guards` done-predicate — that landing-enforcement guard itself lands in a
+/// later substrate block); the
+/// `every_block_contract_row_carries_required_guards` guard here pins only
+/// that every block CARRIES non-empty labels.
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
 struct BlockContractRow {
@@ -537,6 +545,8 @@ struct BlockContractRow {
     prereqs: &'static [TypeInfoParityBlockId],
     mechanism_id: MechanismId,
     consumed_mechanisms: &'static [MechanismId],
+    required_guards: &'static [&'static str],
+    verification_labels: &'static [&'static str],
 }
 
 /// The single block that OWNS (produces) each `SemanticQueryName`
@@ -1635,6 +1645,57 @@ fn semantic_query_name_mirror_matches_live_tag_set() {
         "`SEMANTIC_QUERY_NAME_ALL` contains duplicate variants",
     );
     assert!(!live.is_empty(), "`SemanticQueryKeyTag::ALL` must be non-empty");
+}
+
+/// §9 / §11.5 — every `BlockContractRow` CARRIES its contract metadata: a
+/// non-empty `required_guards` list (the §11.5 done-predicate keys off these
+/// labels) and a non-empty `verification_labels` list, with no empty /
+/// too-short / duplicated label in either. This is the schema-presence gate;
+/// the LANDING-time enforcement (a landed block's required guards are live +
+/// green) is the separate `landed_typeinfo_blocks_have_required_guards`
+/// done-predicate that lands in a later substrate block. A block row with an
+/// empty `required_guards` (or `verification_labels`) FAILS here.
+#[test]
+fn every_block_contract_row_carries_required_guards() {
+    const MIN_LABEL_LENGTH: usize = 8;
+    let mut violations: Vec<String> = Vec::new();
+    for block in TYPEINFO_PARITY_BLOCKS {
+        if block.required_guards.is_empty() {
+            violations.push(format!(
+                "{:?}: empty `required_guards` — a block contract must name at \
+                 least the guard(s) that gate its landing",
+                block.block_id,
+            ));
+        }
+        if block.verification_labels.is_empty() {
+            violations.push(format!(
+                "{:?}: empty `verification_labels` — a block contract must name \
+                 the verification commands it runs",
+                block.block_id,
+            ));
+        }
+        for g in block.required_guards {
+            if g.trim().len() < MIN_LABEL_LENGTH {
+                violations.push(format!(
+                    "{:?}: required-guard label {g:?} is empty / too short",
+                    block.block_id,
+                ));
+            }
+        }
+        let unique: BTreeSet<&str> = block.required_guards.iter().copied().collect();
+        if unique.len() != block.required_guards.len() {
+            violations.push(format!(
+                "{:?}: duplicate required-guard label(s) — each guard must appear once",
+                block.block_id,
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "block contract metadata incomplete ({} violation(s)):\n  {}",
+        violations.len(),
+        violations.join("\n  "),
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────

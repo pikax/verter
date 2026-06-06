@@ -374,6 +374,195 @@ BLOCK_TO_ORGAN: dict[str, str] = {
     "U15FinalLift": "FinalLift",
 }
 
+# ── Per-block REQUIRED GUARDS (§9 / §11.5) ──
+#
+# `BlockContractRow.required_guards` lists the named guards a block must
+# carry green before it lands (the §11.5 `landed_typeinfo_blocks_have_
+# required_guards` done-predicate keys off this list; that landing
+# enforcement guard itself lands in a later substrate block). The labels are
+# the guard NAMES the block's contract in `docs/arch/native-typeinfo-parity*`
+# / `native-flow-return.md` declares — forward-declared for not-yet-landed
+# blocks (consistent with the AdditionalProofRow RowTestGuard
+# forward-declarations). Every list leads with the universal
+# `typeinfo_parity_block_dag_…` guard, which validates EVERY block's
+# prereq/mechanism/key metadata, then the block-specific guards from its
+# contract. The eight `U6.NARROW_*` sub-blocks share the one narrowing-lattice
+# substrate's three shared guards (native-flow-return.md "Shared required new
+# guards"), cited by every sub-block rather than restated.
+_DAG = "typeinfo_parity_block_dag_is_acyclic_and_consumed_keys_and_mechanisms_are_prereqs"
+_NARROW_SHARED = [
+    "narrowing_facts_compose_in_predicate_keyed_frames",
+    "narrowing_facts_are_program_analysis_not_graph_type_nodes",
+    "array_isarray_narrowing_reads_lib_intrinsic_not_text",
+]
+BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
+    "U0ManifestSubstrate": [
+        _DAG,
+        "ignored_test_row_table_holds_exactly_362_rows",
+        "additional_proof_row_table_holds_exactly_7_rows",
+        "semantic_query_name_mirror_matches_live_tag_set",
+    ],
+    "U2QueryValueDomain": [
+        _DAG,
+        "semantic_query_key_spec_table_equals_enum",
+        "query_modes_are_presets_over_projection_demand_eval_policy",
+        "skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode",
+    ],
+    "U8WireSurfaceClosure": [
+        _DAG,
+        "node_taxonomy_complete",
+        "no_non_type_value_smuggled_into_graph_type_node",
+        "all_public_semantic_type_graph_embeddings_are_payload_wrapped",
+    ],
+    "U12Exporter": [
+        _DAG,
+        "no_non_type_value_smuggled_into_graph_type_node",
+        "program_analysis_graph_exposes_flow_contextual_queries",
+        "relation_proofs_not_graph_type_nodes",
+    ],
+    "U13Projection": [
+        _DAG,
+        "capability_rows_map_to_expected_query_fact_mechanisms",
+    ],
+    "U2RelationInfer": [
+        _DAG,
+        "relation_negative_and_unknown_paths_are_fast",
+        "relation_cycle_sentinel_is_never_warm_admitted",
+        "no_infer_not_type_parameter_metadata",
+    ],
+    "U2Utilities": [
+        _DAG,
+        "pick_never_yields_empty_object",
+        "keyspace_budget_exceeded_admits_nothing",
+    ],
+    "U2IndexedAccess": [
+        _DAG,
+        "keyspace_budget_exceeded_admits_nothing",
+    ],
+    "U2MappedTemplate": [
+        _DAG,
+        "template_literal_reduce_models_ts_numeric_bigint_lexing",
+        "mapped_modifier_minus_optional_strips_optional_and_undefined",
+    ],
+    "U2ClassSurfaces": [
+        _DAG,
+        "accessor_decorator_publishes_public_property",
+        "accessor_decorator_identity_target_return_keeps_public_property",
+    ],
+    "U2Enums": [
+        _DAG,
+        "resolve_enum_do_not_warm_hit",
+    ],
+    "U2ModuleAugmentation": [
+        _DAG,
+        "declaration_merge_records_binder_overload_augmentation_order_as_facts",
+        "session_overlay_augmentation_fails_closed_until_implemented",
+        "node_taxonomy_complete",
+    ],
+    "U2JsxFoundations": [
+        _DAG,
+        "jsx_resolution_uses_existing_semantic_queries",
+        "jsx_no_dedicated_graph_type_node",
+    ],
+    "U6FlowReturnSubstrate": [
+        _DAG,
+        "flow_slice_is_graph_reachability_not_procedural_walk",
+        "flow_slice_ir_detaches_from_oxc_arena",
+        "substitution_env_canonical_hash_is_order_independent",
+    ],
+    "U6NarrowTypeof": [_DAG, *_NARROW_SHARED],
+    "U6NarrowEquality": [_DAG, *_NARROW_SHARED],
+    "U6NarrowTruthiness": [_DAG, *_NARROW_SHARED],
+    "U6NarrowIn": [_DAG, *_NARROW_SHARED],
+    "U6NarrowInstanceof": [_DAG, *_NARROW_SHARED],
+    "U6NarrowDiscriminated": [_DAG, *_NARROW_SHARED],
+    "U6NarrowSubstitution": [_DAG, *_NARROW_SHARED],
+    "U6NarrowInvalidation": [_DAG, *_NARROW_SHARED],
+    "U6PredicateAssertion": [
+        _DAG,
+        "predicate_assertion_effect_is_signature_metadata_not_published_type_node",
+        "flow_invalidations_fi08_asserts_narrows_dotted_member_path",
+        "predicate_signature_without_body_audits_signature_only_outcome",
+    ],
+    "U6CallResolve": [
+        _DAG,
+        "resolve_call_key_covers_args_this_contextual_type_overload_policy_and_context",
+        "cross_engine_cycle_discharge_admits_only_stable_deterministic_results",
+        "checker_reentry_graph_spans_flow_call_contextual_narrowing",
+    ],
+    "U6ContextualCallback": [
+        _DAG,
+        "this_type_contextual_object_literal_binding_in_contextual_type_at",
+        "only_completed_deterministic_sessions_are_admitted",
+        "callback_contextual_typing_does_not_pollute_caller_frame",
+    ],
+    "U6ValueInference": [
+        _DAG,
+        "freshness_tracks_per_property_spread_taint",
+        "satisfies_widens_inner_value_to_primitive_without_as_const",
+    ],
+    "U6AsyncGenerator": [
+        _DAG,
+        "await_using_simulated_return_type_resolves_to_primitive",
+        "lib_env_hash_drives_generator_return_resolution",
+    ],
+    "U6CrossFile": [
+        _DAG,
+        "flow_cycle_sentinel_is_never_admitted_as_cache_entry",
+        "flow_cycle_sentinel_does_not_hide_real_base_return_contributor",
+        "cross_file_recursion_terminates_with_audit_event",
+    ],
+    "U6LoopClosure": [
+        _DAG,
+        "flow_policy_differentiates_cache_candidates",
+        "divergent_loop_models_as_void",
+        "no_caching_of_partial_or_budget_exceeded_results",
+    ],
+    "U3CacheFactModel": [
+        _DAG,
+        "relation_budget_exceeded_admits_nothing",
+        "keyspace_budget_exceeded_admits_nothing",
+        "program_analysis_fact_domain_validates_flow_slice",
+    ],
+    "U10ResultDb": [
+        _DAG,
+        "cache_satisfaction_is_demand_lattice_not_enum_order",
+        "cache_candidate_cap_is_per_family_not_uniform",
+        "family_eviction_prefers_invalid_then_lru_valid_hit",
+    ],
+    "U11PublicRelationSession": [
+        _DAG,
+        "relation_proofs_not_graph_type_nodes",
+        "typeinfo_relate_payload_exposes_relation_proof_without_graph_type_node",
+    ],
+    "U14MacroAdapter": [
+        _DAG,
+        "component_meta_is_thin_framework_adapter_no_second_resolver",
+    ],
+    "U15FinalLift": [
+        _DAG,
+        "all_typeinfo_parity_rows_lifted_except_stop_gates",
+        "no_landed_typeinfo_block_has_live_ignored_rows",
+        "bench_result_row_reports_cache_mode_sourcemap_batch_thread_hit_fallback",
+    ],
+}
+
+# ── Per-block VERIFICATION COMMAND LABELS (§9) ──
+#
+# The verification commands a block runs before it lands. PARENT-UNIFORM
+# (native-typeinfo-parity.md §11.11/§11.12 + the per-subplan "Verification
+# commands"): every block runs the manifest coverage gate plus the full
+# workspace gate (the canonical agent gate — nextest for completeness + the
+# shared-process verter_session surface + clippy + fmt). Carried as a label
+# list so the contract row records WHAT must pass, not a free-text blob.
+BLOCK_VERIFICATION_LABELS: list[str] = [
+    "cargo test -p verter_session --test typeinfo_ignored_test_manifest",
+    "cargo nextest run --workspace",
+    "cargo test -p verter_session --tests",
+    "cargo clippy --workspace -- -D warnings",
+    "cargo fmt --all --check",
+]
+
 # ── ROW-LEVEL mechanism, INDEPENDENT of the `block_id` column ──
 #
 # A row's dominant `mechanism_id` is its ROW-LEVEL mechanism (§10.4 /
@@ -940,9 +1129,11 @@ def emit_block_rows() -> str:
         "#[rustfmt::skip]",
         "const TYPEINFO_PARITY_BLOCKS: &[BlockContractRow] = &[",
     ]
+    verification = ", ".join(f'"{label}"' for label in BLOCK_VERIFICATION_LABELS)
     for block in BLOCK_TO_MECHANISM:
         prereqs = ", ".join(f"TypeInfoParityBlockId::{p}" for p in BLOCK_PREREQS[block])
         consumed = ", ".join(f"MechanismId::{m}" for m in consumed_mechs_for_block(block))
+        guards = ", ".join(f'"{g}"' for g in BLOCK_TO_REQUIRED_GUARDS[block])
         out.append(
             "    BlockContractRow { "
             f"block_id: TypeInfoParityBlockId::{block}, "
@@ -950,7 +1141,9 @@ def emit_block_rows() -> str:
             f"organ: ArchitectureOrgan::{BLOCK_TO_ORGAN[block]}, "
             f"prereqs: &[{prereqs}], "
             f"mechanism_id: MechanismId::{BLOCK_TO_MECHANISM[block]}, "
-            f"consumed_mechanisms: &[{consumed}] }},"
+            f"consumed_mechanisms: &[{consumed}], "
+            f"required_guards: &[{guards}], "
+            f"verification_labels: &[{verification}] }},"
         )
     out.append("];")
     return "\n".join(out) + "\n"
