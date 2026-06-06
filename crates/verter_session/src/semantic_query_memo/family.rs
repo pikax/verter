@@ -940,12 +940,16 @@ pub struct AuditEagerKeyRow {
 /// intermediate next-hop demand (it carrier-stops / does NOT materialise a
 /// one-shell surface), so serving a `Shallow` surface request from a
 /// `Navigate` result returns an under-materialised surface — e.g. it hides
-/// a cyclic-heritage expansion the Shallow request would have surfaced
-/// (regression caught by
-/// `meta_resolve::slot_binding_graph_tests::cache_suppress_true_skips_memo_insertion`).
+/// a cyclic-heritage expansion the Shallow request would have surfaced.
 /// Backfill therefore only ever flows toward strictly-shallower projection
 /// depth; the gate prunes the unsound enum-rank cases within that
-/// direction.
+/// direction. The directional rule is pinned by
+/// `super::tests::navigate_compute_does_not_serve_or_backfill_shallow_request`
+/// (a Navigate cold build leaves the Shallow slot empty and a Shallow
+/// request misses, while the narrower Identity slot is backfilled); the
+/// no-sub-slot-mode-terminal soundness invariant it relies on is pinned by
+/// the `warm_publish_one` `debug_assert!` plus
+/// `super::tests::warm_publish_one_debug_asserts_against_sub_slot_mode_terminal`.
 ///
 /// `Skeleton`, `MacroSurfaceShallow`, and `Single` are independent
 /// evaluations with no backfill in either direction.

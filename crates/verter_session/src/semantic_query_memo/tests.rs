@@ -1326,6 +1326,191 @@ fn cache_satisfaction_requires_path_exact_not_prefix() {
     );
 }
 
+/// §3.4 SOUNDNESS PIN — the PRODUCTION publish path (`warm_publish_one`)
+/// debug-asserts that a published entry's recorded terminal point (the
+/// point at the key's own projection path) is at-least the slot's mode.
+///
+/// A sub-slot-mode terminal — e.g. a carrier-stopping `Navigate` terminal
+/// recorded in an `Expanded` slot — would let the two-gate warm hit SERVE
+/// (and the directional backfill CLONE into the `Shallow` slot, since
+/// `Navigate ⊒ Shallow`) an under-materialised surface. This is
+/// unreachable in production but UNGUARDED before §3.4 hardening; the
+/// `debug_assert!` pins it.
+///
+/// DISCRIMINATING: this drives the PRODUCTION `warm_publish_one` directly
+/// with a `Navigate` record published into an `Expanded` slot and asserts
+/// it panics. If the `debug_assert!` were removed, the publish would
+/// silently succeed and this test would FAIL (no panic). Gated on
+/// `debug_assertions` because `debug_assert!` is a no-op in release.
+/// Note the test-only `publish_with_materialized_set_for_tests` path (used
+/// by `cache_satisfaction_is_materialized_point_not_nominal_demand`) does
+/// NOT carry this assert, so that adversarial gate test is unaffected.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "sub-slot-mode terminal")]
+fn warm_publish_one_debug_asserts_against_sub_slot_mode_terminal() {
+    use crate::semantic_query::demand::{Demand, MaterializedPoint, MaterializedSet, ProjectionPath};
+
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let path: Arc<[PathSegment]> =
+        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let proj_path = ProjectionPath::from_segments([PathSegment::Member(Arc::from("foo"))]);
+    let key_expanded = SemanticQueryKey::ProjectPath {
+        base,
+        path,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    };
+    let value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let walker_diagnostics: std::sync::Arc<
+        [crate::project_semantic_dispatch::walk::ShallowDiagnostic],
+    > = std::sync::Arc::from([]);
+    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(
+        crate::fact_signature_helpers::empty_fact_signature(),
+    );
+    let inflight = Arc::new(InflightEntry::new());
+    // A `Navigate` terminal recorded into the `Expanded` slot — the
+    // forbidden sub-slot-mode terminal the production assert rejects.
+    let bad = MaterializedSet::single(MaterializedPoint::new(Demand::navigate(proj_path)));
+    store.warm_publish_one(
+        &host,
+        &key_expanded,
+        &QueryResult::Value(value),
+        &walker_diagnostics,
+        &carrier,
+        &empty_signature(),
+        &Arc::from([]),
+        &bad,
+        &inflight,
+    );
+}
+
+/// §3.4 SOUNDNESS PIN (positive) — no production cold-build records a
+/// sub-slot-mode terminal point. A single-terminal cold build through the
+/// real `execute_cooperative` admission flow for an `Expanded` key records
+/// EXACTLY the slot's own mode at the key's path
+/// (`requested_point_for_key`), never a narrower (sub-slot) mode.
+///
+/// Together with the path-walk arithmetic test
+/// (`path_walk_materialized_set_records_linear_navhops_and_stops_at_arm_split`,
+/// which proves the path-walk terminal records `context.mode`) and the
+/// `warm_publish_one` `debug_assert!` (live under `debug_assertions` for
+/// EVERY production publish), this pins that no production cold-build path
+/// can record a sub-slot-mode terminal.
+///
+/// DISCRIMINATING: if the cold-build default recorded a `Navigate`
+/// terminal (or any narrower mode) for an `Expanded` key, the recorded-set
+/// equality below would FAIL — and the `warm_publish_one` `debug_assert!`
+/// would additionally fire on the publish.
+#[test]
+fn cold_build_default_records_slot_mode_terminal_not_sub_slot() {
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let path: Arc<[PathSegment]> =
+        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let key_expanded = SemanticQueryKey::ProjectPath {
+        base,
+        path,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    };
+
+    let value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let _ = store.execute_cooperative(
+        &host,
+        key_expanded.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || (QueryResult::Value(value), empty_signature()),
+    );
+
+    // The recorded terminal is the slot's OWN mode at the key's path —
+    // NOT a sub-slot (e.g. Navigate) terminal.
+    let expected = crate::semantic_query::demand::MaterializedSet::single(
+        super::family::requested_point_for_key(&key_expanded),
+    );
+    assert_eq!(
+        store.entry_satisfied_projection_for_tests(&key_expanded),
+        Some(expected),
+        "a single-terminal cold build must record the slot-mode terminal \
+         (Expanded@[foo]), never a sub-slot-mode terminal",
+    );
+    // Sanity: the entry self-satisfies its own Expanded request.
+    assert!(
+        store.get_validated(&key_expanded, &host).is_some(),
+        "the entry must serve its own Expanded request",
+    );
+}
+
+/// §3.4 DIRECTIONAL-GATE REGRESSION — a carrier-stopping `Navigate`
+/// compute does NOT serve or backfill a `Shallow` request. The lattice has
+/// `Navigate ⊒ Shallow`, so a naive all-peers-gated backfill would clone a
+/// `Navigate` result into the `Shallow` slot — operationally unsound (it
+/// would serve a one-shell Shallow surface from a result that only
+/// navigated through, never expanded, the type). The §3.4 backfill is
+/// DIRECTIONAL: `slot_domain_siblings(Navigate) = [Identity]` only, so a
+/// Navigate compute never targets the broader Shallow slot.
+///
+/// DISCRIMINATING: a Navigate cold build leaves the `Shallow` slot EMPTY
+/// (and a Shallow request MISSES). It backfills only the narrower
+/// `Identity` slot. If the directional rule regressed to an all-lattice-
+/// peers backfill, the Shallow slot would be populated from the Navigate
+/// record and the Shallow request would wrongly HIT.
+#[test]
+fn navigate_compute_does_not_serve_or_backfill_shallow_request() {
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let path: Arc<[PathSegment]> =
+        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+    let mk = |mode| SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::clone(&path),
+        context: crate::semantic_query::ProjectionReductionContext::published(mode),
+    };
+    let key_navigate = mk(ProjectionMode::Navigate);
+    let key_shallow = mk(ProjectionMode::Shallow);
+    let key_identity = mk(ProjectionMode::Identity);
+
+    // Navigate cold build; the default record set is `{Navigate@[foo]}`.
+    let value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let _ = store.execute_cooperative(
+        &host,
+        key_navigate.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || (QueryResult::Value(value), empty_signature()),
+    );
+
+    // Shallow slot stays EMPTY — Navigate never targets the broader
+    // Shallow slot (directional), so a Shallow request MISSES.
+    assert_eq!(
+        store.slot_candidate_count_for_tests(&key_shallow),
+        0,
+        "a Navigate compute must NOT backfill the broader Shallow slot (directional gate)",
+    );
+    assert!(
+        store.get_validated(&key_shallow, &host).is_none(),
+        "a Shallow request must MISS — a carrier-stopping Navigate result must not serve a \
+         Shallow shell surface",
+    );
+
+    // Positive controls: the Navigate request HITS, and the narrower
+    // Identity slot IS backfilled (`Navigate ⊒ Identity`).
+    assert!(
+        store.get_validated(&key_navigate, &host).is_some(),
+        "the Navigate request HITS its own compute",
+    );
+    assert_eq!(
+        store.slot_candidate_count_for_tests(&key_identity),
+        1,
+        "Navigate backfills the narrower Identity slot (Navigate ⊒ Identity)",
+    );
+}
+
 /// §3.4 GUARD — same-family backfill writes ONLY the RECORDED materialised
 /// points (verbatim), and ONLY into a sibling slot a recorded point
 /// dominates — never by enum rank, never a synthesised/meet point.

@@ -3137,6 +3137,29 @@ impl SemanticGraphStore {
             return true;
         }
         let requested_path = requested_path_for_key(key);
+        // §3.4 soundness invariant (production publish ONLY): the entry's
+        // RECORDED terminal point — the materialised point at the key's own
+        // projection path — must be at-least the slot's mode, i.e. it must
+        // `cached_satisfies` the entry's OWN requested point. A
+        // sub-slot-mode terminal (e.g. a carrier-stopping `Navigate`
+        // terminal recorded in an `Expanded` slot) would let the two-gate
+        // warm hit SERVE — and the directional backfill CLONE, since
+        // `Navigate ⊒ Shallow` — an under-materialised surface. This is
+        // unreachable in production: a path-walk terminal always records
+        // `context.mode` (= the slot's mode — see `path_walk_materialized_set`),
+        // and a single-terminal build defaults to `requested_point_for_key`.
+        // It is pinned here so a future producer regression panics at the
+        // publish site rather than silently corrupting the cache. It lives
+        // ONLY on the production publish path: the test-only
+        // `publish_with_materialized_set_for_tests` deliberately constructs
+        // adversarial under-materialised records to exercise the warm-hit
+        // gate and must NOT trip this assert.
+        debug_assert!(
+            cached_satisfies(satisfied_projection, &requested_point_for_key(key)),
+            "warm_publish_one: entry for {key:?} records no terminal point at its own \
+             projection path that satisfies the slot's mode — a sub-slot-mode terminal \
+             would serve/clone an under-materialised surface (§3.4 soundness invariant)"
+        );
         // The carrier is the COMPLETED self-version-rooted carrier the
         // shared cold-build helper produced via
         // `semantic_graph_read_set_signature` — it already leads with a
@@ -3311,6 +3334,19 @@ impl SemanticGraphStore {
             return;
         }
         let requested_path = requested_path_for_key(&key);
+        // §3.4 soundness invariant (production publish only) — same as
+        // `warm_publish_one`. A prefix-backfill records exactly its own
+        // `Navigate@prefix` hop into a `Navigate`-mode key, so this is
+        // self-satisfying by construction; pinned here so a future
+        // prefix-backfill producer change cannot record a sub-slot-mode
+        // terminal that the warm-hit / backfill gates would then serve or
+        // clone as an under-materialised surface.
+        debug_assert!(
+            cached_satisfies(&satisfied_projection, &requested_point_for_key(&key)),
+            "warm_publish_one_if_absent: prefix-backfill entry for {key:?} records no terminal \
+             point at its own projection path that satisfies the slot's mode (§3.4 soundness \
+             invariant)"
+        );
         // Skip if already warm OR currently in flight. Both checks
         // happen BEFORE acquiring the entries lock; a concurrent cold
         // winner publish that lands between this check and the publish
