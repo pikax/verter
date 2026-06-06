@@ -4214,9 +4214,11 @@ landing/accept/rollback boundary those guards used to police.
   required approval, and the squash-merge `Typeinfo-Block:` trailer convention. There is NO tracked `.cutover-state.typeinfo_parity`
   namespace, NO two-namespace TOML schema, NO namespaced xtask, and NO crash-recovery machinery to deliver (§13) — git history +
   branch protection + `git revert` are the transaction log / accept gate / rollback.
-- **The generated artifacts** — the `SemanticQueryKeySpec` table (§2.9), the proof registry + typed row-test wrapper (§10.3), and
-  the U0 row-exact coverage table (§10.4) — are each produced by a dedicated `cargo run` generator and checked in (generated, not
-  hand-maintained).
+- **The generated artifacts** — the `SemanticQueryKeySpec` table (§2.9, owned by `U2.QUERY_VALUE_DOMAIN`), the proof registry +
+  typed row-test wrapper (§10.3), and the U0 row-exact coverage table (§10.4) — are each to be produced by a dedicated `cargo run`
+  generator and checked in (generated, not hand-maintained). NONE of these is built on the current tree: they are U0-FINISH-B
+  deliverables (the `SemanticQueryKeySpec` table lands with `U2.QUERY_VALUE_DOMAIN`), consistent with the not-yet-built state noted
+  at §10.2 / §10.4. U0-FINISH-A landed only the manifest ledger + DAG + the hand-authored §10.4.1 row→`block_id` partition input.
 
 # Cross-reference / doc-update obligations
 
