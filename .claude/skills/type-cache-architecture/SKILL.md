@@ -285,7 +285,12 @@ a dedicated per-key `InstantiateContext { projection_reduction,
 resolve_env_hash }` / `MacroPayloadContext { resolve_env_hash, mode }`
 (NOT the shared `ProjectionReductionContext`, which stays a pure
 projection-demand identity — §2.6 per-key-context rule); `provenance` +
-`merge_role` stay at FAMILY-IDENTITY on `FamilyKey`. The slot is
+`merge_role` stay at FAMILY-IDENTITY on `FamilyKey` for EVERY
+context-bearing projection-reduction family — `Instantiate`, `KeyOf`,
+`MappedType`, and `ProjectPath` all thread both axes into their
+`FamilyKey`, so two `KeyOf` (or `MappedType`) queries differing only in
+provenance / merge_role get DISTINCT `(FamilyKey, slot)` identities and
+never alias onto one memo entry. The slot is
 **content-free** — its `T,L,J` env dims are KEY dims, but content/version
 hashes (`whole_hash` / `content_hash` / `parse_stable_hash` /
 `fact_dep_signature`) are FORBIDDEN; the versioned `DeclIdentity`

@@ -29,9 +29,12 @@
 > scope + R-c cross-ref; mini-DAG art) — all folded in below — precision/sequencing fixes layered on the locked
 > core, NOT a redesign; no invariant weakened. A THIRD max-mandate confirm-gate (round 3) then returned one
 > P1 + two P2 (all VERIFIED real) — folded in below: **P1-RI3** (the RI-3 guard
-> `checker_reentry_graph_spans_flow_call_contextual_narrowing` named the U6-deferred
-> `FlowReturn`/`ResolveCall`/`ContextualTypeAt`/`FlowNarrowingAt` variants — NOT pre-registered at U2, and the
-> standing `semantic_query_key_spec_table_equals_enum` meta-guard rejects any U2 tree referencing them, so it
+> `checker_reentry_graph_spans_flow_call_contextual_narrowing` asserts a cross-engine reentry span over
+> `FlowReturn`/`ResolveCall`/`ContextualTypeAt`/`FlowNarrowingAt` that is U6-deferred: the `FlowReturn` /
+> `ResolveCall` variants are NOT pre-registered at U2 (the standing
+> `semantic_query_key_spec_table_equals_enum` meta-guard rejects any U2 tree referencing them), and although
+> `ContextualTypeAt` / `FlowNarrowingAt` ARE registered at U2 as non-producing shells, none of the four is
+> WIRED onto the reentry stack at U2 (Relate-only) — so the span guard
 > could not land TDD-first at U2; SAME class as P1-3 — rescoped RI-3's U2 guard to the U2-live
 > `checker_reentry_stack_substrate_built_and_relate_wired` and DEFERRED the full cross-engine span assertion to
 > a **U6-owned** `checker_reentry_graph_spans_flow_call_contextual_narrowing`), **P2-Dec4-guard** (the parent
@@ -342,11 +345,13 @@ struct CheckerTransaction {                          // §4.2 — the per-root c
 - **`CheckerReentryStack`** is the single shared re-entry / cycle-id space. Its DESIGNED-FOR scope spans
   `Relate`, `ResolveCall`, `FlowReturn`, `ContextualTypeAt`, `FlowNarrowingAt` (and the reducers beneath) —
   one stack so the per-engine cycle spaces can never diverge. **At U2 only `Relate` is WIRED onto it** (plus
-  the `Instantiate{args:[], context.projection_reduction.mode=Skeleton}` BFS it subsumes); the `ResolveCall` / `FlowReturn` /
-  `ContextualTypeAt` / `FlowNarrowingAt` engines — their enum variants, spec rows, and behavior — land at
-  **U6** (native-typeinfo-parity.md:507 / qvd:942-948; they are **NOT pre-registered at U2**, and the standing
-  `semantic_query_key_spec_table_equals_enum` meta-guard would reject any U2 tree that referenced them), and
-  U6 wires them onto this same substrate then. Each node is keyed by its **full normalized identity** (a
+  the `Instantiate{args:[], context.projection_reduction.mode=Skeleton}` BFS it subsumes). The `ResolveCall` /
+  `FlowReturn` engines — their enum variants, spec rows, AND behavior — land WHOLE at **U6**
+  (native-typeinfo-parity.md:507 / qvd:942-948); those two variants are **NOT pre-registered at U2** (the
+  standing `semantic_query_key_spec_table_equals_enum` meta-guard would reject any U2 tree that referenced
+  them). The `ContextualTypeAt` / `FlowNarrowingAt` variants + spec rows ARE already registered at U2 as
+  **non-producing shells** (`execute → Error(Miss)`); only their flow / contextual behavior and reentry-wiring
+  are deferred to **U6**. U6 wires all four onto this same substrate then. Each node is keyed by its **full normalized identity** (a
   `Relate` node by the full §2.7 identity incl. `InferenceContextKey`; a U6 `FlowReturn` node by its
   `FlowReturnContext + ReturnProjectionDemand + FlowInputContext`; etc.). The per-flow cycle space and the
   relation assumption stack are *typed views* of this one stack — they cannot diverge.
@@ -689,11 +694,13 @@ converged deterministic result before anything warm-admits (`FlowReturn` → sta
 equality; `Relate` → §4.1 closure). The HARD RULE is uniform: only a converged/stable/deterministic per-domain
 result is cacheable; unconverged / cancelled / superseded-mid-flight / budget-exceeded ⇒ `ReturnOnly`.
 
-**At U2, only `Relate` is wired onto the substrate.** The `ResolveCall` / `FlowReturn` / `ContextualTypeAt` /
-`FlowNarrowingAt` engines — their enum variants, spec rows, and behavior — land at **U6** (native-typeinfo-
-parity.md:507, qvd:942-948; pre-registration at U2 is forbidden and the standing
-`semantic_query_key_spec_table_equals_enum` meta-guard would reject it), and **U6** routes them onto this same
-shared stack (the Rescope section records U6, not RI-8, as the owner of that routing).
+**At U2, only `Relate` is wired onto the substrate.** The `ResolveCall` / `FlowReturn` engines — their enum
+variants, spec rows, AND behavior — land WHOLE at **U6** (native-typeinfo-parity.md:507, qvd:942-948); those
+two variants are NOT pre-registered at U2 (the standing `semantic_query_key_spec_table_equals_enum` meta-guard
+would reject a U2 tree referencing them). The `ContextualTypeAt` / `FlowNarrowingAt` variants + spec rows ARE
+already registered at U2 as **non-producing shells** (`execute → Error(Miss)`); only their behavior and
+reentry-wiring are deferred to **U6**. **U6** routes all four onto this same shared stack (the Rescope section
+records U6, not RI-8, as the owner of that routing).
 
 **RI-8 (U2) consumes the RI-3-built substrate and deletes ONE per-family stand-in: `RefCycleResultDb`** (today's
 cycle authority for parameterized generics — a `ComputeAdmission` cold-path BFS dispatching
