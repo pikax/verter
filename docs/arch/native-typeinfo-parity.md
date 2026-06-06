@@ -178,14 +178,15 @@ Every non-type-value arm is relocated:
   graph payloads need a proof reference, the proof lives on a payload-side proof
   table `TypeInfoGraphPayload.relation_proofs` keyed by an opaque proof id (graph
   nodes carry the proof id, never the proof value itself).
-- **Module augmentation (tag 23) and global augmentation (tag 25)** →
-  `DeclarationAnalysisGraph`. These are declaration / environment-mutation facts —
-  they describe a change to the module / global declaration environment, not a
-  published TS type value — so they are **not** on the type-value allowlist. They
-  are relocated to a concrete declaration / environment **side surface**,
-  `DeclarationAnalysisGraph` (a sibling of `ProgramAnalysisGraph`), carried on
-  `TypeInfoGraphPayload.declaration_surfaces`. The arms are retired + `reserved`
-  (tags `23`/`25` + names `module_augmentation`/`global_augmentation`).
+- **Module augmentation (tag 23) and global augmentation (tag 25)** — the proposed
+  relocation to a `DeclarationAnalysisGraph` side surface was **rejected** (see
+  `/type-resolution` → Merge/augmentation WIRE domain, and
+  `u2-query-value-domain-design.md` §2.2). The authoritative landed decision keeps
+  these arms as the wire home: `GraphTypeNode` kinds **21–25** REMAIN, and the live
+  proto still carries `module_augmentation = 23` / `global_augmentation = 25` as
+  `GraphTypeNode` arms — they are NOT retired, NOT `reserved`, and NOT relocated.
+  The in-process `SemanticQueryValue::DeclarationAnalysis` value domain is the
+  value-side counterpart, not a wire relocation.
 - **Diagnostics and diagnostic directives** → `TypeInfoGraphPayload.diagnostics` /
   `TypeInfoGraphPayload.diagnostic_directives` (and off `SemanticTypeGraph`, §1.5).
 
@@ -425,18 +426,25 @@ recorded facts; owned at `U2.MODULE_AUGMENTATION`).
 > and later/future keys are NOT yet in the enum — this architecture does not imply those
 > already exist.
 
-### 2.1 U2 keeps seven variants
+### 2.1 The seven-variant query-key spine (five landed, two forward-planned)
 
-U2 keeps exactly seven variants: `ResolveMergedDeclaration`,
+The seven-variant spine is: `ResolveMergedDeclaration`,
 `ResolveDeclarationAugmentation`, `ResolveAmbientNamespace`, `ResolveOverloadSet`,
 `ResolveEnum`, `FlowNarrowingAt`, `ContextualTypeAt`.
 
-The seventh variant is the **generalized** augmentation key. The former
-`ResolveModuleAugmentation` slot is broadened to `ResolveDeclarationAugmentation`
-so module **and** global declaration-environment-mutation facts share **one**
-concrete `SemanticQueryKey` identity, per the one-resolver rule. The slot count
-stays seven and the added-key count stays exactly five — this is an existing-slot
-generalization, not a sixth U2 variant.
+Of these, five are **landed** in `SemanticQueryKey` — `ResolveAmbientNamespace`,
+`ResolveOverloadSet`, `ResolveEnum`, `FlowNarrowingAt`, `ContextualTypeAt`. The
+remaining two — `ResolveMergedDeclaration` and `ResolveDeclarationAugmentation` —
+are **forward-planned** (owned by a not-yet-landed block) and are NOT in the enum
+or the generated spec table; they are documented here as the end-state shape, not
+as live deliverables.
+
+The forward-planned augmentation key is the **generalized** form. When it lands,
+the former `ResolveModuleAugmentation` slot is broadened to
+`ResolveDeclarationAugmentation` so module **and** global
+declaration-environment-mutation facts share **one** concrete `SemanticQueryKey`
+identity, per the one-resolver rule — an existing-slot generalization, not a sixth
+spine variant.
 
 ### 2.2 `ResolveDeclarationAugmentation` key shape (declaration-environment identity)
 
@@ -1071,10 +1079,11 @@ enum SemanticQueryValue {
 }
 ```
 
-The `DeclarationAnalysis` arm is the value-domain counterpart of the wire-side
-`DeclarationAnalysisGraph` relocation: once `module_augmentation` /
-`global_augmentation` leave the `GraphTypeNode` type-value surface, the query layer
-must not reintroduce them as `TypeNode` results. `ResolveDeclarationAugmentation`
+The `DeclarationAnalysis` arm is the in-process value-domain home for
+augmentation facts (the `DeclarationAnalysisGraph` wire relocation was rejected;
+the wire home stays the existing `GraphTypeNode` kinds 21–25): the query layer
+resolves augmentation facts to `DeclarationAnalysis`, never to a `TypeNode`
+result. `ResolveDeclarationAugmentation`
 (both env-free `Module(ModuleSpecifier)` and env-free `Global(GlobalEnvScope)`
 targets) resolves to `DeclarationAnalysis`, never `TypeNode`. Global augmentations
 (`declare global` / `export as namespace` / UMD globals) are produced by declaration

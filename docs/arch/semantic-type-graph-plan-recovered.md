@@ -83,7 +83,7 @@ Every rule below is registered in `CRITICAL_RULE_GUARDS` (§8.0) with at least o
 
 ### 2.1 The Five Query Modes Are Explicit
 
-Every reusable type-resolution call carries an explicit `ProjectionReductionContext { mode, demand }`. The `mode` is one of `Identity | Navigate | Shallow | Expanded | Skeleton`; the `demand` is `Published | StructuralTransit`. There is no implicit mode and no default mode. Omitting the mode from a public typeinfo request is `TypeInfoRequestError::MissingProjectionContext`, returned to the caller as a typed error before any semantic execution.
+Every reusable type-resolution call carries an explicit `ProjectionReductionContext { mode, demand, provenance, merge_role }`. The `mode` is one of `Identity | Navigate | Shallow | Expanded | Skeleton`; the `demand` is `Published | StructuralTransit`; `provenance` is the surface-provenance axis (`Structural | MacroTypeArgOwnBody`); `merge_role` is the member-merge role axis (`Authored | OwnBody | Heritage`). There is no implicit mode and no default mode. Omitting the mode from a public typeinfo request is `TypeInfoRequestError::MissingProjectionContext`, returned to the caller as a typed error before any semantic execution.
 
 Mode cascades along a path: intermediate hops in `ProjectPath` run `Navigate`; only the terminal hop runs the caller's requested mode. Sibling members and unrelated branches are never materialised by a path query. Guard: `path_projection_mode_cascade`.
 
@@ -1601,6 +1601,10 @@ export interface EvaluateTypeExpressionGraphRequest {
 export interface ProjectionReductionContext {
   mode: "identity" | "navigate" | "shallow" | "expanded" | "skeleton"
   demand: "published" | "structuralTransit"
+  // Surface-provenance axis.
+  provenance: "structural" | "macroTypeArgOwnBody"
+  // Member-merge role axis (own-body-shadows-heritage in the intersection surface merge).
+  mergeRole: "authored" | "ownBody" | "heritage"
 }
 
 export type GraphClosurePolicy =
