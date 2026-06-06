@@ -3310,7 +3310,20 @@ never observes a disagreement in any committed state. The count and bijection ar
 `IgnoredTestRow` table ONLY — `AdditionalProofRow`s are excluded (they carry no
 `IgnoreStatus`). The bijection guards are: live ignored test sites (source `#[ignore]`s) must
 exactly equal `IgnoredTestRow`s with `status == Ignored`, and that set must also exactly equal
-`EXPECTED_TOTAL_IGNORED_COUNT`. The accounting is a single coupled edit on the block's branch:
+`EXPECTED_TOTAL_IGNORED_COUNT`.
+
+> **Lifted-lifecycle deferral (U0-FINISH-A is intentionally all-`Ignored`):** the ledger this
+> block lands lifts ZERO rows — the generator always emits `status: IgnoreStatus::Ignored`, the
+> guards validate every row against a live source `#[ignore]` site, and the count is pinned at
+> exactly 362 `Ignored` rows. The `IgnoreStatus::Lifted { block_id }` variant exists in the
+> schema as the FORWARD-DECLARATION for the per-block lift lifecycle described below; the
+> lifted-row GENERATION + validation path (a lifted row drops its `#[ignore]` and its status
+> becomes `Lifted { block_id }`, gated by the row-exact coverage gate) is exercised when an
+> actual parity block lands and lifts its rows. That path is OWNED by the lifting block / the
+> U0-FINISH-B coverage gate — it is NOT built in U0-FINISH-A. The accounting below is the
+> contract that lifecycle will honour, not machinery that runs here yet.
+
+The accounting is a single coupled edit on the block's branch:
 
 - **The block's branch** strips the block's source `#[ignore]`s AND flips its rows
   `Ignored → Lifted` AND sets `EXPECTED_TOTAL_IGNORED_COUNT = count(status == Ignored)`
