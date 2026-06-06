@@ -168,14 +168,30 @@ pub struct SemanticGraphStore {
     /// `ProjectPath`) the family carries the variant minus its mode field
     /// and the per-`ProjectionMode` slots hold independent results.
     ///
-    /// **Backfill on completion:** when a broader-mode build publishes its
-    /// result, it also writes that result into every empty narrower-mode
-    /// slot in the same family — `Expanded` backfills `Shallow` /
-    /// `Navigate` / `Identity`, `Shallow` backfills `Navigate` /
-    /// `Identity`, `Navigate` backfills `Identity`. Narrower builds NEVER
-    /// backfill broader slots. Backfill writes only into empty slots, so a
-    /// concurrent narrower build that already populated its slot is never
-    /// pre-empted.
+    /// **Materialised-record warm hit (§3.4):** each candidate carries a
+    /// recorded `satisfied_projection` — the concrete `(path, point)` set
+    /// its compute ACTUALLY produced, NOT its nominal slot mode. A warm hit
+    /// requires TWO independent gates, BOTH of which must pass:
+    /// `cached_satisfies(satisfied_projection, requested_point_for_key(key))`
+    /// (some RECORDED point dominates the request at the SAME path — path
+    /// EXACT, never prefix) AND per-candidate
+    /// `read_set_signature.validate_with_self_roots` against the caller's
+    /// live view.
+    ///
+    /// **Backfill on completion:** a broader-projection build clones its
+    /// entry — the recorded `satisfied_projection` set VERBATIM — into a
+    /// projection-depth-narrower EMPTY sibling slot ONLY when a recorded
+    /// point `cached_satisfies` that sibling slot's requested point. The
+    /// candidate target set is the projection-depth-narrower siblings
+    /// (`Expanded → {Shallow, Navigate, Identity}`, `Shallow → {Navigate,
+    /// Identity}`, `Navigate → Identity`); every candidate is then
+    /// `cached_satisfies`-gated, so the lattice-unsound `Shallow → Navigate`
+    /// clone is REJECTED (`Shallow ⊅ Navigate`: a carrier-stopping Navigate
+    /// surface must not be served from a Shallow shell). Backfill is NEVER
+    /// by enum rank alone and NEVER synthesises a target-slot point.
+    /// Narrower builds NEVER backfill broader slots; backfill writes only
+    /// into an empty slot, so a concurrent narrower build that already
+    /// populated its slot is never pre-empted.
     entries: Mutex<FxHashMap<FamilyKey, FamilySlots>>,
     /// In-flight admission keyed by the full [`SemanticQueryKey`]. Because
     /// mode is part of the key for mode-bearing variants, this keying
@@ -2798,10 +2814,12 @@ impl SemanticGraphStore {
         // 5. Warm-publish only successful values; errors and recursion
         // sentinels never become shared-cache entries ( cache
         //    population). Successful results land in the requested
-        //    `(family, slot)` and backfill every empty narrower slot in
-        //    the same family — the backfill is a no-op against any slot a
-        //    concurrent narrower compute already filled, so per-slot
-        //    in-flight authority (§7.15) is preserved.
+        //    `(family, slot)` and clone into each EMPTY projection-depth-
+        //    narrower sibling slot a recorded materialised point
+        //    `cached_satisfies` (§3.4 directional gated backfill) — the
+        //    backfill is a no-op against any slot a concurrent narrower
+        //    compute already filled, so per-slot in-flight authority
+        //    (§7.15) is preserved.
         //
         //    If a canonical invalidation swept this (family, slot) while
         //    the build was running, the winner's result is computed from

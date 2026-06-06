@@ -522,8 +522,12 @@ pub(super) struct FamilyPublishOutcome {
 /// `read_set_signature.validate_with_self_roots`. The
 /// `validated_at_generation` metadata is recency only.
 ///
-/// Backfill on completion fills every empty narrower slot from a
-/// successful broader compute (see [`FamilySlots::publish`]).
+/// Backfill on completion clones a successful broader-projection
+/// compute into every EMPTY projection-depth-narrower sibling slot, but
+/// ONLY when one of the broader entry's recorded materialised points
+/// `cached_satisfies` the narrower slot's requested point — directional
+/// AND gated, never by enum rank (see [`FamilySlots::publish`] and
+/// [`slot_domain_siblings`]).
 #[derive(Default, Clone)]
 pub(super) struct FamilySlots {
     single: CandidateList,
@@ -535,9 +539,15 @@ pub(super) struct FamilySlots {
     /// Navigate/Expanded; does NOT participate in backfill.
     skeleton: CandidateList,
     /// `StructuralTransit` slot mirrors of the four publication slots —
-    /// Codex-hybrid spec. Independent from the
-    /// publication slots; backfill within the transit family follows
-    /// the same `Expanded → Shallow → Navigate → Identity` hierarchy.
+    /// Codex-hybrid spec. Independent from the publication slots. Transit
+    /// backfill shares the SAME directional candidate ordering as the
+    /// publication slots (`TransitExpanded → TransitShallow →
+    /// TransitNavigate → TransitIdentity`), but every clone into a narrower
+    /// transit sibling is `cached_satisfies`-gated exactly as the
+    /// publication slots are — so e.g. a `TransitShallow → TransitNavigate`
+    /// candidate is only a CANDIDATE and is REJECTED by the gate
+    /// (`Shallow ⊅ Navigate`). It is never an unconditional enum-rank
+    /// fan-out.
     transit_identity: CandidateList,
     transit_navigate: CandidateList,
     transit_shallow: CandidateList,
