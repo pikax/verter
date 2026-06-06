@@ -427,7 +427,13 @@ BLOCK_TO_ORGAN: dict[str, str] = {
 # - U2*: `docs/arch/native-typeinfo-parity-u2-reducers.md`.
 # - U6*: `docs/arch/native-flow-return.md` (the eight `U6.NARROW_*`
 #   sub-blocks share the one narrowing-lattice substrate's three "Shared
-#   required new guards", cited by every sub-block rather than restated).
+#   required new guards", cited by every sub-block rather than restated),
+#   EXCEPT `U6.PREDICATE_ASSERTION`, `U6.CONTEXTUAL_CALLBACK`, and the
+#   call-resolution adjudications, whose guards are OWNED by
+#   `docs/arch/u6-flow-call-resolution-design.md` (e.g.
+#   `predicate_signature_without_body_audits_signature_only_outcome` +
+#   `predicate_assertion_effect_is_signature_metadata_not_published_type_node`
+#   are the "Named deferred guards (owned by U6.PREDICATE_ASSERTION)" there).
 # - U8* / U3 / U10 / U11 / U12 / U13:
 #   `docs/arch/native-typeinfo-parity-cache-export-session.md`.
 # - U14 / U15: `docs/arch/native-typeinfo-parity-adapters-final-lift.md`.

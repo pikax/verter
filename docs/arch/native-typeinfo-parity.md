@@ -2511,12 +2511,16 @@ is created. Both tables live in this one module.
 > block_id/semantic_queries/proof/status/mechanism_id/consumed_mechanisms/unblocker), the
 > closed 7-row `AdditionalProofRow` table, and the `TYPEINFO_PARITY_BLOCKS` DAG (each
 > `BlockContractRow` carrying `required_guards` + `verification_labels`). The §10.4.1
-> row→`block_id` partition table (all 362 rows) is ALSO built and generated — it lives in
-> the BEGIN/END coverage block in §10.4.1 and the Python generator's `parse_partition`
-> reads it as authoritative input. What remains for the oracle/proof gate is the executable
-> proof registry, the row-test wrapper, the §10.4 row-exact capability→mechanism→proof
-> coverage GATE (the registry + checking guards that DEFINE completeness), and the TS7
-> oracle harness (the `ProofRequirement::Ts7Oracle` snapshots) — those are not yet built.
+> row→`block_id` partition table (all 362 rows) is HAND-AUTHORED authoritative input — it
+> lives in the BEGIN/END coverage block in §10.4.1, and the Python manifest generator's
+> `parse_partition` READS it (it does not emit it) to derive each row's `block_id` for the
+> three checked-in manifest-data files (`typeinfo_ignored_test_manifest_rows.rs`,
+> `typeinfo_additional_proof_rows.rs`, `typeinfo_parity_blocks.rs`); `--check` regenerates
+> those three files from this partition and byte-compares. What remains for the oracle/proof
+> gate (U0-FINISH-B, NOT yet built) is the executable proof registry, the row-test wrapper,
+> the reverse `cargo run` coverage-table generator, the §10.4 row-exact
+> capability→mechanism→proof coverage GATE (the registry + checking guards that DEFINE
+> completeness), and the TS7 oracle harness (the `ProofRequirement::Ts7Oracle` snapshots).
 > The §10.4.1 partition itself is NOT the unbuilt part.
 
 ### 10.1 Two SEPARATE tables: the binding 362 vs additional coverage
@@ -2600,6 +2604,17 @@ count-consistent, and CI runs the full workspace gate against the branch's `Lift
 
 ### 10.2 `ProofRequirement` — every row resolves to an executable proof
 
+> **State note:** the `ProofRequirement` enum + the `proof` field on every row ARE built
+> (carried on the live `IgnoredTestRow` / `AdditionalProofRow`). The proof-resolution GATE
+> described in §10.2–§10.4 — the generated oracle snapshots, the generated proof registry,
+> the generated row-test wrapper, and the guards `every_oracle_id_resolves_to_checked_in_snapshot`
+> / `every_guard_or_row_proof_resolves_to_default_suite_test` / `lifted_row_executes_declared_proof`
+> / `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof` /
+> `capability_rows_map_to_expected_query_fact_mechanisms` /
+> `block_rows_cannot_lift_without_complete_coverage` — is the U0-FINISH-B design and is NOT
+> yet built. Those guard names are forward-declared in `BlockContractRow.required_guards`;
+> §10.2–§10.4 describe their intended behavior, not the current tree.
+
 Every row in BOTH tables carries `proof: ProofRequirement`, not a mandatory per-row
 TS-oracle plus a mandatory per-row negative guard. A mandatory per-row TS-oracle is
 wrong: cache-invalidation, audit-footprint, demand/mode-boundary, and negative rows are
@@ -2664,8 +2679,10 @@ aggregation:
 
 The proof guards prove a row's declared proof EXISTS, RUNS, and is CONSUMED — but NOT that
 the row is wired to the architecture MECHANISM intended to lift it. To make 362-row
-full-parity completeness MECHANICAL, U0 GENERATES and CHECKS a row-exact coverage table that
-maps EVERY manifest row through its full mechanism chain:
+full-parity completeness MECHANICAL, the U0-FINISH-B design is a row-exact coverage table
+(GENERATED FROM and CHECKED against the manifest — NOT yet built; today the built artifact is
+the §10.4.1 hand-authored partition the Python generator reads) that maps EVERY manifest row
+through its full mechanism chain:
 
 ```
 row (file::function)
@@ -2756,14 +2773,21 @@ dependence DAG, not its number. This is framing only — it does not renumber `U
 re-layout the blocks; the one mechanism-driven refinement below is that the narrowing
 bucket is split into per-mechanism sub-blocks (`U6.NARROW_*`).
 
-This is the **authoritative, exhaustive** `row → block_id` map the U0 coverage-table
-generator emits and `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`
-checks. It is a total function over the 362 `IgnoredTestRow`s: **every** row appears exactly
-once under exactly one owning `block_id`, no row is owned by two blocks, and the union is
-exactly the 362 manifest rows. Each subplan's `Exact test rows lifted` list is the projection
-of this partition onto that block — the two must agree row-for-row, enforced by
+This is the **authoritative, exhaustive, HAND-AUTHORED** `row → block_id` map that the
+Python manifest generator (`scripts/gen-typeinfo-ignore-manifest.py`) READS — it does not
+emit this partition; it parses it (`parse_partition`) and emits the three checked-in
+manifest-data files from it. It is a total function over the 362 `IgnoredTestRow`s: **every**
+row appears exactly once under exactly one owning `block_id`, no row is owned by two blocks,
+and the union is exactly the 362 manifest rows. The generator's `--check` mode regenerates
+the three files from this partition and byte-compares, so a partition edit that drifts from
+the checked-in manifest data fails `--check`. Each subplan's `Exact test rows lifted` list is
+the projection of this partition onto that block — the two must agree row-for-row. The
+row-exact completeness GATE that will additionally enforce this in-suite —
 `capability_rows_map_to_expected_query_fact_mechanisms` (each row's owning block matches its
-capability's expected mechanism) and the bijection/count guards (§10.5).
+capability's expected mechanism), the bijection/count guards (§10.5), and
+`every_manifest_row_has_non_placeholder_mechanism_and_executable_proof` — is FORWARD-DECLARED
+in `BlockContractRow.required_guards` but NOT yet built (U0-FINISH-B); today the built check
+is the Python generator's `--check`.
 
 The owning `block_id` for each row is its **dominant mechanism** per the Capability Map
 (§Capability Map) and the row-level-split notes in the subplans: a row's substrate maps it to
