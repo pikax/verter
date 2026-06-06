@@ -60,7 +60,14 @@ pub const MAX_EXPANSION_DEPTH_BUDGET: u32 = 256;
 /// Minimum schema version this validator accepts. Producers sending
 /// older payloads receive
 /// [`TypeInfoRequestError::UnknownSchemaVersion`].
-pub const MIN_TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 1;
+///
+/// Bumped to 2 when the env-LESS `GraphDeclSlotRef` roots carrier was
+/// retired: a v1 payload's roots rode the env-less slot (tag 2, now
+/// reserved), which lacks `whole_hash`, so a v1 envelope decoded by a
+/// v2 server would silently drop its roots. Unknown-field wire-compat
+/// is NOT semantic compat — the closed-set validator rejects v1 rather
+/// than admit a payload whose roots cannot be recovered.
+pub const MIN_TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 2;
 
 /// Closed set of schema versions this validator accepts. Any wire
 /// version outside this set (below MIN or above the current server

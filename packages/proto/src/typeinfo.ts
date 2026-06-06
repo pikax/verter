@@ -40,7 +40,6 @@ export {
   GraphProjectionReductionContextSchema,
   GraphDisplayPolicySchema,
   GraphResolvedDeclSlotIdentitySchema,
-  GraphDeclSlotRefSchema,
   GraphHandleSchema,
   GraphTypeNodeRefSchema,
   GraphSpanRefSchema,
@@ -107,7 +106,6 @@ export type {
   GraphProjectionReductionContext,
   GraphDisplayPolicy,
   GraphResolvedDeclSlotIdentity,
-  GraphDeclSlotRef,
   GraphHandle,
   GraphTypeNodeRef,
   GraphSpanRef,
@@ -121,4 +119,4 @@ export type {
  * The taxonomy guard in `crates/verter_session/tests/architecture_guards.rs`
  * keeps the two values in lock-step.
  */
-export const TYPEINFO_GRAPH_SCHEMA_VERSION = 1;
+export const TYPEINFO_GRAPH_SCHEMA_VERSION = 2;

@@ -139,8 +139,18 @@ message SemanticTypeGraph {
 
 // GraphQueryIdentity — identifies the query that produced the snapshot.
 message GraphQueryIdentity {
+  // Tag 2 / name `roots` held the retired env-LESS `GraphDeclSlotRef`
+  // carrier. The query-identity roots now ride the env-BEARING
+  // `GraphResolvedDeclSlotIdentity` on `resolved_roots` (tag 18). The
+  // tag and name are reserved so off-tree clients that decoded the
+  // original schema keep round-tripping the retired slot as an unknown
+  // field, and so neither the tag nor the name is ever reused. The
+  // directive lives at the enclosing message level because proto3
+  // forbids `reserved` inside an `oneof` block — there is no oneof here,
+  // but the message-scope placement is the canonical home.
+  reserved 2;
+  reserved "roots";
   GraphOperation operation = 1;
-  repeated GraphDeclSlotRef roots = 2;
   repeated GraphTypePathSegment path = 3;
   GraphClosurePolicy closure = 4;
   GraphProjectionReductionContext context = 5;
@@ -159,6 +169,10 @@ message GraphQueryIdentity {
   bool include_provenance = 15;
   bool include_diagnostics = 16;
   repeated GraphProjectionKind include_projection = 17;
+  // Env-BEARING query-identity roots. Supersedes the retired env-less
+  // `roots` (tag 2). Each carries the stable `whole_hash` so the query
+  // identity is rooted to the exact content version it resolved.
+  repeated GraphResolvedDeclSlotIdentity resolved_roots = 18;
 }
 
 // GraphTypeNode — the closed taxonomy of typeinfo graph nodes. The
@@ -574,12 +588,6 @@ message GraphResolvedDeclSlotIdentity {
   uint32 decl_name_id = 2;
   bytes whole_hash = 3;
   GraphSymbolNamespace namespace = 4;
-}
-
-message GraphDeclSlotRef {
-  uint32 canonical_name_id = 1;
-  uint32 decl_name_id = 2;
-  GraphSymbolNamespace namespace = 3;
 }
 
 // ----------- Origin edges -----------

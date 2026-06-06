@@ -122,7 +122,6 @@ pub use wire::GraphSignatureParameter as SignatureParameter;
 pub use wire::GraphThisParameter as ThisParameter;
 pub use wire::GraphTypePredicate as TypePredicate;
 
-pub use wire::GraphDeclSlotRef as DeclSlotRef;
 pub use wire::GraphNodeIdMapEntry as NodeIdMapEntry;
 pub use wire::GraphResolvedDeclSlotIdentity as ResolvedDeclSlotIdentityDto;
 pub use wire::GraphStringTable as StringTable;
@@ -247,7 +246,12 @@ pub use wire::TypePredicateExpr;
 /// Current typeinfo graph wire schema version. Increment when adding a
 /// variant to any closed `oneof` (TypeNode, StructuredTypeExpression,
 /// ClosurePolicy, …) or when introducing an additive arm.
-pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 retired the env-LESS `GraphDeclSlotRef` query-identity roots
+/// carrier in favour of the env-BEARING `GraphResolvedDeclSlotIdentity`
+/// (`GraphQueryIdentity.resolved_roots`); the retired `roots` tag/name
+/// are reserved at message scope.
+pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 2;
 
 // -------------------------------------------------------------------------
 // Typed constructor helpers for the request-error variants. The

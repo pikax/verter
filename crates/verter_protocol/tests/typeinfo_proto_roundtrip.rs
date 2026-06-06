@@ -645,9 +645,10 @@ fn prim_string_expr() -> g::StructuredTypeExpression {
 fn sample_query_identity() -> g::QueryIdentity {
     g::QueryIdentity {
         operation: g::Operation::ResolveSymbol as i32,
-        roots: vec![g::DeclSlotRef {
+        resolved_roots: vec![g::ResolvedDeclSlotIdentityDto {
             canonical_name_id: 1,
             decl_name_id: 2,
+            whole_hash: vec![0xAB, 0xCD],
             namespace: g::SymbolNamespace::Type as i32,
         }],
         path: vec![],
