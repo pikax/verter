@@ -2059,7 +2059,10 @@ guards**. Sequence is faithful to §A; do not reorder.
   utility / indexed / mapped / template / class / enum / module / JSX blocks).
 - **Sub-block decomposition (per the child's block graph).** U2 lands as the
   foundation block **`U2.QUERY_VALUE_DOMAIN`** (the typed `SemanticQueryValue`
-  value-domain layer + the seven U2 keys + the three U2-landed added keys + the
+  value-domain layer + the five landed spine keys of the parent's seven-variant
+  spine — the two augmentation spine keys `ResolveMergedDeclaration` /
+  `ResolveDeclarationAugmentation` are forward-planned (below) — + the three
+  U2-landed added keys + the
   finalized slot-identity SHAPE for the U6-landed `FlowReturn` / `ResolveCall` + the
   `ProjectionDemand` / `EvalPolicy` demand lattice with the five mode names as
   PRESETS + the per-block `SemanticQueryKeySpec` table) followed by the keystone
@@ -2096,19 +2099,27 @@ guards**. Sequence is faithful to §A; do not reorder.
   1. Finalize the **`SemanticQueryKey` identity SHAPE once** (the slot-identity
      model for every variant): existing `Instantiate { base }` /
      `ResolveMacroPayload { owner }` moved from the (now-deleted) intermediate
-     `DeclKey` to `ResolvedDeclSlotIdentity` (slot identity, LANDED), AND add the
-     **7 U2 variants** in that identity shape
-     (`ResolveMergedDeclaration`, **`ResolveDeclarationAugmentation`**,
-     `ResolveAmbientNamespace`, `ResolveOverloadSet`, `ResolveEnum`,
-     `FlowNarrowingAt`, `ContextualTypeAt`). The seventh variant is the
-     **generalized** augmentation key: the former `ResolveModuleAugmentation` slot
-     is broadened to `ResolveDeclarationAugmentation { target: Module | Global,
-     context: DeclarationAnalysisContext }` so module AND global
+     `DeclKey` to `ResolvedDeclSlotIdentity` (slot identity, LANDED), AND land the
+     **five landed spine variants** of the parent's seven-variant spine in that
+     identity shape (`ResolveAmbientNamespace`, `ResolveOverloadSet`,
+     `ResolveEnum`, `FlowNarrowingAt`, `ContextualTypeAt`). The remaining two spine
+     variants — `ResolveMergedDeclaration` and **`ResolveDeclarationAugmentation`** —
+     are **forward-planned**, owned by the later `U2.MODULE_AUGMENTATION` reducer
+     block (parent `native-typeinfo-parity.md` §2.1: "five landed, two
+     forward-planned"); they are NOT in the live enum or the generated spec table.
+     The forward-planned seventh variant is the **generalized** augmentation key:
+     the former `ResolveModuleAugmentation` slot is broadened to
+     `ResolveDeclarationAugmentation { target: Module | Global, context:
+     DeclarationAnalysisContext }` so module AND global
      declaration-environment-mutation facts share ONE concrete `SemanticQueryKey`
      identity (resolving to `SemanticQueryValue::DeclarationAnalysis`, never a
      `GraphTypeNode` arm). This is an existing-slot generalization, NOT a sixth U2
-     variant — the slot count stays **seven** and the added-key count stays exactly
-     **five** (below). Every variant routes through
+     variant — the END-STATE slot count stays **seven** and the added-key count
+     stays exactly **five** (below). Same-name declaration merge and cross-file
+     ambient augmentation are produced today by the live `MergedDecl` peer-merge
+     reducer over `SemanticNodeData::MergedDecl` (CLAUDE.md "Declaration Merging /
+     Augmentation (CRITICAL)"), so the augmentation parity rows lift in the later
+     reducer block with NO new query key required. Every variant routes through
      `ProjectSemanticDispatch::execute` (the one-engine rule). This finalizes the
      identity SHAPE — later ADDITIVE variants land in that same slot-identity shape
      with NO cache re-key; adding a later variant is additive, not a second
@@ -2140,14 +2151,16 @@ guards**. Sequence is faithful to §A; do not reorder.
        not a sixth added key.
   2. Add the matching producers in `verter_semantic::analysis` (namespace / merge /
      class analysis) + `verter_session::semantic_query`: the type-value
-     `SemanticNodeData::{MergedDeclaration, AmbientNamespace, Class, Enum}` producers
-     plus the `DeclarationAnalysisGraph` (module + global augmentation) facts that
+     `SemanticNodeData::{MergedDeclaration, AmbientNamespace, Class, Enum}` producers.
+     Same-name declaration merge and cross-file ambient augmentation are LANDED via
+     the live `MergedDecl` peer-merge reducer over `SemanticNodeData::MergedDecl` (the
+     §9.5 cross-file-merge work), NOT a dedicated query key. The forward-planned
+     `DeclarationAnalysisGraph` (module + global augmentation) facts that
      `ResolveDeclarationAugmentation` resolves to — declaration/environment-mutation
-     facts are NOT smuggled into `GraphTypeNode` (parent §1.3, §3).
-     **Cross-file declaration merging lands HERE** (not deferred) per §9.5;
-     `ResolveDeclarationAugmentation` rides `FileArtifactStore::augmentation_index`
-     (landed), its `AugmentationTargetKey` derived from `DeclarationAnalysisContext`
-     at execution time.
+     facts are NOT smuggled into `GraphTypeNode` (parent §1.3, §3) — land with that
+     forward-planned key in `U2.MODULE_AUGMENTATION`, where `ResolveDeclarationAugmentation`
+     rides `FileArtifactStore::augmentation_index` (landed) with its
+     `AugmentationTargetKey` derived from `DeclarationAnalysisContext` at execution time.
   3. Enumerate the remaining B4 caches onto `ArtifactNode` / `QueryNode` against
      that same final key model: `FileArtifactStore`, `ResolvedImportFacts`,
      typed-IR resolve, `MemberSemanticFactStore`, `MemberDisplayFactStore`,
@@ -2169,7 +2182,7 @@ guards**. Sequence is faithful to §A; do not reorder.
   TS-fidelity cases; cross-file merge completeness (§9.5 five properties) is a
   known hard sub-item.
 - **Required deletions:** none of substance at this block — but it FORBADE adding
-  the 7 variants on the intermediate `DeclKey` shape and re-keying later (that
+  the spine variants on the intermediate `DeclKey` shape and re-keying later (that
   double-migration is the anti-pattern §B exists to prevent). Use `ShapeCacheDb`,
   never the retired split shape caches. The `DeclKey` whole-hash fix landed and the
   `DeclKey` struct itself was subsequently deleted when the base/owner moved to
@@ -2851,12 +2864,16 @@ bridge.
 
 ## 5. U2 in depth — B4 ↔ SemanticQueryKey co-sequencing (§B)
 
-**Binding decision (§B): merge Block-4 and the 7-variant `SemanticQueryKey`
-addition into a single block, U2. The 7 variants were NOT staged on the
+**Binding decision (§B): merge Block-4 and the seven-variant `SemanticQueryKey`
+spine into a single block, U2. The spine variants were NOT staged on the
 (now-deleted) intermediate `DeclKey` shape and then re-migrated to slot
 identity.** One clean cutover, no migrate-twice. (LANDED: `Instantiate.base` /
 `ResolveMacroPayload.owner` now key on `ResolvedDeclSlotIdentity`; the `DeclKey`
-struct and `to_decl_key()` were deleted in the cutover.)
+struct and `to_decl_key()` were deleted in the cutover.) Of the seven spine
+variants, **five are landed** as live `SemanticQueryKey` variants and **two
+(`ResolveMergedDeclaration` / `ResolveDeclarationAugmentation`) are
+forward-planned** (parent §2.1) — owned by the later `U2.MODULE_AUGMENTATION`
+reducer block and NOT in the live enum or spec table.
 
 U2 finalizes the **`SemanticQueryKey` identity SHAPE once** (the slot-identity
 model). It does NOT freeze the variant LIST — later ADDITIVE variants land in this
@@ -2871,21 +2888,28 @@ What U2 fixes once is the identity model every variant keys on:
    whole-hash R6 violation was already resolved (§2.2), so it was a slot-precision
    change, not a re-key from scratch.
 
-2. **7 U2 variants in the final shape.** `ResolveMergedDeclaration`,
-   **`ResolveDeclarationAugmentation`**, `ResolveAmbientNamespace`,
-   `ResolveOverloadSet`, `ResolveEnum`, `FlowNarrowingAt`, `ContextualTypeAt` —
-   each added directly in the slot-identity shape, each dispatched through
-   `ProjectSemanticDispatch::execute` (the one-engine rule). The seventh variant is
-   the **generalized** augmentation key: the former `ResolveModuleAugmentation` is
+2. **Seven-variant spine: five landed, two forward-planned.** The five landed
+   spine variants — `ResolveAmbientNamespace`, `ResolveOverloadSet`,
+   `ResolveEnum`, `FlowNarrowingAt`, `ContextualTypeAt` — are each added directly
+   in the slot-identity shape and dispatched through
+   `ProjectSemanticDispatch::execute` (the one-engine rule). The remaining two —
+   `ResolveMergedDeclaration` and **`ResolveDeclarationAugmentation`** — are
+   **forward-planned** (parent `native-typeinfo-parity.md` §2.1: "five landed,
+   two forward-planned"), owned by the later `U2.MODULE_AUGMENTATION` block and
+   NOT in the live enum or spec table. The forward-planned seventh variant is the
+   **generalized** augmentation key: the former `ResolveModuleAugmentation` is
    broadened to `ResolveDeclarationAugmentation { target: Module | Global, context:
    DeclarationAnalysisContext }` so module AND global declaration-environment-mutation
    facts share ONE concrete identity (parent `native-typeinfo-parity.md` §2.1–§2.2).
-   This is an existing-slot generalization, **not a sixth U2 variant** — the slot
-   count stays seven. The type-value `SemanticNodeData` producers
-   (`MergedDeclaration`, `AmbientNamespace`, `Class`, `Enum`) land in the same block
-   alongside the `DeclarationAnalysisGraph` augmentation facts (module + global) that
-   `ResolveDeclarationAugmentation` resolves to. Cross-file declaration merging is
-   implemented here, not deferred (§9.5).
+   This is an existing-slot generalization, **not a sixth U2 variant** — the
+   END-STATE slot count stays seven. Today, same-name declaration merge and
+   cross-file ambient augmentation are produced by the live `MergedDecl`
+   peer-merge reducer over `SemanticNodeData::MergedDecl` (CLAUDE.md "Declaration
+   Merging / Augmentation (CRITICAL)") — NOT a dedicated query key — so the
+   augmentation parity rows lift in the later reducer block with no new key.
+   When the forward-planned augmentation work lands, its type-value /
+   `DeclarationAnalysisGraph` producers land with it (§9.5 cross-file merge
+   completeness).
 
    **Five added keys beyond the seven (parent §2.3) — register them in this same
    slot-identity shape.** `ResolveClassSurface`, `ApparentType`, and
@@ -3069,7 +3093,9 @@ The unified effort is "done" when ALL of the following hold:
   land), in §A order, with the U2 convergence gate landed before any
   graph-execution block (U8+).
 - [ ] **One `SemanticQueryKey` identity shape** (slot-identity) finalized in U2 with
-  all 7 U2 variants, the additive U6 `FlowReturn` / `ResolveCall` variants landed in that same shape
+  the five landed U2 spine variants (the two augmentation spine variants
+  `ResolveMergedDeclaration` / `ResolveDeclarationAugmentation` forward-planned per
+  parent §2.1), the additive U6 `FlowReturn` / `ResolveCall` variants landed in that same shape
   (no cache re-key), every variant dispatched through
   `ProjectSemanticDispatch::execute`; NO `DeclIdentity` and NO content/version
   hash or `fact_dep_signature` in any query-identity key.

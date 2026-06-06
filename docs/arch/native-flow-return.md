@@ -51,9 +51,11 @@ green CI → three-reviewer LAND → squash-merge with the `Typeinfo-Block:` tra
 
 - **Prerequisite U2** finalizes the one `SemanticQueryKey` identity SHAPE (slot
   identity) and the typed `SemanticQueryValue` value-domain layer, and lands the
-  seven U2 keys plus the three U2-landed added keys (`ResolveClassSurface`,
-  `ApparentType`, `TemplateLiteralReduce`) — each as enum variant **+**
-  `SemanticQueryKeySpec` row **+** dispatch behavior together. U2 finalizes the
+  five landed U2 spine keys (the two augmentation spine keys
+  `ResolveMergedDeclaration` / `ResolveDeclarationAugmentation` are forward-planned,
+  owned by `U2.MODULE_AUGMENTATION`) plus the three U2-landed added keys
+  (`ResolveClassSurface`, `ApparentType`, `TemplateLiteralReduce`) — each as enum
+  variant **+** `SemanticQueryKeySpec` row **+** dispatch behavior together. U2 finalizes the
   identity SHAPE/model for `FlowReturn` / `ResolveCall`; it does NOT pre-register
   their spec rows or enum variants. `SemanticQueryKey::FlowReturn` /
   `SemanticQueryKey::ResolveCall` are **additive** variants in that already-final
