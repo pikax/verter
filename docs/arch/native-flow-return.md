@@ -60,12 +60,16 @@ green CI → three-reviewer LAND → squash-merge with the `Typeinfo-Block:` tra
   their spec rows or enum variants. `SemanticQueryKey::FlowReturn` /
   `SemanticQueryKey::ResolveCall` are **additive** variants in that already-final
   slot-identity shape with **no cache re-key** (unified §5, terminal-checklist
-  item 2), landed at U6 (see below). U6 also consumes the U2 reducers it
+  item 2), landed at U6 (see below). U6 consumes the U2 reducers it
   dispatches into:
-  `Relate` (narrowing / call-argument assignment), `ResolveOverloadSet` and
-  `ResolveCall` (call resolution), `ResolveClassSurface` / `ApparentType`
+  `Relate` (narrowing / call-argument assignment), `ResolveOverloadSet`
+  (call resolution dispatches through `ResolveOverloadSet`),
+  `ResolveClassSurface` / `ApparentType`
   (method / apparent-member projection), `TemplateLiteralReduce`, `IndexedAccess`,
-  `KeyOf`, `MappedType`, `Conditional`.
+  `KeyOf`, `MappedType`, `Conditional`. Separately, U6 **lands** its own
+  U6-owned `SemanticQueryKey::ResolveCall` (additive variant, not in the live
+  enum until U6.CALL_RESOLVE) and dispatches/produces it — `ResolveCall` is a
+  U6-owned key, not a U2 reducer U6 consumes.
 - **Prerequisite U4** provides the persistent / cache-runtime node substrate. The
   flow slice-hash and slice-lowered-body artifacts are **B4-style cache-runtime
   nodes** (`FlowSliceHashNode`, `FlowSliceLoweredBodyNode`), not bespoke
