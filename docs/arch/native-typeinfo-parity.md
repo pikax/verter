@@ -2620,8 +2620,14 @@ count-consistent, and CI runs the full workspace gate against the branch's `Lift
 > / `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof` /
 > `capability_rows_map_to_expected_query_fact_mechanisms` /
 > `block_rows_cannot_lift_without_complete_coverage` — is the U0-FINISH-B design and is NOT
-> yet built. Those guard names are forward-declared in `BlockContractRow.required_guards`;
-> §10.2–§10.4 describe their intended behavior, not the current tree.
+> yet built: NONE of these six guards has an implementing test on this tree. Four of them
+> (`every_oracle_id_resolves_to_checked_in_snapshot`,
+> `every_guard_or_row_proof_resolves_to_default_suite_test`, `lifted_row_executes_declared_proof`,
+> `block_rows_cannot_lift_without_complete_coverage`) are NOT referenced by any
+> `BlockContractRow.required_guards`. The other two — `capability_rows_map_to_expected_query_fact_mechanisms`
+> (on `U13.PROJECTION` + `U15.FINAL_LIFT`) and `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof`
+> (on `U15.FINAL_LIFT`) — appear in `required_guards` as forward-declared guard NAMES only, with
+> no implementing test yet. §10.2–§10.4 describe their intended behavior, not the current tree.
 
 Every row in BOTH tables carries `proof: ProofRequirement`, not a mandatory per-row
 TS-oracle plus a mandatory per-row negative guard. A mandatory per-row TS-oracle is
@@ -2705,18 +2711,25 @@ row (file::function)
 ```
 
 - **Hand-authored source, checked-in.** The `row → block_id` partition is hand-authored in
-  §10.4.1 and is the AUTHORITATIVE SOURCE — it is NOT generated from the manifest. The
-  built generator (`scripts/gen-typeinfo-ignore-manifest.py`) READS the §10.4.1 partition
-  (joined with live `#[ignore = "..."]` discovery) and EMITS the manifest rows
-  (`typeinfo_ignored_test_manifest_rows.rs`) + the block DAG (`typeinfo_parity_blocks.rs`)
-  from it; the Rust guard tests only diff/fail and never write tracked source. One coverage
-  row per manifest row; a row whose `mechanism_id` cannot be resolved (or resolves to a
-  placeholder) fails generation. The authoritative `row → block_id` projection over all 362
-  `IgnoredTestRow`s is enumerated in full in §10.4.1; each subplan's `Exact test rows
-  lifted` list is the per-block slice of that partition. (A reverse `cargo run`
+  §10.4.1 and is the AUTHORITATIVE SOURCE for the row→`block_id` PARTITION — it is NOT
+  generated from the manifest. The built generator
+  (`scripts/gen-typeinfo-ignore-manifest.py`) READS the §10.4.1 partition (joined with live
+  `#[ignore = "..."]` discovery + the Capability Map) ONLY to assign each `IgnoredTestRow`'s
+  `block_id`, and EMITS the manifest rows (`typeinfo_ignored_test_manifest_rows.rs`). The
+  `AdditionalProofRow` table (`typeinfo_additional_proof_rows.rs`) and the block DAG
+  (`typeinfo_parity_blocks.rs`) — each block's `required_guards`/`verification_labels`/
+  prereqs/mechanisms — are NOT derived from §10.4.1; they are authored in the generator's own
+  Python maps (`build_additional_rows` / `JSX_NO_NEW_KEY_ROWS`; `emit_block_rows`,
+  `BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`, the prereq/mechanism maps). The
+  Rust guard tests only diff/fail and never write tracked source. The authoritative
+  `row → block_id` projection over all 362 `IgnoredTestRow`s is enumerated in full in
+  §10.4.1; each subplan's `Exact test rows lifted` list is the per-block slice of that
+  partition. (The one-coverage-row-per-manifest-row coverage table that maps every row's
+  `mechanism_id` and fails generation on a placeholder is the reverse `cargo run`
   coverage-table generator — a table generated FROM the manifest, in the same discipline as
-  the oracle rows / proof registry / row-test wrapper — is a `U0-FINISH-B` deliverable and
-  is NOT yet built; today the manifest is generated FROM §10.4.1, not the other way around.)
+  the oracle rows / proof registry / row-test wrapper — a `U0-FINISH-B` deliverable that is
+  NOT yet built; today the manifest's `block_id` column is generated FROM §10.4.1, not the
+  other way around.)
 - **Completeness is DEFINED by this table over the 362 `IgnoredTestRow`s PLUS every
   `AdditionalProofRow`.** Full-parity completeness IS this row-exact coverage table being
   complete and non-placeholder over all rows in both tables. A "missing TS rule" is exactly
@@ -2783,19 +2796,29 @@ bucket is split into per-mechanism sub-blocks (`U6.NARROW_*`).
 
 This is the **authoritative, exhaustive, HAND-AUTHORED** `row → block_id` map that the
 Python manifest generator (`scripts/gen-typeinfo-ignore-manifest.py`) READS — it does not
-emit this partition; it parses it (`parse_partition`) and emits the three checked-in
-manifest-data files from it. It is a total function over the 362 `IgnoredTestRow`s: **every**
-row appears exactly once under exactly one owning `block_id`, no row is owned by two blocks,
-and the union is exactly the 362 manifest rows. The generator's `--check` mode regenerates
-the three files from this partition and byte-compares, so a partition edit that drifts from
-the checked-in manifest data fails `--check`. Each subplan's `Exact test rows lifted` list is
-the projection of this partition onto that block — the two must agree row-for-row. The
-row-exact completeness GATE that will additionally enforce this in-suite —
-`capability_rows_map_to_expected_query_fact_mechanisms` (each row's owning block matches its
-capability's expected mechanism), the bijection/count guards (§10.5), and
-`every_manifest_row_has_non_placeholder_mechanism_and_executable_proof` — is FORWARD-DECLARED
-in `BlockContractRow.required_guards` but NOT yet built (U0-FINISH-B); today the built check
-is the Python generator's `--check`.
+emit this partition; it parses it (`parse_partition`) and uses it ONLY to assign each
+`IgnoredTestRow`'s `block_id` when it emits `typeinfo_ignored_test_manifest_rows.rs`. The
+other two checked-in manifest-data files are NOT derived from this partition: the
+`AdditionalProofRow` table (`typeinfo_additional_proof_rows.rs`) and the
+`TYPEINFO_PARITY_BLOCKS` DAG (`typeinfo_parity_blocks.rs`) are authored in the generator's
+own Python maps (`build_additional_rows` / `JSX_NO_NEW_KEY_ROWS`; `emit_block_rows`,
+`BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`, the prereq/mechanism maps). This
+partition is a total function over the 362 `IgnoredTestRow`s: **every** row appears exactly
+once under exactly one owning `block_id`, no row is owned by two blocks, and the union is
+exactly the 362 manifest rows. The generator's `--check` mode regenerates all three files
+(the manifest rows from this partition + the live ignores + the Capability Map, and the
+`AdditionalProofRow` / DAG files from the Python maps) and byte-compares, so a partition edit
+that drifts the `block_id` column from the checked-in manifest data fails `--check`. Each
+subplan's `Exact test rows lifted` list is the projection of this partition onto that block —
+the two must agree row-for-row. The row-exact completeness GATE that will additionally
+enforce this in-suite — `capability_rows_map_to_expected_query_fact_mechanisms` (each row's
+owning block matches its capability's expected mechanism), the bijection/count guards
+(§10.5), and `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof` — is NOT
+yet built (U0-FINISH-B): `capability_rows_map_to_expected_query_fact_mechanisms` and
+`every_manifest_row_has_non_placeholder_mechanism_and_executable_proof` appear as
+forward-declared guard NAMES in `BlockContractRow.required_guards` (on `U13.PROJECTION` /
+`U15.FINAL_LIFT`) but have no implementing test on this tree; today the built check is the
+Python generator's `--check`.
 
 The owning `block_id` for each row is its **dominant mechanism** per the Capability Map
 (§Capability Map) and the row-level-split notes in the subplans: a row's substrate maps it to
@@ -2845,10 +2868,13 @@ they build substrate (ledger / keys / wire / exporter / projection) the owning b
 their rows through; their `Exact test rows lifted` is explicitly `none`.
 
 The complete partition (each entry `file::function — substrate`):
-<!-- BEGIN U0 row→block coverage table (362 rows). HAND-AUTHORED authoritative source: the manifest
-     generator (scripts/gen-typeinfo-ignore-manifest.py) READS this partition and EMITS
-     crates/verter_session/tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs +
-     typeinfo_parity_blocks.rs from it. Edit rows HERE, then regenerate. -->
+<!-- BEGIN U0 row→block coverage table (362 rows). HAND-AUTHORED authoritative source for the
+     row→block_id PARTITION ONLY: the manifest generator (scripts/gen-typeinfo-ignore-manifest.py)
+     READS this partition (parse_partition) to assign each IgnoredTestRow's block_id and EMITS
+     crates/verter_session/tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs. The
+     AdditionalProofRow table (typeinfo_additional_proof_rows.rs) and the TYPEINFO_PARITY_BLOCKS
+     DAG (typeinfo_parity_blocks.rs) come from the generator's own Python maps, NOT from this
+     partition. Edit block_id assignments HERE, then regenerate. -->
 
 **`U2.RELATION_INFER`** (20 rows):
 
