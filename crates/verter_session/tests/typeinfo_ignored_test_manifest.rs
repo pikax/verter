@@ -304,20 +304,70 @@ enum TypeInfoParityBlockId {
     U15FinalLift,
 }
 
-/// The live `SemanticQueryKey` variant set, mirrored as a name-only
-/// closed enum (the U0 ledger keys queries by NAME — no payloads). Kept
-/// in sync — variant-for-variant — with the live
-/// [`verter_session::semantic_query::SemanticQueryKeyTag`] discriminant set
-/// (`SemanticQueryKeyTag::ALL`). The
-/// `semantic_query_name_mirror_matches_live_tag_set` guard FAILS if this
-/// mirror omits (or invents) any live tag, so the mirror can never silently
-/// drift behind the live key surface and the block-DAG guard's consumed-key
-/// check (`key_owning_block`) can never false-pass for a key the mirror does
-/// not yet name. Later U-blocks that add keys extend BOTH this enum and
-/// [`SEMANTIC_QUERY_NAME_ALL`] in the same change.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
-#[allow(dead_code)]
-enum SemanticQueryName {
+/// Declares the name-only [`SemanticQueryName`] mirror enum, its
+/// declaration-order witness array [`SEMANTIC_QUERY_NAME_ALL`], and an
+/// exhaustive variant→name source ([`semantic_query_name_str`]) from ONE
+/// variant list, so the three CANNOT diverge.
+///
+/// This is the enforcement mechanism behind the
+/// `semantic_query_name_mirror_matches_live_tag_set` guard's drift claim:
+/// because the enum, the array, and the name source are all expanded from the
+/// same `$variant` token list, adding a `SemanticQueryName` variant WITHOUT
+/// listing it in the array is structurally impossible — there is no second
+/// place to forget. (Without this, the `#[allow(dead_code)]` enum would let an
+/// array-less variant pass both the dead-code lint and the array-reading
+/// guard.)
+macro_rules! semantic_query_names {
+    ($($variant:ident),+ $(,)?) => {
+        /// The live `SemanticQueryKey` variant set, mirrored as a name-only
+        /// closed enum (the U0 ledger keys queries by NAME — no payloads).
+        /// Kept in sync — variant-for-variant — with the live
+        /// [`verter_session::semantic_query::SemanticQueryKeyTag`] discriminant
+        /// set (`SemanticQueryKeyTag::ALL`). The
+        /// `semantic_query_name_mirror_matches_live_tag_set` guard FAILS if this
+        /// mirror omits (or invents) any live tag, so the mirror can never
+        /// silently drift behind the live key surface and the block-DAG guard's
+        /// consumed-key check (`key_owning_block`) can never false-pass for a
+        /// key the mirror does not yet name. This enum, its witness array
+        /// [`SEMANTIC_QUERY_NAME_ALL`], and the exhaustive
+        /// [`semantic_query_name_str`] source are all generated from the SAME
+        /// `semantic_query_names!` variant list, so adding a variant here
+        /// without adding it to the array is impossible — there is no second
+        /// place to forget. Later U-blocks that add keys extend the single
+        /// `semantic_query_names!` invocation (and add a `key_owning_block`
+        /// arm).
+        #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
+        #[allow(dead_code)]
+        enum SemanticQueryName {
+            $($variant),+
+        }
+
+        /// Every [`SemanticQueryName`] mirror variant, in live-tag declaration
+        /// order. This is the witness the
+        /// `semantic_query_name_mirror_matches_live_tag_set` guard diffs against
+        /// `SemanticQueryKeyTag::ALL`: a live tag missing here (or an entry here
+        /// with no live tag) FAILS the guard. The array is GENERATED from the
+        /// same `semantic_query_names!` variant list as the enum, so a variant
+        /// can never be present in the enum but absent from the array — the
+        /// array and the enum stay aligned by construction (one token list),
+        /// then aligned with the live tag set by the guard.
+        const SEMANTIC_QUERY_NAME_ALL: &[SemanticQueryName] =
+            &[$(SemanticQueryName::$variant),+];
+
+        /// Exhaustive (wildcard-free) variant→name source for the mirror.
+        /// Generated from the same `semantic_query_names!` variant list, so it
+        /// names every variant and stays a single source of the variant set.
+        /// The guard maps the witness array through this fn (not `Debug`), so a
+        /// name here is the one the array contributes to the live-tag diff.
+        fn semantic_query_name_str(name: SemanticQueryName) -> &'static str {
+            match name {
+                $(SemanticQueryName::$variant => stringify!($variant)),+
+            }
+        }
+    };
+}
+
+semantic_query_names! {
     ResolveDecl,
     Instantiate,
     ProjectMember,
@@ -341,38 +391,6 @@ enum SemanticQueryName {
     FlowNarrowingAt,
     ContextualTypeAt,
 }
-
-/// Every [`SemanticQueryName`] mirror variant, in live-tag declaration order.
-/// This is the witness the `semantic_query_name_mirror_matches_live_tag_set`
-/// guard diffs against `SemanticQueryKeyTag::ALL`: a live tag missing here (or
-/// an entry here with no live tag) FAILS the guard. Adding a
-/// `SemanticQueryName` variant without listing it here leaves it out of the
-/// set the guard builds, so the set inequality FAILS too — the array and the
-/// enum stay aligned by the guard, not by convention.
-const SEMANTIC_QUERY_NAME_ALL: &[SemanticQueryName] = &[
-    SemanticQueryName::ResolveDecl,
-    SemanticQueryName::Instantiate,
-    SemanticQueryName::ProjectMember,
-    SemanticQueryName::IndexedAccess,
-    SemanticQueryName::KeyOf,
-    SemanticQueryName::MappedType,
-    SemanticQueryName::Conditional,
-    SemanticQueryName::TypeOf,
-    SemanticQueryName::NormalizeUnion,
-    SemanticQueryName::NormalizeIntersection,
-    SemanticQueryName::ProjectPath,
-    SemanticQueryName::ResolvedNamedType,
-    SemanticQueryName::Relate,
-    SemanticQueryName::ResolveMacroPayload,
-    SemanticQueryName::ResolveClassSurface,
-    SemanticQueryName::ResolveAmbientNamespace,
-    SemanticQueryName::ResolveEnum,
-    SemanticQueryName::ResolveOverloadSet,
-    SemanticQueryName::ApparentType,
-    SemanticQueryName::TemplateLiteralReduce,
-    SemanticQueryName::FlowNarrowingAt,
-    SemanticQueryName::ContextualTypeAt,
-];
 
 /// Deterministic identifier for a generated TS7 oracle snapshot. Closed
 /// set: one per oracle-backed capability family.
@@ -1624,7 +1642,7 @@ fn semantic_query_name_mirror_matches_live_tag_set() {
         .collect();
     let mirror: BTreeSet<String> = SEMANTIC_QUERY_NAME_ALL
         .iter()
-        .map(|name| format!("{name:?}"))
+        .map(|name| semantic_query_name_str(*name).to_string())
         .collect();
 
     let missing_from_mirror: Vec<&String> = live.difference(&mirror).collect();
@@ -1633,9 +1651,11 @@ fn semantic_query_name_mirror_matches_live_tag_set() {
     assert!(
         missing_from_mirror.is_empty() && extra_in_mirror.is_empty(),
         "the manifest `SemanticQueryName` mirror has drifted from the live \
-         `SemanticQueryKeyTag::ALL` set. Extend BOTH the `SemanticQueryName` \
-         enum AND `SEMANTIC_QUERY_NAME_ALL` (and add a `key_owning_block` arm) \
-         for every added live key in the same change.\n  \
+         `SemanticQueryKeyTag::ALL` set. Extend the single \
+         `semantic_query_names!` invocation (which generates the enum, the \
+         `SEMANTIC_QUERY_NAME_ALL` witness array, and `semantic_query_name_str` \
+         together) and add a `key_owning_block` arm for every added live key in \
+         the same change.\n  \
          live tags missing from the mirror: {missing_from_mirror:?}\n  \
          mirror names with no live tag: {extra_in_mirror:?}",
     );
