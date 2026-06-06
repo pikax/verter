@@ -2495,8 +2495,10 @@ uniform discipline for every block in it. (Contrast the block-SPECIFIC quartet
 per-block data and so ARE restated in every block contract.)
 
 `TYPEINFO_PARITY_BLOCKS: &[BlockContractRow]` lives in the same manifest module
-(`crates/verter_session/tests/typeinfo_ignored_test_manifest.rs`). It contains block ID,
-U-block, prereqs, subplan path, required guards, and verification command labels.
+(`crates/verter_session/tests/typeinfo_ignored_test_manifest.rs`). Each `BlockContractRow`
+carries `block_id`, `owning_u_block`, `organ`, `prereqs`, `mechanism_id`,
+`consumed_mechanisms`, `required_guards`, and `verification_labels` (the verification
+command labels). There is no `subplan path` field.
 
 ## 10. The two-table manifest ledger
 
@@ -2539,7 +2541,7 @@ existing ignored row stays in that `IgnoredTestRow` (it is not duplicated); only
 genuinely NEW fixtures above are `AdditionalProofRow`s.
 
 ```rust
-struct IgnoredTestRow {              // EXACTLY the 362 ignored test-site rows (count-guarded, bijective with source #[ignore]s)
+struct IgnoredTestRow {              // EXACTLY the 362 ignored test-site rows (count-guarded, bijective with source #[ignore]s); 13 fields
     file: &'static str,
     function: &'static str,
     substrate: TargetSubstrate,
@@ -2550,6 +2552,8 @@ struct IgnoredTestRow {              // EXACTLY the 362 ignored test-site rows (
     semantic_queries: &'static [SemanticQueryName],
     proof: ProofRequirement,
     status: IgnoreStatus,
+    mechanism_id: MechanismId,
+    consumed_mechanisms: &'static [MechanismId],
     unblocker: &'static str,
 }
 
@@ -2567,8 +2571,10 @@ struct AdditionalProofRow {          // COVERAGE-ONLY: the closed set of exactly
     block_id: TypeInfoParityBlockId,
     semantic_queries: &'static [SemanticQueryName],
     proof: ProofRequirement,
+    mechanism_id: MechanismId,
+    consumed_mechanisms: &'static [MechanismId],
     // NO `status: IgnoreStatus`: not an ignored test site, so no lifecycle and never in
-    // EXPECTED_TOTAL_IGNORED_COUNT or the bijection.
+    // EXPECTED_TOTAL_IGNORED_COUNT or the bijection. 11 fields (= 13 minus `status` and `unblocker`).
 }
 
 enum ProofRequirement {
@@ -4106,10 +4112,9 @@ landing/accept/rollback boundary those guards used to police.
 
 # Deliverables / legacy
 
-- **Pin the oracle toolchain.** `package.json` currently declares
-  `"@typescript/native-preview": "latest"`. `"latest"` is not a durable oracle contract — the manifest dependency must be pinned
-  to the exact oracle version (`7.0.0-dev.20260526.1`) in `package.json`. This is a required deliverable (and a legacy fix:
-  replace the floating `"latest"` range).
+- **Pin the oracle toolchain — DONE (U0-FINISH-A).** `package.json` pins `"@typescript/native-preview"` to the exact oracle
+  version `7.0.0-dev.20260526.1` (resolved identically in `pnpm-lock.yaml`); the floating `"latest"` range was removed. `"latest"`
+  was not a durable oracle contract, so the manifest dependency is now pinned to the exact oracle version.
 - **The oracle row generator** (deterministic `OracleId`, checked-in normalized snapshots, feature/env-gated regeneration) is a
   required deliverable; the `tsgo`-execution-forbidden guard for runtime/default tests is a required deliverable.
 - **The git/CI landing protocol** (§11) is the required execution-framework deliverable: the per-block branch discipline, the CI
