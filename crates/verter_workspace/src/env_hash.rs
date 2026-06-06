@@ -184,12 +184,15 @@ impl IdeProjectConfig {
 
         // active `exports`/`imports` condition set (order is significant —
         // a different ordering resolves a conditional `exports` map to a
-        // different target). NEVER mixes lib data (R21).
-        for condition in inputs.export_conditions.conditions() {
-            buf.extend_from_slice(condition.as_bytes());
-            buf.push(SEP);
-        }
-        buf.push(SEP);
+        // different target). NEVER mixes lib data (R21). Framed via the shared
+        // `write_str_slice` helper so the framing matches every other slice.
+        let conditions: Vec<&str> = inputs
+            .export_conditions
+            .conditions()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        write_str_slice(&mut buf, &conditions);
 
         compute_hash16(&buf)
     }

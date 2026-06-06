@@ -5,42 +5,49 @@
 //! **content-free shape** — no resolver, no walker, no condition-evaluation
 //! semantics. The resolution-matrix walker that consumes them, and the
 //! broken-input taint producers, live in `verter_session::resolver_core`
-//! (see `docs/arch/native-typeinfo-parity-u2-reducers.md` →
-//! `U0.RESOLVER_CORE_FOUNDATIONS`).
+//! (see `docs/arch/native-typeinfo-parity-u2-reducers.md`).
 //!
 //! Two of these types ([`ModuleResolutionMode`] and [`ConditionSet`]) are
 //! resolve-domain ENV inputs: they ride in [`crate::env_hash::EnvHashInputs`]
 //! and hash into `resolve_env_hash` (and ONLY `resolve_env_hash`). They are
 //! orthogonal to the lib dimension — TS lib selection / `typeRoots` / the
 //! ambient corpus feed `lib_env_hash`, NEVER `resolve_env_hash` (R21 scoping
-//! rule). [`SpecifierKind`] is a per-specifier classification used by the U0
-//! walker; it is NOT a project-env input and does not key any env hash.
+//! rule). [`SpecifierKind`] is a per-specifier classification used by the
+//! resolution-matrix walker in `verter_session::resolver_core`; it is NOT a
+//! project-env input and does not key any env hash.
 
 /// TypeScript `moduleResolution` strategy.
 ///
 /// Content-free shape mirroring the closed TS taxonomy. This is a
 /// resolve-domain ENV input — changing it changes where a bare/relative
 /// specifier resolves, so it hashes into `resolve_env_hash`.
+///
+/// The discriminants are pinned (`#[repr(u8)]` + explicit values) because the
+/// mode is hashed via `mode as u8` into `resolve_env_hash`; pinning prevents a
+/// future variant reorder from silently changing the hash for the same
+/// semantic mode.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ModuleResolutionMode {
     /// Legacy `classic` resolution.
-    Classic,
+    Classic = 0,
     /// `node` / `node10` CommonJS-style resolution.
-    Node10,
+    Node10 = 1,
     /// `node16` ESM-aware resolution.
-    Node16,
+    Node16 = 2,
     /// `nodenext` ESM-aware resolution.
-    NodeNext,
+    NodeNext = 3,
     /// `bundler` resolution (the Vite / Vue workspace default).
     #[default]
-    Bundler,
+    Bundler = 4,
 }
 
 /// Classification of an import specifier by its syntactic shape.
 ///
-/// Content-free vocabulary used by the U0 resolution-matrix walker to pick a
-/// resolution lane. NOT an env-hash input — a specifier's kind is a property
-/// of the specifier being resolved, not of the project environment.
+/// Content-free vocabulary used by the resolution-matrix walker in
+/// `verter_session::resolver_core` to pick a resolution lane. NOT an env-hash
+/// input — a specifier's kind is a property of the specifier being resolved,
+/// not of the project environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpecifierKind {
     /// `./foo`, `../bar` — relative path.
@@ -72,6 +79,13 @@ pub struct ConditionSet(Box<[String]>);
 impl ConditionSet {
     /// Build a condition set from an iterator of condition tokens, preserving
     /// first-seen order and dropping later duplicates.
+    ///
+    /// Framing-ambiguous tokens are rejected at construction: an empty token
+    /// (`""`) or a token containing the NUL byte (`'\0'`, the hash-buffer
+    /// separator) is dropped entirely. Real `package.json`
+    /// `exports`/`imports` condition keys are identifiers and never contain
+    /// NUL, so this drops only impossible/degenerate tokens and keeps the
+    /// content-free shape unambiguous when hashed.
     #[must_use]
     pub fn new<I, S>(conditions: I) -> Self
     where
@@ -81,6 +95,9 @@ impl ConditionSet {
         let mut seen: Vec<String> = Vec::new();
         for cond in conditions {
             let cond = cond.into();
+            if cond.is_empty() || cond.contains('\0') {
+                continue;
+            }
             if !seen.iter().any(|existing| existing == &cond) {
                 seen.push(cond);
             }
@@ -132,6 +149,31 @@ mod tests {
         assert_eq!(
             ModuleResolutionMode::default(),
             ModuleResolutionMode::Bundler
+        );
+    }
+
+    #[test]
+    fn module_resolution_mode_discriminants_are_stable() {
+        // These discriminants are hashed via `mode as u8` into
+        // `resolve_env_hash`; a future variant reorder must NOT silently
+        // change the hash for the same semantic mode.
+        assert_eq!(ModuleResolutionMode::Classic as u8, 0);
+        assert_eq!(ModuleResolutionMode::Node10 as u8, 1);
+        assert_eq!(ModuleResolutionMode::Node16 as u8, 2);
+        assert_eq!(ModuleResolutionMode::NodeNext as u8, 3);
+        assert_eq!(ModuleResolutionMode::Bundler as u8, 4);
+    }
+
+    #[test]
+    fn condition_set_drops_empty_and_nul_tokens() {
+        // Empty tokens and tokens containing the SEP/NUL byte are
+        // framing-ambiguous and can never be real `package.json` condition
+        // keys, so the constructor drops them entirely.
+        let set = ConditionSet::new(["a", "", "b\0c", "d"]);
+        assert_eq!(
+            set.conditions(),
+            &["a".to_string(), "d".to_string()],
+            "empty token and NUL-containing token dropped, real tokens kept"
         );
     }
 }
