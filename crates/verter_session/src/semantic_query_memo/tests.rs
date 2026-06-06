@@ -1347,7 +1347,7 @@ fn cache_satisfaction_requires_path_exact_not_prefix() {
 /// NOT carry this assert, so that adversarial gate test is unaffected.
 #[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "sub-slot-mode terminal")]
+#[should_panic(expected = "records no terminal satisfying the slot's mode")]
 fn warm_publish_one_debug_asserts_against_sub_slot_mode_terminal() {
     use crate::semantic_query::demand::{
         Demand, MaterializedPoint, MaterializedSet, ProjectionPath,

@@ -171,27 +171,17 @@ pub struct SemanticGraphStore {
     /// **Materialised-record warm hit (§3.4):** each candidate carries a
     /// recorded `satisfied_projection` — the concrete `(path, point)` set
     /// its compute ACTUALLY produced, NOT its nominal slot mode. A warm hit
-    /// requires TWO independent gates, BOTH of which must pass:
-    /// `cached_satisfies(satisfied_projection, requested_point_for_key(key))`
-    /// (some RECORDED point dominates the request at the SAME path — path
-    /// EXACT, never prefix) AND per-candidate
-    /// `read_set_signature.validate_with_self_roots` against the caller's
-    /// live view.
+    /// requires TWO gates, BOTH passing: `cached_satisfies` (a RECORDED point
+    /// dominates the request at the SAME path — EXACT, never prefix) AND
+    /// per-candidate `read_set_signature.validate_with_self_roots`.
     ///
     /// **Backfill on completion:** a broader-projection build clones its
-    /// entry — the recorded `satisfied_projection` set VERBATIM — into a
-    /// projection-depth-narrower EMPTY sibling slot ONLY when a recorded
-    /// point `cached_satisfies` that sibling slot's requested point. The
-    /// candidate target set is the projection-depth-narrower siblings
-    /// (`Expanded → {Shallow, Navigate, Identity}`, `Shallow → {Navigate,
-    /// Identity}`, `Navigate → Identity`); every candidate is then
-    /// `cached_satisfies`-gated, so the lattice-unsound `Shallow → Navigate`
-    /// clone is REJECTED (`Shallow ⊅ Navigate`: a carrier-stopping Navigate
-    /// surface must not be served from a Shallow shell). Backfill is NEVER
-    /// by enum rank alone and NEVER synthesises a target-slot point.
-    /// Narrower builds NEVER backfill broader slots; backfill writes only
-    /// into an empty slot, so a concurrent narrower build that already
-    /// populated its slot is never pre-empted.
+    /// entry — recorded set VERBATIM — into a projection-depth-narrower
+    /// EMPTY sibling slot ONLY when a recorded point `cached_satisfies` the
+    /// target's requested point (directional siblings — see
+    /// [`family::slot_domain_siblings`]). Never by enum rank, so the
+    /// lattice-unsound `Shallow → Navigate` clone is REJECTED. Narrower
+    /// builds NEVER backfill broader slots, and only into an empty slot.
     entries: Mutex<FxHashMap<FamilyKey, FamilySlots>>,
     /// In-flight admission keyed by the full [`SemanticQueryKey`]. Because
     /// mode is part of the key for mode-bearing variants, this keying
@@ -2814,12 +2804,10 @@ impl SemanticGraphStore {
         // 5. Warm-publish only successful values; errors and recursion
         // sentinels never become shared-cache entries ( cache
         //    population). Successful results land in the requested
-        //    `(family, slot)` and clone into each EMPTY projection-depth-
-        //    narrower sibling slot a recorded materialised point
-        //    `cached_satisfies` (§3.4 directional gated backfill) — the
-        //    backfill is a no-op against any slot a concurrent narrower
-        //    compute already filled, so per-slot in-flight authority
-        //    (§7.15) is preserved.
+        //    `(family, slot)` and clone into each EMPTY narrower sibling
+        //    slot a recorded point `cached_satisfies` (§3.4 directional
+        //    gated backfill) — a no-op against a slot a concurrent narrower
+        //    compute already filled, so per-slot in-flight authority holds.
         //
         //    If a canonical invalidation swept this (family, slot) while
         //    the build was running, the winner's result is computed from
@@ -3137,28 +3125,12 @@ impl SemanticGraphStore {
             return true;
         }
         let requested_path = requested_path_for_key(key);
-        // §3.4 soundness invariant (production publish ONLY): the entry's
-        // RECORDED terminal point — the materialised point at the key's own
-        // projection path — must be at-least the slot's mode, i.e. it must
-        // `cached_satisfies` the entry's OWN requested point. A
-        // sub-slot-mode terminal (e.g. a carrier-stopping `Navigate`
-        // terminal recorded in an `Expanded` slot) would let the two-gate
-        // warm hit SERVE — and the directional backfill CLONE, since
-        // `Navigate ⊒ Shallow` — an under-materialised surface. This is
-        // unreachable in production: a path-walk terminal always records
-        // `context.mode` (= the slot's mode — see `path_walk_materialized_set`),
-        // and a single-terminal build defaults to `requested_point_for_key`.
-        // It is pinned here so a future producer regression panics at the
-        // publish site rather than silently corrupting the cache. It lives
-        // ONLY on the production publish path: the test-only
-        // `publish_with_materialized_set_for_tests` deliberately constructs
-        // adversarial under-materialised records to exercise the warm-hit
-        // gate and must NOT trip this assert.
+        // §3.4 soundness invariant (production publish ONLY): the recorded
+        // terminal must be at-least the slot's mode — see
+        // `family::slot_domain_siblings`. Test-only publishes bypass this.
         debug_assert!(
             cached_satisfies(satisfied_projection, &requested_point_for_key(key)),
-            "warm_publish_one: entry for {key:?} records no terminal point at its own \
-             projection path that satisfies the slot's mode — a sub-slot-mode terminal \
-             would serve/clone an under-materialised surface (§3.4 soundness invariant)"
+            "warm_publish_one: {key:?} records no terminal satisfying the slot's mode (§3.4)"
         );
         // The carrier is the COMPLETED self-version-rooted carrier the
         // shared cold-build helper produced via
@@ -3334,18 +3306,12 @@ impl SemanticGraphStore {
             return;
         }
         let requested_path = requested_path_for_key(&key);
-        // §3.4 soundness invariant (production publish only) — same as
-        // `warm_publish_one`. A prefix-backfill records exactly its own
-        // `Navigate@prefix` hop into a `Navigate`-mode key, so this is
-        // self-satisfying by construction; pinned here so a future
-        // prefix-backfill producer change cannot record a sub-slot-mode
-        // terminal that the warm-hit / backfill gates would then serve or
-        // clone as an under-materialised surface.
+        // §3.4 soundness invariant — same as `warm_publish_one` (a
+        // prefix-backfill's `Navigate@prefix` hop is self-satisfying).
         debug_assert!(
             cached_satisfies(&satisfied_projection, &requested_point_for_key(&key)),
-            "warm_publish_one_if_absent: prefix-backfill entry for {key:?} records no terminal \
-             point at its own projection path that satisfies the slot's mode (§3.4 soundness \
-             invariant)"
+            "warm_publish_one_if_absent: {key:?} records no terminal satisfying the slot's \
+             mode (§3.4)"
         );
         // Skip if already warm OR currently in flight. Both checks
         // happen BEFORE acquiring the entries lock; a concurrent cold
