@@ -148,7 +148,7 @@ pub(super) enum FamilyKey {
         base: crate::semantic_query::ResolvedDeclSlotIdentity,
         args: Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
-        /// Surface-provenance dimension (codex BINDING design). A
+        /// Surface-provenance dimension. A
         /// macro-type-argument own-body instantiation and a plain
         /// structural instantiation of the SAME decl + args produce
         /// distinct surfaces (`declared_in_macro_type_arg` differs), so
@@ -157,8 +157,7 @@ pub(super) enum FamilyKey {
         /// the family-identity level so per-mode backfill stays within
         /// one provenance family.
         provenance: crate::semantic_query::SurfaceProvenanceContext,
-        /// Member-merge role dimension (codex BINDING design for the
-        /// type-resolution unification). A heritage-arm instantiation
+        /// Member-merge role dimension. A heritage-arm instantiation
         /// (`MemberMergeRole::Heritage`) and a structural instantiation of
         /// the SAME decl + args produce distinct surfaces (the inherited
         /// members carry distinct merge roles), so they MUST NOT collide on
@@ -175,10 +174,26 @@ pub(super) enum FamilyKey {
     },
     KeyOf {
         base: SemanticNodeId,
+        /// Surface-provenance dimension. Key-space reduction threads this
+        /// context through nested evaluation and encoded output bits, so a
+        /// macro-own-body query and a structural query over the same base must
+        /// never share one memo family.
+        provenance: crate::semantic_query::SurfaceProvenanceContext,
+        /// Member-merge role dimension. Heritage/own-body/authored reductions
+        /// can observe different member precedence and metadata, so they are
+        /// part of the family identity rather than the mode slot.
+        merge_role: crate::semantic_query::MemberMergeRole,
     },
     MappedType {
         source: SemanticNodeId,
         mapper: MapperKey,
+        /// Surface-provenance dimension. Mapped-type materialisation evaluates
+        /// mapper values/names under the full projection-reduction context, so
+        /// provenance is value-affecting identity.
+        provenance: crate::semantic_query::SurfaceProvenanceContext,
+        /// Member-merge role dimension. Produced members and nested reductions
+        /// depend on the merge-role regime and must not warm-hit across it.
+        merge_role: crate::semantic_query::MemberMergeRole,
     },
     Conditional {
         check: SemanticNodeId,
@@ -199,7 +214,7 @@ pub(super) enum FamilyKey {
     ProjectPath {
         base: SemanticNodeId,
         path: Arc<[PathSegment]>,
-        /// Surface-provenance dimension (codex BINDING design). A
+        /// Surface-provenance dimension. A
         /// macro-type-argument own-body path projection (the empty-path
         /// macro-payload surface read) and a plain structural path
         /// projection of the SAME `(base, path)` produce distinct
@@ -207,8 +222,7 @@ pub(super) enum FamilyKey {
         /// expanded DeclPlaceholder's own-body members), so they MUST
         /// NOT collide on one family slot.
         provenance: crate::semantic_query::SurfaceProvenanceContext,
-        /// Member-merge role dimension (codex BINDING design for the
-        /// type-resolution unification). The empty-path Shallow projection
+        /// Member-merge role dimension. The empty-path Shallow projection
         /// of a heritage carrier under `MemberMergeRole::Heritage` produces a
         /// distinct surface from a structural projection of the same
         /// `(base, path)`, so they MUST NOT collide on one family slot.
@@ -1088,9 +1102,14 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             mode_to_slot(*mode),
         ),
-        SemanticQueryKey::KeyOf { base, context } => {
-            (FamilyKey::KeyOf { base: *base }, context_to_slot(*context))
-        }
+        SemanticQueryKey::KeyOf { base, context } => (
+            FamilyKey::KeyOf {
+                base: *base,
+                provenance: context.provenance,
+                merge_role: context.merge_role,
+            },
+            context_to_slot(*context),
+        ),
         SemanticQueryKey::MappedType {
             source,
             mapper,
@@ -1099,6 +1118,8 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             FamilyKey::MappedType {
                 source: *source,
                 mapper: mapper.clone(),
+                provenance: context.provenance,
+                merge_role: context.merge_role,
             },
             context_to_slot(*context),
         ),

@@ -5,8 +5,8 @@ ResolveDecl | Live | TypeNode | R T L J | — | ResolveDeclKey | — | Singlefli
 Instantiate | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop,Provenance,MergeRole | InstantiateContext | instantiate_same_base_different_env_or_context_do_not_warm_hit, decl_self_type_or_lib_env_change_produces_distinct_instantiate_key | Singleflight
 ProjectMember | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ProjectionMode | — | Singleflight
 IndexedAccess | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ProjectionMode | — | Singleflight
-KeyOf | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ProjectionReductionContext | — | Singleflight
-MappedType | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ProjectionReductionContext | — | Singleflight
+KeyOf | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop,Provenance,MergeRole | ProjectionReductionContext | keyof_queries_differing_only_by_provenance_do_not_warm_hit, keyof_and_mapped_type_context_axes_do_not_alias_family_identity | Singleflight
+MappedType | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop,Provenance,MergeRole | ProjectionReductionContext | mapped_type_queries_differing_only_by_merge_role_do_not_warm_hit, keyof_and_mapped_type_context_axes_do_not_alias_family_identity | Singleflight
 Conditional | Live | TypeNode | T L J | — | (check,extends,true_branch,false_branch,distributive) | — | Singleflight
 TypeOf | Live | TypeNode | R T L J | — | ValueRootKey | — | Singleflight
 NormalizeUnion | Live | TypeNode | T L J | — | (members) | — | Singleflight

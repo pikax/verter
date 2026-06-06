@@ -826,7 +826,7 @@ pub enum ReductionDemand {
 /// arms).
 ///
 /// Folded into the [`crate::semantic_query_memo::FamilyKey`] identity
-/// for the context-bearing `Instantiate` / `ProjectPath` families so a
+/// for every context-bearing projection-reduction family so a
 /// macro-root surface and a plain structural surface of the SAME node
 /// never collide on one memo slot. It is NOT an env-hash dimension (R21)
 /// — it is a query-identity dimension, like the projection mode.
@@ -851,8 +851,7 @@ pub enum SurfaceProvenanceContext {
     MacroTypeArgOwnBody,
 }
 
-/// Member-merge role — the surface-merge provenance axis (codex BINDING
-/// design for the type-resolution unification). Orthogonal to
+/// Member-merge role — the surface-merge provenance axis. Orthogonal to
 /// [`SurfaceProvenanceContext`] (which records macro-type-argument own-body
 /// participation): a plain non-macro `resolve_named_symbol` carries
 /// `SurfaceProvenanceContext::Structural` yet still needs the merge role to
@@ -899,29 +898,29 @@ pub enum MemberMergeRole {
 /// The cache slot is per-context so a `StructuralTransit/Shallow`
 /// result does not collide with a `Published/Shallow` result on the
 /// same node — they are distinct evaluations. The `provenance` axis is
-/// folded into `FamilyKey` for `Instantiate` / `ProjectPath` (codex
-/// BINDING design) so a macro-root surface and a structural surface of
+/// folded into `FamilyKey` for every context-bearing projection-reduction
+/// family so a macro-root surface and a structural surface of
 /// the same node cache in distinct slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProjectionReductionContext {
     pub mode: ProjectionMode,
     pub demand: ReductionDemand,
-    /// Surface-provenance axis (codex BINDING design). Defaults to
+    /// Surface-provenance axis. Defaults to
     /// [`SurfaceProvenanceContext::Structural`]; only the macro
     /// type-argument own-body entry points opt into
     /// [`SurfaceProvenanceContext::MacroTypeArgOwnBody`]. Part of the
-    /// query identity (folded into `FamilyKey` for `Instantiate` /
-    /// `ProjectPath`), so a macro-root surface and a structural surface
+    /// query identity (folded into `FamilyKey` for every context-bearing
+    /// projection-reduction family), so a macro-root surface and a structural surface
     /// of the same node cache in distinct slots.
     pub provenance: SurfaceProvenanceContext,
-    /// Member-merge role axis (codex BINDING design for the type-resolution
-    /// unification). Orthogonal to [`Self::provenance`]; drives the
+    /// Member-merge role axis. Orthogonal to [`Self::provenance`]; drives the
     /// own-body-shadows-heritage decision in the intersection surface merge.
     /// Defaults to [`MemberMergeRole::Authored`]; the consuming declaration's
     /// per-arm lowering (`lower_decl_body_with_provenance`) and the walker's
     /// heritage-arm propagation set `OwnBody` / `Heritage`. Folded into
-    /// `FamilyKey` for `Instantiate` / `ProjectPath` so a heritage-arm
-    /// surface and a structural surface of the same node cache distinctly.
+    /// `FamilyKey` for every context-bearing projection-reduction family so a
+    /// heritage-arm surface and a structural surface of the same node cache
+    /// distinctly.
     pub merge_role: MemberMergeRole,
 }
 

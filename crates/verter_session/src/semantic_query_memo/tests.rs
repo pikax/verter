@@ -7685,8 +7685,10 @@ fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
 mod env_scoped_key_identity_guards {
     use super::super::family::{family_and_slot, FamilyKey};
     use crate::semantic_query::{
-        HashValue, InstantiateContext, MacroPayloadContext, ProjectionMode,
-        ProjectionReductionContext, ResolvedDeclSlotIdentity, SemanticNodeId, SemanticQueryKey,
+        HashValue, InstantiateContext, MacroPayloadContext, MapperKey, MapperKind, MemberMergeRole,
+        OptionalityMod, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryResult,
+        ReadonlyMod, ResolvedDeclSlotIdentity, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+        SurfaceProvenanceContext,
     };
     use std::sync::Arc;
 
@@ -7707,6 +7709,35 @@ mod env_scoped_key_identity_guards {
 
     fn fam(key: &SemanticQueryKey) -> FamilyKey {
         family_and_slot(key).0
+    }
+
+    fn context_with_axes(
+        provenance: SurfaceProvenanceContext,
+        merge_role: MemberMergeRole,
+    ) -> ProjectionReductionContext {
+        let mut context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+        context.provenance = provenance;
+        context.merge_role = merge_role;
+        context
+    }
+
+    fn mapper_key(id: SemanticNodeId) -> MapperKey {
+        MapperKey {
+            parameter_node: id,
+            key_space: id,
+            value_expr: id,
+            optionality: OptionalityMod::Keep,
+            readonly: ReadonlyMod::Keep,
+            name_remap: None,
+            kind: MapperKind::Computed,
+        }
+    }
+
+    fn assert_value_node(result: QueryResult<SemanticNodeId>, expected: SemanticNodeId) {
+        match result {
+            QueryResult::Value(actual) => assert_eq!(actual, expected),
+            other => panic!("expected Value({expected:?}), got {other:?}"),
+        }
     }
 
     /// Two `Instantiate` queries over the SAME declaration `(canonical, name)`
@@ -7890,6 +7921,200 @@ mod env_scoped_key_identity_guards {
         );
 
         assert_eq!(baseline, fam(&macro_key(owner_t, [0u8; 16])));
+    }
+
+    /// `ProjectionReductionContext.provenance` and `.merge_role` are
+    /// value-affecting query-identity axes for every context-bearing operator
+    /// family. `KeyOf` and `MappedType` must therefore follow the same
+    /// FamilyKey pattern as `Instantiate` / `ProjectPath`: the axes live on the
+    /// family identity, not only on the slot's demand/mode selector.
+    ///
+    /// Pre-fix, `FamilyKey::KeyOf { base }` and
+    /// `FamilyKey::MappedType { source, mapper }` dropped both axes, so each
+    /// assertion below collapsed onto one family slot and failed.
+    #[test]
+    fn keyof_and_mapped_type_context_axes_do_not_alias_family_identity() {
+        let store = super::SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let mapper = mapper_key(base);
+
+        let structural = context_with_axes(
+            SurfaceProvenanceContext::Structural,
+            MemberMergeRole::Authored,
+        );
+        let macro_own_body = context_with_axes(
+            SurfaceProvenanceContext::MacroTypeArgOwnBody,
+            MemberMergeRole::Authored,
+        );
+        let heritage = context_with_axes(
+            SurfaceProvenanceContext::Structural,
+            MemberMergeRole::Heritage,
+        );
+
+        let keyof_structural = SemanticQueryKey::KeyOf {
+            base,
+            context: structural,
+        };
+        let keyof_macro = SemanticQueryKey::KeyOf {
+            base,
+            context: macro_own_body,
+        };
+        let keyof_heritage = SemanticQueryKey::KeyOf {
+            base,
+            context: heritage,
+        };
+        assert_ne!(
+            fam(&keyof_structural),
+            fam(&keyof_macro),
+            "KeyOf provenance must distinguish the FamilyKey"
+        );
+        assert_ne!(
+            fam(&keyof_structural),
+            fam(&keyof_heritage),
+            "KeyOf merge_role must distinguish the FamilyKey"
+        );
+
+        let mapped_structural = SemanticQueryKey::MappedType {
+            source: base,
+            mapper: mapper.clone(),
+            context: structural,
+        };
+        let mapped_macro = SemanticQueryKey::MappedType {
+            source: base,
+            mapper: mapper.clone(),
+            context: macro_own_body,
+        };
+        let mapped_heritage = SemanticQueryKey::MappedType {
+            source: base,
+            mapper,
+            context: heritage,
+        };
+        assert_ne!(
+            fam(&mapped_structural),
+            fam(&mapped_macro),
+            "MappedType provenance must distinguish the FamilyKey"
+        );
+        assert_ne!(
+            fam(&mapped_structural),
+            fam(&mapped_heritage),
+            "MappedType merge_role must distinguish the FamilyKey"
+        );
+    }
+
+    #[test]
+    fn keyof_queries_differing_only_by_provenance_do_not_warm_hit() {
+        let host = super::ctx_host();
+        let store = super::SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let structural_result =
+            store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let macro_result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+
+        let structural = SemanticQueryKey::KeyOf {
+            base,
+            context: context_with_axes(
+                SurfaceProvenanceContext::Structural,
+                MemberMergeRole::Authored,
+            ),
+        };
+        let macro_own_body = SemanticQueryKey::KeyOf {
+            base,
+            context: context_with_axes(
+                SurfaceProvenanceContext::MacroTypeArgOwnBody,
+                MemberMergeRole::Authored,
+            ),
+        };
+
+        let first = store.execute_cooperative(
+            &host,
+            structural,
+            || store.intern_node(SemanticNodeData::Opaque(super::QueryError::Miss)),
+            || {
+                (
+                    QueryResult::Value(structural_result),
+                    super::empty_signature(),
+                )
+            },
+        );
+        assert_value_node(first.value, structural_result);
+
+        let mut second_build_ran = false;
+        let second = store.execute_cooperative(
+            &host,
+            macro_own_body,
+            || store.intern_node(SemanticNodeData::Opaque(super::QueryError::Miss)),
+            || {
+                second_build_ran = true;
+                (QueryResult::Value(macro_result), super::empty_signature())
+            },
+        );
+
+        assert!(
+            second_build_ran,
+            "a KeyOf query with different provenance must cold-build, not warm-hit a prior context"
+        );
+        assert_value_node(second.value, macro_result);
+    }
+
+    #[test]
+    fn mapped_type_queries_differing_only_by_merge_role_do_not_warm_hit() {
+        let host = super::ctx_host();
+        let store = super::SemanticGraphStore::new();
+        let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let mapper = mapper_key(source);
+        let authored_result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let heritage_result =
+            store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+
+        let authored = SemanticQueryKey::MappedType {
+            source,
+            mapper: mapper.clone(),
+            context: context_with_axes(
+                SurfaceProvenanceContext::Structural,
+                MemberMergeRole::Authored,
+            ),
+        };
+        let heritage = SemanticQueryKey::MappedType {
+            source,
+            mapper,
+            context: context_with_axes(
+                SurfaceProvenanceContext::Structural,
+                MemberMergeRole::Heritage,
+            ),
+        };
+
+        let first = store.execute_cooperative(
+            &host,
+            authored,
+            || store.intern_node(SemanticNodeData::Opaque(super::QueryError::Miss)),
+            || {
+                (
+                    QueryResult::Value(authored_result),
+                    super::empty_signature(),
+                )
+            },
+        );
+        assert_value_node(first.value, authored_result);
+
+        let mut second_build_ran = false;
+        let second = store.execute_cooperative(
+            &host,
+            heritage,
+            || store.intern_node(SemanticNodeData::Opaque(super::QueryError::Miss)),
+            || {
+                second_build_ran = true;
+                (
+                    QueryResult::Value(heritage_result),
+                    super::empty_signature(),
+                )
+            },
+        );
+
+        assert!(
+            second_build_ran,
+            "a MappedType query with different merge_role must cold-build, not warm-hit a prior context"
+        );
+        assert_value_node(second.value, heritage_result);
     }
 
     /// The `HostResolvedNamedTypeKey` resolved-named-type artifact identity is

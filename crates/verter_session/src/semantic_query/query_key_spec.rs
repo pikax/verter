@@ -451,22 +451,10 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
     // answers), so the family branches on them via `DemandAxis::Provenance` /
     // `DemandAxis::MergeRole` below.
     //
-    // IMPORTANT — this is true for ONLY the two families whose `FamilyKey`
-    // actually carries those fields: `FamilyKey::Instantiate` (fields
-    // `provenance` + `merge_role`) and `FamilyKey::ProjectPath` (same two
-    // fields), both verified in `semantic_query_memo::family`. The other two
-    // `ProjectionReductionContext`-carrying keys — `FamilyKey::KeyOf { base }`
-    // and `FamilyKey::MappedType { source, mapper }` — carry NO
-    // provenance / merge_role anywhere in the `(family, slot)` memo identity:
-    // `context_to_slot` reads only `demand` + `mode`, and `ModeSlot` has no
-    // provenance / merge_role dimension, so for these two families those fields
-    // are DROPPED from the identity entirely (two KeyOf/MappedType queries
-    // differing only in provenance / merge_role COLLIDE on one entry). Their
-    // `allowed_demand` is therefore the bare `mode_axes` — only the mode axes
-    // survive into the identity. `reduction_axes` below is consumed ONLY by
-    // `Instantiate` and (via `project_path_axes`) `ProjectPath`, whose
-    // `FamilyKey` carries provenance + merge_role precisely to keep those
-    // variants apart.
+    // This applies to every `ProjectionReductionContext`-carrying family:
+    // `Instantiate`, `KeyOf`, `MappedType`, and `ProjectPath` all carry
+    // provenance + merge_role on their `FamilyKey` identity, while
+    // `context_to_slot` keeps the orthogonal demand/mode slot selection.
     //
     // The `demand` field (`ReductionDemand::Published` / `StructuralTransit` /
     // `MacroObjectSurface`) is DELIBERATELY ABSENT from this `DemandAxis` mask:
@@ -546,46 +534,31 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             admission: AdmissionSpec::Singleflight,
         },
         // KeyOf { base, context } — structural keyspace reduction over an
-        // already-resolved node. Its memo identity is `FamilyKey::KeyOf { base }`
-        // (verified in `semantic_query_memo::family`), which carries NO
-        // provenance / merge_role: `context_to_slot` reads only `demand` + `mode`
-        // and `ModeSlot` has no provenance / merge_role dimension, so those
-        // fields are dropped from the `(family, slot)` identity entirely
-        // (provenance / merge_role variants collide on one entry). The family
-        // branches solely on the mode axes; `allowed_demand = mode_axes` because
-        // only the mode axes survive into the identity. Contrast
-        // `Instantiate` / `ProjectPath`, whose `FamilyKey` carries
-        // provenance + merge_role to keep variants apart.
+        // already-resolved node. Its memo identity is
+        // `FamilyKey::KeyOf { base, provenance, merge_role }`; demand/mode
+        // selection still routes through `context_to_slot`.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::KeyOf,
             lifecycle: KeyLifecycle::Live,
             context_shape: "ProjectionReductionContext",
             value_domain: SemanticQueryValueTag::TypeNode,
             env_dims: env_structural(),
-            allowed_demand: mode_axes,
-            cross_context_guard: "",
+            allowed_demand: reduction_axes,
+            cross_context_guard: "keyof_queries_differing_only_by_provenance_do_not_warm_hit, keyof_and_mapped_type_context_axes_do_not_alias_family_identity",
             admission: AdmissionSpec::Singleflight,
         },
         // MappedType { source, mapper, context } — structural mapped-type
         // rewrite over an already-resolved source. Its memo identity is
-        // `FamilyKey::MappedType { source, mapper }` (verified in
-        // `semantic_query_memo::family`), which carries NO provenance /
-        // merge_role: `context_to_slot` reads only `demand` + `mode` and
-        // `ModeSlot` has no provenance / merge_role dimension, so those fields
-        // are dropped from the `(family, slot)` identity entirely (provenance /
-        // merge_role variants collide on one entry). The family branches solely
-        // on the mode axes; `allowed_demand = mode_axes` because only the mode
-        // axes survive into the identity. Contrast `Instantiate` / `ProjectPath`,
-        // whose `FamilyKey` carries provenance + merge_role to keep variants
-        // apart.
+        // `FamilyKey::MappedType { source, mapper, provenance, merge_role }`;
+        // demand/mode selection still routes through `context_to_slot`.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::MappedType,
             lifecycle: KeyLifecycle::Live,
             context_shape: "ProjectionReductionContext",
             value_domain: SemanticQueryValueTag::TypeNode,
             env_dims: env_structural(),
-            allowed_demand: mode_axes,
-            cross_context_guard: "",
+            allowed_demand: reduction_axes,
+            cross_context_guard: "mapped_type_queries_differing_only_by_merge_role_do_not_warm_hit, keyof_and_mapped_type_context_axes_do_not_alias_family_identity",
             admission: AdmissionSpec::Singleflight,
         },
         // Conditional { check, extends, true, false, distributive } —
