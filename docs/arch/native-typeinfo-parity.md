@@ -153,16 +153,23 @@ carrying an explicit type-value classification — is: `primitive` (1), `literal
 (11), `key_of` (12), `indexed_access` (13), `conditional` (14), `mapped` (15),
 `template_literal` (16), `typeof_node` (17), `satisfies_node` (18), `class_node`
 (19), `this_type` (20), `merged_declaration` (21), `ambient_module` (22),
-`ambient_namespace` (24), `infer_node` (29), `enum_node` (30), `opaque` (31),
-`cycle` (32). `merged_declaration` / `ambient_module` / `ambient_namespace` remain
-because each is explicitly classified as a value-bearing namespace / object-type
-surface whose members are queryable type values (the same object surface
-`ResolveMergedDeclaration` / `ResolveAmbientNamespace` projects) — as distinct
-from an augmentation **fact** that mutates the declaration environment. Their
-place on the allowlist is conditional on that value-bearing classification, not on
-their name.
+`module_augmentation` (23), `ambient_namespace` (24), `global_augmentation` (25),
+`infer_node` (29), `enum_node` (30), `opaque` (31), `cycle` (32). The
+declaration-surface arms `merged_declaration` / `ambient_module` /
+`ambient_namespace` remain because each is explicitly classified as a
+value-bearing namespace / object-type surface whose members are queryable type
+values (the same object surface `ResolveMergedDeclaration` /
+`ResolveAmbientNamespace` projects). `module_augmentation` (23) and
+`global_augmentation` (25) likewise REMAIN as retained value-bearing augmentation
+arms: the proposed relocation to a `DeclarationAnalysisGraph` side surface was
+**rejected**, so these arms are the wire home (see the relocation note below and
+`u2-query-value-domain-design.md` §2.2). The in-process
+`SemanticQueryValue::DeclarationAnalysis` value domain is the value-side
+counterpart, not a wire relocation.
 
-Every non-type-value arm is relocated:
+Every arm that does NOT remain a value-bearing arm on `GraphTypeNode` relocates
+(the augmentation arms 23/25 are the explicit exception — see their bullet below,
+where the relocation was rejected and they stay on the wire):
 
 - **Flow narrowing (tag 26) and contextual type (tag 27)** → `ProgramAnalysisGraph`
   (program-analysis facts). The arms are retired + `reserved` (tags `26`/`27` +
@@ -190,25 +197,22 @@ Every non-type-value arm is relocated:
 - **Diagnostics and diagnostic directives** → `TypeInfoGraphPayload.diagnostics` /
   `TypeInfoGraphPayload.diagnostic_directives` (and off `SemanticTypeGraph`, §1.5).
 
-Two mechanical guards close the class:
+The class is closed mechanically by the landed taxonomy guard:
 
-- **`graph_type_node_oneof_contains_only_type_value_arms`** — scans the proto's
-  `GraphTypeNode` `oneof kind` and FAILS if any arm outside the type-value
-  allowlist above (now **without** `module_augmentation` / `global_augmentation`)
-  remains live. A new live arm not on the allowlist fails until it is either added
-  to the allowlist as a genuine type value via a reviewed schema-version bump, or
-  retired/`reserved` and relocated.
-- **`graph_type_node_allowlist_arms_have_type_value_classification`** — asserts
-  every arm ON the allowlist carries an explicit type-value classification and
-  REJECTS any declaration / environment-mutation arm from the allowlist (module
-  augmentation, global augmentation, and any other environment-mutation fact). An
-  arm may be allowlisted only if explicitly classified as a published type value
-  (including the value-bearing namespace/object classification that keeps
-  `merged_declaration` / `ambient_module` / `ambient_namespace`), never merely
-  because it currently appears in the oneof.
+- **`node_taxonomy_complete`** (`crates/verter_session/tests/g_block/typeinfo_graph_contract_guards.rs`)
+  — scans the proto's `GraphTypeNode` `oneof kind` and pins the EXACT 32-arm set,
+  INCLUDING `module_augmentation` (23) and `global_augmentation` (25), plus the
+  additive `reserved 33 to 100;` window at message scope. Adding, dropping, or
+  renaming any arm fails the assertion, so a future arm change is a deliberate
+  schema-version bump, not a silent tag grab. (The earlier-planned split guards
+  `graph_type_node_oneof_contains_only_type_value_arms` /
+  `graph_type_node_allowlist_arms_have_type_value_classification` were NOT landed;
+  the single exact-set `node_taxonomy_complete` assertion subsumes them, and it
+  treats the augmentation arms 23/25 as valid live graph state, not as
+  retired/relocated.)
 
-With both registered, no future non-type-value arm — type value or declaration/env
-fact — needs case-by-case handling: the whole `GraphTypeNode`-purity class is
+With it registered, no future arm needs case-by-case handling: the whole
+`GraphTypeNode` taxonomy is
 closed by one enumerating assertion plus one classification assertion.
 
 The DTO end-state shape is:
@@ -468,21 +472,27 @@ enum DeclarationAugmentationTarget {
 }
 
 struct DeclarationAnalysisContext {
-    parse_env_hash: ParseEnvHash,      // declaration analysis reads parser output (parse-option / parser-version sensitive)
-    resolve_env_hash: ResolveEnvHash,  // name/import resolution (derives AugmentationTargetKey.resolve_env_hash)
-    type_env_hash: TypeEnvHash,        // options affecting the declaration surface
-    lib_env_hash: LibEnvHash,          // lib-declared global/ambient surfaces a global augmentation mutates
-    project_identity: ProjectIdentity, // project isolation (derives AugmentationTargetKey.project_identity)
-    // NO project_config_hash (R21), NO content hash / parse_stable_hash, NO fact_dep_signature (R6).
+    resolve_env_hash: ResolveEnvHash,  // name/import resolution (derives AugmentationTargetKey.resolve_env_hash)  — R
+    lib_env_hash: LibEnvHash,          // lib-declared global/ambient surfaces a global augmentation mutates       — L
+    project_identity: ProjectIdentity, // project isolation (derives AugmentationTargetKey.project_identity)        — J
+    // Exactly the `{R, L, J}` axes that the landed
+    // `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, target }`
+    // folds. NO parse_env_hash / type_env_hash KEY DIM, NO project_config_hash (R21),
+    // NO content hash / parse_stable_hash, NO fact_dep_signature (R6).
 }
 ```
 
 Both `target` variants map to exactly `SemanticQueryValue::DeclarationAnalysis`
 (the `DeclarationAnalysisGraph` fact domain — module facts lower to
 `module_augmentations`, global facts to `global_augmentations`), NEVER
-`SemanticQueryValue::TypeNode` and NEVER a `GraphTypeNode` arm. `parse_env_hash` is
-included (not excluded): a parse-option / parser-version change can alter the
-analysed declaration surface, so the parse env is part of the cache identity.
+`SemanticQueryValue::TypeNode` and NEVER a `GraphTypeNode` arm. The context carries
+the `{R, L, J}` env axes ONLY — exactly the dims the landed `AugmentationTargetKey`
+folds. Parse env (and type env) are NOT key dimensions: a parse-option /
+parser-version change is reflected through the VALUE-side body read (the cold
+compute re-sources the augmenter bodies from live parser output and roots the value
+on the contributing files' `FileWholeHash` self-roots), not through the
+content-free query-identity key (R6). This matches `u2-query-value-domain-design.md`
+§2.2 and `semantic-type-graph-plan-recovered.md`.
 
 Guards: **`global_augmentation_query_has_declaration_analysis_identity`** (global
 declaration-environment-mutation facts are reachable through the generalized
@@ -860,8 +870,9 @@ names are the shorter `*_do_not_warm_hit` forms:
 The FORWARD-PLANNED U2 keys carry their planned guard names:
 **`resolve_merged_declaration_same_site_different_env_or_context_do_not_warm_hit`**
 and **`declaration_augmentation_key_same_site_different_env_or_context_do_not_warm_hit`**
-(whose exact env-axis coverage — including whether it asserts `parse_env_hash` on
-`DeclarationAnalysisContext` — is the open U2 reconciliation noted in §413/§21.2).
+(whose env-axis coverage asserts the `{R, L, J}` axes of
+`DeclarationAnalysisContext` — `resolve_env_hash`, `lib_env_hash`,
+`project_identity` — NOT `parse_env_hash`, which is not a key dim; see §2.2).
 
 ### 2.9 Generated `SemanticQueryKeySpec` table over the whole closed enum
 
@@ -897,7 +908,7 @@ discipline as the oracle rows, the proof registry, and the row-test wrapper).
 | `Relate` | live (existing-key UPGRADE — `{source,target}` → full identity) | inline `(source,target,relation,policy,source_freshness,inference_context,context)` (env `R T L J`; binding-producing) | `Relation(RelationPayload)` | — | `RelationMemo` (`RelationBudget`; coinductive-SCC discharge; `ReturnOnly` on `Unknown`/cancel/`BudgetExceeded`) |
 | `ResolveMacroPayload` | live (Vue-macro payload key, distinct from the typeinfo macro story) | `MacroPayloadContext` (`resolve_env_hash` = `R` + `mode`); owner is the env-bearing content-free `ResolvedDeclSlotIdentity` (slot carries `T,L,J`) | `TypeNode` | `resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit` | `Singleflight`; `ReturnOnly` on overflow/cancel |
 | `ResolveMergedDeclaration` | planned (U2-MODULE) | `MergedDeclarationContext` | `TypeNode` | `resolve_merged_declaration_same_site_different_env_or_context_do_not_warm_hit` | `Singleflight`; `ReturnOnly` on budget/cycle |
-| `ResolveDeclarationAugmentation` | planned (U2-MODULE; generalizes `ResolveModuleAugmentation`) | `DeclarationAnalysisContext` (incl. `parse_env_hash`) | `DeclarationAnalysis(DeclarationAnalysisValue)` | `declaration_augmentation_key_same_site_different_env_or_context_do_not_warm_hit` | `Singleflight`; `ReturnOnly` on overflow/cancel |
+| `ResolveDeclarationAugmentation` | planned (U2-MODULE; generalizes `ResolveModuleAugmentation`) | `DeclarationAnalysisContext` (`{R,L,J}` — NO `parse_env_hash` key dim; parse env enters via the value-side body read only) | `DeclarationAnalysis(DeclarationAnalysisValue)` | `declaration_augmentation_key_same_site_different_env_or_context_do_not_warm_hit` | `Singleflight`; `ReturnOnly` on overflow/cancel |
 | `ResolveAmbientNamespace` | live (added — U2B.5; reducer deferred, `execute` returns `Miss`) | `AmbientNamespaceContext` (`{P,R}` incl. `parse_env_hash` + `mode`) | `TypeNode` | `resolve_ambient_namespace_do_not_warm_hit` + `resolve_ambient_namespace_identity_covers_parse_env_axis` / `_mode_axis` | `NonProducingPendingReducer` |
 | `ResolveOverloadSet` | live (added — U2B.5; reducer deferred, `execute` returns `Miss`) | `OverloadSetContext` (`{R}`) | `OverloadSet(Arc<[SignatureRef]>)` | `resolve_overload_set_do_not_warm_hit` + `resolve_overload_set_key_covers_context` | `NonProducingPendingReducer` |
 | `ResolveEnum` | live (added — U2B.5; reducer deferred, `execute` returns `Miss`) | `EnumContext` (`{R}`) | `TypeNode` | `resolve_enum_do_not_warm_hit` + `resolve_enum_key_covers_context` | `NonProducingPendingReducer` |
@@ -4121,13 +4132,13 @@ unified-plan edits are applied directly in `semantic-db-overhaul-unified-remaini
   §3.11 flow/contextual `TypeNode::FlowNarrowing` / `TypeNode::ContextualType` placements → `ProgramAnalysisGraph` payload entries;
   the stale `TypeNode::RelationProof` wording → `RelationPayload` / payload-side proof table (tag 28 retired/`reserved`); the stale
   JSX `ResolveJsxIntrinsicElement` / `ResolveJsxAttribute` / `TypeNode::JsxIntrinsicElement` wording → the existing-query JSX
-  mechanism (§8); and the stale module/global augmentation placements (the §8 exporter `TypeNode::ModuleAugmentation` DTO, the §3
-  `module_augmentation = 23` / `global_augmentation = 25` type-value arms, and the §2.17 `module_augmentation_is_public_graph_state`
-  guard) → `DeclarationAnalysisGraph` on `TypeInfoGraphPayload.declaration_surfaces` + `SemanticQueryValue::DeclarationAnalysis`,
-  with `module_augmentation_is_public_graph_state` RETIRED/REPLACED by the declaration-surface guards (`merged_declarations_are_public_graph_state`
-  / `ambient_namespaces_are_public_graph_state` / `overload_sets_are_public_graph_state` are UNCHANGED — only the two augmentation
-  facts relocate). Pinned by `flow_contextual_doc_and_wire_placement_match_program_analysis_graph`,
-  `declaration_augmentation_doc_wire_query_placement_match`, and the value-domain / wire-surface guards.
+  mechanism (§8); and the module/global augmentation placement — NO relocation lands. The proposed move of the
+  `module_augmentation = 23` / `global_augmentation = 25` arms off `GraphTypeNode` was **rejected**: these arms REMAIN the wire
+  home (the live proto carries both, and the landed `node_taxonomy_complete` guard pins them as valid 32-arm graph state — see
+  §1.3). The in-process `SemanticQueryValue::DeclarationAnalysis` value domain (reached via the seventh U2 variant
+  `ResolveDeclarationAugmentation`) is the value-side counterpart, NOT a wire relocation. The earlier-planned
+  `module_augmentation_is_public_graph_state` guard and the `*_are_public_graph_state` declaration-surface guard family were
+  never landed; the single exact-set `node_taxonomy_complete` taxonomy assertion is the live guard and treats 23/25 as valid.
 
 ---
 
