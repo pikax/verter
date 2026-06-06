@@ -777,6 +777,46 @@ cfg.project_identity();        // Hash16
 Each function mixes a per-dimension salt so the five hashes derived
 from identical baseline state never collide.
 
+### Module-Resolution Keying (CRITICAL)
+
+Module/import resolution is keyed on the **split** env dimensions, and the
+lib corpus is **NEVER folded into `resolve_env_hash`**. This is the
+import-resolving refinement of R21 — `resolve_env` and `lib_env` are
+orthogonal dimensions, and conflating them is a correctness bug (a
+`lib.dom.d.ts` bump must not invalidate where `./theme` resolves; a
+`moduleResolution` change must not invalidate intrinsic-type meaning).
+
+Concrete contract:
+
+- Every import-resolving cache key / `*Context` carries only the dims it
+  depends on: `resolve_env_hash` always; `lib_env_hash` ONLY when the value
+  consults the ambient/types corpus (module augmentations); `parse_env_hash`
+  and `project_identity` per their own scoping. `ResolvedImportFactsKey` =
+  `{parse_env_hash, resolve_env_hash}` (NO `lib_env_hash`);
+  `EffectiveExportSetKey` = `{resolve_env_hash, lib_env_hash,
+  project_identity}` (lib because augmentations stitch in).
+- **Resolve-domain ENV inputs** (hash into `resolve_env_hash` ONLY): the
+  `moduleResolution` mode (`ModuleResolutionMode`), the active
+  `exports`/`imports` condition set (`ConditionSet`), `base_url`/`paths`,
+  workspace aliases, project references, extension order.
+- **Lib-domain ENV inputs** (hash into `lib_env_hash`, NEVER
+  `resolve_env_hash`): TS lib selection (`lib_names`), `typeRoots`, the
+  ambient-corpus fingerprint.
+- The module-resolution design vocabulary (`ModuleResolutionMode`,
+  `SpecifierKind`, `ConditionSet`) is **content-free SHAPE** in
+  `verter_workspace::module_resolution`. `SpecifierKind` is a per-specifier
+  classification used by the U0 resolution-matrix walker — it is NOT an
+  env-hash input. The matrix walker and the broken-input taint producers
+  live in U0 `verter_session::resolver_core` (see
+  `docs/arch/native-typeinfo-parity-u2-reducers.md` →
+  `U0.RESOLVER_CORE_FOUNDATIONS`); this rule owns only the keying contract.
+
+Guards (`crates/verter_workspace/src/env_hash_tests.rs`):
+`module_resolution_keys_on_resolve_env_not_type_or_lib` (a module-resolution
+input moves `resolve_env_hash` and leaves `type_env_hash`/`lib_env_hash`
+untouched) and `resolve_env_does_not_fold_lib_dims` (a lib-only input moves
+`lib_env_hash` and leaves `resolve_env_hash` untouched).
+
 **R22.** Eviction is memory-bound, not correctness-bound. The reverse
 import graph is content-addressed and serves reachability GC + LSP
 affected-files reporting + diagnostics; it is never wired to cache

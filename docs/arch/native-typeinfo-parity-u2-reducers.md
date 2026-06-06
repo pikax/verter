@@ -158,6 +158,27 @@ Re-entry notes: U0 is idempotent — re-running re-derives 363 and regenerates i
 
 ---
 
+## U0.RESOLVER_CORE_FOUNDATIONS
+
+ID: U0.RESOLVER_CORE_FOUNDATIONS
+Parent U-block: U0
+Subplan: docs/arch/native-typeinfo-parity-u2-reducers.md
+
+Prerequisites: U0.MANIFEST_SUBSTRATE.
+
+Context: Two resolver-core foundations are U0-owned ownership surfaces, distinct from the manifest/ledger substrate (`U0.MANIFEST_SUBSTRATE`) and from the U2 value-domain SHAPE + keying contract (`U2.QUERY_VALUE_DOMAIN` §174). Both are locked by the design gate `docs/arch/u2-query-value-domain-design.md` and both live in `crates/verter_session/src/resolver_core`. They are recorded here so the U0/U2 boundary stays explicit and no U2 block silently absorbs them.
+
+- **#21 module-resolution MATRIX (FORK-C).** The resolution matrix WALKER — the engine that selects a resolution lane per specifier (relative / absolute / bare-package / package-subpath / package-import) under the active `moduleResolution` mode and `exports`/`imports` condition set, walks the candidate targets, and applies the TS-first `effective_target()` priority — is U0 `resolver_core`. It consumes the content-free module-resolution SHAPE vocabulary (`ModuleResolutionMode`, `SpecifierKind`, `ConditionSet`) defined in `verter_workspace::module_resolution`. The matrix is bounded by `workspace_root` (node_modules / `#imports` ancestor walks stop there) and routes through the one shared cross-file resolver — it is NOT a second per-surface resolution engine.
+- **#18 broken-input taint PRODUCERS (FORK-B).** The producers that mint and propagate the broken-input taint marker — the analyzer-side detection of malformed / unresolvable / cyclic input and the propagation rule that carries the taint through the typed-IR so a downstream consumer can degrade typed-honestly rather than fabricate a result — are U0 `resolver_core`. The taint is a typed carrier on the value domain, not a sentinel string; consumers read it, they do not re-derive it.
+
+KEYING boundary (owned elsewhere, NOT by this block): the split-env module-resolution KEYING contract — every import-resolving key/`*Context` carries the split env dims and the lib corpus is NEVER folded into `resolve_env_hash` (R21), with `ModuleResolutionMode` + the `exports`/`imports` `ConditionSet` wired as `resolve_env_hash` inputs — landed in U2B.13 (the `### Module-Resolution Keying (CRITICAL)` rule + the `module_resolution_keys_on_resolve_env_not_type_or_lib` / `resolve_env_does_not_fold_lib_dims` guards in `crates/verter_workspace/src/env_hash_tests.rs`, and the SHAPE vocabulary in `verter_workspace::module_resolution`). U2B.13 lands ONLY the keying vocabulary + env-hash contract; the matrix walker and the taint producers above are NOT in its scope.
+
+SemanticQueryKey/facts touched: the matrix walker resolves through the existing shared cross-file resolver surface and adds no new `SemanticQueryKey`; the taint marker rides the existing typed value domain as an additive carrier.
+
+Critical-rule guards: the keying half is guarded by U2B.13's two env-hash guards (above). The matrix-walker and taint-producer halves are guarded by the FORK-C / FORK-B acceptance tests defined under the design gate `docs/arch/u2-query-value-domain-design.md`.
+
+---
+
 # U2 — Reducer / foundation parity
 
 ## U2.QUERY_VALUE_DOMAIN

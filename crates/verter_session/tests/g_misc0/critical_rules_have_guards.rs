@@ -504,6 +504,13 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "Module-Resolution Keying",
+        &[
+            "module_resolution_keys_on_resolve_env_not_type_or_lib",
+            "resolve_env_does_not_fold_lib_dims",
+        ],
+    ),
+    (
         "Typed Value Domain + Demand-Lattice Resolution",
         &[
             "error_rides_opaque_no_new_error_type_wire_arm",

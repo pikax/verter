@@ -85,6 +85,20 @@ Architectural rules carried by the writer guard at `crates/verter_session/tests/
 - The known-miss generation sidecar is admission-only inside `set_import_dependencies`. Any sidecar `insert`, `extend`, `retain`, or `remove` outside that writer is rejected.
 - Routing positive-only point inserts through `set_import_dependencies` is wrong: it would synthesize a full snapshot, re-stamp previously admitted known misses at the current `content_generation`, and extend stale negative answers that should have re-resolved.
 
+### Module-resolution keying (split env)
+
+Import/module resolution is keyed on the **split** env dimensions — see
+`### Module-Resolution Keying (CRITICAL)` in the `/type-cache-architecture`
+skill (the owner). In short: `resolve_env_hash` carries the resolve-domain
+inputs (the `moduleResolution` mode, the `exports`/`imports` `ConditionSet`,
+`base_url`/`paths`, aliases, references, extension order); the lib corpus
+(`lib_names`/`typeRoots`/ambient fingerprint) is NEVER folded into
+`resolve_env_hash` — it keys `lib_env_hash` only (R21: resolve and lib are
+orthogonal dimensions). The module-resolution SHAPE vocabulary
+(`ModuleResolutionMode`, `SpecifierKind`, `ConditionSet`) lives in
+`verter_workspace::module_resolution`; the FORK-C resolution matrix walker
+that consumes it is U0 `verter_session::resolver_core`.
+
 ## IndexedReady Target Contract
 
 Architectural target for the project-global cache cutover:
