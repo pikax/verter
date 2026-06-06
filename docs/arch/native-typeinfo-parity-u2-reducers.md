@@ -18,7 +18,9 @@ the engine architecture:
    `IgnoredTestRow`s, the separate coverage-only `AdditionalProofRow` table, the
    per-row `ProofRequirement` model, the generated proof registry + typed
    row-test wrapper, the U0 row-exact capability→mechanism→proof coverage table
-   (the parent §10.4.1 partition), and the git/CI landing protocol (branch per
+   (PART 2 §10.4, generated from the distinct hand-authored parent §10.4.1
+   row→block_id partition input — the two are not the same artifact), and the
+   git/CI landing protocol (branch per
    block → CI gate → three-reviewer LAND → squash-merge with the `Typeinfo-Block:`
    trailer; no tracked cursor — git=log, branch-protection=accept, revert=rollback).
    (The `SemanticQueryKeySpec` table generator is NOT a U0 foundation — it is a
@@ -114,7 +116,7 @@ Changes (exact files / functions):
 Deliverables:
 - The two-table ledger (`IgnoredTestRow` × 362 + `AdditionalProofRow`) extended in place, with `EXPECTED_TOTAL_IGNORED_COUNT` defined as the live `count(IgnoredTestRow where status == Ignored)` (never a frozen constant — PART 2 §10.5).
 - The per-row `ProofRequirement` model with no escape hatch; every row in BOTH tables resolves to an executable proof artifact.
-- The two checked-in U0 generated artifacts: the proof registry + row-test wrapper, and the U0 row-exact coverage table (the §10.4.1 partition) — each produced by a dedicated `cargo run` generator. (The `SemanticQueryKeySpec` table is produced by `U2.QUERY_VALUE_DOMAIN`'s generator, not U0.)
+- The two checked-in U0 generated artifacts: the proof registry + row-test wrapper, and the U0 row-exact coverage table (PART 2 §10.4) — each produced by a dedicated `cargo run` generator (these two generators are U0-FINISH-B, NOT yet built on this tree). The §10.4.1 row→block_id partition is a DISTINCT, hand-authored input (already landed under U0-FINISH-A) that the coverage-table generator consumes; it is not itself a generated artifact and must not be equated with the §10.4 coverage table. (The `SemanticQueryKeySpec` table is produced by `U2.QUERY_VALUE_DOMAIN`'s generator, not U0.)
 - The git/CI landing protocol (PART 2 §§11–14): the per-block branch discipline, the CI gate (the full Rust+JS workspace gate + the coverage/proof/required/DAG guards), the branch-protection three-reviewer LAND required approval, and the squash-merge `Typeinfo-Block:` trailer convention — together with the one-commit-per-block history guard `typeinfo_block_lands_as_single_squashed_commit` (PART 2 §11.11 — trailer only, no tree-hash binding) and the three-reviewer LAND gate `typeinfo_block_accept_requires_review_land_verdict` (PART 2 §11.12 — PROCESS/branch-protection rule, no persisted receipt). There is NO tracked `.cutover-state.typeinfo_parity` namespace, NO two-namespace TOML schema, NO namespaced xtask, NO WAL/lease/receipt machinery, and NO legacy-deletion lifecycle to deliver (PART 2 §13) — git history + branch protection + `git revert` are the transaction log / accept gate / rollback.
 - The pinned oracle toolchain (`7.0.0-dev.20260526.1`), the oracle row generator, and the `tsgo`-forbidden runtime guard.
 
@@ -141,20 +143,20 @@ Proof requirement: U0 owns no `IgnoredTestRow`; its proof is the suite of struct
 
 Exit acceptance:
 - The manifest holds EXACTLY 362 `IgnoredTestRow`s (count + bijection green), disjoint from `AdditionalProofRow`s, with `EXPECTED_TOTAL_IGNORED_COUNT == count(status == Ignored)`.
-- The two U0 generated artifacts (the proof registry + row-test wrapper, and the §10.4.1 coverage table) plus the gated oracle-row generator are checked in and their diff-tests are green; every manifest row across both tables has a non-placeholder `mechanism_id` + executable `ProofRequirement` + capability-consistent `semantic_queries`/facts. (The `SemanticQueryKeySpec` table is verified in `U2.QUERY_VALUE_DOMAIN`, not here.)
+- The two U0 generated artifacts (the proof registry + row-test wrapper, and the §10.4 row-exact coverage table — both U0-FINISH-B, consuming the already-landed hand-authored §10.4.1 row→block_id partition) plus the gated oracle-row generator are checked in and their diff-tests are green; every manifest row across both tables has a non-placeholder `mechanism_id` + executable `ProofRequirement` + capability-consistent `semantic_queries`/facts. (The `SemanticQueryKeySpec` table is verified in `U2.QUERY_VALUE_DOMAIN`, not here.)
 - The git/CI landing-protocol guards (`typeinfo_block_lands_as_single_squashed_commit`, `typeinfo_block_accept_requires_review_land_verdict`, `no_vacuous_parent_u_block_landing`, `zero_row_blocks_land_exactly_once`, `landed_typeinfo_blocks_have_required_guards`, the DAG guard) are registered and green in CI; no tracked `.cutover-state.typeinfo_parity` cursor exists (PART 2 §13).
 - `package.json` pins the exact oracle version; the `tsgo`-forbidden guard is green; the oracle generator produces deterministic checked-in snapshots.
 
 Verification commands:
 - `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (count/bijection/proof/coverage + DAG + landing-protocol guards).
-- The two U0 generator `cargo run` targets (proof-registry + row-test wrapper, and the §10.4.1 coverage table) + their diff-tests; the oracle-row generator (feature/env-gated) producing checked-in snapshots.
-- The full workspace gate (the complete Rust **AND** JavaScript gate, green only when BOTH pass — this IS the CI gate, PART 2 §11.2): `cargo test --workspace --tests`; `cargo clippy --workspace -- -D warnings`; `cargo fmt --all --check`; `pnpm test`; `pnpm install --frozen-lockfile`.
+- The two U0 generator `cargo run` targets (proof-registry + row-test wrapper, and the §10.4 row-exact coverage table — both U0-FINISH-B, consuming the already-landed §10.4.1 partition input) + their diff-tests; the oracle-row generator (feature/env-gated) producing checked-in snapshots.
+- The full workspace gate (the complete Rust **AND** JavaScript gate, green only when BOTH pass — this IS the CI gate, PART 2 §11.2): `cargo nextest run --workspace` + `cargo test -p verter_session --tests` (the canonical Rust pair — bare `cargo test --workspace --tests` silently skips the verter_session integration suite and is NOT the gate); `cargo clippy --workspace -- -D warnings`; `cargo fmt --all --check`; `pnpm test`; `pnpm install --frozen-lockfile`.
 - `node scripts/gen-corpus-audit-tests.mjs` (idempotent; if audit-record schema/fixtures change).
 - Commit cadence / review gate: PARENT-UNIFORM — the uniform discipline for EVERY block in this subplan (parent PART 2 §11.11 / §11.12), stated once and not restated per block: each block lands as ONE squash-merge commit (WIP series on the branch during the work, no per-commit gate) carrying the `Typeinfo-Block:` trailer, after green CI + the three-reviewer LAND verdict (1 Claude Code + 2 codex).
 
-Docs updated: keep the `/testing` skill's unignore-manifest + ledger notes current (the two-table ledger, `ProofRequirement`, the §10.4.1 coverage table, the git/CI landing protocol — branch per block → CI gate → three-reviewer LAND → squash-merge with the `Typeinfo-Block:` trailer); record the oracle-version pin and the generated-artifact discipline (generators are `cargo run` targets, tests only diff) in `/build-and-profiling`.
+Docs updated: keep the `/testing` skill's unignore-manifest + ledger notes current (the two-table ledger, `ProofRequirement`, the hand-authored §10.4.1 row→block_id partition input and the distinct §10.4 row-exact coverage table generated from it, the git/CI landing protocol — branch per block → CI gate → three-reviewer LAND → squash-merge with the `Typeinfo-Block:` trailer); record the oracle-version pin and the generated-artifact discipline (generators are `cargo run` targets, tests only diff) in `/build-and-profiling`.
 
-Re-entry notes: U0 is idempotent — re-running re-derives 362 and regenerates its two artifacts (proof registry + row-test wrapper, and the §10.4.1 coverage table) plus the oracle-row snapshots deterministically. A partial U0 leaves an unmerged branch, never a torn tracked cursor — there is nothing to reconcile (PART 2 §13); pick up the branch (or re-cut one) and continue. The manifest tells exactly which generated artifact is stale (its diff-test fails). Do not hand-edit any generated file; re-run its generator.
+Re-entry notes: U0 is idempotent — re-running re-derives 362 and regenerates its two artifacts (proof registry + row-test wrapper, and the §10.4 row-exact coverage table, both consuming the hand-authored §10.4.1 partition input) plus the oracle-row snapshots deterministically. A partial U0 leaves an unmerged branch, never a torn tracked cursor — there is nothing to reconcile (PART 2 §13); pick up the branch (or re-cut one) and continue. The manifest tells exactly which generated artifact is stale (its diff-test fails). Do not hand-edit any generated file; re-run its generator.
 
 ---
 
@@ -972,7 +974,9 @@ the binding 362 total stays exact.
 
 Every block runs the full workspace gate as its CI gate (PART 2 §§11.2, 14) — the
 complete Rust **AND** JavaScript gate, green only when BOTH pass:
-`cargo test --workspace --tests`, `cargo clippy --workspace -- -D warnings`,
+`cargo nextest run --workspace` + `cargo test -p verter_session --tests` (the canonical
+Rust pair — bare `cargo test --workspace --tests` silently skips the verter_session
+integration suite and is NOT the gate), `cargo clippy --workspace -- -D warnings`,
 `cargo fmt --all --check`, `pnpm test`, and `pnpm install --frozen-lockfile`. A block
 reaches `Lifted` + a merged `Typeinfo-Block:` trailer only after green CI over the
 branch content AND the three-reviewer LAND verdict (1 Claude Code + 2 codex; PART 2

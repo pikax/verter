@@ -62,7 +62,8 @@ authority via the standard subplan header (below). The no-orphan-documents targe
 `U0`/`U2`/`U3`/`U6`/`U8`/`U10`–`U15` blocks — and every subplan links back to the
 unified plan and to this parent architecture. The unified plan no longer carries a
 stale `/tmp` coverage path; the flow-return coverage detail lives in
-`native-flow-return.md` and the §10.4 / §10.4.1 coverage table. That index was a
+`native-flow-return.md`, the §10.4 row-exact coverage table (the U0-FINISH-B generated
+artifact), and the §10.4.1 row→block_id partition (its hand-authored input). That index was a
 DELIVERABLE owned by the unified-plan integration step (see "Cross-reference /
 doc-update obligations") and is now **done**.
 
@@ -2868,7 +2869,11 @@ they build substrate (ledger / keys / wire / exporter / projection) the owning b
 their rows through; their `Exact test rows lifted` is explicitly `none`.
 
 The complete partition (each entry `file::function — substrate`):
-<!-- BEGIN U0 row→block coverage table (362 rows). HAND-AUTHORED authoritative source for the
+<!-- BEGIN U0 row→block coverage table (362 rows). [Marker name is a fixed parse contract
+     consumed by scripts/gen-typeinfo-ignore-manifest.py parse_partition — do NOT rename.
+     This region is §10.4.1: the HAND-AUTHORED row→block_id PARTITION (the generator INPUT),
+     NOT the distinct §10.4 row-exact coverage table, which is a U0-FINISH-B artifact generated
+     FROM the manifest.] HAND-AUTHORED authoritative source for the
      row→block_id PARTITION ONLY: the manifest generator (scripts/gen-typeinfo-ignore-manifest.py)
      READS this partition (parse_partition) to assign each IgnoredTestRow's block_id and EMITS
      crates/verter_session/tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs. The
@@ -3324,7 +3329,7 @@ The complete partition (each entry `file::function — substrate`):
 - `message_list_like.rs::message_list_like_extracts_pick_from_inferred_array_element` — `CompositeSurfaces`
 - `message_list_like.rs::message_list_like_slot_remaps_payload_with_message_context` — `CompositeSurfaces`
 - `table_like.rs::table_like_dynamic_slot_projection_uses_template_literal_keys` — `CompositeSurfaces`
-<!-- END U0 row→block coverage table. Union = 362 unique IgnoredTestRows, each owned by exactly one block_id. -->
+<!-- END U0 row→block coverage table. [§10.4.1 partition; marker name is a fixed parse contract — do NOT rename.] Union = 362 unique IgnoredTestRows, each owned by exactly one block_id. -->
 
 ### 10.5 The exact-362 count and bijection
 
@@ -4230,11 +4235,11 @@ unified-plan edits are applied directly in `semantic-db-overhaul-unified-remaini
     parent (`native-typeinfo-parity.md`) AND all four children (`-u2-reducers.md`, `native-flow-return.md`,
     `-cache-export-session.md`, `-adapters-final-lift.md`) — in its §A doc-set index table and at the owning
     `U0`/`U2`/`U3`/`U6`/`U8`/`U10`–`U15` blocks — and the stale `/tmp/verter-native-flow-return-coverage.md` coverage-path reference
-    is deleted (the coverage table is §10.4 / §10.4.1 here + the in-repo manifest, never a scratch/temp artifact).
+    is deleted (the §10.4 coverage table and the §10.4.1 row→block_id partition live here + the in-repo manifest, never a scratch/temp artifact).
   - **(b) Replace the "no-op 4-field-schema confirm" U0 entry with the extended two-table ledger — DONE.** The unified plan's U0
     entry now describes the extended ledger this architecture requires: the two-table ledger (`IgnoredTestRow` extended schema +
     the separate coverage-only `AdditionalProofRow` table — §10.1), `IgnoreStatus` (binary `Ignored` / `Lifted`),
-    `ProofRequirement`, the proof registry + row-test wrapper, the §10.4 / §10.4.1 row-exact coverage table, and the git/CI
+    `ProofRequirement`, the proof registry + row-test wrapper, the §10.4 row-exact coverage table (generated from the §10.4.1 row→block_id partition), and the git/CI
     landing protocol (§§11–14) — branch per block → green CI → three-reviewer LAND → squash-merge with the `Typeinfo-Block:`
     trailer (no tracked `.cutover-state.typeinfo_parity` cursor; git=log, branch-protection=accept, revert=rollback).
   - **(c) Require ALL 362 `IgnoredTestRow`s lifted in U15 + the §9 terminal checklist (not a majority/fraction) — DONE.** The
