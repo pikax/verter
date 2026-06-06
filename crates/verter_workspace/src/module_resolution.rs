@@ -3,8 +3,8 @@
 //! These are the typed vocabulary the module-resolution KEYING contract
 //! (`### Module-Resolution Keying (CRITICAL)`) is expressed in. They are
 //! **content-free shape** — no resolver, no walker, no condition-evaluation
-//! semantics. The FORK-C resolution MATRIX WALKER that consumes them, and the
-//! broken-input taint PRODUCERS, live in U0 `verter_session::resolver_core`
+//! semantics. The resolution-matrix walker that consumes them, and the
+//! broken-input taint producers, live in `verter_session::resolver_core`
 //! (see `docs/arch/native-typeinfo-parity-u2-reducers.md` →
 //! `U0.RESOLVER_CORE_FOUNDATIONS`).
 //!
