@@ -247,8 +247,8 @@ pub use wire::TypePredicateExpr;
 /// variant to any closed `oneof` (TypeNode, StructuredTypeExpression,
 /// ClosurePolicy, …) or when introducing an additive arm.
 ///
-/// v2 retired the env-LESS `GraphDeclSlotRef` query-identity roots
-/// carrier in favour of the env-BEARING `GraphResolvedDeclSlotIdentity`
+/// v2 retired the env-LESS decl-slot query-identity roots carrier in
+/// favour of the env-BEARING `GraphResolvedDeclSlotIdentity`
 /// (`GraphQueryIdentity.resolved_roots`); the retired `roots` tag/name
 /// are reserved at message scope.
 pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 2;

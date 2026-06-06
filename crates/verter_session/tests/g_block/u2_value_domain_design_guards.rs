@@ -11,27 +11,20 @@
 //!    env-less "U2a" uniform-envelope KEY types (`SemanticQueryEnvKey`,
 //!    `TypeLibEnvKey`) must NOT appear in ANY production
 //!    `crates/*/src/**` file, and the env-less query-identity wire slot
-//!    `GraphDeclSlotRef` must NOT be wired into the semantic-query
-//!    identity surface (`crates/verter_session/src/**`). Env stays ON
-//!    the key via per-key `*Context` (two-tier env model); the env-less
-//!    envelope is FORBIDDEN.
+//!    `GraphDeclSlotRef` must NOT appear in ANY production source. The
+//!    env-bearing `GraphResolvedDeclSlotIdentity`
+//!    (`GraphQueryIdentity.resolved_roots`, tag 18) is the query-identity
+//!    roots carrier; the retired slot's tag (2) and name (`roots`) are
+//!    reserved at message scope. Env stays ON the key via per-key
+//!    `*Context` (two-tier env model); the env-less envelope is
+//!    FORBIDDEN.
 //!
-//!    SCOPING NOTE (honest): `GraphDeclSlotRef` currently EXISTS as a
-//!    pre-existing wire DTO (`crates/verter_protocol/.../graph.rs`
-//!    re-exports `wire::GraphDeclSlotRef`, used as
-//!    `GraphQueryIdentity.roots`). Its full RETIREMENT is FORK-A /
-//!    STAGE-B production work (a wire-contract change requiring a
-//!    `schema_version` bump) and is OUT OF SCOPE for this docs+guards
-//!    design-gate landing. This guard therefore bans the two env-less
-//!    KEY types everywhere (they appear NOWHERE today — discriminating)
-//!    and bans `GraphDeclSlotRef` only from the `verter_session` query
-//!    surface (it must never be adopted as a query-identity carrier).
-//!    The STAGE-B guard `no_envless_semantic_query_env_key_envelope`
-//!    will be TIGHTENED to ban the wire symbol outright once FORK-A
-//!    deletes it.
-//!    TODO(follow-up, FORK-A/STAGE-B): retire `wire::GraphDeclSlotRef`
-//!    in favour of `GraphResolvedDeclSlotIdentity` and tighten this
-//!    scanner to ban it across all production src.
+//!    The env-less wire slot was deleted from the proto and the
+//!    `verter_protocol` typed surface; this scanner bans the symbol
+//!    across ALL `crates/*/src/**` so it can never be reintroduced.
+//!    The companion `typeinfo_proto_retires_envless_decl_slot_ref` guard
+//!    pins the proto surface itself (no `message GraphDeclSlotRef`,
+//!    `roots` tag/name reserved, `resolved_roots = 18` present).
 //! 2. `error_rides_opaque_no_new_error_type_wire_arm` — the error
 //!    type rides the existing `SemanticNodeData::Opaque(QueryError)`
 //!    carrier; NO `ErrorType` arm/variant/field may exist on
@@ -86,17 +79,6 @@ fn is_production_src(path: &Path) -> bool {
         .is_some_and(|n| n.ends_with("_tests.rs") || n == "tests.rs")
 }
 
-/// Collect every production-source `.rs` file under `crates/<crate>/src/`.
-fn collect_crate_src_files(crate_name: &str) -> Vec<PathBuf> {
-    let src_dir = workspace_root().join("crates").join(crate_name).join("src");
-    let mut files = Vec::new();
-    if src_dir.is_dir() {
-        collect_rs_files(&src_dir, &mut files);
-    }
-    files.retain(|p| is_production_src(p));
-    files
-}
-
 /// Collect every production-source `.rs` file under `crates/*/src/`.
 fn collect_production_src_files() -> Vec<PathBuf> {
     let crates_dir = workspace_root().join("crates");
@@ -124,10 +106,11 @@ fn collect_production_src_files() -> Vec<PathBuf> {
 /// per-key `*Context`.
 const FORBIDDEN_ENVLESS_KEY_TYPES: &[&str] = &["SemanticQueryEnvKey", "TypeLibEnvKey"];
 
-/// The env-less query-identity wire slot. It currently EXISTS as a
-/// pre-existing wire DTO; its retirement is FORK-A / STAGE-B work
-/// (see the module doc TODO). It must NOT be wired into the
-/// semantic-query identity surface (`verter_session/src`).
+/// The env-less query-identity wire slot. It was RETIRED (deleted from
+/// the proto and the `verter_protocol` typed surface) in favour of the
+/// env-bearing `GraphResolvedDeclSlotIdentity`. The symbol must NOT
+/// appear in ANY production source (`crates/*/src/**`) — it can never
+/// be reintroduced.
 const FORBIDDEN_ENVLESS_WIRE_SLOT: &str = "GraphDeclSlotRef";
 
 /// Pure predicate: does `content` contain any forbidden env-less KEY
@@ -170,17 +153,11 @@ fn no_envless_semantic_query_env_key_envelope() {
         key_offenders.join("\n  "),
     );
 
-    // (b) The env-less wire slot must NOT be wired into the
-    // semantic-query identity surface (`verter_session/src`). Its
-    // wire-DTO retirement is FORK-A / STAGE-B (module-doc TODO).
-    let session_files = collect_crate_src_files("verter_session");
-    assert!(
-        !session_files.is_empty(),
-        "guard self-check: walked verter_session/src and found no .rs \
-         files — the file walker is broken, not the invariant."
-    );
+    // (b) The env-less wire slot was RETIRED — it must NOT appear in
+    // ANY production source. Its env-bearing replacement is
+    // `GraphResolvedDeclSlotIdentity` (`GraphQueryIdentity.resolved_roots`).
     let mut slot_offenders: Vec<String> = Vec::new();
-    for path in &session_files {
+    for path in &all_files {
         let Ok(content) = fs::read_to_string(path) else {
             continue;
         };
@@ -190,11 +167,11 @@ fn no_envless_semantic_query_env_key_envelope() {
     }
     assert!(
         slot_offenders.is_empty(),
-        "U2 VALUE-DOMAIN KEY IDENTITY (CRITICAL): the env-less \
+        "U2 VALUE-DOMAIN KEY IDENTITY (CRITICAL): the retired env-less \
          query-identity wire slot `{FORBIDDEN_ENVLESS_WIRE_SLOT}` must \
-         NOT be wired into the semantic-query identity surface \
-         (`crates/verter_session/src/**`). Query identity uses the \
-         env-bearing `ResolvedDeclSlotIdentity`, not the env-less wire \
+         NOT appear in ANY production source (`crates/*/src/**`). Query \
+         identity uses the env-bearing `GraphResolvedDeclSlotIdentity` \
+         (`GraphQueryIdentity.resolved_roots`), not the env-less wire \
          slot. Offending sites:\n  {}",
         slot_offenders.join("\n  "),
     );
@@ -414,5 +391,119 @@ fn u2_value_domain_design_doc_locks_invariants_discriminator_self_test() {
         missing_locked_phrases(&full_sample).is_empty(),
         "scanner self-test: a sample containing every locked phrase \
          reported some missing — the scanner is too strict."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Guard 4 — the typeinfo proto retired the env-less decl-slot roots slot.
+// ---------------------------------------------------------------------------
+
+fn typeinfo_proto_path() -> PathBuf {
+    workspace_root().join("crates/verter_protocol/proto/verter/v1/typeinfo.proto")
+}
+
+/// Strip line comments (`// …`) from proto source so a symbol mentioned
+/// only in prose does not register as a live wire referent. Block
+/// comments are not used in this schema.
+fn strip_proto_line_comments(src: &str) -> String {
+    src.lines()
+        .map(|line| match line.find("//") {
+            Some(idx) => &line[..idx],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The env-less decl-slot roots slot was retired on the typeinfo wire
+/// (schema_version 2). This guard pins the proto surface itself — the
+/// Rust-src scanner in guard 1 cannot see the proto. It asserts:
+///
+/// 1. NO `message GraphDeclSlotRef` definition and no field typed as the
+///    retired slot survive (checked against comment-stripped source so
+///    an explanatory mention in prose is not a false positive).
+/// 2. The retired `GraphQueryIdentity.roots` tag (`2`) and name
+///    (`roots`) are reserved at message scope.
+/// 3. The env-bearing replacement `resolved_roots = 18` carrying
+///    `GraphResolvedDeclSlotIdentity` is present.
+#[test]
+fn typeinfo_proto_retires_envless_decl_slot_ref() {
+    let path = typeinfo_proto_path();
+    let raw = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("could not read typeinfo proto `{}`: {e}", path.display()));
+    let code = strip_proto_line_comments(&raw);
+
+    // (1) The retired message + any field typed as the env-less slot
+    // must be gone from the live (comment-stripped) wire surface.
+    assert!(
+        !code.contains("message GraphDeclSlotRef"),
+        "TYPEINFO WIRE (CRITICAL): `message GraphDeclSlotRef` must be \
+         DELETED from `{}` — the env-less decl-slot roots carrier was \
+         retired in favour of `GraphResolvedDeclSlotIdentity`.",
+        path.display(),
+    );
+    assert!(
+        !code.contains("GraphDeclSlotRef"),
+        "TYPEINFO WIRE (CRITICAL): the retired `GraphDeclSlotRef` symbol \
+         must not appear as a live referent anywhere in `{}` (only \
+         comment prose may mention the retirement).",
+        path.display(),
+    );
+
+    // (2) The retired tag + name are reserved at message scope.
+    assert!(
+        code.contains("reserved 2;"),
+        "TYPEINFO WIRE (CRITICAL): `GraphQueryIdentity` must `reserved 2;` \
+         — the retired `roots` field number must never be reused.",
+    );
+    assert!(
+        code.contains("reserved \"roots\";"),
+        "TYPEINFO WIRE (CRITICAL): `GraphQueryIdentity` must \
+         `reserved \"roots\";` — the retired field name must never be \
+         reused.",
+    );
+
+    // (3) The env-bearing replacement carrier is present on the next
+    // free tag (18), typed as `GraphResolvedDeclSlotIdentity`.
+    assert!(
+        code.contains("repeated GraphResolvedDeclSlotIdentity resolved_roots = 18;"),
+        "TYPEINFO WIRE (CRITICAL): `GraphQueryIdentity` must carry \
+         `repeated GraphResolvedDeclSlotIdentity resolved_roots = 18;` — \
+         the env-bearing query-identity roots carrier.",
+    );
+}
+
+/// Discriminator self-test for guard 4: the comment-stripper must hide a
+/// prose mention but expose a live referent, and the three structural
+/// needles must be absence/presence discriminating.
+#[test]
+fn typeinfo_proto_retires_envless_decl_slot_ref_discriminator_self_test() {
+    // A prose-only mention is stripped → not a live referent.
+    let prose = "  // GraphDeclSlotRef was retired here\n  uint32 ok = 1;";
+    assert!(
+        !strip_proto_line_comments(prose).contains("GraphDeclSlotRef"),
+        "self-test: the comment-stripper failed to remove a prose-only \
+         mention of the retired symbol."
+    );
+    // A live field referent survives stripping → caught.
+    let live = "  repeated GraphDeclSlotRef roots = 2; // carrier";
+    assert!(
+        strip_proto_line_comments(live).contains("GraphDeclSlotRef"),
+        "self-test: the comment-stripper wrongly removed a live \
+         `GraphDeclSlotRef` field referent."
+    );
+    // The reserved + replacement needles discriminate present vs absent.
+    let clean = "reserved 2;\nreserved \"roots\";\n\
+                 repeated GraphResolvedDeclSlotIdentity resolved_roots = 18;";
+    assert!(
+        clean.contains("reserved 2;")
+            && clean.contains("reserved \"roots\";")
+            && clean.contains("repeated GraphResolvedDeclSlotIdentity resolved_roots = 18;"),
+        "self-test: the structural needles failed to match a clean sample."
+    );
+    let dirty = "repeated GraphResolvedDeclSlotIdentity resolved_roots = 7;";
+    assert!(
+        !dirty.contains("resolved_roots = 18;"),
+        "self-test: the tag-18 needle matched a wrong-tag sample."
     );
 }
