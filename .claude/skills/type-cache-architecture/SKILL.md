@@ -1369,13 +1369,15 @@ key, and no env-less uniform envelope is permitted.
   R21 per-layer honest (each layer carries exactly the dims it depends on) and stays R6-clean: NO
   content/version hash and NO `fact_dep_signature` on any query-identity key.
 - **No env-LESS envelope.** The superseded env-less uniform-envelope design — `SemanticQueryEnvKey`,
-  `TypeLibEnvKey`, the `GraphDeclSlotRef` env-less query-identity wire slot, the `schema_version`-v2
-  bump, and the "U2a/U2b" split — is FORBIDDEN. Env stays ON the key via per-key `*Context`; it is
-  never lifted into a separate uniform env envelope. The env-less KEY types (`SemanticQueryEnvKey`,
-  `TypeLibEnvKey`) must appear NOWHERE in production source; the `GraphDeclSlotRef` wire slot still
-  exists as a pre-existing DTO and is banned from the `verter_session` query-identity surface now —
-  its full wire-DTO retirement (replaced by the env-bearing `GraphResolvedDeclSlotIdentity`) is
-  still pending, after which the guard tightens to ban it across all production source.
+  `TypeLibEnvKey`, and the "U2a/U2b" split — is FORBIDDEN. Env stays ON the key via per-key
+  `*Context`; it is never lifted into a separate uniform env envelope. The env-less KEY types
+  (`SemanticQueryEnvKey`, `TypeLibEnvKey`) must appear NOWHERE in production source. The env-less
+  `GraphDeclSlotRef` query-identity wire slot HAS BEEN RETIRED (deleted from the proto and the
+  `verter_protocol` typed surface) in favour of the env-BEARING `GraphResolvedDeclSlotIdentity`
+  (`GraphQueryIdentity.resolved_roots`, tag 18; `TYPEINFO_GRAPH_SCHEMA_VERSION` bumped to 2, retired
+  `roots` tag/name reserved at message scope). The `no_envless_semantic_query_env_key_envelope` guard
+  now bans the `GraphDeclSlotRef` symbol across ALL `crates/*/src/**`, and
+  `typeinfo_proto_retires_envless_decl_slot_ref` pins the proto surface.
 - **Module-resolution keys on SPLIT env.** A module-resolution result keys on `resolve_env_hash`
   (moduleResolution / paths / baseUrl / conditions) + `lib_env_hash` (typeRoots / types corpus) +
   `project_identity`, plus the transitive `parse_env` carried by the parsed import-specifier list.

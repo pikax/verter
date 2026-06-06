@@ -39,10 +39,15 @@
 > `SemanticNodeData::Opaque(QueryError)` (in `semantic_query.rs`) is the boundary error carrier.
 >
 > **Superseded model (FORBIDDEN).** The `feat/u2a-semantic-key-cutover` env-LESS uniform
-> envelope (`SemanticQueryEnvKey`/`TypeLibEnvKey`, `GraphDeclSlotRef` wire slot, schema_version v2,
-> `SemanticGraphCacheKey{family,slot,env}` split) is NOT a model here. Env stays ON the key via
-> per-key `*Context` structs (R21 per-layer). We mine exactly three ideas from it, re-expressed on
-> the env-bearing model — flagged inline as `[mined: class-dual-space]`, `[mined: merge+aug-rail]`,
+> envelope (`SemanticQueryEnvKey`/`TypeLibEnvKey`, the `SemanticGraphCacheKey{family,slot,env}`
+> split) is NOT a model here. Env stays ON the key via per-key `*Context` structs (R21 per-layer).
+> The env-LESS `GraphDeclSlotRef` query-identity wire slot it carried HAS BEEN RETIRED (deleted from
+> the proto and the `verter_protocol` typed surface): the typeinfo query identity now rides the
+> env-BEARING `GraphResolvedDeclSlotIdentity` (`GraphQueryIdentity.resolved_roots`, tag 18) and
+> `TYPEINFO_GRAPH_SCHEMA_VERSION` is bumped to `2` for that retirement — the env-bearing direction
+> this model endorses, NOT a return to the env-less envelope. We mine exactly three ideas from the
+> superseded model, re-expressed on the env-bearing model — flagged inline as
+> `[mined: class-dual-space]`, `[mined: merge+aug-rail]`,
 > `[mined: producer-discriminator + SymbolSpace::Namespace]`.
 
 ---
