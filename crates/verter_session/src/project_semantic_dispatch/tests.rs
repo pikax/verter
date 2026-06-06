@@ -8932,3 +8932,75 @@ fn multi_level_omit_heritage_carriers_compose_through_all_levels() {
         "`c2` was omitted at the A<-B level and must not be inherited: {member_names:?}"
     );
 }
+
+/// §3.5 navhop arithmetic — direct unit coverage of
+/// [`super::build::path_walk_materialized_set`].
+///
+/// The `Navigate` navhops this helper appends to a path-walk TERMINAL
+/// entry's recorded `satisfied_projection` are operationally INERT for
+/// that family's own warm-hit gate (reads there are path-exact at the
+/// FULL path; prefix serving is owned by `collect_prefix_backfills`), but
+/// they ARE the honest §3.5 materialisation record. They were
+/// untested-by-construction; this pins the arithmetic so the honest
+/// record cannot silently drift (over-record or under-record).
+#[test]
+fn path_walk_materialized_set_records_linear_navhops_and_stops_at_arm_split() {
+    use crate::semantic_query::demand::{
+        Demand, MaterializedPoint, MaterializedSet, ProjectionPath,
+    };
+    use crate::semantic_query::SemanticNodeId;
+
+    // Path A['c']['full']['bar'] (n = 3).
+    let path: Arc<[PathSegment]> = Arc::from(
+        vec![
+            PathSegment::Member(Arc::from("c")),
+            PathSegment::Member(Arc::from("full")),
+            PathSegment::Member(Arc::from("bar")),
+        ]
+        .into_boxed_slice(),
+    );
+
+    // Mirror the helper's own construction exactly so equality is precise.
+    let terminal = {
+        let mut d = Demand::from(ProjectionMode::Expanded);
+        d.projection.path = ProjectionPath::from(Arc::clone(&path));
+        MaterializedPoint::new(d)
+    };
+    let navhop = |k: usize| {
+        let prefix: Arc<[PathSegment]> = Arc::from(path[..k].to_vec().into_boxed_slice());
+        MaterializedPoint::new(Demand::navigate(ProjectionPath::from(prefix)))
+    };
+
+    // (1) all-Some intermediates, start_index = 0 — the full linear walk.
+    // Recorded set is EXACTLY
+    //   { Expanded@[c,full,bar], Navigate@[c], Navigate@[c,full] }
+    // (terminal first, then one Navigate hop per walked intermediate).
+    let all_some = vec![
+        Some(SemanticNodeId(1)),
+        Some(SemanticNodeId(2)),
+        Some(SemanticNodeId(3)),
+    ];
+    let got = super::build::path_walk_materialized_set(&path, ProjectionMode::Expanded, 0, &all_some);
+    let expected = MaterializedSet::from_points(vec![terminal.clone(), navhop(1), navhop(2)]);
+    assert_eq!(
+        got, expected,
+        "a fully-linear walk records the terminal at the full path PLUS one Navigate hop \
+         per walked intermediate ([c] and [c,full]) — no more, no less",
+    );
+
+    // (2) an arm-split `None` at intermediate position 1 STOPS the navhop
+    // run there: only Navigate@[c] is recorded, NEVER Navigate@[c,full].
+    let arm_split = vec![Some(SemanticNodeId(1)), None, Some(SemanticNodeId(3))];
+    let got_split =
+        super::build::path_walk_materialized_set(&path, ProjectionMode::Expanded, 0, &arm_split);
+    let expected_split = MaterializedSet::from_points(vec![terminal.clone(), navhop(1)]);
+    assert_eq!(
+        got_split, expected_split,
+        "an arm-split None at position 1 stops the navhop run — no over-record past the split",
+    );
+    // Negative assertion: the over-record `Navigate@[c,full]` must be ABSENT.
+    assert!(
+        !got_split.points().contains(&navhop(2)),
+        "the navhop run must NOT record a hop past the arm-split position",
+    );
+}

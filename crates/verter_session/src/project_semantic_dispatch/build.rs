@@ -4978,7 +4978,7 @@ fn find_longest_warm_prefix(
 /// warm-hit gate (requests there are always at the full path); they record
 /// the honest materialisation per §3.4 and NEVER inflate a prefix hop to
 /// the terminal mode it never expanded.
-fn path_walk_materialized_set(
+pub(super) fn path_walk_materialized_set(
     path: &Arc<[PathSegment]>,
     terminal_mode: ProjectionMode,
     start_index: usize,
