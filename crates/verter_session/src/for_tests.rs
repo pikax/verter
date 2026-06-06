@@ -333,6 +333,18 @@ pub fn dispatch_execute_type_node_for_tests(
     crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host).execute_type_node(key)
 }
 
+/// Reduce a `MergedDecl` contributor list to its canonical peer-merged graph
+/// node (the mutating reducer that interns the `Object` / heritage
+/// `Intersection`). Exposed so display guards can assert the read-only display
+/// projection renders byte-identically to this canonical reduced surface — the
+/// two paths share one peer-merge engine, so any divergence is a regression.
+pub fn reduce_merged_decl_to_graph_node(
+    store: &crate::semantic_query_memo::SemanticGraphStore,
+    contributors: &[crate::semantic_query::SemanticNodeId],
+) -> crate::semantic_query::SemanticNodeId {
+    crate::project_semantic_dispatch::walk::reduce_merged_decl_with_graph(store, contributors)
+}
+
 /// Drive `ProjectSemanticDispatch::lower_type_expr_in_scope_with_context`
 /// from integration tests so they can exercise the
 /// `structural_transit_with_mode` substrate from outside the crate.

@@ -857,14 +857,17 @@ fn declaration_analysis_contributors_apply_intersection_precedence() {
 
 // ----------------------------------------------------------------------
 // GUARD 10 — a `MergedDecl` carrier renders its ACTUAL peer-merged surface
-// (member union, accumulated overloads, own-body shadowing heritage), NOT a
-// placeholder/constant and NOT just the first contributor. It is also a pure
-// display projection: rendering must not intern a reduced Object/Intersection
-// into the shared semantic graph.
+// (member union + accumulated method overloads), NOT a placeholder/constant
+// and NOT just the first contributor. It is also a PURE display projection:
+// rendering must not intern any reduced node into the shared graph, AND the
+// rendered string must be BYTE-IDENTICAL to the canonical mutating reducer's
+// reduced surface. There is ONE peer-merge engine shared by both paths, so a
+// display-only merge that diverges (separate-signature overload rendering, a
+// display-only own-body-shadows-heritage branch) is a regression.
 // ----------------------------------------------------------------------
 
 #[test]
-fn merged_decl_display_is_non_mutating_and_renders_peer_merged_surface() {
+fn merged_decl_display_matches_graph_reduction_and_is_non_mutating() {
     let store = SemanticGraphStore::new();
     let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -872,67 +875,92 @@ fn merged_decl_display_is_non_mutating_and_renders_peer_merged_surface() {
     let method_number_to_string = func_node(&store, &[("value", number_id)], string_id);
     let method_string_to_number = func_node(&store, &[("value", string_id)], number_id);
 
-    let heritage = object(
-        &store,
-        vec![member_with_role(
-            "shadowed",
-            string_id,
-            false,
-            MemberMergeRole::Heritage,
-        )],
-        vec![],
-        vec![],
-    );
-    let part_x = object(
+    // Two same-name `interface` contributors in source order. `shadowed` is a
+    // non-method CONFLICT — the canonical peer-merge takes the FIRST
+    // contributor deterministically (NOT an own-body-shadows-heritage rule:
+    // that precedence is owned by the intersection reducer over real
+    // `extends`/`implements` arms, never by the own-surface peer-merge). `m` is
+    // a same-name METHOD across both contributors → one accumulated overload
+    // group. The per-member `merge_role` tags must NOT change the own-surface
+    // peer-merge outcome.
+    let part_a = object(
         &store,
         vec![
-            member_with_role("shadowed", boolean_id, false, MemberMergeRole::OwnBody),
+            member_with_role("shadowed", string_id, false, MemberMergeRole::Heritage),
             member("x", number_id, false),
             member("m", method_number_to_string, true),
         ],
         vec![],
         vec![],
     );
-    let part_y = object(
+    let part_b = object(
         &store,
         vec![
+            member_with_role("shadowed", boolean_id, false, MemberMergeRole::OwnBody),
             member("y", string_id, false),
             member("m", method_string_to_number, true),
         ],
         vec![],
         vec![],
     );
+    let contributors = [part_a, part_b];
 
     let merged = store.intern_node(SemanticNodeData::MergedDecl {
-        contributors: Arc::from([heritage, part_x, part_y]),
+        contributors: Arc::from(contributors),
     });
-    let count_before_display = store.node_count();
 
-    // DISCRIMINATING: current mutating display interns a reduced Object (and an
-    // overload Intersection), so `node_count` grows. A pure display projection
-    // renders from a local surface and leaves the graph unchanged.
-    let r = render(&store, merged);
+    // Canonical reduction through the single mutating peer-merge engine
+    // (interns the reduced `Object` + the accumulated overload `Intersection`).
+    let reduced = verter_session::for_tests::reduce_merged_decl_to_graph_node(&store, &contributors);
+    let graph_render = render(&store, reduced);
+    let count_after_reduction = store.node_count();
+
+    // DISCRIMINATING #1 (non-mutating): display renders from a transient
+    // surface and interns nothing — `node_count` is unchanged across the call.
+    let display_render = render(&store, merged);
     assert_eq!(
         store.node_count(),
-        count_before_display,
+        count_after_reduction,
         "display(MergedDecl) must not intern reduced graph nodes"
     );
+
+    // DISCRIMINATING #2 (no divergent second merge engine): display is
+    // byte-identical to the canonical reduced surface. Pre-fix, the display
+    // path rendered overloads as separate method signatures (`m(...): ...;
+    // m(...): ...`) and applied a display-only shadow branch — both diverge
+    // from the reduced Object and FAIL this equality.
     assert_eq!(
-        r,
-        "{ shadowed: boolean; x: number; m(value: number): string; m(value: string): number; y: string }"
+        display_render, graph_render,
+        "display must match the canonical reduced surface byte-for-byte"
+    );
+    assert_eq!(
+        display_render,
+        "{ shadowed: string; x: number; m: ((value: number) => string) & ((value: string) => number); y: string }"
+    );
+
+    // Member union present; not first-contributor-only.
+    assert!(display_render.contains("x: number"), "{display_render}");
+    assert!(display_render.contains("y: string"), "{display_render}");
+    assert_ne!(
+        display_render, "{ x: number }",
+        "must not be first-contributor-only"
+    );
+    // First-contributor precedence for the non-method conflict — NOT the
+    // own-body value, and NOT a synthesised `never`.
+    assert!(
+        display_render.contains("shadowed: string"),
+        "non-method conflict keeps the FIRST contributor: {display_render}"
     );
     assert!(
-        r.contains("x: number"),
-        "first contributor member missing: {r}"
+        !display_render.contains("shadowed: boolean"),
+        "own-surface peer-merge must not special-case merge_role: {display_render}"
     );
+    // Overloads accumulate as a property holding an intersection of function
+    // types (exactly the reduced Object's shape), NOT as separate method
+    // shorthand signatures.
     assert!(
-        r.contains("y: string"),
-        "second contributor member missing: {r}"
-    );
-    assert_ne!(r, "{ x: number }", "must not be first-contributor-only");
-    assert!(
-        !r.contains("shadowed: string"),
-        "own-body member must shadow the heritage-tagged member: {r}"
+        !display_render.contains("m(value:"),
+        "accumulated overloads must not render as separate method signatures: {display_render}"
     );
 
     // NEGATIVE: a `MergedDecl` is atomic (`{…}`) — as an array element it must
@@ -942,11 +970,47 @@ fn merged_decl_display_is_non_mutating_and_renders_peer_merged_surface() {
         readonly: false,
     });
     let ra = render(&store, arr);
-    assert_eq!(ra, format!("{r}[]"));
+    assert_eq!(ra, format!("{display_render}[]"));
     assert!(
         !ra.contains("({"),
         "merged decl is atomic — must not parenthesise: {ra}"
     );
+}
+
+/// A `MergedDecl` contributor with real `extends`/`implements` heritage (an
+/// `Intersection` whose non-object arms are reference heritage) renders its
+/// heritage arms preserved and joined with its own-body surface — byte-identical
+/// to the canonical reducer's `Intersection([heritage…, own_object])`, and
+/// without interning.
+#[test]
+fn merged_decl_display_preserves_heritage_arms_like_graph_reduction() {
+    let store = SemanticGraphStore::new();
+    let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let base_ref = declref(&store, "Base");
+    let own = object(&store, vec![member("x", number_id, false)], vec![], vec![]);
+    // `interface Foo extends Base { x: number }` lowers to an Intersection of
+    // the heritage reference arm and the own-body object arm.
+    let contributor = store.intern_node(SemanticNodeData::Intersection(Arc::from([base_ref, own])));
+    let contributors = [contributor];
+    let merged = store.intern_node(SemanticNodeData::MergedDecl {
+        contributors: Arc::from(contributors),
+    });
+
+    let reduced = verter_session::for_tests::reduce_merged_decl_to_graph_node(&store, &contributors);
+    let graph_render = render(&store, reduced);
+    let count_after_reduction = store.node_count();
+
+    let display_render = render(&store, merged);
+    assert_eq!(
+        store.node_count(),
+        count_after_reduction,
+        "display(MergedDecl) with heritage must not intern reduced graph nodes"
+    );
+    assert_eq!(
+        display_render, graph_render,
+        "display heritage surface must match the canonical reduced Intersection"
+    );
+    assert_eq!(display_render, "Base & { x: number }");
 }
 
 #[test]

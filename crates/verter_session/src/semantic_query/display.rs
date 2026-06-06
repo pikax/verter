@@ -41,8 +41,7 @@ use super::{
     SemanticNodeId, SemanticQueryValue, SignatureRef, TypeParamDecl,
 };
 use crate::project_semantic_dispatch::walk::{
-    MergedDeclDisplayMember, MergedDeclDisplayOwnSurface, MergedDeclDisplaySurface,
-    ShallowSurfaceMember,
+    MergedDeclDisplaySurface, MergedDeclMember, MergedDeclSurface, ShallowSurfaceMember,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use std::fmt;
@@ -483,14 +482,14 @@ fn render_merged_decl_surface(
 
 fn render_merged_decl_own_surface(
     store: &SemanticGraphStore,
-    surface: &MergedDeclDisplayOwnSurface,
+    surface: &MergedDeclSurface,
     needs: DisplayNeeds,
     depth: usize,
     visited: &mut Vec<SemanticNodeId>,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
     for member in &surface.members {
-        parts.extend(render_merged_decl_member(
+        parts.push(render_merged_decl_member(
             store, member, needs, depth, visited,
         ));
     }
@@ -523,34 +522,23 @@ fn render_merged_decl_own_surface(
     }
 }
 
+/// Render one peer-merged member. This mirrors the `Object` arm of
+/// [`display_type_node`] applied to the graph reducer's reduced surface: a
+/// single-signature method renders as method shorthand (`name(params): ret`);
+/// an accumulated overload group (`values.len() > 1`) renders as a PROPERTY
+/// holding the intersection of its function types — exactly what the graph
+/// reducer's interned `Intersection` overload value renders as (an `is_method`
+/// member whose value is an `Intersection` falls through to property style to
+/// stay valid TS). Display therefore never emits separate method signatures
+/// where the reduced Object would not.
 fn render_merged_decl_member(
     store: &SemanticGraphStore,
-    merged: &MergedDeclDisplayMember,
+    merged: &MergedDeclMember,
     needs: DisplayNeeds,
     depth: usize,
     visited: &mut Vec<SemanticNodeId>,
-) -> Vec<String> {
+) -> String {
     let member = &merged.member;
-    if member.is_method
-        && merged.values.len() > 1
-        && merged
-            .values
-            .iter()
-            .all(|value| resolves_to_function(store, *value))
-    {
-        return merged
-            .values
-            .iter()
-            .map(|value| {
-                let mut s = member_prefix(member, needs);
-                s.push_str(&render_signature_colon(
-                    store, *value, "", needs, depth, visited,
-                ));
-                s
-            })
-            .collect();
-    }
-
     let mut s = member_prefix(member, needs);
     match merged.values.as_slice() {
         [value] if member.is_method && resolves_to_function(store, *value) => {
@@ -577,7 +565,7 @@ fn render_merged_decl_member(
             s.push_str(&rendered.join(" & "));
         }
     }
-    vec![s]
+    s
 }
 
 fn member_prefix(member: &ShallowSurfaceMember, needs: DisplayNeeds) -> String {

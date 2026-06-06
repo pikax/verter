@@ -519,24 +519,42 @@ impl<'a> super::ProjectSemanticDispatch<'a> {
     }
 }
 
+/// The peer-merged OWN-body surface of a `MergedDecl` carrier, computed WITHOUT
+/// interning any reduced node. This is the single shared output of
+/// [`merge_declaration_surfaces_core`]: the graph reducer interns it into an
+/// `Object`, the display projection renders it directly. Neither side
+/// re-implements the peer-merge precedence.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct MergedDeclDisplaySurface {
-    pub(crate) heritage_arms: Vec<SemanticNodeId>,
-    pub(crate) own_surface: MergedDeclDisplayOwnSurface,
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct MergedDeclDisplayOwnSurface {
-    pub(crate) members: Vec<MergedDeclDisplayMember>,
+pub(crate) struct MergedDeclSurface {
+    pub(crate) members: Vec<MergedDeclMember>,
     pub(crate) call_signatures: Vec<SemanticNodeId>,
     pub(crate) construct_signatures: Vec<SemanticNodeId>,
     pub(crate) index_signatures: Vec<crate::semantic_query::IndexSignature>,
+    /// Keyspace node when a contributing surface is a mapped/keyspace carrier;
+    /// the first contributor's keyspace wins (an ordinary object carries none).
+    pub(crate) keyspace: Option<SemanticNodeId>,
 }
 
+/// One peer-merged member. `values` holds a single value for an ordinary member
+/// and the ORDERED, deduplicated overload value list for an accumulated
+/// same-name method group (length > 1 only for methods). The graph reducer
+/// interns a multi-value method group into an `Intersection`; the display
+/// projection renders it as a property holding that intersection — both yield
+/// the identical surface.
 #[derive(Debug, Clone)]
-pub(crate) struct MergedDeclDisplayMember {
+pub(crate) struct MergedDeclMember {
     pub(crate) member: ShallowSurfaceMember,
     pub(crate) values: Vec<SemanticNodeId>,
+}
+
+/// The full display surface of a `MergedDecl` carrier: the preserved
+/// `extends`/`implements` HERITAGE reference arms plus the peer-merged own-body
+/// surface. Mirrors the graph reducer's `Intersection([heritage…, own_object])`
+/// shape so the read-only display projection renders byte-identically.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MergedDeclDisplaySurface {
+    pub(crate) heritage_arms: Vec<SemanticNodeId>,
+    pub(crate) own_surface: MergedDeclSurface,
 }
 
 /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
@@ -596,7 +614,7 @@ pub(crate) fn reduce_merged_decl_display_surface(
     }
     MergedDeclDisplaySurface {
         heritage_arms,
-        own_surface: merge_declaration_surfaces_for_display(&own_surfaces),
+        own_surface: merge_declaration_surfaces_core(&own_surfaces),
     }
 }
 
@@ -656,13 +674,23 @@ fn object_surface_view(graph: &SemanticGraphStore, node: SemanticNodeId) -> Opti
     }
 }
 
-fn merge_declaration_surfaces_for_display(
-    contributor_surfaces: &[ShallowSurface],
-) -> MergedDeclDisplayOwnSurface {
+/// Peer-merge contributor own-body surfaces WITHOUT interning — the single
+/// declaration-merge engine shared by the graph reducer
+/// ([`merge_declaration_surfaces`]) and the read-only display projection.
+///
+/// Precedence is exactly the declaration-merge rule: same-name members union;
+/// a same-name METHOD in a later contributor accumulates its signature into one
+/// ORDERED overload value list (identical values deduplicated); any non-method
+/// conflict (or method-over-property) keeps the FIRST contributor
+/// deterministically. The per-member `merge_role` axis is NOT consulted here —
+/// own-body-shadows-heritage precedence is owned exclusively by the
+/// intersection reducer over real `extends`/`implements` arms, never by the
+/// own-surface peer-merge. Call / construct / index signatures union across
+/// contributors; the first contributor's keyspace wins.
+fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> MergedDeclSurface {
     struct Accum {
         first: ShallowSurfaceMember,
-        first_own_body: Option<ShallowSurfaceMember>,
-        saw_heritage: bool,
+        /// Ordered overload values when accumulating same-name methods.
         method_values: Vec<SemanticNodeId>,
     }
 
@@ -671,38 +699,15 @@ fn merge_declaration_surfaces_for_display(
         for member in &surface.members {
             match by_name.get_mut(&member.name) {
                 None => {
-                    let first_own_body = matches!(
-                        member.merge_role,
-                        crate::semantic_query::MemberMergeRole::OwnBody
-                    )
-                    .then(|| member.clone());
                     by_name.insert(
                         Arc::clone(&member.name),
                         Accum {
                             first: member.clone(),
-                            first_own_body,
-                            saw_heritage: matches!(
-                                member.merge_role,
-                                crate::semantic_query::MemberMergeRole::Heritage
-                            ),
                             method_values: vec![member.value],
                         },
                     );
                 }
                 Some(accum) => {
-                    if matches!(
-                        member.merge_role,
-                        crate::semantic_query::MemberMergeRole::Heritage
-                    ) {
-                        accum.saw_heritage = true;
-                    }
-                    if matches!(
-                        member.merge_role,
-                        crate::semantic_query::MemberMergeRole::OwnBody
-                    ) && accum.first_own_body.is_none()
-                    {
-                        accum.first_own_body = Some(member.clone());
-                    }
                     if member.is_method
                         && accum.first.is_method
                         && !accum.method_values.contains(&member.value)
@@ -717,23 +722,22 @@ fn merge_declaration_surfaces_for_display(
     let members = by_name
         .into_values()
         .map(|accum| {
-            let member = if !accum.first.is_method && accum.saw_heritage {
-                accum.first_own_body.unwrap_or(accum.first)
-            } else {
-                accum.first
-            };
-            let values = if member.is_method {
+            let values = if accum.first.is_method {
                 accum.method_values
             } else {
-                vec![member.value]
+                vec![accum.first.value]
             };
-            MergedDeclDisplayMember { member, values }
+            MergedDeclMember {
+                member: accum.first,
+                values,
+            }
         })
         .collect();
 
     let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
     let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
     let mut index_signatures: Vec<crate::semantic_query::IndexSignature> = Vec::new();
+    let mut keyspace: Option<SemanticNodeId> = None;
     for surface in contributor_surfaces {
         for sig in &surface.call_signatures {
             if !call_signatures.contains(sig) {
@@ -750,13 +754,17 @@ fn merge_declaration_surfaces_for_display(
                 index_signatures.push(sig.clone());
             }
         }
+        if keyspace.is_none() {
+            keyspace = surface.keyspace;
+        }
     }
 
-    MergedDeclDisplayOwnSurface {
+    MergedDeclSurface {
         members,
         call_signatures,
         construct_signatures,
         index_signatures,
+        keyspace,
     }
 }
 
@@ -3618,91 +3626,40 @@ fn arm_is_object_surface(graph: &SemanticGraphStore, arm: SemanticNodeId) -> boo
 /// - **Distinct** members union.
 /// - Call / construct / index signatures concatenate across contributors in
 ///   source order; the keyspace is the first contributor's keyspace.
+/// Peer-merge contributor own-body surfaces into an interned `ShallowSurface`.
+/// Computes the shared, non-interning surface via
+/// [`merge_declaration_surfaces_core`], then interns each accumulated
+/// same-name method overload group into an `Intersection` value node (a
+/// single-signature method or an ordinary property keeps its verbatim value).
 fn merge_declaration_surfaces(
     graph: &SemanticGraphStore,
     contributor_surfaces: &[ShallowSurface],
 ) -> ShallowSurface {
-    struct Accum {
-        first: ShallowSurfaceMember,
-        /// Ordered overload values when accumulating same-name methods.
-        method_values: Vec<SemanticNodeId>,
-    }
-    let mut by_name: indexmap::IndexMap<Arc<str>, Accum> = indexmap::IndexMap::new();
-    for surface in contributor_surfaces {
-        for member in &surface.members {
-            match by_name.get_mut(&member.name) {
-                None => {
-                    by_name.insert(
-                        Arc::clone(&member.name),
-                        Accum {
-                            first: member.clone(),
-                            method_values: vec![member.value],
-                        },
-                    );
-                }
-                Some(accum) => {
-                    // Same-name method in a later contributor → accumulate the
-                    // overload signature in source order (dedup identical). A
-                    // non-method (or method-over-property conflict) keeps the
-                    // first contributor deterministically.
-                    if member.is_method
-                        && accum.first.is_method
-                        && !accum.method_values.contains(&member.value)
-                    {
-                        accum.method_values.push(member.value);
-                    }
-                }
-            }
-        }
-    }
-    let members: Vec<ShallowSurfaceMember> = by_name
-        .into_values()
-        .map(|accum| {
-            if accum.first.is_method && accum.method_values.len() > 1 {
+    let core = merge_declaration_surfaces_core(contributor_surfaces);
+    let members: Vec<ShallowSurfaceMember> = core
+        .members
+        .into_iter()
+        .map(|merged| {
+            if merged.member.is_method && merged.values.len() > 1 {
                 let group = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-                    accum.method_values.into_boxed_slice(),
+                    merged.values.into_boxed_slice(),
                 )));
                 ShallowSurfaceMember {
                     value: group,
-                    ..accum.first
+                    ..merged.member
                 }
             } else {
-                accum.first
+                merged.member
             }
         })
         .collect();
 
-    let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
-    let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
-    let mut index_signatures: Vec<crate::semantic_query::IndexSignature> = Vec::new();
-    let mut keyspace: Option<SemanticNodeId> = None;
-    for surface in contributor_surfaces {
-        for sig in &surface.call_signatures {
-            if !call_signatures.contains(sig) {
-                call_signatures.push(*sig);
-            }
-        }
-        for sig in &surface.construct_signatures {
-            if !construct_signatures.contains(sig) {
-                construct_signatures.push(*sig);
-            }
-        }
-        for sig in &surface.index_signatures {
-            if !index_signatures.contains(sig) {
-                index_signatures.push(sig.clone());
-            }
-        }
-        if keyspace.is_none() {
-            keyspace = surface.keyspace;
-        }
-    }
-
     ShallowSurface {
         members,
-        call_signatures,
-        construct_signatures,
-        index_signatures,
-        keyspace,
+        call_signatures: core.call_signatures,
+        construct_signatures: core.construct_signatures,
+        index_signatures: core.index_signatures,
+        keyspace: core.keyspace,
     }
 }
 
