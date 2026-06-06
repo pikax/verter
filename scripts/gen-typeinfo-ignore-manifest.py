@@ -455,13 +455,14 @@ _NARROW_SHARED = [
 ]
 BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
     # U0.MANIFEST_SUBSTRATE: `BlockContractRow.required_guards` carries the
-    # universal DAG guard, the two manifest count guards, and ALL THREE
+    # universal DAG guard, the two manifest count guards, and ALL FOUR
     # FINISH-A-landed structural guards (the semantic-query name mirror, the
-    # per-block required_guards-presence guard, and the manifest-file freshness
-    # guard) — these all gate U0-FINISH-A's landing. The broader §§10.2–10.5 /
-    # §11.5 guard list is the block's full landing predicate, not the
-    # `required_guards` field; the U0-FINISH-B proof/coverage guards remain
-    # forward-declared and are NOT in required_guards.
+    # per-block required_guards-presence guard, the manifest-file freshness
+    # guard, and the key→owning-block owner-mapping closed-set pin) — these all
+    # gate U0-FINISH-A's landing. The broader §§10.2–10.5 / §11.5 guard list is
+    # the block's full landing predicate, not the `required_guards` field; the
+    # U0-FINISH-B proof/coverage guards remain forward-declared and are NOT in
+    # required_guards.
     "U0ManifestSubstrate": [
         _DAG,
         "ignored_test_row_table_holds_exactly_362_rows",
@@ -469,6 +470,7 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
         "semantic_query_name_mirror_matches_live_tag_set",
         "every_block_contract_row_carries_required_guards",
         "typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output",
+        "key_owning_block_owner_mapping_is_pinned_closed_set",
     ],
     # U2.QUERY_VALUE_DOMAIN (u2-reducers.md §220): the section enumerates a
     # large guard list, mostly via ellipsized prefixes (`resolve_merged_…`)
