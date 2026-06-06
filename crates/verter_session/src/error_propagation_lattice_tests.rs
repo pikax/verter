@@ -333,7 +333,7 @@ fn error_any_never_propagation_lattice() {
         "direct mapped over unknown = error"
     );
 
-    // conditional: error check => error (both branches tainted).
+    // conditional: error check => the error carrier dominates both branches.
     let c = absorbed_node(
         dispatch
             .absorb_conditional(error)
@@ -341,7 +341,7 @@ fn error_any_never_propagation_lattice() {
     );
     assert_eq!(
         c, error,
-        "error extends T => the same error carrier (taint preserved)"
+        "error extends T => the same error carrier (carrier-dominating)"
     );
     // A non-special check does NOT fast-reject (the branch logic decides).
     assert!(

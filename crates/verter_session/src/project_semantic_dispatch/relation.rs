@@ -799,9 +799,9 @@ fn expand_pair(
 
     // ── Error type (§22.3): an `Opaque(QueryError)` ERROR-TYPE carrier relates
     //    BIDIRECTIONALLY (like `any`), so a broken sub-result does not cascade
-    //    spurious assignability failures. The error type carries §18 taint and
-    //    is `ReturnOnly`-prone, but RELATION-wise it is wildcard. Only the
-    //    genuine error-type variants qualify (`QueryError::is_error_type`) —
+    //    spurious assignability failures. The error type is `ReturnOnly`-prone
+    //    when input-degraded (a §18.4 property); RELATION-wise it is wildcard.
+    //    Only the genuine error-type variants qualify (`QueryError::is_error_type`) —
     //    the control / recursion sentinels (`Miss`, `RecursiveRef`,
     //    `AliasCycle`, `BudgetExceeded`, `UnstableState`, `DeclPlaceholder`)
     //    keep their `Unknown` relation so recursion / resolution control flow
