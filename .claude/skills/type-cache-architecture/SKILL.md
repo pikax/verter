@@ -349,8 +349,10 @@ materialising the shell; an all-peers backfill would hide cyclic-heritage
 expansions. The gate still REJECTS the unsound legacy `Shallow → Navigate`
 clone (`Shallow ⊅ Navigate`: `normalization_depth None < NavigateOnly`).
 Guards: `cache_satisfaction_is_materialized_point_not_nominal_demand`,
-`backfill_writes_only_recorded_materialized_points` (in
-`semantic_query_memo::tests`); the legacy enum-rank `backfill_targets`
+`cache_satisfaction_requires_path_exact_not_prefix` (the path-axis
+discriminator — a deep recorded point never satisfies a strict-prefix
+request), `backfill_writes_only_recorded_materialized_points` (in
+`semantic_query_memo::tests`); the enum-rank `backfill_targets`
 unconditional fan-out is RETIRED.
 
 **R7.** Shared semantic materialisations key by
