@@ -1663,7 +1663,7 @@ fn dispatch_host_adapter_routes_per_base_scope() {
 /// `build_resolve_decl` records the declaration's origin scope in
 /// the [`SemanticGraphStore`] sidecar at intern time. Verified
 /// end-to-end through the dispatch API so we exercise the full
-/// integration path ( C1 + §7.10).
+/// integration path.
 #[test]
 fn resolve_decl_records_file_scope_in_sidecar() {
     let host = host();
@@ -1706,7 +1706,7 @@ fn resolve_decl_records_file_scope_in_sidecar() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// C1-Commit-B — real `build_instantiate` ( C1 + §2 lazy block)
+// real `build_instantiate` (lazy block)
 // ──────────────────────────────────────────────────────────────────
 //
 // The tests below exercise the shallow + lazy + mode-free
@@ -2054,8 +2054,8 @@ fn same_args_different_callers_dedup_to_one_entry() {
 
 /// Whole-surface expansion through `ProjectPath(result, [], Expanded)`
 /// drives deeper lowering via [`SemanticQueryApi::execute`] re-entry
-/// rather than a private walker. After the C1b self-review added
-/// `TypeExpr::Ref`-with-args handling to the shallow walker, member
+/// rather than a private walker. With `TypeExpr::Ref`-with-args
+/// handling in the shallow walker, member
 /// `y: Other<T>` resolves through `ResolveDecl` → `Instantiate`
 /// dispatch, so the sub-shell carries an `Instantiate` origin edge.
 /// That's the observable signal this test asserts.
@@ -2116,8 +2116,8 @@ fn expanded_instantiate_materialises_through_dispatcher_not_private_walker() {
 
 /// Two instantiations that walk the same shared sub-expression at a
 /// common path share one family-memo entry at that sub-query.
-/// Un-ignored after the C1b self-review added `Ref`-with-args
-/// handling + C3's path walker — together these let the memo dedup
+/// The shallow walker's `Ref`-with-args handling and the path walker
+/// together let the memo dedup
 /// sub-queries that naturally converge across distinct parent
 /// instantiations.
 #[test]
@@ -2191,7 +2191,7 @@ fn distinct_instantiations_share_visited_subpath_lowering_not_full_body() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// C2 — real `build_conditional` ( C2 + §2 lazy block)
+// real `build_conditional` (lazy block)
 // ──────────────────────────────────────────────────────────────────
 
 use crate::semantic_query::BranchSelection;
@@ -2893,7 +2893,7 @@ fn infer_in_open_conditional_stays_symbolic_without_private_bind() {
 }
 
 /// Distinct projections into the same open conditional materialise
-/// only the visited subexpressions. C3's path walker distributes
+/// only the visited subexpressions. The path walker distributes
 /// `ProjectPath` into each branch via dispatch re-entry so the memo
 /// can dedup shared sub-expressions across distinct projections.
 #[test]
@@ -3366,7 +3366,7 @@ fn open_conditional_distributes_path_into_both_branches_via_execute_not_private_
 }
 
 /// Closed conditionals project into the selected branch only. This
-/// test reuses C2's decidable relation logic: `never extends X` is
+/// test reuses the decidable relation logic: `never extends X` is
 /// always assignable → selects the true branch.
 #[test]
 fn closed_conditional_projects_into_selected_branch_only() {
@@ -3642,13 +3642,13 @@ fn key_of_records_source_members() {
 
 // resolve_decl_alias_emits_alias_resolve_edge and
 // barrel_alias_chain_emits_one_edge_per_hop were:
-// resolve_decl returns DeclPlaceholder by design (C16). Alias unwrap
+// resolve_decl returns DeclPlaceholder by design. Alias unwrap
 // happens in the path-walk layer, covered by
 // `alias_unwrap_during_path_walk_emits_alias_resolve` and
 // `alias_identity_extraction_uses_target_not_current`.
 
 // ──────────────────────────────────────────────────────────────────
-// C6 — build_mapped_type ( C6 + §2 lazy block)
+// build_mapped_type (lazy block)
 // ──────────────────────────────────────────────────────────────────
 
 use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
@@ -3890,7 +3890,7 @@ fn mapped_type_resolves_key_space_via_key_of_subquery() {
 // `project_semantic_dispatch_invariants_tests::mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_name_remap`.
 
 // ──────────────────────────────────────────────────────────────────
-// Self-review regression tests (C1b–C6 follow-up)
+// Self-review regression tests
 // ──────────────────────────────────────────────────────────────────
 
 /// Regression: the alias-cycle detection set was previously checking
@@ -4069,7 +4069,7 @@ fn mapped_type_uses_source_member_names_when_object_source() {
 }
 
 // ------------------------------------------------------------------
-// C7 — built-in utility dispatch ( C7 + §2 built-in utilities)
+// built-in utility dispatch
 // ------------------------------------------------------------------
 //
 // These tests cover the utility-routing pass in `build_instantiate`.
@@ -5273,12 +5273,12 @@ fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
     }
 }
 
-/// Substitute-rebuild arms call `self.graph().intern_node(...)` pre-
-/// C6a — scope-less. Under C7 compound `(payload, scope)` interning
-/// this would intern a file-scoped shell's rebuild under `Global`,
-/// breaking same-scope dedup. C6a items 4/5 add
-/// `intern_preserving_scope(origin, data)` and migrate every
-/// shell-rebuild arm.
+/// Substitute-rebuild arms must preserve the origin scope. A plain
+/// `self.graph().intern_node(...)` is scope-less: under compound
+/// `(payload, scope)` interning it would intern a file-scoped shell's
+/// rebuild under `Global`, breaking same-scope dedup.
+/// `intern_preserving_scope(origin, data)` keeps the origin scope across
+/// every shell-rebuild arm.
 ///
 /// Observability: upsert a generic type, instantiate it, and read
 /// the result's `node_scope`. The post-substitution shells must
@@ -5518,7 +5518,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
 
     assert_eq!(
         result, string_node,
-        "C11a: `T extends (x: infer P) => any ? P : never` with T = (x: string) => any \
+        "`T extends (x: infer P) => any ? P : never` with T = (x: string) => any \
          must bind P = string and return string; got node id {result:?}",
     );
 }
@@ -5572,7 +5572,7 @@ fn substitute_recurses_into_function_params_and_return_type() {
             assert_eq!(params.len(), 1);
             assert_eq!(
                 params[0].ty, string_node,
-                "C11a: substitute must recurse into Function params; expected ty = string node"
+                "substitute must recurse into Function params; expected ty = string node"
             );
             assert_eq!(
                 *return_type, string_node,

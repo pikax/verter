@@ -604,7 +604,7 @@ pub(super) fn map_primitive_name(name: PrimitiveName) -> PrimitiveKind {
 /// `["T"]` — not a synthesised `["T0"]` — so origin walks on
 /// `Partial<T>` match `type MyPartial<T> = ...` byte-for-byte.
 ///
-/// See utility-equivalence rule and §3 C7.
+/// See the utility-equivalence rule.
 pub(super) fn utility_param_names(name: &str) -> &'static [&'static str] {
     match name {
         "Partial"
@@ -1702,8 +1702,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 // builders take `&dyn DispatchHost` rather than `&VerterHost`, so they
 // stay scope-free.
 
-/// Scope-free, minimum-surface host seam for dispatch builders ( +
-/// §7.10 + C1).
+/// Scope-free, minimum-surface host seam for dispatch builders.
 ///
 /// Builders that need to reach host-owned prepared declarations, classify
 /// utility names, resolve root identities, or classify bare references take

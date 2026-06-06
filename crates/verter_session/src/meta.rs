@@ -202,11 +202,10 @@ impl MetaProject {
         true
     }
 
-    // C15: overlay_gate, acquire_overlay_gate, enter_base_context, and
-    // revert_active_session_overlays are all retired. Per-session isolation
-    // is structural via SessionRuntime's ArcSwap<SessionView> snapshots
-    // and session-scoped caches. Base-context operations (upsert_base,
-    // ensure_loaded, etc.) operate directly on the host without a gate.
+    // There is no overlay gate. Per-session isolation is structural via
+    // SessionRuntime's ArcSwap<SessionView> snapshots and session-scoped
+    // caches. Base-context operations (upsert_base, ensure_loaded, etc.)
+    // operate directly on the host without a gate.
 
     /// Load a file into the base project. This is the shared state that
     /// all sessions see when they don't have an overlay for the file.
@@ -216,7 +215,7 @@ impl MetaProject {
         source: &str,
     ) -> Result<(), MetaError> {
         self.check_alive()?;
-        // C15: no overlay_gate — base operations go directly to host.
+        // No overlay gate — base operations go directly to host.
         let req = UpsertRequest {
             canonical_id: Some(canonical_id.to_string()),
             input_id: canonical_id.to_string(),
@@ -239,7 +238,7 @@ impl MetaProject {
     /// Ensure a workspace-backed file is loaded into the shared base project.
     pub fn ensure_loaded(self: &Arc<Self>, canonical_id: &str) -> Result<bool, MetaError> {
         self.check_alive()?;
-        // C15: no overlay_gate — base operations go directly to host.
+        // No overlay gate — base operations go directly to host.
 
         let loaded = self.host.ensure_loaded(canonical_id);
 
@@ -254,7 +253,7 @@ impl MetaProject {
     /// Refresh a workspace-backed base file from the current native workspace.
     pub fn refresh_base(self: &Arc<Self>, canonical_id: &str) -> Result<bool, MetaError> {
         self.check_alive()?;
-        // C15: no overlay_gate — base operations go directly to host.
+        // No overlay gate — base operations go directly to host.
 
         self.host.evict(canonical_id);
 
@@ -274,7 +273,7 @@ impl MetaProject {
         projects: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig>,
     ) -> Result<(), MetaError> {
         self.check_alive()?;
-        // C15: no overlay_gate — base operations go directly to host.
+        // No overlay gate — base operations go directly to host.
         self.host.configure_projects(projects);
         Ok(())
     }
@@ -329,7 +328,7 @@ impl MetaProject {
     /// Active sessions keep their overlays; only base caches are flushed.
     pub fn clear_caches(&self) -> Result<(), MetaError> {
         self.check_alive()?;
-        // C15: no overlay_gate — just clear host caches directly.
+        // No overlay gate — just clear host caches directly.
         self.host.clear_compile_cache();
         Ok(())
     }
@@ -344,7 +343,7 @@ impl MetaProject {
         {
             return; // Already shut down
         }
-        // C15: no overlay_gate to revert — session-scoped isolation is
+        // No overlay gate to revert — session-scoped isolation is
         // structural via ArcSwap snapshots. Just close the host.
         self.host.close();
         self.base_sources.write().clear();

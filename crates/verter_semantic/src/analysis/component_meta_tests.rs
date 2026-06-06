@@ -4627,7 +4627,7 @@ fn define_emits_call_signature_events_get_empty_diagnostics_not_global_clones() 
 }
 
 // ---------------------------------------------------------------------------
-// C1: @defaultValue tag synthesis from withDefaults default_value
+// @defaultValue tag synthesis from withDefaults default_value
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -4745,7 +4745,7 @@ fn synthesizes_default_value_tag_for_runtime_define_props() {
 }
 
 // ---------------------------------------------------------------------------
-// C2: Expanded-only props inherit JSDoc by name from canonical_source
+// Expanded-only props inherit JSDoc by name from canonical_source
 // ---------------------------------------------------------------------------
 
 #[test]

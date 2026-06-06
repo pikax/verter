@@ -31,10 +31,10 @@
 //! path and are never consumed by dispatch builders that walk `node_scope`.
 //! The exemption is enforced structurally inside `push_impl` so callers
 //! can't accidentally populate a sidecar entry for a vue-macro node, even
-//! via [`super::SemanticGraphStore::intern_node_with_scope`]. C17 preserves C7's
-//! short-circuit: `VueMacroElements` bypasses both the shard index and the
-//! shard Mutex entirely, acquiring only `inner.write()` for the sequential
-//! id allocation.
+//! via [`super::SemanticGraphStore::intern_node_with_scope`].
+//! `VueMacroElements` short-circuits: it bypasses both the shard index
+//! and the shard Mutex entirely, acquiring only `inner.write()` for the
+//! sequential id allocation.
 
 use std::sync::Arc;
 
@@ -118,7 +118,7 @@ impl NodeArena {
 
     /// Intern `data` and record `scope` in the origin sidecar. Called by
     /// builders that know the declaration origin — `build_resolve_decl`,
-    /// `build_typeof`, C1's forthcoming `build_instantiate`, etc.
+    /// `build_typeof`, `build_instantiate`, etc.
     pub(super) fn push_with_scope(
         &self,
         data: SemanticNodeData,

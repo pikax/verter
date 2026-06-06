@@ -1056,7 +1056,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     return;
                 }
                 SemanticNodeData::Intersection(arms) => {
-                    // Iterative worklist + §3 C3 contributor
+                    // Iterative worklist contributor
                     // rule: push a `JoinIntersection` frame then one
                     // `Step` frame per arm. Opaque arms are dropped at
                     // join time; only non-opaque contributors survive.
@@ -1649,7 +1649,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     current = target_id;
                     // Do not consume a segment; we unwrapped an alias.
                 }
-                // C16: DeclPlaceholder — expand via Instantiate before
+                // DeclPlaceholder — expand via Instantiate before
                 // continuing the path walk.
                 //
                 // Intermediate-hop demand demotion.
@@ -1838,10 +1838,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // Can't descend further through generic path-walk —
                     // Array indexed-access, Tuple slot projection, and
                     // template-literal relation matching are their own
-                    // semantic work (C3 path-walker + ). The
-                    // shell carriers (B4) exist so the graph publishes
-                    // these shapes first-class; deeper projection lands
-                    // in later phases. Return Opaque(Miss) for now.
+                    // path-walker semantic work. The shell carriers exist
+                    // so the graph publishes these shapes first-class;
+                    // deeper projection is not yet wired. Return
+                    // Opaque(Miss).
                     results.push(self.opaque_miss());
                     return;
                 }
@@ -1957,7 +1957,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     }
 
     /// Combine the top `arm_count` entries from `results` into the
-    /// union of the arm projections. C3 union rule: any arm
+    /// union of the arm projections. Union rule: any arm
     /// producing `Opaque(_)` → whole union misses.
     fn join_union(&self, arm_count: usize, results: &mut Vec<SemanticNodeId>) {
         let split = results.len().saturating_sub(arm_count);
@@ -2071,7 +2071,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             }
         };
         match &*data {
-            // C16: DeclPlaceholder — expand via Instantiate.
+            // DeclPlaceholder — expand via Instantiate.
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                 canonical_id,
                 name,

@@ -192,12 +192,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // (lowered from a name-only reference), not as a literal
         // Infer node.
         //
-        // Item 8's "leave Infer string-match alone" is
-        // preserved; the addition is purely cross-variant
-        // bridging — it does NOT fall back for ordinary TypeParam
-        // substitutions (those go through the node-id branch above).
-        // C11a re-evaluates whether nested-infer needs full
-        // node-id matching.
+        // Infer nodes keep their string-match path; this branch is
+        // purely cross-variant bridging — it does NOT fall back for
+        // ordinary TypeParam substitutions (those go through the
+        // node-id branch above). Nested-infer does not require full
+        // node-id matching here.
         let parameter_name: Option<Arc<str>> =
             self.graph()
                 .node_data(parameter_node)

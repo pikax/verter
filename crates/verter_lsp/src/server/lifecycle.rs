@@ -313,7 +313,7 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
         tracing::info!("Sent $/verter/mcpReady with port {port}");
     }
 
-    // C0. Eagerly populate type provider workspace roots so that
+    // Eagerly populate type provider workspace roots so that
     // did_open (which can fire before background_init completes) sends
     // a reasonable projectRootPath to tsserver.
     if let Some(tp) = &server.type_provider {

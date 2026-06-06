@@ -324,7 +324,7 @@ dispatch.execute(SemanticQueryKey::ProjectPath { base, path, context: Projection
 // Then `semantic_node_to_type_expr(host, result)` to round-trip to TypeExpr.
 ```
 
-`env` (type-parameter bindings) and `name_resolution` (import map) must be preserved per Gemini's substitution-environment warning — dropping either causes bare-name misses in declaration-scoped resolution.
+`env` (type-parameter bindings) and `name_resolution` (import map) must both be preserved — dropping either causes bare-name misses in declaration-scoped resolution.
 
 **Retired identifiers** (per plan §9 / §5.7 WIP-C):
 

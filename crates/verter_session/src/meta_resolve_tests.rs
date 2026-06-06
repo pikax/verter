@@ -5412,7 +5412,7 @@ defineProps<Props>()
 // dispatch-backed component-meta tests.
 
 // ===========================================================================
-// C1/C2: Resolver view caches routes and declarations
+// Resolver view caches routes and declarations
 // ===========================================================================
 
 #[test]
@@ -6915,13 +6915,13 @@ defineProps<{ type?: ButtonHTMLAttributes['type'] }>()
 /// the per-key literal into the mapper value, but the substituted
 /// conditional with `infer P` extends a Function whose `check` is
 /// `PricingPlanSlots[K]` — that IndexedAccess never resolves through
-/// the substituted mapper context, so `build_conditional`'s C11a Function-
-/// extends arm sees check_resolved as the unsubstituted shell and skips
+/// the substituted mapper context, so `build_conditional`'s infer-binding
+/// Function-extends arm sees check_resolved as the unsubstituted shell and skips
 /// the per-position infer binding.
 ///
 /// Post-Step-1.5: `build_mapped_type`'s substitute-and-evaluate path
 /// resolves the inner `IndexedAccess` BEFORE the conditional materialises,
-/// so the C11a binding extracts `P → { planId: string }` and the
+/// so the infer binding extracts `P → { planId: string }` and the
 /// substituted true_branch surfaces as
 /// `(props: { planId: string; plan: TPlan }) => any`.
 #[test]

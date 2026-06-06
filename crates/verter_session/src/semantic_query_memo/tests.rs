@@ -167,7 +167,7 @@ fn node_data_is_readable_via_graph_read_trait() {
 /// across threads for identical `(payload, scope)` pairs. The
 /// invariant is strong: two threads interning the same payload at
 /// the same scope must observe equal ids immediately (no visibility
-/// gap from C17's per-shard Mutex). The threads race; the second
+/// gap from the per-shard Mutex). The threads race; the second
 /// arrival finds the first's entry in the shard index and returns
 /// the same id rather than allocating a duplicate.
 #[test]

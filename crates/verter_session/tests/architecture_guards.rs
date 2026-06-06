@@ -5857,6 +5857,116 @@ mod foundations_guards {
                 search_from = abs + needle.len();
             }
         }
+        // Bare cutover-pass label `C<digits>[a-z]?` (e.g. `C16`, `C11a`,
+        // `C7`). The semantic-db-overhaul plan named its passes `C0`…`C17`;
+        // production source must read as final-state, not cite the pass
+        // codename.
+        //
+        // The bare `C<n>` token is far too common to flag unconditionally
+        // (hex `0xC1`, the C language standard `C11`/`C99`, register names,
+        // `Class`-prefixed identifiers), so the scan requires a
+        // word-boundary `C<digits>[a-z]?` token AND one of a small set of
+        // discriminating signals that only a plan-pass codename carries:
+        //   - lowercase letter suffix     → `C11a` (a C-language standard
+        //                                   is `C99`/`C11`/`C17`/`C23` — it
+        //                                   NEVER carries a trailing letter,
+        //                                   so the suffixed form is
+        //                                   unambiguously a plan-pass id)
+        //   - possessive `'s`             → `C7's`, `C1's forthcoming`
+        //   - `(C<n>)` parenthesised      → `(C3)`
+        //   - `:` then an UPPERCASE word  → `C16: Declaration`
+        //                                   (rejects the test-case label
+        //                                    `C1: import …`, lowercase tail)
+        //   - `.` then space + UPPERCASE  → `C0. Eagerly`
+        //   - ` +`  arithmetic combine    → `C2 +`
+        // A `C` immediately followed by a letter (`Class`), a hex context
+        // (`0xC1`, `xC1`), or a bare unsuffixed `C<n>` with none of these
+        // tails (`C99`, `C11`, `C17`) is NOT flagged. (`C17 preserves
+        // C7's …` is still caught — by the `C7's` possessive on the same
+        // line.)
+        {
+            let b = line.as_bytes();
+            let mut i = 0usize;
+            while i < b.len() {
+                if b[i] == b'C' {
+                    // Word-boundary + non-hex on the leading side: the byte
+                    // before `C` must not be alphanumeric / `_`. This also
+                    // excludes hex (`0xC1` → preceding `x`) and identifier
+                    // tails (`fooC1`).
+                    let leading_ok =
+                        i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+                    let mut j = i + 1;
+                    let digit_start = j;
+                    while j < b.len() && b[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    let has_digits = j > digit_start;
+                    // Optional single trailing lowercase letter (`C11a`).
+                    let mut tok_end = j;
+                    let mut has_letter_suffix = false;
+                    if tok_end < b.len() && b[tok_end].is_ascii_lowercase() {
+                        // Only consume it if the NEXT byte is a word
+                        // boundary, so `C11abc` (a longer ident) is not a
+                        // `C11a` label.
+                        if tok_end + 1 >= b.len()
+                            || !(b[tok_end + 1].is_ascii_alphanumeric() || b[tok_end + 1] == b'_')
+                        {
+                            tok_end += 1;
+                            has_letter_suffix = true;
+                        }
+                    }
+                    // Trailing word boundary at `tok_end` (the byte after
+                    // the digit/optional-letter run must not be alnum/`_`),
+                    // so `C16x`/`C1foo` are not labels.
+                    let trailing_word_boundary = tok_end >= b.len()
+                        || !(b[tok_end].is_ascii_alphanumeric() || b[tok_end] == b'_');
+                    if leading_ok && has_digits && trailing_word_boundary {
+                        // Lowercase letter suffix (`C11a`) — a C-language
+                        // standard never carries one, so the suffixed form
+                        // is unambiguously a plan-pass codename.
+                        if has_letter_suffix {
+                            return true;
+                        }
+                        // Discriminating trailing context.
+                        let next = b.get(tok_end).copied();
+                        // possessive `'`
+                        if next == Some(b'\'') {
+                            return true;
+                        }
+                        // parenthesised `(C<n>)`
+                        if i > 0 && b[i - 1] == b'(' && next == Some(b')') {
+                            return true;
+                        }
+                        // `:` then optional spaces then an UPPERCASE letter.
+                        if next == Some(b':') {
+                            let mut k = tok_end + 1;
+                            while k < b.len() && b[k] == b' ' {
+                                k += 1;
+                            }
+                            if k < b.len() && b[k].is_ascii_uppercase() {
+                                return true;
+                            }
+                        }
+                        // `.` then space then UPPERCASE.
+                        if next == Some(b'.')
+                            && tok_end + 2 < b.len()
+                            && b[tok_end + 1] == b' '
+                            && b[tok_end + 2].is_ascii_uppercase()
+                        {
+                            return true;
+                        }
+                        // ` +` arithmetic combine.
+                        if next == Some(b' ') && tok_end + 1 < b.len() && b[tok_end + 1] == b'+' {
+                            return true;
+                        }
+                    }
+                    // Resume the scan past this `C` run.
+                    i = tok_end.max(i + 1);
+                    continue;
+                }
+                i += 1;
+            }
+        }
         false
     }
 
@@ -5894,6 +6004,7 @@ mod foundations_guards {
             "gemini",                    // gemini's attribution
             "cc's",                      // CC's attribution
             "codex",                     // codex vocab + Codex Nth-consult
+            "consult #",                 // numbered `consult #<digit>` marker
             "§",                         // plan § / decimal-section refs
             "slice",                     // Slice \d
             "deleted in",                // deletion history
@@ -5908,6 +6019,7 @@ mod foundations_guards {
             "/ fix ",                    // / Fix [A-Z]
             "fix-",                      // Fix-[A-Z] / pre-Fix- / post-Fix-
             "fork-",                     // FORK-[A-Z] staged-fork code-name
+            "scope-lock",                // SCOPE-LOCK plan vocabulary
             "pre-c",                     // pre-C<digit> cutover marker
             "pre_c",                     // pre_C<digit> cutover marker
             "prec",                      // preC<digit> cutover marker
@@ -5923,6 +6035,19 @@ mod foundations_guards {
         // Uppercase-anchored `PE\d+` branch: check raw text.
         if src.contains("PE") {
             return true;
+        }
+        // Bare cutover-pass label `C<digit>` branch: case-sensitive
+        // (uppercase `C` immediately followed by an ASCII digit). The
+        // per-line scan applies the word-boundary + trailing-context
+        // discriminator; the cheap necessary condition is the literal
+        // `C` followed by a digit anywhere in the file.
+        {
+            let raw = src.as_bytes();
+            if (0..raw.len().saturating_sub(1))
+                .any(|i| raw[i] == b'C' && raw[i + 1].is_ascii_digit())
+            {
+                return true;
+            }
         }
         // Bare Greek-letter phase-codename branch: a Greek capital
         // (U+0391..=U+03A9) is never part of legitimate source prose, so
@@ -6007,206 +6132,221 @@ mod foundations_guards {
         );
     }
 
+    /// Deliberate-violation fixtures: each fabricated line models a real
+    /// archaeology pattern observed in the codebase before the guard was
+    /// wired. Shared between `guard7_predicate_rejects_deliberate_violations`
+    /// (the per-line predicate must FLAG each) and
+    /// `prefilter_never_skips_a_flagged_line` (the whole-file pre-reject
+    /// must NOT skip any of them).
+    const POSITIVE_ARCHAEOLOGY_FIXTURES: &[&str] = &[
+        "// Phase 4 — graph-native projection for imported declarations.",
+        "// Phase 11b.2 — surface-projection helpers.",
+        "// Pre-Phase-4 the resolver passed the imported declaration's raw value.",
+        "// Post-Phase-4 + post-Phase-5l: assertion now expects the resolved value.",
+        "// D-Cutover §5.8 WIP-W retired the previously embedded engine.",
+        "// post-cutover clippy cleanup — direct_macro_type_reference_expr removed.",
+        "// `find_matching_angle` was deleted in 5g once the dispatch resolver took over.",
+        "#[allow(dead_code)] // deletion in 5g per call-graph closure",
+        "// they retire alongside the engine deletion in 5g.",
+        "// `legacy_first_pass` was retired in 11d.",
+        "/// phase-1b cutover deleted the declared component-meta query.",
+        // Audit-infrastructure plan archaeology — fixed-needle and
+        // `plan §` matches added when the audit-substrate cutover
+        // landed. The decimal section ref (§1.5) is a focused
+        // discriminator scoped to lines that also mention the
+        // audit-substrate vocabulary.
+        "// joiner-accounting per the audit infrastructure plan §1.5",
+        "/// see audit-infrastructure-plan.md for the contract",
+        "// per plan §3.4 of the audit substrate work",
+        "// Plan §3 Step 4 — joiner-accounting bumps",
+        "// joiner-accounting reference §1.5 lives elsewhere",
+        // Stage-family phase-archaeology — mirrors the Phase
+        // family. These are the patterns the fact-based cache
+        // refactor's stage list leaks into production source.
+        "// Stage 4d retired the per-session overlay-mutation lifecycle.",
+        "/// Pre-Stage-4d the overlay-mutation lifecycle invoked this from query paths.",
+        "// post-Stage-4d (R17): no-op when overlays are absent.",
+        "// Stage-5b instrumentation counter — admission-cap discriminator.",
+        "/// Stage 6e installs the legacy_dep_signature shadow scaffold.",
+        "/// stage 6a wires the real ResolvedImportFacts cache.",
+        "// Stage-4d compliance from the pre-state.",
+        // Block N.x — orchestrator block vocabulary.
+        "// Block 6.i Commit AX — descend the per-member cursor.",
+        "// Block 6.j R18 — emit PublishedField at the macro publication boundary.",
+        "/// Block 6.c per-request hoist read this counter.",
+        "// Block 12.a substrate cutover deleted the legacy walker.",
+        // Commit XY — alpha-suffixed commit markers.
+        "// Commit AX (codex-hybrid): the call-site provides the cursor.",
+        "// see Commit BX for the carrier-stop closure.",
+        // PE\d+ — orchestrator's per-block phase-extraction
+        // marker (e.g. `PE4`, `PE12`).
+        "// PE4 hash-cons memo discriminator shim.",
+        "/// (PE4 hoist discriminator).",
+        "// PE12 substrate cleanup follow-up.",
+        // / Fix [A-Z]\b — orchestrator's per-fix alpha marker
+        // (`/ Fix D`, `/ Fix AX`).
+        "//! / Fix D wraps the public substitute in change-tracking.",
+        "/// / Fix AX companion of the substitute helper.",
+        // Hyphenated Fix-letter / pre-Fix-letter / post-Fix-letter
+        // markers — distinct from the `/ Fix D` slash form.
+        "// Fix-D wraps the public substitute in change-tracking.",
+        "/// pre-Fix-D substitute helpers rebuilt every match arm.",
+        "// post-Fix-D the no-op branches short-circuit.",
+        "// Pre-Fix-AX companion of the substitute helper.",
+        // Path-letter cluster markers (`Path C C5`, `Path C C11a`).
+        "// Path C C5 propagates the lowering-time mapper kind.",
+        "/// Path C C11a — nested-infer in Function types.",
+        "// Path C C12 — batch submission handle.",
+        "// Path A B12 — alternate cluster marker.",
+        // round-N / Round-N / pre-Round-N / post-Round-N markers.
+        "// round-7 substrate extension closes the publication boundary.",
+        "// the round-12 codex TOP RISK warned about this regression.",
+        "/// pre-Round-10 admission called key_names_from_keyspace_node.",
+        "// post-Round-11 acceptance contract.",
+        "// Round-13 Step-0 on the corpus ChatMessage.vue.",
+        "// round 7 cutover demand.",
+        // Codex Nth-consult markers (title-case form).
+        "// Codex 4th-consult Q1 dispatch chain prerequisite.",
+        "/// Codex 7th consult diagnostic chain.",
+        "// Codex 2nd-consult landed in this revision.",
+        // Cluster-letter markers (single-letter discriminator only).
+        "// Cluster A: single-infer conditional.",
+        "/// Cluster B value selection.",
+        "// per Cluster C — relate Object surface.",
+        // Plan-section / Commit-number / revision archaeology
+        // (formerly the broader-D111 classifier's scope, now folded
+        // into the single source of truth).
+        "// Plan §3 Commit 9 — hover.provenance opt-in.",
+        "/// plan §3 Commit 8 — necessary for the audit bundle.",
+        "// Plan §3 Step 4 — audit warm-cache.",
+        "/// Plan §4.8 / Phase C / Commit R — RefCycleResultDb.",
+        "// Phase D §5.6 WIP-L — function shape (plan §2 decision).",
+        "// architectural-debt-closure rev 10.",
+        "// were deleted in Commit 3 of the cutover sub-plan).",
+        "// Counterpart deleted in Plan §6.15 / N — entry stored.",
+        "// Five-phase materialiser entry per plan §10.",
+        "// `phase-archaeology` is a sweep target.",
+        // Cache-runtime plan vocabulary (H19) — the three
+        // block-vocabulary patterns: the `\bblock \d+\b`
+        // word-boundary scan and the two fixed needles.
+        "// block 5: rehome the compile cache",
+        "// cache-runtime overhaul wiring",
+        "// runtime cutover landing step",
+        // Hyphenated block markers (e.g. `block-6.i`,
+        // `Block-12.a`) — orchestrator per-block code-names.
+        "// the block-6.i AX-WIP audit-passive-observer refactor",
+        "// Block-12.a substrate cutover",
+        // Orchestrator codenames added in H19 — `AX-WIP` plus the
+        // case-insensitive + hyphenation-tolerant `codex` vocabulary
+        // family (`codex audit`, `codex finding`, `codex observed`,
+        // and their `Codex …` / `codex-…` variants). Every
+        // capitalisation and separator must trip the predicate.
+        "// after AX-WIP closes the Rule-5 leak",
+        "// (codex finding: keyspace enumeration cannot proceed)",
+        "// see codex audit on the 500-level fixture",
+        // Title-case `Codex audit` — the lowercase-only fixed
+        // needle missed this; the case-insensitive scan catches it.
+        "// Codex audit observation: chain-walk on the 500-level fixture",
+        // Hyphenated variants — `codex-observed`, `codex-audit`,
+        // `codex-finding`. The normalisation step collapses `-`
+        // to space before the substring check.
+        "// the codex-observed body-materialisation hazard",
+        "// codex-audit probe on the 500-level fixture",
+        "// (codex-finding: keyspace enumeration)",
+        // Title-case + hyphenation combined.
+        "// see Codex-Audit on the 500-level fixture",
+        // Bare `codex observed` (no hyphen) — completes the
+        // observed/audit/finding triple in the case-insensitive
+        // scan.
+        "// codex observed divergence from tsgo",
+        // SCOPE-LOCK plan markers — the orchestrator's block-plan
+        // scope-lock vocabulary.
+        "// (SCOPE-LOCK 12 — self_root_canonicals = base ∪ augmenters)",
+        "/// interface + class merge (SCOPE-LOCK 4): instance-member fold",
+        "// scope-lock 15e overlay-aware index population",
+        // `Codex P<n>` / `Codex-P<n>` review-finding markers — the
+        // verdict label that must not survive into final-state prose.
+        "/// Project isolation prevents cross-project poisoning (Codex P0.1).",
+        "// known_miss_generation (Codex P2.2): read the owner's tag",
+        "// the Codex-P2.2 fix lives alongside it",
+        // FORK-<UPPER> — staged-fork orchestrator code-names.
+        "// U2B.9 FORK-A: the key carries an InstantiateContext.",
+        "/// base/owner slot (FORK-A): reads the defining file's env.",
+        "// per the design §2.1 FORK-B note, provenance is family-identity.",
+        // U<digit>B-anchored plan-block tokens (`U2B.9`, `U2B9`,
+        // `U2B.5`, `U2B.8`) — the staged-overhaul plan's block ids.
+        "// U2B.9 — env-scoped key-identity guards.",
+        "/// every U2B.5/6/7 spine row (class-surface / ambient-namespace).",
+        "// Test-only probe; lets the U2B.8 size-discipline guards pin the cap.",
+        "/// base/owner slot (U2B.9): reads the defining file's per-canonical env.",
+        "// the U2B9 cutover collapsed the split shape caches.",
+        // LETTERED plan-phase labels (`Phase C/D/G/H`) — the single
+        // uppercase-letter marker form. Distinct from the numeric
+        // `Phase \d+` family above.
+        "// Phase C focused semantic-query counters.",
+        "/// Identity tuple for the Phase G mapped-member materialization.",
+        "// Phase H classification + recursive hash-cons memo probe.",
+        "// Phase D recursive-ref guard pushes the canonical pair.",
+        "// Builder Phase C owns the second pass.",
+        "// Codex BINDING Phase G direction (Hypothesis A).",
+        // WIP-[A-Z] orchestrator work-in-progress markers.
+        "// §5.6 WIP-L — function shape.",
+        "/// Phase D §5.3 WIP-R: per-call cycle-guard over visited nodes.",
+        // Agent-attribution provenance — possessives, design-label
+        // phrases, and codex review-question markers.
+        "// Calls to `build_typeof` (gemini's HIGH-confidence direction).",
+        "// confirms codex's mapper-identity-instability concern.",
+        "/// Gemini's CRITICAL PERFORMANCE finding and CC's M1.",
+        "/// Reduction-demand axis (codex-hybrid spec).",
+        "// Phase C: codex-prescribed \"mapped descents\" counter.",
+        "// Codex Q4 — IA path-precision.",
+        "// the codex spec mandates carrier-stop here.",
+        "/// Codex's 3-way consult identified the from_host entry.",
+        // pre-AX / post-AX orchestrator codename narrative.
+        "// the pre-AX walker bailed on imported mapped arms.",
+        "/// (matches the pre-AX behaviour).",
+        "// post-AX the entry point is unified.",
+        // Hyphenated `codex re-review` review-provenance label.
+        "// Flag-after-insert race fix (codex re-review P2):",
+        "/// Strict ordering (codex re-review): the writer sets the flag.",
+        // Review/consult verdict provenance — `codex flagged`,
+        // `codex consult`, `<agent> diagnosis`, and the numbered
+        // `consult #<digit>` marker. Each names the review agent or a
+        // numbered consult round rather than the mechanism.
+        "// the mapper-identity-instability signal codex flagged.",
+        "/// is the SINGLE conversion point (codex consult) — route here.",
+        "// bug fix (codex consult #3 diagnosis): the previous arg.",
+        "// hover died. This is the exact P0 both codex reviewers flagged.",
+        "// gemini diagnosis: keyspace enumeration stalls the dispatch.",
+        "// see consult #5 for the numbered-consult rationale.",
+        // Bare Greek-letter phase codenames — `Γ.A`, `Γ.B`, `Δ.1`.
+        // A Greek capital followed by `.<alnum>` is the orchestrator
+        // phase-codename marker and never legitimate source prose.
+        "/// Γ.A invariant: invalidation does NOT drop Global.",
+        "// Γ.B reverse index registration for each canonical.",
+        "// the Δ.2 step folds the augmenter contributions.",
+        // pre-C<digit> / post-C<digit> / Pass C<digit> — the cutover
+        // plan's `C<n>` codename in pre/post/Pass narrative form.
+        "// always equal to node_arena_pushes pre-C7, diverges later.",
+        "/// the pre_C7 counter relationship holds until interning lands.",
+        "// post-C17 the lock-wait counter is wired into the audit ctx.",
+        "// preC7 the two counters are identical.",
+        "/// (C17 observability per Pass C17).",
+        // Bare cutover-pass label `C<digits>[a-z]?` — the
+        // semantic-db-overhaul plan named its passes `C0`…`C17`.
+        // Each fixture exercises one of the discriminating signals.
+        "/// C16: Declaration resolved but not yet materialized.", // `:` + UPPERCASE
+        "// C17 preserves C7's short-circuit on the refcount path.", // `C7's` possessive
+        "// C11a re-evaluates whether nested-infer needs node-id matching.", // letter suffix
+        "/// build_typeof, C1's forthcoming build_instantiate, etc.", // `C1's` possessive
+        "// C0. Eagerly populate the type-provider workspace roots.", // `.` + UPPERCASE
+        "// Distributive distribution is dispatch's job (C2 + lazy block).", // ` +`
+        "//   sub-queries (C3).",                                  // `(C3)` parenthesised
+    ];
+
     #[test]
     fn guard7_predicate_rejects_deliberate_violations() {
-        // Each of these fabricated lines models a real archaeology
-        // pattern observed in the codebase before this guard was wired.
-        let cases = [
-            "// Phase 4 — graph-native projection for imported declarations.",
-            "// Phase 11b.2 — surface-projection helpers.",
-            "// Pre-Phase-4 the resolver passed the imported declaration's raw value.",
-            "// Post-Phase-4 + post-Phase-5l: assertion now expects the resolved value.",
-            "// D-Cutover §5.8 WIP-W retired the previously embedded engine.",
-            "// post-cutover clippy cleanup — direct_macro_type_reference_expr removed.",
-            "// `find_matching_angle` was deleted in 5g once the dispatch resolver took over.",
-            "#[allow(dead_code)] // deletion in 5g per call-graph closure",
-            "// they retire alongside the engine deletion in 5g.",
-            "// `legacy_first_pass` was retired in 11d.",
-            "/// phase-1b cutover deleted the declared component-meta query.",
-            // Audit-infrastructure plan archaeology — fixed-needle and
-            // `plan §` matches added when the audit-substrate cutover
-            // landed. The decimal section ref (§1.5) is a focused
-            // discriminator scoped to lines that also mention the
-            // audit-substrate vocabulary.
-            "// joiner-accounting per the audit infrastructure plan §1.5",
-            "/// see audit-infrastructure-plan.md for the contract",
-            "// per plan §3.4 of the audit substrate work",
-            "// Plan §3 Step 4 — joiner-accounting bumps",
-            "// joiner-accounting reference §1.5 lives elsewhere",
-            // Stage-family phase-archaeology — mirrors the Phase
-            // family. These are the patterns the fact-based cache
-            // refactor's stage list leaks into production source.
-            "// Stage 4d retired the per-session overlay-mutation lifecycle.",
-            "/// Pre-Stage-4d the overlay-mutation lifecycle invoked this from query paths.",
-            "// post-Stage-4d (R17): no-op when overlays are absent.",
-            "// Stage-5b instrumentation counter — admission-cap discriminator.",
-            "/// Stage 6e installs the legacy_dep_signature shadow scaffold.",
-            "/// stage 6a wires the real ResolvedImportFacts cache.",
-            "// Stage-4d compliance from the pre-state.",
-            // Block N.x — orchestrator block vocabulary.
-            "// Block 6.i Commit AX — descend the per-member cursor.",
-            "// Block 6.j R18 — emit PublishedField at the macro publication boundary.",
-            "/// Block 6.c per-request hoist read this counter.",
-            "// Block 12.a substrate cutover deleted the legacy walker.",
-            // Commit XY — alpha-suffixed commit markers.
-            "// Commit AX (codex-hybrid): the call-site provides the cursor.",
-            "// see Commit BX for the carrier-stop closure.",
-            // PE\d+ — orchestrator's per-block phase-extraction
-            // marker (e.g. `PE4`, `PE12`).
-            "// PE4 hash-cons memo discriminator shim.",
-            "/// (PE4 hoist discriminator).",
-            "// PE12 substrate cleanup follow-up.",
-            // / Fix [A-Z]\b — orchestrator's per-fix alpha marker
-            // (`/ Fix D`, `/ Fix AX`).
-            "//! / Fix D wraps the public substitute in change-tracking.",
-            "/// / Fix AX companion of the substitute helper.",
-            // Hyphenated Fix-letter / pre-Fix-letter / post-Fix-letter
-            // markers — distinct from the `/ Fix D` slash form.
-            "// Fix-D wraps the public substitute in change-tracking.",
-            "/// pre-Fix-D substitute helpers rebuilt every match arm.",
-            "// post-Fix-D the no-op branches short-circuit.",
-            "// Pre-Fix-AX companion of the substitute helper.",
-            // Path-letter cluster markers (`Path C C5`, `Path C C11a`).
-            "// Path C C5 propagates the lowering-time mapper kind.",
-            "/// Path C C11a — nested-infer in Function types.",
-            "// Path C C12 — batch submission handle.",
-            "// Path A B12 — alternate cluster marker.",
-            // round-N / Round-N / pre-Round-N / post-Round-N markers.
-            "// round-7 substrate extension closes the publication boundary.",
-            "// the round-12 codex TOP RISK warned about this regression.",
-            "/// pre-Round-10 admission called key_names_from_keyspace_node.",
-            "// post-Round-11 acceptance contract.",
-            "// Round-13 Step-0 on the corpus ChatMessage.vue.",
-            "// round 7 cutover demand.",
-            // Codex Nth-consult markers (title-case form).
-            "// Codex 4th-consult Q1 dispatch chain prerequisite.",
-            "/// Codex 7th consult diagnostic chain.",
-            "// Codex 2nd-consult landed in this revision.",
-            // Cluster-letter markers (single-letter discriminator only).
-            "// Cluster A: single-infer conditional.",
-            "/// Cluster B value selection.",
-            "// per Cluster C — relate Object surface.",
-            // Plan-section / Commit-number / revision archaeology
-            // (formerly the broader-D111 classifier's scope, now folded
-            // into the single source of truth).
-            "// Plan §3 Commit 9 — hover.provenance opt-in.",
-            "/// plan §3 Commit 8 — necessary for the audit bundle.",
-            "// Plan §3 Step 4 — audit warm-cache.",
-            "/// Plan §4.8 / Phase C / Commit R — RefCycleResultDb.",
-            "// Phase D §5.6 WIP-L — function shape (plan §2 decision).",
-            "// architectural-debt-closure rev 10.",
-            "// were deleted in Commit 3 of the cutover sub-plan).",
-            "// Counterpart deleted in Plan §6.15 / N — entry stored.",
-            "// Five-phase materialiser entry per plan §10.",
-            "// `phase-archaeology` is a sweep target.",
-            // Cache-runtime plan vocabulary (H19) — the three
-            // block-vocabulary patterns: the `\bblock \d+\b`
-            // word-boundary scan and the two fixed needles.
-            "// block 5: rehome the compile cache",
-            "// cache-runtime overhaul wiring",
-            "// runtime cutover landing step",
-            // Hyphenated block markers (e.g. `block-6.i`,
-            // `Block-12.a`) — orchestrator per-block code-names.
-            "// the block-6.i AX-WIP audit-passive-observer refactor",
-            "// Block-12.a substrate cutover",
-            // Orchestrator codenames added in H19 — `AX-WIP` plus the
-            // case-insensitive + hyphenation-tolerant `codex` vocabulary
-            // family (`codex audit`, `codex finding`, `codex observed`,
-            // and their `Codex …` / `codex-…` variants). Every
-            // capitalisation and separator must trip the predicate.
-            "// after AX-WIP closes the Rule-5 leak",
-            "// (codex finding: keyspace enumeration cannot proceed)",
-            "// see codex audit on the 500-level fixture",
-            // Title-case `Codex audit` — the lowercase-only fixed
-            // needle missed this; the case-insensitive scan catches it.
-            "// Codex audit observation: chain-walk on the 500-level fixture",
-            // Hyphenated variants — `codex-observed`, `codex-audit`,
-            // `codex-finding`. The normalisation step collapses `-`
-            // to space before the substring check.
-            "// the codex-observed body-materialisation hazard",
-            "// codex-audit probe on the 500-level fixture",
-            "// (codex-finding: keyspace enumeration)",
-            // Title-case + hyphenation combined.
-            "// see Codex-Audit on the 500-level fixture",
-            // Bare `codex observed` (no hyphen) — completes the
-            // observed/audit/finding triple in the case-insensitive
-            // scan.
-            "// codex observed divergence from tsgo",
-            // SCOPE-LOCK plan markers — the orchestrator's block-plan
-            // scope-lock vocabulary.
-            "// (SCOPE-LOCK 12 — self_root_canonicals = base ∪ augmenters)",
-            "/// interface + class merge (SCOPE-LOCK 4): instance-member fold",
-            "// scope-lock 15e overlay-aware index population",
-            // `Codex P<n>` / `Codex-P<n>` review-finding markers — the
-            // verdict label that must not survive into final-state prose.
-            "/// Project isolation prevents cross-project poisoning (Codex P0.1).",
-            "// known_miss_generation (Codex P2.2): read the owner's tag",
-            "// the Codex-P2.2 fix lives alongside it",
-            // FORK-<UPPER> — staged-fork orchestrator code-names.
-            "// U2B.9 FORK-A: the key carries an InstantiateContext.",
-            "/// base/owner slot (FORK-A): reads the defining file's env.",
-            "// per the design §2.1 FORK-B note, provenance is family-identity.",
-            // U<digit>B-anchored plan-block tokens (`U2B.9`, `U2B9`,
-            // `U2B.5`, `U2B.8`) — the staged-overhaul plan's block ids.
-            "// U2B.9 — env-scoped key-identity guards.",
-            "/// every U2B.5/6/7 spine row (class-surface / ambient-namespace).",
-            "// Test-only probe; lets the U2B.8 size-discipline guards pin the cap.",
-            "/// base/owner slot (U2B.9): reads the defining file's per-canonical env.",
-            "// the U2B9 cutover collapsed the split shape caches.",
-            // LETTERED plan-phase labels (`Phase C/D/G/H`) — the single
-            // uppercase-letter marker form. Distinct from the numeric
-            // `Phase \d+` family above.
-            "// Phase C focused semantic-query counters.",
-            "/// Identity tuple for the Phase G mapped-member materialization.",
-            "// Phase H classification + recursive hash-cons memo probe.",
-            "// Phase D recursive-ref guard pushes the canonical pair.",
-            "// Builder Phase C owns the second pass.",
-            "// Codex BINDING Phase G direction (Hypothesis A).",
-            // WIP-[A-Z] orchestrator work-in-progress markers.
-            "// §5.6 WIP-L — function shape.",
-            "/// Phase D §5.3 WIP-R: per-call cycle-guard over visited nodes.",
-            // Agent-attribution provenance — possessives, design-label
-            // phrases, and codex review-question markers.
-            "// Calls to `build_typeof` (gemini's HIGH-confidence direction).",
-            "// confirms codex's mapper-identity-instability concern.",
-            "/// Gemini's CRITICAL PERFORMANCE finding and CC's M1.",
-            "/// Reduction-demand axis (codex-hybrid spec).",
-            "// Phase C: codex-prescribed \"mapped descents\" counter.",
-            "// Codex Q4 — IA path-precision.",
-            "// the codex spec mandates carrier-stop here.",
-            "/// Codex's 3-way consult identified the from_host entry.",
-            // pre-AX / post-AX orchestrator codename narrative.
-            "// the pre-AX walker bailed on imported mapped arms.",
-            "/// (matches the pre-AX behaviour).",
-            "// post-AX the entry point is unified.",
-            // Hyphenated `codex re-review` review-provenance label.
-            "// Flag-after-insert race fix (codex re-review P2):",
-            "/// Strict ordering (codex re-review): the writer sets the flag.",
-            // Review/consult verdict provenance — `codex flagged`,
-            // `codex consult`, `<agent> diagnosis`, and the numbered
-            // `consult #<digit>` marker. Each names the review agent or a
-            // numbered consult round rather than the mechanism.
-            "// the mapper-identity-instability signal codex flagged.",
-            "/// is the SINGLE conversion point (codex consult) — route here.",
-            "// bug fix (codex consult #3 diagnosis): the previous arg.",
-            "// hover died. This is the exact P0 both codex reviewers flagged.",
-            "// gemini diagnosis: keyspace enumeration stalls the dispatch.",
-            "// see consult #5 for the numbered-consult rationale.",
-            // Bare Greek-letter phase codenames — `Γ.A`, `Γ.B`, `Δ.1`.
-            // A Greek capital followed by `.<alnum>` is the orchestrator
-            // phase-codename marker and never legitimate source prose.
-            "/// Γ.A invariant: invalidation does NOT drop Global.",
-            "// Γ.B reverse index registration for each canonical.",
-            "// the Δ.2 step folds the augmenter contributions.",
-            // pre-C<digit> / post-C<digit> / Pass C<digit> — the cutover
-            // plan's `C<n>` codename in pre/post/Pass narrative form.
-            "// always equal to node_arena_pushes pre-C7, diverges later.",
-            "/// the pre_C7 counter relationship holds until interning lands.",
-            "// post-C17 the lock-wait counter is wired into the audit ctx.",
-            "// preC7 the two counters are identical.",
-            "/// (C17 observability per Pass C17).",
-        ];
-        for line in cases {
+        for line in POSITIVE_ARCHAEOLOGY_FIXTURES {
             assert!(
                 line_has_phase_archaeology(line),
                 "guard 7 predicate must reject deliberate-violation line: {line:?}",
@@ -6369,11 +6509,53 @@ mod foundations_guards {
             // a formula, e.g. a summation) is not the phase-codename
             // marker form.
             "// the weight Σ accumulates across the visited nodes.",
+            // Bare cutover-pass label negatives — `C<digits>` forms that
+            // are NOT the plan-pass codename. These guard against
+            // over-broad matching workspace-wide.
+            "// C99 and C11 are the relevant C-language standards.", // C-standard, comment-leading + space + uppercase word (`C99 and` → `and` is lowercase; `C11 are` → lowercase) — not flagged
+            "// the C11 atomic_compare_exchange path needs a fence.", // `C11` mid-comment (not comment-leading), no trailing trigger
+            "// the constant 0xC1 is the opcode prefix.",             // hex
+            "// the byte 0xC16 marks the start of the frame.",        // hex, longer
+            "// Class C2 inheritance is resolved by the linker.", // `C2` mid-prose, no trailing trigger
+            "// returns the C3 register value to the caller.", // `C3` mid-comment, not comment-leading
+            "// the codomain C99 is well-defined.",            // C99 bare
+            "// see RFC C1 in the appendix.", // `C1` mid-comment, not comment-leading, no trigger
+            "// ClassName carries the C identifier prefix.", // `C` then letter — not a digit label
         ];
         for line in allowed {
             assert!(
                 !line_has_phase_archaeology(line),
                 "guard 7 predicate must NOT flag legitimate line: {line:?}",
+            );
+        }
+    }
+
+    /// Prefilter / line-predicate parity: the cheap whole-file
+    /// pre-reject [`file_may_have_phase_archaeology`] must NEVER skip a
+    /// file containing a line the per-line predicate
+    /// [`line_has_phase_archaeology`] would flag. Both the production
+    /// sweep (`no_phase_archaeology_in_production_code`) and the strict
+    /// test-file sweep (`phase_archaeology_test_files_count_zero`) gate
+    /// the per-line scan on the prefilter, so any prefilter blind spot is
+    /// a SILENT coverage hole. Asserting the prefilter returns `true` for
+    /// every deliberate-violation fixture line permanently pins the
+    /// invariant that the two predicates cannot diverge.
+    #[test]
+    fn prefilter_never_skips_a_flagged_line() {
+        for line in POSITIVE_ARCHAEOLOGY_FIXTURES {
+            // Sanity: the line-level predicate flags it (mirrors
+            // `guard7_predicate_rejects_deliberate_violations`).
+            assert!(
+                line_has_phase_archaeology(line),
+                "fixture is not flagged by the per-line predicate: {line:?}",
+            );
+            // The prefilter, run over the SINGLE line as a whole "file",
+            // must not pre-reject it.
+            assert!(
+                file_may_have_phase_archaeology(line),
+                "prefilter `file_may_have_phase_archaeology` SKIPS a line the \
+                 per-line predicate flags — the prefilter has a coverage hole \
+                 and the sweep would silently miss this violation: {line:?}",
             );
         }
     }

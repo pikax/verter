@@ -767,7 +767,7 @@ pub(crate) fn resolve_payload_surface(
 ///     win, since the gates are cheap to re-run.
 ///  4. **Cold compute is single-shot.** When a reduction is required,
 ///     `reduce_member_value_graph_native` runs ONCE
-///     (per the C2 single-compute pattern). The cache's
+///     (single-compute pattern). The cache's
 ///     `get_or_compute` closure captures the pre-computed
 ///     `MaterializedTypeExpr` by move; if the fact signature cannot
 ///     be built (no tear-free scope observation or a
@@ -994,7 +994,7 @@ fn member_shape_peek_or_compute(
     }
 
     // (4) Cold compute via the graph-native reducer. Single-shot —
-    // pre-computed ONCE outside the cache call (C2 single-compute
+    // pre-computed ONCE outside the cache call (single-compute
     // pattern). The cache's `get_or_compute` closure either captures
     // and moves the pre-computed `materialized` into the cache entry,
     // or returns `None` (signature-refusal) — in either case the

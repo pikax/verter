@@ -343,7 +343,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let merged = self.reduce_merged_decl(contributors);
                 return self.raise_node_to_type_expr_inner(merged, active);
             }
-            // C16: DeclPlaceholder → TypeExpr::Ref (replaces DeclAnchor).
+            // DeclPlaceholder lowers to a TypeExpr::Ref shell.
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder { name, .. }) => TypeExpr::Ref {
                 name: std::sync::Arc::clone(name),
                 type_arguments: verter_type_expr::empty_type_args(),

@@ -298,7 +298,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             // Named type reference (`type Foo<T> = { y: Other<T> }` →
             // `Other<T>` at `y`'s position). Resolve through
-            // dispatch per C1:
+            // dispatch:
             //   - 0-arg refs → execute(ResolveDecl(...)).
             //   - n-arg refs → execute(ResolveDecl(...)) then
             //     execute(Instantiate(decl_identity, lowered_args)) →
@@ -1843,8 +1843,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
             // Conditionals, rest, recursive-ref, and unknown
             // constructs remain out of this pass's scope — they route
-            // through their own dispatch builders (C2/C7/...) or stay
-            // solver-scratch-only per.
+            // through their own dispatch builders (conditional /
+            // userland-equivalence) or stay solver-scratch-only.
             _ => self.opaque(QueryError::Miss),
         }
     }

@@ -1697,7 +1697,7 @@ pub enum QueryError {
     RecursiveRef { name: Arc<str> },
     /// Catch-all for text-bearing failures surfaced to the caller.
     Other(Arc<str>),
-    /// C16: Declaration resolved but not yet materialized. The node
+    /// Declaration resolved but not yet materialized. The node
     /// carries the file scope sidecar so callers can construct the
     /// content-free `ResolvedDeclSlotIdentity` slot for `Instantiate`
     /// keys. Walk/enumerate code treats this as "expandable via
@@ -3930,7 +3930,7 @@ pub enum SemanticNodeData {
     /// - `true_branch_ref` / `false_branch_ref` — shell-level references
     ///   to each branch. Not pre-expanded; a walker that projects into
     ///   the branch materialises its body via
-    ///   [`SemanticQueryKey::ProjectPath`] sub-queries (C3).
+    ///   [`SemanticQueryKey::ProjectPath`] sub-queries.
     /// - `distributive` — `true` when `check` is a naked type parameter
     ///   (TS distributive-conditional semantics).
     ///
@@ -4031,12 +4031,12 @@ pub enum SemanticNodeData {
 }
 
 impl SemanticNodeData {
-    /// Stable discriminant index used by Path C instrumentation
+    /// Stable discriminant index used by arena instrumentation
     /// to bucket per-variant push counts on
     /// [`crate::types::MetaProvenance::node_arena_pushes_per_discriminant`].
     ///
     /// Values are independent of the variant declaration order so that
-    /// variant additions / removals (e.g. C16 retiring `DeclAnchor`) do not
+    /// variant additions / removals do not
     /// renumber unrelated buckets. The returned index must stay below
     /// [`crate::types::SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT`].
     #[must_use]

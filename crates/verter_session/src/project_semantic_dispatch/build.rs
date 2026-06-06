@@ -233,8 +233,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         }
 
-        // Record the declaration's origin scope in the sidecar (
-        // + C1) so dispatch builders reached from this anchor can route
+        // Record the declaration's origin scope in the sidecar so
+        // dispatch builders reached from this placeholder can route
         // per-base-scope lookups through the scope's declaration-scope
         // payload.
         let scope = NodeScopeId::File {
@@ -243,8 +243,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             local_scope: key.scope.local_scope,
         };
         let signature = self.dep_signature_for(&key.scope.canonical_id, observed_hash);
-        // C16: DeclAnchor retired. Return a DeclPlaceholder that carries
-        // enough identity for callers to construct Instantiate keys.
+        // Return a DeclPlaceholder that carries enough identity for
+        // callers to construct Instantiate keys.
         let node_id = self.graph().intern_node_with_scope(
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                 canonical_id: Arc::clone(&key.scope.canonical_id),
@@ -1329,9 +1329,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
 
         // SubstituteTypeParam edges on the shell result: one per visited
-        // substituted occurrence ( C1 — edges emitted at
-        // substitution position; at shell level this aggregates on the
-        // result node per lazy block).
+        // substituted occurrence — edges emitted at substitution
+        // position; at shell level this aggregates on the result node
+        // per lazy block.
         for (param_name, arg_id) in substitutions {
             self.graph().record_origin_edge(
                 result,
@@ -3353,11 +3353,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///    shell. Member optionality / readonly derive from the mapper's
     ///    modifiers (`Add` → always on, `Remove` → always off, `Keep` →
     ///    inherit from the source if available, else default off).
-    /// 3. Member values are lazy: C6 interns them as opaque placeholders
-    ///    because the full `K → key` substitution over `value_expr`
-    ///    requires solver-scale `TypeExpr` lowering that lands in C7's
-    ///    userland-equivalence pass. Callers projecting into a produced
-    ///    member follow the ProjectPath sub-query route into the
+    /// 3. Member values are lazy: they are interned as opaque
+    ///    placeholders because the full `K → key` substitution over
+    ///    `value_expr` requires solver-scale `TypeExpr` lowering handled
+    ///    by the userland-equivalence path. Callers projecting into a
+    ///    produced member follow the ProjectPath sub-query route into the
     ///    keyspace + value expression.
     /// 4. Emit `Normalize` edges from the mapped result to each
     ///    contributing key. Emit one `ProjectMember` edge per produced
@@ -3828,13 +3828,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// evaluator's `Conditional` arm
     /// ([`crate::project_semantic_dispatch::evaluate`]: 142) →
     /// `SemanticQueryKey::Conditional` →
-    /// [`Self::build_conditional`]'s **C11a infer-binding path**
+    /// [`Self::build_conditional`]'s **infer-binding path**
     /// (build.rs: 2266) → `evaluate_deferred_semantic_node(check)`
     /// at default `Published(Expanded)` → IndexedAccess evaluator arm
     /// (evaluate.rs: 95) which hard-codes `ProjectionMode::Navigate`
     /// for the index re-dispatch, so the `PricingPlanSlots["badge"]`
     /// **selected-index / path projection** reduces independently of
-    /// the caller's `StructuralTransit(Navigate)` demand. The C11a
+    /// the caller's `StructuralTransit(Navigate)` demand. The infer
     /// binding then closes the conditional to a `Function`.
     ///
     /// dispatch chain (slot fixture):
@@ -3849,7 +3849,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///                                      under StructuralTransit(Navigate)
     ///               → conditional check resolves PricingPlanSlots["badge"]
     ///                            through selected-index/path projection
-    ///                 → C11a infer binds P
+    ///                 → infer binds P
     ///                   → true branch becomes a Function.
     /// ```
     ///
@@ -4132,7 +4132,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Conditional type ( C2 + §2 lazy block + §3
+    /// Conditional type (lazy-block evaluation +
     /// distributive-conditional authority).
     ///
     /// Evaluates `check extends extends ? true_branch : false_branch`
@@ -4163,10 +4163,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   references intact. Emits
     ///   [`OriginEdgeKind::ConditionalSelect`] with
     ///   [`BranchSelection::Deferred`]. Neither branch is recursively
-    ///   materialised; path projection into the result (C3) drives
+    ///   materialised; path projection into the result drives
     ///   per-subexpression lazy expansion.
     ///
-    /// C2's relation evaluator handles the decidable shapes the shallow
+    /// The relation evaluator handles the decidable shapes the shallow
     /// walker reaches directly: primitive identity, primitive-to-top/any,
     /// `never` bottom, exact node identity, and the obvious
     /// non-assignability cases. Object / union / intersection / generic
@@ -4182,7 +4182,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         false_branch: SemanticNodeId,
         distributive: bool,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        // §22 fast-reject (runs BEFORE the distributive-`Union` distribution,
+        // Fast-reject (runs BEFORE the distributive-`Union` distribution,
         // the `infer`-binding paths, and `shallow_relation_check`): `error
         // extends T` ⇒ `error` (carrier dominates), `any extends T ? X : Y` ⇒
         // `X | Y` (union of both branches, mode-independent), and DISTRIBUTIVE
@@ -4203,8 +4203,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let observed_self_roots =
             self.observed_self_roots_from_nodes([check, extends, true_branch, false_branch]);
 
-        // C2 + §3: distributive distribution is the
-        // dispatch layer's responsibility. When `distributive == true`
+        // Distributive distribution is the dispatch layer's
+        // responsibility. When `distributive == true`
         // and `check` is a union, re-enter `execute` per-member with
         // `distributive: false`, then normalise the per-member results
         // through `NormalizeUnion`. Each sub-dispatch lands in a

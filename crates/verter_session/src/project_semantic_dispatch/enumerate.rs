@@ -194,7 +194,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Primitive(PrimitiveKind::Never) => {
                 results.push(Some(Vec::new()));
             }
-            // C16: DeclPlaceholder — expand via Instantiate before
+            // DeclPlaceholder — expand via Instantiate before
             // enumerating keys. The placeholder's `whole_hash` is
             // payload-only diagnostic context; the `Instantiate` key
             // is content-free (R6) and `build_instantiate` re-sources
