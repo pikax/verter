@@ -2820,18 +2820,18 @@ impl SemanticGraphStore {
         //
         //    **TOCTOU guard.** We acquire `self.entries.lock()` FIRST and
         //    then re-check `inflight.state.aborted` under the entries
-        //  lock before calling `publish`. Invalidation's also
+        //    lock before calling `publish`. Invalidation also
         //    acquires `self.entries.lock()`; acquiring it here
         //    serialises us against invalidation. If invalidation got the
         //    entries lock first and aborted our in-flight via step 2,
         //    our re-check sees `aborted = true` and we skip publish. If
         //    we got the entries lock first, we publish and release;
-        //  invalidation then evicts our fresh publish in its
+        //    invalidation then evicts our fresh publish afterward.
         //    Either interleaving leaves the slot empty post-invalidation.
         //    A pre-lock check alone would leave a gap where a build
         //    result from a thread that checked `aborted=false` before
         //    acquiring `entries` could land AFTER invalidation's step 1
-        //  completed but BEFORE set `aborted=true` — a stale
+        //    completed but BEFORE it set `aborted=true` — a stale
         //    slot whose carrier does NOT reference the invalidated
         //    canonical (so even fact-rail self-root validation does
         //    not catch it).
