@@ -2508,10 +2508,14 @@ is created. Both tables live in this one module.
 > full 13-column `IgnoredTestRow` (file/function/substrate/capability/organ/owning_u_block/
 > block_id/semantic_queries/proof/status/mechanism_id/consumed_mechanisms/unblocker), the
 > closed 7-row `AdditionalProofRow` table, and the `TYPEINFO_PARITY_BLOCKS` DAG (each
-> `BlockContractRow` carrying `required_guards` + `verification_labels`). What remains for
-> the oracle/proof gate is the executable proof registry, the row-test wrapper, the
-> §10.4.1 coverage table, and the TS7 oracle harness (the `ProofRequirement::Ts7Oracle`
-> snapshots) — those are not yet built.
+> `BlockContractRow` carrying `required_guards` + `verification_labels`). The §10.4.1
+> row→`block_id` partition table (all 362 rows) is ALSO built and generated — it lives in
+> the BEGIN/END coverage block in §10.4.1 and the Python generator's `parse_partition`
+> reads it as authoritative input. What remains for the oracle/proof gate is the executable
+> proof registry, the row-test wrapper, the §10.4 row-exact capability→mechanism→proof
+> coverage GATE (the registry + checking guards that DEFINE completeness), and the TS7
+> oracle harness (the `ProofRequirement::Ts7Oracle` snapshots) — those are not yet built.
+> The §10.4.1 partition itself is NOT the unbuilt part.
 
 ### 10.1 Two SEPARATE tables: the binding 362 vs additional coverage
 
@@ -4070,6 +4074,7 @@ design-intent names for keys whose closure guards land alongside their reducers:
 - `block_rows_cannot_lift_without_complete_coverage` (a branch flipping rows `Lifted` without complete coverage fails CI)
 - `ignored_test_row_table_holds_exactly_362_rows`
 - `additional_proof_row_table_holds_exactly_7_rows`
+- `semantic_query_name_mirror_matches_live_tag_set` (the `SemanticQueryName` mirror tracks the live `SemanticQueryKeyTag::ALL` variant set; carried in `U0.MANIFEST_SUBSTRATE`'s `BlockContractRow.required_guards`)
 - the source-`#[ignore]` ↔ `Ignored`-rows ↔ `EXPECTED_TOTAL_IGNORED_COUNT` bijection/count guards
 - `no_landed_typeinfo_block_has_live_ignored_rows`
 
