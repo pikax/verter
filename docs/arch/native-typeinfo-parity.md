@@ -2504,9 +2504,14 @@ The manifest is extended **in place** (in
 `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs`); no second ledger file
 is created. Both tables live in this one module.
 
-> **State note:** the schema below is the **end state** to be built. The current manifest
-> has only file/function/substrate/unblocker fields — no block/status/proof/guard fields.
-> This architecture does not imply the extended schema already exists.
+> **State note:** the two-table schema below is BUILT. The live manifest carries the
+> full 13-column `IgnoredTestRow` (file/function/substrate/capability/organ/owning_u_block/
+> block_id/semantic_queries/proof/status/mechanism_id/consumed_mechanisms/unblocker), the
+> closed 7-row `AdditionalProofRow` table, and the `TYPEINFO_PARITY_BLOCKS` DAG (each
+> `BlockContractRow` carrying `required_guards` + `verification_labels`). What remains for
+> the oracle/proof gate is the executable proof registry, the row-test wrapper, the
+> §10.4.1 coverage table, and the TS7 oracle harness (the `ProofRequirement::Ts7Oracle`
+> snapshots) — those are not yet built.
 
 ### 10.1 Two SEPARATE tables: the binding 362 vs additional coverage
 

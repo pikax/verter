@@ -571,7 +571,11 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
     use SemanticQueryName::*;
     use TypeInfoParityBlockId::*;
     match key {
-        ResolveDecl | TypeOf | NormalizeUnion | NormalizeIntersection | ResolvedNamedType
+        ResolveDecl
+        | TypeOf
+        | NormalizeUnion
+        | NormalizeIntersection
+        | ResolvedNamedType
         | ApparentType => U2QueryValueDomain,
         Relate | Instantiate | Conditional => U2RelationInfer,
         IndexedAccess | KeyOf | ProjectMember | ProjectPath => U2IndexedAccess,
@@ -1644,7 +1648,10 @@ fn semantic_query_name_mirror_matches_live_tag_set() {
         SEMANTIC_QUERY_NAME_ALL.len(),
         "`SEMANTIC_QUERY_NAME_ALL` contains duplicate variants",
     );
-    assert!(!live.is_empty(), "`SemanticQueryKeyTag::ALL` must be non-empty");
+    assert!(
+        !live.is_empty(),
+        "`SemanticQueryKeyTag::ALL` must be non-empty"
+    );
 }
 
 /// §9 / §11.5 — every `BlockContractRow` CARRIES its contract metadata: a
