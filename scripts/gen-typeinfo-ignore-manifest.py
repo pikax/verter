@@ -440,7 +440,6 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
     ],
     "U2Utilities": [
         _DAG,
-        "pick_never_yields_empty_object",
         "keyspace_budget_exceeded_admits_nothing",
     ],
     "U2IndexedAccess": [
@@ -450,7 +449,8 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
     "U2MappedTemplate": [
         _DAG,
         "template_literal_reduce_models_ts_numeric_bigint_lexing",
-        "mapped_modifier_minus_optional_strips_optional_and_undefined",
+        "mapped_minus_optional_strips_only_optional_origin_undefined",
+        "mapped_minus_optional_preserves_explicit_undefined_on_required_property",
     ],
     "U2ClassSurfaces": [
         _DAG,
@@ -489,7 +489,6 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
     "U6PredicateAssertion": [
         _DAG,
         "predicate_assertion_effect_is_signature_metadata_not_published_type_node",
-        "flow_invalidations_fi08_asserts_narrows_dotted_member_path",
         "predicate_signature_without_body_audits_signature_only_outcome",
     ],
     "U6CallResolve": [
@@ -507,11 +506,11 @@ BLOCK_TO_REQUIRED_GUARDS: dict[str, list[str]] = {
     "U6ValueInference": [
         _DAG,
         "freshness_tracks_per_property_spread_taint",
-        "satisfies_widens_inner_value_to_primitive_without_as_const",
+        "satisfies_does_not_widen_returned_value",
     ],
     "U6AsyncGenerator": [
         _DAG,
-        "await_using_simulated_return_type_resolves_to_primitive",
+        "async_return_wraps_in_promise_via_builtin_utility",
         "lib_env_hash_drives_generator_return_resolution",
     ],
     "U6CrossFile": [
