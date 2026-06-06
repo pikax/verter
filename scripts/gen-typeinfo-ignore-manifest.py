@@ -27,6 +27,14 @@ Run after adding / removing / renaming an ignored test, or after the
 
 Commit the regenerated rows alongside the source changes that prompted
 the regeneration.
+
+Pass `--check` (or `--verify`) to regenerate in memory and EXIT NON-ZERO
+if any committed file diverges, WITHOUT writing — the drift gate (the
+Rust guard tests only diff/fail, never write tracked source):
+
+    python3 scripts/gen-typeinfo-ignore-manifest.py --check
+    # or via pnpm:
+    pnpm gen:typeinfo-manifest:check
 """
 
 from __future__ import annotations
@@ -1224,14 +1232,15 @@ def build_additional_rows() -> list[dict]:
     return rows
 
 
-def main() -> int:
+def main(check_only: bool = False) -> int:
     repo_root = Path(__file__).resolve().parent.parent
     src_dir = repo_root / "crates/verter_session/src/typeinfo/typeinfo_tests"
     if not src_dir.is_dir():
         print(f"typeinfo_tests dir missing: {src_dir}", file=sys.stderr)
         return 2
     out_dir = repo_root / "crates/verter_session/tests/manifest_data"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if not check_only:
+        out_dir.mkdir(parents=True, exist_ok=True)
 
     doc = (repo_root / "docs/arch/native-typeinfo-parity.md").read_text()
     partition = parse_partition(doc)
@@ -1320,19 +1329,67 @@ def main() -> int:
                 f"partition (do NOT derive mechanism from block)."
             )
         for k in r["keys"]:
-            if not _reaches(r["block"], KEY_OWNING_BLOCK[k]):
+            key_owner = KEY_OWNING_BLOCK.get(k)
+            if key_owner is None:
+                raise SystemExit(
+                    f"unknown semantic-query key: {r['file']}::{r['fn']} "
+                    f"(mechanism {r['mech']}) consumes {k}, which has no entry "
+                    f"in KEY_OWNING_BLOCK. Add {k} to KEY_OWNING_BLOCK to match "
+                    f"the live `key_owning_block` arms in "
+                    f"typeinfo_ignored_test_manifest.rs."
+                )
+            if not _reaches(r["block"], key_owner):
                 raise SystemExit(
                     f"unreachable key: {r['file']}::{r['fn']} (mechanism "
-                    f"{r['mech']}) consumes {k} owned by {KEY_OWNING_BLOCK[k]}, "
+                    f"{r['mech']}) consumes {k} owned by {key_owner}, "
                     f"not reachable from block {r['block']}. Fix MECHANISM_TO_KEYS "
                     f"or the block prereqs."
                 )
 
     additional = build_additional_rows()
 
-    (out_dir / "typeinfo_ignored_test_manifest_rows.rs").write_text(emit_ignored_rows(rows))
-    (out_dir / "typeinfo_additional_proof_rows.rs").write_text(emit_additional_rows(additional))
-    (out_dir / "typeinfo_parity_blocks.rs").write_text(emit_block_rows())
+    # The generated artifacts, computed in memory. The Rust guard tests
+    # only diff/fail; this script is the SOLE writer. `--check` mode
+    # regenerates these in memory and FAILS (non-zero) if any committed
+    # file diverges, WITHOUT writing — so CI / a pnpm script can detect
+    # generator drift without a tracked-source side effect.
+    generated: dict[str, str] = {
+        "typeinfo_ignored_test_manifest_rows.rs": emit_ignored_rows(rows),
+        "typeinfo_additional_proof_rows.rs": emit_additional_rows(additional),
+        "typeinfo_parity_blocks.rs": emit_block_rows(),
+    }
+
+    if check_only:
+        drifted: list[str] = []
+        for name, content in generated.items():
+            path = out_dir / name
+            committed = path.read_text() if path.exists() else None
+            if committed != content:
+                drifted.append(name)
+        if drifted:
+            print(
+                "error: committed typeinfo manifest is STALE vs the generator "
+                "for the following file(s):",
+                file=sys.stderr,
+            )
+            for name in drifted:
+                print(f"  - crates/verter_session/tests/manifest_data/{name}", file=sys.stderr)
+            print(
+                "Regenerate with `pnpm gen:typeinfo-manifest` and commit the result.",
+                file=sys.stderr,
+            )
+            return 6
+        print(
+            f"check: {len(generated)} generated manifest file(s) match the "
+            f"regenerated output ({len(rows)} IgnoredTestRows, "
+            f"{len(additional)} AdditionalProofRows, "
+            f"{len(BLOCK_TO_MECHANISM)} BlockContractRows)",
+            file=sys.stderr,
+        )
+        return 0
+
+    for name, content in generated.items():
+        (out_dir / name).write_text(content)
 
     print(
         f"wrote {len(rows)} IgnoredTestRows, {len(additional)} AdditionalProofRows, "
@@ -1342,5 +1399,19 @@ def main() -> int:
     return 0
 
 
+def _parse_args(argv: list[str]) -> bool:
+    """Returns True for check-only mode. Accepts `--check` / `--verify`."""
+    flags = set(argv[1:])
+    unknown = flags - {"--check", "--verify"}
+    if unknown:
+        print(
+            f"error: unknown argument(s): {', '.join(sorted(unknown))}. "
+            f"Usage: gen-typeinfo-ignore-manifest.py [--check|--verify]",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return bool(flags)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(check_only=_parse_args(sys.argv)))

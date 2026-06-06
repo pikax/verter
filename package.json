@@ -42,6 +42,7 @@
     "clean": "pnpm -r exec npx shx rm -rf .turbo dist tsconfig.tsbuildinfo && npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
     "gen:query-key-spec": "cargo run -p verter_session --bin gen-query-key-spec",
     "gen:typeinfo-manifest": "python3 scripts/gen-typeinfo-ignore-manifest.py",
+    "gen:typeinfo-manifest:check": "python3 scripts/gen-typeinfo-ignore-manifest.py --check",
     "integration-test": "node scripts/integration-test/run.mjs",
     "integration-test:discover": "node scripts/integration-test/run.mjs --discover-local --discover-only",
     "integration-test:local": "node scripts/integration-test/run.mjs --discover-local --local-only",
