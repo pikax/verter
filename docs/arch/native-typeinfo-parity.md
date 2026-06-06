@@ -1708,6 +1708,20 @@ they never invoke `tsgo`. Regeneration is feature/env-gated (a dedicated drift
 generator) — the only place permitted to execute `tsgo`. A guard forbids `tsgo`
 execution anywhere in runtime/default tests except the gated drift generator.
 
+> Note: `OracleId` here is the COARSE closed 17-family enum (the snapshot directory /
+> presentation key). The per-`(row, query)` snapshot IDENTITY is the content-derived
+> `snapshot_id` defined in `u0-oracle-harness-design.md`, derived from REGISTRY-ONLY,
+> tsgo-free inputs (the row-ref, the `query_helper_kind` + payload, `host_project`,
+> `normalizer_version`, `probe_synthesis_version`, the pinned `env_corpus_id` of the
+> closed vendored oracle-env corpus, the effective `compiler_options_hash`,
+> `tsgo_version`, and `oracle_schema_version`). The resolution-affecting env hash
+> (`oracle_env_hash`, taken over the vendored corpus) is NOT a `snapshot_id` input —
+> folding the full resolved-file-set into the filename would be circular; it is STORED
+> in the snapshot and validated as a VALUE on read (the consumption test and
+> `no_orphan_snapshot` re-enumerate the vendored corpus and re-hash it against the
+> stored manifest). `OracleId` itself is also excluded from `snapshot_id`. See that
+> document for the `TypeExpr`-projection harness and the closed vendored-corpus model.
+
 `satisfies` performs target-contextual validation and widening while preserving the
 source member set where TypeScript does; it is not a blanket replacement with the
 target and not a projection repair. Exact TS7 oracle pins are mandatory before lift.
@@ -2294,6 +2308,17 @@ RESCOPE-GATE-REQUIRED phase (`U2.RELATION_INFER`, U6 cross-engine, the native ch
 …) is designed at its rescope session, the session names that phase's families' N / M
 and the oracle gates the phase's acceptance. So the oracle grows phase-by-phase
 alongside the algorithm-depth design, rather than landing as one monolith.
+
+**TypeExpr type-projection oracle (specified separately).** The first concrete
+realization of this oracle — for the `TypeExpr`-valued type-projection families — is
+specified in [`u0-oracle-harness-design.md`](u0-oracle-harness-design.md). It captures
+tsgo `textDocument/hover` text via a synthesized probe, lowers it to a `TypeExpr` at
+generation time, and gates on **exact-equality** per-(row,query) `TypeExpr` snapshots
+(a stricter gate than a per-family budget) over **≤122 rows** — the oracle rows that do
+NOT assert a relation/call verdict. The structured / `relation_verdict` oracle for the
+`Relate` and call-resolution families remains future work under the per-family
+divergence-budget model described here, sourced from a structured checker path rather
+than hover text.
 
 **Distinct from the §6.2 / U15 perf benches.** The §6.2 Verter-vs-`tsgo` fixtures run
 the same pinned `tsgo` but gate COST (fallback count / cache mode); the §6.3 oracle
