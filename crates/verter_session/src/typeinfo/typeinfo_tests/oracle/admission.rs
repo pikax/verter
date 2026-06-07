@@ -56,165 +56,25 @@ use oxc_span::SourceType;
 
 use verter_type_expr::{MemberVisibility, ObjectMember, PrimitiveName, TypeExpr};
 
+// The source-side raw-fact data model is the PRODUCTION parse-time capture
+// (design item G — `verter_parser` / re-exported through `verter_compiler`).
+// There is ONE `RawSourceSurface` type: the admission predicate here consumes
+// the exact records the parse pass stores on the content-addressed artifact, so
+// the live `resolve_source_declarations` path feeds this gate without a second
+// type. The admission VERDICT model (`SourceContributor` / `SourceWalkResult` /
+// `AdmissionVerdict` / `RejectReason`) is admission-specific and stays here.
+use verter_compiler::utils::oxc::vue::resolve_type::{
+    OverloadSignature, RawDeclKind, RawKey, RawMemberKind, RawSourceSurface, TupleElementShape,
+    TypeParamModifiers, UniqueSymbolOp,
+};
+
 use super::normalize::ProjectionModeKind;
 
 // ===========================================================================
-// Source-side raw-fact data model (design item G — the type half).
-//
-// `RawSourceSurface` retains EXACTLY the closed set of pre-lowering admission
-// facts the OXC lowering would erase (each the catch-target of a §Q2 REJECT
-// row), and NOTHING that survives lowering losslessly (those are read from the
-// lowered body). The PARSE-TIME capture that populates these off the OXC parse
-// tree, and the live-resolver navigation that resolves a `SourceLocator` to an
-// ordered contributor vector, are deferred to a later increment.
+// Source-side admission verdict model (admission-specific — the raw-fact DATA
+// model `RawSourceSurface` / `RawKey` / … is the production parse-time capture
+// re-exported above, NOT redefined here).
 // ===========================================================================
-
-/// The RAW key form of an object/class member, before OXC drops a non-static
-/// key (`property_key_name` returns `None` for any non-static key —
-/// `verter_type_expr_oxc/src/lib.rs:921` — so the member is silently elided at
-/// `oxc/lib.rs:99`). A computed / `symbol` / `unique symbol` key must be visible
-/// as such, not silently dropped.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RawKey {
-    /// `name: T` — a static (identifier / string / numeric) key.
-    Static(String),
-    /// `[expr]: T` — a computed key.
-    Computed,
-    /// A `symbol`-keyed member.
-    SymbolKeyed,
-    /// A `unique symbol`-keyed member.
-    UniqueSymbolKeyed,
-}
-
-/// The kind of an object/class member, before OXC collapses an accessor to a
-/// plain property (an accessor is not even an `ObjectMember` variant —
-/// `verter_type_expr/src/lib.rs:426`).
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RawMemberKind {
-    Property,
-    IndexSignature,
-    Getter,
-    Setter,
-    Method,
-    CallSignature,
-    ConstructSignature,
-}
-
-/// A type parameter's RAW modifiers, before lowering drops them (`TypeParam` has
-/// no `const` modifier and no variance field — `lib.rs:1018`).
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct TypeParamModifiers {
-    /// The `const` modifier on a `const T` type parameter.
-    pub(crate) is_const: bool,
-    /// The `in` (contravariant) variance annotation.
-    pub(crate) variance_in: bool,
-    /// The `out` (covariant) variance annotation.
-    pub(crate) variance_out: bool,
-}
-
-impl TypeParamModifiers {
-    /// Whether ANY non-default modifier is present (the reject trigger).
-    fn is_present(&self) -> bool {
-        self.is_const || self.variance_in || self.variance_out
-    }
-}
-
-/// The RAW shape of a tuple element, before TS/lowering collapse the
-/// optional-element vs `| undefined` distinction.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TupleElementShape {
-    /// `[A, B]` — a plain, required, unlabeled element (the ONLY admissible
-    /// shape).
-    Plain,
-    /// `[A, B?]` — an optional element.
-    Optional,
-    /// `[label: A]` — a labelled element.
-    Labelled,
-    /// `[A | undefined]` — an explicit `| undefined` member (the distinction TS
-    /// collapses against the optional form).
-    OrUndefined,
-}
-
-/// The retained parse-time raw-fact record for ONE contributor declaration. The
-/// closed set of pre-lowering admission facts §Q2 enumerates — captured at the
-/// file's initial parse, before lowering erases them.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RawSourceSurface {
-    /// Leading-slash file id of THIS contributor.
-    pub(crate) decl_canonical: String,
-    /// The declaration kind.
-    pub(crate) decl_kind: RawDeclKind,
-    /// Per object/class member, the RAW key form.
-    pub(crate) raw_member_keys: Vec<RawKey>,
-    /// Per member, its raw kind (so an accessor is visible as Getter/Setter).
-    pub(crate) member_kinds: Vec<RawMemberKind>,
-    /// Per member, the DECLARED visibility modifier (before `oxc/lib.rs:427`
-    /// stamps it public).
-    pub(crate) member_visibility: Vec<MemberVisibility>,
-    /// Each `unique symbol` type-operator occurrence (before `oxc/lib.rs:171`
-    /// lowers it straight through).
-    pub(crate) unique_symbol_ops: Vec<UniqueSymbolOp>,
-    /// Whether a constructor type / class carries `abstract` (before
-    /// `oxc/lib.rs:126` ignores it).
-    pub(crate) abstract_ctor: bool,
-    /// Per type parameter, the `const` flag + `in`/`out` variance.
-    pub(crate) type_param_modifiers: Vec<TypeParamModifiers>,
-    /// Whether the decl uses a `this` type or a `this` parameter (erased to
-    /// `Ref("this")` / unrepresentable).
-    pub(crate) this_type_or_param: bool,
-    /// For a value / `typeof` referent, the `as const` + readonly/literal-tuple
-    /// provenance (collapsed by lowering). `None` when not a value referent.
-    pub(crate) value_const_assertion: Option<bool>,
-    /// The ORDERED raw signature group as written; `len >= 2` is an overload
-    /// SET (the multi-signature group a hover summary would collapse).
-    pub(crate) overload_signatures: Vec<OverloadSignature>,
-    /// For a utility-type application, the RAW referent identifier(s) as
-    /// written (inspection only — the transitive walk uses
-    /// `transitive_referents`).
-    pub(crate) utility_referent_names: Vec<String>,
-    /// Per tuple element, the optional / labelled / `| undefined` presence.
-    pub(crate) tuple_element_shape: Vec<TupleElementShape>,
-    /// `typeof`/`ReturnType`/`Parameters` next hops for the transitive walk.
-    pub(crate) transitive_referents: Vec<TransitiveReferent>,
-}
-
-/// The declaration kind of a contributor.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RawDeclKind {
-    TypeAlias,
-    Interface,
-    Enum,
-    Class,
-    Function,
-    Variable,
-}
-
-/// A single `unique symbol` type-operator occurrence (opaque — its presence is
-/// the reject trigger).
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UniqueSymbolOp;
-
-/// One raw signature in an overload group (opaque — the GROUP's arity is the
-/// reject trigger).
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OverloadSignature;
-
-/// A `typeof`/`ReturnType`/`Parameters` next-hop locator (opaque here — the live
-/// transitive walk re-enters the shared resolver for each, deferred).
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TransitiveReferent {
-    pub(crate) reference_canonical: String,
-    pub(crate) reference_name: String,
-}
 
 /// One bound defining declaration the source-side walk resolved, pairing the
 /// retained raw-fact record with the contributor's already-lowered body
