@@ -41,6 +41,7 @@
     "copy-plugin": "npx shx mkdir -p extensions/vue-vscode/node_modules/@verter && npx shx cp -r extensions/typescript-plugin extensions/vue-vscode/node_modules/@verter/typescript-plugin",
     "clean": "pnpm -r exec npx shx rm -rf .turbo dist tsconfig.tsbuildinfo && npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
     "gen:query-key-spec": "cargo run -p verter_session --bin gen-query-key-spec",
+    "gen:oracle-snapshots": "cargo run -p verter_session --features oracle-gen --bin oracle_gen",
     "gen:typeinfo-manifest": "python3 scripts/gen-typeinfo-ignore-manifest.py",
     "gen:typeinfo-manifest:check": "python3 scripts/gen-typeinfo-ignore-manifest.py --check",
     "integration-test": "node scripts/integration-test/run.mjs",
