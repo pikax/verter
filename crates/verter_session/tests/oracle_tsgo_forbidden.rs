@@ -94,6 +94,50 @@ fn oracle_consumption_path_has_no_tsgo_spawn() {
     }
 }
 
+/// The tsgo generator pins `@typescript/native-preview` to the EXACT preview
+/// version the snapshots were captured under (`docs/arch/u0-oracle-harness-design.md`
+/// §Q2 "Env pinning" — `tsgo_version = "7.0.0-dev.20260526.1"`). A floating
+/// `"latest"` would let an upgrade silently change tsgo answers without
+/// invalidating any snapshot. Discriminating: reverting the workspace
+/// `package.json` to `"latest"` (or any other version) FAILS this guard.
+#[test]
+fn tsgo_version_is_pinned() {
+    const PINNED_TSGO_VERSION: &str = "7.0.0-dev.20260526.1";
+
+    // MANIFEST_DIR is `crates/verter_session`; the workspace `package.json` is at
+    // the repo root (two levels up).
+    let pkg_json = Path::new(MANIFEST_DIR)
+        .join("../../package.json")
+        .canonicalize()
+        .expect("canonicalize workspace package.json path");
+    let raw = fs::read_to_string(&pkg_json)
+        .unwrap_or_else(|e| panic!("read {}: {e}", pkg_json.display()));
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("parse package.json");
+
+    let pinned = parsed
+        .get("devDependencies")
+        .and_then(|d| d.get("@typescript/native-preview"))
+        .or_else(|| {
+            parsed
+                .get("dependencies")
+                .and_then(|d| d.get("@typescript/native-preview"))
+        })
+        .and_then(|v| v.as_str())
+        .expect("package.json declares @typescript/native-preview");
+
+    assert_eq!(
+        pinned, PINNED_TSGO_VERSION,
+        "@typescript/native-preview MUST be pinned to the exact oracle tsgo \
+         version `{PINNED_TSGO_VERSION}`, not `{pinned}` — a floating version \
+         would let an upgrade silently change tsgo hover answers without \
+         invalidating the checked-in snapshots"
+    );
+    assert_ne!(
+        pinned, "latest",
+        "the tsgo pin must not be the floating `latest` tag"
+    );
+}
+
 fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
