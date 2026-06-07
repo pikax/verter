@@ -5,9 +5,9 @@
 //! carries the documented header comment, and respects the
 //! active-vs-landed invariant: a block cannot simultaneously be the active
 //! block AND appear in landed_blocks. The arch guard
-//! `tests/no_post_cutover_deferrals.rs` (Block 5 deliverable) reads the
-//! same file to govern which `block-<N> RED` ignore tokens are accepted at
-//! any moment in the cutover lifecycle.
+//! `tests/no_post_cutover_deferrals.rs` reads the same file to govern which
+//! `block-<N> RED` ignore tokens are accepted at any moment in the cutover
+//! lifecycle.
 
 use std::path::PathBuf;
 

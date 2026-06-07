@@ -1,8 +1,8 @@
-//! End-to-end session-overlay augmentation isolation oracle (SCOPE-LOCK 15e).
+//! End-to-end session-overlay augmentation isolation oracle.
 //!
-//! B2 proved overlay isolation at the INDEX level
-//! (`session_overlay_augmenter_isolated_from_base_index` in
-//! `g_misc3/module_augmentation_stitching.rs`). This is the END-TO-END oracle
+//! `session_overlay_augmenter_isolated_from_base_index` in
+//! `g_misc3/module_augmentation_stitching.rs` proves overlay isolation
+//! at the INDEX level. This is the END-TO-END oracle
 //! through the PUBLIC consumer (`MetaProject` / `MetaSession::get_component_meta`,
 //! whose session-scoped resolution runs under the `HostStoreView::from_session_id`
 //! overlay-aware view): a session-overlay `declare module` augmenter must surface
@@ -17,11 +17,11 @@
 //! `sessionOnly`); the session meta surfaces prop `sessionOnly` (never
 //! `fromBase`); the post-session base re-query is unchanged.
 //!
-//! Against a non-overlay-aware index (B2 pre-change: base-only `is_legacy()`
-//! scan, no `population` dimension) the session scan never sees the overlay
+//! Against a non-overlay-aware index (base-only `is_legacy()` scan, no
+//! `population` dimension) the session scan never sees the overlay
 //! augmenter version, so the session meta would carry `fromBase` (the base
 //! augmenter) and NOT `sessionOnly` — the discriminating session assertion
-//! FAILS. Post-change it PASSES.
+//! would FAIL. With the overlay-aware index it PASSES.
 
 use std::sync::Arc;
 

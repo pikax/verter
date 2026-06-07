@@ -1,12 +1,12 @@
-//! F8 baseline (Plan §3 Step 1) — allocation count for `getComponentMeta`
-//! with `audit_enabled: false`.
+//! Baseline allocation count for `getComponentMeta` with
+//! `audit_enabled: false`.
 //!
 //! Wraps the global allocator with a counting allocator, runs a
 //! `getComponentMeta` request on a small fixture, and records the
-//! allocation count. The post-Step-2 (F4 lazy trace macro) number
-//! goes into the F8 deliverable as the "trace allocation eliminated"
-//! evidence — pre-Step-2 the macro's `format!(...)` argument allocated
-//! on every call site even when no accumulator was installed.
+//! allocation count. With the lazy trace macro, the trace sites do
+//! not allocate when no accumulator is installed — a naive trace
+//! macro would instead run its `format!(...)` argument on every call
+//! site even when no accumulator was installed.
 //!
 //! Test binaries each install their own `#[global_allocator]`, so this
 //! test owns the entire process's allocator. Other tests in the same
@@ -68,18 +68,18 @@ fn record_baseline_allocation_count_for_audit_off_get_component_meta() {
     });
 
     // First call: warm bootstrap (parsing, indexing, initial resolution).
-    // Allocations during this phase are not what F4 targets.
+    // Allocations during this phase are not what the lazy trace macro targets.
     let primed = host.get_component_meta_with_resolution("/Small.vue");
     assert!(
         primed.is_some(),
-        "F8 baseline precondition: host must resolve `/Small.vue` before measurement",
+        "baseline precondition: host must resolve `/Small.vue` before measurement",
     );
 
     // Reset, then measure a second resolution. Audit is off → no
     // `RequestFootprintAccumulator` is installed in TLS for either call,
-    // so post-Step-2 the trace macros short-circuit before evaluating
-    // their detail expressions; pre-Step-2 every trace site
-    // unconditionally ran `format!(...)`.
+    // so the trace macros short-circuit before evaluating their detail
+    // expressions; a naive trace site would unconditionally run
+    // `format!(...)`.
     COUNTER.store(0, Ordering::Relaxed);
     let _ = host.get_component_meta_with_resolution("/Small.vue");
     let allocations = COUNTER.load(Ordering::Relaxed);
@@ -93,14 +93,14 @@ fn record_baseline_allocation_count_for_audit_off_get_component_meta() {
     // legitimately changes its allocation profile.
     assert!(
         allocations > 0,
-        "F8 baseline: counting allocator must have observed allocations \
+        "baseline: counting allocator must have observed allocations \
          from a non-trivial getComponentMeta resolution",
     );
     assert!(
         allocations < 200_000,
-        "F8 baseline: audit-off resolution allocated {allocations} times — \
-         pre-Step-2 the trace macro fired format!() on every call regardless \
-         of accumulator presence. If this number is large, F4 (lazy trace \
-         macro) may have regressed.",
+        "baseline: audit-off resolution allocated {allocations} times — \
+         a naive trace macro would fire format!() on every call regardless \
+         of accumulator presence. If this number is large, the lazy trace \
+         macro may have regressed.",
     );
 }

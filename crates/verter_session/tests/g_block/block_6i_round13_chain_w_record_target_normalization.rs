@@ -71,7 +71,7 @@ use verter_session::audited_request::AuditedRequest;
 // union from `ToolOutputProperties`. Each member name appears only
 // in this file and would appear as a per-prop publication-path side-
 // effect of eagerly lowering the Conditional's `extends` arm under
-// `Published(Expanded)` (the pre-Round-13 behaviour). Any
+// `Published(Expanded)`. Any
 // `ProjectMember` edge naming them on the publication path is
 // unambiguously the Chain-W leak.
 const AI_TYPES_TS: &str = r#"
@@ -79,7 +79,7 @@ const AI_TYPES_TS: &str = r#"
 // Conditional whose `extends` arm contains a Mapped over a
 // literal-union keyspace `{ outputSchema, execute }`. When this
 // Conditional is lowered under the inherited outer
-// `Published(Expanded)` context (the pre-Round-13 behaviour) the
+// `Published(Expanded)` context the
 // `extends` lowering eagerly dispatches `Partial<{ outputSchema, execute }>`
 // → `build_mapped_type` reaches `may_reduce_operator(Published(_)) ==
 // true` → enumerates the literal keyspace → emits one ProjectMember
@@ -97,9 +97,9 @@ export type ChainW<T> = T extends Partial<ToolBody> ? { ok: true } : { ok: false
 // Mirrors the corpus ChatMessage shape: a generic interface
 // extending `UIMessage<TTools>` consumed by
 // `defineProps<X<TTools>>()`. The per-prop publication path
-// iterates inherited members. Pre-Round-13 the Conditional's
-// `extends` arm inherited the outer `Published(Expanded)` context
-// and emitted per-member edges for `outputSchema` / `execute`.
+// iterates inherited members. A Conditional whose
+// `extends` arm inherits the outer `Published(Expanded)` context
+// would emit per-member edges for `outputSchema` / `execute`.
 const CHAT_MESSAGE_VUE: &str = r#"<script lang="ts">
 import type { ChainW } from './ai_types';
 

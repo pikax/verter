@@ -40,8 +40,8 @@
 //!   reverse-dependent cascade was removed; this entry covers only the
 //!   upserted file's own-cache drain.
 //!
-//! Reference pattern: Block 1.E's `import_route_writer_guard.rs` and
-//! Block 1.G's `no_accumulate_dispatch_dep_signature_outside_helpers.rs`.
+//! Reference pattern: `import_route_writer_guard.rs` and
+//! `no_accumulate_dispatch_dep_signature_outside_helpers.rs`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -398,7 +398,7 @@ fn no_bulk_invalidation_outside_reset_methods() {
     }
     assert!(
         violations.is_empty(),
-        "Block 5 `no_eager_invalidation` violation:\n{}\n\n\
+        "`no_eager_invalidation` violation:\n{}\n\n\
          The fact-based cache architecture revalidates warm hits via \n\
          `HostFenceValidator` + dep-signatures. Eager bulk-clear bypasses \n\
          that machinery. If you need lifecycle reset, name the method \n\

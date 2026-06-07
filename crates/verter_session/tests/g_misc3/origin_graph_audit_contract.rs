@@ -1,30 +1,30 @@
-//! F1 (Plan §3 Step 3) — `origin_graph` audit-only contract.
+//! `origin_graph` audit-only contract.
 //!
-//! Discriminator strategy: at HEAD `b8e0e1b4`, the materialization
-//! path that produces component-meta does NOT route through
-//! `ProjectSemanticDispatch::execute` (that's the Step 6 lift), so
-//! `record_origin_edge` does not fire during normal `getComponentMeta`
-//! resolution and `export_all_origin_edges()` returns an empty set
-//! for every realistic fixture. A runtime-discriminator that asserts
+//! Discriminator strategy: the materialization path that produces
+//! component-meta does NOT route through
+//! `ProjectSemanticDispatch::execute` yet, so `record_origin_edge`
+//! does not fire during normal `getComponentMeta` resolution and
+//! `export_all_origin_edges()` returns an empty set for every
+//! realistic fixture. A runtime-discriminator that asserts
 //! `origin_graph.is_some()` in the audit-on case would be unprovable
-//! pre-Step-6 and is therefore not used here.
+//! until that routing lands and is therefore not used here.
 //!
-//! Instead the Step 3 discriminator is split:
+//! Instead the discriminator is split:
 //!
 //! 1. **Static-text discriminator** (`gate_text_includes_audit_enabled`)
-//!    — asserts the code at `meta_resolve.rs` contains the
-//!    `audit_enabled && self.config.footprint_capture` guard. Pre-fix
-//!    the guard isn't there; post-fix it is. This is mechanically
-//!    discriminating against any tree that loses the gate.
+//!    — asserts the code contains the
+//!    `audit_enabled && self.config.footprint_capture` guard. Without
+//!    the guard the test fails; with it the test passes. This is
+//!    mechanically discriminating against any tree that loses the gate.
 //!
 //! 2. **Forward-looking regression invariants** (the `_runtime_*`
 //!    tests) — exercise the audit-off and audit-only paths end to end
-//!    with realistic fixtures. They currently pass both pre- and
-//!    post-fix because the dispatch path that populates origin edges
-//!    isn't routed yet, but they become discriminators once Step 6
-//!    routes materialization through dispatch and edges populate.
-//!    Today they protect against regressions that would crash or
-//!    surface the field unconditionally on a non-empty graph.
+//!    with realistic fixtures. They currently pass because the
+//!    dispatch path that populates origin edges isn't routed yet, but
+//!    they become discriminators once materialization routes through
+//!    dispatch and edges populate. Today they protect against
+//!    regressions that would crash or surface the field
+//!    unconditionally on a non-empty graph.
 
 use std::sync::Arc;
 
@@ -80,18 +80,15 @@ fn gate_text_includes_audit_enabled() {
     // FAIL-FIRST static-text discriminator. Asserts the source contains
     // the boolean `audit_enabled && self.config.footprint_capture` (in
     // either token order, robust to reformatting whitespace) inside the
-    // `compute_component_meta_state_inner` body. Pre-fix the gate is
-    // absent; post-fix it is present at exactly one site (the
+    // `compute_component_meta_state_inner` body. Without the gate it is
+    // absent; with it the gate is present at exactly one site (the
     // `origin_graph:` field of `ResolvedComponentMetaState`).
     //
-    // Phase 11a — `compute_component_meta_state_inner` (and the
-    // surrounding `impl VerterHost` block) moved from
-    // `meta_resolve.rs` to `meta_resolve/host_methods.rs`.
-    // Phase 10a — moved again from `meta_resolve/host_methods.rs` to
-    // `host_manage/component_meta_methods.rs` (the seal puts host-impl
-    // code under host-impl tier). The test anchor (gate text in the
-    // function body) is unchanged — only the file path moved. This is
-    // a §0.6.1 mechanical path adjustment.
+    // `compute_component_meta_state_inner` (and the surrounding
+    // `impl VerterHost` block) lives in
+    // `host_manage/component_meta_methods.rs` (host-impl code under the
+    // host-impl tier). The test anchor is the gate text in the function
+    // body — robust to the file path.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("host_manage")
@@ -106,11 +103,10 @@ fn gate_text_includes_audit_enabled() {
     let needle_b = "self.config.footprint_capture && audit_enabled";
     assert!(
         normalized.contains(needle_a) || normalized.contains(needle_b),
-        "F1 contract: host_manage/component_meta_methods.rs must contain the gate \
-         `audit_enabled && self.config.footprint_capture` (in either token \
-         order) for `origin_graph` emission. Pre-fix that gate is absent \
-         and `origin_graph` would emit under any audit configuration. \
-         (Plan §3 Step 3 D3 + D34.)",
+        "origin_graph contract: host_manage/component_meta_methods.rs must \
+         contain the gate `audit_enabled && self.config.footprint_capture` \
+         (in either token order) for `origin_graph` emission. Without that \
+         gate `origin_graph` would emit under any audit configuration.",
     );
 }
 
@@ -118,11 +114,11 @@ fn gate_text_includes_audit_enabled() {
 fn runtime_audit_off_does_not_emit_origin() {
     // Regression invariant: with audit_enabled=false, origin_graph
     // is None whether edges are populated or not. Today this passes
-    // both pre- and post-fix because the dispatch graph isn't being
-    // populated for component-meta requests. Post-Step-6 (when
-    // materialization routes through dispatch and edges populate),
-    // this becomes the runtime FAIL-FIRST discriminator: pre-fix
-    // returns Some(dto), post-fix returns None.
+    // because the dispatch graph isn't being populated for
+    // component-meta requests. Once materialization routes through
+    // dispatch and edges populate, this becomes the runtime
+    // FAIL-FIRST discriminator: without the gate it returns Some(dto),
+    // with the gate it returns None.
     let host = host_with(false, false);
     let (_meta, resolved) = host
         .get_component_meta_with_resolution("/Component.vue")
@@ -135,7 +131,7 @@ fn runtime_audit_off_does_not_emit_origin() {
 
 #[test]
 fn runtime_audit_on_no_footprint_does_not_emit_origin() {
-    // Regression invariant for D34: gating on `audit_enabled` alone
+    // Regression invariant: gating on `audit_enabled` alone
     // is not enough — `footprint_capture` must also be true (matches
     // the LSP hover-provenance gate). HostConfig::validate forbids
     // footprint_capture without audit_enabled, so this is the only

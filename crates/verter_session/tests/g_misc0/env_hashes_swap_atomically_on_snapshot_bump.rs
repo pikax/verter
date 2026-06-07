@@ -1,8 +1,8 @@
-//! Block 1.6 — env-hash tables swap atomically with the rest of the
+//! Env-hash tables swap atomically with the rest of the
 //! published workspace snapshot on workspace-config bumps.
 //!
-//! Plan citation: `D:/tmp/verter-stage7-final-cutover-plan.md` § "Storage:
-//! published snapshot, NOT `OnceCell`". Env-hash arrays live INSIDE the
+//! Storage is the published snapshot, NOT an `OnceCell`. Env-hash
+//! arrays live INSIDE the
 //! published `PublishedRoot`. On snapshot republish (workspace-config
 //! bump, project graph rebuild), the entire snapshot atomically swaps
 //! via `ArcSwapOption<PublishedRoot>`; the env-hash table inside it

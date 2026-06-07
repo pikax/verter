@@ -1,4 +1,4 @@
-//! Slice 2.1 §1.5 joiner-accounting contract test (CRITICAL).
+//! Joiner-accounting contract test (CRITICAL).
 //!
 //! 16 concurrent identical requests on the same canonical. The
 //! per-cache attribution rule requires:
@@ -14,10 +14,10 @@
 //! - Sum of `record.store.cache_layers.component_meta.misses` across
 //!   16 records == 1 (the winner observed a miss before populating).
 //!
-//! Discriminating contract: the v3 design (host-global deltas)
-//! would misattribute under concurrency — multiple winners would
-//! all see the same global delta. The per-request TLS context
-//! makes attribution exact.
+//! Discriminating contract: a host-global delta design would
+//! misattribute under concurrency — multiple winners would all see
+//! the same global delta. The per-request TLS context makes
+//! attribution exact.
 //!
 //! NOTE: Concurrent execution requires the host to be `Arc`-shared
 //! across threads. Each thread spawns a fresh request through the
@@ -58,7 +58,7 @@ fn sixteen_concurrent_identical_requests_attribute_one_miss_fifteen_hits() {
     const N_THREADS: usize = 16;
 
     // Prime the cache with a single cold request so the
-    // `ComponentMetaResultDb` has a populated entry. The §1.5
+    // `ComponentMetaResultDb` has a populated entry. The
     // joiner-accounting rule is structural: each subsequent
     // request must be exactly ONE of:
     //   - winner (recorded miss before populating, OR re-validated)
@@ -66,20 +66,20 @@ fn sixteen_concurrent_identical_requests_attribute_one_miss_fifteen_hits() {
     //
     // After the prime, 16 concurrent requests on the SAME canonical
     // should each observe a warm hit on the
-    // ComponentMetaResultDb cache. The §1.5 attribution
+    // ComponentMetaResultDb cache. The attribution
     // contract requires:
     //   - sum(from_cache=true)  == 16 (all 16 are joiners)
     //   - sum(from_cache=false) == 0
     //   - sum(component_meta.hits)   == 16 (per-request attribution)
     //   - sum(component_meta.misses) == 0
     //
-    // This is the precise §1.5 contract under "all-warm" concurrency.
-    // The pre-change tree (no per-request attribution) would either:
+    // This is the precise contract under "all-warm" concurrency.
+    // A design without per-request attribution would either:
     //   1. Fail to compile (no `cache_layers` field) — main discriminator.
-    //   2. Or under host-global delta accounting (the v3 design rejected
-    //      by Codex S7), the global `component_meta_live` counter would
-    //      report the same delta to every reader, so summing 16
-    //      records would give 16 × N hits, not the per-request 1 each.
+    //   2. Or under host-global delta accounting, the global
+    //      `component_meta_live` counter would report the same delta to
+    //      every reader, so summing 16 records would give 16 × N hits,
+    //      not the per-request 1 each.
     //
     // The discriminator works in either failure mode.
     let _prime = AuditedRequest::builder()
@@ -107,7 +107,7 @@ fn sixteen_concurrent_identical_requests_attribute_one_miss_fifteen_hits() {
     let from_cache_true: usize = records.iter().filter(|r| r.from_cache).count();
     let from_cache_false: usize = records.iter().filter(|r| !r.from_cache).count();
 
-    // §1.5 joiner-accounting contract under all-warm concurrency:
+    // Joiner-accounting contract under all-warm concurrency:
     // EVERY one of the 16 concurrent requests is a joiner — the
     // prime did the cold work. The cold winner (`from_cache=false`)
     // exists, but is the prime, not one of the 16 concurrent
@@ -141,7 +141,7 @@ fn sixteen_concurrent_identical_requests_attribute_one_miss_fifteen_hits() {
 
     assert_eq!(
         total_component_meta_misses, 0,
-        "§1.5 all-warm: sum of cache_layers.component_meta.misses across {} records must be 0 (all joiners), got {} (records: {:?})",
+        "all-warm: sum of cache_layers.component_meta.misses across {} records must be 0 (all joiners), got {} (records: {:?})",
         N_THREADS,
         total_component_meta_misses,
         records
@@ -156,7 +156,7 @@ fn sixteen_concurrent_identical_requests_attribute_one_miss_fifteen_hits() {
     );
     assert_eq!(
         total_component_meta_hits, N_THREADS as u64,
-        "§1.5 all-warm: sum of cache_layers.component_meta.hits across {} records must be exactly {} (one per joiner), got {} (records: {:?})",
+        "all-warm: sum of cache_layers.component_meta.hits across {} records must be exactly {} (one per joiner), got {} (records: {:?})",
         N_THREADS,
         N_THREADS,
         total_component_meta_hits,
@@ -188,7 +188,7 @@ fn sixteen_concurrent_identical_requests_attribute_one_miss_fifteen_hits() {
         );
         // Each joiner observes exactly one hit on the
         // final-result cache. Per-request attribution rejects
-        // host-global accumulation: a v3-style host-delta would
+        // host-global accumulation: a host-delta design would
         // see 16 records each report N hits (where N is the
         // global counter at the time of read), summing to N×16
         // not 16. The discriminator is `hits == 1` per record.

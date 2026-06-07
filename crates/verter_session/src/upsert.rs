@@ -198,8 +198,8 @@ pub(crate) fn build_upsert_result(
     })
 }
 
-// `compute_changed_exports` retired with the R3 cross-file
-// invalidation cutover — downstream caches revalidate lazily via
-// `fact_dep_signature` checks, so a producer-side export-diff helper
-// is no longer needed by the upsert path. LSP affected-files
-// reporting consumes the reverse-dep graph directly (R22).
+// There is no producer-side export-diff helper: cross-file
+// invalidation (R3) is read-side, so downstream caches revalidate
+// lazily via `fact_dep_signature` checks rather than the upsert path
+// computing changed exports. LSP affected-files reporting consumes
+// the reverse-dep graph directly (R22).

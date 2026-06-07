@@ -1,7 +1,7 @@
 //! Filtered-kind requests MUST be invisible to the host-owned
 //! peak-RSS sampler.
 //!
-//! Plan §1.8.1: when `AuditRequestRegistration::new` returns the
+//! When `AuditRequestRegistration::new` returns the
 //! `Noop` variant (the `consumer_filter` rejected the request kind),
 //! the registration does NOT enter `active_requests` AND does NOT
 //! publish a record. The sampler, which ticks over `active_requests`,
@@ -112,7 +112,7 @@ fn filtered_kind_registration_is_noop_and_invisible_to_sampler() {
     assert!(
         host.host_audit_runtime().take_record(request_id).is_none(),
         "take_record must return None for a filtered (Noop) request — \
-         per §1.8.1's `Option<RequestAuditRecord>` rule, callers see \
+         per the `Option<RequestAuditRecord>` rule, callers see \
          absence rather than a placeholder shell"
     );
 }

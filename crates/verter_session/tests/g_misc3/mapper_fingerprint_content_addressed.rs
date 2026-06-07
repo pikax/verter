@@ -1,9 +1,9 @@
-//! Stage 1 discriminator tests for the content-addressed
+//! Discriminator tests for the content-addressed
 //! [`MapperFingerprint`].
 //!
 //! # Why this exists
 //!
-//! Phase G's `MapperBinderRegistry` was introduced to give every
+//! The `MapperBinderRegistry` gives every
 //! `[K in source]` mapped-type binder a STABLE
 //! `(canonical, display_name, fingerprint) -> ordinal` mapping.
 //! The original primitive used `Arc::as_ptr(source) as usize` as
@@ -21,7 +21,7 @@
 //!
 //! # What this file pins
 //!
-//! Codex BINDING — Stage 1: the fingerprint must be a
+//! BINDING: the fingerprint must be a
 //! **content-addressed** structural hash over the mapper's
 //! `source` / `value` / `name_type` `TypeExpr` subtrees plus the
 //! `(optional, readonly)` modifiers.
@@ -90,7 +90,7 @@ use verter_type_expr::{
 /// content must produce the SAME fingerprint AND map to the
 /// SAME ordinal in the registry. This is the load-bearing
 /// invariant: `PreparedTypeDecl.body: TypeExpr` is value-cloned
-/// per bundle, so the post-Stage-1 fingerprint MUST recognise
+/// per bundle, so the fingerprint MUST recognise
 /// the two clones as one logical mapper.
 ///
 /// **Pre-fix behaviour** (pointer-identity primitive): FAILS —
@@ -441,7 +441,7 @@ fn chatmessages_like_mapped_binder_ordinal_collision_is_zero() {
         .as_ref()
         .expect("footprint_capture is enabled in the harness");
 
-    // Codex BINDING — Stage 1 prediction: with the
+    // BINDING: with the
     // content-addressed fingerprint, no two lowerings of the
     // SAME mapper land on different ordinals, so the collision
     // counter is zero on this fixture.

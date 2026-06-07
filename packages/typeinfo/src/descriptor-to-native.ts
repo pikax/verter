@@ -4,7 +4,7 @@
  *
  * Used by {@link TypeInfoSession.resolveSymbol} to forward a
  * `typeArgs?: TypeRef[]` argument as a JSON array of native
- * `TypeExpr` values per §5.2 of the typeinfo plan.
+ * `TypeExpr` values.
  *
  * The mapping is structural; descriptor variants without a direct
  * native counterpart (`enum`, `recursiveRef` cycles) lower to a

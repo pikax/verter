@@ -38,7 +38,7 @@ fn component_meta_signature_carries_route_surface() {
     assert!(
         window.contains("read_set_signature: crate::fact_signature_helpers::ReadSetSignature")
             || window.contains("read_set_signature: ReadSetSignature"),
-        "Block 1.8 component_meta matrix slice: \
+        "component_meta matrix slice: \
          `ComponentMetaResultEntry` MUST carry \
          `read_set_signature: ReadSetSignature`. Window:\n{window}"
     );

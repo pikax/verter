@@ -8,7 +8,7 @@
 //!
 //! Discrimination contract: a regression that re-walked / re-lowered
 //! `Shared` on the second visit would surface `expansions == 2` (one
-//! per visit). The post-change tree produces `expansions <= 1`
+//! per visit). Correct interning produces `expansions <= 1`
 //! because the dispatcher's `execute_cooperative` memo dedups
 //! identical keys — `ResolveDecl(Shared)` evaluates exactly once
 //! intra-request even when the path visits `Shared` twice.
@@ -114,8 +114,8 @@ fn type_resolution_audit_diamond_intra_request_interning() {
     // Discrimination — the diamond's interning contract:
     //
     // 1. Both visits resolve to the SAME semantic node id (`Shared`).
-    //    Pre-change tree (no interning) would surface distinct ids
-    //    for the same declaration's body.
+    //    Without interning, the same declaration's body would surface
+    //    distinct ids.
     assert_eq!(
         left_node, right_node,
         "diamond visits must resolve to one interned node id for `Shared`. \
@@ -149,15 +149,14 @@ fn type_resolution_audit_diamond_intra_request_interning() {
     //    must NOT trigger any new file reads — the second visit
     //    satisfied the warm semantic graph, so the third visit's
     //    file-load surface is empty. This characterises the
-    //    "zero additional file reads on the second visit" half of
-    //    the Codex P2 contract.
+    //    "zero additional file reads on the second visit" contract.
     //
     //    The audit's per-file vector is the discriminator. The
     //    third request must report `record.files` is empty (the
     //    type-resolution producer has not yet wired file
-    //    attribution; the assertion below characterises today's
-    //    Wave 3.A baseline AND survives the future wiring because
-    //    every file the dispatcher consults must be a cache hit).
+    //    attribution; the assertion below holds AND survives later
+    //    wiring because every file the dispatcher consults must be a
+    //    cache hit).
     let third = SemanticQueryKey::ProjectPath {
         base: ab_node,
         path: Arc::from(

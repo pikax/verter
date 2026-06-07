@@ -1,6 +1,6 @@
-//! Block 1.H RED test — cross-thread joiner scenarios: a cold
-//! compute on thread A and a concurrent join on thread B both
-//! end up observing the producer's cold-build facts.
+//! Cross-thread joiner scenarios: a cold compute on thread A and a
+//! concurrent join on thread B both end up observing the producer's
+//! cold-build facts.
 //!
 //! For the AppConfigNoOverrideProofDb (which uses a DashMap
 //! rather than the cooperative `execute_cooperative` flow used by
@@ -10,10 +10,8 @@
 //! that the published `fact_dep_signature` remains consistent
 //! across thread observations.
 //!
-//! Pre-Block-1.H the cache had no production producer; this
-//! cross-thread test could not even compile against the pre-tree.
-//! Post-Block-1.H the producer is wired and concurrent calls
-//! both observe a consistent admitted entry.
+//! The producer is wired and concurrent calls both observe a
+//! consistent admitted entry.
 
 use std::sync::Arc;
 use std::thread;

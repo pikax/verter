@@ -18,7 +18,7 @@ pub struct ResolvedNativeProp {
 /// Holds the private/protected class-member visibility surface
 /// (`native_props`) projected from the eager OXC [`ResolvedElements`] for an
 /// imported macro type. This is the SOLE responsibility of the surface
-/// projector after the props/emits/slots cutover: the published
+/// projector: the published
 /// props/emits/slots surface is owned exclusively by the typeinfo macro-surface
 /// path ([`crate::VerterHost::vue_macro_dtos`] → the
 /// `props/emits/slots_from_typeinfo_surface` normalizers). `native_props` has a
@@ -40,7 +40,7 @@ pub fn project_macro_surfaces(
 /// Project the native-only macro surface ([`ProjectedMacroSurfaces`]) from the
 /// eager OXC [`ResolvedElements`].
 ///
-/// After the props/emits/slots cutover this projector is responsible for ONLY
+/// This projector is responsible for ONLY
 /// `native_props` (the private/protected class-member visibility surface). The
 /// published props/emits/slots are owned exclusively by the typeinfo
 /// macro-surface path; `source`, `owner_canonical`, and `macro_kind` no longer

@@ -1,4 +1,4 @@
-//! U2B.6 guards — the `ApparentType` + `TemplateLiteralReduce` key surface.
+//! Guards for the `ApparentType` + `TemplateLiteralReduce` key surface.
 //!
 //! These tests pin the IDENTITY contract of the two new
 //! [`SemanticQueryKey`] variants `ApparentType` and `TemplateLiteralReduce`,
@@ -9,7 +9,7 @@
 //! through the ONE shared deferred evaluator, never a hand-rolled reducer).
 //!
 //! Identity is probed BEHAVIORALLY through the family memo exactly as the
-//! sibling U2B.5 guards do: publishing a synthetic candidate under key `a`
+//! sibling class/namespace/enum guards do: publishing a synthetic candidate under key `a`
 //! and then reading `slot_candidate_count_for_tests(b)` is `> 0` iff `a` and
 //! `b` project to the SAME `(FamilyKey, ModeSlot)`. A warm entry under one
 //! identity is returned for another ONLY when they share a slot.

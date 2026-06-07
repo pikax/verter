@@ -1,19 +1,11 @@
-//! Block 1.6 — `host_view_env_hashes_for(canonical)` returns real env-hash
+//! `host_view_env_hashes_for(canonical)` returns real env-hash
 //! bundles from the workspace's published-snapshot tables.
 //!
-//! Plan citation: `D:/tmp/verter-stage7-final-cutover-plan.md` § "Block 1.6"
-//! + § "Correction 3: project-scoped env-hash API".
+//! Contract: `host_view_env_hashes_for(canonical)` consults
+//! the workspace-published env-hash table keyed by the owning project's
+//! `ProjectId`, returning a non-default, project-derived bundle.
 //!
-//! Discrimination chain:
-//! - Pre-Block-1.6 stub: `host_view_env_hashes()` always returns
-//!   `EnvHashes::default()` (all-zero).
-//! - Post-Block-1.6 GREEN: `host_view_env_hashes_for(canonical)` consults
-//!   the workspace-published env-hash table keyed by the owning project's
-//!   `ProjectId`, returning a non-default, project-derived bundle.
-//!
-//! This test FAILS against the pre-change tree (the `_for(canonical)`
-//! method does not exist) and PASSES against the post-GREEN state. The
-//! negative assertions verify the bundle is NOT all-zero, NOT equal to
+//! The negative assertions verify the bundle is NOT all-zero, NOT equal to
 //! `EnvHashes::default()`, and is internally distinguishable across
 //! dimensions (R21 salt invariant).
 
@@ -59,7 +51,7 @@ fn host_view_env_hashes_for_canonical_returns_non_default_bundle() {
     let default_env = verter_session::session_view::EnvHashes::default();
     assert_ne!(
         env, default_env,
-        "post-Block-1.6 GREEN: host_view_env_hashes_for must NOT collapse to EnvHashes::default() \
+        "host_view_env_hashes_for must NOT collapse to EnvHashes::default() \
          for a canonical owned by a published project",
     );
     assert_ne!(

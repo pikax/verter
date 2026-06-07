@@ -1,5 +1,5 @@
-//! Plan §3 Commit 8 — Rust-side verification of the `verter_wasm`
-//! audit binding serialization surface.
+//! Rust-side verification of the `verter_wasm` audit binding
+//! serialization surface.
 //!
 //! `serde-wasm-bindgen` drives the FFI conversion via the same
 //! `serde::Serialize` / `serde::Deserialize` impls that `serde_json`
@@ -25,8 +25,8 @@
 //!
 //! Keeping this Rust-side test distinct from the live-WASM TS test
 //! is intentional: this file catches serde-level regressions even
-//! when the WASM binary is not yet built (common during
-//! mid-refactor), and it runs inside the `cargo test --workspace
+//! when the WASM binary is not yet built, and it runs inside the
+//! `cargo test --workspace
 //! --tests` gate without a WASM toolchain.
 
 use std::sync::Arc;
@@ -126,8 +126,8 @@ fn synthesize_record() -> RequestAuditRecord {
     }
 }
 
-/// `wasm_get_component_meta_with_audit_serializes_across_boundary`
-/// (plan §3 Commit 8 test list). Verify that the Rust-side
+/// `wasm_get_component_meta_with_audit_serializes_across_boundary`.
+/// Verify that the Rust-side
 /// `RequestAuditRecord` round-trips through `serde_json` without loss —
 /// this exercises the exact serde impls `serde-wasm-bindgen` consumes
 /// to produce a `JsValue` bundle.
@@ -136,7 +136,7 @@ fn wasm_get_component_meta_with_audit_serializes_across_boundary() {
     let original = synthesize_record();
 
     let json = serde_json::to_string(&original).expect("serialize");
-    // u64 fields MUST be decimal strings on the wire (plan §1.4).
+    // u64 fields MUST be decimal strings on the wire.
     assert!(
         json.contains("\"request_id\":\"7\""),
         "request_id must serialize as a decimal string, got JSON: {json}",
@@ -149,7 +149,7 @@ fn wasm_get_component_meta_with_audit_serializes_across_boundary() {
         json.contains("\"bytes_read\":\"42\""),
         "bytes_read must serialize as a decimal string, got JSON: {json}",
     );
-    // i64 fields likewise (plan §3.B Commit 7.A).
+    // i64 fields likewise.
     assert!(
         json.contains("\"process_rss_delta_bytes\":\"-128\""),
         "i64 fields must serialize as decimal strings, got JSON: {json}",
@@ -175,8 +175,8 @@ fn wasm_get_component_meta_with_audit_serializes_across_boundary() {
     assert_eq!(fp.derivation_subgraph.edges.len(), 1);
 }
 
-/// `wasm_why_loaded_binding_invokes_rust_walker` (plan §3 Commit 8
-/// test list). End-to-end verification: (1) Rust produces a bundle,
+/// `wasm_why_loaded_binding_invokes_rust_walker`.
+/// End-to-end verification: (1) Rust produces a bundle,
 /// (2) the bundle is serialized to JSON (equivalent to what the WASM
 /// binding hands to `whyLoadedFromAuditJson`), (3) the serialized
 /// JSON is deserialized and the walker invoked on it, (4) the

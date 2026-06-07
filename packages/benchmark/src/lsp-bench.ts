@@ -622,11 +622,11 @@ function outputJson(
   const configs: Record<string, any> = {};
   for (const [name, r] of Object.entries(results)) {
     configs[name] = {
-      initialize: round2(r.initialize),
-      workspaceScan: round2(r.workspaceScan),
-      didOpenToHover: round2(r.didOpenToHover),
-      hoverCold: round2(r.hoverCold),
-      hoverWarmMedian: round2(r.hoverWarmMedian),
+      initialize: roundTo2(r.initialize),
+      workspaceScan: roundTo2(r.workspaceScan),
+      didOpenToHover: roundTo2(r.didOpenToHover),
+      hoverCold: roundTo2(r.hoverCold),
+      hoverWarmMedian: roundTo2(r.hoverWarmMedian),
     };
   }
 
@@ -646,7 +646,7 @@ function outputJson(
   process.stdout.write(JSON.stringify(json, null, 2) + "\n");
 }
 
-function round2(n: number): number {
+function roundTo2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 

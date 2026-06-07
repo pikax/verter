@@ -1,5 +1,5 @@
 /**
- * Audit validator — plan §3 Commit 10 / F8.
+ * Audit validator.
  *
  * Validates a component-meta audit bundle against a declarative
  * specification. The validator replaces the legacy
@@ -124,7 +124,7 @@ export interface AuditSpec {
    * Optional pinned footprint snapshot (rendered JSON). Compared
    * string-equal against the live footprint after
    * `mask_incidental_spans()`-style normalization performed on the
-   * Rust side. Plan §3 Commit 10 future-facing check.
+   * Rust side.
    */
   expectedFootprintSnapshot?: string;
   /**
@@ -330,7 +330,7 @@ function collectAuditMemberEdges(
       // structurally legitimate intermediate by edge-kind alone.
       // We tag each name with the `"ProjectPath"` sentinel so the
       // validator never sees a `null`-provenance bucket (the
-      // round-17 false-negative class).
+      // false-negative class).
       for (const seg of meta.ProjectPath.path as ProjectPathSegment[]) {
         if (typeof seg === "object" && seg !== null && "Member" in seg) {
           edges.push({ memberName: seg.Member.name, provenance: "ProjectPath" });
@@ -534,7 +534,7 @@ function validateExpectedResult(
 /**
  * Render the audit footprint as a deterministic, snapshot-friendly
  * string. Exported so tests can pin exact-match behaviour without
- * copy-pasting the normalization schema. Plan §3 Commit 10 + review F11.
+ * copy-pasting the normalization schema.
  */
 export function renderFootprintForSnapshot(fp: RequestAuditRecord["footprint"]): string {
   // Normalized JSON for snapshot comparison. Intentionally diverges
@@ -546,8 +546,7 @@ export function renderFootprintForSnapshot(fp: RequestAuditRecord["footprint"]):
   // readable in a PR diff without flapping on subgraph detail —
   // useful for bench specs, unsuitable when the exact record list
   // matters. Use the Rust helper + `RequestAuditRecord::emit_json`
-  // when you need the full structural payload. Plan §3 Commit 10 +
-  // review F9.
+  // when you need the full structural payload.
   if (!fp) return "null";
   const normalized = {
     indexed_ready_builds: fp.indexed_ready_builds.map((r) => r.canonical_id).sort(),

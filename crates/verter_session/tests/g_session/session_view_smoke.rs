@@ -1,4 +1,4 @@
-//! Stage 4a smoke test for [`SessionView`] trait + [`HostView`] /
+//! Smoke test for [`SessionView`] trait + [`HostView`] /
 //! [`OverlaidView`] impls.
 //!
 //! This integration test boots a real `VerterHost`, ingests a tiny
@@ -6,11 +6,9 @@
 //! companion to the unit tests under
 //! `crates/verter_session/src/session_view.rs::tests`.
 //!
-//! Plan provenance: fact-based cache refactor Stage 4a. Binds R17
-//! (sessions are views), R18 (no thread-local view globals), R19
-//! (fact validation orthogonal to concurrency oracle) — the latter
-//! two are tested at Stages 4b/4c. Stage 4a is the read-trait-only
-//! commit.
+//! Binds R17 (sessions are views), R18 (no thread-local view
+//! globals), and R19 (fact validation orthogonal to concurrency
+//! oracle); this covers the read-trait surface.
 
 use std::sync::Arc;
 
@@ -89,9 +87,9 @@ fn overlaid_view_overlay_wins_then_falls_through_to_base() {
 
 #[test]
 fn overlaid_view_byte_identical_overlay_matches_base_hash() {
-    // R17 — byte-identical overlay collapses to base hash. This is
-    // the core architectural invariant for Stage 4a: overlay
-    // identity is content-addressed, not session-identity-keyed.
+    // R17 — byte-identical overlay collapses to base hash. The core
+    // architectural invariant: overlay identity is content-addressed,
+    // not session-identity-keyed.
     let host = host();
     let body = "export const a = 1;";
     upsert_and_index(&host, "/x.ts", body);
@@ -139,8 +137,7 @@ fn overlaid_view_diverging_overlay_diverges_in_hash() {
 #[test]
 fn host_view_and_overlaid_view_share_session_view_trait_object() {
     // Sanity check that both impls coerce to `&dyn SessionView` —
-    // the resolver-tier wiring in Stage 4b consumes the trait
-    // object form.
+    // the resolver-tier wiring consumes the trait object form.
     let host = host();
     upsert(&host, "/m.ts", "export const x = 1;");
 

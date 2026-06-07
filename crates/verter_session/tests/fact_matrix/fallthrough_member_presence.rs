@@ -35,9 +35,8 @@ fn fallthrough_signature_carries_member_presence() {
     let window = &src[idx..idx + end];
     assert!(
         window.contains("fact_versions: Arc<[crate::resolver_core::FactVersionRef]>"),
-        "Block 1.8 fallthrough matrix slice: `CachedFallthroughEntry` \
-         MUST carry `fact_versions: Arc<[FactVersionRef]>` after the \
-         Block 1.A substrate migration. Window:\n{window}"
+        "fallthrough matrix slice: `CachedFallthroughEntry` \
+         MUST carry `fact_versions: Arc<[FactVersionRef]>`. Window:\n{window}"
     );
 
     let presence_fact = FactVersionRef::Parse(ParseFactRef {

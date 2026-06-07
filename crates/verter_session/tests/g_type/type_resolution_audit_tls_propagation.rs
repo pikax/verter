@@ -1,5 +1,4 @@
-//! TLS-observer propagation through `VerterHost::resolve_type_with_audit`
-//! (Wave 3 Slice 3.A follow-up).
+//! TLS-observer propagation through `VerterHost::resolve_type_with_audit`.
 //!
 //! Drives the public production entry-point through the
 //! [`verter_session::tests::audit_tls_harness::assert_observer_reaches`]
@@ -19,13 +18,12 @@
 //!   record is published, and the harness's calling-thread probe sees
 //!   `current_observer() == None` after the call returns.
 //!
-//! Discrimination contract:
-//! - Pre-change tree (no harness driver pinned to this entry-point):
-//!   no test exercises observer propagation through the
-//!   `resolve_type_with_audit` window — characterisation tests check
-//!   record contents but don't probe the TLS slot.
-//! - Wired correctly: the positive case observes a populated record
-//!   and a non-zero hops counter; the negative case observes neither.
+//! Discrimination contract: when wired correctly, the positive case
+//! observes a populated record and a non-zero hops counter; the
+//! negative case observes neither. Without a harness driver pinned to
+//! this entry-point, no test exercises observer propagation through the
+//! `resolve_type_with_audit` window — characterisation tests check
+//! record contents but don't probe the TLS slot.
 
 use std::sync::Arc;
 

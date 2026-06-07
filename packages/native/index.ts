@@ -2,7 +2,7 @@
 
 // Re-export audit helpers so `@verter/native` consumers can import
 // `whyLoaded`, `whyInstantiated`, `assertLoadedFilesExactly`, etc.
-// directly from the package root. Plan §3 Commit 8.
+// directly from the package root.
 export * from "./audit";
 
 // =============================================================================
@@ -398,8 +398,8 @@ export declare class VerterHost {
    */
   resolveExports(canonicalOrAlias: string): import("./host-types").HostResolvedExport[];
   /**
-   * Sets the resolved import dependencies for a file, enabling Tier 2/3
-   * smart invalidation (cross-file change tracking).
+   * Sets the resolved import dependencies for a file, enabling
+   * cross-file smart invalidation (change tracking).
    */
   setImportDependencies(
     canonicalOrAlias: string,
@@ -467,7 +467,7 @@ export declare class VerterHost {
   evaluateTypes(canonicalOrAlias: string): string | null;
 
   // ===========================================================================
-  // Typed audit entry-points (Wave 3 / Slice 3.H)
+  // Typed audit entry-points
   //
   // Each entry-point wraps a `VerterHost::*_with_audit` Rust producer
   // and returns the produced `RequestAuditRecord` as a JSON Buffer.
@@ -546,7 +546,7 @@ export declare class VerterHost {
   getBundlerBatchSummary(args?: BundlerBatchSummaryArgs): Buffer;
 
   // ===========================================================================
-  // Typeinfo entry-points (Phase 4 / typeinfo plan §6.1)
+  // Typeinfo entry-points
   //
   // Wrap the Rust host typeinfo substrate. Used by `@verter/typeinfo`
   // for `TypeInfoSession`'s public API.
@@ -713,7 +713,7 @@ export declare class ComponentMetaSession {
   getResolvedComponentMeta(canonicalOrAlias: string): Buffer | null;
 
   /**
-   * Tier 1B selective surface API (D32 + D101). Returns the
+   * Selective surface API. Returns the
    * `ComponentMetaSurface` envelope: eager scalars + `NamedTypeHandle`
    * for every type-bearing field. Consumers walk the type graph one
    * layer at a time via {@link getComponentMetaTypeExpansion}. The
@@ -726,7 +726,7 @@ export declare class ComponentMetaSession {
   getComponentMetaSurface(canonicalOrAlias: string): Buffer | null;
 
   /**
-   * Tier 1B selective surface API (D32 + D101). Resolves a
+   * Selective surface API. Resolves a
    * `TypeHandle` (encoded as a `verter.v1.TypeHandle` protobuf
    * message) into a one-layer `verter.v1.TypeExpansion`. The optional
    * `depth` argument is currently informational; the bridge always
@@ -752,7 +752,7 @@ export declare class ComponentMetaSession {
   /**
    * Run the Rust provenance walker against a committed audit bundle
    * JSON string, rooted at `canonicalId`. Returns a
-   * `ProvenanceChain` JSON string. Plan §2.8.
+   * `ProvenanceChain` JSON string.
    */
   whyLoadedFromAuditJson(auditJson: string, canonicalId: string): string;
 

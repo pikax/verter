@@ -1,29 +1,27 @@
-//! Stage-0 path-precision baseline characterisation.
+//! Coarse-invalidation baseline characterisation for path-precision.
 //!
-//! Paired with Stage 6d's `tests/path_precise_invalidation.rs`. Both
-//! consume the shared fixture corpus under
+//! Paired with `tests/path_precise_invalidation.rs`. Both consume the
+//! shared fixture corpus under
 //! `crates/verter_session/tests/fixtures/path_precise/`.
 //!
-//! Stage 0 (this file): assert TODAY's coarse cache invalidation
-//! behaviour. The fixture is loaded, the consumer's published surface
-//! is computed cold, the relevant Foo member body is edited, and the
-//! consumer is observed to invalidate / recompute even when the edit
-//! is to a sibling member the projection did NOT select. The test
-//! PASSES on the audited base SHA `ccc05223` (cache is path-coarse).
+//! This file asserts TODAY's coarse cache invalidation behaviour. The
+//! fixture is loaded, the consumer's published surface is computed
+//! cold, the relevant Foo member body is edited, and the consumer is
+//! observed to invalidate / recompute even when the edit is to a
+//! sibling member the projection did NOT select (the cache is
+//! path-coarse today).
 //!
-//! Stage 6d (`tests/path_precise_invalidation.rs`): the inverted
+//! The paired `tests/path_precise_invalidation.rs` is the inverted
 //! assertion — under path-precise semantics the consumer must NOT
 //! invalidate when an unselected sibling is edited.
 //!
-//! Plan citation: §"Stage 0" sub-task 4; §"Stage 6d" verify bullet
-//! "Path-precision test (Stage 0 pairing)".
 //! Architectural rules bound: R14, R28.
 //!
 //! The path-precise corpus contains 16 archetypes. Today the cache
 //! responds the same to every archetype (whole-export closure
-//! invalidation). Stage 6d will discriminate; Stage 0 pins the coarse
-//! response so the discriminator has a real pre-change observation to
-//! invert.
+//! invalidation). The path-precise target discriminates; this file
+//! pins the coarse response so the discriminator has a real
+//! pre-change observation to invert.
 
 use std::fs;
 use std::path::PathBuf;
@@ -60,16 +58,18 @@ fn read_expected_json(name: &str) -> serde_json::Value {
 }
 
 /// CHARACTERISATION — every archetype's expected.json carries a complete
-/// invalidation_matrix where Stage-0 (today's) cell is set to `true` for
-/// every edit kind that the Stage-6d cell is set to `false` for. This is
-/// the FULL discrimination contract: the expected.json files mechanically
-/// encode the inversion Stage 6d will apply.
+/// invalidation_matrix where the `stage_0_today_invalidates_consumer`
+/// cell is set to `true` for every edit kind that the
+/// `stage_6d_target_invalidates_consumer` cell is set to `false` for.
+/// This is the FULL discrimination contract: the expected.json files
+/// mechanically encode the inversion the path-precise target applies.
 ///
-/// The test PASSES on the audited base SHA because the expected.json
-/// files were authored to encode today's coarse behaviour as
+/// The test PASSES today because the expected.json files were authored
+/// to encode today's coarse behaviour as
 /// `stage_0_today_invalidates_consumer: true`. A future amendment to
 /// these JSONs that weakens the contract — e.g. removing the
-/// stage_6d cell from path-precise rows — fails this test.
+/// `stage_6d_target_invalidates_consumer` cell from path-precise rows —
+/// fails this test.
 #[test]
 fn every_path_precise_archetype_has_stage0_and_stage6d_paired_cells() {
     let archetypes_with_invalidation_matrix: &[&str] = &[
@@ -121,19 +121,20 @@ fn every_path_precise_archetype_has_stage0_and_stage6d_paired_cells() {
     // fails this test.
     assert!(
         paired_count >= 30,
-        "Stage-0 expected at least 30 paired invalidation rows across all archetypes \
-         (got {paired_count}); the corpus must densely cover today-vs-Stage-6d \
-         discrimination."
+        "expected at least 30 paired invalidation rows across all archetypes \
+         (got {paired_count}); the corpus must densely cover the \
+         today-vs-path-precise-target discrimination."
     );
 }
 
 /// CHARACTERISATION — `pick_literal_key.expected.json` declares the
 /// load-bearing path-precision inversion: today editing `Foo.b` DOES
-/// invalidate the `Pick<Foo, "a">` consumer; under Stage 6d it does NOT.
+/// invalidate the `Pick<Foo, "a">` consumer; under path-precise
+/// semantics it does NOT.
 ///
 /// This is the single highest-leverage row in the corpus — it is the
-/// path-precision archetype that Stage 6d's central correctness invariant
-/// targets.
+/// path-precision archetype that the path-precise target's central
+/// correctness invariant targets.
 #[test]
 fn pick_literal_key_today_invalidates_on_unselected_sibling_edit() {
     let json = read_expected_json("pick_literal_key.expected.json");
@@ -154,22 +155,22 @@ fn pick_literal_key_today_invalidates_on_unselected_sibling_edit() {
         .expect("stage_0_today_invalidates_consumer is bool");
     assert!(
         today,
-        "Stage-0 baseline (path_precise/pick_literal_key.ts edit Foo.b): today the consumer \
+        "coarse baseline (path_precise/pick_literal_key.ts edit Foo.b): today the consumer \
          MUST be invalidated (whole-export closure). This row characterises the coarse \
-         behaviour Stage 6d inverts."
+         behaviour the path-precise target inverts."
     );
 
-    // Stage 6d target: FALSE.
+    // Path-precise target: FALSE.
     let stage6d = edit_foo_b
         .get("stage_6d_target_invalidates_consumer")
         .and_then(|v| v.as_bool())
         .expect("stage_6d_target_invalidates_consumer is bool");
     assert!(
         !stage6d,
-        "Stage-0/Stage-6d discrimination contract: Stage 6d must invert this row to FALSE \
-         (R14, R28: Member(Foo, \"b\") changes but the Pick consumer never observed it). \
-         If this assertion fails, the path-precision pairing has weakened and Stage 6d \
-         is no longer building a discriminating test against this corpus."
+        "today-vs-path-precise discrimination contract: the path-precise target must invert \
+         this row to FALSE (R14, R28: Member(Foo, \"b\") changes but the Pick consumer never \
+         observed it). If this assertion fails, the path-precision pairing has weakened and \
+         the target is no longer building a discriminating test against this corpus."
     );
 
     let rule = edit_foo_b
@@ -232,10 +233,10 @@ fn every_path_precise_fixture_is_present_and_non_trivial() {
 /// CHARACTERISATION — cosmetic-edit fixtures explicitly document the
 /// semantic/display lane split per R13.
 ///
-/// These two fixtures are the cleanest Stage-6d / Stage-3 paired
-/// discriminators because the edit kind (JSDoc / comment) is intuitively
-/// non-semantic. The expected.json files must encode the lane split
-/// otherwise the discrimination contract is broken.
+/// These two fixtures are the cleanest paired discriminators because
+/// the edit kind (JSDoc / comment) is intuitively non-semantic. The
+/// expected.json files must encode the lane split otherwise the
+/// discrimination contract is broken.
 #[test]
 fn cosmetic_edit_fixtures_pin_semantic_vs_display_lane_split() {
     let jsdoc = read_expected_json("cosmetic_edit_jsdoc.expected.json");
@@ -279,7 +280,7 @@ fn cosmetic_edit_fixtures_pin_semantic_vs_display_lane_split() {
         "Comment edit must NOT recompute MemberSemanticFactStore (R13)"
     );
 
-    // Today (Stage 0): a comment edit DOES invalidate the consumer (no
+    // Today: a comment edit DOES invalidate the consumer (no
     // semantic/display split today; content_hash changes are coarse).
     let comment_matrix = comment
         .get("invalidation_matrix")
@@ -297,8 +298,8 @@ fn cosmetic_edit_fixtures_pin_semantic_vs_display_lane_split() {
             .unwrap_or(true);
         assert!(
             today && !stage6d,
-            "Stage-0 vs Stage-6d cosmetic-edit discrimination must hold for every comment \
-             edit row: today=true, stage_6d=false. Row: {row}"
+            "today-vs-path-precise cosmetic-edit discrimination must hold for every comment \
+             edit row: today=true, target=false. Row: {row}"
         );
     }
 }
@@ -342,8 +343,8 @@ fn module_augmentation_corpus_covers_all_four_r29_target_kinds() {
 /// four legacy termination sentinels documented in
 /// `cycle_safety_failure_mode.md`.
 ///
-/// This pin is load-bearing: Stage 3's CycleRef-based test reads the
-/// list and inverts it — only `CycleRef` is acceptable post-Stage 3.
+/// This pin is load-bearing: the CycleRef-based test reads the list and
+/// inverts it — only `CycleRef` is acceptable under the target.
 #[test]
 fn recursive_via_pick_enumerates_four_legacy_termination_sentinels() {
     let json = read_expected_json("recursive_via_pick.expected.json");
@@ -354,7 +355,7 @@ fn recursive_via_pick_enumerates_four_legacy_termination_sentinels() {
     assert_eq!(
         sentinels.len(),
         4,
-        "Stage-0 baseline: exactly four termination sentinels are documented in \
+        "coarse baseline: exactly four termination sentinels are documented in \
          tests/fixtures/cache_baseline/cycle_safety_failure_mode.md and must be enumerated \
          here (Unknown(semanticMiss), RecursiveRef, preserved Pick<Self,…>, bare Ref(Self))."
     );
@@ -365,20 +366,20 @@ fn recursive_via_pick_enumerates_four_legacy_termination_sentinels() {
     assert_eq!(
         target.get("shape").and_then(|v| v.as_str()),
         Some("CycleRef"),
-        "Stage-6d target shape must be CycleRef per R27"
+        "path-precise target shape must be CycleRef per R27"
     );
     assert_eq!(
         target
             .get("fingerprint_invariant_under_source_reorder")
             .and_then(|v| v.as_bool()),
         Some(true),
-        "Stage-6d target must guarantee fingerprint invariance under source reordering (R27)"
+        "path-precise target must guarantee fingerprint invariance under source reordering (R27)"
     );
 }
 
 /// CHARACTERISATION — generic_arg_of_generic.expected.json carries
-/// normalized_type_args structural representation, which Stage 5 / 6d
-/// must consume.
+/// normalized_type_args structural representation, which the
+/// path-precise target must consume.
 #[test]
 fn generic_arg_of_generic_records_normalized_type_args_shape() {
     let json = read_expected_json("generic_arg_of_generic.expected.json");

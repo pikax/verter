@@ -1,10 +1,9 @@
-//! Block 1.6 — ARCH GUARD — no `EnvHashes::default()` or
+//! ARCH GUARD — no `EnvHashes::default()` or
 //! `ProjectIdentity([0u8; 16])` in production code paths.
 //!
-//! Plan citation: `D:/tmp/verter-stage7-final-cutover-plan.md` plan
-//! invariant #2: "No `EnvHashes::default()` / `ProjectIdentity([0u8; 16])`
-//! in production code." Block 1.6 plumbs real env-hash + project-identity
-//! values through `host_view_env_hashes_for` / `host_view_project_identity_for`
+//! Invariant: "No `EnvHashes::default()` / `ProjectIdentity([0u8; 16])`
+//! in production code." Real env-hash + project-identity
+//! values flow through `host_view_env_hashes_for` / `host_view_project_identity_for`
 //! so the all-zero placeholders never appear at request-time in
 //! production. This guard locks the invariant.
 //!
@@ -26,10 +25,10 @@
 //!
 //! Discrimination chain: the guard FAILS the moment any future commit
 //! introduces a new occurrence of either pattern inside a production
-//! window. It PASSES against the post-Block-1.6-GREEN tree because the
-//! Block 1.6 cleanup replaced the only production callers
+//! window. It PASSES against the current tree because the
+//! production callers
 //! (`HostView::new`, `OverlaidView::new`, `HostViewRef::new`,
-//! `OverlaidViewRef::new`, `*::project_identity()` accessors) with
+//! `OverlaidViewRef::new`, `*::project_identity()` accessors) use
 //! workspace-default-derived values.
 //!
 //! Negative-control sanity: the guard's filter logic is exercised in

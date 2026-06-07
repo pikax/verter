@@ -12,8 +12,8 @@
 //!
 //! Each fixture is a discriminating test: it FAILS (stack overflow /
 //! panic) on a tree where `lower_ts_type` recurses unguarded past the
-//! default stack budget, and PASSES on the post-cutover tree. If a
-//! later change re-introduces unbounded recursion, these fixtures
+//! default stack budget, and PASSES where lowering is depth-bounded.
+//! If a later change re-introduces unbounded recursion, these fixtures
 //! catch it.
 
 use oxc_allocator::Allocator;

@@ -1,22 +1,18 @@
-//! Stage 5 Sub-task C — `whole_hash` migration audit (R7).
+//! `whole_hash` audit (R7).
 //!
-//! The plan §"Stage 5 / Sub-task C" enumerates five load-bearing
-//! read sites of the legacy `DeclIdentity.whole_hash` field plus
-//! related accessors. Each site is either:
-//! - **RETIRED**: the legacy read is deleted by Sub-task C and
-//!   replaced with a documented alternative (per-candidate
-//!   `fact_dep_signature`, `SessionView::content_hash_for`,
+//! Enumerates five load-bearing read sites of the legacy
+//! `DeclIdentity.whole_hash` field plus related accessors. Each site
+//! is either:
+//! - **RETIRED**: the legacy read is deleted and replaced with a
+//!   documented alternative (per-candidate `fact_dep_signature`,
+//!   `SessionView::content_hash_for`,
 //!   `VersionedDeclIdentity.content_hash` inside the cached value).
 //! - **ROUTED**: the read remains but is now accessed through the
-//!   new Stage-5c data layer.
+//!   content-free slot-identity data layer.
 //!
 //! This test grep-walks the production source under
 //! `crates/*/src/**` and asserts each enumerated site's current
-//! state. **Discriminating**: pre-Stage-5c, all five sites still
-//! read `whole_hash` from `DeclIdentity` / `ShallowFileState` in
-//! the patterns described below; post-Stage-5c, at least one site
-//! is routed through the new types and the rest are tracked here
-//! for future stages.
+//! state.
 //!
 //! Site #3 (the walker routed-expr engine's whole_hash read) is now
 //! RETIRED: the `component_meta_query_engine/routed_expr.rs` engine was
@@ -41,19 +37,18 @@ fn read_source_file(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"))
 }
 
-/// Read site #1 — `prepared_decl.rs:159, :237`. Today the legacy
-/// reads cast `state.whole_hash[..8]` to `u64` and pack it into
+/// Read site #1 — `prepared_decl.rs:159, :237`. The legacy reads cast
+/// `state.whole_hash[..8]` to `u64` and pack it into
 /// `prepared.cache_deps.defining_file = Some((canonical, hash_u64))`.
 ///
-/// **Documented Stage-5c+ replacement** (per plan §"Stage 5 / Sub-task C"
-/// read-sites table): "Prepared-decl hash folds the per-candidate
-/// `fact_dep_signature`'s top-level identity; file version comes
-/// from `VersionedDeclIdentity.content_hash` inside the cached
-/// value."
+/// **Documented replacement**: "Prepared-decl hash folds the
+/// per-candidate `fact_dep_signature`'s top-level identity; file
+/// version comes from `VersionedDeclIdentity.content_hash` inside the
+/// cached value."
 ///
-/// This test ASSERTS the legacy pattern is still present (Stage-5c
-/// introduces the substrate; Stage-6 wires the replacement) AND
-/// emits an inventory entry tracking the migration.
+/// This test ASSERTS the legacy pattern's read-site count stays within
+/// the inventoried bound AND emits an inventory entry tracking the
+/// migration.
 #[test]
 fn whole_hash_read_site_1_prepared_decl_hash_mixing_inventoried() {
     let path = workspace_root().join("crates/verter_session/src/resolver_core/prepared_decl.rs");
@@ -63,53 +58,51 @@ fn whole_hash_read_site_1_prepared_decl_hash_mixing_inventoried() {
     let legacy_pattern = "u64::from_le_bytes(state.whole_hash[..8].try_into().unwrap_or_default())";
     let occurrences = source.matches(legacy_pattern).count();
 
-    // Stage-5c lands the substrate; Stage 6+ replaces these reads.
-    // Today there are two read sites (lines 159 and 237 per plan).
-    // The inventory: at most 2 occurrences. Documented for future
-    // stages.
+    // There are two read sites (lines 159 and 237). The inventory:
+    // at most 2 occurrences.
     assert!(
         occurrences <= 2,
-        "prepared_decl.rs whole_hash u64 cast count exceeded plan's 2-site inventory (got {occurrences})"
+        "prepared_decl.rs whole_hash u64 cast count exceeded the 2-site inventory (got {occurrences})"
     );
 }
 
-/// Read site #2 — `route_db.rs:318` (Stage-5 inventory). The Stage-5
-/// inventory captured `BarrelRouteSurface.whole_hash: Hash16` +
-/// per-source-file hashes (`source_hashes: Vec<(String, Hash16)>`) as
-/// the file-version anchor for barrel-surface validation.
+/// Read site #2 — `route_db.rs:318`. The legacy inventory captured
+/// `BarrelRouteSurface.whole_hash: Hash16` + per-source-file hashes
+/// (`source_hashes: Vec<(String, Hash16)>`) as the file-version anchor
+/// for barrel-surface validation.
 ///
-/// **Stage 6c retirement**: replaced by
+/// **Retirement**: replaced by
 /// `BarrelRouteSurface.fact_dep_signature: Arc<[FactVersionRef]>`.
 /// The barrel surface now carries its own validation signature
 /// directly, validated against the active `StoreView` like every
-/// other `ValidatedFactCache` candidate. This test inverts the
-/// Stage-5 invariant — it asserts the legacy whole_hash + source_hashes
-/// fields are GONE and the replacement signature field is present.
+/// other `ValidatedFactCache` candidate. This test asserts the legacy
+/// whole_hash + source_hashes fields are GONE and the replacement
+/// signature field is present.
 #[test]
 fn whole_hash_read_site_2_route_db_surface_hash_inventoried() {
     let path = workspace_root().join("crates/verter_session/src/resolver_core/route_db.rs");
     let source = read_source_file(&path);
 
-    // Legacy patterns that MUST be absent post-Stage-6c.
+    // Legacy patterns that MUST be absent.
     let has_surface_hash_field =
         source.contains("pub whole_hash: Hash16,") || source.contains("pub whole_hash: HashValue,");
     let has_source_hashes_field = source.contains("pub source_hashes: Vec<");
 
     assert!(
         !has_surface_hash_field,
-        "BarrelRouteSurface.whole_hash field MUST be retired post-Stage-6c \
+        "BarrelRouteSurface.whole_hash field MUST be retired \
          (replaced by fact_dep_signature: Arc<[FactVersionRef]>)"
     );
     assert!(
         !has_source_hashes_field,
-        "BarrelRouteSurface.source_hashes field MUST be retired post-Stage-6c \
+        "BarrelRouteSurface.source_hashes field MUST be retired \
          (replaced by fact_dep_signature: Arc<[FactVersionRef]>)"
     );
 
     // Positive assertion: the replacement field is present.
     assert!(
         source.contains("pub fact_dep_signature: Arc<[FactVersionRef]>"),
-        "BarrelRouteSurface.fact_dep_signature MUST be present (Stage-6c replacement for whole_hash)"
+        "BarrelRouteSurface.fact_dep_signature MUST be present (replacement for whole_hash)"
     );
 }
 
@@ -200,10 +193,9 @@ fn extract_fn_body<'a>(src: &'a str, needle: &str) -> &'a str {
 /// Read site #4 — `NodeScopeId::File { whole_hash }`. Today the
 /// scope-id variant carries `whole_hash` inline.
 ///
-/// **Documented Stage-5c+ replacement**: "Sourced from
+/// **Documented replacement**: "Sourced from
 /// `VersionedDeclIdentity.content_hash` inside the cached value;
-/// not exposed at the cache key." Stage 5c lands the new types;
-/// future stages remove the field from `NodeScopeId::File`.
+/// not exposed at the cache key."
 #[test]
 fn whole_hash_read_site_4_node_scope_id_inventoried() {
     let path = workspace_root().join("crates/verter_session/src/semantic_query.rs");
@@ -222,20 +214,19 @@ fn whole_hash_read_site_4_node_scope_id_inventoried() {
 /// `#[derive(Hash)]` on `DeclIdentity` includes `whole_hash` in
 /// the hash mixing.
 ///
-/// **Documented Stage-5c+ replacement**: "Slot identity hashes
-/// content-free (6 fields per R7); two file versions of 'same
-/// decl' produce equal slot keys, distinct `VersionedDeclIdentity`
-/// payloads → multi-candidate separates them." Stage 5c introduces
-/// the content-free `ResolvedDeclSlotIdentity` alongside
-/// `DeclIdentity`; downstream stages migrate cache keys.
+/// **Documented replacement**: "Slot identity hashes content-free
+/// (6 fields per R7); two file versions of 'same decl' produce equal
+/// slot keys, distinct `VersionedDeclIdentity` payloads →
+/// multi-candidate separates them." The content-free
+/// `ResolvedDeclSlotIdentity` exists alongside `DeclIdentity`.
 #[test]
 fn whole_hash_read_site_5_decl_identity_hash_alongside_content_free_slot() {
     let path = workspace_root().join("crates/verter_session/src/semantic_query.rs");
     let source = read_source_file(&path);
 
-    // Stage-5c invariant: the content-free `ResolvedDeclSlotIdentity`
-    // exists alongside the legacy `DeclIdentity`. The slot has six
-    // fields (R7) and does NOT include `whole_hash`.
+    // The content-free `ResolvedDeclSlotIdentity` exists alongside
+    // the legacy `DeclIdentity`. The slot has six fields (R7) and
+    // does NOT include `whole_hash`.
     let slot_present = source.contains("pub struct ResolvedDeclSlotIdentity");
     let slot_six_fields = source.contains("pub defining_canonical: Arc<str>")
         && source.contains("pub merged_symbol_name: Arc<str>")
@@ -246,7 +237,7 @@ fn whole_hash_read_site_5_decl_identity_hash_alongside_content_free_slot() {
 
     assert!(
         slot_present,
-        "ResolvedDeclSlotIdentity must be introduced by Stage 5c (site #5 routing target)"
+        "ResolvedDeclSlotIdentity must be present (site #5 routing target)"
     );
     assert!(
         slot_six_fields,

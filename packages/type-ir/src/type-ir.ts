@@ -67,7 +67,7 @@ export interface TupleType {
    *
    * Renderers walk `labels` to produce labelled output `[id: number, name?: string]`
    * rather than `[{ label: "id"; }, { label?: "name"; }]` (the previous bug)
-   * or the anonymous `[number, string]` (the pre-cutover lossy form).
+   * or the anonymous `[number, string]` (the legacy lossy form).
    */
   labels?: (string | null)[];
 }

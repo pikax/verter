@@ -226,7 +226,7 @@ export class ProjectSession {
   }
 
   /**
-   * Tier 1B selective surface (D32 + D101). Returns the
+   * Selective surface. Returns the
    * `verter.v1.ComponentMetaSurface` proto bytes (eager scalars +
    * `NamedTypeHandle` for every type-bearing field). Returns `null`
    * when the canonical does not resolve. Returns `null` AND logs a
@@ -252,7 +252,7 @@ export class ProjectSession {
   }
 
   /**
-   * Tier 1B selective surface (D32 + D101). Resolves a
+   * Selective surface. Resolves a
    * `verter.v1.TypeHandle` (caller pre-encodes via the proto module)
    * to a one-layer `verter.v1.TypeExpansion`. Returns the raw bytes;
    * D114 magic-byte error envelopes (`buf[0] === 0xFF`) are surfaced

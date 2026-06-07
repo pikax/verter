@@ -3,8 +3,8 @@
  *
  * Runs each component in an isolated child process with a hard timeout
  * enforced by SIGKILL from the parent. The runner is consumed by the
- * audit-only corpus driver in `scripts/benchmark/trace-component-corpus.mjs`
- * (plan §3 Commit 10): each spawned worker emits BOTH the
+ * audit-only corpus driver in `scripts/benchmark/trace-component-corpus.mjs`:
+ * each spawned worker emits BOTH the
  * `RustAuditRecord` JSON (`audit_path`) AND the
  * `ComponentMetaAnalysis` JSON (`analysis_path`) via the NAPI
  * `getComponentMetaWithAudit` binding. The runner exposes these paths
@@ -52,7 +52,7 @@ export interface CorpusTraceResult {
    * `VERTER_COMPONENT_META_AUDIT_PATH`). The runner pre-allocates the
    * path; consumers should check `existsSync(audit_path)` before
    * reading. Populated when the worker emits the bundle through the
-   * NAPI `getComponentMetaWithAudit` binding (plan §3 Commit 10).
+   * NAPI `getComponentMetaWithAudit` binding.
    */
   audit_path: string;
   /**
@@ -60,7 +60,7 @@ export interface CorpusTraceResult {
    * (env `VERTER_COMPONENT_META_ANALYSIS_PATH`). The runner
    * pre-allocates the path; consumers should check `existsSync` before
    * reading. Mirrors `audit_path` — both come from the same
-   * `getComponentMetaWithAudit` call in the worker (plan §3 Commit 10).
+   * `getComponentMetaWithAudit` call in the worker.
    */
   analysis_path: string;
   /**

@@ -118,7 +118,7 @@ fn build_with_merged_foo(parts: Vec<Vec<(&str, TypeExpr)>>) -> Arc<IndexedReady>
 #[test]
 fn two_interface_parts_emit_one_merged_export_fact() {
     // R10: two `interface Foo` parts → one merged `Export("Foo", Type)`
-    // fact. The Phase 1 emitter observes the SINGLE merged
+    // fact. The fact emitter observes the SINGLE merged
     // `ShallowTypeSymbol` (shallow walk did the merge) and emits
     // one Export fact.
     let indexed = build_with_merged_foo(vec![
@@ -155,7 +155,7 @@ fn two_interface_parts_emit_one_merged_export_fact() {
 fn declaration_merge_member_reorder_produces_byte_identical_export_fact() {
     // R10 / member-order invariance: reordering the MEMBERS WITHIN a
     // merged interface contributor produces a byte-identical
-    // `Export("Foo")` fact, because the Phase 1 emitter alpha-normalises
+    // `Export("Foo")` fact, because the fact emitter alpha-normalises
     // each object surface by sorted member name. This is a GENUINE
     // reorder (`parts_a != parts_b`): if the emitter hashed members in
     // source order, the two hashes would differ.
@@ -229,9 +229,9 @@ fn merge_with_added_part_changes_export_fact() {
     );
 }
 
-/// Stage 0 → Stage 3 corpus-anchored binding: the
+/// Corpus-anchored binding: the
 /// `declaration_merge.ts` fixture exercises the merged-symbol
-/// identity contract (R10). Stage 3 must be able to load it and
+/// identity contract (R10). The loader must be able to load it and
 /// verify the structural shape — two `interface MergedInterface`
 /// parts and an overloaded function — matches the documented
 /// contract.

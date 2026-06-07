@@ -644,7 +644,7 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 6. P2a — aliased-union DTO. `type UnionAlias = Fixed | Bubble;
+// 6. Aliased-union DTO. `type UnionAlias = Fixed | Bubble;
 //    defineProps<UnionAlias>()`. The macro-object DTO surface MUST
 //    enumerate the UNION of object-arm members (every member present in
 //    ANY arm is part of the component macro surface — the Vue macro
@@ -652,10 +652,10 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
 //    members.
 //
 //    Discrimination: branch-only members (`width` on `Fixed`, `offset`
-//    on `Bubble`) appear ONLY under the `MacroObjectSurface` demand. The
-//    pre-P2a `published(Shallow)` demand synthesises the intersection and
+//    on `Bubble`) appear ONLY under the `MacroObjectSurface` demand. A
+//    `published(Shallow)` demand synthesises the intersection and
 //    drops both branch-only members, keeping only the common `tag`. The
-//    fix is in `resolve_vue_macro_surface`'s `terminal_context`
+//    correct path is `resolve_vue_macro_surface`'s `terminal_context`
 //    (`macro_object_surface` instead of `published`).
 // ─────────────────────────────────────────────────────────────────────
 
@@ -678,7 +678,7 @@ fn p2a_aliased_union_define_props_enumerates_both_arms() {
         &[("lib.es5.d.ts", harness::STUB_LIB_ES5)],
     );
 
-    // (a) Direct `vue_macro_dtos` (FullMetadata) — the exact P2a surface.
+    // (a) Direct `vue_macro_dtos` (FullMetadata) — the aliased-union surface.
     let dtos = host.vue_macro_dtos(&VueMacroSurfaceRequest {
         owner_canonical: std::sync::Arc::from("/AliasedUnionProps.vue"),
         macro_index: 0,
@@ -703,7 +703,7 @@ fn p2a_aliased_union_define_props_enumerates_both_arms() {
             "the macro-object DTO surface MUST enumerate the UNION of \
              object-arm members; branch-only member `{branch_only}` is missing. \
              Ordinary `Published(Shallow)` synthesises the property-access \
-             INTERSECTION and drops it — the P2a `macro_object_surface` demand \
+             INTERSECTION and drops it — the `macro_object_surface` demand \
              enumerates the arms. Got: {dto_names:?}"
         );
     }
@@ -747,13 +747,13 @@ fn p2a_aliased_union_define_props_enumerates_both_arms() {
 //
 //    Discrimination: the open-conditional empty-path Shallow contract
 //    returns an EMPTY surface (branch selection is impossible). Under the
-//    macro object-surface demand, the Fix-A arm distributes both branches
-//    through `merge_union_surfaces_for_macro`. Pre-fix the define_props
-//    surface is EMPTY (both `a` and `b` missing); post-fix both `a` and
-//    `b` are present AND optional. (Contrast test 3, which covers the
-//    EMITS open conditional via the separate emits branch-merge path —
-//    props travel through the shallow walker, which is the path Fix A
-//    repairs.)
+//    macro object-surface demand, the macro-object-surface arm distributes
+//    both branches through `merge_union_surfaces_for_macro`. Pre-fix the
+//    define_props surface is EMPTY (both `a` and `b` missing); post-fix
+//    both `a` and `b` are present AND optional. (Contrast test 3, which
+//    covers the EMITS open conditional via the separate emits branch-merge
+//    path — props travel through the shallow walker, which is the path the
+//    macro-object-surface arm repairs.)
 // ─────────────────────────────────────────────────────────────────────
 
 const OPEN_CONDITIONAL_PROPS_VUE: &str = r#"<script setup lang="ts" generic="T extends 'a' | 'b'">
@@ -792,7 +792,7 @@ fn open_conditional_props_root_enumerates_both_branches() {
              branch member `{required}` is missing. The OPEN conditional under \
              a macro object surface distributes both branches through \
              `merge_union_surfaces_for_macro` — an empty surface means the \
-             Fix-A macro-object-surface arm regressed back to the empty \
+             macro-object-surface arm regressed back to the empty \
              `OpenConditional` contract. Got: {dto_names:?}"
         );
     }

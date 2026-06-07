@@ -41,7 +41,7 @@ export type RustSemanticFootprintAudit = RequestFootprintAudit;
 /**
  * JSON-shaped audit bundle returned by
  * `ComponentMetaSession.getComponentMetaWithAudit`. Mirrors the Rust
- * `AuditBundle` (plan §3 Commit 8). `analysis` and `resolution` are
+ * `AuditBundle`. `analysis` and `resolution` are
  * FFI projections; `record` is the full ts-rs–generated record.
  */
 export interface AuditBundle {
@@ -66,7 +66,7 @@ export function decodeAuditBundle(buffer: Buffer | null): AuditBundle | null {
  * Ask "why was this file loaded during this audited request?".
  * Delegates to the Rust walker via the `ComponentMetaSession`'s
  * `whyLoadedFromAuditJson` binding so the traversal logic stays in
- * one place (plan §2.8 single-walker rule).
+ * one place (single-walker rule).
  */
 export function whyLoaded(
   session: ComponentMetaSession,
@@ -104,7 +104,7 @@ export function whyInstantiated(
 /**
  * Assert (set-equality) that `loaded_files()` — the files the
  * scheduler actually read on behalf of this request — equals
- * `expected`. Plan §1.4 + §3.B.
+ * `expected`.
  *
  * Mirrors the Rust-side `RequestAuditRecord::assert_loaded_files_exactly`
  * helper; throws with a unified-diff style message on mismatch so the
@@ -125,7 +125,6 @@ export function assertLoadedFilesExactly(record: RequestAuditRecord, expected: s
  * Assert (set-equality) that `declared_dependency_files()` — the
  * broader "this request's dependency closure" set (`vfs_reads ∪
  * shared_load_reuses ∪ indexed_ready_builds`) — equals `expected`.
- * Plan §3.B Commit 7.B.
  *
  * Use this when the fixture's intent is "these files appeared in the
  * request's dependency graph", which is a distinct claim from
@@ -177,7 +176,7 @@ export function declaredDependencyFiles(footprint: RustSemanticFootprintAudit | 
 /**
  * Render a `ProvenanceChain` as plain text — a tiny indented list of
  * edges with the termination reason. Pure formatting; does NOT walk
- * the graph. Plan §2.8 — the walker lives in Rust; TS callers render
+ * the graph — the walker lives in Rust; TS callers render
  * results.
  */
 export function renderChainText(chain: ProvenanceChain): string {

@@ -1377,7 +1377,7 @@ impl VerterHost {
         let canonical_id = normalized_canonical_id.as_ref();
 
         // Fast path: check FileArtifactStore through the project-global cache.
-        // R3 cutover: query the scheduler's current `whole_hash` for the
+        // R3: query the scheduler's current `whole_hash` for the
         // canonical and pin the lookup to it. With eager
         // `evict_canonical` removed at upsert, the `get_any`
         // permissive lookup could return a stale candidate alongside

@@ -206,8 +206,8 @@ fn wait_for_worker(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> WorkerResult {
-    // Hang deadline: respect plan §8 slice 5.1's `timeout * 2`
-    // semantics for real corpus timeouts (which are multi-second),
+    // Hang deadline: the `timeout * 2` semantics for real corpus
+    // timeouts (which are multi-second),
     // but enforce a floor so tiny test-only timeouts cannot trigger
     // a spurious process abort.
     let hard_deadline_at =
@@ -260,12 +260,11 @@ fn run_audited(
     fixture: CorpusFixture,
     _cancel: Arc<AtomicBool>,
 ) -> Result<RequestAuditRecord, AuditedRequestError> {
-    // The cancellation flag is observable by future audited producers
-    // that wire phase-boundary checks. Today, hermetic component-meta
+    // The cancellation flag is observable by audited producers that
+    // wire phase-boundary checks. Today, hermetic component-meta
     // resolution is fast and synchronous; the flag is preserved as
     // an Arc capture so the worker thread can be cooperatively
-    // signalled when slice 5.1's downstream consumers (sibling hang
-    // plan) start polling it.
+    // signalled once downstream consumers start polling it.
     let CorpusFixture {
         canonical_id,
         source,

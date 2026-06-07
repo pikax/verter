@@ -1,6 +1,6 @@
 /**
- * @ai-generated - Plan §3 Step 10 / F9: SLA bucket counts + bench
- * harness CLI flag deprecation.
+ * @ai-generated - SLA bucket counts + bench harness CLI flag
+ * deprecation.
  *
  * FAIL-FIRST tests for the SLA-vs-hard-timeout split:
  *
@@ -20,7 +20,7 @@ import { describe, expect, it } from "vitest";
 
 import { buildSlaCount, type ComponentResultRow } from "./meta-ui-report.js";
 
-describe("buildSlaCount (plan §3 Step 10 / F9)", () => {
+describe("buildSlaCount", () => {
   it("partitions component results by latency vs slaMs", () => {
     const rows: ComponentResultRow[] = [
       {

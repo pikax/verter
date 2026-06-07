@@ -3,9 +3,9 @@
 //! The trait has four entry points:
 //!
 //! - `validates(fact)` — generic dispatch.
-//! - `validates_parse_domain(parse_fact)` — Stage 6 producer overrides.
-//! - `validates_resolve_imports_domain(resolve_fact)` — Stage 6 producer overrides.
-//! - `validates_route_surface_domain(route_fact)` — Stage 6 producer overrides.
+//! - `validates_parse_domain(parse_fact)` — producer overrides.
+//! - `validates_resolve_imports_domain(resolve_fact)` — producer overrides.
+//! - `validates_route_surface_domain(route_fact)` — producer overrides.
 //!
 //! The default `validates` impl routes each per-domain variant to
 //! the matching per-domain method. This test exercises every arm
@@ -18,9 +18,8 @@
 //!    value — proving the dispatch table is keyed by
 //!    `FactDomain` (3 variants), not by `FactKey`.
 //!
-//! Plan: §"Stage 3 — Sub-task F" + R26 ("Adding a new `FactKey`
-//! extends the per-domain `*FactRef` enum but does NOT widen the
-//! trait").
+//! R26: "Adding a new `FactKey` extends the per-domain `*FactRef`
+//! enum but does NOT widen the trait".
 
 use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
 use verter_session::file_artifact_store::InternedName;

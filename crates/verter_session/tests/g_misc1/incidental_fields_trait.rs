@@ -14,17 +14,12 @@
 //! These tests use *test-local* implementors so they pass on any
 //! tree that has the trait defined — they are independent of which
 //! audit record types currently have incidental fields. They fail
-//! to compile against any tree where the trait does not yet exist
-//! (which is the discriminator for Slice 0.3 vs the pre-change
-//! codebase).
-//!
-//! See plan §2 Slice 0.3 ("Hand-written `IncidentalFields` trait").
+//! to compile against any tree where the trait does not exist.
 
 use verter_session::component_meta_audit::IncidentalFields;
 
-/// Test-local implementor with two incidental fields. Models a
-/// future audit record with multiple flaky payloads (Wave 2 will
-/// add ~6).
+/// Test-local implementor with two incidental fields. Models an
+/// audit record with multiple flaky payloads.
 #[derive(Debug, Default, PartialEq, Eq, Clone)]
 struct TwoIncidentalFields {
     flaky_a: Vec<u32>,

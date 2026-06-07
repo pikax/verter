@@ -23,8 +23,8 @@ struct TestHost {
     external_macro_elements: BTreeMap<(String, String), ResolvedElements>,
     eval_outputs: ComponentMetaEvalOutputs,
     projectable_owner_local_roots: BTreeSet<String>,
-    // Owner-local roots that project to a NON-EMPTY prepared surface. After
-    // the props/emits/slots cutover the cold resolver gates the owner-local
+    // Owner-local roots that project to a NON-EMPTY prepared surface. The
+    // cold resolver gates the owner-local
     // authority entry on a boolean ("does this root have a surface?") via
     // `owner_local_macro_root_has_surface`; the published props/emits/slots
     // surface itself is owned by the typeinfo path. This set mirrors that
@@ -716,7 +716,7 @@ fn local_resolved_macro_types_push_authoritative_owner_local_entry() {
     // An owner-local emit root that projects to a non-empty surface produces
     // an authoritative `ResolvedMacroMeta` entry (the cold resolver's
     // contract). The published emit payload itself is NOT carried on
-    // `ResolvedMacroMeta` after the cutover — it is owned by the typeinfo
+    // `ResolvedMacroMeta` — it is owned by the typeinfo
     // macro-surface path (covered in `typeinfo_tests::vue_adapter`); this
     // test pins the entry identity + authority the materialiser gates on.
     let host = TestHost {

@@ -1,10 +1,10 @@
-//! Stage 3 R27 binding: cycle-safe worklist hashing replaces the
+//! R27 binding: cycle-safe worklist hashing replaces the
 //! legacy cooperative cycle guards documented in
 //! `crates/verter_session/tests/fixtures/cache_baseline/cycle_safety_failure_mode.md`.
 //!
-//! Verify-bullet 10: per Stage-0's investigation, the conclusion
-//! was layered cooperative cycle guards (not pure stack-overflow,
-//! not pure cache-miss explosion). Stage 3's R27 worklist with
+//! Verify-bullet 10: the failure mode was layered cooperative cycle
+//! guards (not pure stack-overflow,
+//! not pure cache-miss explosion). The R27 worklist with
 //! `CycleRef(visit_index)` replaces those guards; mutually-recursive
 //! types now hash without stack overflow AND produce canonical
 //! `CycleRef` placeholders (not the four legacy sentinels:
@@ -25,8 +25,8 @@ fn mutually_recursive_types_terminate_without_stack_overflow() {
     // R27: the worklist hasher MUST terminate on a 200-deep
     // intentional chain (much deeper than the default stack would
     // tolerate via recursion). It emits `budget_exceeded == true`
-    // at depth ≥ MAX_HASH_DEPTH (= 64). The legacy pre-Stage-3
-    // policy walker would have terminated via one of the four
+    // at depth ≥ MAX_HASH_DEPTH (= 64). The legacy policy walker
+    // would have terminated via one of the four
     // sentinel shapes documented in
     // `cycle_safety_failure_mode.md` (Unknown(semanticMiss),
     // RecursiveRef, preserved Pick, bare Ref(Self)) — NONE of
@@ -44,14 +44,14 @@ fn mutually_recursive_types_terminate_without_stack_overflow() {
     //   - Termination: hash produced (no stack overflow).
     //   - Budget exceeded: depth > 64 trips the budget; producer
     //     MUST admit as `NonCacheable` (the admission guard lives
-    //     at Stage 6d, but the producer-side signal is set here).
+    //     downstream, but the producer-side signal is set here).
     assert!(
         result.budget_exceeded,
         "200-deep nesting MUST trip budget_exceeded (limit = {MAX_HASH_DEPTH})"
     );
     // Hash is still produced — the worklist hasher does NOT
     // panic / abort under recursion. This is the headline
-    // discrimination vs. the pre-Stage-3 implementation, which
+    // discrimination vs. the legacy implementation, which
     // would either stack-overflow inside hashing or terminate via
     // a legacy sentinel inside the policy walker (which the new
     // hasher does NOT call).
@@ -92,10 +92,10 @@ fn ref_to_self_produces_canonical_cycle_ref_via_lens() {
     // R27 cycle-handling: a `TypeExpr::Ref { name: "Self" }`
     // representing the recursive reference resolves via the lens
     // to a `LocalDecl` shape edge — NOT inlined. This is the
-    // path-precise equivalent of the pre-Stage-3 `Unknown(semanticMiss)`
+    // path-precise equivalent of the legacy `Unknown(semanticMiss)`
     // sentinel: the consumer observes the reference shape, and the
     // referent's body fingerprint is observed separately via the
-    // Phase 2 `Member` lookup.
+    // `Member` fact lookup.
     struct SelfLens;
     impl CrossDeclLens for SelfLens {
         fn resolve(&self, name: &str, space: SymbolSpace) -> Option<CrossDeclRef> {

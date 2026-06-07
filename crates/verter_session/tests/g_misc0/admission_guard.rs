@@ -1,7 +1,7 @@
-//! Sub-task D — `ValidatedFactCache` admission-guard discrimination.
+//! `ValidatedFactCache` admission-guard discrimination.
 //!
-//! Stage 6d adds two pre-publish gates to
-//! `ValidatedFactCache::insert_arc_with_kind`:
+//! `ValidatedFactCache::insert_arc_with_kind` enforces two pre-publish
+//! gates:
 //!
 //! - **Over-cap signature** → admission refused, `FactSignatureOverflow`
 //!   emitted, `signature_overflow_count` advances.
@@ -90,8 +90,8 @@ fn loose_insert_arc_admits_empty_signature_for_legacy_callers() {
     // The non-strict `insert_arc` keeps the legacy "stable miss"
     // behaviour: an empty signature admits without firing the
     // refusal guard. Strict producers must opt in via
-    // `insert_arc_with_kind`. Stage 7's canary will validate that
-    // strict-mode `admission_refused_count == 0` over the
+    // `insert_arc_with_kind`. A strict-mode canary validates that
+    // `admission_refused_count == 0` over the
     // steady-state baseline; the loose-mode counter is not
     // observed as a discriminating signal.
     let cache: ValidatedFactCache<&'static str, u32> = ValidatedFactCache::default();

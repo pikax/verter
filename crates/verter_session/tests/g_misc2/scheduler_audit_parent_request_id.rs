@@ -1,4 +1,4 @@
-//! Wave 2 Slice 2.3 — `RequestAuditRecord::parent_request_id`
+//! `RequestAuditRecord::parent_request_id`
 //! discriminating coverage.
 //!
 //! When a sub-request is initiated while a parent context is on the
@@ -10,13 +10,9 @@
 //! and stamps the record's envelope-level
 //! `parent_request_id: Option<String>` field.
 //!
-//! Pre-Slice-2.3: the `RequestContext` never recorded a parent, so
-//! the `parent_request_id` envelope field stayed `None` even when a
-//! parent was on the stack.
-//!
-//! Post-Slice-2.3: a sub-request constructed under an installed
-//! parent guard captures the parent's id, and the synthesized /
-//! finalised audit record exposes it.
+//! A sub-request constructed under an installed parent guard
+//! captures the parent's id, and the synthesized / finalised audit
+//! record exposes it.
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::Arc;
@@ -54,9 +50,8 @@ fn request_context_constructed_under_installed_parent_records_parent_request_id(
     );
 
     // A NEW RequestContext constructed inside the parent guard's
-    // scope must record the parent's id. Pre-Slice-2.3 the field
-    // does not exist; the test would not compile. Post-Slice-2.3 the
-    // captured parent must equal 4242.
+    // scope must record the parent's id. The captured parent must
+    // equal 4242.
     let child = RequestContext::new(
         /* request_id */ 9999,
         Arc::from("/child.vue"),
@@ -67,8 +62,7 @@ fn request_context_constructed_under_installed_parent_records_parent_request_id(
         child.parent_request_id,
         Some(4242),
         "child constructed under installed parent must capture parent_request_id; \
-         pre-Slice-2.3 this field did not exist and the test would fail to compile, \
-         post-Slice-2.3 the parent's id must propagate"
+         the parent's id must propagate"
     );
 
     // Negative control: a context constructed AFTER the parent
@@ -94,7 +88,7 @@ fn request_context_constructed_under_installed_parent_records_parent_request_id(
 /// an outer-installed parent guard, then drains the audit record
 /// and asserts `record.parent_request_id == Some(parent.to_string())`.
 ///
-/// This exercises the full plan §5 Slice 2.3 wire path:
+/// This exercises the full wire path:
 /// scheduler-side TLS at sub-request construction → captured parent
 /// → audit-finalisation → envelope field.
 #[test]
@@ -154,8 +148,8 @@ fn audited_sub_request_under_installed_parent_publishes_parent_request_id_in_rec
         record.parent_request_id,
         Some(PARENT_REQ_ID.to_string()),
         "child record must carry parent_request_id == Some('{}'); \
-         pre-Slice-2.3 the constructor never sniffed scheduler TLS, \
-         so this field stayed None even when a parent was installed",
+         the constructor sniffs scheduler TLS, so this field captures \
+         the parent's id whenever a parent is installed",
         PARENT_REQ_ID,
     );
 }

@@ -1,10 +1,8 @@
-//! Block 6.i Round 10 — Chain Y discriminator (routed surface demand split).
+//! Chain Y discriminator (routed surface demand split).
 //!
-//! Closes Chain Y, the smallest residual emitter on the nuxt-ui
-//! corpus (9.9% / 36 of 364 captured ProjectMember emissions per
-//! the round-10 diagnostic at `D:/tmp/round10-diagnostic-report.md`,
-//! all attributed to EditorDragHandle). The chain enters through
-//! the macro publication route fast-path:
+//! Closes Chain Y, a residual emitter on the nuxt-ui corpus of
+//! captured ProjectMember emissions, attributed to EditorDragHandle.
+//! The chain enters through the macro publication route fast-path:
 //!
 //! ```text
 //! produce_one_macro_object_shape
@@ -14,17 +12,17 @@
 //!   ⇧ Instantiate(Published(Expanded))  →  build_key_of / build_mapped_type emit
 //! ```
 //!
-//! Pre-Commit-5 the macro publication's `Ref { name, type_arguments:
+//! A macro publication where the `Ref { name, type_arguments:
 //! [] }` fast-path in `produce_one_macro_object_shape` always
-//! routed through `project_type_surface_shape_via_host_threaded`,
-//! which instantiated the root's full structural body under
+//! routes through `project_type_surface_shape_via_host_threaded`
+//! leaks: that path instantiates the root's full structural body under
 //! `Published(Expanded)` — re-entering `build_key_of` /
 //! `build_mapped_type` for `extends Omit<DragHandleProps, …>` /
 //! `extends Omit<ButtonProps, …>` heritage chains and emitting one
 //! `ProjectMember` edge per inherited library member name.
 //!
-//! Post-Commit-5 the fast-path applies the SAME path-precision
-//! predicate the round-9 non-fast-path uses
+//! The fast-path instead applies the SAME path-precision
+//! predicate the non-fast-path uses
 //! (`macro_payload_root_is_conditional_carrier`): a Conditional
 //! macro payload root retains `Published(Expanded)` for the
 //! inherited-emits branch-merge protocol; a non-Conditional root
@@ -62,9 +60,9 @@ export interface DragHandleProps {
 // `EditorDragHandleProps extends Omit<DragHandleProps, 'element'>`
 // + `defineProps<EditorDragHandleProps>()`. The macro payload
 // lowers to `Ref { 'EditorDragHandleProps', [] }` which hits the
-// fast path in `produce_one_macro_object_shape`. Pre-Commit-5 the
-// fast path drives `dispatch_root_instantiated`'s
-// `Instantiate(Published(Expanded))` which instantiates the root's
+// fast path in `produce_one_macro_object_shape`. A fast path that
+// drives `dispatch_root_instantiated`'s
+// `Instantiate(Published(Expanded))` instantiates the root's
 // structural body and emits per-key edges for every member of
 // `DragHandleProps` (minus the Omit'd `element` key).
 const EDITOR_DRAG_HANDLE_VUE: &str = r#"<script setup lang="ts">
@@ -114,7 +112,7 @@ fn chain_y_routed_surface_demand_split_does_not_leak_inherited_library_members()
         "onElementDragStart",
     ];
 
-    // Block 6.j R18 — scope leak counter to intermediate provenances.
+    // R18 — scope leak counter to intermediate provenances.
     // `MemberEdgeProvenance::PublishedField` is the producer-side
     // declaration of the user-visible surface and is OUT of the leak
     // domain: a `defineProps<EditorDragHandleProps>()` publication
@@ -162,20 +160,17 @@ fn chain_y_routed_surface_demand_split_does_not_leak_inherited_library_members()
 
     assert_eq!(
         total, 0,
-        "Block 6.i Round 10 Chain Y — macro publication route fast-path \
+        "Chain Y — macro publication route fast-path \
          MUST NOT emit `ProjectMember` edges for inherited library members \
          (`editor`, `computePositionConfig`, `onElementDragEnd`, …). The \
          macro fast-path in `produce_one_macro_object_shape` must apply \
          the path-precision predicate `macro_payload_root_is_conditional_carrier` \
-         (same predicate as the round-9 non-fast-path) and route \
+         (same predicate as the non-fast-path) and route \
          non-Conditional roots through \
          `project_type_surface_shape_transit_shallow_via_host_threaded` \
          (carrier-lower in `Navigate` + project under \
          `Published(Shallow)`). Got: leak_edges={leak_edge_count} \
          (names={leak_edge_names:?}), \
-         projection_path_member_hits={leak_path_count}. \
-         See `D:/tmp/round10-diagnostic-report.md` Chain Y (9.9% / 36 of \
-         364 captured emissions on EditorDragHandle) and the codex 5th \
-         consult Q1-Y verdict at `D:/tmp/round10-codex-reconsult-out.txt`."
+         projection_path_member_hits={leak_path_count}."
     );
 }

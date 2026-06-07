@@ -1,23 +1,17 @@
-//! Block 6.i Round 7 — discriminator: **slots unresolved-import diagnostic preservation**.
+//! Discriminator: **slots unresolved-import diagnostic preservation**.
 //!
 //! Companion to `block_6i_round7_emits_unresolved_diagnostic`. The
 //! `defineSlots<MissingImport>()` macro must publish a
-//! `MacroExpansionDiagnostics` envelope under every round-7 commit:
-//! pre-cutover via the Navigate-lowering failure path,
-//! post-cutover via the macro-payload diagnostic probe (codex Q2) and
-//! the equivalent probe in
+//! `MacroExpansionDiagnostics` envelope, either via the
+//! Navigate-lowering failure path or via the macro-payload diagnostic
+//! probe and the equivalent probe in
 //! `slot_binding_graph::resolve_slot_bindings_graph_native`.
 //!
-//! ## Discrimination progression
+//! ## Discrimination
 //!
-//! - **Commit 1 (no substrate extensions):** PASS — Navigate
-//!   lowering fails loudly; the existing diagnostic path emits the
-//!   envelope. Regression guard.
-//! - **Commit 2 (substrate extensions added, including the probe):**
-//!   PASS — `resolve_macro_payload` and `resolve_slot_bindings_graph_native`
-//!   switch to StructuralTransit lowering AND invoke the probe.
-//! - **Commit 3 (atomic cutover):** PASS — consumer migrations land;
-//!   the probe continues to fire the diagnostic.
+//! `resolve_macro_payload` and `resolve_slot_bindings_graph_native`
+//! lower under StructuralTransit AND invoke the probe, which fires the
+//! diagnostic. Without it the envelope is dropped.
 
 #![allow(clippy::too_many_lines, dead_code, unused_imports)]
 
@@ -64,7 +58,7 @@ fn build_workspace_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
 }
 
 #[test]
-fn round7_define_slots_unresolved_import_publishes_diagnostic_through_cutover() {
+fn round7_define_slots_unresolved_import_publishes_diagnostic_through_transit() {
     let host = build_workspace_host(&[(
         "/workspace/src/Comp.vue",
         r#"<script setup lang="ts">
@@ -92,14 +86,13 @@ defineSlots<MissingSlots>()
 
     assert!(
         !define_slots_diags.is_empty(),
-        "Block 6.i Round 7 — `defineSlots<MissingSlots>()` MUST publish a \
-         `MacroExpansionDiagnostics` envelope with `macro_kind == DefineSlots` \
-         under EVERY round-7 commit: pre-cutover via the Navigate-lowering \
-         failure path, post-cutover via the macro-payload diagnostic probe \
-         (codex Q2) on both `resolve_macro_payload` and \
+        "`defineSlots<MissingSlots>()` MUST publish a \
+         `MacroExpansionDiagnostics` envelope with `macro_kind == DefineSlots`, \
+         either via the Navigate-lowering failure path or via the \
+         macro-payload diagnostic probe on both `resolve_macro_payload` and \
          `resolve_slot_bindings_graph_native`. A regression here means the \
-         probe was not wired into both paths or the cutover landed without \
-         preserving the silent-miss contract. Got {} total diagnostics: {:#?}",
+         probe was not wired into both paths or the silent-miss contract is \
+         not preserved. Got {} total diagnostics: {:#?}",
         meta.macro_expansion_diagnostics.len(),
         meta.macro_expansion_diagnostics,
     );

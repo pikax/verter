@@ -6,8 +6,8 @@
 //! `audit_timing_capture = true`, each acquisition's wait duration
 //! flows into the per-request `WaitAudit::lock_wait_ns` aggregate.
 //!
-//! Discriminator: pre-Slice-2.4 the `RequestAuditRecord::waits` field
-//! does not exist or is always `None`. A naive stub that always wrote
+//! Discriminator: without the `RequestAuditRecord::waits` field, or
+//! when it is always `None`, this fails. A naive stub that always wrote
 //! `0` would also fail the strictly-positive assertion. The single
 //! mutation point (`record_*_lock_acquisition` helpers in
 //! `host_manage.rs`) is exercised across both arena.rs and
@@ -77,7 +77,7 @@ fn at_least_one_concurrent_request_observes_non_zero_lock_wait_ns() {
         assert!(
             r.waits.is_some(),
             "request {}: waits must be Some when audit_timing_capture is on; \
-             pre-Slice-2.4 the field does not exist or is always None",
+             the field must exist and not be always None",
             r.request_id,
         );
     }
@@ -118,8 +118,7 @@ fn at_least_one_concurrent_request_observes_non_zero_lock_wait_ns() {
         max_wait_ns > 0,
         "at least one of {} concurrent requests must observe a strictly \
          positive lock_wait_ns; max observed = {} ns. \
-         Pre-Slice-2.4 the field does not exist; a stub that always wrote \
-         0 would also fail this assertion.",
+         A stub that always wrote 0 would also fail this assertion.",
         REQUESTS,
         max_wait_ns,
     );

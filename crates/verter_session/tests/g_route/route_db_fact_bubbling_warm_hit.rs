@@ -17,7 +17,7 @@
 //! independently — the tracer assertion catches site (1), and the
 //! counter-delta assertion catches site (2).
 //!
-//! ## Why this could not be expressed pre-cutover
+//! ## Why this could not be expressed before the consumer migration
 //!
 //! Before the consumer migration onto
 //! `get_or_resolve_route_observing_facts`, consumer call sites used

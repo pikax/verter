@@ -1,22 +1,18 @@
 //! `DedupeHook` — caller-side pre-admission singleflight contract.
 //!
-//! BINDING DECISION (Block 7): `DedupeHook` is the *caller-side*
-//! pre-admission singleflight hook, distinct from the scheduler-internal
-//! post-unlock `DedupJoinerEvent` (which stays as-is). A later caller
-//! (the session `cache_runtime`, landing in B7f) implements `DedupeHook`
-//! over its own in-flight table to collapse duplicate in-flight
-//! submissions BEFORE they reach the DAG — the scheduler crate stays
-//! unaware of the cache-runtime substrate (H20).
+//! `DedupeHook` is the *caller-side* pre-admission singleflight hook,
+//! distinct from the scheduler-internal post-unlock `DedupJoinerEvent`.
+//! A caller (the session `cache_runtime`) implements `DedupeHook` over
+//! its own in-flight table to collapse duplicate in-flight submissions
+//! BEFORE they reach the DAG — the scheduler crate stays unaware of the
+//! cache-runtime substrate (H20).
 //!
-//! B7a defines the narrowest sound contract: `probe(&WorkNodeIdentity) ->
-//! Option<DedupeJoiner>`. The scheduler dedupe identity is
-//! `WorkNodeIdentity` (the binding single-authority decision); a future
-//! public `DedupKey` is a thin wrapper/derivation that lands with the
-//! cache-node envelope in B7e — at that point the probe param migrates to
-//! the thin wrapper. B7a also ships a genuine no-op default
-//! (`NoDedupeHook`) that always returns `None` (never collapses) so the
-//! "no hook supplied" path is a real, exercised value, not an advertised
-//! behaviour it lacks.
+//! The contract is the narrowest sound shape: `probe(&WorkNodeIdentity)
+//! -> Option<DedupeJoiner>`. The scheduler dedupe identity is
+//! `WorkNodeIdentity` (the single-authority decision). It also ships a
+//! genuine no-op default (`NoDedupeHook`) that always returns `None`
+//! (never collapses) so the "no hook supplied" path is a real,
+//! exercised value, not an advertised behaviour it lacks.
 //!
 //! These tests EXERCISE the contract (they are not satisfied by an empty
 //! trait):
@@ -27,7 +23,7 @@
 //! 2. The shipped `NoDedupeHook` default is invoked and always returns
 //!    `None` (it never advertises a collapse).
 //! 3. The contract is object-safe (`&dyn DedupeHook`) and `Send + Sync`,
-//!    so later blocks can store it behind a trait object on a work node.
+//!    so it can be stored behind a trait object on a work node.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -45,7 +41,7 @@ fn file_stage(canonical: &str, generation: u64) -> WorkNodeIdentity {
 
 /// A real consumer-side hook: it owns an in-flight identity set and
 /// returns a joiner when the probed identity is already in flight. This is
-/// the shape the session `cache_runtime` will implement in B7f.
+/// the shape the session `cache_runtime` implements.
 struct InflightSetHook {
     inflight: HashSet<WorkNodeIdentity>,
 }
@@ -104,8 +100,8 @@ fn no_dedupe_hook_never_collapses() {
     );
 }
 
-/// The contract is object-safe + `Send + Sync` so later blocks can hand a
-/// `&dyn DedupeHook` to `submit_request` / `try_submit_dag`. We exercise
+/// The contract is object-safe + `Send + Sync` so a `&dyn DedupeHook`
+/// can be handed to `submit_request` / `try_submit_dag`. We exercise
 /// it through a trait object to prove object-safety at the type level.
 #[test]
 fn hook_is_object_safe_and_thread_safe() {

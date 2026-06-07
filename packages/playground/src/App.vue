@@ -14,7 +14,7 @@ const store = useStore();
 
 provide("store", store);
 
-// Plan §3 Commit 8 — "Why?" tab for the playground. The chain is
+// "Why?" tab for the playground. The chain is
 // populated by the audit pipeline once the playground wires a
 // `getComponentMetaWithAudit` call against the WASM session; until
 // then the tab renders the component's empty state with the

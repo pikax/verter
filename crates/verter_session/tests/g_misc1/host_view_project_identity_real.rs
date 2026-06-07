@@ -1,18 +1,11 @@
-//! Block 1.6 — `host_view_project_identity_for(canonical)` returns the
+//! `host_view_project_identity_for(canonical)` returns the
 //! published project's identity hash, not the all-zero stub.
 //!
-//! Plan citation: `D:/tmp/verter-stage7-final-cutover-plan.md` § "Block 1.6".
+//! Contract: `host_view_project_identity_for(canonical)`
+//! maps canonical → ProjectId via the published snapshot, then looks
+//! up the project-identity hash on `PublishedRoot::project_identity_hashes`.
 //!
-//! Discrimination chain:
-//! - Pre-Block-1.6 stub: `host_view_project_identity()` returns
-//!   `ProjectIdentity([0u8; 16])` regardless of canonical.
-//! - Post-Block-1.6 GREEN: `host_view_project_identity_for(canonical)`
-//!   maps canonical → ProjectId via the published snapshot, then looks
-//!   up the project-identity hash on `PublishedRoot::project_identity_hashes`.
-//!
-//! This test FAILS against the pre-change tree (the `_for(canonical)`
-//! method does not exist) and PASSES against the post-GREEN state. The
-//! negative assertion verifies the returned identity is NOT the all-zero
+//! The negative assertion verifies the returned identity is NOT the all-zero
 //! placeholder that R21 forbids in production.
 
 #![cfg(not(target_arch = "wasm32"))]
@@ -55,7 +48,7 @@ fn host_view_project_identity_for_canonical_returns_real_hash() {
     assert_ne!(
         identity,
         ProjectIdentity([0u8; 16]),
-        "post-Block-1.6 GREEN: host_view_project_identity_for must NOT collapse to \
+        "host_view_project_identity_for must NOT collapse to \
          ProjectIdentity([0u8; 16]) for a canonical owned by a published project — R21 forbids \
          all-zero project identities in production paths",
     );

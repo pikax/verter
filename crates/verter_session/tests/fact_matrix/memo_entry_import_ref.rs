@@ -1,9 +1,8 @@
 //! Matrix slice: `memo_entry` × `import_ref`.
 //!
 //! Discrimination: cross-file imports drive Instantiate /
-//! ProjectPath dispatches through the memo. Block 1.H Track 1
-//! wraps the cold build with `install_fact_tracer`; the counter
-//! advances.
+//! ProjectPath dispatches through the memo. The cold build is
+//! wrapped with `install_fact_tracer`; the counter advances.
 
 use std::sync::Arc;
 

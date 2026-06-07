@@ -1,9 +1,9 @@
 //! Matrix slice: `memo_entry` × `member_presence`.
 //!
 //! Discrimination: the dispatch's `execute_cooperative` cold build
-//! drives semantic-query memoization. Block 1.H Track 1 wraps the
-//! cold build with `install_fact_tracer`; the counter advances on
-//! every cold execute.
+//! drives semantic-query memoization. The cold build is wrapped
+//! with `install_fact_tracer`; the counter advances on every cold
+//! execute.
 
 use std::sync::Arc;
 

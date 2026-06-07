@@ -65,7 +65,7 @@ fn corpus_generator_output_matches_committed_files() {
     let root = workspace_root();
     let generator = root.join("scripts/gen-corpus-audit-tests.mjs");
     if !generator.exists() {
-        panic!("generator script missing at {generator:?} — expected at plan §3 Commit 12 path",);
+        panic!("generator script missing at {generator:?}",);
     }
 
     let tempdir = tempfile::tempdir().expect("tempdir");
@@ -437,15 +437,14 @@ fn commit_7_snapshots_stable_against_current_incidental_event_names_list() {
         }
     }
 
-    // Additionally pin that the F6 authored fixtures are still
+    // Additionally pin that the authored fixtures are still
     // committed — they're the load-bearing snapshots the
     // incidental-span masker was designed to support.
     let authored_fixtures_dir =
         root.join("crates/verter_session/tests/component_meta_audit/corpus_representatives");
     assert!(
         authored_fixtures_dir.exists(),
-        "authored corpus_representatives fixture dir missing at {authored_fixtures_dir:?} — \
-         Commit 7 landing should have created it",
+        "authored corpus_representatives fixture dir missing at {authored_fixtures_dir:?}",
     );
     let count = fs::read_dir(&authored_fixtures_dir)
         .unwrap()
@@ -459,7 +458,7 @@ fn commit_7_snapshots_stable_against_current_incidental_event_names_list() {
         .count();
     assert!(
         count >= 6,
-        "expected at least 6 authored corpus_representatives fixtures (Commit 7), found {count}",
+        "expected at least 6 authored corpus_representatives fixtures, found {count}",
     );
 }
 

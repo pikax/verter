@@ -1,4 +1,4 @@
-//! Block 6.i Option A discriminator — per-key Mapped substitution at
+//! Option A discriminator — per-key Mapped substitution at
 //! the Shallow walker boundary.
 //!
 //! Verifies that a `Published(Shallow)` walk over a Mapped node whose
@@ -19,7 +19,7 @@
 //! under `structural_transit_with_mode(Navigate)`. The literal-union
 //! key-space enumerates directly through `collect_literal_keys`
 //! (sidestepping the imported-interface DeclRef enumeration path that
-//! is independent of Commit 2). The `value_expr`
+//! is independent of the per-key substitution amendment). The `value_expr`
 //! `ExtendSlotWithPlan<TPlan, K>` lowers at Navigate to an
 //! `InstantiationRef { base: ExtendSlotWithPlan, args: [TPlan_arg, K_param] }`
 //! carrier — the mapper binder `K` is the second positional arg.
@@ -28,14 +28,14 @@
 //! triggers `expand_empty_path_shallow_terminal_surface` →
 //! `synthesise_mapped_surface`.
 //!
-//! - **Pre-Commit-2:** `synthesise_mapped_surface` stored the raw
-//!   `mapper.value_expr` — the `InstantiationRef` whose second
-//!   positional arg is the unbound `K` TypeParam. The badge member's
-//!   value contains the unbound binder; assertion that the
+//! - **Without per-key substitution:** `synthesise_mapped_surface`
+//!   stores the raw `mapper.value_expr` — the `InstantiationRef` whose
+//!   second positional arg is the unbound `K` TypeParam. The badge
+//!   member's value contains the unbound binder; assertion that the
 //!   substituted value's args contain `Literal("badge")` FAILS.
 //!
-//! - **Post-Commit-2:** `synthesise_mapped_surface` substitutes
-//!   `K → "badge"` via the shared
+//! - **With per-key substitution:** `synthesise_mapped_surface`
+//!   substitutes `K → "badge"` via the shared
 //!   `ProjectSemanticDispatch::materialize_mapped_member_value_for_key`
 //!   helper. The badge member's value (after fallback to the
 //!   substituted carrier when materialisation hits a carrier) carries
@@ -84,7 +84,7 @@ export type ExtendSlotWithPlan<TPlan, TKey extends keyof PricingPlanSlots> =
 // `'badge' | 'title'` directly without dispatching `KeyOf` on the
 // underlying interface — so the discriminator does NOT depend on the
 // imported-interface DeclRef enumeration path (which is a separate
-// architectural axis from Commit 2's per-key substitution amendment).
+// architectural axis from the per-key substitution amendment).
 export type LiteralKeyedSlots<TPlan extends PricingPlan = PricingPlan> = {
   [K in 'badge' | 'title']?: ExtendSlotWithPlan<TPlan, K>
 };
@@ -145,9 +145,9 @@ fn instantiation_ref_args_contain_string_literal(
 
 /// Walk an InstantiationRef carrier and check whether any of its
 /// positional args is a `TypeParam { display_name }` matching
-/// `target`. Pre-Commit-2 the badge member's value retained the
-/// unbound mapper binder `K` as a TypeParam — this predicate would
-/// fire and the substitution-presence predicate would not.
+/// `target`. Without per-key substitution the badge member's value
+/// retains the unbound mapper binder `K` as a TypeParam — this
+/// predicate fires and the substitution-presence predicate does not.
 fn instantiation_ref_args_contain_typeparam_named(
     graph: &verter_session::for_tests::SemanticGraphStore,
     node: SemanticNodeId,
@@ -268,9 +268,9 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
             )
         });
 
-    // The discriminator: post-Commit-2 the badge value's substituted
-    // carrier contains `Literal("badge")` as one of its
-    // `InstantiationRef.args`. Pre-Commit-2 it carries the raw
+    // The discriminator: with per-key substitution the badge value's
+    // substituted carrier contains `Literal("badge")` as one of its
+    // `InstantiationRef.args`. Without it, the value carries the raw
     // `mapper.value_expr` with the unbound `K` TypeParam.
     let value_node = badge_member.value;
     let value_data = graph
@@ -278,14 +278,14 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
         .expect("badge value node must have data");
 
     // The badge value should NOT carry the unbound mapper binder `K`.
-    // The pre-Commit-2 walker stored `mapper.value_expr` verbatim,
-    // whose `args[1]` was the `TypeParam { display_name: "K" }`
+    // A walker that stored `mapper.value_expr` verbatim would keep
+    // `args[1]` as the `TypeParam { display_name: "K" }`
     // produced by the Mapped binder's lowering. Any `TypeParam`
     // descendant whose display name is `K` evidences the unbound
     // binder leaking onto the published surface.
     assert!(
         !instantiation_ref_args_contain_typeparam_named(graph, value_node, "K"),
-        "Block 6.i Commit 2 regression — badge member value still carries the unbound \
+        "per-key substitution regression — badge member value still carries the unbound \
          mapper binder `K` (TypeParam) in its substituted args. The Shallow walker is \
          publishing the raw `mapper.value_expr` with the free mapper binder unbound. \
          Per the Option A architectural contract, `synthesise_mapped_surface` MUST \
@@ -307,7 +307,7 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     );
     assert!(
         badge_in_args || badge_in_conditional,
-        "Block 6.i Commit 2 contract — badge member value MUST evidence per-key \
+        "per-key substitution contract — badge member value MUST evidence per-key \
          substitution. Expected either:\n  \
            (a) an `InstantiationRef` whose args contain `Literal(\"badge\")` \
          (substituted carrier on Opaque/Miss fallback), OR\n  \
@@ -347,7 +347,7 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     );
 
     // Note: badge.value and title.value MAY share a SemanticNodeId
-    // post-Commit-2 when the materialised body converges to the same
+    // when the materialised body converges to the same
     // shape for both keys (e.g. both resolve to an opaque Conditional
     // shell because PricingPlanSlots[K] cannot resolve under
     // StructuralTransit lowering). Identity-equality is therefore

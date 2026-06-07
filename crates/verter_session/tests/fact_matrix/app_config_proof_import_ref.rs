@@ -40,6 +40,6 @@ fn app_config_proof_does_not_observe_import_ref_facts() {
             .fact_dep_signature
             .iter()
             .any(|f| matches!(f, FactVersionRef::ResolveImports(_))),
-        "AppConfigNoOverrideProofDb producer must NOT observe ResolveImports facts in Block 1.H scope"
+        "AppConfigNoOverrideProofDb producer must NOT observe ResolveImports facts"
     );
 }

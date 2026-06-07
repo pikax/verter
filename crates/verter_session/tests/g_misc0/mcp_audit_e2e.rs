@@ -212,8 +212,7 @@ fn audit_mcp_tool_call_subrequest_records_mcp_request_as_parent_request_id() {
         sub_record.parent_request_id,
         Some(mcp_record.request_id.to_string()),
         "downstream component-meta record must inherit MCP request id as parent_request_id; \
-         pre-Slice-3.F there is no MCP wrapper to install the TLS slot, \
-         post-Slice-3.F audit_mcp_tool_call installs RequestContextGuard so the \
+         audit_mcp_tool_call installs RequestContextGuard so the \
          sub-request RequestContext sniffs the parent at construction"
     );
 

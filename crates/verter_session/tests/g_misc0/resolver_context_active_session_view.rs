@@ -1,6 +1,6 @@
 //! RED test: `ResolverContext::active_session_view` default impl returns `None`.
 //!
-//! Block 1.5 will add `SessionResolverContext` which overrides this method to
+//! A future `SessionResolverContext` will override this method to
 //! return `Some(view)`. For now only the default (VerterHost) path exists; this
 //! test verifies the default returns `None` and does not panic.
 //!
@@ -8,7 +8,7 @@
 //! tests, so we verify the behaviour through the `for_tests` shim which routes
 //! the call through the sealed trait impl on `VerterHost`.
 //!
-//! NOTE: `SessionResolverContext` does not yet exist (pending Block 1.5). When
+//! NOTE: `SessionResolverContext` does not yet exist. When
 //! it lands, a new test that verifies `Some(view)` should be added; the test
 //! below verifies the default (None) is stable.
 

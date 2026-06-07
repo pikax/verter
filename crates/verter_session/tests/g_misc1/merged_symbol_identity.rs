@@ -1,4 +1,4 @@
-//! R7 merged-symbol identity stability tests for Stage 5 Sub-task C.
+//! R7 merged-symbol identity stability tests.
 //!
 //! `ResolvedDeclSlotIdentity` is **content-free** and stable across:
 //! 1. Interface merging (same-scope `interface Foo` declarations
@@ -168,8 +168,8 @@ fn r7_namespace_value_merge_produces_distinct_slots() {
 
 /// R7 — slot identity is CONTENT-FREE: two file-versions of the
 /// same decl produce the SAME slot, distinct `VersionedDeclIdentity`
-/// payloads. The Stage-5b multi-candidate substrate uses this
-/// invariant to coexist concurrent generations under one key.
+/// payloads. The multi-candidate substrate uses this invariant to
+/// coexist concurrent generations under one key.
 #[test]
 fn r7_slot_identity_is_content_free() {
     let slot = type_slot("/src/types.ts", "Foo");
@@ -204,7 +204,7 @@ fn r7_slot_identity_is_content_free() {
 
 /// R7 — distinct projects with the SAME (canonical, name) produce
 /// DISTINCT slot identities. Project isolation prevents cross-project
-/// poisoning (Codex P0.1).
+/// poisoning.
 #[test]
 fn r7_project_identity_isolates_slots() {
     let canonical = "/src/types.ts";

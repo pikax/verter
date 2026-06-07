@@ -4,7 +4,7 @@
  * Rust-walker bindings `whyLoadedFromAuditJson` /
  * `whyInstantiatedFromAuditJson`.
  *
- * Mirror of `packages/native/audit.ts` (plan §3 Commit 8). The file
+ * Mirror of `packages/native/audit.ts`. The file
  * lives under `src/` to match this package's existing TS layout
  * (`tsdown.config.ts` entry = `src/index.ts`).
  *
@@ -69,7 +69,7 @@ export function decodeAuditBundle(value: unknown): AuditBundle | null {
 /**
  * Ask "why was this file loaded during this audited request?".
  * Delegates to the Rust walker via the `MetaSession`'s
- * `whyLoadedFromAuditJson` binding (plan §2.8 single-walker rule).
+ * `whyLoadedFromAuditJson` binding (single-walker rule).
  */
 export function whyLoaded(
   session: AuditCapableMetaSession,
@@ -102,7 +102,7 @@ export function whyInstantiated(
   return JSON.parse(chainJson) as ProvenanceChain;
 }
 
-/** Set-equality assertion mirroring the native helper. Plan §1.4. */
+/** Set-equality assertion mirroring the native helper. */
 export function assertLoadedFilesExactly(record: RustAuditRecord, expected: string[]): void {
   const actual = loadedFiles(record.footprint ?? null);
   const missing = expected.filter((f) => !actual.includes(f)).sort();
@@ -114,7 +114,7 @@ export function assertLoadedFilesExactly(record: RustAuditRecord, expected: stri
   throw new Error(lines.join("\n"));
 }
 
-/** Set-equality assertion for the broader dependency set. Plan §3.B Commit 7.B. */
+/** Set-equality assertion for the broader dependency set. */
 export function assertDeclaredDependencyFilesExactly(
   record: RustAuditRecord,
   expected: string[],

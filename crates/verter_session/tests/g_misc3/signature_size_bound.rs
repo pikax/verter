@@ -1,6 +1,6 @@
 //! R20 signature-size bound enforcement.
 //!
-//! Stage 5 Sub-task B introduces a cap on `fact_dep_signature` size:
+//! There is a cap on `fact_dep_signature` size:
 //! signatures with > 1024 `FactVersionRef` entries are admitted as
 //! `NonCacheable`, the candidate does NOT enter the cache, and a
 //! typed `FactSignatureOverflow` audit event fires.
@@ -70,8 +70,8 @@ fn r20_over_cap_signature_refuses_admission() {
 }
 
 /// R20 — the `FactSignatureOverflow` counter increments when an
-/// over-cap signature is rejected. (Discriminating test: pre-Stage-5b
-/// no counter exists; post-Stage-5b a typed counter increments.)
+/// over-cap signature is rejected. (Discriminating test: a typed
+/// counter increments.)
 #[test]
 fn r20_over_cap_signature_emits_overflow_event() {
     let cache = ValidatedFactCache::<String, usize>::default();
@@ -176,7 +176,7 @@ fn r20_over_cap_signature_correct_value_fallback() {
         valid_facts: facts.iter().cloned().collect(),
     };
 
-    // Caller flow round 1: ask the cache first, miss, run producer,
+    // First caller call: ask the cache first, miss, run producer,
     // try to insert (refused — over cap).
     let key = "fallback".to_string();
     let round_1_value = if let Some(v) = cache.get_if_valid(&key, &view) {
@@ -189,14 +189,14 @@ fn r20_over_cap_signature_correct_value_fallback() {
     assert_eq!(
         compute_count.load(Ordering::SeqCst),
         1,
-        "round 1: producer must have run exactly once (cold miss)"
+        "first call: producer must have run exactly once (cold miss)"
     );
     assert!(
         cache.get_if_valid(&key, &view).is_none(),
-        "round 1 post-insert: over-cap admission must not be visible to a warm read",
+        "first call post-insert: over-cap admission must not be visible to a warm read",
     );
 
-    // Caller flow round 2: same key, same view, same producer.
+    // Second caller call: same key, same view, same producer.
     // Substrate must again return None, forcing the producer to
     // recompute — proving the over-cap admission did NOT enter the
     // cache and steal a warm hit.
@@ -210,12 +210,12 @@ fn r20_over_cap_signature_correct_value_fallback() {
     assert_eq!(
         compute_count.load(Ordering::SeqCst),
         2,
-        "round 2: cache must NOT admit the over-cap candidate, so the producer must \
+        "second call: cache must NOT admit the over-cap candidate, so the producer must \
          have run a second time via the caller's fallback branch (would be 1 if the \
          cache silently swallowed admission)"
     );
 
-    // Round 3: prove correctness across the cap boundary. The
+    // Third call: prove correctness across the cap boundary. The
     // producer's output, exercised through the fallback path, MUST
     // match a from-scratch cold call.
     let cold_independent_value = producer(42);

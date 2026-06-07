@@ -1,11 +1,10 @@
-//! TLS-observer propagation through `VerterHost::analyze_with_audit`
-//! (Wave 3 Slice 3.C).
+//! TLS-observer propagation through `VerterHost::analyze_with_audit`.
 //!
 //! Drives the public production entry-point through the
 //! [`verter_session::tests::audit_tls_harness::assert_observer_reaches`]
 //! harness and asserts that, while the analysis runs, the audit
-//! substrate's TLS slot is populated. This is the per-slice TLS
-//! contract the §4 Wave 1.5 harness exists to enforce.
+//! substrate's TLS slot is populated. This is the TLS
+//! contract the shared harness exists to enforce.
 //!
 //! Discrimination contract:
 //! - **Pre-change tree** (no `analyze_with_audit` entry-point): this

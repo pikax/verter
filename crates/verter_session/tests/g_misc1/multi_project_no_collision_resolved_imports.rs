@@ -1,16 +1,14 @@
-//! Block 1.6 — multi-project workspace yields distinct env-hash arrays
+//! Multi-project workspace yields distinct env-hash arrays
 //! for the same canonical claimed by overlapping projects.
 //!
-//! Plan citation: `D:/tmp/verter-stage7-final-cutover-plan.md` § "Correction 3:
-//! project-scoped env-hash API". v7's `env_hash_array_for_canonical(canonical)`
-//! could not disambiguate workspaces where
+//! A canonical-keyed env-hash API could not disambiguate workspaces where
 //! `WorkspaceSnapshot::owners_for_file(canonical) -> SmallVec<[ProjectId; 2]>`
-//! returns multiple projects. v8 keys the env-hash API by `ProjectId`,
+//! returns multiple projects. The env-hash API is keyed by `ProjectId`,
 //! NOT canonical, so callers with explicit project context get distinct
 //! cache identities for the same canonical.
 //!
-//! Discrimination chain — this test exercises the canonical-keyed-API
-//! failure mode that v7's design could not catch:
+//! This test exercises the canonical-keyed-API
+//! failure mode that a canonical-only design could not catch:
 //!
 //! 1. Construct a `MemoryWorkspace` with TWO projects whose roots both
 //!    cover the same canonical (`/shared/util.ts`). The published
@@ -27,7 +25,7 @@
 //! A canonical-only API (`env_hash_array_for_canonical(canonical)`)
 //! would return the SAME bundle for both queries — that bundle could
 //! only encode one project's settings, so cache keys derived from it
-//! would collide across the two projects. This test discriminates
+//! would collide across the two projects. This test guards
 //! against that bug by asserting the project-keyed API does NOT
 //! collapse to a single bundle.
 

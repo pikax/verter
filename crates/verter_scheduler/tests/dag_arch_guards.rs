@@ -44,7 +44,7 @@ fn walk(dir: &Path, buf: &mut String) {
     }
 }
 
-/// H23 — `JobIndex` is fully retired in the scheduler crate source.
+/// H23 — `JobIndex` is fully absent from the scheduler crate source.
 ///
 /// Discriminator: any of `struct JobIndex`, `impl JobIndex`, or
 /// `Mutex<JobIndex>` re-introduced as a field or symbol makes this
@@ -250,11 +250,11 @@ fn h23_dag_capacity_reservation_release_consumes_by_value() {
     );
 }
 
-/// §6c — `submit_batch_atomic` is the SOLE batch submission API.
+/// `submit_batch_atomic` is the SOLE batch submission API.
 ///
 /// The non-atomic `Scheduler::submit_batch` (which fanned N separate
-/// `NewRequest` items, each its own wake + `submit_count` bump) was
-/// deleted by the §6c cutover. Every batch submission now lands ONE
+/// `NewRequest` items, each its own wake + `submit_count` bump) is
+/// gone. Every batch submission now lands ONE
 /// `Submission::NewRequestBatch` admitted under a single `dag.lock()`
 /// via `submit_batch_atomic`. This guard pins both halves: the
 /// non-atomic signature is gone, and the atomic signature remains.
@@ -272,41 +272,40 @@ fn scheduler_has_only_atomic_batch_api() {
     let src = read_scheduler_source();
     assert!(
         !src.contains("pub fn submit_batch("),
-        "§6c: the non-atomic `Scheduler::submit_batch(...)` must stay deleted — \
+        "the non-atomic `Scheduler::submit_batch(...)` must stay deleted — \
          `submit_batch_atomic` is the sole batch submission API. Re-introducing \
-         the N-separate-`NewRequest` fan-out resurrects the deleted dual path \
+         the N-separate-`NewRequest` fan-out resurrects the dual path \
          (N wakes + N `submit_count` bumps instead of one atomic batch).",
     );
     assert!(
         src.contains("pub fn submit_batch_atomic("),
-        "§6c: `Scheduler::submit_batch_atomic(...)` is the sole batch submission \
+        "`Scheduler::submit_batch_atomic(...)` is the sole batch submission \
          API and must exist. If it was renamed or removed, every host batch \
          caller (compile_many Stage B, the single-file `upsert`) lost its \
          atomic-admission primitive.",
     );
 }
 
-/// B7b — readiness selection is lane/credit based, NOT a linear scan.
+/// Readiness selection is lane/credit based, NOT a linear scan.
 ///
 /// `next_ready_for_pump` is the SOLE selection engine. The
 /// weighted-credit lane selector reads only the bounded
 /// `ready_lanes` matrix; it must NEVER revert to scanning the whole
-/// `self.nodes` map (the O(N)-per-call scan + full sort that the
-/// cutover removed). This guard isolates the body of
-/// `next_ready_for_pump` and asserts none of the scan-era
-/// fingerprints reappear inside it.
+/// `self.nodes` map (an O(N)-per-call scan + full sort). This guard
+/// isolates the body of `next_ready_for_pump` and asserts none of the
+/// scan fingerprints appear inside it.
 ///
 /// Discriminator: re-introducing `self.nodes.iter()` /
 /// `self.nodes.values()` / a ranked `.collect()` / `.sort_by(` inside
-/// the selector fires this guard. The pre-change scan impl contained
-/// all four; the lane impl contains none.
+/// the selector fires this guard. A scanning impl contains all four;
+/// the lane impl contains none.
 #[test]
 fn b7b_next_ready_for_pump_has_no_linear_scan() {
     let src = fs::read_to_string(scheduler_src_root().join("dag.rs")).expect("read dag.rs");
     let marker = "pub fn next_ready_for_pump(";
     let start = src
         .find(marker)
-        .expect("B7b: `next_ready_for_pump` must exist as the sole readiness selector");
+        .expect("`next_ready_for_pump` must exist as the sole readiness selector");
     // Isolate the function body: from the marker to the matching
     // closing brace of the fn block. Walk brace depth starting at the
     // first `{` after the signature.
@@ -340,7 +339,7 @@ fn b7b_next_ready_for_pump_has_no_linear_scan() {
     ] {
         assert!(
             !body.contains(needle),
-            "B7b: `next_ready_for_pump` must select via the bounded `ready_lanes` matrix, \
+            "`next_ready_for_pump` must select via the bounded `ready_lanes` matrix, \
              not a linear scan over the node map — found scan fingerprint `{needle}`. \
              Readiness selection must stay O(lanes), never O(N).",
         );
@@ -348,17 +347,17 @@ fn b7b_next_ready_for_pump_has_no_linear_scan() {
     // Positive anchor: the selector must read the lane matrix.
     assert!(
         body.contains("ready_lanes"),
-        "B7b: `next_ready_for_pump` must read the `ready_lanes` matrix",
+        "`next_ready_for_pump` must read the `ready_lanes` matrix",
     );
 }
 
-/// B7b — time-based priority aging is fully retired. The
-/// weighted-credit lane selector replaced it; no aging config, no
+/// Time-based priority aging does not exist. The weighted-credit lane
+/// selector is the anti-starvation mechanism; no aging config, no
 /// aging field, and no `effective_priority` promotion fn may exist.
 ///
 /// Discriminator: re-introducing `DagAgingConfig`,
 /// `SchedulerConfig.aging`, or `fn effective_priority` fires this
-/// guard. The pre-change source declared all three.
+/// guard.
 #[test]
 fn b7b_priority_aging_is_retired() {
     let src = read_scheduler_source();
@@ -370,17 +369,17 @@ fn b7b_priority_aging_is_retired() {
     ] {
         assert!(
             !src.contains(needle),
-            "B7b: time-based aging is retired — found `{needle}`. Anti-starvation is \
+            "time-based aging does not exist — found `{needle}`. Anti-starvation is \
              smooth weighted selection-count credit in the lane selector, not aging.",
         );
     }
 }
 
-/// B7b — the typed CPU/IO `DagCapacityBudget` ledger is the SOLE
+/// The typed CPU/IO `DagCapacityBudget` ledger is the SOLE
 /// admission authority. No second admission-budget type may appear
-/// beside it (the cutover forbids a parallel budget such as
-/// `DagAdmissionBudget`), and no second ready-queue authority such as
-/// an `ArrayQueue` ready set.
+/// beside it (a parallel budget such as `DagAdmissionBudget` is
+/// forbidden), and no second ready-queue authority such as an
+/// `ArrayQueue` ready set.
 ///
 /// Discriminator: introducing a `struct DagAdmissionBudget` (a second
 /// budget) or an `ArrayQueue` ready-queue fires this guard. The lane
@@ -395,7 +394,7 @@ fn b7b_no_second_admission_budget_or_ready_queue() {
     ] {
         assert!(
             !src.contains(needle),
-            "B7b: the typed CPU/IO `DagCapacityBudget` ledger is the sole admission \
+            "the typed CPU/IO `DagCapacityBudget` ledger is the sole admission \
              authority and `ready_lanes` is the sole ready set — found a second \
              budget/queue symbol `{needle}`.",
         );
@@ -403,7 +402,7 @@ fn b7b_no_second_admission_budget_or_ready_queue() {
     // The single ledger type must still exist.
     assert!(
         src.contains("pub struct DagCapacityBudget"),
-        "B7b: `DagCapacityBudget` (the sole admission ledger) must exist",
+        "`DagCapacityBudget` (the sole admission ledger) must exist",
     );
 }
 
@@ -436,12 +435,12 @@ fn fn_body<'a>(src: &'a str, signature_marker: &str) -> &'a str {
     &src[body_open..=body_end]
 }
 
-/// U1 / B7d — there is EXACTLY ONE routing point from a dequeued `ReadyJob` to
+/// There is EXACTLY ONE routing point from a dequeued `ReadyJob` to
 /// the `StageExecutor`, and the `CacheNode` case actually ROUTES (it calls
 /// `StageExecutor::execute_cache_node`) rather than being skipped or
 /// `unreachable!()`'d.
 ///
-/// This guard pins the dispatch cutover:
+/// This guard pins the dispatch surface:
 ///
 /// 1. The lossy `WorkNodeIdentity → TaskKind` adapter `task_kind_for_ready_job`
 ///    (whose CacheNode arm was an `unreachable!()`) stays deleted — no
@@ -469,17 +468,17 @@ fn u1_single_dispatch_path_routes_cache_node_to_executor() {
     //     in comments do not match (they lack `fn ` immediately before).
     assert!(
         !src.contains("fn task_kind_for_ready_job"),
-        "U1: the lossy `task_kind_for_ready_job` adapter (its CacheNode arm was \
+        "the lossy `task_kind_for_ready_job` adapter (its CacheNode arm was \
          an `unreachable!()`) must stay deleted — `dispatch_ready_job_to_executor` \
          is the sole ReadyJob→executor routing point. Re-introducing the adapter \
-         resurrects the second dispatch path the cutover removed.",
+         resurrects a second dispatch path.",
     );
 
     // (2) The single dispatch entry exists and is declared exactly once.
     let entry_decls = src.matches("fn dispatch_ready_job_to_executor(").count();
     assert_eq!(
         entry_decls, 1,
-        "U1: `dispatch_ready_job_to_executor` must be the ONE ReadyJob→executor \
+        "`dispatch_ready_job_to_executor` must be the ONE ReadyJob→executor \
          dispatch entry — found {entry_decls} declarations. A second routing entry \
          is a forbidden parallel dispatch path.",
     );
@@ -489,7 +488,7 @@ fn u1_single_dispatch_path_routes_cache_node_to_executor() {
     let body = fn_body(&src, "fn dispatch_ready_job_to_executor(");
     assert!(
         body.contains("execute_cache_node"),
-        "U1: `dispatch_ready_job_to_executor` must route CacheNode work to \
+        "`dispatch_ready_job_to_executor` must route CacheNode work to \
          `StageExecutor::execute_cache_node` — the call is missing, so cache-node \
          work is not dispatched to the executor.",
     );
@@ -498,21 +497,21 @@ fn u1_single_dispatch_path_routes_cache_node_to_executor() {
     // contain the `execute_cache_node` call and must NOT contain `unreachable!`.
     let cache_arm_start = body
         .find("WorkKind::CacheNode,")
-        .expect("U1: the dispatch entry must have a `WorkKind::CacheNode` match arm");
+        .expect("the dispatch entry must have a `WorkKind::CacheNode` match arm");
     let after = &body[cache_arm_start..];
-    let cache_arm_end = after.find("(WorkKind::Load,").expect(
-        "U1: the dispatch entry must have a file-stage `WorkKind::Load` arm after CacheNode",
-    );
+    let cache_arm_end = after
+        .find("(WorkKind::Load,")
+        .expect("the dispatch entry must have a file-stage `WorkKind::Load` arm after CacheNode");
     let cache_arm = &after[..cache_arm_end];
     assert!(
         cache_arm.contains("execute_cache_node"),
-        "U1: the CacheNode dispatch arm must call `execute_cache_node` (real routing)",
+        "the CacheNode dispatch arm must call `execute_cache_node` (real routing)",
     );
     assert!(
         !cache_arm.contains("unreachable!"),
-        "U1: the CacheNode dispatch arm must NOT be `unreachable!()` — it must ROUTE \
-         the cache node to `execute_cache_node`. An `unreachable!()` here is the \
-         placeholder the cutover removed.",
+        "the CacheNode dispatch arm must NOT be `unreachable!()` — it must ROUTE \
+         the cache node to `execute_cache_node`. An `unreachable!()` here is a \
+         placeholder, not real routing.",
     );
 
     // The file-stage executor chokepoint is invoked only through the single
@@ -523,7 +522,7 @@ fn u1_single_dispatch_path_routes_cache_node_to_executor() {
     // One definition + one call site = two textual matches.
     assert_eq!(
         on_worker_calls, 2,
-        "U1: `execute_stage_on_worker` must be the single file-stage executor \
+        "`execute_stage_on_worker` must be the single file-stage executor \
          chokepoint reached from ONE call site (its definition + one invocation = \
          two matches) — found {on_worker_calls}. A second call site forks the \
          dispatch path.",

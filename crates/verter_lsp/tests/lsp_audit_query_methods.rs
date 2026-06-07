@@ -1,11 +1,8 @@
-//! Wave 5 Slice 5.3 — LSP audit-query methods (read-only).
+//! LSP audit-query methods (read-only).
 //!
 //! Drives `verter/audit/getRecord` and `verter/audit/getRecent` end
-//! to end. Pre-change tree: the inherent methods do not exist, so
-//! these tests will not even compile against the pre-Slice-5.3
-//! sources. Post-change tree (this slice): the methods consult the
-//! host's records store via `host_audit_runtime().audit_records_store()`
-//! and return JSON.
+//! to end. The methods consult the host's records store via
+//! `host_audit_runtime().audit_records_store()` and return JSON.
 //!
 //! The methods are read-only: a `getRecord` call must not drain the
 //! store, and two consecutive calls return the same payload. The
@@ -115,8 +112,8 @@ async fn get_audit_record_returns_published_record_without_draining() {
     let service = build_test_server(Arc::clone(&host));
     let server = service.inner();
 
-    // First read — discriminating: pre-change tree does not have the
-    // method on `VerterLanguageServer` at all, so this won't compile.
+    // First read — discriminating: this exercises the
+    // `get_audit_record` method on `VerterLanguageServer`.
     let response = server
         .get_audit_record(GetAuditRecordParams {
             request_id: request_id.to_string(),
@@ -155,7 +152,7 @@ async fn get_audit_record_returns_published_record_without_draining() {
         .expect("second get_audit_record must succeed");
     assert!(
         again.is_some(),
-        "get_audit_record must be read-only — pre-change drain semantics would return None here"
+        "get_audit_record must be read-only — drain semantics would return None here"
     );
 
     // Sanity: the records store retained the record.

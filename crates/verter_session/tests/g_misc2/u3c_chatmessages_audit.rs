@@ -1,14 +1,14 @@
-//! Structural audit gate for the eager→typeinfo component-meta cutover, driven
+//! Structural audit gate for the typeinfo component-meta path, driven
 //! against the vendored hermetic `ChatMessages.vue` corpus fixture.
 //!
-//! ChatMessages.vue (the `nuxt-ui` chat-messages component) was the worst-case
-//! hang on the eager rail (196–598s): its `withDefaults(defineProps<…>())` +
+//! ChatMessages.vue (the `nuxt-ui` chat-messages component) is the worst-case
+//! shape for the eager rail: its `withDefaults(defineProps<…>())` +
 //! `defineSlots<…>` macros, resolved cross-file through imported generic types,
-//! drove the eager imported-macro-surface materialiser + an external OXC
-//! frontier/reparse loop. The typeinfo cutover removes both.
+//! would drive an eager imported-macro-surface materialiser + an external OXC
+//! frontier/reparse loop. The typeinfo path removes both.
 //!
 //! The GATE is STRUCTURAL audit counters (the project's "data over heuristics"
-//! rule), NOT wall-clock — the counters prove the eager work is GONE:
+//! rule), NOT wall-clock — the counters prove the eager work is absent:
 //!
 //! - `synthesis_expanded_instantiate_calls == 0` — no synthesis-attributable
 //!   Expanded `Instantiate` (the eager imported-macro-surface materialisation
@@ -65,20 +65,20 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 /// `<=` heuristic): a higher value means new eager expansion crept in; a lower
 /// value means the residual owner expansion changed and the gate is re-derived.
 ///
-/// Re-derived 4 -> 3: the Stage 4a atomic reroute deleted the eager
-/// macro-object materialiser from the production resolution path
-/// (`compute_component_meta_state_inner` no longer calls
+/// The value is 3 because the eager macro-object materialiser is gone
+/// from the production resolution path
+/// (`compute_component_meta_state_inner` does not call
 /// `produce_macro_object_shapes_for_purpose`; `define_props`/`define_emits`/
-/// `define_slots` are now owned by `projectors::define_shapes`). The
+/// `define_slots` are owned by `projectors::define_shapes`). The
 /// materialiser ran a DUPLICATE eager Expanded-mode `Instantiate` (its
 /// `context.projection_reduction.mode = Expanded`) of
 /// the macro root (`produce_one_macro_object_shape` → the registry/projection
 /// pre-pass) over the SAME `(base, args, context)` the projector path already
 /// resolves once through `ResolveMacroPayload` / the empty-path Shallow walker.
-/// Removing the materialiser removed exactly that one duplicate eager
-/// instantiate — the count drops by exactly 1.
+/// Without the materialiser, that one duplicate eager instantiate is gone, so
+/// the residual owner-surface expansion is exactly 3.
 ///
-/// 7-point re-derivation proof (discharged before lowering the constant):
+/// Re-derivation proof (the value is pinned by these invariants):
 ///  1. member identity corpus-wide: the full component-meta suite
 ///     (`meta_tests` + `meta_resolve_tests` + `component_meta_query_engine`
 ///     tests, ~820 tests) passes — every member-identity / dedup assertion
@@ -102,15 +102,13 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 ///  6. `synthesis_expanded_instantiate_calls == 0`: asserted directly above
 ///     (the eager-path signal stays 0 — the removed instantiate was NOT
 ///     synthesis-attributed; it was the materialiser pre-pass).
-///  7. COMMITTED DISCRIMINATOR — the drop is the materialiser pre-pass, NOT the
-///     reducer demotion. The atomic-reroute commit (`b2694ad30`) made TWO
-///     behavioural changes: (a) it removed the eager materialiser call, and
-///     (b) it demoted the `slot_bindings` field reducer from Expanded
-///     (`reduce_field_type_expr`) to `Navigate`
-///     (`published_reducer.rs::reduce_published_field_types`). codex BINDING
-///     flagged that point 7 must isolate WHICH change moved the count. It is
-///     isolated empirically and the result is committed here as a reproducible
-///     discriminator:
+///  7. DISCRIMINATOR — the residual count reflects the materialiser pre-pass
+///     being gone, NOT the reducer mode. Two behavioural facts hold on this
+///     path: (a) the eager materialiser call is removed, and (b) the
+///     `slot_bindings` field reducer runs in `Navigate`
+///     (`published_reducer.rs::reduce_published_field_types`) rather than
+///     Expanded (`reduce_field_type_expr`). To isolate WHICH of these sets the
+///     count:
 ///
 ///     Reverting ONLY the `slot_bindings` reducer back to Expanded
 ///     (`field.r#type = reduce_field_type_expr(query_engine,
@@ -119,11 +117,11 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 ///     `expanded_instantiate_calls == 3` — the count is INVARIANT under the
 ///     reducer mode for this fixture (ChatMessages' published `slot_bindings`
 ///     reduce to carrier `IndexedAccess` shells that issue no Expanded
-///     `Instantiate` in either mode). Therefore the reducer demotion
-///     contributes ZERO to the 4 -> 3 drop; the entire delta is the removed
+///     `Instantiate` in either mode). Therefore the reducer mode contributes
+///     ZERO to the residual count; the entire difference is the removed
 ///     materialiser pre-pass.
 ///
-///     This is corroborated structurally by the committed
+///     This is corroborated structurally by the
 ///     `synthesis_expanded_instantiate_calls == 0` assertion below: the removed
 ///     instantiate was Expanded but NOT synthesis-attributed, which is exactly
 ///     the materialiser's `produce_one_macro_object_shape` pre-pass signature
@@ -150,7 +148,7 @@ const CHAT_MESSAGES_DECLARED_DEPENDENCY_ROOTS: &[&str] = &[
 ];
 
 #[test]
-fn chatmessages_cutover_audit_has_no_eager_materialization_or_frontier_loop() {
+fn chatmessages_audit_has_no_eager_materialization_or_frontier_loop() {
     // ---- COLD run ------------------------------------------------------
     let host = build_hermetic_host(&[("/ChatMessages.vue", CHAT_MESSAGES_VUE)]);
     let cold_start = Instant::now();
@@ -168,7 +166,7 @@ fn chatmessages_cutover_audit_has_no_eager_materialization_or_frontier_loop() {
     assert_eq!(
         payload.synthesis_expanded_instantiate_calls,
         CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING,
-        "ChatMessages cutover gate: synthesis_expanded_instantiate_calls \
+        "ChatMessages gate: synthesis_expanded_instantiate_calls \
          ({}) must equal the committed ceiling {} — a non-zero value means the \
          eager imported-macro-surface materialisation regressed back in",
         payload.synthesis_expanded_instantiate_calls,
@@ -182,7 +180,7 @@ fn chatmessages_cutover_audit_has_no_eager_materialization_or_frontier_loop() {
     // be re-derived deliberately.
     assert_eq!(
         payload.expanded_instantiate_calls, CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE,
-        "ChatMessages cutover gate: expanded_instantiate_calls ({}) must equal the \
+        "ChatMessages gate: expanded_instantiate_calls ({}) must equal the \
          committed value {} — a higher value means new eager expansion crept in",
         payload.expanded_instantiate_calls, CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE,
     );
@@ -213,7 +211,7 @@ fn chatmessages_cutover_audit_has_no_eager_materialization_or_frontier_loop() {
         .collect();
     assert!(
         unrelated.is_empty(),
-        "ChatMessages cutover gate: every declared dependency must be a candidate \
+        "ChatMessages gate: every declared dependency must be a candidate \
          of one of the SFC's own relative-import roots {CHAT_MESSAGES_DECLARED_DEPENDENCY_ROOTS:?} \
          — these entries are unrelated-import breadth-walks: {unrelated:?}",
     );
@@ -221,7 +219,7 @@ fn chatmessages_cutover_audit_has_no_eager_materialization_or_frontier_loop() {
     // No eager imported-macro-surface projection (that rail is deleted).
     assert_eq!(
         fp.resolver_hot_path.imported_macro_surface_projection, 0,
-        "ChatMessages cutover gate: imported_macro_surface_projection must be 0 \
+        "ChatMessages gate: imported_macro_surface_projection must be 0 \
          — the eager imported-macro-surface rail is deleted; any non-zero \
          observation means it was revived",
     );
@@ -230,26 +228,26 @@ fn chatmessages_cutover_audit_has_no_eager_materialization_or_frontier_loop() {
     // `project_imported_macro_surfaces` reparse hang source).
     assert_eq!(
         fp.resolver_hot_path.frontier_closure_invocations_total, 0,
-        "ChatMessages cutover gate: frontier_closure_invocations_total must be 0 \
+        "ChatMessages gate: frontier_closure_invocations_total must be 0 \
          — no external OXC frontier/reparse loop",
     );
     assert_eq!(
         fp.resolver_hot_path
             .frontier_closure_invocations_target_none,
         0,
-        "ChatMessages cutover gate: frontier_closure_invocations_target_none must be 0",
+        "ChatMessages gate: frontier_closure_invocations_target_none must be 0",
     );
     assert_eq!(
         fp.resolver_hot_path
             .frontier_closure_redundant_target_none_pairs,
         0,
-        "ChatMessages cutover gate: frontier_closure_redundant_target_none_pairs must be 0",
+        "ChatMessages gate: frontier_closure_redundant_target_none_pairs must be 0",
     );
     assert_eq!(
         fp.resolver_hot_path
             .resolved_external_type_cache_negative_misses,
         0,
-        "ChatMessages cutover gate: resolved_external_type_cache_negative_misses must be 0 \
+        "ChatMessages gate: resolved_external_type_cache_negative_misses must be 0 \
          — no negative-cache thrash from a reparse loop",
     );
 
@@ -265,7 +263,7 @@ fn chatmessages_cutover_audit_has_no_eager_materialization_or_frontier_loop() {
     assert_eq!(
         irb,
         vec!["/ChatMessages.vue".to_string()],
-        "ChatMessages cutover gate: the owner SFC must be the SOLE IndexedReady \
+        "ChatMessages gate: the owner SFC must be the SOLE IndexedReady \
          build (no eager dependency materialisation). Observed: {irb:?}",
     );
 
@@ -296,7 +294,7 @@ fn chatmessages_cutover_audit_has_no_eager_materialization_or_frontier_loop() {
         .collect();
     assert!(
         irb2.is_empty(),
-        "ChatMessages cutover gate (pre-indexed): a component-meta resolve against \
+        "ChatMessages gate (pre-indexed): a component-meta resolve against \
          a host whose owner SFC was ALREADY upserted must build ZERO fresh \
          IndexedReady (the cached owner IndexedReady is reused). Observed fresh \
          builds: {irb2:?}",

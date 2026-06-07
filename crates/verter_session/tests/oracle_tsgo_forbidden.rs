@@ -142,13 +142,13 @@ fn tsgo_dep_is_generation_only(parsed: &toml::Value) -> Result<(), String> {
 fn tsgo_generation_only_checker_discriminates() {
     let parse = |s: &str| toml::from_str::<toml::Value>(s).expect("parse synthetic manifest");
 
-    // (1) Absent dep + no feature reference → OK (the pre-cutover state).
+    // (1) Absent dep + no feature reference → OK (the tsgo-absent manifest).
     assert!(tsgo_dep_is_generation_only(&parse(
         "[dependencies]\nserde = \"1\"\n[features]\ndefault = []\n"
     ))
     .is_ok());
 
-    // (2) Correct optional + oracle-gen-gated form → OK (the post-cutover state).
+    // (2) Correct optional + oracle-gen-gated form → OK (the correctly-gated manifest).
     assert!(tsgo_dep_is_generation_only(&parse(
         "[dependencies]\nverter_type_runtime = { path = \"../x\", optional = true }\n\
          [features]\ndefault = []\noracle-gen = [\"dep:verter_type_runtime\"]\n"

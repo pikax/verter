@@ -1,9 +1,9 @@
 //! Matrix slice: `ref_cycle` × `member`.
 //!
 //! Discrimination: the BFS observes the body fingerprint of each
-//! visited recursive member. Block 1.H Track 1 wraps the cold
-//! BFS in `install_fact_tracer`; the counter advances when the
-//! BFS is invoked.
+//! visited recursive member. The cold BFS is wrapped in
+//! `install_fact_tracer`; the counter advances when the BFS is
+//! invoked.
 
 use std::sync::Arc;
 

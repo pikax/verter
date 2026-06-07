@@ -1,7 +1,7 @@
-//! Plan rule-namespace discriminator (B1).
+//! Plan rule-namespace discriminator.
 //!
-//! The cache-runtime overhaul plan declares its own `H1–H20` rule
-//! namespace. The older `R<n>` namespace belongs to
+//! The `docs/arch/cache-runtime-overhaul-plan.md` document declares its
+//! own `H1–H20` rule namespace. The older `R<n>` namespace belongs to
 //! `.claude/skills/type-cache-architecture/SKILL.md`.
 //!
 //! Plan-level `R<n>` references must take one of three recognised
@@ -233,14 +233,14 @@ fn plan_rule_namespace_uses_h_not_r() {
 
 #[test]
 fn plan_rule_namespace_discriminator_rejects_synthetic_violation() {
-    // F4 discriminator suite. The brief mandates that each
-    // allowlist context discriminate — a bare `R20` in design prose
+    // Discriminator suite: each allowlist context must
+    // discriminate — a bare `R20` in design prose
     // MUST trip, but `R20` inside the H↔R table, after `skill ` ,
     // or under `#### Owning-doc updates` MUST NOT trip.
 
     // (a) Bare `R20` in plain prose outside the allowlist trips.
     let synthetic_violation_plan = "\
-Block 4 design context.
+Design context.
 
 R20 sits in plain prose here.
 
@@ -313,7 +313,7 @@ Outside the table.
 
     // (d) `R20` inside `#### Owning-doc updates` does NOT trip.
     let synthetic_owning_doc_plan = "\
-Block design discussion.
+Design discussion.
 
 #### Owning-doc updates
 
@@ -343,7 +343,7 @@ Block design discussion.
     // (e) The `#### Owning-doc updates` allowlist ends at the
     // next header — a bare `R20` AFTER the section closes trips.
     let synthetic_owning_doc_end_plan = "\
-Block design discussion.
+Design discussion.
 
 #### Owning-doc updates
 

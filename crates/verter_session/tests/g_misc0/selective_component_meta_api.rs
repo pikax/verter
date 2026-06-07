@@ -1,11 +1,11 @@
-//! Tier 1B selective component-meta surface API discriminating tests.
+//! Selective component-meta surface API discriminating tests.
 //!
-//! Each test in this file FAILED against the pre-Tier-1B tree (the
+//! Each test in this file FAILS against a tree lacking the
 //! `MetaSession::get_component_meta_surface` and
-//! `MetaSession::get_component_meta_type_expansion` methods did not exist;
+//! `MetaSession::get_component_meta_type_expansion` methods (along with
 //! the `ComponentMetaSurface` envelope, `TypeHandle` identity, BFS bridge
-//! and magic-byte `BridgeError` envelopes did not exist) and PASSES against
-//! the post-Tier-1B tree.
+//! and magic-byte `BridgeError` envelopes) and PASSES against
+//! the tree that carries them.
 
 use rustc_hash::FxHashMap;
 use verter_session::component_meta_payload::{
@@ -352,9 +352,9 @@ fn shallow_materializer_object_with_n_properties_costs_one_expand_call() {
     // property_count eagerly + N lazy children. Constructing that
     // expansion is *one* call.
     //
-    // For Tier 1B the expansion is constructed directly (the BFS bridge
-    // assembles it in `get_component_meta_type_expansion` once 1C-α wires
-    // the OXC→graph traversal). Counting the number of TypeExpansion
+    // The expansion is constructed directly (the BFS bridge
+    // assembles it in `get_component_meta_type_expansion` when the
+    // OXC→graph traversal is wired). Counting the number of TypeExpansion
     // constructions that satisfy "Object with N properties" must be 1.
     let h = handle("avatar.vue", "Avatar");
     let mut children = Vec::new();
@@ -605,14 +605,13 @@ fn selective_api_internal_substrate_match_catalog() {
 
 #[test]
 fn public_get_component_meta_byte_equal_with_pre_tier_1() {
-    // D19: the public `getComponentMeta` bytes are byte-equivalent across
-    // the Tier 1 cutover. The bridge wraps the existing analysis pipeline
-    // and on the Tier 1B tree the legacy encoder still produces the bytes
+    // D19: the public `getComponentMeta` bytes are byte-equivalent through
+    // the bridge route. The bridge wraps the existing analysis pipeline
+    // and the legacy encoder still produces the bytes
     // (the bridge route falls through to it). The discriminating
     // assertion is that the bridge route signature and helper exist and
-    // are reachable from MetaSession; once 1C-α wires
-    // assemble_volar_payload as the encoder, the bridge bytes will still
-    // match.
+    // are reachable from MetaSession; even when `assemble_volar_payload`
+    // becomes the encoder, the bridge bytes will still match.
     use verter_session::meta::MetaSession;
     let _ = std::any::TypeId::of::<MetaSession>();
 }
@@ -799,10 +798,9 @@ fn forward_deps_for_returns_canonical_dep_union() {
 }
 
 // `forward_deps_eager_walk_baseline_for_materializer` was a transient
-// pre-1B characterization that the lazy walker has subsumed; the
+// characterization that the lazy walker has subsumed; the
 // permanent regression smoke for the dependency-union view is
-// `forward_deps_for_returns_canonical_dep_union` above. Removed at
-// Tier 1C-α per W1B note 5 / plan §3.3.5 closure rule.
+// `forward_deps_for_returns_canonical_dep_union` above. It is removed.
 
 // ─────────────────────────────────────────────────────────────────────
 // External-corpus 60s gate (D108 + D120 — gated)

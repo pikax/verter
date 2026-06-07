@@ -2,7 +2,7 @@
 //! `DerivedRawState.import_routes_known_miss_recorded_at_generation`
 //! producer ownership.
 //!
-//! Block 1.E enforces the route-cache invariant in two parts:
+//! This guard enforces the route-cache invariant in two parts:
 //!
 //! 1. **Strict guard on the known-miss generation sidecar.**
 //!    `DerivedRawState.import_routes_known_miss_recorded_at_generation`
@@ -687,7 +687,7 @@ fn format_violations(violations: &[Violation]) -> String {
 // Guard 1: positive-route admission allow-list.
 // ---------------------------------------------------------------------------
 
-/// Block 1.E positive-route admission allow-list.
+/// Positive-route admission allow-list.
 ///
 /// `DerivedRawState.import_routes` may be mutated only by:
 ///   * `VerterHost::set_import_dependencies` — full snapshot writer;
@@ -724,7 +724,7 @@ fn import_routes_writer_allow_list() {
         .collect();
     assert!(
         route_violations.is_empty(),
-        "Block 1.E `import_routes_writer_allow_list` violation:\n{}\n\n\
+        "`import_routes_writer_allow_list` violation:\n{}\n\n\
          `DerivedRawState.import_routes` is a two-mode admission field.\n\
            * Positive route point admission: `cache_positive_import_route_result`.\n\
            * Full caller-supplied snapshot: `set_import_dependencies`.\n\
@@ -742,7 +742,7 @@ fn import_routes_writer_allow_list() {
 // Guard 2: strict known-miss sidecar — single producer.
 // ---------------------------------------------------------------------------
 
-/// Block 1.E strict guard on the known-miss generation sidecar.
+/// Strict guard on the known-miss generation sidecar.
 ///
 /// `DerivedRawState.import_routes_known_miss_recorded_at_generation`
 /// admission is single-producer. The full-snapshot writer
@@ -773,7 +773,7 @@ fn known_miss_generation_sidecar_strict() {
         .collect();
     assert!(
         sidecar_violations.is_empty(),
-        "Block 1.E `known_miss_generation_sidecar_strict` violation:\n{}\n\n\
+        "`known_miss_generation_sidecar_strict` violation:\n{}\n\n\
          `DerivedRawState.import_routes_known_miss_recorded_at_generation`\n\
          is single-producer. Snapshot assignment only inside\n\
          `set_import_dependencies`; `.clear()` only inside\n\
@@ -792,7 +792,7 @@ fn known_miss_generation_sidecar_strict() {
 // Guard 3: positive-route helper sentinel — discriminating identity
 // ---------------------------------------------------------------------------
 
-/// Block 1.E sentinel — the renamed positive-route producer must
+/// Sentinel — the positive-route producer must
 /// continue to exist with the correct shape. If a future refactor
 /// either deletes `cache_positive_import_route_result` (folding it
 /// into another method) or weakens its body to no longer construct a
@@ -842,7 +842,7 @@ fn positive_route_helper_shape() {
         found,
         "expected `cache_positive_import_route_result` to exist on `impl VerterHost` \
          in `crates/verter_session/src/host_resolve/dependency_resolution.rs`; \
-         the helper is the canonical positive-route producer for Block 1.E"
+         the helper is the canonical positive-route producer"
     );
     assert!(
         has_some_resolved,
@@ -904,10 +904,9 @@ fn quote_block_source(block: &Block) -> String {
 /// admission cycle. This sentinel asserts the symmetry directly.
 ///
 /// `finish_upsert_post_commit` is the per-canonical post-commit step of
-/// the shared upsert engine (`upsert_many_with_priority`); the §6c
-/// cutover moved the owner-source-update own-cache drain there from the
-/// retired `upsert_via_scheduler_with_priority`, so the route + sidecar
-/// clears now live in this function.
+/// the shared upsert engine (`upsert_many_with_priority`); it owns the
+/// owner-source-update own-cache drain, so the route + sidecar clears
+/// live in this function.
 ///
 /// Discriminating property: searching the function bodies textually
 /// for both `import_routes.clear()` and
@@ -943,7 +942,7 @@ fn lifecycle_reset_clears_both_route_and_sidecar() {
     );
     assert!(
         cp_body.contains("import_routes_known_miss_recorded_at_generation . clear ("),
-        "Block 1.E lifecycle symmetry: `configure_projects` must ALSO clear \
+        "lifecycle symmetry: `configure_projects` must ALSO clear \
          `import_routes_known_miss_recorded_at_generation` to keep the known-miss \
          sidecar in lockstep with `import_routes` on project-graph reset. \
          Without the sidecar clear, a stale `content_generation` stamp survives \

@@ -1,27 +1,23 @@
-//! Architecture guard — `accumulate_dispatch_dep_signature` helper is
-//! gone after Block 9 retires the legacy dispatch accumulator.
+//! Architecture guard — the legacy `accumulate_dispatch_dep_signature`
+//! helper is gone once the legacy dispatch accumulator is retired.
 //!
 //! The legacy `meta_resolve::dep_signature::accumulate_dispatch_dep_signature`
-//! helper predates the fact-tracer fan-out substrate. Block 1.C / 1.G
-//! introduced a dual-emit window: every legacy
-//! `accumulate_dispatch_dep_signature(sig)` call is paired with an
-//! `observe_fact_signature(...)` call inside one of two helpers
-//! (`emit_slot_binding_graph_dispatch_facts`,
+//! helper predates the fact-tracer fan-out substrate. A dual-emit
+//! window pairs every legacy `accumulate_dispatch_dep_signature(sig)`
+//! call with an `observe_fact_signature(...)` call inside one of two
+//! helpers (`emit_slot_binding_graph_dispatch_facts`,
 //! `emit_dispatch_dep_signature_facts`), so both the curated
 //! `state.fact_versions` channel and the `ACTIVE_TRACERS` fan-out
 //! observe the same dep facts.
 //!
-//! Block 9 deletes the helper and the legacy drain. Once the
-//! `state.fact_versions` channel is retired and every consumer reads
-//! from the tracer-finalised `ReadSetSignature.facts` only, the helper
-//! becomes dead code and is deleted.
+//! Once the `state.fact_versions` channel is retired and every
+//! consumer reads from the tracer-finalised `ReadSetSignature.facts`
+//! only, the helper becomes dead code and is deleted.
 //!
-//! `#[ignore]` reason: the helper still exists at HEAD (commit
-//! `e79dbdb54`) and is actively invoked by the two dual-emit wrappers.
-//! Un-ignoring this test before Block 9 lands would fail — so the
-//! guard sits dormant until the retirement commit deletes the symbol,
-//! at which point the `#[ignore]` line is removed alongside the
-//! producer.
+//! The helper still exists today and is actively invoked by the two
+//! dual-emit wrappers, so this guard sits `#[ignore]`'d until the
+//! symbol is deleted, at which point the `#[ignore]` line is removed
+//! alongside the producer.
 //!
 //! When activated, the guard scans
 //! `crates/verter_session/src/**/*.rs` (production source) for:
@@ -31,7 +27,7 @@
 //! 2. Any call site whose callee path's last segment is
 //!    `accumulate_dispatch_dep_signature`.
 //!
-//! Either form is a Block-9 regression.
+//! Either form is a regression.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -268,24 +264,24 @@ fn format_hits(hits: &[Hit]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Production-tree guard (block-gated).
+// Production-tree guard (gated).
 // ---------------------------------------------------------------------------
 
 /// `accumulate_dispatch_dep_signature` (the helper definition AND
-/// every call site) is forbidden in production source after Block 9
-/// retires the legacy dispatch accumulator.
+/// every call site) is forbidden in production source once the legacy
+/// dispatch accumulator is retired.
 ///
-/// Today the symbol still exists at HEAD (the dual-emit wrappers
+/// Today the symbol still exists (the dual-emit wrappers
 /// `emit_slot_binding_graph_dispatch_facts` and
 /// `emit_dispatch_dep_signature_facts` still call it). The test sits
-/// `#[ignore]`'d until Block 9 deletes both helpers and the legacy
-/// drain. The fact-tracer fan-out (`observe_fact_signature`) is the
-/// sole dispatch-fact emission path after that.
+/// `#[ignore]`'d until both helpers and the legacy drain are deleted.
+/// The fact-tracer fan-out (`observe_fact_signature`) is the sole
+/// dispatch-fact emission path after that.
 ///
 /// Sibling guard: `no_accumulate_dispatch_dep_signature_outside_helpers.rs`
-/// (Block 1.G) pins down which helpers may CALL this symbol during the
-/// dual-emit window. That guard goes green now; THIS guard activates
-/// only when the symbol itself disappears.
+/// pins down which helpers may CALL this symbol during the dual-emit
+/// window. That guard goes green now; THIS guard activates only when
+/// the symbol itself disappears.
 #[test]
 #[ignore = "block-9 RED — closed by accumulate_dispatch_dep_signature deletion"]
 fn no_accumulate_dispatch_dep_signature_in_production() {
@@ -296,9 +292,9 @@ fn no_accumulate_dispatch_dep_signature_in_production() {
     }
     assert!(
         hits.is_empty(),
-        "Block 5 `legacy_accumulate_dispatch_dep_signature_gone` violation (gated):\n{}\n\n\
-         `{SYMBOL}` is the legacy dispatch accumulator. Block 9 retires \n\
-         it; after that commit, every dispatch fact emission must route \n\
+        "`legacy_accumulate_dispatch_dep_signature_gone` violation (gated):\n{}\n\n\
+         `{SYMBOL}` is the legacy dispatch accumulator. Once it is \n\
+         retired, every dispatch fact emission must route \n\
          through `observe_fact_signature(...)` via the fact-tracer \n\
          fan-out only. Re-introducing the symbol — either as a function \n\
          definition or as a call site — is a regression.",

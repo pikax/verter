@@ -1,5 +1,4 @@
-//! Wave 3 Slice 3.E — discriminating test for the LSP cancellation
-//! contract.
+//! Discriminating test for the LSP cancellation contract.
 //!
 //! Drives a hover-style audited request whose body deadlines past
 //! the per-method budget. Asserts that:
@@ -11,17 +10,11 @@
 //! * the harness surfaces an LSP `request_cancelled` JSON-RPC error
 //!   to the caller.
 //!
-//! Pre-change tree: the LSP handler had no audit wiring. The
-//! registration was never created, so the records store stayed
-//! empty and the active-request registry never held the slot. The
-//! `records_store_size == 1` and `error == Some("cancelled")`
-//! assertions therefore failed.
-//!
-//! Post-change tree (this slice): every audited LSP handler enters
+//! Every audited LSP handler enters
 //! [`verter_lsp::audit_harness::run_with_audit`], which wraps the
 //! handler body in `tokio::time::timeout(per_method_budget, ...)`
 //! and finalises the registration with the cancellation marker on
-//! timeout. Both assertions pass.
+//! timeout.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -88,12 +81,11 @@ async fn supersede_via_timeout_finalizes_first_request_with_cancellation_marker(
     let post = host.host_audit_runtime().snapshot();
     assert_eq!(
         post.active_request_count, 0,
-        "the registration must NOT linger in the active-request registry after the supersede; \
-         pre-change tree leaks the entry"
+        "the registration must NOT linger in the active-request registry after the supersede"
     );
     assert_eq!(
         post.records_store_size, 1,
-        "the cancellation marker record must be published; pre-change tree publishes nothing"
+        "the cancellation marker record must be published"
     );
 
     // Drain the (single) record and verify the marker.
@@ -126,7 +118,7 @@ async fn supersede_via_timeout_finalizes_first_request_with_cancellation_marker(
     assert_eq!(
         payload.error.as_deref(),
         Some("cancelled"),
-        "the cancellation marker must be `Some(\"cancelled\")`; pre-change tree leaves it None"
+        "the cancellation marker must be `Some(\"cancelled\")`"
     );
     assert_eq!(payload.method, LspMethodTag::Hover);
     // The cancellation-marker payload retains the method discriminant
@@ -135,10 +127,10 @@ async fn supersede_via_timeout_finalizes_first_request_with_cancellation_marker(
 }
 
 /// Discriminator: `contains_active_request(id)` flips from `true`
-/// (mid-flight) to `false` (post-finalize) for a cancellation. The
-/// pre-change tree (no audit wiring) never inserted into the
-/// active-request registry to begin with, so this test fails on the
-/// `mid.contains_active_request(id) == true` assertion.
+/// (mid-flight) to `false` (post-finalize) for a cancellation. A host
+/// without audit wiring never inserts into the active-request registry
+/// to begin with, so the `mid.contains_active_request(id) == true`
+/// assertion is what proves the wiring is live.
 #[tokio::test]
 async fn cancellation_drains_request_id_from_active_registry() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {

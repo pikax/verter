@@ -1,11 +1,7 @@
-//! Block 1.H RED test — `install_fact_tracer` works at top-level
-//! (no outer tracer present) and the cache admits a non-empty
-//! `fact_dep_signature`.
+//! `install_fact_tracer` works at top-level (no outer tracer present)
+//! and the cache admits a non-empty `fact_dep_signature`.
 //!
-//! Pre-Block-1.H the Family B/C/D caches' cold-compute closures
-//! were not wrapped in `install_fact_tracer`; admitted entries
-//! could carry empty/legacy-derived signatures only. Post-Block-1.H
-//! the AppConfigNoOverrideProofDb producer wraps its cold compute
+//! The AppConfigNoOverrideProofDb producer wraps its cold compute
 //! with `install_fact_tracer`; the published entry's
 //! `fact_dep_signature` carries the producer's `FileWholeHash`
 //! observation captured by the tracer.

@@ -1,4 +1,4 @@
-//! Phase 12.A3 — coverage guard for the typed cache invalidation
+//! Coverage guard for the typed cache invalidation
 //! domain registration on [`verter_session::project_type_store::ProjectTypeStore`].
 //!
 //! The `project_type_store_dbs!` macro is the single source of
@@ -21,7 +21,7 @@
 use verter_session::invalidation_domain::{InvalidationDomain, ParticipatesInInvalidation};
 use verter_session::project_type_store::{ProjectTypeStore, PROJECT_TYPE_STORE_DB_INVENTORY};
 
-/// Phase 12.A3 acceptance gate (test 1 of 2 — runtime surface).
+/// Acceptance gate (test 1 of 2 — runtime surface).
 ///
 /// Asserts the macro-generated inventory and the runtime
 /// `all_dbs_for_invalidation()` are coherent: same length, same
@@ -57,10 +57,10 @@ fn every_db_in_project_type_store_participates_in_invalidation() {
     }
 }
 
-/// Phase 12.A12 step 2 — object-safety regression. The trait
+/// Object-safety regression. The trait
 /// [`ParticipatesInInvalidation`] is callable through `&dyn`.
 /// Adding an associated `Key` type to this trait would silently
-/// break this; the §12.A12 design splits per-DB
+/// break this; the design splits per-DB
 /// `InvalidationByCanonical` (NOT object-safe) from
 /// `ParticipatesInInvalidation` (object-safe) for exactly this
 /// reason.
@@ -74,9 +74,9 @@ fn participates_in_invalidation_remains_object_safe() {
     }
 }
 
-/// Phase 12.A3 — every domain variant is reachable. Sanity check
+/// Every domain variant is reachable. Sanity check
 /// for the enum's `ALL` constant and its iteration ordering. Also
-/// asserts the variant count matches the plan brief
+/// asserts the variant count matches the documented contract
 /// (`{FileContent, TypeGraph, ResolverState, ComponentMeta,
 /// ProjectGeneration, AppConfigInterfaceMerge}` = 6 variants).
 #[test]

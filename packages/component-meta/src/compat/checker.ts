@@ -681,7 +681,7 @@ function buildCompatHtmlButtonTypePropMeta(prop: PropMeta): PropertyMeta | undef
 function buildCompatStringBrandUnionPropMeta(prop: PropMeta): PropertyMeta | undefined {
   // Structural gate: descriptor's top-level union (with optional `undefined`
   // stripped) contains a `string & {}` branded arm — an `intersection` of
-  // `primitive("string")` and an empty object. The W7.2 typed-IR rule
+  // `primitive("string")` and an empty object. The typed-IR rule
   // replaces the prior rawType `.includes("(string & {})")` text gate.
   const stripped = stripUndefinedArm(prop.type);
   const arms = unionArms(stripped);
@@ -1167,7 +1167,7 @@ function looksLikeBareTypeReference(t: TypeDescriptor): boolean {
  * Structural test: is `t` an indexed-access type (`Foo['bar']` /
  * `Foo[Bar]`)?
  *
- * Switches on the `IndexedAccessType` variant added in W0.6. A top-level
+ * Switches on the `IndexedAccessType` variant. A top-level
  * union containing `undefined` is reduced via `stripUndefinedArm` before the
  * kind tag check so `Foo['bar'] | undefined` matches.
  */
@@ -1287,7 +1287,7 @@ function typeDescriptorToCompatDisplay(
       // already identifies the element symbolically; expanding the ref
       // obscures the structural reading. When the element is anonymous,
       // the existing registry-resolving display path is used (matches
-      // the pre-cutover behaviour for unlabelled tuples).
+      // the legacy behaviour for unlabelled tuples).
       const rendered = descriptor.elements.map((type, i) => {
         const label = descriptor.labels?.[i] ?? null;
         if (label) {
@@ -2122,7 +2122,7 @@ export class ComponentMetaChecker {
       throw new Error("ComponentMetaChecker has been disposed.");
     }
     // Engine state is the authoritative liveness signal exposed to compat.
-    // Per the migration plan §7.1 / D35, the compat layer does not consult
+    // The compat layer does not consult
     // session-local `closed` directly — `engine.state` is the single allow-
     // listed property read on `_session.*`. Compat's own `close()` method
     // nulls `this._session` synchronously before any external observer can

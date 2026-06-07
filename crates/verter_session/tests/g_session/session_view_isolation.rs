@@ -1,11 +1,11 @@
-//! Stage 4d discriminating tests — sessions do not mutate the host.
+//! Discriminating tests — sessions do not mutate the host.
 //!
 //! Binds **R17** (sessions are views over the base host; a
 //! `SessionView` never mutates the host; `host.upsert` is not called
 //! from any query path) and **R20** (multi-candidate storage isolates
-//! concurrent overlay variants — partial at Stage 4d, full at Stage 5).
+//! concurrent overlay variants).
 //!
-//! Stage 4d removes the overlay-mutation lifecycle so that:
+//! There is no overlay-mutation lifecycle, so:
 //!
 //! 1. Two sessions can hold conflicting overlays simultaneously
 //!    without CAS-claiming a shared overlay slot, without
@@ -16,16 +16,13 @@
 //!    on the shared host.
 //!
 //! The host's `upsert_count` provenance counter is the discriminating
-//! signal: pre-Stage-4d a query through an overlay-bearing session
-//! incremented this counter (apply + later revert). Post-Stage-4d
-//! the counter does not move during query paths.
+//! signal: an overlay-mutation lifecycle would increment this counter
+//! (apply + later revert), but the counter does not move during query
+//! paths.
 //!
-//! Plan deviation note: Stage 5 / 6 reinstate overlay-aware reads via
-//! `SessionView`-routed cache reads + multi-candidate storage. Until
-//! then, overlay-bearing sessions transparently read the base host's
-//! source for queries. Stage 4d's verification is therefore about
-//! the *absence of host mutation*, not about the presence of
-//! overlay-correct semantics.
+//! This file's verification is about the *absence of host mutation*;
+//! overlay-correct read semantics are exercised by the
+//! `SessionView`-routed cache-read + multi-candidate-storage tests.
 
 use std::sync::Arc;
 
@@ -49,8 +46,8 @@ fn upsert_base(project: &Arc<MetaProject>, canonical: &str, source: &str) {
 
 fn host_upsert_count(project: &Arc<MetaProject>) -> u64 {
     // The host's `provenance().host_upsert_calls` is bumped once
-    // per `VerterHost::upsert(...)` invocation (Stage 4d wired the
-    // increment in `host_upsert.rs`). We snapshot the value
+    // per `VerterHost::upsert(...)` invocation (the increment lives
+    // in `host_upsert.rs`). We snapshot the value
     // before and after session queries to assert no query path
     // triggered an upsert internally.
     project
@@ -65,12 +62,11 @@ fn two_concurrent_sessions_with_conflicting_overlays_both_succeed() {
     // R17 — sessions never mutate the host. Two sessions with
     // diverging overlay sources for the SAME canonical can run
     // queries concurrently without one waiting on the other's
-    // host-revert. Pre-Stage-4d the CAS-claim loop in
-    // `with_overlay_target_context` would have serialised them
-    // through `active_overlay_session` (one session would have
-    // had to revert the other's overlay before claiming the host).
-    // Post-Stage-4d there is no CAS, no host-revert, no shared
-    // gate; both sessions complete without observable
+    // host-revert. A CAS-claim loop in `with_overlay_target_context`
+    // would have serialised them through `active_overlay_session`
+    // (one session would have had to revert the other's overlay
+    // before claiming the host). There is no CAS, no host-revert, no
+    // shared gate; both sessions complete without observable
     // serialisation.
 
     let project = fresh_project();
@@ -87,11 +83,11 @@ fn two_concurrent_sessions_with_conflicting_overlays_both_succeed() {
         .expect("overlay B");
 
     // Both sessions issue a query through their own session
-    // surface. Pre-Stage-4d this sequence would have caused
+    // surface. An overlay-mutation design would have caused
     // session B's query to revert session A's overlay (or vice
     // versa) — measurable through a non-zero increment of the
-    // host's upsert provenance counter. Post-Stage-4d the counter
-    // does not move during these query paths.
+    // host's upsert provenance counter. The counter does not move
+    // during these query paths.
 
     let upserts_before = host_upsert_count(&project);
 
@@ -121,7 +117,7 @@ fn two_concurrent_sessions_with_conflicting_overlays_both_succeed() {
     // store; they do NOT increment `upsert_calls`.
     assert_eq!(
         upserts_before, upserts_after,
-        "Stage 4d (R17): query paths MUST NOT call host.upsert. \
+        "R17: query paths MUST NOT call host.upsert. \
          Counter moved from {upserts_before} → {upserts_after} \
          during two sessions' get_analysis queries."
     );
@@ -148,7 +144,7 @@ fn session_upsert_does_not_increment_host_upsert_counter() {
          {before_base} → {after_base})"
     );
 
-    // The Stage 4d invariant: session.upsert MUST NOT increment.
+    // The invariant: session.upsert MUST NOT increment.
     let session = project.open_session().expect("session");
     let before_overlay = host_upsert_count(&project);
     session
@@ -157,7 +153,7 @@ fn session_upsert_does_not_increment_host_upsert_counter() {
     let after_overlay = host_upsert_count(&project);
     assert_eq!(
         before_overlay, after_overlay,
-        "Stage 4d (R17): session.upsert MUST NOT increment host.upsert_calls. \
+        "R17: session.upsert MUST NOT increment host.upsert_calls. \
          Counter moved from {before_overlay} → {after_overlay} during \
          a single session.upsert call."
     );
@@ -166,11 +162,11 @@ fn session_upsert_does_not_increment_host_upsert_counter() {
 #[test]
 fn session_close_does_not_call_host_upsert() {
     // R17 — releasing a session does NOT trigger host upserts.
-    // Pre-Stage-4d closing a session would have CAS-cleared
-    // `active_overlay_session` and called
+    // An overlay-mutation design would have CAS-cleared
+    // `active_overlay_session` on close and called
     // `revert_other_session_overlays` (which invokes
-    // `host.upsert(...)` to restore base sources). Post-Stage-4d
-    // session close is a pure state removal.
+    // `host.upsert(...)` to restore base sources). Session close is
+    // a pure state removal.
 
     let project = fresh_project();
     upsert_base(&project, "/x.ts", "export const a = 1;");
@@ -186,25 +182,23 @@ fn session_close_does_not_call_host_upsert() {
 
     assert_eq!(
         before_close, after_close,
-        "Stage 4d (R17): closing a session MUST NOT call host.upsert. \
+        "R17: closing a session MUST NOT call host.upsert. \
          Counter moved from {before_close} → {after_close} during session drop."
     );
 }
 
 #[test]
 fn many_concurrent_sessions_do_not_serialise_on_a_project_gate() {
-    // R20 stress — N sessions × M overlays. Pre-Stage-4d the CAS
-    // would have funneled every overlay-bearing query through the
-    // single `active_overlay_session` slot, which would have
-    // serialised concurrent overlay-bearing queries. Post-Stage-4d
-    // there is no project-wide gate.
+    // R20 stress — N sessions × M overlays. A CAS-based design
+    // would have funneled every overlay-bearing query through a
+    // single `active_overlay_session` slot, serialising concurrent
+    // overlay-bearing queries; there is no project-wide gate.
     //
     // The discriminating signal: zero `host.upsert` calls during
-    // an N-session test. Pre-Stage-4d any session.get_analysis
-    // would have incremented `upsert_calls` (apply overlay; later
-    // revert when another session claimed the slot). Stage 5 will
-    // add a more rigorous parallel stress test (R20 candidate set
-    // size histogram); Stage 4d locks in the counter invariant.
+    // an N-session test. An overlay-mutation design would have
+    // incremented `upsert_calls` on any session.get_analysis (apply
+    // overlay; later revert when another session claimed the slot).
+    // This locks in the counter invariant.
 
     let project = fresh_project();
     upsert_base(&project, "/shared.ts", "export const x = 0;");
@@ -226,7 +220,7 @@ fn many_concurrent_sessions_do_not_serialise_on_a_project_gate() {
 
     assert_eq!(
         upserts_before, upserts_after,
-        "Stage 4d (R17, R20): {N} concurrent overlay-bearing sessions MUST \
+        "R17, R20: {N} concurrent overlay-bearing sessions MUST \
          NOT trigger a single host.upsert during query paths. Counter moved \
          from {upserts_before} → {upserts_after}."
     );
@@ -245,7 +239,7 @@ fn many_concurrent_sessions_do_not_serialise_on_a_project_gate() {
     let upserts_final = host_upsert_count(&project);
     assert_eq!(
         upserts_after, upserts_final,
-        "Stage 4d (R17): no host.upsert across two query passes either"
+        "R17: no host.upsert across two query passes either"
     );
 }
 
@@ -284,7 +278,7 @@ fn upsert_base_is_the_only_documented_host_upsert_source() {
     let after_session_ops = host_upsert_count(&project);
     assert_eq!(
         before_session_ops, after_session_ops,
-        "Stage 4d (R17): the full session surface (upsert/delete/reset/get_*) \
+        "R17: the full session surface (upsert/delete/reset/get_*) \
          MUST NOT bump host.upsert_calls. {before_session_ops} → {after_session_ops}"
     );
 }

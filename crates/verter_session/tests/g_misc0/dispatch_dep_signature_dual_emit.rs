@@ -35,8 +35,8 @@
 //! `accumulate_dispatch_dep_signature` half of the helper would leave
 //! the legacy counter at zero while the tracer counter still
 //! advanced; the lockstep-equal assertion below would FAIL. Removing
-//! the `observe_fact_signature` half would invert the failure. The
-//! pre-fix tree (commit `5855c9c25`) fails this test because the
+//! the `observe_fact_signature` half would invert the failure. A
+//! tree without the dual-emit fix fails this test because the
 //! legacy counter never advances for the six in-scope sites — only
 //! the `slot_binding_graph` dual-emit helper still feeds the
 //! accumulator there.
@@ -142,7 +142,7 @@ fn dispatch_dep_signature_dual_emit_in_lockstep() {
     // `ComponentMetaResultEntry` shrinks and warm-hit validation
     // misses transitive-type edits. If only the legacy counter
     // advances, the fact-tracer fan-out is missing → the
-    // `read_set.finalise()` producer (Block 9) cannot replace
+    // `read_set.finalise()` producer cannot replace
     // `state.fact_versions` without losing coverage.
     assert!(
         tracer_after > tracer_before,

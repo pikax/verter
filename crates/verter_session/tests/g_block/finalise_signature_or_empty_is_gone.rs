@@ -624,10 +624,9 @@ impl<'ast, 'a> Visit<'ast> for IdentSearch<'a> {
 fn ast_walker_flags_known_bypass_variants() {
     let known_bypasses: &[(&str, &str)] = &[
         // Known empty-fact-rail bypass variants: the 5 syntactic
-        // forms exercised by codex review + the pre-existing
-        // structural variants the AST walker handles + the
-        // inferred-call shapes where the FactVersionRef anchor lives
-        // on the argument (not the callee turbofish).
+        // forms + the pre-existing structural variants the AST walker
+        // handles + the inferred-call shapes where the FactVersionRef
+        // anchor lives on the argument (not the callee turbofish).
         (
             "type-inferred empty: `let x: Arc<[FactVersionRef]> = Arc::from([]);`",
             "use std::sync::Arc;\n\
@@ -777,7 +776,7 @@ fn ast_walker_flags_known_bypass_variants() {
 
 /// Self-validating fixture: the walker MUST NOT false-positive on
 /// look-alike but benign expressions. These cover every false-positive
-/// surface codex flagged plus a couple of additional shapes.
+/// surface plus a couple of additional shapes.
 #[test]
 fn ast_walker_does_not_false_positive_on_benign_shapes() {
     let benign: &[(&str, &str)] = &[

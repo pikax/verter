@@ -1,9 +1,9 @@
 //! Matrix slice: `memo_entry` × `route_surface`.
 //!
 //! Discrimination: route-surface dispatches go through the memo.
-//! Block 1.H Track 1 wraps `execute_cooperative`'s cold build
-//! with `install_fact_tracer`; the counter advances on a
-//! barrel-route fixture.
+//! `execute_cooperative`'s cold build is wrapped with
+//! `install_fact_tracer`; the counter advances on a barrel-route
+//! fixture.
 
 use std::sync::Arc;
 

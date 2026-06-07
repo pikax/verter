@@ -23,7 +23,7 @@
 //! Reverting site (3) makes the counter-delta assertion fail (the
 //! cold counter would still advance, but the coalesced one wouldn't).
 //!
-//! ## Why this could not be expressed pre-cutover
+//! ## Why this could not be expressed before the consumer migration
 //!
 //! Before the consumer migration, the route cold path was reached
 //! via `get_or_resolve_route_with_facts` which discarded the

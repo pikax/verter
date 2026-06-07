@@ -107,7 +107,7 @@ fn import_ref_invariant_under_resolution_change() {
 fn import_ref_changes_when_specifier_text_changes() {
     // Discrimination: a real specifier-text edit DOES change the
     // parse-domain fact (would invalidate the consumer's resolved
-    // canonical via the Stage-6 ResolvedImportClause fact).
+    // canonical via the ResolvedImportClause fact).
     let with_theme = build_with_import("Theme", "./theme", "Theme", "/theme.ts");
     let with_styles = build_with_import("Theme", "./styles", "Theme", "/theme.ts");
 

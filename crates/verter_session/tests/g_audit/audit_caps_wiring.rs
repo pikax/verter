@@ -12,7 +12,7 @@
 //! cap-bounded push behaviour was already exercised at the
 //! accumulator surface by `audit_caps_truncation_tests.rs`.
 //!
-//! Codex flagged a wiring gap during the Phase B fix-cycle: the
+//! This guards a wiring gap: the
 //! production accumulator-construction site at
 //! `host_manage/component_meta_entry.rs::get_component_meta_with_resolution`
 //! built the per-request accumulator with

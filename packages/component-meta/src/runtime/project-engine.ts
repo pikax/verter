@@ -56,14 +56,14 @@ export interface NativeMetaSession {
   /** Provenance counters for observability. Returns JSON. */
   getProvenance(): string;
   /**
-   * Tier 1B selective surface (D32 + D101). Returns
+   * Selective surface. Returns
    * `verter.v1.ComponentMetaSurface` bytes (eager scalars +
    * `NamedTypeHandle` for every type-bearing field). Error envelopes
    * are magic-byte-prefixed (`buf[0] === 0xFF`).
    */
   getComponentMetaSurface(canonicalOrAlias: string): Buffer | null;
   /**
-   * Tier 1B selective surface (D32 + D101). Resolves a
+   * Selective surface. Resolves a
    * `verter.v1.TypeHandle` to a one-layer `verter.v1.TypeExpansion`.
    * Error envelopes are magic-byte-prefixed (`buf[0] === 0xFF`).
    */

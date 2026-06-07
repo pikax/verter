@@ -1,19 +1,16 @@
-//! R7 cross-owner `MaterializeStructureDb` reuse test (Stage 5
-//! Sub-task D).
+//! R7 cross-owner `MaterializeStructureDb` reuse test.
 //!
-//! Per plan §"Stage 5 / Sub-task D" + plan §"Verify" bullet 2:
-//! "Discriminating cross-owner reuse test on `MaterializeStructureDb`:
-//! pre-Stage-0 = N entries; post-Stage-5 = 1 entry."
+//! Discriminating cross-owner reuse on `MaterializeStructureDb`:
+//! N consumer scopes must collapse onto 1 entry.
 //!
 //! **Discriminating contract:** the cache key's `Hash`/`PartialEq`
 //! must EXCLUDE `scope_canonical_id`. N concurrent materialise
 //! requests for the same `(base, scope_axis, mode)` reached from
 //! distinct consumer scopes must land in ONE cache entry, not N.
 //!
-//! Pre-Stage-5d (legacy `#[derive(Hash, PartialEq)]` including
-//! `scope_canonical_id`): N entries.
-//! Post-Stage-5d (hand-rolled `Hash`/`PartialEq` excluding
-//! `scope_canonical_id`): 1 entry.
+//! A `#[derive(Hash, PartialEq)]` that included `scope_canonical_id`
+//! would yield N entries; the hand-rolled `Hash`/`PartialEq` excluding
+//! `scope_canonical_id` yields 1 entry.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -137,10 +134,8 @@ fn r7_distinct_projection_mode_produces_distinct_entries() {
     assert_ne!(key_expanded, key_navigate);
 }
 
-/// R7 — Stage 5d end-state placeholder type. The richer
-/// `MaterializationCacheKey` is introduced alongside the legacy
-/// key for Stage 6+ migration. This test pins the structural
-/// shape (5 fields).
+/// R7 — the richer `MaterializationCacheKey` coexists alongside the
+/// legacy key. This test pins the structural shape (5 fields).
 #[test]
 fn r7_materialization_cache_key_has_5_fields() {
     use verter_session::component_meta_materialize::{

@@ -121,7 +121,7 @@ fn concurrent_audits_on_same_host_each_see_their_own_record() {
 
 #[test]
 fn audited_request_record_carries_populated_footprint_when_capture_enabled() {
-    // Plan §3 Commit 4 wire-up: when `footprint_capture` is enabled,
+    // When `footprint_capture` is enabled,
     // the request path mines the per-request accumulator and attaches a
     // `RequestFootprintAudit` to the record. Without the
     // `mine_footprint` call inserted in `meta_resolve.rs`, the
@@ -137,9 +137,9 @@ fn audited_request_record_carries_populated_footprint_when_capture_enabled() {
         .as_ref()
         .expect("footprint_capture=true must populate record.footprint");
     // Cache counters are populated from the request's own atomics
-    // (plan §1.4 — kills `is_approximate`). We exercise the read path
+    // (no `is_approximate`). We exercise the read path
     // here; exact counts depend on resolver call shape and are pinned
-    // by the Commit 7 corpus snapshots.
+    // by the corpus snapshots.
     let _ = footprint.cache_outcomes.cold_builds
         + footprint.cache_outcomes.warm_hits
         + footprint.cache_outcomes.joined_waits
@@ -152,8 +152,8 @@ fn audited_request_record_carries_populated_footprint_when_capture_enabled() {
 
 #[test]
 fn audited_request_resolve_produces_non_empty_vfs_reads_for_trivial_vue_sfc() {
-    // Plan §3.A Commit 6.D exit criterion. Proves SessionVfsSink
-    // is registered and routing events for the audit window.
+    // Proves SessionVfsSink is registered and routing events for the
+    // audit window.
     //
     // Critical fixture detail: `host.upsert` submits a scheduler
     // request with `source = Some(raw)`, so the source stage
@@ -227,7 +227,7 @@ fn audited_request_resolve_produces_non_empty_vfs_reads_for_trivial_vue_sfc() {
     assert!(
         !footprint.vfs_reads.is_empty(),
         "SessionVfsSink must route VFS read events into footprint.vfs_reads — \
-         empty means the sink registration broke (plan §3.A Commit 6.D)",
+         empty means the sink registration broke",
     );
     for r in &footprint.vfs_reads {
         assert_eq!(

@@ -1,15 +1,15 @@
-//! Slice 2.1 — per-cache HitMiss with per-request attribution.
+//! Per-cache HitMiss with per-request attribution.
 //!
-//! This test asserts the §1.5 joiner-accounting contract under
+//! This test asserts the joiner-accounting contract under
 //! serialised execution: cold then warm component-meta on the SAME
 //! canonical, with each request producing its own audit record. The
 //! cold record's `cache_layers.component_meta` shows a miss; the
 //! warm record shows a hit.
 //!
-//! Discriminating: pre-change tree has no `cache_layers` field on
-//! `RequestStoreAudit`, so this test will not compile. Post-change,
-//! the assertions verify per-request hit/miss attribution attributes
-//! exactly to the request that performed the lookup.
+//! Discriminating: a design without a `cache_layers` field on
+//! `RequestStoreAudit` would not compile. The assertions verify
+//! per-request hit/miss attribution attributes exactly to the request
+//! that performed the lookup.
 
 use std::sync::Arc;
 

@@ -2328,10 +2328,10 @@ function graphPrimitiveName(tag: number): Parameters<typeof primitive>[0] {
 
 function graphTypeExprToString(expr: GraphTypeExprRef): string {
   const node = expr.graph.getNode(expr.nodeId);
-  // Plan §3 Step 6.5 (D30): every graph node kind renders to a
-  // structural string form. The pre-Step-6.5 `default: graphNode(N)`
+  // Every graph node kind renders to a
+  // structural string form. The legacy `default: graphNode(N)`
   // fallback leaked operator-node kinds into compat-layer strings as
-  // diagnostic placeholders (Phase 3 §4.1 graphNode_leak bucket).
+  // diagnostic placeholders (graphNode_leak bucket).
   // Now every kind has explicit structural rendering; the exhaustive
   // switch below replaces the fallback so future graph-node kinds
   // surface as TypeScript compile errors at this site rather than

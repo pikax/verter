@@ -1,4 +1,4 @@
-//! Phase 0 — correctness gate (Tier 1 + Tier 2 unified test target).
+//! Correctness gate (Tier 1 + Tier 2 unified test target).
 //!
 //! Cargo discovers this file as the `correctness` integration-test
 //! target. Submodules live at `tests/correctness/<file>.rs` and are
@@ -7,17 +7,16 @@
 //!
 //! Run: `cargo test -p verter_session --test correctness`
 //!
-//! Author-first workflow (§0p.A.0): for every Class A fixture the
+//! Author-first workflow: for every Class A fixture the
 //! programmatic expected value lives in
 //! `tests/correctness/expected/<id>.rs` and is the single source of
 //! truth. The committed `<id>.correctness.snap.json` is GENERATED
 //! from that programmatic value via the `--ignored`
 //! `generate_class_a_snapshots_from_expected` test. Class B + C
 //! fixtures (regression baselines) are captured directly via
-//! `UPDATE_SNAPSHOTS=1` on the main test (Phase 0a authors zero such
-//! fixtures; Phase 0b adds them).
+//! `UPDATE_SNAPSHOTS=1` on the main test.
 //!
-//! UPDATE_SNAPSHOTS=1 regeneration is GUARDED — see §0p.A.4.
+//! UPDATE_SNAPSHOTS=1 regeneration is GUARDED.
 
 use std::path::PathBuf;
 
@@ -35,7 +34,7 @@ mod fixtures;
 mod snapshot_view;
 
 /// Resolve the snapshot path for a fixture using the class-specific
-/// suffix discipline (§0p.A.2). Class A → `<id>.correctness.snap.json`,
+/// suffix discipline. Class A → `<id>.correctness.snap.json`,
 /// Class B + C → `<id>.regression.snap.json`.
 fn snapshot_path_for(fixture: &fixtures::CorrectnessFixture) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -48,8 +47,7 @@ fn snapshot_path_for(fixture: &fixtures::CorrectnessFixture) -> PathBuf {
 }
 
 /// Build a hermetic [`VerterHost`] using the same `MemoryWorkspace`
-/// pattern that the `component_meta_audit::harness` already uses
-/// (§0.6.1 small decision: adopt the existing fixture helper).
+/// pattern that the `component_meta_audit::harness` already uses.
 /// `audit_enabled` is on because [`AuditedRequest::resolve`] requires
 /// a published `RequestAuditRecord` — the gate ignores the record and
 /// only consumes the [`ComponentMetaAnalysis`] payload.
@@ -81,7 +79,7 @@ fn compute_for_fixture(fixture: &fixtures::CorrectnessFixture) -> ComponentMetaA
     match req {
         Ok((analysis, _resolution, _record)) => analysis,
         Err(e) => panic!(
-            "Phase 0 correctness fixture `{}` (`{}`) must resolve, got {e}",
+            "correctness fixture `{}` (`{}`) must resolve, got {e}",
             fixture.id, fixture.target,
         ),
     }
@@ -98,7 +96,7 @@ fn compute_for_fixture(fixture: &fixtures::CorrectnessFixture) -> ComponentMetaA
 /// `emits_from_typeinfo_surface` path: the property's value (the tuple)
 /// stays on the macro object surface as the event payload; the
 /// referenced interface is NOT unfolded into the surface. The test
-/// FAILS against the pre-cutover behavior that unfolded the tuple's
+/// FAILS against the earlier behavior that unfolded the tuple's
 /// referenced interface into sibling events (the same defect that left
 /// the `pathological_table_loading_animation` regression baseline with
 /// stale `index` + `row` events) and PASSES against the current owner
@@ -158,7 +156,7 @@ defineEmits<{
     );
 }
 
-/// Phase 0 §0p.A.0 author-first workflow (Codex P1-4 r4 fix).
+/// Author-first workflow.
 ///
 /// For Class A fixtures, the .snap.json is GENERATED from the
 /// programmatic `expected::<fixture_id>()` constant — NOT captured
@@ -178,7 +176,7 @@ fn generate_class_a_snapshots_from_expected() {
         let expected_view = expected::lookup_class_a_expected(fixture.id).unwrap_or_else(|| {
             panic!(
                 "Class A fixture `{}` has no entry in expected.rs. \
-                 Phase 0 §0p.A.0 author-first workflow REQUIRES a \
+                 The author-first workflow REQUIRES a \
                  programmatic expected value before the .snap.json can \
                  be generated. Add `pub fn {}() -> SnapshotView` to \
                  expected.rs and a match arm in \
@@ -206,16 +204,16 @@ fn correctness_snapshot_for_every_fixture() {
         let snapshot_path = snapshot_path_for(fixture);
 
         if std::env::var("UPDATE_SNAPSHOTS").is_ok() {
-            // Regeneration is allowed only when the active phase brief
-            // declared EXPECTS_SNAPSHOT_REGEN (§0.6.4). For Class A,
-            // regen MUST go through generate_class_a_snapshots_from_expected
-            // — direct UPDATE_SNAPSHOTS=1 on Class A captures Verter's
-            // output and bypasses the author-first workflow.
+            // Regeneration is allowed only when the change explicitly
+            // expects snapshot regeneration. For Class A, regen MUST go
+            // through generate_class_a_snapshots_from_expected — direct
+            // UPDATE_SNAPSHOTS=1 on Class A captures Verter's output and
+            // bypasses the author-first workflow.
             if fixture.is_class_a() {
                 panic!(
                     "Class A fixture `{}` cannot be regenerated via \
                      UPDATE_SNAPSHOTS=1 — that captures Verter's output, \
-                     bypassing the author-first workflow (§0p.A.0). \
+                     bypassing the author-first workflow. \
                      Run `cargo test --test correctness -- --ignored \
                      generate_class_a_snapshots_from_expected` instead, \
                      after updating `expected.rs`.",
@@ -230,7 +228,7 @@ fn correctness_snapshot_for_every_fixture() {
         let expected = std::fs::read_to_string(&snapshot_path).unwrap_or_else(|e| {
             panic!(
                 "snapshot missing for `{}` (id `{}`, class `{:?}`): {e} — \
-                 Phase 0 §0p.A.2 must hand-author the expected value in \
+                 must hand-author the expected value in \
                  expected.rs (Class A) or capture via UPDATE_SNAPSHOTS=1 \
                  (Class B+C).",
                 fixture.target, fixture.id, fixture.class,
@@ -240,23 +238,23 @@ fn correctness_snapshot_for_every_fixture() {
             actual.trim(),
             expected.trim(),
             "Tier-1 correctness mismatch for fixture `{}`. The committed \
-             .snap.json is hand-authored from TS spec + Verter rules \
-             (§0p.A.0). If actual differs, that is a Verter resolver \
+             .snap.json is hand-authored from TS spec + Verter rules. \
+             If actual differs, that is a Verter resolver \
              defect — NOT a snapshot to regenerate. Investigate the diff. \
-             If you genuinely intend to change resolved-type output, your \
-             phase brief must carry EXPECTS_SNAPSHOT_REGEN (§0.6.4) and \
+             If you genuinely intend to change resolved-type output, the \
+             change must explicitly expect snapshot regeneration and \
              the diff must be human-reviewed.",
             fixture.id,
         );
     }
 }
 
-/// Phase 0 §0p.A.0 author-first workflow gate (Codex P1-4 r4):
+/// Author-first workflow gate:
 /// Class A's `<id>.correctness.snap.json` MUST byte-equal the JSON
 /// serialization of `expected::lookup_class_a_expected(id)`. If they
 /// disagree, the worker forgot to run
 /// `--ignored generate_class_a_snapshots_from_expected` after editing
-/// `expected.rs`. This catches the self-confirming-snapshot trap (F6).
+/// `expected.rs`. This catches the self-confirming-snapshot trap.
 fn ensure_class_a_expected_matches_snapshot() {
     for fixture in fixtures::FIXTURES {
         if !fixture.is_class_a() {
@@ -265,7 +263,7 @@ fn ensure_class_a_expected_matches_snapshot() {
         let expected_view = expected::lookup_class_a_expected(fixture.id).unwrap_or_else(|| {
             panic!(
                 "Class A fixture `{}` is missing from expected.rs. \
-                 Author-first workflow (§0p.A.0) requires a programmatic \
+                 Author-first workflow requires a programmatic \
                  expected value AND a derivation note before the \
                  .snap.json is meaningful.",
                 fixture.id,
@@ -293,13 +291,12 @@ fn ensure_class_a_expected_matches_snapshot() {
     }
 }
 
-/// Phase 0 §0p.A.4 — every Class A fixture must carry a hand-written
+/// Every Class A fixture must carry a hand-written
 /// derivation note whose first non-blank line cites a rule source
 /// (TS spec §, Verter rule, CLAUDE.md §, or .claude/skills/...). The
-/// citation regex in the plan body is implemented here as a plain
+/// citation regex is implemented here as a plain
 /// prefix matcher to avoid pulling in a `regex` workspace dependency
-/// for a single test-only check (§0.6.1 small decision: match
-/// surrounding workspace style).
+/// for a single test-only check (matching surrounding workspace style).
 fn ensure_class_a_derivation_notes() {
     let notes_dir =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/correctness/derivation_notes");
@@ -311,11 +308,11 @@ fn ensure_class_a_derivation_notes() {
         let content = std::fs::read_to_string(&path).unwrap_or_else(|_| {
             panic!(
                 "Class A fixture `{}` is missing its derivation note at \
-                 {}. Phase 0 §0p.A.0 mandates a TS-spec or Verter-rule \
-                 citation before the snapshot can be considered \
+                 {}. A TS-spec or Verter-rule \
+                 citation is required before the snapshot can be considered \
                  hand-derived. Without this file, the fixture is \
                  indistinguishable from a self-confirming snapshot of \
-                 Verter's current output (the F6+N3 trap).",
+                 Verter's current output.",
                 fixture.id,
                 path.display(),
             )
@@ -337,7 +334,7 @@ fn ensure_class_a_derivation_notes() {
     }
 }
 
-/// Plain-string equivalent of the §0p.A.4 citation regex
+/// Plain-string equivalent of the citation regex
 /// `(?i)^TS spec\s+§|^[.]/[.]claude/skills/|^Verter rule\b|^CLAUDE[.]md\s+§`.
 /// Matches the same set of leading anchors as the regex.
 fn citation_line_is_well_formed(line: &str) -> bool {
@@ -385,7 +382,7 @@ fn check_keyword_then_section(core: &str, keyword: &str) -> bool {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// §0p.A.5 — Parametric discriminating self-test (12-property coverage).
+// Parametric discriminating self-test (12-property coverage).
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // Each row mutates ONE property of an actually-resolved SnapshotView
@@ -495,11 +492,10 @@ const DISCRIMINATING_CASES: &[DiscriminatingCase] = &[
 #[test]
 fn correctness_gate_is_discriminating_for_every_property() {
     for case in DISCRIMINATING_CASES {
-        // r5/M6 fix: skip cases whose fixture isn't yet present.
-        // Phase 0a authors mapped-type fixtures only; Phase 0b adds
-        // the property fixtures. Without this skip, Phase 0a's
-        // marker check would block on a panic from missing 0b
-        // fixtures.
+        // Skip cases whose fixture isn't present. Mapped-type fixtures
+        // and the per-property fixtures are authored independently;
+        // without this skip, a fixture that is not yet present would
+        // panic.
         let Some(fixture) = fixtures::FIXTURES.iter().find(|f| f.id == case.fixture_id) else {
             continue;
         };
@@ -509,7 +505,7 @@ fn correctness_gate_is_discriminating_for_every_property() {
             panic!(
                 "mutation {:?} could not be applied to fixture `{}`: {why}. \
                  The fixture must exercise the property the mutation \
-                 targets — see §0p.A.2 fixture authorship.",
+                 targets.",
                 case.mutation, case.fixture_id,
             )
         });
@@ -520,8 +516,8 @@ fn correctness_gate_is_discriminating_for_every_property() {
             mutated_json.trim(),
             "discriminating self-test FAILED for case {:?} on fixture `{}`. \
              Rule: {}. The gate is INSENSITIVE to this property; the \
-             projection in §0p.A.3 is missing the field that encodes it. \
-             Phase 0 baseline cannot be trusted until this is fixed.",
+             SnapshotView projection is missing the field that encodes it. \
+             The correctness baseline cannot be trusted until this is fixed.",
             case.mutation,
             case.fixture_id,
             case.rule_doc,
@@ -613,9 +609,7 @@ fn apply_mutation(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Self-tests for the citation matcher itself (sanity checks — these
-// must FAIL on the pre-change tree, since the harness did not exist
-// before this commit).
+// Self-tests for the citation matcher itself (sanity checks).
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]

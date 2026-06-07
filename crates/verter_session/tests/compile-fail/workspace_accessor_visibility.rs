@@ -1,6 +1,6 @@
-//! Phase 6b sub-plan §6b.D2b — T11 (REGRESSION) compile-fail fixture.
+//! Compile-fail fixture: `VerterHost::workspace()` is not externally callable.
 //!
-//! `VerterHost::workspace()` was demoted from `pub` to `pub(crate)` so
+//! `VerterHost::workspace()` is `pub(crate)` (not `pub`) so
 //! external crates cannot reach the workspace mutator surface directly.
 //! External read consumers go through `VerterHost::workspace_read()`
 //! which returns the narrower `Arc<dyn WorkspaceRead>` trait object.

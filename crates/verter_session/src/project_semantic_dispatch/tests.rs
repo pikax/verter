@@ -4624,8 +4624,8 @@ fn deferred_utilities_return_opaque_miss_with_instantiate_edge() {
     }
 }
 
-/// `ReturnType<typeof fn>` routes purely through dispatch ( C7,
-/// §5.8 D-cutover). `build_typeof` lowers the value to a
+/// `ReturnType<typeof fn>` routes purely through dispatch.
+/// `build_typeof` lowers the value to a
 /// [`SemanticNodeData::Object`] whose `call_signatures[0]` is a
 /// canonical [`SemanticNodeData::Function`]. `build_builtin_utility`
 /// unwraps the call signature and returns the function's return-type
@@ -8690,8 +8690,8 @@ fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     // Resolve `Derived`'s declaration, then read its one-level surface through
-    // the SAME empty-path Shallow reader the cutover routes the macro/object-filter
-    // paths through. The `extends Omit<Base, 'a'>` heritage arm forces `Base`
+    // the SAME empty-path Shallow reader the macro/object-filter
+    // paths route through. The `extends Omit<Base, 'a'>` heritage arm forces `Base`
     // through `object_filter_source_surface`'s carrier branch.
     let derived = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(
         crate::semantic_query::ResolveDeclKey {

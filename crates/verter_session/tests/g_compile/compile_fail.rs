@@ -1,4 +1,4 @@
-//! Phase 6b sub-plan §6b.D2b — T11 (REGRESSION) compile-fail driver.
+//! Compile-fail driver.
 //!
 //! Cargo's normal `[[test]]` target cannot express "this test passes when
 //! it fails to compile" — a normal integration test that fails to compile
@@ -11,10 +11,8 @@
 //! that calls `verter_session::VerterHost::workspace(&host)` from
 //! outside the crate; trybuild captures the visibility error.
 //!
-//! Classified REGRESSION (matches T6/T12/T13) — the test asserts a
-//! constraint that holds at the destination commit, not a pre/post
-//! discrimination, so the red-then-green-within-commit invariant
-//! doesn't apply.
+//! This is a regression test — it asserts a constraint that holds in
+//! the final state, not a pre/post discrimination.
 
 // trybuild spawns a full `cargo build` of the fixture crate (linking
 // `verter_session`), which dominates this test's ~100s runtime. It is gated

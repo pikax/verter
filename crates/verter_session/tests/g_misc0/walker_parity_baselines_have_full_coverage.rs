@@ -51,15 +51,15 @@ fn parity_baselines_count_equals_sixteen() {
         .count();
     assert_eq!(
         count, EXPECTED_BASELINE_COUNT,
-        "plan §11.5 — exactly {EXPECTED_BASELINE_COUNT} parity baselines must exist; \
+        "exactly {EXPECTED_BASELINE_COUNT} parity baselines must exist; \
          found {count} fixtures matching the `fn fixture_NN_` naming convention"
     );
 }
 
 #[test]
 fn parity_baselines_cover_each_walker_policy_arm() {
-    // The legacy walker policy table (plan §1.6 / §1.12 + the
-    // round-7 route-extraction tightenings) has these distinct
+    // The legacy walker policy table (including the route-extraction
+    // tightenings) has these distinct
     // shape buckets that the materialiser must reproduce:
     //
     //  - Object surface (members + optional + methods)
@@ -105,8 +105,8 @@ fn parity_baselines_cover_each_walker_policy_arm() {
         assert!(
             src.contains(signature),
             "baseline file is missing the `{signature}` fixture — \
-             the `{bucket}` policy bucket is not characterised. Plan §11.5 \
-             discrimination contract violated.",
+             the `{bucket}` policy bucket is not characterised. \
+             Discrimination contract violated.",
         );
     }
 }

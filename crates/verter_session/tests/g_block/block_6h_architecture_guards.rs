@@ -83,10 +83,10 @@ fn peek_member_shape_known_exists_with_request_bound_assert() {
 #[test]
 fn reduce_field_type_expr_peeks_before_route_gate() {
     let content = read_projectors_mod();
-    // Block 6.i Commit AX — the reduction body lives in the
-    // carrier-aware `reduce_field_type_expr_with_mode`; the bare
+    // The reduction body lives in the carrier-aware
+    // `reduce_field_type_expr_with_mode`; the bare
     // `reduce_field_type_expr` is a thin `Expanded`-defaulting
-    // wrapper. The peek-before-gate ordering invariant moved with
+    // wrapper. The peek-before-gate ordering invariant lives with
     // the body.
     let body = fn_body_slice(&content, "pub(crate) fn reduce_field_type_expr_with_mode(");
 
@@ -116,7 +116,7 @@ fn reduce_field_type_expr_peeks_before_route_gate() {
 #[test]
 fn reduce_field_type_expr_consults_cached_peek_after_gate() {
     let content = read_projectors_mod();
-    // Block 6.i Commit AX — body lives in `reduce_field_type_expr_with_mode`.
+    // Body lives in `reduce_field_type_expr_with_mode`.
     let body = fn_body_slice(&content, "pub(crate) fn reduce_field_type_expr_with_mode(");
 
     let route_gate_idx = body
@@ -150,10 +150,10 @@ fn member_shape_peek_or_compute_runs_gates_before_cached_peek() {
     let raise_idx = body
         .find("raise_node_to_type_expr(member_value)")
         .expect("guard: raise call must remain in `member_shape_peek_or_compute`.");
-    // Block 6.i F1: the gate is invoked via the `_with_fence` variant
+    // The gate is invoked via the `_with_fence` variant
     // so the gate's cross-file dep facts thread into the admit's
     // `fact_dep_signature`. Match either the bare or the `_with_fence`
-    // form so the guard survives the F1 refactor and a hypothetical
+    // form so the guard survives a hypothetical
     // future rename back. Document the intent: do NOT remove the gate
     // entirely; rename only to a fence-bearing successor.
     let gate_idx = body
@@ -233,7 +233,7 @@ fn peek_does_not_consult_route_db_or_owner_import_surface_db() {
     assert!(
         body.contains("shape_cache_db("),
         "guard: `peek_member_shape_known` MUST consult `ShapeCacheDb` \
-         (Block 6.i universal cache, replaces `MaterializeMemoDb`) \
+         (the universal cache, replaces `MaterializeMemoDb`) \
          as the operator-shape lookup substrate.",
     );
 }

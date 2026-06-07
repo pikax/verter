@@ -3,8 +3,8 @@
 //! Discrimination: each owner-import that resolves through a
 //! barrel re-export drives a RouteDb walk; the route_facts
 //! collected by `resolve_imported_type_root_with_facts` enter the
-//! surface's `fact_dep_signature`. Block 1.H Track 1 wraps the
-//! cold body with `install_fact_tracer`; the counter advances.
+//! surface's `fact_dep_signature`. The cold body is wrapped with
+//! `install_fact_tracer`; the counter advances.
 
 use std::sync::Arc;
 

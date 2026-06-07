@@ -7,7 +7,7 @@
 //!
 //! Discrimination: a getComponentMeta on a SFC with cross-file
 //! imports advances the counter (the producer is wrapped in
-//! `install_fact_tracer` per Block 1.H Track 1).
+//! `install_fact_tracer`).
 
 use std::sync::Arc;
 

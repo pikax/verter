@@ -2,7 +2,7 @@
 //!
 //! Discrimination: a SFC that uses a cross-file type reference
 //! drives the materializer cold path AND the import-route walk.
-//! Block 1.H Track 1 wraps the materializer cold compute in
+//! The materializer cold compute is wrapped in
 //! `install_fact_tracer`; the counter advances.
 
 use std::sync::Arc;

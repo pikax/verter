@@ -1,6 +1,6 @@
-//! Stage 3 R13 binding: semantic / display lane split.
+//! R13 binding: semantic / display lane split.
 //!
-//! Verify-bullet bindings:
+//! Invariants:
 //!
 //! - Bullet 2 — Comment-only edit: NO `semantic_hash` change anywhere;
 //!   `MemberSemanticFactStore` not re-keyed (`parse_stable_hash`
@@ -54,7 +54,7 @@ fn dummy_disp(b: u8) -> [u8; 16] {
 /// Bullet 2: comment-only edit.
 ///
 /// The shallow walk's `parse_stable_hash` is invariant under
-/// comment edits (Stage 1's locked-down invariant — verified by
+/// comment edits (verified by
 /// `parse_stable_hash_invariance::whitespace_edit_does_not_change_parse_stable_hash`).
 /// Therefore the `MemberSemanticFactStore` key is unchanged; the
 /// cached semantic fact survives.
@@ -148,7 +148,7 @@ fn comment_only_edit_keeps_semantic_key_rekeys_display_to_equal_value() {
     );
 
     // And the v1 entry MUST still exist (multi-content_hash
-    // coexistence) — Stage 6c GC handles eviction.
+    // coexistence) — GC handles eviction.
     let disp_v1 = display_store
         .get(&disp_key_v1)
         .expect("v1 display entry still present");
@@ -241,7 +241,7 @@ fn jsdoc_edit_keeps_semantic_rekeys_display_to_new_value() {
 /// Sanity: a Fact's `key` carries the right `FactLane` semantics
 /// when promoted to an `ObservedFact`. (The lane field on
 /// `ObservedFact` is what `fact_dep_signature` writes during
-/// observation; producers at Stage 5/6 will set it.)
+/// observation; producers set it.)
 #[test]
 fn fact_carries_distinct_semantic_and_display_hashes() {
     let fact = Fact {

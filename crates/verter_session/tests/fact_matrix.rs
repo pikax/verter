@@ -1,11 +1,10 @@
 //! Cross-consumer × fact-kind matrix.
 //!
 //! 10 caches × 5 fact-kinds = 50 slices. Each slice characterises
-//! one matrix cell. Block 1.H landed the first 25 slices for the
-//! Family B/C/D caches using a host-pipeline counter-delta
-//! discriminator. Block 1.8 landed the second 25 slices for the
-//! Family A consumers (`compile_tier`, `component_meta`,
-//! `fallthrough`, `route_surface`, `slot_binding_graph`) using
+//! one matrix cell. The Family B/C/D caches use a host-pipeline
+//! counter-delta discriminator. The Family A consumers
+//! (`compile_tier`, `component_meta`, `fallthrough`,
+//! `route_surface`, `slot_binding_graph`) use
 //! substrate-validation / fact-tracer fan-out discriminators.
 //!
 //! The completeness arch guard in
@@ -80,7 +79,7 @@ mod owner_import_surface_module_augmentation_index_shape;
 #[path = "fact_matrix/owner_import_surface_route_surface.rs"]
 mod owner_import_surface_route_surface;
 
-// ── compile_tier × * (Block 1.8) ─────────────────────────────────────
+// ── compile_tier × * ─────────────────────────────────────────────────
 #[path = "fact_matrix/compile_tier_import_ref.rs"]
 mod compile_tier_import_ref;
 #[path = "fact_matrix/compile_tier_member.rs"]
@@ -92,7 +91,7 @@ mod compile_tier_module_augmentation_index_shape;
 #[path = "fact_matrix/compile_tier_route_surface.rs"]
 mod compile_tier_route_surface;
 
-// ── component_meta × * (Block 1.8) ───────────────────────────────────
+// ── component_meta × * ───────────────────────────────────────────────
 #[path = "fact_matrix/component_meta_import_ref.rs"]
 mod component_meta_import_ref;
 #[path = "fact_matrix/component_meta_member.rs"]
@@ -104,7 +103,7 @@ mod component_meta_module_augmentation_index_shape;
 #[path = "fact_matrix/component_meta_route_surface.rs"]
 mod component_meta_route_surface;
 
-// ── fallthrough × * (Block 1.8) ──────────────────────────────────────
+// ── fallthrough × * ──────────────────────────────────────────────────
 #[path = "fact_matrix/fallthrough_import_ref.rs"]
 mod fallthrough_import_ref;
 #[path = "fact_matrix/fallthrough_member.rs"]
@@ -116,7 +115,7 @@ mod fallthrough_module_augmentation_index_shape;
 #[path = "fact_matrix/fallthrough_route_surface.rs"]
 mod fallthrough_route_surface;
 
-// ── route_surface × * (Block 1.8) ────────────────────────────────────
+// ── route_surface × * ────────────────────────────────────────────────
 #[path = "fact_matrix/route_surface_import_ref.rs"]
 mod route_surface_import_ref;
 #[path = "fact_matrix/route_surface_member.rs"]
@@ -128,7 +127,7 @@ mod route_surface_module_augmentation_index_shape;
 #[path = "fact_matrix/route_surface_route_surface.rs"]
 mod route_surface_route_surface;
 
-// ── slot_binding_graph × * (Block 1.8) ───────────────────────────────
+// ── slot_binding_graph × * ───────────────────────────────────────────
 #[path = "fact_matrix/slot_binding_graph_import_ref.rs"]
 mod slot_binding_graph_import_ref;
 #[path = "fact_matrix/slot_binding_graph_member.rs"]

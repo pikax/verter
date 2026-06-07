@@ -36,6 +36,6 @@ fn app_config_proof_does_not_observe_route_surface_facts() {
             .fact_dep_signature
             .iter()
             .any(|f| matches!(f, FactVersionRef::RouteSurface(_))),
-        "AppConfigNoOverrideProofDb producer must NOT observe RouteSurface facts in Block 1.H scope"
+        "AppConfigNoOverrideProofDb producer must NOT observe RouteSurface facts"
     );
 }

@@ -1,12 +1,12 @@
 /**
- * Discriminating regression tests for the W7.1 operator-splitter migration.
+ * Discriminating regression tests for the operator-splitter behaviour.
  *
- * Before W7.1 the compat layer split top-level type operators by walking
- * `prop.rawType` text. These tests would FAIL against that pre-W7.1 tree
+ * The legacy compat layer split top-level type operators by walking
+ * `prop.rawType` text. These tests would FAIL against that legacy tree
  * because they construct `PropMeta` inputs where `prop.type` (TypeDescriptor)
  * carries the structural truth and `prop.rawType` is a deliberate decoy.
  *
- * After W7.1 the splitter callers consume `prop.type` (TypeDescriptor)
+ * The splitter callers consume `prop.type` (TypeDescriptor)
  * directly via `unionArms` / `intersectionArms` / `stripUndefinedArm` /
  * structural utility-type matches. The expected output below reflects that
  * descriptor-driven behaviour.
@@ -29,7 +29,7 @@ function makeProp(overrides: Partial<PropMeta> & { type: TypeDescriptor }): Prop
   };
 }
 
-describe("W7.1: operator splitters consume TypeDescriptor (not prop.rawType)", () => {
+describe("operator splitters consume TypeDescriptor (not prop.rawType)", () => {
   describe("union arm extraction (replaces splitTopLevelTypeUnion / splitTopLevelTypeOperator '|')", () => {
     it("buildCompatAnyPropMeta: detects 'any' arm from prop.type, not from prop.rawType text", () => {
       // Decoy: rawType text claims a non-`any` shape, descriptor says union including any.
@@ -39,15 +39,15 @@ describe("W7.1: operator splitters consume TypeDescriptor (not prop.rawType)", (
         required: false,
       });
       const result = mapPropMeta(prop);
-      // Post-cutover: descriptor wins → `any` projection.
+      // Descriptor wins → `any` projection.
       expect(result.type).toBe("any");
     });
 
     it("buildCompatAnyPropMeta: multi-arm union with 'any' text but no descriptor 'any' arm declines projection", () => {
       // Decoy: rawType text contains a multi-arm union including "any" as one
-      // arm. Pre-W7.1 the splitter-on-text would have found the "any" arm
+      // arm. The legacy splitter-on-text would have found the "any" arm
       // (`splitTopLevelTypeUnion("string | any").some(part => part.trim() === "any")`
-      // = true) and projected the `any` shape. Post-W7.1 the arm extraction is
+      // = true) and projected the `any` shape. The arm extraction is
       // structural on `prop.type` — which has no `primitive("any")` arm — so
       // the projection declines.
       const prop = makeProp({
@@ -69,12 +69,12 @@ describe("W7.1: operator splitters consume TypeDescriptor (not prop.rawType)", (
           literal("reset"),
           primitive("undefined"),
         ]),
-        // Decoy rawType: bogus shape that pre-W7.1 splitter would not match.
+        // Decoy rawType: bogus shape that the legacy splitter would not match.
         rawType: "bogus | shape",
         required: false,
       });
       const result = mapPropMeta(prop);
-      // Post-cutover: descriptor structural match wins.
+      // Descriptor structural match wins.
       expect(result.type).toBe('"button" | "submit" | "reset" | undefined');
     });
   });
@@ -82,9 +82,9 @@ describe("W7.1: operator splitters consume TypeDescriptor (not prop.rawType)", (
   describe("intersection arm extraction (replaces splitTopLevelTypeIntersection / splitTopLevelTypeOperator '&')", () => {
     it("buildCompatStringBrandUnionPropMeta: extracts arms from descriptor structure, with arm count matching descriptor not rawType", () => {
       // Descriptor: union with 2 literal arms + a `string & {}` branded arm
-      // (the structural gate for the function after W7.3) + `undefined`.
-      // Pre-W7.1 the splitter would have parsed `rawType` text and produced
-      // its arm count from text. Post-W7.3 the structural gate is descriptor-
+      // (the structural gate for the function) + `undefined`.
+      // The legacy splitter would have parsed `rawType` text and produced
+      // its arm count from text. The structural gate is descriptor-
       // based: the branded `intersection(string, {})` arm triggers projection
       // AND the arm count is derived from `prop.type`.
       const brandedArm: TypeDescriptor = {
@@ -104,7 +104,7 @@ describe("W7.1: operator splitters consume TypeDescriptor (not prop.rawType)", (
         required: false,
       });
       const result = mapPropMeta(prop);
-      // Post-cutover: the arm set in the rendered type comes from prop.type
+      // The arm set in the rendered type comes from prop.type
       // (3 non-undefined arms), NOT from the 5-arm rawType.
       expect(result.type).toContain('"noopener"');
       expect(result.type).toContain('"noreferrer"');
@@ -115,10 +115,10 @@ describe("W7.1: operator splitters consume TypeDescriptor (not prop.rawType)", (
 
   describe("undefined stripping (replaces stripTopLevelUndefinedFromTypeString)", () => {
     it("Numberish gate declines when descriptor is not Numberish, even if rawType text says so", () => {
-      // Descriptor is structurally `string | undefined` (NOT Numberish). Pre-W7.1 the
+      // Descriptor is structurally `string | undefined` (NOT Numberish). The legacy
       // function would have stripped `prop.rawType` text via the deleted splitter, found
       // the stripped form equal to "Numberish", and constructed a Numberish compat result.
-      // Post-W7.1+W7.2 the Numberish projection gate reads the descriptor's typed kind
+      // The Numberish projection gate reads the descriptor's typed kind
       // (no Booleanish/Numberish ref arm) and DECLINES the Numberish projection — the
       // schema does NOT carry the Numberish enum entries.
       const prop = makeProp({
@@ -127,7 +127,7 @@ describe("W7.1: operator splitters consume TypeDescriptor (not prop.rawType)", (
         required: false,
       });
       const result = mapPropMeta(prop);
-      // Post-cutover: the schema is NOT the Numberish enum projection — the
+      // The schema is NOT the Numberish enum projection — the
       // Numberish-specific schema entries (`"\"true\""`, `"true"`, etc.) are
       // absent, demonstrating the gate declined irrespective of the rawType
       // display passthrough.
@@ -150,14 +150,14 @@ describe("W7.1: operator splitters consume TypeDescriptor (not prop.rawType)", (
       const event = {
         name: "click",
         payload,
-        // Decoy rawSignature: malformed string the pre-W7.1 splitter could not parse;
-        // the post-W7.1 walker reads structurally from `event.payload`.
+        // Decoy rawSignature: malformed string the legacy splitter could not parse;
+        // the walker reads structurally from `event.payload`.
         rawSignature: "definitely not a parseable signature",
         hasValidator: false,
         isDeclared: true,
       };
       const result = mapEventMeta(event);
-      // Post-cutover: structural walk drops the leading event-name literal arm
+      // Structural walk drops the leading event-name literal arm
       // and reconstructs the tuple from remaining parameter descriptors.
       expect(result.type).toBe("[number]");
     });

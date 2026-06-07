@@ -1,4 +1,4 @@
-//! Block 1.C matrix slice — `ImportRef`.
+//! Cross-consumer × fact-kind matrix slice — `ImportRef`.
 //!
 //! Verifies the slot-binding-graph dual-emit fact-tracer fan-out
 //! substrate delivers `FactKey::ImportRef` facts (cross-file import
@@ -49,14 +49,14 @@ fn slot_binding_graph_fact_tracer_carries_import_ref() {
     let captured = match finalise {
         FactReadSetFinalise::Ok(sig) => sig,
         FactReadSetFinalise::Overflow => panic!(
-            "Block 1.C matrix slice: tracer overflowed on a single-fact \
+            "matrix slice: tracer overflowed on a single-fact \
              signature — substrate bug, not test bug"
         ),
     };
 
     assert!(
         captured.iter().any(|f| f == &import_ref_fact),
-        "Block 1.C matrix slice: the fact-tracer substrate MUST carry \
+        "matrix slice: the fact-tracer substrate MUST carry \
          the `ImportRef` fact through the fan-out path emitted by the \
          slot-binding-graph dual-emit helper. captured={captured:?}"
     );
@@ -70,7 +70,7 @@ fn slot_binding_graph_fact_tracer_carries_import_ref() {
     let src = read_session_src("meta_resolve/slot_binding_graph.rs");
     assert!(
         src.contains("dep_signature_to_fact_signature"),
-        "Block 1.C matrix slice (arch guard): \
+        "matrix slice (arch guard): \
          `slot_binding_graph.rs` MUST reference \
          `dep_signature_to_fact_signature` as the bridge between \
          the legacy `DepSignature` accumulator payload and the \

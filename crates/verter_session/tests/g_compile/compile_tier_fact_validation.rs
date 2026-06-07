@@ -1,6 +1,6 @@
 //! R3/R26/R28 compile-tier fact-validation discriminator suite.
 //!
-//! These tests pin the substrate landed in stage 7C.A1: every
+//! These tests pin the compile-tier fact-validation substrate: every
 //! `CompileSlot` carries a `fact_dep_signature` of observed
 //! cross-file facts, the warm-hit oracle validates that signature
 //! against the producer's current fact registry, and a cross-file

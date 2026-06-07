@@ -1,4 +1,4 @@
-//! Block 6.i Transit-Shallow Publication — discriminator #2.
+//! Transit-Shallow Publication — DeclRef source enumeration.
 //!
 //! Verifies that a `Mapped` whose `source` is a `DeclRef` /
 //! `InstantiationRef` carrier (produced by lowering an imported
@@ -6,28 +6,24 @@
 //! through the Shallow walker's `synthesise_mapped_surface` rather
 //! than returning an empty / None surface.
 //!
-//! The codex Transit-Shallow architecture (Q1 #2 / Q3) inserts a new
-//! source-surface enumeration helper `mapped_surface_source_members_for_projection`
+//! The Transit-Shallow architecture inserts a source-surface
+//! enumeration helper `mapped_surface_source_members_for_projection`
 //! that runs ONLY inside `synthesise_mapped_surface` (not the
 //! global `key_names_*` API): it dispatches
 //! `ProjectPath { source, [], Published(Shallow) }` and returns a
 //! `Vec<SurfaceMember>` so the synthesiser can use source member
 //! modifiers and Identity-mapper values directly when available.
 //!
-//! ## Discrimination progression
+//! ## Discrimination
 //!
-//! - **Commit 1 (no substrate):** FAIL — under `Published(Shallow)`
-//!   the source enumeration fallback in `synthesise_mapped_surface`
-//!   calls `key_names_from_base_node(source)` which does NOT handle
-//!   `DeclRef` / `InstantiationRef`; the synthesise returns None and
-//!   the empty-path Shallow walker publishes an empty surface (the
-//!   `msg` member is absent).
-//! - **Commit 2 (substrate added):** PASS — the new helper enables
-//!   source enumeration via empty-path Published(Shallow) on the
-//!   source carrier; the synthesised surface contains the expected
-//!   `msg` member.
-//! - **Commit 3 (atomic cutover):** PASS — substrate exercised by
-//!   the publication path too.
+//! Without the source-surface helper, under `Published(Shallow)`
+//! the source enumeration fallback in `synthesise_mapped_surface`
+//! calls `key_names_from_base_node(source)` which does NOT handle
+//! `DeclRef` / `InstantiationRef`; the synthesise returns None and
+//! the empty-path Shallow walker publishes an empty surface (the
+//! `msg` member is absent). With the helper, source enumeration runs
+//! via empty-path Published(Shallow) on the source carrier and the
+//! synthesised surface contains the expected `msg` member.
 
 #![allow(clippy::too_many_lines, dead_code, unused_imports)]
 
@@ -86,9 +82,9 @@ fn shallow_walker_enumerates_declref_source_via_source_surface_helper() {
 
     // Step 2: drive empty-path Published(Shallow) on the carrier. The
     // walker visits the Mapped node and calls `synthesise_mapped_surface`.
-    // Pre-Commit-2 substrate, the fallback `key_names_from_base_node` does
-    // NOT handle DeclRef and the surface is None / empty. Post-Commit-2,
-    // the new source-surface helper enables enumeration via the source's
+    // Without the source-surface helper, the fallback
+    // `key_names_from_base_node` does NOT handle DeclRef and the surface
+    // is None / empty. With it, enumeration runs via the source's
     // empty-path Shallow projection.
     let project_query = SemanticQueryKey::ProjectPath {
         base: carrier,
@@ -111,24 +107,24 @@ fn shallow_walker_enumerates_declref_source_via_source_surface_helper() {
     let view = match surface_data.as_ref() {
         SemanticNodeData::Object(view) => view.clone(),
         other => panic!(
-            "Block 6.i Transit-Shallow Publication contract — synthesise_mapped_surface MUST \
+            "Transit-Shallow Publication contract — synthesise_mapped_surface MUST \
              produce a `SemanticNodeData::Object` for a Mapped with a DeclRef source under \
-             Published(Shallow). Pre-substrate the synthesiser bails (no source enumeration for \
-             DeclRef carriers) and publishes a deferred shell instead. Got: {other:?}",
+             Published(Shallow). Without source enumeration the synthesiser bails (no source \
+             enumeration for DeclRef carriers) and publishes a deferred shell instead. Got: {other:?}",
         ),
     };
 
     let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
     assert!(
         names.contains(&"msg"),
-        "Block 6.i Transit-Shallow Publication — synthesised surface MUST contain `msg` (one \
-         of DeclRefSource's members). Pre-substrate the enumeration silently drops it; the new \
-         `mapped_surface_source_members_for_projection` helper enables the DeclRef enumeration. \
-         Got: {names:?}",
+        "Transit-Shallow Publication — synthesised surface MUST contain `msg` (one \
+         of DeclRefSource's members). Without source enumeration the enumeration silently \
+         drops it; the `mapped_surface_source_members_for_projection` helper enables the \
+         DeclRef enumeration. Got: {names:?}",
     );
     assert!(
         names.contains(&"count"),
-        "Block 6.i Transit-Shallow Publication — synthesised surface MUST contain `count`. \
+        "Transit-Shallow Publication — synthesised surface MUST contain `count`. \
          Got: {names:?}",
     );
 }

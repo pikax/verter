@@ -269,7 +269,7 @@ describe("runComponentInIsolation", () => {
   });
 
   it("corpus_trace_runner_emits_audit_and_analysis_json_reads_audit_only", async () => {
-    // Plan §3 Commit 10 test list. The rewritten runner passes
+    // The runner passes
     // `VERTER_COMPONENT_META_AUDIT_PATH` and
     // `VERTER_COMPONENT_META_ANALYSIS_PATH` to the child (consumed by
     // `_audit-component.ts`) and reports the emitted-file state on
@@ -337,7 +337,7 @@ describe("runComponentInIsolation", () => {
   });
 
   it("runner source invokes audit-validator, not the deleted trace-validator", async () => {
-    // Plan §3 Commit 10 exit criterion (plan §6 item 11): the
+    // Exit criterion: the
     // runner's module must not reference the deleted regex
     // validator. A regression that re-introduces `trace-validator`,
     // `trace-check`, or `trace-specs/component-meta` trips here.
@@ -346,7 +346,7 @@ describe("runComponentInIsolation", () => {
     for (const forbidden of ["trace-validator", "trace-check", "trace-specs/component-meta"]) {
       expect(
         source.includes(forbidden),
-        `corpus-trace-runner.ts must not reference ${forbidden} — plan §3 Commit 10`,
+        `corpus-trace-runner.ts must not reference ${forbidden}`,
       ).toBe(false);
     }
     // The audit path fields (`audit_path`, `analysis_path`,

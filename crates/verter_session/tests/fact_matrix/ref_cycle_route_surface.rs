@@ -1,8 +1,8 @@
 //! Matrix slice: `ref_cycle` × `route_surface`.
 //!
 //! Discrimination: the BFS walks barrel routes when the recursive
-//! alias is re-exported through `export *`. Block 1.H Track 1
-//! wraps the BFS in `install_fact_tracer`; the counter advances.
+//! alias is re-exported through `export *`. The BFS is wrapped in
+//! `install_fact_tracer`; the counter advances.
 
 use std::sync::Arc;
 

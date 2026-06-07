@@ -1,21 +1,20 @@
 //! R28 binding: two-fact MemberPresence vs Member model.
 //!
-//! Verify-bullet bindings:
+//! Bindings:
 //!
-//! - Bullet 4 — Single body edit: exactly one `Member`
+//! - Single body edit: exactly one `Member`
 //!   `semantic_hash` changes; corresponding `MemberPresence`
 //!   UNCHANGED (header invariant).
-//! - Bullet 6 — `pick_literal_key.ts` (Stage 0 fixture): editing
+//! - `pick_literal_key.ts` fixture: editing
 //!   `Foo.b` body changes `Member(Foo, "b")` only; `MemberPresence(Foo, "a")`
 //!   unchanged; `Member(Foo, "a")` unchanged.
 //!
-//! Stage 3 emits `MemberPresence` eagerly (Phase 1) and provides
-//! the lazy substrate for `Member` (Phase 2 stores). The Stage 6d
-//! consumer will admit `Member` facts into the stores via
-//! `compute_semantic_hash`. For Stage 3 we test the hashing
+//! The emitter produces `MemberPresence` eagerly and provides
+//! the lazy substrate for `Member`. The path-precise consumer
+//! admits `Member` facts into the stores via
+//! `compute_semantic_hash`. Here we test the hashing
 //! discrimination directly using `compute_semantic_hash` over the
-//! member body — which is exactly what Stage 6d's producer will
-//! call.
+//! member body — which is exactly what the `Member` producer calls.
 //!
 //! Architectural rules bound: R14, R28.
 
@@ -110,8 +109,8 @@ fn build_foo(members: Vec<(&str, TypeExpr)>) -> Arc<IndexedReady> {
 #[test]
 fn bullet_4_single_body_edit_changes_member_keeps_presence_unchanged() {
     // R28 two-fact model: editing `Foo.a`'s body changes the
-    // `Member(Foo, a)` semantic_hash (Phase 2) but the
-    // `MemberPresence(Foo, a)` header (Phase 1) is UNCHANGED.
+    // `Member(Foo, a)` semantic_hash but the
+    // `MemberPresence(Foo, a)` header is UNCHANGED.
     let kind = MemberKind::Property {
         readonly: false,
         optional: false,
@@ -121,7 +120,7 @@ fn bullet_4_single_body_edit_changes_member_keeps_presence_unchanged() {
     let body_v1 = TypeExpr::Primitive(PrimitiveName::String);
     let body_v2 = TypeExpr::Primitive(PrimitiveName::Number);
 
-    // Phase 2 `Member.semantic_hash` (what Stage 6d will admit
+    // `Member.semantic_hash` (admitted
     // into `MemberSemanticFactStore`).
     let member_v1 = compute_semantic_hash(&body_v1, SymbolSpace::Type, &UnresolvedLens);
     let member_v2 = compute_semantic_hash(&body_v2, SymbolSpace::Type, &UnresolvedLens);
@@ -130,7 +129,7 @@ fn bullet_4_single_body_edit_changes_member_keeps_presence_unchanged() {
         "R28: editing member body MUST change Member semantic_hash"
     );
 
-    // Phase 1 `MemberPresence` is header-only and identical across
+    // `MemberPresence` is header-only and identical across
     // body edits with the same `(name, kind, exporter)`.
     let presence_v1 = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
     let presence_v2 = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
@@ -142,7 +141,7 @@ fn bullet_4_single_body_edit_changes_member_keeps_presence_unchanged() {
 
 #[test]
 fn bullet_6_pick_literal_key_path_precise_invariant() {
-    // Stage 0 fixture: `pick_literal_key.ts` —
+    // Fixture: `pick_literal_key.ts` —
     //   interface Foo { a; b; c }
     //   export type Props = Pick<Foo, "a">;
     // Editing `Foo.b` body MUST NOT shift `MemberPresence(Foo, "a")`
@@ -196,8 +195,8 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
         ))],
     }));
 
-    // Member.semantic_hash per member body (Phase 2, what Stage 6d
-    // would admit into `MemberSemanticFactStore`).
+    // Member.semantic_hash per member body (admitted
+    // into `MemberSemanticFactStore`).
     let member_a_v1 = compute_semantic_hash(&body_a, SymbolSpace::Type, &UnresolvedLens).hash;
     let member_a_v2 = compute_semantic_hash(&body_a, SymbolSpace::Type, &UnresolvedLens).hash;
     let member_b_v1 = compute_semantic_hash(&body_b_v1, SymbolSpace::Type, &UnresolvedLens).hash;
@@ -243,7 +242,7 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
 fn phase1_emission_produces_member_presence_for_every_member() {
     // Verify the emitter populates `MemberPresence` for every
     // member in the shallow inventory. Required for downstream
-    // path-precise consumers (Stage 6d) to observe presence facts.
+    // path-precise consumers to observe presence facts.
     let indexed = build_foo(vec![
         ("a", TypeExpr::Primitive(PrimitiveName::Number)),
         ("b", TypeExpr::Primitive(PrimitiveName::String)),
@@ -258,7 +257,7 @@ fn phase1_emission_produces_member_presence_for_every_member() {
         };
         assert!(
             emission.facts.lookup(&key).is_some(),
-            "Phase 1 MUST emit MemberPresence for member `{name}`"
+            "emitter MUST emit MemberPresence for member `{name}`"
         );
     }
     // And a MemberShape fact for the whole-surface consumer.
@@ -268,14 +267,14 @@ fn phase1_emission_produces_member_presence_for_every_member() {
     };
     assert!(
         emission.facts.lookup(&shape_key).is_some(),
-        "Phase 1 MUST emit MemberShape"
+        "emitter MUST emit MemberShape"
     );
 }
 
-/// Stage 0 → Stage 3 corpus-anchored binding: the
+/// Corpus-anchored binding: the
 /// `pick_literal_key.ts` fixture's expected-invalidation matrix
-/// describes the path-precise contract Stage 6d will enforce.
-/// Stage 3 must (a) be able to LOAD the fixture without
+/// describes the path-precise contract the consumer enforces.
+/// The emitter must (a) be able to LOAD the fixture without
 /// special-casing, and (b) discriminate the documented
 /// member-set: the consumer selects key `"a"` and the source
 /// declares members `a`, `b`, `c`.
@@ -290,7 +289,7 @@ fn pick_literal_key_fixture_declares_documented_member_set() {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
 
     // The fixture must declare exactly members `a`, `b`, `c` on
-    // `interface Foo`. Stage 6d's discrimination depends on this
+    // `interface Foo`. The consumer's discrimination depends on this
     // exact member set.
     assert!(src.contains("export interface Foo"));
     assert!(src.contains("a: { id: number; name: string }"));
@@ -314,10 +313,10 @@ fn pick_literal_key_fixture_declares_documented_member_set() {
         sig_strs
             .iter()
             .any(|s| s.contains("MemberPresence(Foo, \"a\"")),
-        "Stage 0 corpus pairs with Stage 3's MemberPresence emission"
+        "corpus pairs with the MemberPresence emission"
     );
     assert!(
         sig_strs.iter().any(|s| s.contains("Member(Foo, \"a\"")),
-        "Stage 0 corpus pairs with Stage 6d's Member emission"
+        "corpus pairs with the Member emission"
     );
 }

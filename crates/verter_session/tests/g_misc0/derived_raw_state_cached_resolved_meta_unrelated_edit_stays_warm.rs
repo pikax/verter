@@ -1,11 +1,11 @@
-//! Block 1A — `DerivedRawState.cached_resolved_meta` NEGATIVE
+//! `DerivedRawState.cached_resolved_meta` NEGATIVE
 //! discriminator: an unrelated edit must leave the warm cached
 //! resolved-meta entry alive.
 //!
-//! Pre-1A: substrate uses `Vec<FactVersionRef>` and the consumer
-//! calls `view.invalid_fact_details(...)` (per-item walk). Any
+//! A substrate that used `Vec<FactVersionRef>` with a consumer
+//! calling `view.invalid_fact_details(...)` (per-item walk) plus any
 //! conservative invalidation in `host_upsert` (eager cascade) would
-//! drop the entry; this NEGATIVE assertion would fail. Post-1A:
+//! drop the entry, failing this NEGATIVE assertion. The
 //! per-domain fast-path validator preserves the warm entry under
 //! unrelated edits.
 
@@ -76,7 +76,7 @@ fn unrelated_edit_keeps_cached_resolved_meta_warm() {
 
     let recomputes_after = prov.component_meta_resolved_state_recomputes.load(Relaxed);
 
-    // Discriminator (per codex P2): comparing `accepted_props.len()`
+    // Discriminator: comparing `accepted_props.len()`
     // would NOT prove the cached resolved-meta entry stayed warm — a
     // regression that eager-invalidates and cold-recomputes the
     // resolved-meta state would still return the same prop count and
@@ -85,7 +85,7 @@ fn unrelated_edit_keeps_cached_resolved_meta_warm() {
     // "cold-recomputed but produced the same shape".
     assert_eq!(
         recomputes_after, recomputes_before,
-        "Block 1A: unrelated edit must NOT invalidate the cached_resolved_meta entry. \
+        "unrelated edit must NOT invalidate the cached_resolved_meta entry. \
          `component_meta_resolved_state_recomputes` advanced from {recomputes_before} \
          to {recomputes_after}, signalling that the cold-compute path ran despite \
          the edit not touching any dep observed by Comp.vue's fact signature."

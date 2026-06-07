@@ -1,13 +1,13 @@
 /**
- * Discriminating regression tests for the W7.2 shape-heuristic migration.
+ * Discriminating regression tests for the shape-heuristic behaviour.
  *
- * Before W7.2 the compat layer's `looksLike*` helpers (`looksLikeBareTypeReference`,
+ * The legacy compat layer's `looksLike*` helpers (`looksLikeBareTypeReference`,
  * `looksLikeIndexedAccessType`, `looksLikeSlotsHelperRawType`,
  * `looksLikeUiHelperRawType`, `looksLikeStringCompatibleType`) ran regex / substring
  * checks against `prop.rawType` text.
  *
- * Post-W7.2 every helper switches on `TypeDescriptor.kind`. These tests would
- * FAIL against the pre-W7.2 tree because they construct `PropMeta` /
+ * Every helper now switches on `TypeDescriptor.kind`. These tests would
+ * FAIL against the legacy tree because they construct `PropMeta` /
  * `SlotMeta.bindings` inputs where `prop.type` / `binding.type`
  * (`TypeDescriptor`) carries the structural truth and `prop.rawType` /
  * `binding.rawType` is a deliberate decoy.
@@ -58,7 +58,7 @@ function makeSlot(
   };
 }
 
-describe("W7.2: shape-detection heuristics switch on TypeDescriptor.kind (not prop.rawType)", () => {
+describe("shape-detection heuristics switch on TypeDescriptor.kind (not prop.rawType)", () => {
   describe("looksLikeSlotsHelperRawType (gate for buildCompatSlotsPropMeta)", () => {
     it("projects slots-helper shape when descriptor is a ComponentSlots ref, regardless of rawType decoy", () => {
       // Descriptor: `ComponentSlots<typeof Theme>` — the Vue helper ref kind
@@ -78,12 +78,12 @@ describe("W7.2: shape-detection heuristics switch on TypeDescriptor.kind (not pr
       const prop = makeProp({
         name: "slots",
         type: ref("ComponentSlots", [themeShape]),
-        // Decoy rawType: pre-W7.2 regex (/\["slots"\]$/) would NOT match.
+        // Decoy rawType: the legacy regex (/\["slots"\]$/) would NOT match.
         rawType: "ButThisRawTypeDoesNotEndInSlots",
         required: false,
       });
       const result = mapPropMeta(prop);
-      // Post-cutover: descriptor ComponentSlots ref structural marker
+      // Descriptor ComponentSlots ref structural marker
       // triggers the projection → slot names extracted via the unwrap helper.
       expect(result.type).toContain("header?: ClassNameValue");
       expect(result.type).toContain("footer?: ClassNameValue");
@@ -103,13 +103,13 @@ describe("W7.2: shape-detection heuristics switch on TypeDescriptor.kind (not pr
             },
           ],
         },
-        // Decoy rawType: ends in ["slots"] — pre-W7.2 the regex matched and would
-        // have entered the slots projection branch. Post-W7.2 the gate is structural.
+        // Decoy rawType: ends in ["slots"] — the legacy regex matched and would
+        // have entered the slots projection branch. The gate is now structural.
         rawType: 'MyType["slots"]',
         required: true,
       });
       const result = mapPropMeta(prop);
-      // Post-cutover: no IndexedAccess<_,"slots"> nor ComponentSlots ref →
+      // No IndexedAccess<_,"slots"> nor ComponentSlots ref →
       // declines slots projection. The resulting rendered type is NOT the
       // ClassNameValue-rewrite produced by buildCompatSlotsPropMeta.
       expect(result.type).not.toContain("items?: ClassNameValue");
@@ -119,7 +119,7 @@ describe("W7.2: shape-detection heuristics switch on TypeDescriptor.kind (not pr
   describe("looksLikeUiHelperRawType (gate for buildCompatUiBindingType in slot bindings)", () => {
     it("projects UI-helper binding shape when descriptor is a ComponentUI ref, regardless of rawType decoy", () => {
       // Slot binding descriptor: `ComponentUI<typeof Theme>` — the Vue helper
-      // ref. The post-W7.2 typed `looksLikeUiHelperRawType` matches the ref
+      // ref. The typed `looksLikeUiHelperRawType` matches the ref
       // structurally, and `extractCompatUiBindingFieldNames` extracts the slot
       // field names via `unwrapComponentUiDescriptor`.
       const slotsFunctionMap: TypeDescriptor = {
@@ -153,12 +153,12 @@ describe("W7.2: shape-detection heuristics switch on TypeDescriptor.kind (not pr
         {
           name: "ui",
           type: ref("ComponentUI", [themeShape]),
-          // Decoy rawType: pre-W7.2 regex (/\["ui"\]$/) would NOT match.
+          // Decoy rawType: the legacy regex (/\["ui"\]$/) would NOT match.
           rawType: "ButThisRawTypeDoesNotEndInUi",
         },
       ]);
       const result = mapSlotMeta(slot);
-      // Post-cutover: descriptor ComponentUI ref marker triggers UI projection.
+      // Descriptor ComponentUI ref marker triggers UI projection.
       expect(result.type).toContain("wrapper: (props?: Record<string, any> | undefined) => string");
       expect(result.type).toContain("label: (props?: Record<string, any> | undefined) => string");
     });
@@ -169,12 +169,12 @@ describe("W7.2: shape-detection heuristics switch on TypeDescriptor.kind (not pr
         {
           name: "ui",
           type: primitive("string"),
-          // Decoy rawType: ends in ["ui"] — pre-W7.2 regex matched.
+          // Decoy rawType: ends in ["ui"] — the legacy regex matched.
           rawType: 'MyType["ui"]',
         },
       ]);
       const result = mapSlotMeta(slot);
-      // Post-cutover: not a UI-helper shape → declines projection. The rendered
+      // Not a UI-helper shape → declines projection. The rendered
       // type is the slot-binding default (a function signature), NOT the
       // `{ ui: (...) => string }` UI-helper expansion.
       expect(result.type).not.toContain("(props?: Record<string, any> | undefined) => string");
@@ -187,18 +187,18 @@ describe("W7.2: shape-detection heuristics switch on TypeDescriptor.kind (not pr
       const prop = makeProp({
         name: "value",
         type: primitive("number"),
-        // Decoy rawType: bare identifier TEXT. Pre-W7.2 the regex
+        // Decoy rawType: bare identifier TEXT. The legacy regex
         // /^[A-Za-z_$][A-Za-z0-9_$]*$/ matched, `shouldPreferDescriptorForProp`
         // returned true (bare-ref text sniff), and the descriptor text
-        // "number" replaced the raw alias "Color". Post-W7.2 the typed
+        // "number" replaced the raw alias "Color". The typed
         // `looksLikeBareTypeReference(descriptor)` returns false (descriptor
         // is primitive, not Ref), so the rawType passthrough wins.
         rawType: "Color",
         required: true,
       });
       const result = mapPropMeta(prop);
-      // Post-cutover: descriptor is primitive (no bare-ref marker) → rawType
-      // passthrough wins ("Color"). Pre-cutover would have produced "number".
+      // Descriptor is primitive (no bare-ref marker) → rawType
+      // passthrough wins ("Color"). (The legacy path produced "number".)
       expect(result.type).toBe("Color");
     });
 
@@ -207,18 +207,18 @@ describe("W7.2: shape-detection heuristics switch on TypeDescriptor.kind (not pr
       const prop = makeProp({
         name: "value",
         type: ref("Foo"),
-        // Decoy rawType: text shape that pre-W7.2 regex would NOT recognise
+        // Decoy rawType: text shape that the legacy regex would NOT recognise
         // as bare-ref (parens) and NOT as indexed-access (no trailing brackets).
         // Both regex checks FAIL → shouldPreferDescriptorForProp returns false
-        // → rawType passthrough wins. Post-W7.2 the typed
+        // → rawType passthrough wins. The typed
         // `looksLikeBareTypeReference(descriptor)` reads kind="ref" with no
         // typeArguments → returns true → descriptor text wins.
         rawType: "someText(notAType)",
         required: true,
       });
       const result = mapPropMeta(prop);
-      // Post-cutover: descriptor structural bare-Ref → descriptor text wins.
-      // (Pre-cutover would have kept the rawType.)
+      // Descriptor structural bare-Ref → descriptor text wins.
+      // (The legacy path would have kept the rawType.)
       expect(result.type).toBe("Foo");
     });
   });
@@ -229,19 +229,19 @@ describe("W7.2: shape-detection heuristics switch on TypeDescriptor.kind (not pr
       const prop = makeProp({
         name: "value",
         type: union([primitive("string"), primitive("undefined")]),
-        // Decoy rawType: bracket-access TEXT shape. Pre-W7.2 the regex
+        // Decoy rawType: bracket-access TEXT shape. The legacy regex
         // /\[[^\]]+\]$/ matched this and `shouldPreferDescriptorForProp`
         // returned true (text-based indexed-access check) → swapping the raw
-        // alias for the resolved descriptor text. Post-W7.2 the typed
+        // alias for the resolved descriptor text. The typed
         // `looksLikeIndexedAccessType(descriptor)` returns false (descriptor
         // is primitive, not IndexedAccess), so the rawType passthrough wins.
         rawType: "Foo['bar']",
         required: false,
       });
       const result = mapPropMeta(prop);
-      // Post-cutover: rawType passthrough wins → `Foo["bar"]` (normalised
-      // single-to-double-quote rendering). Pre-cutover would have produced
-      // "string | undefined" via the text-based shape sniff.
+      // rawType passthrough wins → `Foo["bar"]` (normalised
+      // single-to-double-quote rendering). (The legacy path produced
+      // "string | undefined" via the text-based shape sniff.)
       expect(result.type).toBe('Foo["bar"]');
     });
 
@@ -250,9 +250,9 @@ describe("W7.2: shape-detection heuristics switch on TypeDescriptor.kind (not pr
       const prop = makeProp({
         name: "value",
         type: indexedAccess(ref("Foo"), literal("bar")),
-        // Decoy rawType: bare alias TEXT. Pre-W7.2 the regex matched bare ref,
+        // Decoy rawType: bare alias TEXT. The legacy regex matched bare ref,
         // and shouldPreferDescriptorForProp returned true via the bare-ref text
-        // sniff → descriptor swap. Post-W7.2 the typed
+        // sniff → descriptor swap. The typed
         // `looksLikeIndexedAccessType(descriptor)` returns true (descriptor IS
         // IndexedAccess), so the swap still happens — but driven by the
         // descriptor structure, not by parsing the rawType text.
@@ -260,7 +260,7 @@ describe("W7.2: shape-detection heuristics switch on TypeDescriptor.kind (not pr
         required: false,
       });
       const result = mapPropMeta(prop);
-      // Post-cutover: descriptor structural match → swap to descriptor text.
+      // Descriptor structural match → swap to descriptor text.
       expect(result.type).toBe('Foo["bar"] | undefined');
     });
   });
@@ -271,16 +271,16 @@ describe("W7.2: shape-detection heuristics switch on TypeDescriptor.kind (not pr
       const prop = makeProp({
         name: "color",
         type: union([literal("red"), literal("green"), literal("blue"), primitive("undefined")]),
-        // Decoy rawType: pre-W7.2 the regex looked for `"`/`string` substring —
+        // Decoy rawType: the legacy regex looked for `"`/`string` substring —
         // we set rawType to something that DOES contain those (preserving the
-        // pre-W7.2 default behaviour), but the structural decision must NOT
+        // legacy default behaviour), but the structural decision must NOT
         // depend on rawType.
         rawType: "MyColorType",
         required: false,
         default: "red",
       });
       const result = mapPropMeta(prop);
-      // Post-cutover: descriptor walk identifies string-literal arms →
+      // Descriptor walk identifies string-literal arms →
       // string-compatible → default value `red` JSON.stringify-wrapped to `"red"`.
       expect(result.default).toBe('"red"');
     });
@@ -290,15 +290,15 @@ describe("W7.2: shape-detection heuristics switch on TypeDescriptor.kind (not pr
       const prop = makeProp({
         name: "count",
         type: primitive("number"),
-        // Decoy rawType: contains the substring 'string'. Pre-W7.2 the
+        // Decoy rawType: contains the substring 'string'. The legacy
         // text-based helper would have returned true and wrapped a non-numeric
-        // default. Post-W7.2 the descriptor walk returns false.
+        // default. The descriptor walk returns false.
         rawType: "Stringish",
         required: false,
         default: "foo",
       });
       const result = mapPropMeta(prop);
-      // Post-cutover: descriptor identifies number-only → string-stringify
+      // Descriptor identifies number-only → string-stringify
       // declines → default value `foo` passes through unmodified.
       expect(result.default).toBe("foo");
     });
@@ -318,7 +318,7 @@ describe("W7.2: shape-detection heuristics switch on TypeDescriptor.kind (not pr
         default: "custom",
       });
       const result = mapPropMeta(prop);
-      // Post-cutover: descriptor identifies string-literal arm → string-compatible
+      // Descriptor identifies string-literal arm → string-compatible
       // → default wrapped as JSON string.
       expect(result.default).toBe('"custom"');
     });

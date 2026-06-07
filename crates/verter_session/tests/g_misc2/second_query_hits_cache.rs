@@ -1,5 +1,5 @@
-//! Block 1.9 — budget oracle #2: the 2nd query of the same key hits
-//! the warm component-meta cache.
+//! Budget oracle: the 2nd query of the same key hits the warm
+//! component-meta cache.
 //!
 //! Drives `get_component_meta(/owner.vue)` twice in succession with
 //! no intervening mutation. Snapshots
@@ -12,8 +12,8 @@
 //!
 //! `component_meta_result_cache_hits` is the production cache's
 //! authoritative warm-return counter (see
-//! `component_meta_result_db.rs::get_with_view`, plan §"Project-
-//! global cache (final state)"). A second identical request that
+//! `component_meta_result_db.rs::get_with_view` and the project-global
+//! cache). A second identical request that
 //! does NOT increment `cache_hits` is a cache-miss in disguise —
 //! either the cache key drifted (cache-key fragmentation), the
 //! revalidation logic rejected the warm entry (over-invalidation),
@@ -23,12 +23,12 @@
 //!
 //! ## Discrimination contract
 //!
-//! Pre-budget shape: query 1 incurs a cold miss (cache_misses += 1);
+//! Regression shape: query 1 incurs a cold miss (cache_misses += 1);
 //! query 2 with NO intervening change incurs a SECOND miss because
 //! a regression keyed the cache on a per-request token, or because
 //! a revalidator rejected the warm entry.
 //!
-//! Post-budget shape: query 1 incurs the cold miss; query 2 hits the
+//! Correct shape: query 1 incurs the cold miss; query 2 hits the
 //! warm cache exactly once (cache_hits += 1, cache_misses unchanged).
 //!
 //! ### Why the discrimination is non-trivial

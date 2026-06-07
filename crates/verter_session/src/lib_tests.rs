@@ -1748,7 +1748,7 @@ fn close_clears_all_caches() {
         read_lock(&host.alias_to_canonical).is_empty(),
         "alias_to_canonical should be empty after close"
     );
-    // Workspace-authoritative reverse-dep graph (Commit-3 cutover): close()
+    // Workspace-authoritative reverse-dep graph: close()
     // calls `notify_delete` for every tracked file, which fires
     // `EdgeStore::remove_file` and clears the per-owner state and
     // reverse-axis entries. Verify there are no lingering reverse-dep

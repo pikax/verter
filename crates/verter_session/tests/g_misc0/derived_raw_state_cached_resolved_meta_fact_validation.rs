@@ -1,13 +1,13 @@
-//! Block 1A — `DerivedRawState.cached_resolved_meta` fact-validation
+//! `DerivedRawState.cached_resolved_meta` fact-validation
 //! discriminator (POSITIVE).
 //!
-//! Pre-1A: `ResolvedComponentMetaCacheEntry.fact_versions:
-//! Vec<FactVersionRef>` and the consumer (`try_get_cached_resolved_meta`)
+//! A `ResolvedComponentMetaCacheEntry.fact_versions:
+//! Vec<FactVersionRef>` whose consumer (`try_get_cached_resolved_meta`)
 //! used `view.invalid_fact_details(&cached.fact_versions, 6)` instead
-//! of the per-domain fast-path validator. The migration source-grep
-//! arch guard FAILS pre-1A.
+//! of the per-domain fast-path validator would FAIL the migration
+//! source-grep arch guard.
 //!
-//! Post-1A: substrate is `Arc<[FactVersionRef]>` and
+//! The substrate is `Arc<[FactVersionRef]>` and
 //! `try_get_cached_resolved_meta` short-circuits via
 //! `view.validates_fact_signature(...)`. Editing a referenced dep
 //! triggers an invalidation observable via the
@@ -51,23 +51,23 @@ fn cached_resolved_meta_substrate_and_consumer_wired() {
     let window = &types_src[idx..idx + end];
     assert!(
         window.contains("fact_versions: Arc<[crate::resolver_core::FactVersionRef]>"),
-        "Block 1A: ResolvedComponentMetaCacheEntry.fact_versions must be \
+        "ResolvedComponentMetaCacheEntry.fact_versions must be \
          `Arc<[FactVersionRef]>`. Window:\n{window}"
     );
     assert!(
         !window.contains("fact_versions: Vec<"),
         "ResolvedComponentMetaCacheEntry must NOT carry the legacy `Vec<FactVersionRef>` \
-         shape after Block 1A. Window:\n{window}"
+         shape. Window:\n{window}"
     );
 
-    // Consumer-site arch guard (per codex P2): `try_get_cached_resolved_meta`
+    // Consumer-site arch guard: `try_get_cached_resolved_meta`
     // must dispatch through `validates_fact_signature` so the
     // per-domain fast-path is the live invalidation oracle. A
     // regression that reverts to the legacy `.iter().all(view.validates(...))`
     // form or to `invalid_fact_details` as the gating predicate
     // would erase this assertion.
     //
-    // Block 6.c (`2049a5473`) split the consumer into an owned-view
+    // The consumer is split into an owned-view
     // wrapper (`try_get_cached_resolved_meta_for_view_fingerprint`)
     // and a view-threading implementation
     // (`try_get_cached_resolved_meta_for_view_fingerprint_with_store_view`).
@@ -88,7 +88,7 @@ fn cached_resolved_meta_substrate_and_consumer_wired() {
     let cwindow = &consumer_src[cidx..cidx + cend];
     assert!(
         cwindow.contains("view.validates_fact_signature(&cached.fact_versions)"),
-        "Block 1A: try_get_cached_resolved_meta_for_view_fingerprint_with_store_view \
+        "try_get_cached_resolved_meta_for_view_fingerprint_with_store_view \
          must gate the warm-hit return on `view.validates_fact_signature(...)`. \
          Window:\n{cwindow}"
     );
@@ -130,7 +130,7 @@ fn cached_resolved_meta_substrate_and_consumer_wired() {
 
     assert!(
         recomputes_after > recomputes_before,
-        "Block 1A: editing a referenced dep MUST bypass the warm \
+        "editing a referenced dep MUST bypass the warm \
          resolved-meta cache. `component_meta_resolved_state_recomputes` \
          did not advance from {recomputes_before} to {recomputes_after}, \
          which means the validator did not catch the version bump and a \

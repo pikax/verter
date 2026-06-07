@@ -1,23 +1,21 @@
-//! Verify-bullet 15: parse-time fact emission on a 10k-line file
-//! is bounded — the Phase 1 emitter walks the pre-extracted
-//! `ShallowFileState` once, with O(file_size) work.
+//! Parse-time fact emission on a 10k-line file is bounded — the
+//! emitter walks the pre-extracted `ShallowFileState` once, with
+//! O(file_size) work.
 //!
-//! The budget contract: parse time on a 10k-line file ≤ 1.1× the
-//! pre-Stage-3 baseline. Pre-Stage-3 emission was a no-op (Stage 1
-//! placeholder), so the 1.1× headroom is generous. We measure by:
+//! The budget contract: the emitter cost is bounded against the
+//! stable-hash baseline. We measure by:
 //!
 //! 1. Constructing a synthetic 10k-decl `IndexedReady` directly
 //!    (no parser invocation — the shallow walk's cost is already
-//!    paid by Stage 0's `parse_stable_hash` baseline).
-//! 2. Running the legacy stable-hash baseline path: just compute
-//!    `parse_stable_hash` (Stage 1's locked-down behavior).
-//! 3. Running the Stage 3 emitter on the same input.
+//!    paid by the `parse_stable_hash` baseline).
+//! 2. Running the stable-hash baseline path: just compute
+//!    `parse_stable_hash`.
+//! 3. Running the fact emitter on the same input.
 //! 4. Asserting the emitter cost is bounded — ≤ 5× the stable-hash
-//!    baseline, which is a generous bound since Stage 3 does
+//!    baseline, which is a generous bound since the emitter does
 //!    strictly more work (per-member presence facts, per-import
-//!    facts, etc.). The 1.1× headroom in the plan applies to the
-//!    end-to-end parse-time path including the OXC parser; this
-//!    sub-test characterises the emitter contribution.
+//!    facts, etc.). This sub-test characterises the emitter
+//!    contribution to the end-to-end parse-time path.
 //!
 //! The hard guarantee is that the emitter walk is O(file_size),
 //! not O(N²) or worse. We measure on a 10k-decl input to surface
@@ -110,14 +108,14 @@ fn phase1_emitter_scales_linearly_on_10k_decl_input() {
     let _ = compute_parse_stable_hash(&indexed_10k);
     let _ = emit_parse_facts(&indexed_10k);
 
-    // Stable-hash baseline (pre-Stage-3 Stage-1 path).
+    // Stable-hash baseline path.
     let baseline_start = Instant::now();
     for _ in 0..3 {
         let _ = compute_parse_stable_hash(&indexed_10k);
     }
     let baseline_dur = baseline_start.elapsed() / 3;
 
-    // Stage 3 emitter cost.
+    // Fact emitter cost.
     let stage3_start = Instant::now();
     for _ in 0..3 {
         let _ = emit_parse_facts(&indexed_10k);
@@ -126,7 +124,7 @@ fn phase1_emitter_scales_linearly_on_10k_decl_input() {
 
     eprintln!(
         "fact-emission parse-time on 10k decls — baseline parse_stable_hash: {baseline_dur:?}; \
-         Stage 3 emit_parse_facts: {stage3_dur:?}"
+         emit_parse_facts: {stage3_dur:?}"
     );
 
     // Hard ceiling: 5× the stable-hash baseline. The emitter does
@@ -138,7 +136,7 @@ fn phase1_emitter_scales_linearly_on_10k_decl_input() {
     eprintln!("fact-emission / baseline ratio: {ratio_pct}%");
     assert!(
         stage3_dur < baseline_dur * 100,
-        "Phase 1 emitter scales linearly: stage3_dur={stage3_dur:?}, baseline_dur={baseline_dur:?}, \
+        "fact emitter scales linearly: stage3_dur={stage3_dur:?}, baseline_dur={baseline_dur:?}, \
          ratio={ratio_pct}%. The 100× cap is a no-regression sentinel — actual ratio is \
          typically ≤ 10×."
     );
@@ -155,7 +153,7 @@ fn phase1_emission_produces_expected_fact_count_on_10k_decls() {
     let registry = emission.facts.registry();
     assert!(
         registry.len() >= 10_000,
-        "Phase 1 MUST emit at least one fact per decl ({} got, expected ≥ 10_000)",
+        "fact emission MUST emit at least one fact per decl ({} got, expected ≥ 10_000)",
         registry.len()
     );
 }

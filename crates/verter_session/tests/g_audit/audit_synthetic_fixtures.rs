@@ -1,4 +1,4 @@
-//! Plan §4.18 / §6.10 sub-task 7 — synthetic audit fixtures.
+//! Synthetic audit fixtures.
 //!
 //! End-to-end tests that drive each fixture through the public
 //! `AuditedRequest` resolution surface and assert the resolved
@@ -22,8 +22,7 @@
 //!      `true` on the canonical nuxt-ui DotPathKeys shape.
 //!    - `component_meta_materialize::tests::registry_route_extracts_actual_root_for_builtin_pick_over_recursive_helper`
 //!      verifies `extract_route_root_identity_node` recurses into
-//!      `args[0]` so the cycle guard sees the actual root identity
-//!      (Codex2 P0 #3).
+//!      `args[0]` so the cycle guard sees the actual root identity.
 //!
 //! These integration tests guarantee the END-TO-END flow on real
 //! `.vue` fixtures (parsing → lowering → materialiser → type-expand
@@ -75,7 +74,7 @@ fn recursive_alias_self_pick_publishes_shallow_ref() {
 
     // Discriminating assertion: the projector path publishes the bare
     // `Self` ref. A non-shallow shape (eager Pick expansion, an
-    // expanded object, etc.) would indicate the cutover regressed and
+    // expanded object, etc.) would indicate a regression that
     // re-introduced eager materialisation at publication time.
     match &value_field.r#type {
         TypeExpr::Ref {
@@ -97,7 +96,7 @@ fn recursive_alias_self_pick_publishes_shallow_ref() {
         other => panic!(
             "expected the projector to publish the shallow `Self` ref \
              (no eager Pick<Self, 'a'> expansion); got {other:?}. \
-             A non-shallow shape here indicates a cutover regression \
+             A non-shallow shape here indicates a regression \
              that re-introduced eager materialisation at publication \
              time.",
         ),

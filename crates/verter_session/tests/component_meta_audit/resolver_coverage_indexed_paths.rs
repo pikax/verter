@@ -1,23 +1,14 @@
-//! Phase 5b §5.A — TDD seed for resolver coverage gap: deeply
-//! indexed paths (`A['c']['full']['bar']`) lose path context across
-//! hops in the engine's `project_type_member` chain.
+//! Resolver coverage for deeply indexed paths
+//! (`A['c']['full']['bar']`): path context must be preserved across
+//! hops.
 //!
-//! **Root cause (per sub-plan §5 commit 8):** engine's
-//! `project_type_member` chains via the prepared-decl resolver and
-//! drops path context across hops. `ProjectPath{base, [seg1, seg2,
-//! seg3, seg4], Expanded}` walks via `PathWalker` with a single
-//! consistent context, never losing intermediate hops.
+//! `ProjectPath{base, [seg1, seg2, seg3, seg4], Expanded}` walks via
+//! `PathWalker` with a single consistent context, never losing
+//! intermediate hops.
 //!
-//! **Pre-Phase-5b behaviour:** for `Cfg['nested']['theme']['palette']`,
-//! the resolver loses one of the intermediate hops and surfaces the
-//! WRONG branch's members, the WRONG type, or `Unknown`.
-//!
-//! **Post-Phase-5b expected:** props extracted are exactly the leaf
-//! `palette` members (`primary`, `secondary`), with no leakage from
-//! sibling branches at any intermediate level.
-//!
-//! This seed remains RED through the end of Phase 5b. It closes in
-//! 5f §8 via callsite migration.
+//! For `Cfg['nested']['theme']['palette']`, the props extracted are
+//! exactly the leaf `palette` members (`primary`, `secondary`), with
+//! no leakage from sibling branches at any intermediate level.
 
 use crate::harness::{build_hermetic_host_with_lib, resolve_under_audit, STUB_LIB_ES5};
 

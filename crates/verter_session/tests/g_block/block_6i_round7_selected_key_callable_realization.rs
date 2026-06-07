@@ -1,4 +1,4 @@
-//! Block 6.i Round 7 — discriminator: **selected-key callable realization**.
+//! Discriminator: **selected-key callable realization**.
 //!
 //! Drives the substrate's per-key Mapped materialization through the
 //! `Published(Shallow)` boundary on a `defineSlots`-shaped fixture
@@ -15,36 +15,33 @@
 //! member whose `value` is a `Function`. The body's Conditional
 //! (`PricingPlanSlots["badge"] extends (props: infer P) => unknown ?
 //! ...`) must close: the selected-index `PricingPlanSlots["badge"]`
-//! reduces to a Function, the C11a infer binds `P`, and the true
+//! reduces to a Function, the infer binds `P`, and the true
 //! branch becomes the `(props: P & { plan: PricingPlan }) => unknown`
 //! Function.
 //!
 //! Crucially, this test probes the substrate **directly** (not through
 //! the component-meta pipeline) so it discriminates between:
 //!
-//! - Pre-Commit-2 substrate: the per-key materializer drops the body's
-//!   Conditional under `StructuralTransit(Navigate)` (no
+//! - Without the per-key helper: the per-key materializer drops the
+//!   body's Conditional under `StructuralTransit(Navigate)` (no
 //!   `may_reduce_operator` for the index reduction) and the slot
 //!   member's `value` stays as a `Conditional` carrier shell. The
 //!   `Function`-arm match in the consumer fails. FAILS this test.
-//! - Post-Commit-2 substrate: the new `materialize_selected_key_mapped_value`
-//!   helper dispatches `Instantiate { base, args: [], context:
+//! - With the `materialize_selected_key_mapped_value` helper: it
+//!   dispatches `Instantiate { base, args: [], context:
 //!   InstantiateContext { projection_reduction, resolve_env_hash } }` with
 //!   `context.projection_reduction.mode = Navigate` and the substituted key,
 //!   then the per-key body's
 //!   `PricingPlanSlots["badge"]` reduces through the selected-index
-//!   path projection (the brief's Q1 dispatch chain), Conditional
-//!   closes, Function emerges. PASSES this test.
+//!   path projection, Conditional closes, Function emerges. PASSES this
+//!   test.
 //!
-//! ## Discrimination progression
+//! ## Discrimination
 //!
-//! - **Commit 1 (no substrate extensions):** FAIL — the per-key
-//!   materializer leaves a Conditional shell.
-//! - **Commit 2 (selected-key helper landed):** PASS — the helper
-//!   dispatches the substituted body through the right demand chain
-//!   so the Conditional closes and `Function` lands.
-//! - **Commit 3 (atomic cutover):** PASS — same substrate, exercised
-//!   from the publication path too.
+//! The `materialize_selected_key_mapped_value` helper dispatches the
+//! substituted body through the right demand chain so the Conditional
+//! closes and `Function` lands. Without it the per-key materializer
+//! leaves a Conditional shell.
 
 #![allow(clippy::too_many_lines, dead_code, unused_imports)]
 
@@ -121,7 +118,7 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
     // and calls the per-key materializer for ExtendSlotWithPlan<
     // PricingPlan, K>. The selected-key helper substitutes K, then
     // instantiates the body so PricingPlanSlots[K] resolves through
-    // the selected-index path, C11a infer binds P, and the true
+    // the selected-index path, the infer binds P, and the true
     // branch closes to a Function.
     let project_query = SemanticQueryKey::ProjectPath {
         base: carrier,
@@ -144,7 +141,7 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
     let view = match surface_data.as_ref() {
         SemanticNodeData::Object(view) => view.clone(),
         other => panic!(
-            "Block 6.i Round 7 — synthesise_mapped_surface MUST produce a \
+            "synthesise_mapped_surface MUST produce a \
              `SemanticNodeData::Object` for LiteralKeyedSlots<PricingPlan>. Got: {other:?}",
         ),
     };
@@ -155,7 +152,7 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
         .find(|m| m.name.as_ref() == "badge")
         .unwrap_or_else(|| {
             panic!(
-                "Block 6.i Round 7 — synthesised surface MUST contain `badge`. Got: {:?}",
+                "synthesised surface MUST contain `badge`. Got: {:?}",
                 view.members
                     .iter()
                     .map(|m| m.name.as_ref())
@@ -171,10 +168,10 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
 
     assert!(
         is_function,
-        "Block 6.i Round 7 — selected-key callable realization MUST close \
+        "selected-key callable realization MUST close \
          `ExtendSlotWithPlan<PricingPlan, \"badge\">`'s Conditional body to a \
          `SemanticNodeData::Function` under `Published(Shallow)` on a \
-         `StructuralTransit(Navigate)` carrier. Without the Commit-2 \
+         `StructuralTransit(Navigate)` carrier. Without the \
          `materialize_selected_key_mapped_value` helper, the per-key materializer \
          leaves the Conditional shell carrier-shaped and the slot-binding consumer's \
          `Function`-arm match fails. Got node data: {badge_value_data:?}",
@@ -192,7 +189,7 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
         .expect("title member's value node must have semantic data");
     assert!(
         matches!(title_value_data.as_ref(), SemanticNodeData::Function { .. }),
-        "Block 6.i Round 7 — selected-key callable realization MUST fire for \
+        "selected-key callable realization MUST fire for \
          every enumerated key. `title` value: {title_value_data:?}",
     );
 }

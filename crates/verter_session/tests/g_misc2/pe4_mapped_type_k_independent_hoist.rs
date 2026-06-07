@@ -36,9 +36,8 @@
 //!    cross-variant `Infer { name }` fallback must classify this as
 //!    K-dependent so the per-K materialiser remains the authority.
 //!
-//! All three fixtures pass on `752620d83` (pre-PE4 baseline) — they
-//! exercise core mapped-type semantics that have been correct
-//! throughout the semantic-db overhaul. The hoist's value is asserted
+//! All three fixtures exercise core mapped-type semantics that are
+//! correct independent of the hoist. The hoist's value is asserted
 //! via the *shared-id* discriminator on (1), and the *distinct-ids*
 //! discriminator on (2) and (3). These three together discriminate
 //! "hoisted what I should" vs. "wrongly hoisted what I shouldn't".

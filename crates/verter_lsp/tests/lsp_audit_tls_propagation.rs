@@ -1,6 +1,5 @@
 //! TLS-observer propagation through
-//! [`verter_lsp::audit_harness::run_with_audit`] (Wave 3 Slice 3.E
-//! follow-up).
+//! [`verter_lsp::audit_harness::run_with_audit`].
 //!
 //! `run_with_audit` wraps every audited LSP handler future. When
 //! audit is enabled it constructs an `LspAuditSession` (which
@@ -35,13 +34,9 @@
 //! avoids the "cannot block within a runtime" trap that
 //! `#[tokio::test]` would impose.
 //!
-//! Discrimination contract:
-//! - Pre-change tree (no harness driver pinned to `run_with_audit`):
-//!   the cancellation-contract test verifies the supersede path but
-//!   does not probe the substrate's TLS slot.
-//! - Wired correctly: the body's mid-flight `current_observer()`
-//!   probe returns `Some(_)` in the audit-enabled case and `None`
-//!   in the audit-disabled case.
+//! Discrimination contract: the body's mid-flight `current_observer()`
+//! probe returns `Some(_)` in the audit-enabled case and `None`
+//! in the audit-disabled case.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

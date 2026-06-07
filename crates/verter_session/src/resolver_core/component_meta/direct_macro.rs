@@ -295,9 +295,9 @@ pub(super) fn macro_dep_exported_type_name<'a>(
 /// prepared decl and is read by downstream stages on demand. Non-TypeAlias
 /// kinds (Interface / Class / Unknown) seed the registry directly so the
 /// initial publication carries the graph-typed surface; TypeAlias kinds
-/// also seed under the same contract because the only pre-cutover branch
-/// that suppressed seeding (a non-Object alias body) was a text-driven
-/// inspection that has been retired.
+/// also seed under the same contract — there is no branch that suppresses
+/// seeding, because suppression once relied on a text-driven inspection
+/// (a non-Object alias body) that the typed-IR contract removed.
 pub(super) fn should_seed_direct_macro_registry_entry(
     declaration: &ResolvedTypeDeclaration,
 ) -> bool {

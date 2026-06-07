@@ -25,7 +25,7 @@
  * smoke runs the REAL-`.node` fallback on whatever supported platform
  * executes it — Linux / macOS / Windows — not just one pinned host.
  *
- * Skip / fail discipline (issue #90 round-2 items 1+2):
+ * Skip / fail discipline:
  *   - GENUINELY UNSUPPORTED host (no `PLATFORM_MATRIX` row for this
  *     platform/arch) ⇒ a LOUD skip (there is nothing to build here).
  *   - SUPPORTED host (a matrix row exists) but the matching `.node` is

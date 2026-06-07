@@ -19,8 +19,8 @@
 //! that imports a type from `/src/types.ts`, the SFC's
 //! `compile_slot.fact_dep_signature` MUST contain at least one
 //! `FactVersionRef::Parse` entry whose `canonical_id` is
-//! `/src/types.ts`. This holds against the post-change tree and
-//! WOULD FAIL against a tree where the prefetch is removed.
+//! `/src/types.ts`. This WOULD FAIL against a tree where the prefetch
+//! is removed.
 
 use verter_semantic::facts::registry::FactKey;
 use verter_session::resolver_core::{FactVersionRef, ParseFactRef};
@@ -78,9 +78,8 @@ fn read_signature(host: &VerterHost, canonical: &str) -> ReadSetSignature {
 ///
 /// Discriminating: against a tree where the pre-tracer prefetch is
 /// removed, the signature would be empty (artifacts not in store,
-/// routes not in derived cache → silent skip). Against the
-/// post-change tree, the prefetch populates both layers and the
-/// observation lands.
+/// routes not in derived cache → silent skip). The prefetch populates
+/// both layers and the observation lands.
 #[test]
 fn cold_compile_observes_member_fact_for_cross_file_type_import() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -215,19 +214,18 @@ fn cross_file_type_edit_invalidates_consumer_via_fact_validation() {
     );
 }
 
-// ── Block 1.J.3 discriminators ────────────────────────────────────
+// ── Runtime-import / external-dep discriminators ──────────────────
 //
 // These tests upsert the dependency through the plain `upsert`. The
 // owner-upsert path has no eager reverse-dependent cascade, so the
 // consumer's compile slot is not physically cleared by a dependency
 // edit. The ONLY mechanism that can invalidate the consumer is the
 // warm-hit fact-signature check (`compile_slot_fact_signature_validates`).
-// That isolation is what makes each test discriminating: against the
-// pre-1.J.3 producer (no `FileWholeHash` for runtime imports /
-// external `src=` deps) the consumer's signature carries no fact for
-// the edited dep, so the warm hit is served stale; against the
-// post-1.J.3 producer the whole-hash fact mismatches and the warm
-// hit misses.
+// That isolation is what makes each test discriminating: a producer
+// without a `FileWholeHash` for runtime imports / external `src=` deps
+// would record no fact for the edited dep in the consumer's signature,
+// so the warm hit would be served stale; with the whole-hash fact the
+// signature mismatches on edit and the warm hit misses.
 
 /// Discriminator 1 — compile-slot invalidation on a runtime-import
 /// body edit.
@@ -240,10 +238,10 @@ fn cross_file_type_edit_invalidates_consumer_via_fact_validation() {
 /// `() => number` is unchanged — must still invalidate `Comp.vue`'s
 /// warm compile slot.
 ///
-/// Pre-fix: the producer recorded only `ImportRef` + signature-pinned
-/// `Export`; a body-only edit leaves both hashes identical →
-/// `compile_slot_is_warm` stays `true` → stale slot served.
-/// Post-fix: the `FileWholeHash` fact mismatches → warm hit misses.
+/// A producer that recorded only `ImportRef` + signature-pinned
+/// `Export` would leave both hashes identical on a body-only edit →
+/// `compile_slot_is_warm` stays `true` → stale slot served. With the
+/// `FileWholeHash` fact the edit mismatches → warm hit misses.
 #[test]
 fn compile_slot_invalidates_on_runtime_import_body_edit() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -285,7 +283,7 @@ fn compile_slot_invalidates_on_runtime_import_body_edit() {
     });
     assert!(
         observes_utils_whole_hash,
-        "R3/B1.j.3: the compile-tier producer MUST observe a \
+        "R3: the compile-tier producer MUST observe a \
          FileWholeHash for a runtime-imported dependency. \
          Signature observed: {:?}",
         signature
@@ -311,7 +309,7 @@ fn compile_slot_invalidates_on_runtime_import_body_edit() {
     let warm_after = host.compile_slot_is_warm("/src/Comp.vue", &profile);
     assert!(
         !warm_after,
-        "B1.j.3: a runtime-import body edit MUST invalidate the \
+        "a runtime-import body edit MUST invalidate the \
          consumer compile slot via FileWholeHash fact-validation. \
          warm_after=true means the producer recorded no whole-hash \
          fact for the runtime dep (the signature-pinned Export fact \
@@ -339,14 +337,13 @@ fn compile_slot_invalidates_on_runtime_import_body_edit() {
 /// replacing the stale slot with a fresh one — which makes
 /// `compile_slot_is_warm` return `true` again.
 ///
-/// Pre-fix: `ensure_compiled`'s warm path checked only
-/// `slot.semantic_hash == parse.semantic_hash && style_override_hash`.
-/// The SFC's own content is unchanged, so that predicate held and
-/// `ensure_compiled` returned `Ok(())` WITHOUT recompiling — the
-/// stale slot stayed in place and `compile_slot_is_warm` stayed
-/// `false` even after `ensure_compiled` ran.
-/// Post-fix: the warm path additionally runs
-/// `compile_slot_fact_signature_validates`, sees the dep fact
+/// A warm path that checked only
+/// `slot.semantic_hash == parse.semantic_hash && style_override_hash`
+/// would hold that predicate when the SFC's own content is unchanged,
+/// so `ensure_compiled` would return `Ok(())` WITHOUT recompiling — the
+/// stale slot would stay in place and `compile_slot_is_warm` would stay
+/// `false` even after `ensure_compiled` ran. The warm path additionally
+/// runs `compile_slot_fact_signature_validates`, sees the dep fact
 /// mismatch, falls through to a real recompile, and the slot becomes
 /// warm.
 #[test]
@@ -394,7 +391,7 @@ fn ensure_compiled_warm_path_validates_compile_slot_fact_signature() {
     // content is unchanged.
     assert!(
         !host.compile_slot_is_warm("/src/Comp.vue", &profile),
-        "B1.j.3: after a cross-file dep edit the compile slot MUST \
+        "after a cross-file dep edit the compile slot MUST \
          fail fact-validation (a warm slot here means the signature \
          did not catch the dep edit)."
     );
@@ -404,14 +401,14 @@ fn ensure_compiled_warm_path_validates_compile_slot_fact_signature() {
     host.ensure_compiled("/src/Comp.vue", &profile)
         .expect("ensure_compiled recompile");
 
-    // Post-fix: the recompile re-recorded a fresh fact signature
-    // against the edited dep, so the slot is warm again. Pre-fix:
-    // `ensure_compiled` returned `Ok(())` without recompiling — the
-    // stale slot (still carrying the pre-edit dep fact hash) remained,
-    // so this assertion would FAIL with the slot still not warm.
+    // The recompile re-records a fresh fact signature against the
+    // edited dep, so the slot is warm again. A warm path that returned
+    // `Ok(())` without recompiling would leave the stale slot (still
+    // carrying the pre-edit dep fact hash) in place, so this assertion
+    // would FAIL with the slot still not warm.
     assert!(
         host.compile_slot_is_warm("/src/Comp.vue", &profile),
-        "B1.j.3: ensure_compiled's warm path MUST validate the \
+        "ensure_compiled's warm path MUST validate the \
          compile-slot fact signature. A slot that is still not warm \
          after ensure_compiled means it short-circuited on the \
          unchanged semantic_hash and left the stale slot in place \
@@ -427,11 +424,11 @@ fn ensure_compiled_warm_path_validates_compile_slot_fact_signature() {
 /// `merge_external_sources`, so editing `tpl.html` must invalidate
 /// the consumer compile slot.
 ///
-/// Pre-fix: `external_requests` was never passed to the compile-tier
-/// producer — the SFC's `fact_dep_signature` was completely empty,
-/// which trivially validates → stale slot served forever.
-/// Post-fix: the producer observes a `FileWholeHash` of the resolved
-/// external canonical → an edit mismatches → warm hit misses.
+/// If `external_requests` is not passed to the compile-tier producer,
+/// the SFC's `fact_dep_signature` is completely empty, which trivially
+/// validates → stale slot served forever. The producer observes a
+/// `FileWholeHash` of the resolved external canonical → an edit
+/// mismatches → warm hit misses.
 #[test]
 fn compile_slot_invalidates_on_external_src_template_edit() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -462,10 +459,10 @@ fn compile_slot_invalidates_on_external_src_template_edit() {
     });
     assert!(
         observes_tpl_whole_hash,
-        "R3/B1.j.3: the compile-tier producer MUST observe a \
-         FileWholeHash for an external `src=` dependency. The \
-         pre-1.J.3 producer never received `external_requests` and \
-         produced an empty signature. Signature observed: {:?}",
+        "R3: the compile-tier producer MUST observe a \
+         FileWholeHash for an external `src=` dependency. A producer \
+         that never received `external_requests` would produce an \
+         empty signature. Signature observed: {:?}",
         signature
             .facts
             .iter()
@@ -488,7 +485,7 @@ fn compile_slot_invalidates_on_external_src_template_edit() {
     let warm_after = host.compile_slot_is_warm("/src/Comp.vue", &profile);
     assert!(
         !warm_after,
-        "B1.j.3: an external `src=` template edit MUST invalidate the \
+        "an external `src=` template edit MUST invalidate the \
          consumer compile slot via FileWholeHash fact-validation. \
          warm_after=true means the producer recorded no whole-hash \
          fact for the external dependency."
@@ -503,15 +500,14 @@ fn compile_slot_invalidates_on_external_src_template_edit() {
 /// is re-emitted in the assembled module, so editing `setup.ts`'s body
 /// must invalidate `Comp.vue`'s warm compile slot.
 ///
-/// Pre-fix: the producer's `FileWholeHash` admission ran only inside
-/// the `for binding in import.bindings.iter()` loop. A side-effect
-/// import has empty `bindings`, so the loop body never executed and no
-/// `FileWholeHash` fact was recorded for `./setup` — the consumer's
-/// signature carried no fact for the dep, so a warm hit was served
-/// stale.
-/// Post-fix: a non-type-only import with a resolved dep contributes
-/// its `FileWholeHash` fact even with zero bindings → the edit
-/// mismatches → warm hit misses.
+/// If the producer's `FileWholeHash` admission ran only inside the
+/// `for binding in import.bindings.iter()` loop, a side-effect import
+/// (empty `bindings`) would never execute the loop body and no
+/// `FileWholeHash` fact would be recorded for `./setup` — the
+/// consumer's signature would carry no fact for the dep, so a warm hit
+/// would be served stale. A non-type-only import with a resolved dep
+/// contributes its `FileWholeHash` fact even with zero bindings → the
+/// edit mismatches → warm hit misses.
 #[test]
 fn compile_slot_invalidates_on_side_effect_import_body_edit() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -551,10 +547,10 @@ fn compile_slot_invalidates_on_side_effect_import_body_edit() {
     });
     assert!(
         observes_setup_whole_hash,
-        "R3/B1.j.3: the compile-tier producer MUST observe a \
+        "R3: the compile-tier producer MUST observe a \
          FileWholeHash for a side-effect (bindings-empty) runtime \
-         import. Pre-fix the whole-hash admission ran only inside the \
-         per-binding loop, which never executes for a side-effect \
+         import. If the whole-hash admission ran only inside the \
+         per-binding loop, it would never execute for a side-effect \
          import. Signature observed: {:?}",
         signature
             .facts
@@ -578,7 +574,7 @@ fn compile_slot_invalidates_on_side_effect_import_body_edit() {
     let warm_after = host.compile_slot_is_warm("/src/Comp.vue", &profile);
     assert!(
         !warm_after,
-        "B1.j.3: a side-effect import body edit MUST invalidate the \
+        "a side-effect import body edit MUST invalidate the \
          consumer compile slot via FileWholeHash fact-validation. \
          warm_after=true means the producer recorded no whole-hash \
          fact for the side-effect dep (its empty `bindings` skipped \

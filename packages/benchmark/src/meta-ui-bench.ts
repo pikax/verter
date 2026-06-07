@@ -45,11 +45,10 @@ interface MetaUiBenchArgs {
   scenarios: MetaUiScenario[];
   repeats: number;
   warmupPasses: number;
-  /// Plan §3 Step 10: kill threshold for runaway requests. Aliased
-  /// from the legacy `--query-timeout-ms` flag. Replaces the
-  /// pre-Step-10 single 250 ms hard timeout.
+  /// Kill threshold for runaway requests. Aliased from the legacy
+  /// `--query-timeout-ms` flag.
   queryTimeoutMs: number;
-  /// Plan §3 Step 10: SLA threshold (metric only). Components that
+  /// SLA threshold (metric only). Components that
   /// resolve above `slaMs` but below `queryTimeoutMs` are tallied as
   /// `slaCount.exceededSla` but allowed to complete; under or equal
   /// counts as `slaCount.withinSla`. CI compares
@@ -92,7 +91,7 @@ interface BackendInstance {
   dispose(): Promise<void> | void;
   isAvailable(): boolean;
   /**
-   * Tier 6 §8.2 / T9.4 — return the stderr text the worker emitted
+   * return the stderr text the worker emitted
    * between the query-send and query-end of the most recent
    * `query()` call (or null when no query has run yet). Used by
    * the runner to write a per-component sidecar log on failure.
@@ -151,7 +150,7 @@ type WorkerMessage =
   | WorkerErrorMessage
   | WorkerFatalMessage;
 
-// Step 10 / F9 SLA-vs-hard-timeout split (plan §3 Step 10):
+// SLA-vs-hard-timeout split:
 //   - DEFAULT_SLA_MS measures responsiveness (within-SLA / exceeded-SLA
 //     buckets). Components above this threshold are reported but not
 //     killed; the within-SLA count drives the CI regression gate.
@@ -205,7 +204,7 @@ function logProgress(
 }
 
 /**
- * T9.2 — detect unquoted CSV in `--scenarios=` / `--backends=` /
+ * detect unquoted CSV in `--scenarios=` / `--backends=` /
  * `--components=`. When the user runs (typically in a shell that
  * splits unquoted commas):
  *
@@ -281,7 +280,7 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
   };
   let expectedDirExplicit = false;
 
-  // T9.2 — detect unquoted CSV before the per-flag walk; the warning
+  // detect unquoted CSV before the per-flag walk; the warning
   // surfaces on stderr so it does not corrupt --json output, and the
   // walk still proceeds so the parser remains backward-compatible.
   const spillover = detectUnquotedCsvSpillover(argv);
@@ -354,9 +353,8 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
       continue;
     }
     if (arg.startsWith("--query-timeout-ms=")) {
-      // Plan §3 Step 10: --query-timeout-ms is deprecated. Aliases
-      // --hard-timeout-ms with a stderr deprecation warning. Removed
-      // one release after this lands per repo deprecation convention.
+      // --query-timeout-ms is deprecated. Aliases --hard-timeout-ms
+      // with a stderr deprecation warning.
       const value = parseNonNegativeInt(
         arg.slice("--query-timeout-ms=".length),
         "query-timeout-ms",
@@ -684,7 +682,7 @@ class WorkerBackendInstance implements BackendInstance {
       resolve: (value: MeasuredQueryResult) => void;
       reject: (reason?: unknown) => void;
       timer: NodeJS.Timeout | null;
-      // Tier 6 §8.2 / T9.4 — snapshot of `this.stderr.length` at
+      // snapshot of `this.stderr.length` at
       // query-send time. The slice from this index to the array's
       // end at query-completion captures the stderr emitted during
       // this query.
@@ -693,7 +691,7 @@ class WorkerBackendInstance implements BackendInstance {
   >();
   private nextRequestId = 1;
   private unavailableError: Error | null = null;
-  // Tier 6 §8.2 / T9.4 — stderr captured during the most recent
+  // stderr captured during the most recent
   // query, surfaced via `takeLastQueryStderr()`. Cleared on the
   // next query-send to keep the sidecar log per-component-precise.
   private lastQueryStderr: string | null = null;
@@ -774,7 +772,7 @@ class WorkerBackendInstance implements BackendInstance {
         clearTimeout(pending.timer);
       }
       this.pending.delete(message.requestId);
-      // Tier 6 §8.2 / T9.4 — capture per-query stderr (success path)
+      // capture per-query stderr (success path)
       // so callers that always want the sidecar log can read it.
       this.captureQueryStderr(pending.stderrChunkStart);
       pending.resolve(message.result);
@@ -790,7 +788,7 @@ class WorkerBackendInstance implements BackendInstance {
         clearTimeout(pending.timer);
       }
       this.pending.delete(message.requestId);
-      // Tier 6 §8.2 / T9.4 — capture per-query stderr on the error
+      // capture per-query stderr on the error
       // path before the rejection so the sidecar log captures the
       // exact window of worker output that produced the failure.
       this.captureQueryStderr(pending.stderrChunkStart);
@@ -950,7 +948,7 @@ function classifyFailure(error: unknown): MetaUiOutcomeBucket {
 }
 
 /**
- * Tier 6 §8.2 / T9.4 — write a per-component stderr sidecar log.
+ * write a per-component stderr sidecar log.
  *
  * Sidecar path: `<outputDir>/sidecar-logs/<relativePath>.stderr.log`
  * Directory structure mirrors the component's path so two
@@ -978,8 +976,8 @@ export function writeComponentStderrSidecar(
   mkdirSync(dirname(sidecarPath), { recursive: true });
   const header =
     reason.kind === "success"
-      ? `# Component: ${relativePath}\n# Outcome: ${reason.outcome} (latency=${reason.latencyMs.toFixed(2)}ms)\n# Generated: ${new Date().toISOString()}\n# Tier 6 §8.2 / T9.4 — per-component stderr sidecar\n\n`
-      : `# Component: ${relativePath}\n# Outcome: ${reason.outcome} (FAILED)\n# Error: ${reason.errorMessage}\n# Generated: ${new Date().toISOString()}\n# Tier 6 §8.2 / T9.4 — per-component stderr sidecar\n\n`;
+      ? `# Component: ${relativePath}\n# Outcome: ${reason.outcome} (latency=${reason.latencyMs.toFixed(2)}ms)\n# Generated: ${new Date().toISOString()}\n# per-component stderr sidecar\n\n`
+      : `# Component: ${relativePath}\n# Outcome: ${reason.outcome} (FAILED)\n# Error: ${reason.errorMessage}\n# Generated: ${new Date().toISOString()}\n# per-component stderr sidecar\n\n`;
   writeFileSync(sidecarPath, header + stderrText, "utf8");
   return sidecarPath;
 }
@@ -1127,7 +1125,7 @@ async function runSingleScenarioRepeat(
         outcome,
         error: error instanceof Error ? error.message : String(error),
       });
-      // Tier 6 §8.2 / T9.4 — write per-component stderr sidecar on
+      // write per-component stderr sidecar on
       // failure so the failure context (loader output, plugin
       // resolver noise, native panic line) survives the worker
       // process crash for offline diagnosis.
@@ -1272,7 +1270,7 @@ async function runRepoScenarioRepeat(
             outcome,
             error: error instanceof Error ? error.message : String(error),
           });
-          // Tier 6 §8.2 / T9.4 — sidecar write for the
+          // sidecar write for the
           // recovery-mode (post-crash) per-component path.
           writeComponentStderrSidecar(
             args.outputDir,
@@ -1330,7 +1328,7 @@ async function runRepoScenarioRepeat(
           outcome,
           error: error instanceof Error ? error.message : String(error),
         });
-        // Tier 6 §8.2 / T9.4 — sidecar write for the long-lived
+        // sidecar write for the long-lived
         // shared-instance steady-state path. The instance may
         // already be unavailable at this point; takeLastQueryStderr
         // still returns the captured window because stderr was

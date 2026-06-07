@@ -94,7 +94,7 @@ describe("parseMetaUiBenchArgs", () => {
   });
 });
 
-describe("Tier 6 §8.2 / T9.2 — detectUnquotedCsvSpillover", () => {
+describe("detectUnquotedCsvSpillover", () => {
   // Discriminator: when a user passes `--scenarios=single_cold
   // repo_first_pass` (unquoted, with whitespace) the shell splits
   // on whitespace and `repo_first_pass` arrives as a positional
@@ -608,7 +608,7 @@ describe("verter benchmark worker parity", () => {
   );
 });
 
-describe("Tier 6 §8.2 / T9.4 — bench_meta_ui_per_component_isolation", () => {
+describe("bench_meta_ui_per_component_isolation", () => {
   // The brief's named discriminating test
   // (`bench_meta_ui_per_component_isolation`). Two invariants:
   //   1. The benchmark worker pre-query stderr capture is per-query

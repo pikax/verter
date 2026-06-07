@@ -1,17 +1,16 @@
-//! Block 6.i Round 11 — Chain V discriminator (generic-bearing carrier
-//! per-prop publication).
+//! Chain V discriminator (generic-bearing carrier per-prop
+//! publication).
 //!
-//! Closes the residual Chain V leak that Round-10's Commit 2 did NOT
-//! close. The Round-10 Commit 2 fixture used a SIMPLE
+//! Closes a residual Chain V leak. A SIMPLE
 //! `defineProps<{ editorOptions: Partial<EditorOptions> }>()` shape:
 //! the per-prop publication path enters
 //! `reduce_field_type_expr_with_mode(... Navigate)` carrying a single
-//! Mapped TypeExpr for `Partial<EditorOptions>`. Commit 2's propagation
-//! of `publish_mode` into `materialize_component_meta_type_expr_until_stable`'s
+//! Mapped TypeExpr for `Partial<EditorOptions>`. Propagating
+//! `publish_mode` into `materialize_component_meta_type_expr_until_stable`'s
 //! mode parameter closes that fixture: the `dispatch.shallow_lower_type_expr(...
 //! Navigate)` + `dispatch.raise_and_reduce(_, Navigate)` legs both run
-//! under `Published(Navigate)` (the legacy `mode → Published(mode)` shell),
-//! which under the codex-hybrid demand axis IS reduction-permissive —
+//! under `Published(Navigate)` (the `mode → Published(mode)` shell),
+//! which under the hybrid demand axis IS reduction-permissive —
 //! `may_reduce_operator(Published(_)) == true` regardless of mode.
 //!
 //! But the corpus Editor (nuxt-ui-codex-bench `Editor.vue`) carries a
@@ -38,13 +37,11 @@
 //! true` for the Mapped's source, enumerating the source's keyspace and
 //! emitting one `ProjectMember` edge per `EditorOptions` member.
 //!
-//! Per codex 6th-consult Q1-V (BINDING):
+//! V needs a context-explicit TypeExpr materializer using
+//! `StructuralTransit(Navigate)` for carrier lowering and
+//! `Published(Navigate)` only at the terminal publication boundary.
 //!
-//! > V needs a context-explicit TypeExpr materializer using
-//! > `StructuralTransit(Navigate)` for carrier lowering and
-//! > `Published(Navigate)` only at the terminal publication boundary.
-//!
-//! Post-Round-11 Commit 2 the materialiser carrier-lowers under
+//! The materialiser carrier-lowers under
 //! `StructuralTransit(Navigate)` — `may_reduce_operator` evaluates
 //! `false` at every nested `Instantiate` / `KeyOf` / `MappedType`
 //! dispatch — and the published shape stays as a structural carrier
@@ -98,8 +95,8 @@ export interface EditorHandlersConfig {
 // through `<script setup generic>`. The per-prop publication path
 // iterates each inherited member name and enters
 // `reduce_field_type_expr_with_mode(... Navigate)` for the carrier-
-// substituted value. Pre-Round-11 the materialiser lowered the
-// carrier under `Published(Navigate)` and emitted per-member edges
+// substituted value. A materialiser that lowered the
+// carrier under `Published(Navigate)` would emit per-member edges
 // on the Mapped reduction.
 const EDITOR_VUE: &str = r#"<script lang="ts">
 import type { EditorOptions, ContentDescriptor, EditorHandlersConfig } from './editor_options';
@@ -143,7 +140,7 @@ fn chain_v_generic_carrier_does_not_leak_inherited_library_members_through_per_p
     // edges through the per-prop publication path on a generic-bearing
     // `Omit<Partial<Lib>, …>` carrier. These names live ONLY in
     // `EditorOptions`' body — never on `EditorProps`' declared own
-    // surface — so any `ProjectMember` edge naming them after Round 11
+    // surface — so any `ProjectMember` edge naming them
     // is a Chain-V Rule-5 leak from the carrier materialiser.
     const LEAK_MEMBERS: &[&str] = &[
         "editable",
@@ -155,7 +152,7 @@ fn chain_v_generic_carrier_does_not_leak_inherited_library_members_through_per_p
         "paste",
     ];
 
-    // Block 6.j R18 — scope leak counter to intermediate provenances.
+    // R18 — scope leak counter to intermediate provenances.
     // `MemberEdgeProvenance::PublishedField` is the producer-side
     // declaration of the user-visible surface and is OUT of the leak
     // domain: a `defineProps<EditorProps>()` publication legitimately
@@ -203,26 +200,23 @@ fn chain_v_generic_carrier_does_not_leak_inherited_library_members_through_per_p
 
     assert_eq!(
         total, 0,
-        "Block 6.i Round 11 Chain V — a generic-bearing \
+        "Chain V — a generic-bearing \
          `Omit<Partial<Lib>, ...>` carrier on the per-prop publication \
          path MUST NOT emit `ProjectMember` edges for the library's \
          inherited members. The TypeExpr materialiser must drive the \
-         lowering under `StructuralTransit(Navigate)` (per codex 6th-\
-         consult Q1-V) so `may_reduce_operator` evaluates `false` at \
+         lowering under `StructuralTransit(Navigate)` so \
+         `may_reduce_operator` evaluates `false` at \
          every nested `Instantiate` / `KeyOf` / `MappedType` dispatch — \
          the per-prop publication boundary observes the carrier shape \
          one-level shallow, never enumerating the source's keyspace. \
          Got: leak_edges={leak_edge_count} (names={leak_edge_names:?}), \
          projection_path_member_hits={leak_path_count}. \
-         Pre-Round-11 the materialiser at \
-         `meta_resolve/materialize/field_types.rs:62-225` ran \
+         A materialiser that ran \
          `dispatch.shallow_lower_type_expr(..., Navigate)` + \
          `dispatch.raise_and_reduce(_, Navigate)` under `Published(Navigate)` \
-         (the legacy `mode → published(mode)` shell), which is still \
+         (the `mode → published(mode)` shell) stays \
          reduction-permissive — `may_reduce_operator(Published(_)) == \
-         true`. Round-11 Commit 2 routes the carrier lowering through \
-         `StructuralTransit(Navigate)`. See \
-         `D:/tmp/round10-review-codex-out.txt` Q1-V (BINDING) and \
-         `D:/tmp/round11-implementer-brief.md` Commit 2 spec."
+         true`. The carrier lowering instead runs through \
+         `StructuralTransit(Navigate)`."
     );
 }

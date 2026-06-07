@@ -1,9 +1,8 @@
 //! Matrix slice: `ref_cycle` × `import_ref`.
 //!
 //! Discrimination: the BFS walks cross-file imports when the
-//! recursive alias is defined in a separate module. Block 1.H
-//! Track 1 wraps the BFS in `install_fact_tracer`; the counter
-//! advances.
+//! recursive alias is defined in a separate module. The BFS is
+//! wrapped in `install_fact_tracer`; the counter advances.
 
 use std::sync::Arc;
 

@@ -1,11 +1,11 @@
-//! Stage 10 — eviction policy discrimination tests.
+//! Eviction policy discrimination tests.
 //!
 //! Binds R22 (eviction is memory-bound, not correctness-bound) +
-//! the Stage 10 extension to `EvictionPolicyConfig` adding
+//! the `EvictionPolicyConfig` fields
 //! `per_canonical_content_hash_retention` (default 3) and
-//! `promote_threshold` (default 2). Each test FAILS pre-change
-//! against the Stage 0 substrate and PASSES post-change against
-//! the Stage 10 substrate — both fields ARE new in Stage 10.
+//! `promote_threshold` (default 2). Each test FAILS against a
+//! substrate lacking these fields and PASSES against the substrate
+//! that carries them.
 //!
 //! Hermeticity: in-process `FileArtifactStore` + synthetic
 //! `IndexedReady` payloads. No third-party fixture.
@@ -28,7 +28,7 @@ fn legacy_key(canonical: &str, content_hash_seed: u8) -> FileArtifactKey {
     FileArtifactKey::legacy_for_test(Arc::from(canonical), h)
 }
 
-/// Stage 10 discrimination: per-canonical retention caps the number
+/// Discrimination: per-canonical retention caps the number
 /// of distinct `content_hash` variants kept per canonical. With
 /// retention = 3, admitting 5 variants for the same canonical and
 /// running the retention sweep MUST leave exactly 3.
@@ -75,7 +75,7 @@ fn per_canonical_retention_evicts_oldest_variants_first() {
     );
 }
 
-/// Stage 10 discrimination: per-canonical retention with cap = 1
+/// Discrimination: per-canonical retention with cap = 1
 /// drops every variant except the highest-numbered one.
 #[test]
 fn per_canonical_retention_one_keeps_only_top_variant() {
@@ -102,7 +102,7 @@ fn per_canonical_retention_one_keeps_only_top_variant() {
     );
 }
 
-/// Stage 10 discrimination: `usize::MAX` retention disables the
+/// Discrimination: `usize::MAX` retention disables the
 /// per-canonical cap — every variant survives.
 #[test]
 fn per_canonical_retention_max_disables_cap() {
@@ -124,10 +124,10 @@ fn per_canonical_retention_max_disables_cap() {
     );
 }
 
-/// Stage 10 discrimination: promotion-aware LRU floor preserves hot
+/// Discrimination: promotion-aware LRU floor preserves hot
 /// entries (hit count >= promote_threshold) when only cold
-/// candidates are over the floor. Pre-Stage-10 the LRU was pure
-/// recency; the promotion split is new.
+/// candidates are over the floor. A pure-recency LRU would not
+/// preserve them; the promotion split does.
 #[test]
 fn promote_threshold_retains_hot_entries() {
     let store = FileArtifactStore::new();
@@ -209,7 +209,7 @@ fn promote_threshold_retains_hot_entries() {
     }
 }
 
-/// Stage 10 discrimination: with `promote_threshold = 0` (every
+/// Discrimination: with `promote_threshold = 0` (every
 /// entry is hot — promotion disabled), the floor falls back to
 /// pure recency. This characterises the legacy `evict_lru`
 /// behaviour and proves the new method subsumes it.
@@ -243,18 +243,18 @@ fn promote_threshold_zero_falls_back_to_pure_recency() {
     );
 }
 
-/// Stage 10 discrimination: `EvictionPolicyConfig::default()`
-/// exposes the new Stage 10 fields with documented defaults.
+/// Discrimination: `EvictionPolicyConfig::default()`
+/// exposes the retention fields with documented defaults.
 #[test]
 fn eviction_policy_config_defaults_carry_stage10_tunables() {
     let policy = EvictionPolicyConfig::default();
     assert_eq!(
         policy.per_canonical_content_hash_retention, 3,
-        "Stage 10 contract: default retention is 3"
+        "contract: default retention is 3"
     );
     assert_eq!(
         policy.promote_threshold, 2,
-        "Stage 10 contract: default promote threshold is 2"
+        "contract: default promote threshold is 2"
     );
     // Existing defaults remain.
     assert_eq!(policy.memory_pressure_threshold, usize::MAX);

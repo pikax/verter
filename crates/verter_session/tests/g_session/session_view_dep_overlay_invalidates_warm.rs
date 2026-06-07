@@ -2,9 +2,9 @@
 //! cache facts against the SESSION-OVERLAYED store view, not the base
 //! host's store view.
 //!
-//! Codex P1 (Block 6.B fix round 1): when a session overlays (or
-//! tombstones) a DEPENDENCY of an owner SFC while the owner's own
-//! whole-hash is UNCHANGED, the view-aware warm-hit path in
+//! When a session overlays (or tombstones) a DEPENDENCY of an owner
+//! SFC while the owner's own whole-hash is UNCHANGED, the view-aware
+//! warm-hit path in
 //! [`crate::host_manage::component_meta_entry::try_component_meta_cache_hit_with_view`]
 //! must NOT return the base-host's component-meta result. The cached
 //! candidate's `read_set_signature.facts` pin every cross-file dep
@@ -24,8 +24,8 @@
 //! per-canonical snapshots, the warm hit returns `None`, and the cold
 //! recompute under the session yields the OVERLAY analysis.
 //!
-//! This test fails at HEAD `863a4a25c` (returns the stale base prop
-//! type) and passes after the minimal restoration is in place.
+//! Without the session-view threading the warm hit returns the stale
+//! base prop type; with it the test passes.
 
 use std::sync::Arc;
 

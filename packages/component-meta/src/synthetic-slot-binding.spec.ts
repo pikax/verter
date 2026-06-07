@@ -1,5 +1,5 @@
 /**
- * R22-final S0 discriminating test: synthetic-carrier typed-IR cutover.
+ * Discriminating test: synthetic-carrier typed-IR.
  *
  * Asserts that a `SyntheticSlotBindingNode` produced in a `ComponentMetaPayload`
  * TypeGraph round-trips through:
@@ -13,12 +13,11 @@
  * matches the carrier's `bindingName`, the consumer pipelines MUST NOT
  * resolve the carrier through the registry (same-name poisoning risk).
  *
- * Pre-S0: the variant did not exist; the test fails because (a) the proto
+ * Without the variant the test fails because (a) the proto
  * field is unknown to the decoder OR (b) `TypeDescriptor` does not include
  * `kind: "syntheticSlotBinding"` so `nativeComponentMetaToComponentMeta`
  * cannot produce it OR (c) the compat / schema / bench paths fall through
  * to "ref" / "unknown".
- * Post-S0: all assertions pass.
  */
 
 import { describe, expect, it } from "vitest";
@@ -39,7 +38,7 @@ const CARRIER_BINDING_NAME = "FooSlotBinding";
 const CARRIER_VALUE_NODE = "0";
 const CARRIER_SLOT_NAME = "default";
 
-describe("synthetic slot binding carrier (R22-final S0)", () => {
+describe("synthetic slot binding carrier", () => {
   it("decodes the proto SyntheticSlotBindingNode and produces a SyntheticSlotBindingType descriptor", () => {
     const payload = encodeTestComponentMetaPayload({
       filePath: "/project/src/Card.vue",

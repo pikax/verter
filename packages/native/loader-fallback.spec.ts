@@ -238,7 +238,7 @@ describe("issue #90 — @verter/native optional-dependency fallback", () => {
         // (the test above) must throw under this pre-fix body. Removing the
         // identifiers or the assertion would gut the discrimination, not
         // tidy it. (This is a test fixture, not production source, so the
-        // no-phase-archaeology rule does not apply here.)
+        // final-state-prose rule does not apply here.)
         const preFixLoader = `
 const { existsSync } = require('fs');
 const { join } = require('path');

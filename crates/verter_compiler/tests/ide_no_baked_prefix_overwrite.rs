@@ -5,7 +5,7 @@
 //! user expression into ONE `out.overwrite(start, end, &format!("…{resolved}…"))`.
 //! The resulting `Chunk::Overwritten` maps its whole generated run back to the
 //! overwrite's source start — so the user identifier maps to a FOREIGN position
-//! (the prop start), and under Phase-1's strict mapper the identifier drops to
+//! (the prop start), and under the strict mapper the identifier drops to
 //! `None`. Either way the identifier is no longer navigable. Every navigable user
 //! expression MUST instead flow through the typed `EmitOp` substrate
 //! (`crates/verter_compiler/src/ide/template/emit.rs`): the user expression is
@@ -397,11 +397,10 @@ fn baked_prefix_scanner_detects_violation() {
         "scanner must detect the native v-model baked overwrite"
     );
 
-    // CRITICAL (FINDING 3): the v-on baked handler overwrites — object spread,
-    // dynamic event-name spread, and the duplicate-event spread — MUST now be
-    // DETECTED. The previous guard EXEMPTED these (a gate-bypass). Each is a
-    // navigable handler baked into a mapped overwrite → the desync bug.
-    // The exact pre-fix object-literal shape baked `rewritten`
+    // CRITICAL: the v-on baked handler overwrites — object spread,
+    // dynamic event-name spread, and the duplicate-event spread — MUST be
+    // DETECTED. Each is a navigable handler baked into a mapped overwrite →
+    // the desync bug. The object-literal shape bakes `rewritten`
     // (= `rewrite_v_on_object_literal_expr(&resolved)`) into the overwrite.
     let v_on_object = r#"out.overwrite(prop.start, prop_end, &format!("{{...{}}}", rewritten));"#;
     assert_eq!(
@@ -482,9 +481,8 @@ fn baked_prefix_scanner_detects_violation() {
 
 #[test]
 fn indirected_baked_overwrite_scanner_detects_violation() {
-    // Discriminating: the strengthened scanner must FIRE on the `let`-indirected
-    // baked overwrite (the FINDING-A guard hole) and must NOT fire on the clean
-    // typed-substrate emission.
+    // Discriminating: the scanner must FIRE on the `let`-indirected
+    // baked overwrite and must NOT fire on the clean typed-substrate emission.
 
     // 1. `let close = format!(… final_expr …); out.overwrite(.., .., &close);` —
     //    the exact pre-fix props.rs `guarded.is_some()` shape. `final_expr` is a
@@ -498,7 +496,7 @@ fn indirected_baked_overwrite_scanner_detects_violation() {
         indirected_baked_overwrites(let_format_final_expr).len(),
         1,
         "scanner MUST detect `let close = format!(.. final_expr ..); out.overwrite(.., &close)` — \
-         else the guard hole (FINDING A) stays open"
+         else the let-indirected guard hole stays open"
     );
 
     // 2. `let close = format!(… resolved …); out.overwrite(.., .., &close);` — the
@@ -515,7 +513,7 @@ fn indirected_baked_overwrite_scanner_detects_violation() {
 
     // 3. A var bound DIRECTLY to a resolver-output PRODUCER, then baked at a FOREIGN
     //    anchor: `let v = build_prefixed_expr(...); out.overwrite(arg_end, prop_end,
-    //    &v);`. Producer-bound taint is in scope (codex: the absence of `format!`
+    //    &v);`. Producer-bound taint is in scope (the absence of `format!`
     //    does not make it safe) → flagged.
     let let_producer_foreign = r#"
         let v = build_prefixed_expr(value_expr, vs, exp, resolver, &[]);
@@ -525,7 +523,7 @@ fn indirected_baked_overwrite_scanner_detects_violation() {
         indirected_baked_overwrites(let_producer_foreign).len(),
         1,
         "scanner MUST detect a producer-bound var baked into an overwrite \
-         (the future-pattern desync codex flagged)"
+         (the future-pattern desync)"
     );
 
     // 4. CLEAN: the migrated in-place substrate — boundary split + unmapped guard
@@ -546,13 +544,12 @@ fn indirected_baked_overwrite_scanner_detects_violation() {
     );
 
     // 5. A SELF-ANCHORED bake — `let v = build_prefixed_expr(value); out.overwrite(
-    //    node.start, node.end, &v)` — MUST now FIRE. There is no self-anchored
+    //    node.start, node.end, &v)` — MUST FIRE. There is no self-anchored
     //    exclusion: span shape does not prove the baked text is the node's own
     //    resolved form, and a mapped overwrite of resolver output ALWAYS maps its
-    //    whole run to the overwrite start (the desync). This is the Q2 guard
-    //    strengthening — the previously-exempted self-anchored shape is the very bug
-    //    class the broken-interpolation recovery (`SynthesizedResolved`) was migrated
-    //    off of.
+    //    whole run to the overwrite start (the desync). The self-anchored shape is
+    //    the very bug class the broken-interpolation recovery (`SynthesizedResolved`)
+    //    is emitted through the substrate to avoid.
     let self_anchored_bake = r#"
         let resolved = resolver.resolve_simple_expr(ident);
         out.overwrite(
@@ -565,7 +562,7 @@ fn indirected_baked_overwrite_scanner_detects_violation() {
         indirected_baked_overwrites(self_anchored_bake).len(),
         1,
         "scanner MUST detect a SELF-ANCHORED resolver-output bake (`out.overwrite(node.start, \
-         node.end, &resolved)`) — the self-anchored exclusion was REMOVED in Q2 because span \
+         node.end, &resolved)`) — there is no self-anchored exclusion because span \
          shape does not prove RHS provenance"
     );
 

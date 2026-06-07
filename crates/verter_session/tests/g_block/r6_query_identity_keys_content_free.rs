@@ -580,8 +580,8 @@ fn source_reintroduces_decl_key_struct(source: &str) -> bool {
 }
 
 /// Discrimination harness for [`source_reintroduces_decl_key_struct`]:
-/// every formatting evasion named in the U2B.9 review MUST be detected, and
-/// the near-miss identifiers / prose MUST be rejected. This is the
+/// every formatting evasion MUST be detected, and the near-miss
+/// identifiers / prose MUST be rejected. This is the
 /// characterizing test that proves the token-robust detector defeats the
 /// exact evasions a naive substring scan would miss.
 #[test]

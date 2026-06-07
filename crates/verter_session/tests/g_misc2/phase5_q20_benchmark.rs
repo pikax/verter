@@ -1,12 +1,10 @@
 //! Q20 benchmark tracking for the projector decomposition.
 //!
 //! Records the warm and cold latency of `getComponentMeta` for a
-//! representative ChatMessage-like fixture as a regression baseline,
-//! aligned to plan §7.0.3 (10 iterations, median).
+//! representative ChatMessage-like fixture as a regression baseline
+//! (10 iterations, median).
 //!
-//! The §7.0.3 deletion-gate (≤ 20% diff: DELETE; > 20% diff: KEEP)
-//! was applied retrospectively in §7.3 — the per-member rescue cache
-//! stays. The benchmark's ongoing role is regression detection: warm
+//! The benchmark's role is regression detection: warm
 //! median must remain dramatically faster than cold median (proves
 //! the cache fence is functioning), and absolute medians must stay
 //! within reasonable bounds (proves the projector path's dispatch
@@ -105,7 +103,7 @@ fn median_ns(samples: &mut [u128]) -> u128 {
 /// Q20 benchmark — 10 iterations, median cold + median warm.
 /// Asserts (a) warm median is dramatically faster than cold median
 /// (cache fence functions), (b) totals stay within 10s budget,
-/// (c) prop counts match across cold/warm passes. Plan §7.0.3.
+/// (c) prop counts match across cold/warm passes.
 #[test]
 fn phase5_q20_benchmark_recorded() {
     const ITERATIONS: usize = 10;

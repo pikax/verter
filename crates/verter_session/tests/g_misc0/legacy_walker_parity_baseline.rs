@@ -1,11 +1,9 @@
-//! Phase 7 (component-meta cold-path long-tail plan §9 / §11.5) —
 //! 16 parity baselines against the legacy walker family. Each
 //! fixture exercises one arm of the legacy walker's policy table;
-//! the assertions are the contract that the new session-layer
-//! materialiser must reproduce in Phase 9.
+//! the assertions are the contract that the session-layer
+//! materialiser reproduces.
 //!
-//! **Pre-Phase-9.** These baselines run against the LEGACY walker
-//! (`meta_resolve.rs:7669`) via the public `AuditedRequest` resolution
+//! These baselines run via the public `AuditedRequest` resolution
 //! surface. Each fixture is a Vue SFC with `defineProps<{ value: T
 //! }>()` for some T that exercises a distinct policy-table arm.
 //!
@@ -44,19 +42,18 @@ fn resolve_with_files(
     }
 }
 
-/// Baseline assertion: the legacy walker successfully produced a
-/// `ResolvedComponentMetaState` for the fixture. The walker's
-/// component-meta path runs on every fixture — pre-Phase-9 via the
-/// legacy walker, post-Phase-9 via the new materialiser. Both must
+/// Baseline assertion: resolution successfully produced a
+/// `ResolvedComponentMetaState` for the fixture. The
+/// component-meta path runs on every fixture and must
 /// produce equivalent resolutions.
 ///
 /// The presence of `resolved_macros` may be empty for hermetic
 /// builds when the macro is resolved through a different code path
 /// (e.g., script-setup defineProps directly populates the snapshot's
 /// macro list rather than `resolved_macros` until cross-file types
-/// resolve). We assert the resolution itself succeeded — Phase 9
-/// will tighten this if more granular structural assertions become
-/// possible without committing to the snapshot file structure.
+/// resolve). We assert the resolution itself succeeded; a future
+/// change may tighten this if more granular structural assertions
+/// become possible without committing to the snapshot file structure.
 fn assert_value_prop_resolved(resolution: &ResolvedComponentMetaState, fixture: &str) {
     // The snapshot must carry SOMETHING — at minimum at least one
     // analyzed macro (the `defineProps<{ value: T }>()` call site).
@@ -75,7 +72,7 @@ fn assert_value_prop_resolved(resolution: &ResolvedComponentMetaState, fixture: 
 }
 
 // =====================================================================
-// Plan §6.9 / H — structural per-fixture assertion machinery.
+// Structural per-fixture assertion machinery.
 //
 // `ParityAssertion { fixture, expected_value_kind: ResolvedValueKind }`
 // describes the contract that fixture N's `value` prop's TypeExpr must
@@ -689,7 +686,7 @@ fn fixture_16_typeof_value_ref_resolves_to_value_type() {
 }
 
 // =====================================================================
-// Plan §6.9 / H — DISCRIMINATION_EXEMPT pre-population machinery.
+// DISCRIMINATION_EXEMPT pre-population machinery.
 //
 // `collect_all_fixture_resolutions` materialises each of the 16
 // fixtures via the same `resolve_with_files` path the per-fixture
@@ -699,7 +696,7 @@ fn fixture_16_typeof_value_ref_resolves_to_value_type() {
 // and returns the symmetric pairs that came out equivalent.
 //
 // The output of `compute_pairwise_equivalences` populates
-// `DISCRIMINATION_EXEMPT`. Per plan §4.17 sub-task 1: halt-on-deviation
+// `DISCRIMINATION_EXEMPT`. Halt-on-deviation
 // if more than 3 exemption pairs OR a cluster of 3+ fixtures.
 // =====================================================================
 
@@ -827,7 +824,7 @@ fn compute_pairwise_equivalences() -> Vec<(usize, usize)> {
 /// TypeExprs). Computed once via `compute_pairwise_equivalences`
 /// and frozen here.
 ///
-/// Plan §4.17 sub-task 2: this list MUST be the exact output of
+/// This list MUST be the exact output of
 /// the pairwise pre-computation — not stub-empty. The discrimination
 /// guard test runs the pairwise loop AND asserts pair_count == 240
 /// (16×15), so empty/skipped exemption lists are mechanically
@@ -845,7 +842,7 @@ const DISCRIMINATION_EXEMPT: &[(usize, usize)] = &[
     // evaluated_types.
     (8, 15),
     (15, 8),
-    // Pair (13, 14) symmetric: post-§7.3 cutover fixtures 14
+    // Pair (13, 14) symmetric: fixtures 14
     // (`Partial<Foo>`) and 15 (`Required<Foo>`) both reduce to
     // `TypeExpr::Mapped`. The kind-only assertion cannot
     // discriminate two distinct mapped types that share the same
@@ -1087,7 +1084,7 @@ fn dump_fixture_resolutions() {
 
 #[test]
 fn discrimination_exempt_pairwise_count_within_budget() {
-    // Plan §4.17 sub-task 2: halt-on-deviation if > 3 unique pairs OR
+    // Halt-on-deviation if > 3 unique pairs OR
     // a cluster of 3+ fixtures shares an exemption.
     let exempt: std::collections::HashSet<(usize, usize)> =
         DISCRIMINATION_EXEMPT.iter().copied().collect();
@@ -1117,7 +1114,7 @@ fn discrimination_exempt_pairwise_count_within_budget() {
     assert!(
         unique_pair_count <= 3,
         "DISCRIMINATION_EXEMPT pair count must be ≤ 3 unique pairs (got {unique_pair_count}); \
-         halt-on-deviation per plan §4.17 sub-task 2"
+         halt-on-deviation"
     );
 
     // Cluster check: no fixture should appear in 3+ unique exempt pairs.
@@ -1132,20 +1129,20 @@ fn discrimination_exempt_pairwise_count_within_budget() {
         assert!(
             partners.len() < 3,
             "fixture {fixture} participates in {} unique exempt pairs; \
-             cluster-of-3 forbidden per plan §4.17 sub-task 2",
+             cluster-of-3 forbidden",
             partners.len()
         );
     }
 }
 
-/// Plan §6.9 sub-task 3 — discrimination guard test (rev-9 hardened).
+/// Discrimination guard test.
 ///
 /// Iterates all 16x15=240 cross-pairs of fixtures. For each pair (i, j)
 /// with i != j, verifies that fixture i's expected assertion FAILS on
 /// fixture j's resolution — unless (i, j) is in DISCRIMINATION_EXEMPT.
 ///
 /// pair_count tracking + eprintln + assert_eq!(pair_count, 240) is the
-/// rev-9 mechanical proof that the §4.17 sub-task 1 pairwise loop
+/// mechanical proof that the pairwise loop
 /// actually executed (not skipped or short-circuited).
 #[test]
 fn parity_assertions_discriminate_per_fixture() {
@@ -1204,13 +1201,13 @@ fn parity_assertions_discriminate_per_fixture() {
          (out of 16x15=240 expected pairs)"
     );
     // Pairwise-computation gate: if any short-circuit elides the iteration,
-    // pair_count != 240 and the assertion fails. This is the rev-9 mechanical
-    // proof that the §4.17 sub-task 1 pairwise loop actually executed.
+    // pair_count != 240 and the assertion fails. This is the mechanical
+    // proof that the pairwise loop actually executed.
     assert_eq!(pair_count, 240, "must evaluate all 16x15 cross-pairs");
 }
 
 // =====================================================================
-// 16 per-fixture parity tests (§6.9). Each test re-runs its fixture
+// 16 per-fixture parity tests. Each test re-runs its fixture
 // and runs the structured `ParityAssertion` from
 // `expected_assertions_per_fixture` against the resolution.
 //

@@ -1,4 +1,4 @@
-//! Slice 3.B test: sourcemap phase timing + sourcemap_bytes surface
+//! Sourcemap phase timing + sourcemap_bytes surface
 //! through `CompilePayload::{sourcemap_ms, sourcemap_bytes}` when the
 //! producer generates a sourcemap.
 //!

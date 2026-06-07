@@ -1,17 +1,17 @@
 //! `parse_stable_hash` invariance tests.
 //!
 //! `parse_stable_hash` is a structural hash over a file's post-shallow-analysis
-//! decl skeleton (R28 / Stage 1 fingerprint hashing rules). Invariants:
+//! decl skeleton (R28 fingerprint hashing rules). Invariants:
 //!
 //! - **Invariant under whitespace edits, comment edits, JSDoc edits, and
-//!   generic param identifier renames.** Stage 1's `parse_stable_hash`
+//!   generic param identifier renames.** `parse_stable_hash`
 //!   walks the shallow symbol inventory (names + kinds + member name lists)
 //!   without inspecting bodies, so cosmetic changes that don't shift the
 //!   inventory shape don't ripple.
 //! - **Changes under decl-shape edits.** Adding/removing/renaming a
 //!   declaration or member produces a new hash.
 //!
-//! Stage 1 builds `parse_stable_hash` from `IndexedReady.shallow_state`.
+//! `parse_stable_hash` is built from `IndexedReady.shallow_state`.
 //! These tests synthesise `ShallowFileState` directly (the same way
 //! `IndexedReady::new_for_test` does) so we can vary the inventory
 //! programmatically without invoking the full parser pipeline.

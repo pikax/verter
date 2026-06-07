@@ -2495,7 +2495,7 @@ mod w1_1_typed_form_regression {
 
 // ───────────────────────────────────────────────────────────────────────────
 // W2.5 — `build_expanded_type_expr` consumes the analyzer-populated
-// `AnalyzedPropField.type_expr` directly. The pre-cutover code parsed
+// `AnalyzedPropField.type_expr` directly, never parsing
 // `type_annotation` text via `parse_jsdoc_tag_type_payload`, which loses the
 // producer's typed precision and replaces complex shapes with whatever the
 // text parser reconstructs. The discriminator is to construct a synthetic

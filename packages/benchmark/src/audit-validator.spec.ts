@@ -1,5 +1,5 @@
 /**
- * Audit validator tests. Plan §3 Commit 10 / F8.
+ * Audit validator tests.
  *
  * Exercises every legacy-parity check in
  * [`audit-validator.ts`](./audit-validator.ts):
@@ -313,24 +313,24 @@ describe("audit_validator_covers_expected_footprint_snapshot_diff", () => {
 });
 
 describe("audit_validator_consumes_curated_specs_without_panicking", () => {
-  // Plan §3 Commit 10. Confirms every authored audit-spec file
+  // Confirms every authored audit-spec file
   // parses as valid JSON, has the required `component` identifier,
   // and (when run against an empty synthetic bundle) produces a
   // usable `ValidationResult` — i.e. the validator's match/branch
   // logic handles every field-combination the specs declare without
   // panicking or falling through a missing branch.
   //
-  // This is **NOT** the plan-originally-named
+  // This is **NOT** the
   // `audit_validator_validates_all_6_curated_corpus_representatives_green`
-  // contract (review finding F2). That contract — "the specs pass
+  // contract. That contract — "the specs pass
   // against LIVE audit bundles from a working native build" —
-  // requires a NAPI-wired runner and lives in the Commit 13 corpus
+  // requires a NAPI-wired runner and lives in the corpus
   // integration tests (`crates/verter_session/tests/component_meta_audit_corpus/`).
   // This test is narrower by design: it pins the validator's
   // match/branch coverage against empty synthetic bundles so a
   // regression in the validator itself surfaces before the corpus
   // run. The "green against live bundles" assertion is delegated
-  // to the corpus suite; see review F2 for the full rationale.
+  // to the corpus suite.
   const specDir = resolve(import.meta.dirname, "../audit-specs/component-meta");
   const expectedSpecFiles = [
     "Accordion.json",
@@ -341,7 +341,7 @@ describe("audit_validator_consumes_curated_specs_without_panicking", () => {
     "AvatarGroup.json",
   ];
 
-  it("has 6 spec files named after Commit 7 corpus representatives", () => {
+  it("has 6 spec files named after corpus representatives", () => {
     const entries = readdirSync(specDir)
       .filter((n) => n.endsWith(".json"))
       .sort();
@@ -371,7 +371,7 @@ describe("audit_validator_consumes_curated_specs_without_panicking", () => {
 });
 
 describe("legacy_regex_validator_and_specs_deleted", () => {
-  // Plan §3 Commit 10 clean-cut: the regex validator and its
+  // The regex validator and its
   // pinned specs are retired. Grep-based deletion guard.
   const benchmark = resolve(import.meta.dirname, "..");
 
@@ -589,7 +589,7 @@ describe("audit_validator_rule5_compliance_path_segments_count_as_legitimate", (
     // `intermediate.deeper.root`. By edge kind, every Member segment
     // is a structural intermediate — collected with the
     // `"ProjectPath"` sentinel provenance (NOT `null`, which would
-    // re-introduce the round-17 false-negative class).
+    // re-introduce the false-negative class).
     bundle.record.footprint!.derivation_subgraph.edges = [
       projectPathEdge(1, 100, ["intermediate", "deeper", "root"]),
     ] as never;
@@ -603,12 +603,12 @@ describe("audit_validator_rule5_compliance_path_segments_count_as_legitimate", (
 });
 
 describe("audit_validator_rule5_compliance_published_field_not_masked_by_fp_projections", () => {
-  it("FAILS when a PublishedField edge names an off-surface member even if fp.projections lifts the same name (round-17 codex bug)", () => {
-    // Reproducer for the round-17 codex BINDING finding:
+  it("FAILS when a PublishedField edge names an off-surface member even if fp.projections lifts the same name", () => {
+    // Reproducer for the BINDING finding:
     //
     //   `mine_footprint` lifts every `ProjectMember` edge into
     //   `fp.projections` (member-name only, no provenance).
-    //   The pre-round-17 validator iterated `fp.projections` and
+    //   The legacy validator iterated `fp.projections` and
     //   inserted `(name, provenance: null)` rows that auto-classified
     //   as "legitimate intermediate" — masking the offending
     //   `PublishedField` edge that named the same off-surface name.
@@ -621,7 +621,7 @@ describe("audit_validator_rule5_compliance_published_field_not_masked_by_fp_proj
     //   2. An `fp.projections` record also naming `phantom` (the
     //      lift that used to auto-legitimize via null provenance).
     //
-    // POST round-17 fix: `collectAuditMemberEdges` ignores
+    // The fix: `collectAuditMemberEdges` ignores
     // `fp.projections` entirely (every audit-name comes from a
     // typed edge in `derivation_subgraph.edges`), and the validator
     // checks each edge structurally without cross-edge masking.
@@ -647,10 +647,10 @@ describe("audit_validator_rule5_compliance_published_field_not_masked_by_fp_proj
 });
 
 describe("audit_validator_rule5_compliance_published_field_not_masked_by_cross_edge", () => {
-  it("FAILS when a PublishedField edge names an off-surface member even if another edge legitimizes the same name (round-17 Claude caveat)", () => {
-    // Reproducer for the round-17 Claude live-code caveat:
+  it("FAILS when a PublishedField edge names an off-surface member even if another edge legitimizes the same name", () => {
+    // Reproducer for the live-code caveat:
     //
-    //   The pre-round-17 validator aggregated a
+    //   The legacy validator aggregated a
     //   `legitimateIntermediateNames` set across ALL edges — if
     //   ANY edge with allowlisted provenance named a member, every
     //   non-allowlisted edge for the same member was masked.
@@ -660,7 +660,7 @@ describe("audit_validator_rule5_compliance_published_field_not_masked_by_cross_e
     //   edge (e.g. a member walked via both a Pick-equivalent
     //   structural walk and a direct `PublishedField` emit).
     //
-    // POST round-17 fix: the validator's check is per-edge
+    // The fix: the validator's check is per-edge
     // structural — `PublishedField` MUST name a published-surface
     // field regardless of what any other edge says about the same
     // name. Cross-edge masking is removed.

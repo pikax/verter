@@ -13,11 +13,10 @@
 //! 3. The canonical id from the tool argument round-trips into
 //!    the record envelope.
 //!
-//! Discrimination: pre-Slice-3.F there was no `audit_mcp_tool_call`
-//! method on `VerterHost` and the MCP handler did not emit an audit
-//! record; the host store therefore had no record for this call to
-//! retrieve. Post-Slice-3.F the handler routes through the wrapper
-//! and the host store gains a record per call.
+//! Discrimination: the MCP handler routes through
+//! `host.audit_mcp_tool_call(...)`, so the host store gains a record
+//! per call. Without that wrapper the host store would hold no record
+//! for this call to retrieve.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -90,9 +89,8 @@ async fn analyze_file_tool_emits_mcp_audit_record_with_populated_payload() {
 
     // Drain the host's audit-records store and confirm at least one
     // `RequestKind::Mcp { tool: \"analyze_file\" }` record landed.
-    // The post-change tree records exactly one MCP record per tool
-    // invocation; the pre-change tree records zero (no
-    // audit_mcp_tool_call wrapper to feed the records store).
+    // The handler records exactly one MCP record per tool invocation
+    // via the `audit_mcp_tool_call` wrapper that feeds the records store.
     let host = &server.host;
     let mut found_analyze_file_record = None;
     // Scan a small window of request ids — the integration-level

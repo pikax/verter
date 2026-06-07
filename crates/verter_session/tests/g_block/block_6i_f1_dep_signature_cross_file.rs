@@ -1,19 +1,17 @@
-//! Block 6.i F1 — characterisation test for the cross-file dep-
-//! signature threading invariant.
+//! Characterisation test for the cross-file dep-signature threading
+//! invariant.
 //!
 //! Discrimination property:
 //!
-//! After Block 6.i Commit B, `member_shape_peek_or_compute` admits a
-//! `ShapeCacheEntry` via every gate-shortcut path (package-backed,
-//! cycle, non-reducible) with `dep_signature: Arc::from(Vec::new())`.
-//! That entry self-roots ONLY on the scope file's `whole_hash` — a
+//! Each admit must thread the gate-observed dep facts (the cycle BFS
+//! fence and the package-backed declaration scope) so the cache
+//! entry's `fact_dep_signature` invalidates on cross-file edits. The
+//! failure mode this guards against: `member_shape_peek_or_compute`
+//! admits a `ShapeCacheEntry` via a gate-shortcut path (package-backed,
+//! cycle, non-reducible) with `dep_signature: Arc::from(Vec::new())`,
+//! which self-roots ONLY on the scope file's `whole_hash` — a
 //! content edit to the IMPORTED helper file that the gates touched
 //! during compute does NOT invalidate the cache entry.
-//!
-//! F1 threads the gate-observed dep facts (the cycle BFS fence and
-//! the package-backed declaration scope) into each admit so the
-//! cache entry's `fact_dep_signature` invalidates on cross-file
-//! edits.
 //!
 //! Setup: an owner component references an imported type. The type
 //! resolution path goes through the projector's shallow gates and
@@ -22,11 +20,11 @@
 //! reports a miss (driven by `fact_dep_signature` invalidation) —
 //! NOT a stale warm hit.
 //!
-//! Without F1, this test FAILS: the empty dep_signature self-roots
-//! the entry on owner.vue only, and the helper-file edit does not
-//! invalidate. With F1, the admit's dep_signature carries the
-//! helper file's whole_hash, and the helper edit triggers fact-
-//! validation failure on the next warm-read.
+//! Without the cross-file dep threading, this test FAILS: the empty
+//! dep_signature self-roots the entry on owner.vue only, and the
+//! helper-file edit does not invalidate. With it, the admit's
+//! dep_signature carries the helper file's whole_hash, and the
+//! helper edit triggers fact-validation failure on the next warm-read.
 
 #![cfg(test)]
 
@@ -79,7 +77,7 @@ fn admit_threads_cross_file_dep_signature_for_imported_helper() {
     .expect("Owner.vue upsert");
 
     // Prime — cold compute publishes the shape and admits to the
-    // shape cache. F1: the admit's `fact_dep_signature` includes the
+    // shape cache. The admit's `fact_dep_signature` includes the
     // helper file's whole_hash.
     let prime = mh.host().get_component_meta("/src/Owner.vue");
     assert!(prime.is_some(), "prime call must resolve");
@@ -92,17 +90,17 @@ fn admit_threads_cross_file_dep_signature_for_imported_helper() {
     let warm_hits_after = prov.component_meta_result_cache_hits.load(Relaxed);
     assert!(
         warm_hits_after > warm_hits_before,
-        "F1 sanity: warm path must hit before the helper edit \
+        "sanity: warm path must hit before the helper edit \
          (hits {warm_hits_before} -> {warm_hits_after})"
     );
 
     let misses_before = prov.component_meta_result_cache_misses.load(Relaxed);
 
     // Now EDIT the helper file: change `Pick<Big, 'a'>` to
-    // `Pick<Big, 'b'>`. Owner.vue is NOT touched. Without F1, the
-    // shape cache entry self-roots only on Owner.vue and survives
-    // this edit silently — the next call would publish the STALE
-    // 'a'-keyed shape. With F1, the entry's fact_dep_signature
+    // `Pick<Big, 'b'>`. Owner.vue is NOT touched. Without cross-file
+    // dep threading, the shape cache entry self-roots only on Owner.vue
+    // and survives this edit silently — the next call would publish the
+    // STALE 'a'-keyed shape. With it, the entry's fact_dep_signature
     // carries helper.ts's whole_hash; the edit invalidates.
     let req = UpsertRequest {
         canonical_id: Some("/src/helper.ts".to_string()),
@@ -130,7 +128,7 @@ fn admit_threads_cross_file_dep_signature_for_imported_helper() {
 
     assert!(
         misses_after > misses_before,
-        "F1: after a helper-file edit the owner's warm hit MUST miss \
+        "after a helper-file edit the owner's warm hit MUST miss \
          via fact-validation (misses_before={misses_before} \
          misses_after={misses_after})"
     );
@@ -141,12 +139,12 @@ fn admit_threads_cross_file_dep_signature_for_imported_helper() {
     let prop_names: Vec<String> = meta.props.iter().map(|p| p.name.clone()).collect();
     assert!(
         prop_names.contains(&"b".to_string()),
-        "F1: post-edit published surface must reflect helper's new \
+        "post-edit published surface must reflect helper's new \
          Pick<Big, 'b'> — actual prop names: {prop_names:?}"
     );
     assert!(
         !prop_names.contains(&"a".to_string()),
-        "F1: post-edit published surface must NOT carry the stale \
+        "post-edit published surface must NOT carry the stale \
          'a' prop — actual prop names: {prop_names:?}"
     );
 }

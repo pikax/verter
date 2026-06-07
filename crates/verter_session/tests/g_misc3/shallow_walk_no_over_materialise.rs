@@ -1,5 +1,5 @@
-//! Block 1.9 — budget oracle #3: shallow walks must not over-
-//! materialise unrelated members.
+//! Budget oracle: shallow walks must not over-materialise unrelated
+//! members.
 //!
 //! Drives a `defineProps<Pick<Foo, 'bar'>>` consumer. After the cold
 //! resolver runs, asserts the published prop surface contains EXACTLY

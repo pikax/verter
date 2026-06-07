@@ -1,12 +1,9 @@
-//! Block 1.H RED test — when `install_fact_tracer` observes more
-//! than `FACT_SIGNATURE_CAP` (1024) distinct facts, the producer
-//! refuses to admit the entry to cache.
+//! When `install_fact_tracer` observes more than
+//! `FACT_SIGNATURE_CAP` (1024) distinct facts, the producer refuses
+//! to admit the entry to cache.
 //!
-//! Pre-Block-1.H the Family B/C/D caches had no
-//! `install_fact_tracer` wrapping. Overflow at the tracer
-//! boundary was unobservable. Post-Block-1.H the producer
-//! advances the `<cache>_overflow_refusals` counter and refuses
-//! cache admission so the next request cold-recomputes.
+//! The producer advances the `<cache>_overflow_refusals` counter and
+//! refuses cache admission so the next request cold-recomputes.
 //!
 //! Discrimination: overflowing the tracer inside an outer scope
 //! that exceeds the cap advances the per-host `signature_overflow_at_install` counter

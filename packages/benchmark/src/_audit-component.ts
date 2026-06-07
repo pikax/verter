@@ -1,5 +1,5 @@
 /**
- * Audit-emitting per-component worker. Plan §3 Commit 10 (F8).
+ * Audit-emitting per-component worker.
  *
  * Spawned per-component by `corpus-trace-runner.ts` (and orchestrated
  * by `scripts/benchmark/trace-component-corpus.mjs`). Drives the NAPI
@@ -35,14 +35,13 @@
  *   the legacy normalized-artifact path used by the meta-ui benches.
  *   When set, the worker also writes the normalized artifact via
  *   `normalizeComponentMetaArtifact`.
- * - `VERTER_COMPONENT_META_FOCUSED_JSONL_PATH` (optional, Phase C) —
+ * - `VERTER_COMPONENT_META_FOCUSED_JSONL_PATH` (optional) —
  *   path to a JSONL file where the worker APPENDS one line carrying
  *   the focused-counter slice for the audited component. The line is
  *   a self-contained JSON object: `{ component, queryMs, counters }`
- *   where `counters` is the Phase C slice (semantic-query, substitute,
+ *   where `counters` is the focused slice (semantic-query, substitute,
  *   build_typeof, prepared_decl_bundle, cache_outcomes, truncation).
- *   This is the bench-side telemetry surface for Phase C investigation
- *   — see `D:/tmp/phase-d-implementer-brief.md` for the analysis flow.
+ *   This is the bench-side telemetry surface for focused investigation.
  *
  * Stdout contract: writes a single `Done in <ms>ms ...` line on
  * success and a `Closed` line on shutdown so
@@ -241,13 +240,13 @@ if (legacyResultPath) {
   writeNormalizedComponentMetaArtifact(legacyResultPath, artifact);
 }
 
-// Phase C telemetry — when the focused-JSONL path is configured, emit
-// a self-contained one-line JSON slice with the Phase C focused
+// Focused telemetry — when the focused-JSONL path is configured, emit
+// a self-contained one-line JSON slice with the focused
 // counter set: semantic-query cold/warm per kind, substitute
 // telemetry, build_typeof telemetry, prepared-decl-bundle per-rejection
 // counters, cache_outcomes, truncation_counters. The shape is
 // intentionally small (~5-10 KB per component) so a corpus run does
-// not OOM the harness like Phase A's 8.4 GB per-component audit JSON.
+// not OOM the harness like the full per-component audit JSON.
 const focusedJsonlPath = process.env.VERTER_COMPONENT_META_FOCUSED_JSONL_PATH;
 if (focusedJsonlPath) {
   type RustAuditRecord = {
@@ -283,7 +282,7 @@ if (focusedJsonlPath) {
     componentRel: componentRelForJsonl,
     queryMs,
     propsCount: (bundle.analysis as { props?: unknown[] } | null)?.props?.length ?? 0,
-    // Phase C focused counter slice — ALL fields keyed to the Rust
+    // Focused counter slice — ALL fields keyed to the Rust
     // `ResolverHotPathCounters` (snake_case from serde) so the JSONL
     // line is stable across regens.
     counters: {
@@ -303,16 +302,16 @@ if (focusedJsonlPath) {
       semantic_query_keyof_warm: rhp.semantic_query_keyof_warm ?? 0,
       semantic_query_project_path_cold: rhp.semantic_query_project_path_cold ?? 0,
       semantic_query_project_path_warm: rhp.semantic_query_project_path_warm ?? 0,
-      // Substitute telemetry (codex-prescribed sites).
+      // Substitute telemetry.
       substitute_top_level_calls: rhp.substitute_top_level_calls ?? 0,
       substitute_memo_hits: rhp.substitute_memo_hits ?? 0,
       substitute_typeof_opaque: rhp.substitute_typeof_opaque ?? 0,
       substitute_conditional_descend: rhp.substitute_conditional_descend ?? 0,
       substitute_mapped_type_descend: rhp.substitute_mapped_type_descend ?? 0,
-      // build_typeof telemetry (gemini's HIGH-confidence direction).
+      // build_typeof telemetry.
       build_typeof_calls: rhp.build_typeof_calls ?? 0,
       build_typeof_prepared_value_misses: rhp.build_typeof_prepared_value_misses ?? 0,
-      // Phase G focused mapped-member materialization counters.
+      // Focused mapped-member materialization counters.
       mapped_member_plain_unique: rhp.mapped_member_plain_unique ?? 0,
       mapped_member_plain_repeated: rhp.mapped_member_plain_repeated ?? 0,
       mapped_member_selected_key_unique: rhp.mapped_member_selected_key_unique ?? 0,
@@ -323,13 +322,13 @@ if (focusedJsonlPath) {
         rhp.prepared_decl_bundle_callsite_build_instantiate ?? 0,
       prepared_decl_bundle_callsite_other: rhp.prepared_decl_bundle_callsite_other ?? 0,
       mapped_binder_ordinal_collision: rhp.mapped_binder_ordinal_collision ?? 0,
-      // Phase H focused recursive-substitution counters.
+      // Focused recursive-substitution counters.
       recursive_substitute_unique: rhp.recursive_substitute_unique ?? 0,
       recursive_substitute_repeated: rhp.recursive_substitute_repeated ?? 0,
       substitute_mapped_rebuild: rhp.substitute_mapped_rebuild ?? 0,
       substitute_conditional_rebuild: rhp.substitute_conditional_rebuild ?? 0,
       recursive_substitute_memo_hits: rhp.recursive_substitute_memo_hits ?? 0,
-      // Prepared-decl-bundle per-rejection (Phase A + Phase B counter set).
+      // Prepared-decl-bundle per-rejection counter set.
       prepared_decl_bundle_cold: rhp.prepared_decl_bundle_cold ?? 0,
       prepared_decl_bundle_warm: rhp.prepared_decl_bundle_warm ?? 0,
       prepared_decl_bundle_reject_entry_missing: rhp.prepared_decl_bundle_reject_entry_missing ?? 0,

@@ -1,4 +1,4 @@
-//! Wave 3 Slice 3.E — `VERTER_LSP_AUDIT_TRACE_OUT` integration test.
+//! `VERTER_LSP_AUDIT_TRACE_OUT` integration test.
 //!
 //! Mirrors the existing `VERTER_COMPONENT_META_AUDIT_JSON_OUT`
 //! drainer: when the env var is set, every finalised LSP audit
@@ -52,7 +52,7 @@ async fn audited_lsp_run_appends_jsonline_to_trace_out_when_env_var_set() {
     let contents = std::fs::read_to_string(&path).expect("trace-out file must exist");
     assert!(
         !contents.trim().is_empty(),
-        "trace-out file must contain at least one line; pre-change tree never wrote anything"
+        "trace-out file must contain at least one line"
     );
     let line = contents
         .lines()

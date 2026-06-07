@@ -1,8 +1,8 @@
-//! Phase-1 e2e — drives every Phase-1 audit helper through a fake
-//! `RequestContext` and asserts the new counters and structured event
-//! variants land in the audit record / accumulator. Plan §3.7.
+//! End-to-end test that drives every audit helper through a fake
+//! `RequestContext` and asserts the counters and structured event
+//! variants land in the audit record / accumulator.
 //!
-//! This test does NOT exercise the materialiser (Phase 8); it validates
+//! This test does NOT exercise the materialiser; it validates
 //! the audit envelope only. Each helper is invoked with a context
 //! installed (so the counter increments fire) and without a context
 //! (so the no-op fast path is exercised).
@@ -145,9 +145,8 @@ fn phase1_cache_outcome_kind_tainted_serializes_round_trip() {
 
 #[test]
 fn phase1_pub_mirror_enums_have_expected_variants() {
-    // Plan §3.4 — `MaterializationScopeAudit` and
-    // `ProjectionModeAudit` are PUB (not pub(crate)) so this
-    // integration test can construct them.
+    // `MaterializationScopeAudit` and `ProjectionModeAudit` are PUB
+    // (not pub(crate)) so this integration test can construct them.
     let scopes = [
         MaterializationScopeAudit::TopLevel,
         MaterializationScopeAudit::Nested,

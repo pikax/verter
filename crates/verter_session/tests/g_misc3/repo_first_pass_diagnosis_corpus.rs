@@ -1,6 +1,6 @@
-//! Phase 11b — corpus-driven `repo_first_pass` diagnosis benchmark.
+//! Corpus-driven `repo_first_pass` diagnosis benchmark.
 //!
-//! This test exercises the four §10.4 overlay-isolation scenarios on
+//! This test exercises the four overlay-isolation scenarios on
 //! the live `.integration-tests/repos/nuxt-ui-codex-bench` corpus and
 //! emits the captured per-counter deltas as JSON to stdout. The vitest
 //! at `packages/benchmark/src/repo-first-pass.spec.ts` invokes this
@@ -32,25 +32,20 @@ use verter_workspace::{
     ProjectRank, VfsProjectConfig, WorkspaceAccess,
 };
 
-/// §4.2 component list — the 12 components Phase 11b's diagnosis
-/// curve is captured against. Late-slow components (`Table.vue`,
+/// Full component list — the 12 components the diagnosis curve is
+/// captured against. Late-slow components (`Table.vue`,
 /// `SelectMenu.vue`, `InputMenu.vue`) sit deliberately at the end so
 /// scenario (iii) "target after prior" exercises the warmest possible
 /// state on the components most implicated in the regression.
 ///
-/// **Deviation note (§17.7):** the initial sub-agent attempt
-/// captured the full 12 × 4 grid in a single `cargo test` invocation
-/// and triggered a process abort (likely a stack overflow on one of
-/// the late-slow components) after ~19 minutes of wall-clock work.
-/// The sub-agent reduced the production list to a `DEFAULT_BUDGET`
-/// component subset that completes reliably; the full grid runs by
-/// passing `VERTER_PHASE_11B_FULL_LIST=1` for the orchestrator's
-/// dedicated benchmark machine. The deviation is recorded in the
-/// Phase 11b diagnosis report
-/// (`docs/arch/debt-closure/11d-repo-first-pass-diagnosis.md`); the
-/// reduced subset retains both the §4.2 ChatMessage early-failure
-/// component AND a late-slow witness so the cost curves still
-/// inform Phase 11d's fix selection.
+/// Capturing the full 12 × 4 grid in a single `cargo test` invocation
+/// can trigger a process abort (a stack overflow on one of the
+/// late-slow components) after long wall-clock work, so the default
+/// list is a reduced subset that completes reliably; the full grid
+/// runs by passing `VERTER_PHASE_11B_FULL_LIST=1` on a dedicated
+/// benchmark machine. The reduced subset retains both the ChatMessage
+/// early-failure component AND a late-slow witness so the cost curves
+/// still inform fix selection.
 const FULL_COMPONENTS: &[&str] = &[
     "ChatMessage.vue",
     "ChatMessages.vue",
@@ -67,7 +62,7 @@ const FULL_COMPONENTS: &[&str] = &[
 ];
 
 /// Default reduced subset that completes within the spec's 30-min
-/// vitest timeout on the 2026-05 reference development hardware.
+/// vitest timeout on reference development hardware.
 /// Includes one early-cold (`Avatar`) + one canonical regression
 /// witness (`Button`) + one late-slow witness (`Modal`). The full
 /// 12-component list is gated behind `VERTER_PHASE_11B_FULL_LIST=1`.
@@ -325,12 +320,11 @@ fn run_after_prior_clear_caches(
 
 #[test]
 fn repo_first_pass_diagnosis_corpus_emits_json() {
-    // Phase 11b deviation: spawn the corpus benchmark on an 8 MB
-    // stack so deep cooperative-admission recursion (the regression
-    // under diagnosis) does not abort with `STATUS_STACK_OVERFLOW`
-    // mid-capture. The default test thread stack is 2 MB on Windows,
-    // which is insufficient for some §4.2 components on the
-    // cold-path resolver.
+    // Spawn the corpus benchmark on a large stack so deep
+    // cooperative-admission recursion (the regression under diagnosis)
+    // does not abort with `STATUS_STACK_OVERFLOW` mid-capture. The
+    // default test thread stack is 2 MB on Windows, which is
+    // insufficient for some components on the cold-path resolver.
     let result = std::thread::Builder::new()
         .name("repo_first_pass_diagnosis".to_string())
         .stack_size(16 * 1024 * 1024)

@@ -9,9 +9,7 @@
 //! of each helper guarantee a silent omission fails this test.
 //!
 //! The test depends on `crate::typeinfo::graph::*` (re-exports of the
-//! prost-generated wire types in `crate::verter::v1`); against the
-//! pre-substrate tree those types do not exist and the file fails to
-//! compile, which is the FAIL-pre arm of the discriminator.
+//! prost-generated wire types in `crate::verter::v1`).
 
 use prost::Message;
 
@@ -261,8 +259,8 @@ fn closed_taxonomies_have_the_documented_cardinalities() {
     ];
     assert_eq!(primitives.len(), 12);
 
-    // Exactness: 9 statuses (matches the audit payload counters in
-    // commit 3 — drift between them is a discriminating failure).
+    // Exactness: 9 statuses (matches the audit payload counters —
+    // drift between them is a discriminating failure).
     let exactness: &[g::Exactness] = &[
         g::Exactness::ExactResolved,
         g::Exactness::ExactSymbolic,

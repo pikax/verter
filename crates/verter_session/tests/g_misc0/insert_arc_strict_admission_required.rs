@@ -5,7 +5,7 @@
 //! ## Why
 //!
 //! `ValidatedFactCache::insert_arc_with_kind(key, value, facts, kind)`
-//! is the strict admission path defined by the Block 0 substrate.
+//! is the strict admission path.
 //! It enforces R20 fact-completeness: an empty `facts` vector causes
 //! admission to be refused (the cache entry is not recorded, the
 //! `admission_refused_count()` counter advances, and a
@@ -15,7 +15,7 @@
 //! `signature_overflow_count()` path.
 //!
 //! The loose `insert_arc` and `insert` (which falls through to
-//! `insert_arc`) paths bypass this gate. Block 0 documents that
+//! `insert_arc`) paths bypass this gate.
 //! `insert_arc` is reserved for "stable-miss producers" — a small
 //! number of legacy call sites where an empty-signature admission is
 //! variant-gated or non-empty-signature-gated at the call site
@@ -39,14 +39,11 @@
 //!
 //! ## Allow-list
 //!
-//! Seven pre-existing call sites in production source legitimately
+//! Seven call sites in production source legitimately
 //! use the loose `<receiver>.insert(...)` / `<receiver>.insert_arc(...)`
 //! admission path. Three categories — call-site-gated, helper
-//! method, and wrapper method — are all documented in the Block
-//! 1.7 audit at
-//! `D:/tmp/block1.7-facts-irrelevant-eligibility.md`. Adding a new
-//! call site here requires extending the allow-list AND extending
-//! the audit doc.
+//! method, and wrapper method — are documented below. Adding a new
+//! call site here requires extending the allow-list.
 //!
 //! ### Category A: call-site-gated cold paths (variant or fact-presence)
 //!
@@ -55,8 +52,7 @@
 //!   admits only when `!result.facts.is_empty()` OR the value is
 //!   one of the inherently-constant variants
 //!   (`IntrinsicSurface(_)` / `ConsumedBindings(_)`) — the latter is
-//!   the canonical `is_facts_irrelevant: true` candidate identified
-//!   by the Block 1.7 audit.
+//!   the canonical `is_facts_irrelevant: true` candidate.
 //! - `FallthroughResolverState::resolve_node` in
 //!   `resolver_core/fallthrough_resolver.rs`. The singleflight cold
 //!   body applies the same variant-or-facts gate via a local
@@ -616,7 +612,7 @@ fn fact_validated_caches_use_strict_admission_in_production_source() {
                 errors.push(format!(
                     "loose-admission count drift in `{key_suffix}::{fn_name}`: expected \
                      {expected_count}, observed {observed_count}. If this is intentional, \
-                     update `EXPECTED_LOOSE_ADMISSION_COUNTS` AND the Block 1.7 audit doc."
+                     update `EXPECTED_LOOSE_ADMISSION_COUNTS`."
                 ));
             }
             None => {

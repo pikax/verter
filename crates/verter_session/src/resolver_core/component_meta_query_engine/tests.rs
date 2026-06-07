@@ -1841,9 +1841,9 @@ type Wrapper<T> = { value: T; label: string }
         shape.properties.iter().all(|property| property.optional),
         "Partial<...> must mark every member optional",
     );
-    // Substitution coverage: the cutover's core guarantee is that dispatch
-    // SUBSTITUTES the generic arg (it is the replacement for the deleted
-    // `substitute_type_expr`). Assert the concrete member TYPES, not just
+    // Substitution coverage: dispatch's core guarantee is that it
+    // SUBSTITUTES the generic arg (it is the sole substitution path —
+    // there is no `substitute_type_expr`). Assert the concrete member TYPES, not just
     // names: a regression returning `{ value: T; label: string }` (no
     // substitution) would pass the name/optional checks above but flip these.
     let value_ty = shape
@@ -1866,9 +1866,9 @@ type Wrapper<T> = { value: T; label: string }
     );
 }
 
-/// PHASE-1A — function generic shadowing through the dispatch
-/// instantiation path (`instantiate_local_generic_ref_via_dispatch`),
-/// the route that survives the prepared-substitution slow-lane deletion.
+/// Function generic shadowing through the dispatch instantiation path
+/// (`instantiate_local_generic_ref_via_dispatch`), the route that
+/// survives the prepared-substitution slow-lane deletion.
 ///
 /// Legacy `substitute_function_expr` (surface.rs) removed the function's
 /// OWN type parameters from the substitution map before substituting the

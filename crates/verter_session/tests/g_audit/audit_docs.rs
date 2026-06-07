@@ -1,4 +1,4 @@
-//! Plan §3 Commit 11 (F9) — documentation gate tests.
+//! Documentation gate tests.
 //!
 //! Guards the audit-footprint documentation surface against silent
 //! regressions:
@@ -44,9 +44,7 @@ fn workspace_root() -> PathBuf {
     }
 }
 
-/// Files the plan enumerated as needing module-scoped
-/// `#![deny(missing_docs)]`. The list is plan-text fixed — if it
-/// changes, update both this test AND plan §3 Commit 11.
+/// Files that must carry module-scoped `#![deny(missing_docs)]`.
 const DOC_DENY_FILES: &[&str] = &[
     "crates/verter_scheduler/src/request_context.rs",
     "crates/verter_session/src/request_context.rs",
@@ -65,7 +63,7 @@ const DOC_DENY_FILES: &[&str] = &[
 fn audit_modules_compile_without_missing_docs_warnings() {
     // The workspace build is the primary gate — if `#![deny(missing_docs)]`
     // catches an undocumented item, `cargo build --workspace --tests`
-    // (the CLAUDE.md §0.2 gate) fails first. This test's role is to
+    // fails first. This test's role is to
     // pin the ATTRIBUTE's presence so a future refactor can't silently
     // strip it without failing a test whose name names the risk.
     let root = workspace_root();
@@ -75,9 +73,9 @@ fn audit_modules_compile_without_missing_docs_warnings() {
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read `{}`: {e}", path.display()));
         assert!(
             src.contains("#![deny(missing_docs)]"),
-            "`{rel}` must carry `#![deny(missing_docs)]` per plan §3 Commit 11. \
+            "`{rel}` must carry `#![deny(missing_docs)]`. \
              If this test is failing because the attribute was removed, either \
-             restore it or update the plan + this test together.",
+             restore it or update this test together.",
         );
     }
 }
@@ -140,12 +138,11 @@ fn audit_doc_snippet_names_resolve_to_exported_symbols() {
 fn skill_references_audit_api_names_exactly_as_exported() {
     let root = workspace_root();
     let skill_path = root.join(".claude/skills/component-meta/SKILL.md");
-    // Plan §3 Commit 11 explicitly modifies
-    // `.claude/skills/component-meta/SKILL.md` and the file is
-    // tracked in this repo. Silent-skip on missing file would hide
-    // a `git rm` mistake on a future branch; an explicit env-var
-    // escape hatch keeps the path open for downstream consumers
-    // who vendor this test without the skill file.
+    // `.claude/skills/component-meta/SKILL.md` is tracked in this
+    // repo. Silent-skip on missing file would hide a `git rm` mistake
+    // on a future branch; an explicit env-var escape hatch keeps the
+    // path open for downstream consumers who vendor this test without
+    // the skill file.
     if !skill_path.exists() {
         if std::env::var("VERTER_SKIP_SKILL_MD_CHECKS").is_ok() {
             eprintln!(
@@ -155,15 +152,15 @@ fn skill_references_audit_api_names_exactly_as_exported() {
             return;
         }
         panic!(
-            "`.claude/skills/component-meta/SKILL.md` is missing at `{}`. Plan §3 Commit 11 \
-             adds this file and it must remain tracked. If you are intentionally testing a \
+            "`.claude/skills/component-meta/SKILL.md` is missing at `{}`. This file \
+             must remain tracked. If you are intentionally testing a \
              vendored checkout without the skill file, set \
-             `VERTER_SKIP_SKILL_MD_CHECKS=1`; otherwise, restore the file. (Review F10.)",
+             `VERTER_SKIP_SKILL_MD_CHECKS=1`; otherwise, restore the file.",
             skill_path.display(),
         );
     }
     let skill = fs::read_to_string(&skill_path).expect("read SKILL.md");
-    // Audit-surface API names enumerated in the plan. If you add a
+    // Audit-surface API names. If you add a
     // reference in the skill file, append the name here — the test
     // pins the mapping so "I mentioned X but X was renamed" surfaces.
     let audit_api_names = &[

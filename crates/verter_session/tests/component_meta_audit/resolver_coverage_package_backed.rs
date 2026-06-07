@@ -1,22 +1,14 @@
-//! Phase 5b §5.A — TDD seed for resolver coverage gap:
-//! package-backed type references (types coming from `node_modules`
-//! / declared package roots) bypass the `is_package_backed_ref`
-//! gate, allowing structurally-shallow function-property references
-//! at nested positions where Verter should refuse to descend.
+//! Resolver coverage for package-backed type references: types coming
+//! from `node_modules` / declared package roots must enforce the
+//! `is_package_backed_ref` gate, refusing to descend into
+//! structurally-shallow function-property references at nested
+//! positions.
 //!
-//! **Root cause (per sub-plan §5 commit 9):** engine's
-//! `project_expr_surface_expr` did NOT enforce
-//! `is_package_backed_ref`. The migration routes through
-//! `materialize_component_meta_structure`, which DOES enforce the
-//! `PackageRefTopLevel` and `FunctionPropertyAtNested` gates.
+//! Resolution routes through `materialize_component_meta_structure`,
+//! which enforces the `PackageRefTopLevel` and
+//! `FunctionPropertyAtNested` gates.
 //!
-//! **Pre-Phase-5b behaviour:** a typed prop whose declaration lives
-//! in a package-backed barrel and whose body contains an unresolved
-//! function-typed property surfaces with structurally-shallow
-//! members the gate is supposed to refuse.
-//!
-//! **Post-Phase-5l behaviour (harness fix re-homed from §5.13 r15):**
-//! the SFC is seated at `/ws/src/c.vue` so the unowned node_modules
+//! The SFC is seated at `/ws/src/c.vue` so the unowned node_modules
 //! walk has parent directories to traverse (`/ws/src` → `/ws`),
 //! reaching `/ws/node_modules/pkg-types/`. The package's body is
 //! shaped so `OuterProps` has a sibling object-typed member

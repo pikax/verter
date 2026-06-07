@@ -1,4 +1,4 @@
-//! Wave 3 Slice 3.E — Diagnostics + Completion audit tests.
+//! Diagnostics + Completion audit tests.
 //!
 //! Drives the [`verter_lsp::audit_harness::run_with_audit`] code
 //! path through a synthetic body that returns a representative
@@ -50,8 +50,7 @@ async fn diagnostics_audit_records_num_diagnostics() {
     assert_eq!(
         p.num_diagnostics,
         Some(5),
-        "num_diagnostics must reflect the producer's count; \
-         pre-change tree leaves the field None"
+        "num_diagnostics must reflect the producer's count"
     );
     assert!(p.error.is_none());
 }
@@ -102,8 +101,7 @@ async fn completion_audit_records_num_completion_items() {
     assert_eq!(
         p.num_completion_items,
         Some(7),
-        "num_completion_items must reflect the producer's count; \
-         pre-change tree leaves the field None"
+        "num_completion_items must reflect the producer's count"
     );
     assert!(p.error.is_none());
 }

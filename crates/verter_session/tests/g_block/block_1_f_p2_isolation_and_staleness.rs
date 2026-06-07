@@ -1,12 +1,11 @@
-//! Discriminating regression tests for Block 1.f P2 findings
-//! ([Codex review of Block 1.f cleanup]).
+//! Discriminating regression tests for overlay fallthrough and
+//! known-miss staleness.
 //!
-//! Both tests pin contract behaviour that exists only after the
-//! Block 1.f P2 fixes land. Each test would FAIL against the
-//! pre-fix tree and PASS against the post-fix tree (the
+//! Both tests pin contract behaviour. Each test would FAIL against a
+//! tree without these fixes and PASS against the tree with them (the
 //! discriminator property required by the stub-prevention rule).
 //!
-//! ## P2.1 — overlay fallthrough uses the scheduler-authoritative
+//! ## Overlay fallthrough uses the scheduler-authoritative
 //! content-hash helper
 //!
 //! Before the fix, `OverlaidView::resolved_import_facts` (and
@@ -27,7 +26,7 @@
 //! base-only views) — the scheduler-authoritative current content
 //! hash, with no permissive `FileArtifactStore` fallback.
 //!
-//! ## P2.2 — later route snapshots replace earlier negative entries
+//! ## Later route snapshots replace earlier negative entries
 //!
 //! Before the fix, `ResolvedImportFactsKey` was
 //! `(canonical, content_hash, parse_env_hash, resolve_env_hash,
@@ -57,7 +56,7 @@ use verter_session::{
 };
 
 // ---------------------------------------------------------------------------
-// P2.1 — overlay fallthrough scheduler hash
+// Overlay fallthrough scheduler hash
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -118,7 +117,7 @@ fn overlay_view_with_unrelated_overlay_observes_admitted_facts_for_base_owner() 
 
     let payload = overlay_view.resolved_import_facts("/owner.ts").expect(
         "OverlaidView with an unrelated overlay must observe the producer's payload for \
-             the base-fallthrough owner (Codex P2.1 / Block 1.f-fix)",
+             the base-fallthrough owner",
     );
 
     let used_entry = payload
@@ -134,7 +133,7 @@ fn overlay_view_with_unrelated_overlay_observes_admitted_facts_for_base_owner() 
 }
 
 // ---------------------------------------------------------------------------
-// P2.2 — known-miss generation in the cache key
+// Known-miss generation in the cache key
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -145,7 +144,7 @@ fn later_set_import_dependencies_replaces_prior_known_miss_in_view() {
         ..HostConfig::default()
     }));
 
-    // Stage 1 — upsert owner with an unresolvable specifier and admit
+    // First, upsert owner with an unresolvable specifier and admit
     // a known-miss bundle. The owner's
     // `import_routes_known_miss_recorded_at_generation` sidecar has
     // one entry → the key's `known_miss_generation` tag is non-zero.
@@ -184,7 +183,7 @@ fn later_set_import_dependencies_replaces_prior_known_miss_in_view() {
         "first admission must record `Used` as a negative (unresolved) entry",
     );
 
-    // Stage 2 — the target file is created. The `upsert` advances
+    // Next, the target file is created. The `upsert` advances
     // the workspace `content_generation`, so the next
     // `set_import_dependencies` for the same owner re-records the
     // (now zero-element) known-miss sidecar under a fresh
@@ -210,10 +209,9 @@ fn later_set_import_dependencies_replaces_prior_known_miss_in_view() {
     );
 
     let post_resolve = view.resolved_import_facts("/owner.ts").expect(
-        "view must observe the resolved bundle after the target file is created \
-             (Codex P2.2 / Block 1.f-fix: known-miss generation in the cache key lets the \
-             later snapshot win admission instead of being silently discarded against the \
-             stale negative entry)",
+        "view must observe the resolved bundle after the target file is created: the \
+             known-miss generation in the cache key lets the later snapshot win admission \
+             instead of being silently discarded against the stale negative entry",
     );
     let positive_entry = post_resolve
         .import_clauses

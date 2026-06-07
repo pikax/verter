@@ -1,5 +1,5 @@
-//! Block 6.i Round 9 — Pattern A discriminator (non-slot props
-//! Mapped/utility-route library inheritance leak).
+//! Pattern A discriminator (non-slot props Mapped/utility-route
+//! library inheritance leak).
 //!
 //! Closes the architectural class behind the corpus leak for `Editor`,
 //! `Table`, `Carousel`, `EditorDragHandle` (and Pattern B singular
@@ -9,13 +9,13 @@
 //! structurally under `Published(Expanded)` and emits one
 //! `ProjectMember` edge per inherited member name.
 //!
-//! Pre-Commit-2 the non-slot path in [`produce_one_macro_object_shape`]
+//! A non-slot path in [`produce_one_macro_object_shape`] that
 //! routes through `project_expr_class_a_via_dispatch_threaded` under
-//! `Published(Expanded)`. The Mapped-arm publication path
+//! `Published(Expanded)` leaks: the Mapped-arm publication path
 //! ([`build_mapped_type`] / [`intern_keyspace_names`]) reduces
 //! `keyof T` and emits one `ProjectMember` edge per enumerated key.
 //!
-//! Post-Commit-2 the producer branches on the lowered root's semantic
+//! The producer instead branches on the lowered root's semantic
 //! shape: an Object/Intersection/Mapped/Ref/InstantiationRef root
 //! dispatches via `project_expr_class_a_via_dispatch_transit_shallow_threaded`.
 //! The transit-shallow Empty-path lowering at `Navigate` mode + the
@@ -63,7 +63,7 @@ export interface EditorOptions {
 // `defineProps<Partial<EditorOptions>>()`. Lowered macro payload is
 // `InstantiationRef { base: Partial, args: [EditorOptions] }` — root
 // shape after Navigate-mode realization is `Mapped { source: keyof
-// EditorOptions, … }`. NOT a Conditional → Commit 2's path-precise
+// EditorOptions, … }`. NOT a Conditional → the path-precise
 // branch dispatches the transit-shallow helper.
 const EDITOR_VUE: &str = r#"<script setup lang="ts">
 import type { EditorOptions } from './editor_options';
@@ -107,7 +107,7 @@ fn pattern_a_non_slot_mapped_publication_does_not_leak_inherited_library_members
         "paste",
     ];
 
-    // Block 6.j R18 — scope leak counter to intermediate provenances.
+    // R18 — scope leak counter to intermediate provenances.
     // `MemberEdgeProvenance::PublishedField` is the producer-side
     // declaration of the user-visible surface and is OUT of the leak
     // domain: a `defineProps<Partial<EditorOptions>>()` publication
@@ -155,7 +155,7 @@ fn pattern_a_non_slot_mapped_publication_does_not_leak_inherited_library_members
 
     assert_eq!(
         total, 0,
-        "Block 6.i Round 9 Pattern A — non-slot Mapped/utility-route macro \
+        "Pattern A — non-slot Mapped/utility-route macro \
          publication MUST publish 0 ProjectMember edges or projection-path \
          Member segments naming any inherited `EditorOptions` member \
          (`editable`, `textDirection`, `tabindex`, `clipboardTextSerializer`, \
@@ -163,13 +163,13 @@ fn pattern_a_non_slot_mapped_publication_does_not_leak_inherited_library_members
          must keep the Mapped/keyof reduction deferred. \
          Got: leak_edges={leak_edge_count} (names={leak_edge_names:?}), \
          projection_path_member_hits={leak_path_count}. \
-         At HEAD `23c866eb1` the non-slot path lowers at \
+         A non-slot path that lowers at \
          Published(Expanded) and routes through \
-         `project_expr_class_a_via_dispatch_threaded`. The Empty-path \
-         Expanded lowering reduces `Partial<EditorOptions>` via the \
+         `project_expr_class_a_via_dispatch_threaded` reduces \
+         `Partial<EditorOptions>` via the Empty-path Expanded \
          Mapped publication path; `build_mapped_type` / \
          `intern_keyspace_names` then emits one `ProjectMember` edge per \
-         enumerated key. Commit 2's path-precise transit-shallow swap \
+         enumerated key. The path-precise transit-shallow swap \
          keeps the Mapped carrier deferred for Object/Intersection/Mapped/Ref/\
          InstantiationRef-rooted macro payloads (the Conditional-rooted \
          inherited-emits path retains Expanded for branch-merge — see \

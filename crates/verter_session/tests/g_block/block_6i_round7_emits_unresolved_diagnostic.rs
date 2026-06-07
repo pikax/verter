@@ -1,44 +1,34 @@
-//! Block 6.i Round 7 — discriminator: **emits unresolved-import diagnostic preservation**.
+//! Discriminator: **emits unresolved-import diagnostic preservation**.
 //!
-//! Regression guard locked at the round-7 boundary: the macro-payload
-//! boundary MUST publish a `MacroExpansionDiagnostics` envelope when
-//! `defineEmits<MissingImport>()`'s payload fails to resolve, AT ALL
-//! commits in the round-7 sequence.
+//! Regression guard: the macro-payload boundary MUST publish a
+//! `MacroExpansionDiagnostics` envelope when
+//! `defineEmits<MissingImport>()`'s payload fails to resolve.
 //!
-//! ## Why this guards the cutover
+//! ## Why this guards the behaviour
 //!
-//! Pre-Commit-2 the publication path lowers the macro payload via
-//! `ProjectionMode::Navigate`. An unresolved import fails loudly:
+//! A publication path that lowers the macro payload via
+//! `ProjectionMode::Navigate` fails loudly on an unresolved import:
 //! `lower_type_expr_in_scope_with_mode` returns `None`, then
 //! `resolve_macro_payload` pushes `macro-payload-lowering-failed`
 //! into `diag_sink`. The diagnostic envelope lands.
 //!
-//! Post-Commit-2 substrate addition: `resolve_macro_payload` migrates
-//! to `structural_transit_with_mode(Navigate)` lowering. Under transit
-//! demand an unresolved import may resolve to a `DeclRef` carrier
+//! Under `structural_transit_with_mode(Navigate)` lowering, an
+//! unresolved import may resolve to a `DeclRef` carrier
 //! WITHOUT firing `walker_diagnostics` (the carrier-stop substrate
 //! silently passes the missing decl through). To keep this contract
-//! green, Commit 2 adds the **macro-payload diagnostic probe**
-//! (codex Q2) that re-runs the payload resolution under publication
+//! green, `resolve_macro_payload` uses the **macro-payload diagnostic
+//! probe** that re-runs the payload resolution under publication
 //! demand without publishing a value — purely for diagnostic
 //! capture. The probe translates `Error`, `Recursive`, `Opaque`,
 //! `cache_suppress`, and `walker_diagnostics` into the
 //! `MacroExpansionDiagnostics` envelope so the unresolved-import
-//! diagnostic contract holds across the transit-shallow cutover.
+//! diagnostic contract holds under transit-shallow lowering.
 //!
-//! ## Discrimination progression
+//! ## Discrimination
 //!
-//! - **Commit 1 (no substrate extensions):** PASS — Navigate
-//!   lowering fails loudly; the existing diagnostic path emits the
-//!   envelope. Regression guard.
-//! - **Commit 2 (substrate extensions added, including the probe):**
-//!   PASS — `resolve_macro_payload` switches to StructuralTransit
-//!   lowering AND invokes the probe; the probe fires the diagnostic.
-//! - **Commit 3 (atomic cutover):** PASS — consumer migrations land;
-//!   the probe continues to fire the diagnostic.
-//!
-//! A regression that drops the probe / drops the diagnostic
-//! translation across the cutover fails this test loudly.
+//! `resolve_macro_payload` lowers under StructuralTransit AND invokes
+//! the probe; the probe fires the diagnostic. A regression that drops
+//! the probe / drops the diagnostic translation fails this test loudly.
 
 #![allow(clippy::too_many_lines, dead_code, unused_imports)]
 
@@ -85,7 +75,7 @@ fn build_workspace_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
 }
 
 #[test]
-fn round7_define_emits_unresolved_import_publishes_diagnostic_through_cutover() {
+fn round7_define_emits_unresolved_import_publishes_diagnostic_through_transit() {
     let host = build_workspace_host(&[(
         "/workspace/src/Comp.vue",
         r#"<script setup lang="ts">
@@ -113,12 +103,11 @@ defineEmits<MissingEmits>()
 
     assert!(
         !define_emits_diags.is_empty(),
-        "Block 6.i Round 7 — `defineEmits<MissingEmits>()` MUST publish a \
-         `MacroExpansionDiagnostics` envelope with `macro_kind == DefineEmits` \
-         under EVERY round-7 commit: pre-cutover via the Navigate-lowering \
-         failure path, post-cutover via the macro-payload diagnostic probe \
-         (codex Q2). A regression here means the probe was not wired in or \
-         the cutover landed without preserving the silent-miss contract. \
+        "`defineEmits<MissingEmits>()` MUST publish a \
+         `MacroExpansionDiagnostics` envelope with `macro_kind == DefineEmits`, \
+         either via the Navigate-lowering failure path or via the \
+         macro-payload diagnostic probe. A regression here means the probe was \
+         not wired in or the silent-miss contract is not preserved. \
          Got {} total diagnostics: {:#?}",
         meta.macro_expansion_diagnostics.len(),
         meta.macro_expansion_diagnostics,

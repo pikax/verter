@@ -1,6 +1,6 @@
 //! R1 / R2 — byte-identical `upsert` produces zero cache mutations.
 //!
-//! Per the architectural rules bound by Stage 2 of the fact-based cache plan:
+//! Per the fact-based cache architectural rules:
 //!
 //! - **R1**: `host.upsert(canonical, source)` is a cache-state no-op iff the
 //!   quintuple `(canonical, content_hash, parse_env_hash, resolve_env_hash,
@@ -11,15 +11,14 @@
 //!   explicit method with a stated scope; it is never a side effect of
 //!   `upsert`.
 //!
-//! These tests INVERT the runtime behaviour the pre-Stage-2 fast path
-//! exhibited: a byte-identical re-upsert used to clear `compile_slots`,
-//! `cached_resolved_meta`, route-mirroring state, the project-wide
-//! `resolved_type_cache_db`, the `eval_env_cache_db`, the semantic-fact cache,
-//! and bump `store_view_epoch`. Post-Stage-2 the byte-identical fast path
-//! is a true no-op — none of those mutations fire.
+//! The byte-identical fast path is a true no-op: it does NOT clear
+//! `compile_slots`, `cached_resolved_meta`, route-mirroring state, the
+//! project-wide `resolved_type_cache_db`, the `eval_env_cache_db`, or
+//! the semantic-fact cache, and does NOT bump `store_view_epoch`. None
+//! of those mutations fire on a byte-identical re-upsert.
 //!
-//! Discrimination contract: every assertion fails against the pre-change
-//! tree and passes against the post-change tree.
+//! Discrimination contract: every assertion fails if the fast path
+//! mutates cache state.
 
 use std::sync::Arc;
 
@@ -61,10 +60,9 @@ fn re_upsert_byte_identical(host: &VerterHost) {
 
 /// R1 — byte-identical re-upsert MUST NOT bump `store_view_epoch`.
 ///
-/// The pre-Stage-2 byte-identical fast path called
-/// `self.bump_store_view_epoch()` unconditionally; the post-change fast
-/// path skips the bump because no cache state was touched. Capture the
-/// epoch before and after N=10 re-upserts and assert no change.
+/// The byte-identical fast path skips the bump because no cache state
+/// was touched. Capture the epoch before and after N=10 re-upserts and
+/// assert no change.
 #[test]
 fn byte_identical_re_upsert_does_not_bump_store_view_epoch() {
     let host = build_host_with_one_file();
@@ -78,8 +76,8 @@ fn byte_identical_re_upsert_does_not_bump_store_view_epoch() {
     assert_eq!(
         epoch_after, epoch_before,
         "R1: byte-identical re-upsert MUST NOT bump store_view_epoch. \
-         The pre-Stage-2 fast path bumped unconditionally — this assertion \
-         fails on the pre-change tree (epoch would have grown by exactly 10)."
+         A fast path that bumped unconditionally would fail this assertion \
+         (epoch would have grown by exactly 10)."
     );
 }
 
@@ -125,11 +123,11 @@ defineProps<{ beta: number }>()
 
 /// R1 — byte-identical re-upsert MUST NOT change DB entry counts.
 ///
-/// The pre-Stage-2 fast path mutated `compile_slots`, `derived_raw_cache`
-/// inner maps, and `dependency_cache` per-canonical entries.
-/// The outer entry counts stayed stable (the existing entry was mutated
-/// in place, not removed), so this assertion is a SECONDARY discriminator
-/// alongside the epoch-bump check.
+/// Even when a fast path mutates `compile_slots`, `derived_raw_cache`
+/// inner maps, and `dependency_cache` per-canonical entries, the outer
+/// entry counts stay stable (the existing entry is mutated in place, not
+/// removed), so this assertion is a SECONDARY discriminator alongside
+/// the epoch-bump check.
 ///
 /// What this test most reliably catches:
 /// 1. A regression that re-keys the entry on byte-identical re-upsert
@@ -176,11 +174,12 @@ fn byte_identical_re_upsert_preserves_db_entry_counts() {
 /// R1 — byte-identical re-upsert MUST NOT clear the project-wide
 /// `resolved_type_cache_db`.
 ///
-/// The pre-Stage-2 fast path called `self.resolved_type_cache().clear()`
-/// — a project-wide wipe, not a per-canonical drain. We seed the cache by
-/// driving real semantic work that populates it, then re-upsert and
-/// assert the count is preserved. This is a hostile probe: pre-change
-/// the count would drop to zero after the first byte-identical re-upsert.
+/// A fast path that called `self.resolved_type_cache().clear()` would
+/// do a project-wide wipe, not a per-canonical drain. We seed the cache
+/// by driving real semantic work that populates it, then re-upsert and
+/// assert the count is preserved. This is a hostile probe: a wiping
+/// fast path would drop the count to zero after the first byte-identical
+/// re-upsert.
 #[test]
 fn byte_identical_re_upsert_preserves_resolved_type_cache_len() {
     // Build a host with one file whose semantic resolution will populate
@@ -199,9 +198,9 @@ fn byte_identical_re_upsert_preserves_resolved_type_cache_len() {
 
     // Drive component-meta resolution to seed resolved_type_cache_db.
     // The probe may legitimately produce zero cache entries on a simple
-    // fixture; the test still discriminates because pre-change the wipe
-    // resets the count to 0 and post-change it stays at the seed value
-    // (whatever that is).
+    // fixture; the test still discriminates because a wipe resets the
+    // count to 0 while the correct no-op fast path keeps it at the seed
+    // value (whatever that is).
     let _ = host.get_component_meta_with_resolution(CANONICAL);
 
     let count_before = host.project_type_store().resolved_type_cache().len();
@@ -216,18 +215,17 @@ fn byte_identical_re_upsert_preserves_resolved_type_cache_len() {
         count_after, count_before,
         "R1: byte-identical re-upsert MUST NOT clear the project-wide \
          resolved_type_cache_db. count_before={count_before}, count_after={count_after}. \
-         The pre-Stage-2 fast path called `self.resolved_type_cache().clear()` \
-         which wipes the entire DB project-wide; this assertion fails on \
-         the pre-change tree if the cache had any non-zero entries pre-upsert."
+         A fast path that called `self.resolved_type_cache().clear()` \
+         wipes the entire DB project-wide; this assertion fails for such \
+         a path if the cache had any non-zero entries pre-upsert."
     );
 }
 
 /// R1 — byte-identical re-upsert MUST NOT clear the project-wide
 /// `eval_env_cache_db`.
 ///
-/// The pre-Stage-2 fast path called `self.eval_env_cache().clear()` —
-/// a project-wide wipe. Post-Stage-2 the entries survive byte-identical
-/// re-upserts.
+/// A fast path that called `self.eval_env_cache().clear()` would do a
+/// project-wide wipe. The entries survive byte-identical re-upserts.
 #[test]
 fn byte_identical_re_upsert_preserves_eval_env_cache_len() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -256,19 +254,18 @@ fn byte_identical_re_upsert_preserves_eval_env_cache_len() {
         count_after, count_before,
         "R1: byte-identical re-upsert MUST NOT clear the project-wide \
          eval_env_cache_db. count_before={count_before}, count_after={count_after}. \
-         The pre-Stage-2 fast path called `self.eval_env_cache().clear()` which \
-         wipes the entire DB project-wide; this assertion fails on the \
-         pre-change tree if the cache had any non-zero entries pre-upsert."
+         A fast path that called `self.eval_env_cache().clear()` wipes \
+         the entire DB project-wide; this assertion fails for such a path \
+         if the cache had any non-zero entries pre-upsert."
     );
 }
 
 /// R1 / R2 — direct audit-observer probe: byte-identical re-upsert
 /// MUST NOT emit any `CacheDrainedAtUpsert` structured event.
 ///
-/// The Stage-2 instrumentation hook
+/// The instrumentation hook
 /// (`StructuredAuditEvent::CacheDrainedAtUpsert`) fires at every
-/// cache cascade drain site enumerated in Stage 0's
-/// `evict_canonical_inventory.json` (`co_evicted_outside_project_type_store`
+/// cache cascade drain site (the `co_evicted_outside_project_type_store`
 /// block plus `databases_drained`). The byte-identical fast path
 /// goes through NONE of those sites, so observing zero events on a
 /// re-upsert is direct proof of R1 / R2 compliance — independent of

@@ -1,5 +1,5 @@
 #![allow(deprecated)]
-//! Discriminating test for `WorkspaceAccess::audit_op` (Slice 3.D).
+//! Discriminating test for `WorkspaceAccess::audit_op`.
 //!
 //! Drives a real specifier resolution through `MemoryWorkspace` via
 //! the trait method and asserts:
@@ -13,9 +13,9 @@
 //! starts touching unrelated files, `record.files` would grow beyond
 //! the single resolved target and this test would fail.
 //!
-//! **Discriminating against pre-change tree**: `audit_op` did not exist
-//! before this slice, so this test would not even compile against the
-//! pre-change tree.
+//! **Discriminating**: if `audit_op` started touching unrelated files,
+//! `record.files` would grow beyond the single resolved target and the
+//! assertions below would fail.
 
 use std::sync::Arc;
 
@@ -122,7 +122,6 @@ fn audit_op_resolve_records_exactly_the_resolved_target_in_files() {
         touched,
         vec!["d:/project/src/utils.ts"],
         "audit_op(AuditResolve) must list EXACTLY the resolved target in `record.files`. \
-         Pre-change tree (no `audit_op`) does not even compile this test. \
          A future regression that walks unrelated imports would surface here as extra entries."
     );
     assert_eq!(
@@ -149,8 +148,6 @@ fn audit_op_resolve_unresolved_specifier_yields_zero_touched_files() {
     // a well-formed record, with `files_touched == 0` and an empty
     // `record.files`. This guards the default impl against silently
     // recording phantom entries on the resolution-failure path.
-    //
-    // Discriminating: pre-change tree does not compile (no `audit_op`).
     let ws = MemoryWorkspace::new(MemoryOptions::default());
     ws.inject_file(
         "d:/project/src/app.vue".to_string(),

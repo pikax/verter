@@ -1,12 +1,11 @@
-//! S1 discrimination tests for the `TypeExpr::SyntheticSlotBinding`
-//! variant introduced by the Block 6.j R22-final synthetic-carrier
-//! typed-IR cutover.
+//! Discrimination tests for the `TypeExpr::SyntheticSlotBinding`
+//! variant (the R22 synthetic-carrier typed-IR representation).
 //!
-//! Each test must be writable such that it FAILS against the pre-S1
-//! tree (where the variant did not exist) AND PASSES on the post-S1
-//! tree — the discriminating property comes from the variant being
-//! constructible and its identity surviving Clone / Eq / Hash / JSON
-//! round-trip / OXC normalisation.
+//! Each test is discriminating: it FAILS against a tree where the
+//! variant does not exist AND PASSES where it does — the
+//! discriminating property comes from the variant being constructible
+//! and its identity surviving Clone / Eq / Hash / JSON round-trip /
+//! OXC normalisation.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -38,7 +37,7 @@ fn hash_one<H: Hash>(value: &H) -> u64 {
     hasher.finish()
 }
 
-/// R22-final substrate removal target: TypeExpr layout must not widen
+/// R22 substrate layout invariant: TypeExpr layout must not widen
 /// by adding the SyntheticSlotBinding arm. The widest existing arms
 /// (Mapped, RecursiveRef) currently dominate; the new
 /// Arc<SyntheticCarrierKey> arm must be pointer-sized and must NOT
@@ -121,9 +120,8 @@ fn synthetic_carrier_serde_roundtrip() {
 
 #[test]
 fn synthetic_carrier_value_node_zero_is_legitimate() {
-    // Per Phase 4 amendment 7: `SemanticNodeId(0)` is a VALID node id;
-    // the carrier must be constructible AND round-trip correctly with
-    // value_node = 0.
+    // `SemanticNodeId(0)` is a VALID node id; the carrier must be
+    // constructible AND round-trip correctly with value_node = 0.
     let zero = TypeExpr::synthetic_slot_binding(make_key(
         "/abs/Foo.vue",
         SyntheticCarrierSurfaceKind::SlotBinding,
@@ -186,7 +184,7 @@ fn synthetic_carrier_surface_kind_distinguishes() {
 
 #[test]
 fn synthetic_carrier_slot_name_present_vs_absent_distinct() {
-    // Phase 4: slot_name participates in identity. None vs Some("default")
+    // slot_name participates in identity. None vs Some("default")
     // must be distinguishable, even though the projector surface displays
     // identically.
     let with_slot = TypeExpr::synthetic_slot_binding(make_key(

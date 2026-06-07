@@ -1,6 +1,5 @@
 /**
- * WASM audit binding integration tests. Plan §3 Commit 8 (F7) test
- * list — specifically:
+ * WASM audit binding integration tests — specifically:
  *
  * - `wasm_get_component_meta_with_audit_serializes_across_boundary`
  * - `wasm_why_loaded_binding_invokes_rust_walker`
@@ -48,7 +47,7 @@ describe("@verter/wasm audit bindings", () => {
   });
 
   it("wasm_get_component_meta_with_audit_serializes_across_boundary", () => {
-    // Plan §3 Commit 8 test list. Exercise the real WASM boundary:
+    // Exercise the real WASM boundary:
     // `MetaProject` constructor with audit enabled, upsert source,
     // open a session, call `getComponentMetaWithAudit`, and assert
     // the JS value round-trip produces an `AuditBundle` shape.
@@ -75,13 +74,13 @@ describe("@verter/wasm audit bindings", () => {
     expect(bundle.record).toHaveProperty("timings");
     expect(bundle.record).toHaveProperty("footprint");
 
-    // u64 transport invariant — every u64 field is a decimal string
-    // (plan §1.4). This is the load-bearing property that makes JSON
+    // u64 transport invariant — every u64 field is a decimal string.
+    // This is the load-bearing property that makes JSON
     // round-trips through JS lossless at 2^53+1.
     expect(typeof bundle.record.request_id).toBe("string");
     expect(bundle.record.request_id).toMatch(/^[0-9]+$/);
 
-    // i64 transport invariant (plan §3.B / 7.A).
+    // i64 transport invariant.
     expect(typeof bundle.record.memory.process_rss_delta_bytes).toBe("string");
 
     // Footprint shape — every record-vector present as an array.
@@ -111,7 +110,7 @@ describe("@verter/wasm audit bindings", () => {
   });
 
   it("wasm_why_loaded_binding_invokes_rust_walker", () => {
-    // Plan §3 Commit 8 test list. End-to-end exercise of the Rust
+    // End-to-end exercise of the Rust
     // walker through the WASM binding. The TS wrapper `whyLoaded`
     // stringifies the bundle, hands it to `whyLoadedFromAuditJson`,
     // and `JSON.parse`s the returned chain.
@@ -154,7 +153,7 @@ describe("@verter/wasm audit bindings", () => {
   });
 
   it("wasm_binding_returns_typed_request_id_distinct_across_calls", () => {
-    // Plan §3 Commit 8 discrimination: the audit binding MUST assign
+    // Discrimination: the audit binding MUST assign
     // a fresh request_id per call. A regression where the session
     // reuses a request_id across `getComponentMetaWithAudit` calls
     // would break downstream correlation (audit_records storage,

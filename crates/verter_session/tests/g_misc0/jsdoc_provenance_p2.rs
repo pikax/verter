@@ -2,7 +2,7 @@
 //! P2-4, driven end-to-end through the production component-meta path
 //! (`defineProps<T>()` → `get_component_meta` → `prop.description`), which
 //! attributes JSDoc via the shared typeinfo surface
-//! (`TypeInfoSurface::with_member_jsdoc_spans`) — the SOLE post-cutover JSDoc
+//! (`TypeInfoSurface::with_member_jsdoc_spans`) — the SOLE JSDoc
 //! attribution path.
 //!
 //! The typeinfo surface locates each member's JSDoc STRUCTURALLY: from the

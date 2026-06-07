@@ -16,7 +16,7 @@
 //!   `augmenter_set_fingerprint` in `RouteDb.effective_export_sets`).
 //!
 //! The placeholder shape (`false` for resolve-imports; permissive
-//! `true` for `EffectiveExportSet`) is forbidden post-Stage-7C.E.
+//! `true` for `EffectiveExportSet`) is forbidden.
 
 use std::fs;
 use std::path::PathBuf;
@@ -66,7 +66,7 @@ fn validates_resolve_imports_domain_real_body() {
 /// Source-grep arch guard: `validates_route_surface_domain` for
 /// `FactKey::EffectiveExportSet` MUST consult the cached
 /// `EffectiveExportSetEntry` fingerprint — the permissive
-/// `true` placeholder is forbidden post-Stage-7C.E.
+/// `true` placeholder is forbidden.
 #[test]
 fn validates_route_surface_effective_export_set_real_body() {
     let src = read_session_source("resolver_store.rs");
@@ -84,10 +84,10 @@ fn validates_route_surface_effective_export_set_real_body() {
     );
     // Negative: the legacy permissive `true` placeholder must NOT
     // remain. The pattern `FactKey::EffectiveExportSet => true,`
-    // was the placeholder shape Stage-7C.E removed.
+    // was the removed placeholder shape.
     assert!(
         !src.contains("FactKey::EffectiveExportSet => true,"),
-        "`FactKey::EffectiveExportSet => true,` placeholder is forbidden — Stage-7C.E wires the real validator (R26)",
+        "`FactKey::EffectiveExportSet => true,` placeholder is forbidden — the real validator is wired (R26)",
     );
 }
 

@@ -2,9 +2,8 @@
 //!
 //! Discrimination: route_surface facts are produced when the
 //! materializer's cold path drives an import-route walk that
-//! resolves through the RouteDb. Block 1.H Track 1 wraps the
-//! materializer's cold compute in `install_fact_tracer`; the
-//! counter advances.
+//! resolves through the RouteDb. The materializer's cold compute is
+//! wrapped in `install_fact_tracer`; the counter advances.
 
 use std::sync::Arc;
 

@@ -40,14 +40,14 @@ fn slot_binding_graph_signature_carries_member_presence() {
     let captured = match finalise {
         FactReadSetFinalise::Ok(sig) => sig,
         FactReadSetFinalise::Overflow => panic!(
-            "Block 1.8 slot_binding_graph matrix slice: tracer overflowed \
+            "slot_binding_graph matrix slice: tracer overflowed \
              on a single-fact signature — substrate bug, not test bug"
         ),
     };
 
     assert!(
         captured.iter().any(|f| f == &presence_fact),
-        "Block 1.8 slot_binding_graph matrix slice: the fact-tracer \
+        "slot_binding_graph matrix slice: the fact-tracer \
          substrate MUST carry the `MemberPresence` fact through the \
          fan-out path emitted by the slot-binding-graph dual-emit \
          helper. captured={captured:?}"

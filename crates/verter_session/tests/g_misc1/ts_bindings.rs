@@ -392,11 +392,11 @@ fn audit_ts_bindings_are_in_sync_actually_regenerates_and_diffs() {
 
 #[test]
 fn rust_memory_audit_process_rss_delta_bytes_serializes_as_json_string() {
-    // Plan §3.B Commit 7.A — the only `i64` audit field in the
+    // The only `i64` audit field in the
     // schema must serialize as a decimal string, including with
-    // negative values. The prior HEAD emitted a JSON number while
-    // the TS contract claimed `bigint`; that runtime-vs-type
-    // mismatch is the bug this test guards against.
+    // negative values. A JSON number emitted while the TS contract
+    // claimed `bigint` is the runtime-vs-type
+    // mismatch this test guards against.
     use verter_session::component_meta_audit::{
         ComponentMetaPayload, RequestAuditRecord, RequestKind, RequestKindPayload,
         RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit,
@@ -518,8 +518,8 @@ fn loaded_files_has_no_comment_rationalizing_divergence() {
         assert!(
             !loaded_files_region.contains(forbidden),
             "`loaded_files` docblock re-introduced forbidden rationalization `{forbidden}`. \
-             Plan §3.B Commit 7.B forbids rationalizing bucket divergence in the \
-             `loaded_files` contract — either the helper is exact (and the divergence \
+             Rationalizing bucket divergence in the \
+             `loaded_files` contract is forbidden — either the helper is exact (and the divergence \
              is a capture-site bug to fix) or the fixture wants the broader set (and \
              should call `declared_dependency_files`)."
         );
@@ -531,14 +531,13 @@ fn loaded_files_has_no_comment_rationalizing_divergence() {
     assert!(
         !loaded_files_region.contains("for r in &self.indexed_ready_builds"),
         "`loaded_files` body must not iterate `indexed_ready_builds` — that belongs \
-         in `declared_dependency_files` only. Plan §3.B Commit 7.B."
+         in `declared_dependency_files` only."
     );
 }
 
 #[test]
 fn audit_generated_ts_has_zero_bigint_occurrences() {
-    // Plan §3.B Commit 7.A exit criterion 7b: after the i64
-    // extension, `bigint` must never appear in audit.generated.ts.
+    // `bigint` must never appear in audit.generated.ts.
     // Every integer field > 32 bits is transported as a decimal
     // string; every integer field ≤ 32 bits is a JS number.
     let contents = regenerate_audit_bindings_into_tempdir();
@@ -546,14 +545,13 @@ fn audit_generated_ts_has_zero_bigint_occurrences() {
     assert_eq!(
         count, 0,
         "audit.generated.ts must contain zero `bigint` occurrences; found {count}. \
-         Every `u64`/`i64` audit field must use the decimal-string transport. \
-         Plan §3.B Commit 7.A."
+         Every `u64`/`i64` audit field must use the decimal-string transport."
     );
 }
 
 #[test]
 fn json_emission_round_trips_structurally_equivalent_to_rust() {
-    // Plan §3 Commit 10 test list. Simulates the TS-side round-trip
+    // Simulates the TS-side round-trip
     // performed by `audit-validator.ts`: Rust serializes an audit
     // record → TS consumes via `JSON.parse` → TS re-emits via
     // `JSON.stringify` → Rust deserializes the re-emitted form →
@@ -787,12 +785,12 @@ fn json_emission_round_trips_structurally_equivalent_to_rust() {
 fn audit_generated_ts_uses_string_for_every_u64_field() {
     // Grep-based regression guard: every known-u64 field in the
     // audit schema must appear typed as `string` in
-    // `audit.generated.ts`, never `number` or `bigint`. Plan §1.4.
+    // `audit.generated.ts`, never `number` or `bigint`.
     let contents = regenerate_audit_bindings_into_tempdir();
 
     // (field_name, enclosing_type_hint) for every u64 field that
     // MUST be `: string` in the generated TS. The list is derived
-    // from the Commit 6.C pre-flight grep against
+    // from a grep against
     // `crates/verter_session/src/component_meta_audit/**`.
     let u64_fields: &[(&str, &str)] = &[
         ("request_id", "RequestAuditRecord"),

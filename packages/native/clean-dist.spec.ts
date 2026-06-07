@@ -52,7 +52,7 @@ describe("clean-dist.mjs", () => {
       // the generated loader never trip over an orphaned binary. Dropping
       // these fixture names would silently stop characterising the
       // legacy-cleanup contract. (Test fixture, not production source — the
-      // no-phase-archaeology rule does not apply here.)
+      // final-state-prose rule does not apply here.)
       const currentNode = join(fakeDistDir, "verter-native.win32-x64-msvc.node");
       const legacyNode = join(fakeDistDir, "verter_napi.win32-x64-msvc.node");
       const olderAliasNode = join(fakeDistDir, "verter.linux-x64-gnu.node");

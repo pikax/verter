@@ -1,13 +1,13 @@
 /**
  * `@verter/typeinfo` — public type-resolution session API.
  *
- * Wraps the Rust host typeinfo substrate (Phase 3 / typeinfo plan §5)
+ * Wraps the Rust host typeinfo substrate
  * over the `@verter/native` NAPI bindings. Returns
  * `TypeDescriptor`s from `@verter/type-ir` so downstream consumers
  * (Storybook adapters, JSON Schema generators, Zod codegen) can stay
  * framework-agnostic.
  *
- * **Architecture invariant (test #4 in plan §6.4):** this package
+ * **Architecture invariant:** this package
  * intentionally does NOT depend on `@verter/component-meta`. The
  * typeinfo substrate is the foundation; component-meta specialises
  * on top of it. Importing component-meta from here would invert the

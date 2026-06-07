@@ -1,15 +1,9 @@
-//! Block 1.H RED test — nested `install_fact_tracer` calls fan facts
-//! into both layers via the TLS tracer stack.
+//! Nested `install_fact_tracer` calls fan facts into both layers via
+//! the TLS tracer stack.
 //!
-//! Pre-Block-1.H the 5 Family B/C/D caches
-//! (`MaterializeStructureDb`, `RefCycleResultDb`, `MemoEntry`,
-//! `AppConfigNoOverrideProofDb`, `OwnerImportSurfaceDb`) had no
-//! `install_fact_tracer` wiring on their cold-compute closures. A
-//! nested-call test against the pre-tree would not even compile
-//! because the production producers did not invoke
-//! `install_fact_tracer`.
-//!
-//! Post-Block-1.H the producers wrap their cold builds with
+//! The 5 Family B/C/D caches (`MaterializeStructureDb`,
+//! `RefCycleResultDb`, `MemoEntry`, `AppConfigNoOverrideProofDb`,
+//! `OwnerImportSurfaceDb`) wrap their cold builds with
 //! `install_fact_tracer`. This test installs an OUTER tracer, then
 //! drives the AppConfigNoOverrideProofDb producer (which installs
 //! its OWN inner tracer). The outer tracer must observe the

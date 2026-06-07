@@ -1,4 +1,4 @@
-//! Block 1.C architecture guard — every
+//! Architecture guard — every
 //! `accumulate_dispatch_dep_signature` call site in
 //! `crates/verter_session/src/meta_resolve/slot_binding_graph.rs`
 //! must route through the file-local dual-emit helper
@@ -6,8 +6,8 @@
 //!
 //! This is a structural guard, not a behavioural test. A regression
 //! that adds a NEW call site to `accumulate_dispatch_dep_signature`
-//! directly — bypassing the dual-emit helper — would defeat Block
-//! 9's collapse plan (Block 9 collapses by changing the
+//! directly — bypassing the dual-emit helper — would defeat the
+//! eventual collapse (which changes the
 //! `fact_dep_signature` source from `state.fact_versions` to the
 //! tracer's `read_set.finalise()`, then deletes the legacy
 //! accumulator; any unpaired direct call would lose coverage on
@@ -66,7 +66,7 @@ fn slot_binding_graph_helper_is_declared() {
     let src = read_workspace_file("crates/verter_session/src/meta_resolve/slot_binding_graph.rs");
     assert!(
         src.contains("fn emit_slot_binding_graph_dispatch_facts("),
-        "Block 1.C arch guard: `slot_binding_graph.rs` MUST declare \
+        "Arch guard: `slot_binding_graph.rs` MUST declare \
          the dual-emit helper `emit_slot_binding_graph_dispatch_facts`. \
          Without the helper, the five dispatch-emission sites cannot \
          route their `accumulate_dispatch_dep_signature` AND \
@@ -96,31 +96,31 @@ fn slot_binding_graph_helper_calls_both_channels() {
 
     assert!(
         helper_body.contains("accumulate_dispatch_dep_signature(sig)"),
-        "Block 1.C arch guard: \
+        "Arch guard: \
          `emit_slot_binding_graph_dispatch_facts` MUST call \
          `accumulate_dispatch_dep_signature(sig)` so the legacy \
          drain path (compute_component_meta_state_inner line ~869) \
          continues to fold slot-binding-graph dispatch facts into \
-         `state.fact_versions` during the Block 1.C → Block 9 \
-         transition window. Helper body:\n{helper_body}"
+         `state.fact_versions` during the transition to the \
+         tracer-sourced signature. Helper body:\n{helper_body}"
     );
 
     assert!(
         helper_body.contains("observe_fact_signature"),
-        "Block 1.C arch guard: \
+        "Arch guard: \
          `emit_slot_binding_graph_dispatch_facts` MUST call \
          `observe_fact_signature` so the fact-tracer fan-out path \
          delivers slot-binding-graph dispatch facts into every \
          active `FactReadSet` on the `ACTIVE_TRACERS` stack. Without \
          this call, the legacy single-channel emission persists and \
-         Block 9 cannot retire the accumulator. Helper body:\n{helper_body}"
+         the accumulator cannot be retired. Helper body:\n{helper_body}"
     );
 
     assert!(
         helper_body.contains("dep_signature_to_fact_signature"),
-        "Block 1.C arch guard: \
+        "Arch guard: \
          `emit_slot_binding_graph_dispatch_facts` MUST call \
-         `dep_signature_to_fact_signature` (the Block 0 bridge) to \
+         `dep_signature_to_fact_signature` (the signature bridge) to \
          convert the legacy `DepSignature` payload into a \
          `Vec<FactVersionRef>` before fanning out — `observe_fact_signature` \
          takes `&[FactVersionRef]`, not `&DepSignature`. Helper body:\n{helper_body}"
@@ -128,7 +128,7 @@ fn slot_binding_graph_helper_calls_both_channels() {
 
     assert!(
         helper_body.contains("slot_binding_graph_fact_tracer_emissions"),
-        "Block 1.C arch guard: \
+        "Arch guard: \
          `emit_slot_binding_graph_dispatch_facts` MUST bump the \
          `slot_binding_graph_fact_tracer_emissions` provenance \
          counter so the positive behavioural test can discriminate \
@@ -137,7 +137,7 @@ fn slot_binding_graph_helper_calls_both_channels() {
 
     assert!(
         helper_body.contains("slot_binding_graph_legacy_accumulator_emissions"),
-        "Block 1.C arch guard: \
+        "Arch guard: \
          `emit_slot_binding_graph_dispatch_facts` MUST bump the \
          `slot_binding_graph_legacy_accumulator_emissions` \
          provenance counter so the dual-emit lockstep invariant is \
@@ -163,7 +163,7 @@ fn slot_binding_graph_uses_paired_emit_at_every_site() {
     let pure_calls = calls.saturating_sub(decl_count);
     assert_eq!(
         pure_calls, 6,
-        "Block 1.C arch guard: `slot_binding_graph.rs` MUST contain \
+        "Arch guard: `slot_binding_graph.rs` MUST contain \
          exactly 6 calls to `emit_slot_binding_graph_dispatch_facts` \
          (one per dispatch-read site: accumulate_lowered_node_carrier_deps, \
          TWO sites in slot_param_root_is_symbolic_only (the open-generic \
@@ -187,26 +187,26 @@ fn slot_binding_graph_has_no_direct_accumulate_calls_outside_helper() {
     //   helper body (1)
     //
     // Any other occurrence is a direct call from a non-helper site
-    // and violates the Block 1.C → Block 9 collapse contract.
+    // and violates the dual-emit collapse contract.
     let total_occurrences = src.matches("accumulate_dispatch_dep_signature").count();
     assert!(
         total_occurrences <= 2,
-        "Block 1.C arch guard: `slot_binding_graph.rs` may reference \
+        "Arch guard: `slot_binding_graph.rs` may reference \
          `accumulate_dispatch_dep_signature` AT MOST twice (once in \
          the `use` import, once inside the dual-emit helper body). \
          A third or later occurrence is a direct call from a \
          non-helper site, which would bypass the dual-emit pairing \
-         and break Block 9's planned collapse. observed_occurrences={total_occurrences}"
+         and break the planned collapse. observed_occurrences={total_occurrences}"
     );
 
     // Conversely, the helper body MUST still call the legacy
-    // accumulator — Block 9 owns the deletion of this call AND the
-    // entire legacy helper.
+    // accumulator — the collapse that retires the legacy drain path
+    // owns the deletion of this call AND the entire legacy helper.
     assert!(
         total_occurrences >= 2,
-        "Block 1.C arch guard: the legacy `accumulate_dispatch_dep_signature` \
-         call inside the dual-emit helper MUST remain until Block 9 \
-         retires the legacy drain path. Removing it before Block 9 \
+        "Arch guard: the legacy `accumulate_dispatch_dep_signature` \
+         call inside the dual-emit helper MUST remain until the \
+         legacy drain path is retired. Removing it prematurely \
          shrinks `state.fact_versions` for slot-binding-graph \
          consumers. observed_occurrences={total_occurrences}"
     );

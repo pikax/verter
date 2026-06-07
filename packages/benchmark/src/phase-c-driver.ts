@@ -1,10 +1,10 @@
 /**
- * Phase C telemetry driver.
+ * Focused-counter telemetry driver.
  *
  * Spawns `_audit-component.ts` once per target component
  * (ChatMessages.vue / Button.vue / Table.vue by default) with the
  * focused-counter JSONL emit enabled, then summarises the per-component
- * counter slice on stdout for the Phase C investigator. The full JSONL
+ * counter slice on stdout for inspection. The full JSONL
  * is written to `--jsonl-out=...` (default `D:/tmp/phase-c-counters.jsonl`).
  *
  * Audit caps stay at the Rust 10K-per-lane defaults — large enough to
@@ -131,7 +131,7 @@ async function main() {
   }
   writeFileSync(args.jsonlOut, "", "utf-8");
   console.log(
-    `Phase C driver: hard_timeout=${args.hardTimeoutMs}ms components=${args.components.join(",")}`,
+    `counter driver: hard_timeout=${args.hardTimeoutMs}ms components=${args.components.join(",")}`,
   );
   console.log(`JSONL output: ${args.jsonlOut}`);
 

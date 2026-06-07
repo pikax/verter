@@ -1,18 +1,18 @@
-//! Block 1.C — `slot_binding_graph` dual-emit POSITIVE discriminator.
+//! `slot_binding_graph` dual-emit POSITIVE discriminator.
 //!
-//! Pre-1.C: the slot-binding-graph traversal in
+//! The slot-binding-graph traversal in
 //! `crates/verter_session/src/meta_resolve/slot_binding_graph.rs`
-//! emitted dispatch facts ONLY through
-//! `accumulate_dispatch_dep_signature` (the legacy TLS accumulator
-//! drained at `host_manage/component_meta_methods.rs:869` and folded
-//! into `state.fact_versions`). The fact-tracer fan-out channel
+//! must emit dispatch facts through BOTH the legacy TLS accumulator
+//! (`accumulate_dispatch_dep_signature`, drained at
+//! `host_manage/component_meta_methods.rs:869` and folded into
+//! `state.fact_versions`) AND the fact-tracer fan-out channel
 //! (`observe_fact_signature` →
-//! `resolver_core::resolver_context::observe_fan_out_borrowed`) was
-//! not wired at the five `accumulate_dispatch_dep_signature` call
-//! sites — Block 9 cannot retire the legacy channel without losing
-//! coverage of slot-binding-graph dispatch reads.
+//! `resolver_core::resolver_context::observe_fan_out_borrowed`) at
+//! the five `accumulate_dispatch_dep_signature` call sites —
+//! otherwise retiring the legacy channel would lose coverage of
+//! slot-binding-graph dispatch reads.
 //!
-//! Post-1.C: every legacy emission at the five sites
+//! Every legacy emission at the five sites
 //! (`accumulate_lowered_node_carrier_deps`,
 //! `slot_param_root_is_symbolic_only`,
 //! `resolve_slot_bindings_graph_native`, and two sites in
@@ -123,21 +123,21 @@ fn slot_binding_graph_traversal_emits_paired_fact_tracer_and_legacy_signatures()
 
     // Dual-emit discrimination: BOTH counters must advance. If only
     // the legacy counter advances, the fact-tracer fan-out is
-    // missing → Block 9 cannot retire the legacy channel without
+    // missing → the legacy channel cannot be retired without
     // losing coverage. If only the tracer counter advances, the
     // legacy drain at `compute_component_meta_state_inner` loses
-    // slot-binding-graph facts from `state.fact_versions` → Block
-    // 1.B's `fact_dep_signature` shrinks.
+    // slot-binding-graph facts from `state.fact_versions` → the
+    // owner's `fact_dep_signature` shrinks.
     assert!(
         tracer_after > tracer_before,
-        "Block 1.C: the slot-binding-graph traversal MUST advance \
+        "the slot-binding-graph traversal MUST advance \
          `slot_binding_graph_fact_tracer_emissions` — the dual-emit \
          helper bumps the counter at every `observe_fact_signature` \
          call. tracer_before={tracer_before} tracer_after={tracer_after}"
     );
     assert!(
         legacy_after > legacy_before,
-        "Block 1.C: the slot-binding-graph traversal MUST advance \
+        "the slot-binding-graph traversal MUST advance \
          `slot_binding_graph_legacy_accumulator_emissions` — the \
          dual-emit helper bumps the counter at every \
          `accumulate_dispatch_dep_signature` call. \
@@ -152,7 +152,7 @@ fn slot_binding_graph_traversal_emits_paired_fact_tracer_and_legacy_signatures()
     let legacy_delta = legacy_after - legacy_before;
     assert_eq!(
         tracer_delta, legacy_delta,
-        "Block 1.C: per-call lockstep invariant — both counters must \
+        "per-call lockstep invariant — both counters must \
          advance by the same delta. tracer_delta={tracer_delta} \
          legacy_delta={legacy_delta}"
     );
@@ -165,7 +165,7 @@ fn slot_binding_graph_traversal_emits_paired_fact_tracer_and_legacy_signatures()
     // sanity check.
     assert!(
         tracer_delta >= 1,
-        "Block 1.C: at least one fact-tracer emission must fire for \
+        "at least one fact-tracer emission must fire for \
          this fixture; tracer_delta={tracer_delta}"
     );
 }

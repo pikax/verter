@@ -4,7 +4,7 @@
 //!
 //! ## Why
 //!
-//! The Block 0/1.H/1.I substrate establishes a two-step contract
+//! The fact-signature substrate establishes a two-step contract
 //! for every cache entry that carries a `fact_dep_signature`:
 //!
 //! 1. **Tracer install.** The cold-compute body runs inside
@@ -224,8 +224,8 @@ impl<'a> Scanner<'a> {
         let fn_name = fn_name.clone();
 
         // Detection 1: direct `with_fact_tracer` + strict admission
-        // in the same fn body. This is the "Block 1.H should have
-        // migrated" pattern. Allow-listed call sites bypass.
+        // in the same fn body. This is the unmigrated-pairing pattern.
+        // Allow-listed call sites bypass.
         if pairings.saw_direct_with_fact_tracer
             && pairings.saw_insert_arc_with_kind_on_known_cache
             && !self.is_direct_with_fact_tracer_allowed(self.file, &fn_name)

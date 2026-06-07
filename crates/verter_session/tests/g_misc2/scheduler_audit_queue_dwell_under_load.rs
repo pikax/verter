@@ -1,5 +1,4 @@
-//! Wave 2 Slice 2.3 — `SchedulerAudit::queue_dwell_ms` discriminating
-//! coverage.
+//! `SchedulerAudit::queue_dwell_ms` discriminating coverage.
 //!
 //! Drives 16 concurrent submissions through the real scheduler with
 //! a session-side [`verter_session::request_context::RequestContext`]
@@ -32,9 +31,9 @@
 //! captures that value and publishes it via
 //! `AuditObserver::record_scheduler_dispatch`.
 //!
-//! Discriminating: pre-Slice-2.3 the `record_scheduler_dispatch`
-//! observer hook does not exist; the per-request scheduler_audit
-//! slot is never populated; the assertion below would fail because
+//! Discriminating: without the `record_scheduler_dispatch`
+//! observer hook, the per-request scheduler_audit slot is never
+//! populated; the assertion below would fail because
 //! every slot is `None`. A naive stub that filled the slot but
 //! always wrote `0.0` would also fail because zero is not
 //! strictly-positive.
@@ -349,7 +348,7 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
     // Bounded join: each submitter completes once its request finishes
     // (which requires the pause + gate to have been released). A genuine
     // deadlock PANICS within ~10s rather than hanging the suite — this is
-    // also what makes the FIX-2 bound provable: with the release removed,
+    // also what makes the bound provable: with the release removed,
     // the submitters never complete and this join surfaces the stall.
     for (idx, h) in handles.into_iter().enumerate() {
         join_within(
@@ -363,8 +362,8 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
     for (idx, ctx) in contexts.iter().enumerate() {
         assert!(
             ctx.scheduler_audit.lock().is_some(),
-            "request {} on /file{}.vue: scheduler_audit slot must be populated, \
-             pre-Slice-2.3 the slot does not exist or is never written",
+            "request {} on /file{}.vue: scheduler_audit slot must be populated; \
+             without the dispatch hook the slot is never written",
             ctx.request_id,
             idx,
         );
@@ -385,8 +384,7 @@ fn at_least_one_concurrent_request_observes_non_zero_queue_dwell_ms() {
         max_dwell > 0.0,
         "at least one of {} concurrent requests must observe a strictly \
          positive queue_dwell_ms; max observed = {} ms. \
-         Pre-Slice-2.3 the field does not exist; a stub that always wrote \
-         0.0 would also fail this assertion.",
+         A stub that always wrote 0.0 would also fail this assertion.",
         REQUESTS,
         max_dwell,
     );

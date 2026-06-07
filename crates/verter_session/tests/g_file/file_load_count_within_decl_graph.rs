@@ -1,5 +1,5 @@
-//! Block 1.9 — budget oracle #1: file-load count stays bounded by the
-//! declaration graph.
+//! Budget oracle: file-load count stays bounded by the declaration
+//! graph.
 //!
 //! Drives a `get_component_meta` request whose declaration graph
 //! includes a fixed, statically-known number of files: the owner SFC +
@@ -21,15 +21,15 @@
 //!
 //! ## Discrimination contract
 //!
-//! Pre-budget shape: `ensure_loaded_calls` delta scales with the
-//! transitive import closure (which includes files the consumer never
-//! references). For our 3-file fixture, the pre-budget tree could
-//! load 5+ files (owner + 2 type files + indirect helpers + barrel
-//! sweeps).
+//! An unbudgeted shape would have `ensure_loaded_calls` delta scale
+//! with the transitive import closure (which includes files the
+//! consumer never references). For our 3-file fixture, such a tree
+//! could load 5+ files (owner + 2 type files + indirect helpers +
+//! barrel sweeps).
 //!
-//! Post-budget shape: the demand-driven resolver loads exactly the
-//! files reachable via the declaration graph the consumer projects.
-//! For our 3-file fixture the cold path touches:
+//! The demand-driven resolver loads exactly the files reachable via
+//! the declaration graph the consumer projects. For our 3-file fixture
+//! the cold path touches:
 //!   - `/owner.vue` (the SFC the consumer queries)
 //!   - `/inner.ts` (defines `Inner`, referenced by the prop type)
 //!   - `/outer.ts` (re-exports `Inner` as `Outer`, the prop type)
@@ -51,8 +51,8 @@
 //!   - falls through to a legacy "load every workspace file" path
 //!
 //! All three would inflate `ensure_loaded_calls` to a count strictly
-//! greater than `expected_graph_files + BUDGET_SLACK`. The post-
-//! budget tree stays under the bound.
+//! greater than `expected_graph_files + BUDGET_SLACK`. The
+//! demand-driven resolver stays under the bound.
 
 use std::sync::Arc;
 
@@ -67,7 +67,7 @@ const EXPECTED_GRAPH_FILES: u64 = 3;
 
 /// Tolerance for incidental cold-start file loads (e.g. host probing
 /// the workspace root for tsconfig / lib resolution). 10 is a generous
-/// upper bound — the post-budget tree typically lands at 1-5 above the
+/// upper bound — the resolver typically lands at 1-5 above the
 /// declaration-graph count for a small fixture.
 const BUDGET_SLACK: u64 = 10;
 
@@ -157,7 +157,7 @@ fn ensure_loaded_count_stays_within_declaration_graph_budget() {
          loaded files outside the declaration graph (over-loading), \
          re-loaded the same file under different cache keys \
          (cache-key fragmentation), or fell through to a legacy \
-         workspace-sweep path. The demand-driven post-budget tree \
+         workspace-sweep path. The demand-driven resolver \
          loads only files reachable through the consumer's typed \
          declaration walk.",
         delta,

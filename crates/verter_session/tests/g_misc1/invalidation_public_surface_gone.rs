@@ -249,7 +249,7 @@ fn verter_host_public_invalidation_surface_is_narrow() {
     }
     assert!(
         violations.is_empty(),
-        "Block 5 `invalidation_public_surface_gone` violation:\n{}\n\n\
+        "`invalidation_public_surface_gone` violation:\n{}\n\n\
          `impl VerterHost` exposes a narrow public invalidation API. \n\
          The fact-based cache architecture revalidates warm hits via \n\
          `HostFenceValidator` and dep-signatures, so external callers \n\

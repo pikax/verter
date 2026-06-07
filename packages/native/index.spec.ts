@@ -339,7 +339,7 @@ describe("component-meta native aliases", () => {
   });
 
   it("exposes synchronous audit binding methods on ComponentMetaSession", () => {
-    // Plan §3 Commit 8 — the three audit bindings must all be
+    // The three audit bindings must all be
     // synchronous (no async fn, no Promise-returning NAPI surface).
     const native = require("./index.js");
     const methods = Object.getOwnPropertyNames(native.ComponentMetaSession.prototype).sort();
@@ -352,7 +352,7 @@ describe("component-meta native aliases", () => {
   it("getComponentMetaWithAudit throws when the host does not enable audit", () => {
     // Default HostConfig has audit_enabled = false. Calling the audit
     // binding must surface a clear error rather than returning an
-    // empty-footprint bundle. Plan §3 Commit 8.
+    // empty-footprint bundle.
     const native = require("./index.js");
     const host = new native.ComponentMetaHost();
     const session = host.openSession();
@@ -364,7 +364,7 @@ describe("component-meta native aliases", () => {
   });
 
   it("napi_get_component_meta_with_audit_returns_populated_footprint", () => {
-    // Plan §3 Commit 8 test list entry. With audit_enabled +
+    // With audit_enabled +
     // footprint_capture on, the binding returns a Buffer containing
     // `{ analysis, resolution, record }` JSON — and the record's
     // `footprint` field MUST be populated (non-null, with at least
@@ -392,10 +392,10 @@ describe("component-meta native aliases", () => {
     expect(bundle).toHaveProperty("resolution");
     expect(bundle).toHaveProperty("record");
     expect(bundle.record).toHaveProperty("request_id");
-    // u64 fields must be decimal strings per plan §1.4 / §3.B.
+    // u64 fields must be decimal strings.
     expect(typeof bundle.record.request_id).toBe("string");
     expect(bundle.record.request_id).toMatch(/^[0-9]+$/);
-    // i64 fields likewise after §3.B Commit 7.A.
+    // i64 fields are likewise decimal strings.
     expect(typeof bundle.record.memory.process_rss_delta_bytes).toBe("string");
 
     // Footprint attach invariant — the plan-required test name
@@ -456,7 +456,7 @@ describe("component-meta native aliases", () => {
   });
 
   it("napi_audit_json_round_trips_through_typescript_json_parse_stringify", () => {
-    // Plan §3 Commit 8 test list. The audit JSON round-trip through
+    // The audit JSON round-trip through
     // `JSON.parse`/`JSON.stringify` is the path the hover / playground
     // consumers take — they stringify, ship over a transport, parse,
     // re-stringify before handing to `whyLoadedFromAuditJson`. This
@@ -514,9 +514,9 @@ describe("component-meta native aliases", () => {
   });
 
   it("napi_take_audit_record_called_synchronously_before_promise_resolves", () => {
-    // Plan §3 Commit 8 binding-shape decision 1: the audit NAPI
-    // methods are SYNCHRONOUS. The plan's phrase "Promise resolves
-    // synchronously" meant that the binding hands the audit record
+    // Binding-shape rule: the audit NAPI
+    // methods are SYNCHRONOUS. "Promise resolves
+    // synchronously" means the binding hands the audit record
     // back on the same call that produced it — NOT that the binding
     // uses `async fn`. This test pins that decision: the Buffer must
     // be observable on the same microtask as the call that produced
@@ -645,7 +645,7 @@ describe("VerterHost type declarations in sync with native binary", () => {
     const native = require("./index.js");
     expect(typeof native.processStyle).toBe("function");
     expect(typeof native.VerterHost).toBe("function");
-    // Phase 9b — `compileBatch` was deleted; batch SFC compile is now
+    // `compileBatch` does not exist; batch SFC compile is
     // the `host.compileMany` instance method. Negative assertion to
     // catch any future re-export attempt.
     expect((native as { compileBatch?: unknown }).compileBatch).toBeUndefined();
@@ -703,7 +703,7 @@ describe("processStyle", () => {
 });
 
 // =============================================================================
-// Phase 9b — VerterHost.compileMany E2E
+// VerterHost.compileMany E2E
 // =============================================================================
 
 describe("VerterHost.compileMany", () => {

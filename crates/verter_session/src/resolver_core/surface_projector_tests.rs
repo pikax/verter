@@ -6,7 +6,7 @@
 //! surface_projector_tests` declaration gates compilation; no inner
 //! `#![cfg(test)]` is needed.
 //!
-//! After the props/emits/slots cutover the surface projector is
+//! The surface projector is
 //! responsible for ONLY the native-only `native_props` carrier (the
 //! private/protected class-member visibility surface). The published
 //! props/emits/slots surface is owned by the typeinfo macro-surface path

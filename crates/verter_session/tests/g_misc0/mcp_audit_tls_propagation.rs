@@ -1,5 +1,4 @@
-//! TLS-observer propagation through `VerterHost::audit_mcp_tool_call`
-//! (Wave 3 Slice 3.F follow-up).
+//! TLS-observer propagation through `VerterHost::audit_mcp_tool_call`.
 //!
 //! `audit_mcp_tool_call` wraps a synthetic tool-callback closure with
 //! the standard registration / `RequestContextGuard` / finalize

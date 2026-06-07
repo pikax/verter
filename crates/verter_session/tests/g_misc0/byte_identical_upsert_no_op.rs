@@ -1,20 +1,19 @@
 //! R1 / R2 — byte-identical `host.upsert(...)` is a true cache-state no-op.
 //!
-//! Plan citation: `D:/tmp/verter-fact-based-cache-plan.md` §"Stage 2".
 //! Architectural rules bound: **R1, R2**.
 //!
-//! The Stage 0 `evict_canonical_inventory.json` documents every DB that
-//! `host.upsert(...)` mutated on the pre-Stage-2 byte-identical fast path
-//! (the `co_evicted_outside_project_type_store` block plus the Stage 0
-//! ProjectTypeStore drains). This test cross-references that inventory
-//! at runtime: construct a host, perform N=10 byte-identical re-upserts,
+//! The `evict_canonical_inventory.json` documents every DB that
+//! `host.upsert(...)` could mutate on the byte-identical fast path
+//! (the `co_evicted_outside_project_type_store` block plus the
+//! ProjectTypeStore drains). This test cross-references that inventory:
+//! construct a host, perform N=10 byte-identical re-upserts,
 //! and assert every observable DB-level dimension is preserved.
 //!
 //! Verify-bullet correspondence:
-//! - **Verify #1 (Stage 2)**: "After N byte-identical re-upserts: all DB
-//!   entries from Stage 0's `evict_canonical_inventory.json` unchanged."
+//! - **Verify #1**: "After N byte-identical re-upserts: all DB
+//!   entries from `evict_canonical_inventory.json` unchanged."
 //!   — `inventory_dbs_unchanged_after_n_byte_identical_re_upserts`.
-//! - **Verify #2 (Stage 2)**: "`bump_store_view_epoch` counter unchanged
+//! - **Verify #2**: "`bump_store_view_epoch` counter unchanged
 //!   when quintuple is unchanged." —
 //!   `store_view_epoch_unchanged_after_n_byte_identical_re_upserts`.
 
@@ -59,7 +58,7 @@ fn re_upsert_byte_identical(host: &VerterHost) {
         .expect("re-upsert succeeds");
 }
 
-/// Snapshot every DB the Stage 0 inventory tracks so a post-upsert
+/// Snapshot every DB the inventory tracks so a post-upsert
 /// comparison can prove byte-identical re-upsert is a true no-op.
 #[derive(Debug, PartialEq, Eq)]
 struct InventorySnapshot {
@@ -85,15 +84,15 @@ fn snapshot(host: &VerterHost) -> InventorySnapshot {
     }
 }
 
-/// Verify-bullet #1: every DB on Stage 0's
+/// Verify-bullet #1: every DB on
 /// `evict_canonical_inventory.json` is unchanged after N=10
 /// byte-identical re-upserts.
 ///
 /// Discriminating predicate: this test runs all the upserts after taking
-/// the baseline snapshot. Pre-Stage-2 the fast path called `clear()` on
+/// the baseline snapshot. A fast path that called `clear()` on
 /// `resolved_type_cache_db` and `eval_env_cache_db` AND bumped
-/// `store_view_epoch`. The snapshot comparison fails if any DB shrank,
-/// any DB grew, or the epoch advanced.
+/// `store_view_epoch` would fail it. The snapshot comparison fails if any
+/// DB shrank, any DB grew, or the epoch advanced.
 #[test]
 fn inventory_dbs_unchanged_after_n_byte_identical_re_upserts() {
     let host = build_host_and_seed();
@@ -106,11 +105,11 @@ fn inventory_dbs_unchanged_after_n_byte_identical_re_upserts() {
     let after = snapshot(&host);
     assert_eq!(
         after, baseline,
-        "R1: every DB on the Stage 0 evict_canonical inventory MUST be \
-         unchanged after byte-identical re-upserts. The pre-Stage-2 fast \
-         path bumped store_view_epoch and called \
-         resolved_type_cache().clear() + eval_env_cache().clear(), so \
-         the pre-change tree diverges on at least one of those dimensions."
+        "R1: every DB on the evict_canonical inventory MUST be \
+         unchanged after byte-identical re-upserts. A fast \
+         path that bumped store_view_epoch and called \
+         resolved_type_cache().clear() + eval_env_cache().clear() would \
+         diverge on at least one of those dimensions."
     );
 }
 
@@ -136,8 +135,8 @@ fn store_view_epoch_unchanged_after_n_byte_identical_re_upserts() {
     assert_eq!(
         epoch_after, epoch_before,
         "R1: byte-identical re-upsert MUST NOT bump store_view_epoch. \
-         The pre-Stage-2 fast path bumped unconditionally — epoch_before \
-         = {epoch_before}, epoch_after = {epoch_after}. The post-Stage-2 \
+         A fast path that bumped unconditionally would diverge — \
+         epoch_before = {epoch_before}, epoch_after = {epoch_after}. The \
          fast path skips the bump because no cache state was touched."
     );
 }

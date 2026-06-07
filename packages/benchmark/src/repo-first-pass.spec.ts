@@ -1,7 +1,7 @@
 /**
- * @ai-generated - Phase 11b diagnosis benchmark.
+ * @ai-generated - repo_first_pass diagnosis benchmark.
  *
- * Drives the four §10.4 overlay-isolation scenarios against the
+ * Drives the four overlay-isolation scenarios against the
  * nuxt-ui-codex-bench corpus and emits the captured per-counter
  * deltas to `tmp/perf-baselines/post-b2/repo-first-pass.json`.
  *
@@ -15,12 +15,12 @@
  * the output, asserts non-empty data, and writes the public
  * baseline JSON.
  *
- * Corpus-drift refusal (Phase 11b mandatory):
+ * Corpus-drift refusal (mandatory):
  * - The spec reads `tmp/perf-baselines/post-b2/baseline-commit.txt`
  *   for the recorded `corpus-commit`.
  * - Runs `git -C <corpus> rev-parse HEAD` for the live commit.
  * - On mismatch: aborts with `BENCHMARK_CORPUS_DRIFT: ...` and exit
- *   code 78 (per §8 Phase 11b's contract). Vitest converts the
+ *   code 78 (per the diagnosis contract). Vitest converts the
  *   thrown error to a test failure; this spec also calls
  *   `process.exit(78)` when `process.env.VERTER_PHASE_11B_STRICT`
  *   is set so CI scripts can shell-detect drift directly.
@@ -56,8 +56,8 @@ function parseBaselineRecord(): BaselineRecord {
   if (!existsSync(BASELINE_COMMIT_FILE)) {
     throw new Error(
       `BENCHMARK_BASELINE_MISSING: ${BASELINE_COMMIT_FILE} does not exist. ` +
-        `Phase 11b requires a recorded baseline; the orchestrator should run ` +
-        `Phase 11a (post-B2 baseline capture) before dispatching Phase 11b.`,
+        `This regression run requires a recorded baseline; capture the ` +
+        `baseline before dispatching the run.`,
     );
   }
   const text = readFileSync(BASELINE_COMMIT_FILE, "utf8");
@@ -79,7 +79,9 @@ function parseBaselineRecord(): BaselineRecord {
 
 function liveCorpusCommit(corpusRoot: string): string {
   if (!existsSync(corpusRoot)) {
-    throw new Error(`BENCHMARK_CORPUS_MISSING: ${corpusRoot} not present. Phase 11b cannot run.`);
+    throw new Error(
+      `BENCHMARK_CORPUS_MISSING: ${corpusRoot} not present. The regression run cannot proceed.`,
+    );
   }
   const result = spawnSync("git", ["-C", corpusRoot, "rev-parse", "HEAD"], {
     encoding: "utf8",
@@ -180,7 +182,7 @@ function writeReport(report: DiagnosisJson): void {
   writeFileSync(OUTPUT_JSON, `${JSON.stringify(report, null, 2)}\n`, "utf8");
 }
 
-describe("Phase 11b — repo_first_pass diagnosis benchmark", () => {
+describe("repo_first_pass diagnosis benchmark", () => {
   it("refuses to run when the corpus has drifted from the recorded baseline", () => {
     // This test always passes when the corpus is in sync; its
     // discriminating value is that it exercises the

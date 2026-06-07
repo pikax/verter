@@ -1,8 +1,7 @@
 //! Architecture guard: `crates/verter_session/src/lib.rs` MUST stay
 //! under the line-count target.
 //!
-//! `lib.rs` declared one of the largest single source files in the
-//! repository before the Tier C cleanup; the long-term shape is a thin
+//! `lib.rs` is kept as a thin
 //! crate root that re-exports submodules and owns only the
 //! root-`VerterHost` struct definition. Method bodies, large doc blocks,
 //! and ancillary impl blocks belong in cohesive submodules.
@@ -10,9 +9,9 @@
 //! Adding a new method directly on lib.rs that pushes the file past the
 //! target should fail this gate; the right pattern is to extend
 //! `VerterHost` from a submodule (`host_manage.rs`, `host_resolve.rs`,
-//! etc.) — every other Tier C cleanup file already follows this shape.
+//! etc.) — every other host submodule already follows this shape.
 //!
-//! The target line-count is the post-shrink ceiling. The current value
+//! The target line-count is the ceiling. The current value
 //! is calibrated to give regular maintenance some breathing room without
 //! permitting another 1k-line growth episode.
 
@@ -28,8 +27,8 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-// Bumped from 831 → 855 when the PE4 hash-cons cache layers landed
-// two new `for_tests::dispatch_*_for_tests` shims
+// The ceiling accounts for the hash-cons cache layers'
+// two `for_tests::dispatch_*_for_tests` shims
 // (`substitute_semantic_type_param`,
 // `evaluate_deferred_semantic_node_with_context`). The shims live
 // inside the existing `for_tests` module gating pattern; further

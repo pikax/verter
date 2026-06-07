@@ -1,5 +1,4 @@
-//! Phase 5h §5.B.5.1 r15/F9 — rule-correctness gate for deferred Class A
-//! fixtures authored by 5h.
+//! Rule-correctness gate for deferred Class A fixtures.
 //!
 //! Counting fixtures does not prove they discriminate.
 //! `ensure_class_a_expected_matches_snapshot()` only enforces
@@ -8,23 +7,20 @@
 //! commit a self-confirming snapshot where post-fix snapshot equals
 //! (still-wrong) expected.
 //!
-//! The §5.B.5.1 r15 rule-correctness gate adds a programmatic
-//! byte-equality test: read the rule-correct expected value as
-//! DATA from the workspace's `phase-00-tier1-mismatches.md` (a
-//! fenced ```json``` block per fixture id), then compare it
-//! byte-for-byte against the post-Phase-5h-fix Verter output for
-//! the same fixture.
+//! The rule-correctness gate adds a programmatic byte-equality test:
+//! read the rule-correct expected value as DATA from the workspace's
+//! `phase-00-tier1-mismatches.md` (a fenced ```json``` block per
+//! fixture id), then compare it byte-for-byte against the Verter
+//! output for the same fixture.
 //!
-//! Discrimination: this test FAILS pre-Phase-5h-fix (Verter
-//! produces `["alpha"]` while the rule-correct expected is
-//! `["alpha", "beta", "gamma"]`); PASSES post-fix (Verter's
-//! resolver-context shadow gate routes through the userland
-//! declaration → all three Cfg members surface).
+//! Discrimination: this test asserts Verter's resolver-context shadow
+//! gate routes through the userland declaration so all three Cfg
+//! members surface (`["alpha", "beta", "gamma"]`), not just
+//! `["alpha"]`.
 //!
 //! Negative assertion: refusal to regenerate. The test PANICS if
 //! `UPDATE_SNAPSHOTS=1` is set in the environment when the test
-//! runs — this catches the self-confirming-snapshot anti-pattern
-//! the §0p.A.4 case-2 self-test guards against.
+//! runs — this catches the self-confirming-snapshot anti-pattern.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,11 +42,10 @@ fn mismatches_md_path() -> PathBuf {
         .join("phase-00-tier1-mismatches.md")
 }
 
-/// Workspace path to `phase-00b-tier1-mismatches.md` (the Phase 0b
-/// deferred-fixture log). Same layout as
-/// [`mismatches_md_path`] but for Phase 0b's two row-1/row-2 entries
-/// (`fixture_slots_typed`, `fixture_models`) authored by Phase 5j
-/// §5.12.
+/// Workspace path to `phase-00b-tier1-mismatches.md` (the
+/// component-meta-property deferred-fixture log). Same layout as
+/// [`mismatches_md_path`] but for the row-1/row-2 entries
+/// (`fixture_slots_typed`, `fixture_models`).
 fn mismatches_md_path_00b() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..") // crates/
@@ -64,8 +59,7 @@ fn mismatches_md_path_00b() -> PathBuf {
 ///
 /// Returns `Some(view)` when the block is present and parses;
 /// `None` when the fixture has no machine-readable rule-correct
-/// expected (i.e., the §5.B.5.1 STOP — the .md file needs the
-/// block authored).
+/// expected (the .md file needs the block authored).
 fn read_rule_correct_block_from(path: &PathBuf, fixture_id: &str) -> Option<SnapshotView> {
     let md = std::fs::read_to_string(path).unwrap_or_else(|e| {
         panic!(
@@ -109,8 +103,8 @@ fn read_rule_correct_block_from_mismatches_md(fixture_id: &str) -> Option<Snapsh
 
 /// Parse the rule-correct expected `SnapshotView` for `fixture_id`
 /// from `phase-00b-tier1-mismatches.md`. Wrapper around
-/// [`read_rule_correct_block_from`] for Phase 0b deferrals (rows 1
-/// and 2, owned by Phase 5j §5.12).
+/// [`read_rule_correct_block_from`] for the component-meta-property
+/// deferrals (rows 1 and 2).
 fn read_rule_correct_block_from_mismatches_md_00b(fixture_id: &str) -> Option<SnapshotView> {
     read_rule_correct_block_from(&mismatches_md_path_00b(), fixture_id)
 }
@@ -149,7 +143,7 @@ fn run_resolver_under_audit_and_serialize(fixture_id: &str) -> SnapshotView {
     let analysis = match req {
         Ok((analysis, _resolution, _record)) => analysis,
         Err(e) => panic!(
-            "Phase 5h §5.B.5.1 rule-correctness gate: fixture `{fixture_id}` \
+            "rule-correctness gate: fixture `{fixture_id}` \
              (`{}`) must resolve, got {e}",
             fixture.target,
         ),
@@ -157,21 +151,18 @@ fn run_resolver_under_audit_and_serialize(fixture_id: &str) -> SnapshotView {
     SnapshotView::from_analysis(&analysis)
 }
 
-/// Phase 5h §5.B.5.1 rule-correctness gate for the
-/// `userland_shadowing_pick` deferred fixture.
+/// Rule-correctness gate for the `userland_shadowing_pick` deferred
+/// fixture.
 ///
 /// Reads the rule-correct expected `SnapshotView` from the JSON
 /// block in `phase-00-tier1-mismatches.md` (row 5 — TS-first /
 /// userland shadow). Compares it byte-for-byte against the
-/// post-Phase-5h-fix Verter output for the same fixture.
+/// Verter output for the same fixture.
 ///
-/// **Discrimination:**
-///   - Pre-Phase-5h-fix: Verter resolves `Pick<Cfg, 'alpha'>` to
-///     the lib's mapped Pick → surfaces only `alpha`. Test FAILS
-///     (rule-correct expected has all three: alpha + beta + gamma).
-///   - Post-Phase-5h-fix: the resolver-context shadow gate routes
-///     through the userland declaration → all three members
-///     surface. Test PASSES.
+/// **Discrimination:** the resolver-context shadow gate routes
+/// through the userland declaration so all three Cfg members
+/// (alpha + beta + gamma) surface, not just `alpha` from the lib's
+/// mapped Pick.
 ///
 /// **Negative assertion:** refusal to regenerate. The test PANICS
 /// if `UPDATE_SNAPSHOTS=1` is set in the environment, catching
@@ -181,7 +172,7 @@ fn deferred_fixture_userland_shadowing_pick_byte_equal_to_rule_correct_expected(
     if std::env::var("UPDATE_SNAPSHOTS").as_deref() == Ok("1") {
         panic!(
             "UPDATE_SNAPSHOTS=1 is FORBIDDEN for deferred fixtures \
-             (§5.B.5.1 r15/F9 — would lock in self-confirming snapshot). \
+             (would lock in self-confirming snapshot). \
              Either fix the resolver (rule-correct expected stays) OR \
              escalate to user (rule-correct expected was wrong)."
         );
@@ -191,7 +182,7 @@ fn deferred_fixture_userland_shadowing_pick_byte_equal_to_rule_correct_expected(
         read_rule_correct_block_from_mismatches_md("userland_shadowing_pick").unwrap_or_else(|| {
             panic!(
                 "Rule-correct expected for `userland_shadowing_pick` not found in \
-                 phase-00-tier1-mismatches.md. Per §5.B.5.1 STOP CONDITIONS, the \
+                 phase-00-tier1-mismatches.md. The \
                  .md file must carry a machine-readable JSON block \
                  (`{{ \"fixture_id\": \"userland_shadowing_pick\", \"expected\": <SnapshotView> }}`). \
                  Surface to user."
@@ -210,25 +201,22 @@ fn deferred_fixture_userland_shadowing_pick_byte_equal_to_rule_correct_expected(
         serde_json::to_string_pretty(&actual).expect("post-fix SnapshotView serializes");
     assert_eq!(
         actual_json, rule_correct_json,
-        "Phase 5h §5.B.5.1 rule-correctness gate: post-fix output for \
+        "rule-correctness gate: output for \
          `userland_shadowing_pick` MUST byte-equal the rule-correct expected \
-         from phase-00-tier1-mismatches.md. Either the §5.10 ScopeShadowing \
-         thread did not fully close the userland-shadow-pick gap (5h STOP) \
+         from phase-00-tier1-mismatches.md. Either the ScopeShadowing \
+         thread did not fully close the userland-shadow-pick gap \
          OR the rule-correct expected was wrong (escalate to user, do NOT \
          regenerate)."
     );
 }
 
-/// Phase 5i §5.B.5.1 rule-correctness gate for the `mapped_exclude`
-/// deferred fixture (row 1).
+/// Rule-correctness gate for the `mapped_exclude` deferred fixture
+/// (row 1).
 ///
-/// **Discrimination:**
-///   - Pre-Phase-5i-fix: Verter surfaces `kind: /*unknown*/
-///     semanticMiss` because `Exclude<>` falls into
-///     `build_builtin_utility`'s deferred catch-all `_` arm.
-///   - Post-Phase-5i-fix: the new `Extract` / `Exclude` arm
-///     dispatches per-member through `relate_nodes` and
-///     reconstitutes survivors as `"a" | "c"`.
+/// **Discrimination:** the `Extract` / `Exclude` arm dispatches
+/// per-member through `relate_nodes` and reconstitutes survivors as
+/// `"a" | "c"`, rather than surfacing `kind: /*unknown*/
+/// semanticMiss`.
 ///
 /// **Negative assertion:** UPDATE_SNAPSHOTS=1 PANICS — the
 /// self-confirming-snapshot trap is closed.
@@ -237,7 +225,7 @@ fn deferred_fixture_mapped_exclude_byte_equal_to_rule_correct_expected() {
     if std::env::var("UPDATE_SNAPSHOTS").as_deref() == Ok("1") {
         panic!(
             "UPDATE_SNAPSHOTS=1 is FORBIDDEN for deferred fixtures \
-             (§5.B.5.1 r15/F9 — would lock in self-confirming snapshot). \
+             (would lock in self-confirming snapshot). \
              Either fix the resolver (rule-correct expected stays) OR \
              escalate to user (rule-correct expected was wrong)."
         );
@@ -247,7 +235,7 @@ fn deferred_fixture_mapped_exclude_byte_equal_to_rule_correct_expected() {
         .unwrap_or_else(|| {
             panic!(
                 "Rule-correct expected for `mapped_exclude` not found in \
-                 phase-00-tier1-mismatches.md. Per §5.B.5.1 STOP CONDITIONS, the \
+                 phase-00-tier1-mismatches.md. The \
                  .md file must carry a machine-readable JSON block \
                  (`{{ \"fixture_id\": \"mapped_exclude\", \"expected\": <SnapshotView> }}`). \
                  Surface to user."
@@ -262,25 +250,22 @@ fn deferred_fixture_mapped_exclude_byte_equal_to_rule_correct_expected() {
         serde_json::to_string_pretty(&actual).expect("post-fix SnapshotView serializes");
     assert_eq!(
         actual_json, rule_correct_json,
-        "Phase 5i §5.B.5.1 rule-correctness gate: post-fix output for \
+        "rule-correctness gate: output for \
          `mapped_exclude` MUST byte-equal the rule-correct expected from \
-         phase-00-tier1-mismatches.md row 1. Either the §5.11 \
-         Exclude/Extract reduction did not fully close the gap (5i STOP) \
+         phase-00-tier1-mismatches.md row 1. Either the \
+         Exclude/Extract reduction did not fully close the gap \
          OR the rule-correct expected was wrong (escalate to user, do NOT \
          regenerate)."
     );
 }
 
-/// Phase 5i §5.B.5.1 rule-correctness gate for the `mapped_extract`
-/// deferred fixture (row 2).
+/// Rule-correctness gate for the `mapped_extract` deferred fixture
+/// (row 2).
 ///
-/// **Discrimination:**
-///   - Pre-Phase-5i-fix: Verter surfaces `/*unknown*/ semanticMiss`
-///     for the same reason as `mapped_exclude` (deferred utility
-///     catch-all).
-///   - Post-Phase-5i-fix: the per-member relation engine dispatch
-///     keeps `'a'` and `'b'` (assignable to filter union
-///     `'a' | 'b'`) and drops `'c'`, producing `"a" | "b"`.
+/// **Discrimination:** the per-member relation engine dispatch keeps
+/// `'a'` and `'b'` (assignable to filter union `'a' | 'b'`) and drops
+/// `'c'`, producing `"a" | "b"`, rather than surfacing
+/// `/*unknown*/ semanticMiss`.
 ///
 /// **Negative assertion:** UPDATE_SNAPSHOTS=1 PANICS.
 #[test]
@@ -288,7 +273,7 @@ fn deferred_fixture_mapped_extract_byte_equal_to_rule_correct_expected() {
     if std::env::var("UPDATE_SNAPSHOTS").as_deref() == Ok("1") {
         panic!(
             "UPDATE_SNAPSHOTS=1 is FORBIDDEN for deferred fixtures \
-             (§5.B.5.1 r15/F9 — would lock in self-confirming snapshot). \
+             (would lock in self-confirming snapshot). \
              Either fix the resolver (rule-correct expected stays) OR \
              escalate to user (rule-correct expected was wrong)."
         );
@@ -298,7 +283,7 @@ fn deferred_fixture_mapped_extract_byte_equal_to_rule_correct_expected() {
         .unwrap_or_else(|| {
             panic!(
                 "Rule-correct expected for `mapped_extract` not found in \
-                 phase-00-tier1-mismatches.md. Per §5.B.5.1 STOP CONDITIONS, the \
+                 phase-00-tier1-mismatches.md. The \
                  .md file must carry a machine-readable JSON block \
                  (`{{ \"fixture_id\": \"mapped_extract\", \"expected\": <SnapshotView> }}`). \
                  Surface to user."
@@ -313,29 +298,23 @@ fn deferred_fixture_mapped_extract_byte_equal_to_rule_correct_expected() {
         serde_json::to_string_pretty(&actual).expect("post-fix SnapshotView serializes");
     assert_eq!(
         actual_json, rule_correct_json,
-        "Phase 5i §5.B.5.1 rule-correctness gate: post-fix output for \
+        "rule-correctness gate: output for \
          `mapped_extract` MUST byte-equal the rule-correct expected from \
-         phase-00-tier1-mismatches.md row 2. Either the §5.11 \
-         Exclude/Extract reduction did not fully close the gap (5i STOP) \
+         phase-00-tier1-mismatches.md row 2. Either the \
+         Exclude/Extract reduction did not fully close the gap \
          OR the rule-correct expected was wrong (escalate to user, do NOT \
          regenerate)."
     );
 }
 
-/// Phase 5i §5.B.5.1 rule-correctness gate for the
-/// `template_literal_as_key` deferred fixture (row 3, re-homed
-/// from 5k per §5.13 r15 table).
+/// Rule-correctness gate for the `template_literal_as_key` deferred
+/// fixture (row 3).
 ///
-/// **Discrimination:**
-///   - Pre-Phase-5i-fix: Verter's mapped-type evaluator does not
-///     apply `mapper.name_remap`, so iteration produces props
-///     keyed by the SOURCE union (`A`, `B`) rather than the
-///     remapped names. The pre-existing snapshot would diverge
-///     from rule-correct.
-///   - Post-Phase-5i-fix: `build_mapped_type` substitutes the
-///     iteration key into the remap expression and folds the
-///     `TemplateLiteral` evaluator's output to a `Literal::String`,
-///     producing `prefixA` and `prefixB`.
+/// **Discrimination:** `build_mapped_type` substitutes the iteration
+/// key into the remap expression and folds the `TemplateLiteral`
+/// evaluator's output to a `Literal::String`, producing `prefixA` and
+/// `prefixB` — not props keyed by the SOURCE union (`A`, `B`) that a
+/// mapped-type evaluator without `mapper.name_remap` would emit.
 ///
 /// **Negative assertion:** UPDATE_SNAPSHOTS=1 PANICS.
 #[test]
@@ -343,7 +322,7 @@ fn deferred_fixture_template_literal_as_key_byte_equal_to_rule_correct_expected(
     if std::env::var("UPDATE_SNAPSHOTS").as_deref() == Ok("1") {
         panic!(
             "UPDATE_SNAPSHOTS=1 is FORBIDDEN for deferred fixtures \
-             (§5.B.5.1 r15/F9 — would lock in self-confirming snapshot). \
+             (would lock in self-confirming snapshot). \
              Either fix the resolver (rule-correct expected stays) OR \
              escalate to user (rule-correct expected was wrong)."
         );
@@ -354,7 +333,7 @@ fn deferred_fixture_template_literal_as_key_byte_equal_to_rule_correct_expected(
             || {
                 panic!(
                     "Rule-correct expected for `template_literal_as_key` not found in \
-                     phase-00-tier1-mismatches.md. Per §5.B.5.1 STOP CONDITIONS, the \
+                     phase-00-tier1-mismatches.md. The \
                      .md file must carry a machine-readable JSON block \
                      (`{{ \"fixture_id\": \"template_literal_as_key\", \"expected\": <SnapshotView> }}`). \
                      Surface to user."
@@ -370,33 +349,26 @@ fn deferred_fixture_template_literal_as_key_byte_equal_to_rule_correct_expected(
         serde_json::to_string_pretty(&actual).expect("post-fix SnapshotView serializes");
     assert_eq!(
         actual_json, rule_correct_json,
-        "Phase 5i §5.B.5.1 rule-correctness gate: post-fix output for \
+        "rule-correctness gate: output for \
          `template_literal_as_key` MUST byte-equal the rule-correct \
          expected from phase-00-tier1-mismatches.md row 3. Either the \
-         §5.11 mapper name_remap + TemplateLiteral fold did not fully \
-         close the gap (5i STOP) OR the rule-correct expected was wrong \
+         mapper name_remap + TemplateLiteral fold did not fully \
+         close the gap OR the rule-correct expected was wrong \
          (escalate to user, do NOT regenerate)."
     );
 }
 
-/// Phase 5j §5.B.5.1 rule-correctness gate for the
-/// `fixture_slots_typed` deferred fixture
-/// (`phase-00b-tier1-mismatches.md` row 1).
+/// Rule-correctness gate for the `fixture_slots_typed` deferred
+/// fixture (`phase-00b-tier1-mismatches.md` row 1).
 ///
-/// **Discrimination:**
-///   - Pre-Phase-5j-fix: Verter dispatches
-///     `ProjectPath { base, [Member(slot), Member(binding)],
-///     Expanded }` directly. The walker hits the slot's `Function`
-///     value with `Member(binding)` remaining and falls through to
-///     `opaque_miss` (per `walk.rs` Function arm catch-all). The
-///     binding raises to `Unknown { raw: "semanticMiss" }`.
-///   - Post-Phase-5j-fix: the new
-///     `ProjectSemanticDispatch::project_slot_binding_member`
-///     helper composes existing variants to descend through
-///     `Function` -> `params[0].ty` -> `Member(binding)`. The
-///     binding raises to `Primitive(String)` / `Primitive(Number)`,
-///     and the `SnapshotView`'s slot `payload_signature` renders
-///     `{ item: string }` / `{ row: number }`.
+/// **Discrimination:** the
+/// `ProjectSemanticDispatch::project_slot_binding_member` helper
+/// composes existing variants to descend through `Function` ->
+/// `params[0].ty` -> `Member(binding)`. The binding raises to
+/// `Primitive(String)` / `Primitive(Number)`, and the
+/// `SnapshotView`'s slot `payload_signature` renders
+/// `{ item: string }` / `{ row: number }`, rather than raising to
+/// `Unknown { raw: "semanticMiss" }`.
 ///
 /// **Negative assertion:** `UPDATE_SNAPSHOTS=1` PANICS — the
 /// self-confirming-snapshot trap is closed.
@@ -405,7 +377,7 @@ fn deferred_fixture_fixture_slots_typed_byte_equal_to_rule_correct_expected() {
     if std::env::var("UPDATE_SNAPSHOTS").as_deref() == Ok("1") {
         panic!(
             "UPDATE_SNAPSHOTS=1 is FORBIDDEN for deferred fixtures \
-             (§5.B.5.1 r15/F9 — would lock in self-confirming snapshot). \
+             (would lock in self-confirming snapshot). \
              Either fix the resolver (rule-correct expected stays) OR \
              escalate to user (rule-correct expected was wrong)."
         );
@@ -416,7 +388,7 @@ fn deferred_fixture_fixture_slots_typed_byte_equal_to_rule_correct_expected() {
             || {
                 panic!(
                     "Rule-correct expected for `fixture_slots_typed` not found in \
-                     phase-00b-tier1-mismatches.md. Per §5.B.5.1 STOP CONDITIONS, the \
+                     phase-00b-tier1-mismatches.md. The \
                      .md file must carry a machine-readable JSON block \
                      (`{{ \"fixture_id\": \"fixture_slots_typed\", \"expected\": <SnapshotView> }}`). \
                      Surface to user."
@@ -432,32 +404,26 @@ fn deferred_fixture_fixture_slots_typed_byte_equal_to_rule_correct_expected() {
         serde_json::to_string_pretty(&actual).expect("post-fix SnapshotView serializes");
     assert_eq!(
         actual_json, rule_correct_json,
-        "Phase 5j §5.B.5.1 rule-correctness gate: post-fix output for \
+        "rule-correctness gate: output for \
          `fixture_slots_typed` MUST byte-equal the rule-correct expected \
-         from phase-00b-tier1-mismatches.md row 1. Either the §5.12 \
+         from phase-00b-tier1-mismatches.md row 1. Either the \
          `project_slot_binding_member` helper did not fully close the \
-         slot-binding lowering gap (5j STOP) OR the rule-correct expected \
+         slot-binding lowering gap OR the rule-correct expected \
          was wrong (escalate to user, do NOT regenerate)."
     );
 }
 
-/// Phase 5k §5.B.5.1 rule-correctness gate for the
-/// `generic_substitution_via_typeof` deferred fixture
-/// (`phase-00-tier1-mismatches.md` row 4).
+/// Rule-correctness gate for the `generic_substitution_via_typeof`
+/// deferred fixture (`phase-00-tier1-mismatches.md` row 4).
 ///
-/// **Discrimination:**
-///   - Pre-Phase-5k-fix: `shallow_lower_type_expr`'s `TypeExpr::TypeOf`
-///     arm joined `value_ref.path[0..2]` into the literal `"sample.id"`
-///     and looked it up as a single value root. No such binding
-///     exists, so the lookup missed and propagated `Opaque(Miss)`
-///     up through `Instantiate`. Substitution into the body
-///     `{ id: T }` left T unsubstituted; the snapshot rendered
-///     `id: T` (the bare type-parameter token).
-///   - Post-Phase-5k-fix: the lowering attempts single-segment root
-///     resolution first (`sample`), succeeds, projects the remaining
-///     `["id"]` path through `ProjectPath { mode: Navigate }` to
-///     `string`, then substitutes `T → string`. The snapshot
-///     renders `id: string`.
+/// **Discrimination:** the lowering attempts single-segment root
+/// resolution first (`sample`), succeeds, projects the remaining
+/// `["id"]` path through `ProjectPath { mode: Navigate }` to
+/// `string`, then substitutes `T → string`. The snapshot renders
+/// `id: string`, rather than the bare type-parameter token `id: T`
+/// that a `TypeExpr::TypeOf` arm joining `value_ref.path[0..2]` into
+/// `"sample.id"` would produce (missed lookup → `Opaque(Miss)` →
+/// unsubstituted T).
 ///
 /// **Negative assertion:** `UPDATE_SNAPSHOTS=1` PANICS — the
 /// self-confirming-snapshot trap is closed.
@@ -466,7 +432,7 @@ fn deferred_fixture_generic_substitution_via_typeof_byte_equal_to_rule_correct_e
     if std::env::var("UPDATE_SNAPSHOTS").as_deref() == Ok("1") {
         panic!(
             "UPDATE_SNAPSHOTS=1 is FORBIDDEN for deferred fixtures \
-             (§5.B.5.1 r15/F9 — would lock in self-confirming snapshot). \
+             (would lock in self-confirming snapshot). \
              Either fix the resolver (rule-correct expected stays) OR \
              escalate to user (rule-correct expected was wrong)."
         );
@@ -477,7 +443,7 @@ fn deferred_fixture_generic_substitution_via_typeof_byte_equal_to_rule_correct_e
             .unwrap_or_else(|| {
                 panic!(
                     "Rule-correct expected for `generic_substitution_via_typeof` not found in \
-                     phase-00-tier1-mismatches.md. Per §5.B.5.1 STOP CONDITIONS, the \
+                     phase-00-tier1-mismatches.md. The \
                      .md file must carry a machine-readable JSON block \
                      (`{{ \"fixture_id\": \"generic_substitution_via_typeof\", \"expected\": <SnapshotView> }}`). \
                      Surface to user."
@@ -492,36 +458,30 @@ fn deferred_fixture_generic_substitution_via_typeof_byte_equal_to_rule_correct_e
         serde_json::to_string_pretty(&actual).expect("post-fix SnapshotView serializes");
     assert_eq!(
         actual_json, rule_correct_json,
-        "Phase 5k §5.B.5.1 rule-correctness gate: post-fix output for \
+        "rule-correctness gate: output for \
          `generic_substitution_via_typeof` MUST byte-equal the rule-correct \
          expected from phase-00-tier1-mismatches.md row 4. Either the \
-         §5.13 single-segment-first lookup in `shallow_lower_type_expr`'s \
+         single-segment-first lookup in `shallow_lower_type_expr`'s \
          `TypeExpr::TypeOf` arm did not fully close the value-member \
-         typeof gap (5k STOP) OR the rule-correct expected was wrong \
+         typeof gap OR the rule-correct expected was wrong \
          (escalate to user, do NOT regenerate)."
     );
 }
 
-/// Phase 5j §5.B.5.1 rule-correctness gate for the `fixture_models`
-/// deferred fixture (`phase-00b-tier1-mismatches.md` row 2,
-/// re-homed from 5k to 5j per parent §5.13 r15 table).
+/// Rule-correctness gate for the `fixture_models` deferred fixture
+/// (`phase-00b-tier1-mismatches.md` row 2).
 ///
-/// **Discrimination:**
-///   - Pre-Phase-5j-fix: Verter dispatches
-///     `ProjectPath { base, [Member(model)], Expanded }` on a
-///     `parsed_type_argument` that IS the field type (typically a
-///     `Primitive`, `Ref`, or `Union` with no member to navigate).
-///     The dispatch always misses; the closure produces
-///     `Unknown { raw: "semanticMiss" }` for both the model
-///     `type_expr` and the synthesised prop's `type_signature`.
-///   - Post-Phase-5j-fix: the `expand_field_expr`'s `DefineModel`
-///     branch in `host_manage.rs::compute_evaluated_types*`
-///     lower+raises `parsed_type_argument` directly. The model's
-///     `type_expr` becomes `Primitive(String)` / `Primitive(Number)`;
-///     the prop's `type_signature` becomes `string | undefined` /
-///     `number | undefined` (Vue's optional-by-default contract);
-///     the `update:<name>` event's payload is unchanged
-///     (`[value: T | undefined]`, already correct pre-Phase-5j).
+/// **Discrimination:** the `expand_field_expr`'s `DefineModel`
+/// branch in `host_manage.rs::compute_evaluated_types*`
+/// lower+raises `parsed_type_argument` directly. The model's
+/// `type_expr` becomes `Primitive(String)` / `Primitive(Number)`;
+/// the prop's `type_signature` becomes `string | undefined` /
+/// `number | undefined` (Vue's optional-by-default contract); the
+/// `update:<name>` event's payload is `[value: T | undefined]`.
+/// Without the branch, dispatching
+/// `ProjectPath { base, [Member(model)], Expanded }` on a
+/// `parsed_type_argument` that IS the field type misses and produces
+/// `Unknown { raw: "semanticMiss" }`.
 ///
 /// **Negative assertion:** `UPDATE_SNAPSHOTS=1` PANICS.
 #[test]
@@ -529,7 +489,7 @@ fn deferred_fixture_fixture_models_byte_equal_to_rule_correct_expected() {
     if std::env::var("UPDATE_SNAPSHOTS").as_deref() == Ok("1") {
         panic!(
             "UPDATE_SNAPSHOTS=1 is FORBIDDEN for deferred fixtures \
-             (§5.B.5.1 r15/F9 — would lock in self-confirming snapshot). \
+             (would lock in self-confirming snapshot). \
              Either fix the resolver (rule-correct expected stays) OR \
              escalate to user (rule-correct expected was wrong)."
         );
@@ -539,7 +499,7 @@ fn deferred_fixture_fixture_models_byte_equal_to_rule_correct_expected() {
         .unwrap_or_else(|| {
             panic!(
                 "Rule-correct expected for `fixture_models` not found in \
-                 phase-00b-tier1-mismatches.md. Per §5.B.5.1 STOP CONDITIONS, the \
+                 phase-00b-tier1-mismatches.md. The \
                  .md file must carry a machine-readable JSON block \
                  (`{{ \"fixture_id\": \"fixture_models\", \"expected\": <SnapshotView> }}`). \
                  Surface to user."
@@ -554,12 +514,11 @@ fn deferred_fixture_fixture_models_byte_equal_to_rule_correct_expected() {
         serde_json::to_string_pretty(&actual).expect("post-fix SnapshotView serializes");
     assert_eq!(
         actual_json, rule_correct_json,
-        "Phase 5j §5.B.5.1 rule-correctness gate: post-fix output for \
+        "rule-correctness gate: output for \
          `fixture_models` MUST byte-equal the rule-correct expected from \
-         phase-00b-tier1-mismatches.md row 2 (re-homed from 5k to 5j per \
-         §5.13 r15 table). Either the §5.12 `expand_field_expr` \
+         phase-00b-tier1-mismatches.md row 2. Either the `expand_field_expr` \
          `DefineModel` branch did not fully close the macro-payload \
-         lowering gap (5j STOP) OR the rule-correct expected was wrong \
+         lowering gap OR the rule-correct expected was wrong \
          (escalate to user, do NOT regenerate)."
     );
 }

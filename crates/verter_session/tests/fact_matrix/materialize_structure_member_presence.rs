@@ -1,17 +1,15 @@
 //! Matrix slice: `materialize_structure` × `member_presence`.
 //!
 //! Discrimination: the `MaterializeStructureDb` producer is wired
-//! through `install_fact_tracer` (Block 1.H Track 1). When a real
-//! component-meta resolution exercises the materializer cold path,
-//! the producer's tracer captures member-presence facts via the
-//! resolver substrate.
+//! through `install_fact_tracer`. When a real component-meta
+//! resolution exercises the materializer cold path, the producer's
+//! tracer captures member-presence facts via the resolver
+//! substrate.
 //!
-//! Block 1.H scope: this slice verifies that the
+//! This slice verifies that the
 //! `materialize_structure_fact_tracer_installs` counter advances
 //! when a getComponentMeta call drives the materializer cold path.
-//! The substrate-correctness contract is the counter delta; the
-//! per-fact-kind capture verification belongs to Block 1.8's
-//! cross-consumer matrix arch guard.
+//! The substrate-correctness contract is the counter delta.
 
 use std::sync::Arc;
 

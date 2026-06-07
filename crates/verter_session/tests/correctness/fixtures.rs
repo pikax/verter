@@ -1,24 +1,19 @@
-//! Phase 0 — fixture registry. Each entry maps to one synthetic Vue
+//! Fixture registry. Each entry maps to one synthetic Vue
 //! project and a snapshot file. `class` discriminates the
 //! correctness ground-truth tier (Class A) from the regression
 //! baselines (Class B + C).
 //!
-//! Phase 0a authored the 11 Class A fixtures (6 mapped-type + 5
-//! structural). Per §0p.A.2 r9 reviewer consensus, 5 utility-type
-//! fixtures (`mapped_exclude`, `mapped_extract`,
-//! `template_literal_as_key`, `generic_substitution_via_typeof`,
-//! `userland_shadowing_pick`) are deferred to Phase 5 §5.B.5 — those
-//! fixtures' rule-correct expected outputs Verter does not currently
-//! produce, so they are NOT acceptable as Class A regression
-//! baselines NOR as Class B (Class B is for fixtures whose Verter
-//! output IS the intended behaviour). Phase 5 will author them with
-//! rule-correct expected once the resolver variants close the gaps.
+//! The Class A fixtures (mapped-type + structural) carry hand-derived
+//! rule-correct expected outputs. The remaining utility-type fixtures
+//! (`mapped_exclude`, `mapped_extract`, `template_literal_as_key`,
+//! `generic_substitution_via_typeof`, `userland_shadowing_pick`) are
+//! authored with rule-correct expected once the resolver variants
+//! close the gaps.
 //!
-//! Phase 0b appends 7 Class A component-meta property fixtures plus
-//! Class B + C regression baselines (6 corpus_representatives + 3
-//! pathologicals). Class B + C capture Verter's current output via
-//! `UPDATE_SNAPSHOTS=1` per §0p.A.2 — they are regression baselines
-//! only, not rule-derived.
+//! The component-meta property fixtures are Class A; the Class B + C
+//! regression baselines (corpus_representatives + pathologicals)
+//! capture Verter's current output via `UPDATE_SNAPSHOTS=1` — they are
+//! regression baselines only, not rule-derived.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FixtureClass {
@@ -36,7 +31,7 @@ pub enum FixtureClass {
 
 impl FixtureClass {
     /// Snapshot-file suffix per class. Different suffix prevents
-    /// collision and signals the regen policy (§0.6.4 stricter for A).
+    /// collision and signals the regen policy (stricter for A).
     pub const fn suffix(self) -> &'static str {
         match self {
             FixtureClass::ClassA => "correctness",
@@ -182,8 +177,8 @@ defineProps<{ root: Tree }>();
 //   resolves to `Cfg` itself — surfacing all three members
 //   (`alpha`, `beta`, `gamma`) — NOT the lib's mapped-Pick output of
 //   only `alpha`. Verter rule `./.claude/skills/type-resolution`
-//   ("user shadowing wins"). Phase 5h §5.10 closes this case via
-//   the resolver-context `ScopeShadowing` struct.
+//   ("user shadowing wins"). Handled by the resolver-context
+//   `ScopeShadowing` struct.
 const USERLAND_SHADOWING_PICK_VUE: &str = r#"<script setup lang="ts">
 type Pick<T, _K> = T;
 interface Cfg {
@@ -200,9 +195,8 @@ defineProps<Pick<Cfg, 'alpha'>>();
 //   `Exclude<T,U> = T extends U ? never : T` distributes per-member
 //   over T and drops every member matching U. For
 //   `Exclude<'a' | 'b' | 'c', 'b'>`, only `'a'` and `'c'` survive.
-//   Phase 5i §5.11 closes this gap via per-member relation engine
-//   dispatch in `build_builtin_utility`'s new `Extract` / `Exclude`
-//   arms.
+//   Handled via per-member relation engine dispatch in
+//   `build_builtin_utility`'s `Extract` / `Exclude` arms.
 const MAPPED_EXCLUDE_VUE: &str = r#"<script setup lang="ts">
 defineProps<{ kind: Exclude<'a' | 'b' | 'c', 'b'> }>();
 </script>
@@ -213,8 +207,8 @@ defineProps<{ kind: Exclude<'a' | 'b' | 'c', 'b'> }>();
 //   `Extract<T,U> = T extends U ? T : never` distributes per-member
 //   over T and keeps every member matching U. For
 //   `Extract<'a' | 'b' | 'c', 'a' | 'b'>`, only `'a'` and `'b'`
-//   survive. Phase 5i §5.11 closes this gap via the same arm that
-//   handles `Exclude` (sister utility).
+//   survive. Handled via the same arm that handles `Exclude`
+//   (sister utility).
 const MAPPED_EXTRACT_VUE: &str = r#"<script setup lang="ts">
 defineProps<{ kind: Extract<'a' | 'b' | 'c', 'a' | 'b'> }>();
 </script>
@@ -230,25 +224,16 @@ defineProps<{ kind: Extract<'a' | 'b' | 'c', 'a' | 'b'> }>();
 //   Substitution into the body `{ id: T }` yields `{ id: string }`,
 //   surfacing one required prop `id: string`.
 //
-//   Pre-Phase-5k: the `shallow_lower_type_expr`'s `TypeExpr::TypeOf`
-//   arm unconditionally joined the first two `value_ref.path`
-//   segments into `"sample.id"` and looked up that joined name as a
-//   value root. No such value binding exists, so the lookup missed,
-//   the type argument lowered to `Opaque(Miss)`, and substitution
-//   left the body `{ id: T }` with `T` unsubstituted — Verter
-//   emitted the bare token `T` as the prop's type signature.
-//
-//   Post-Phase-5k: the lowering attempts single-segment root
-//   resolution first (`sample`), succeeds, projects the remaining
-//   `["id"]` path through `ProjectPath { mode: Navigate }` to
-//   `string`, then substitutes `T → string` in the instantiation
-//   body. The materialised surface produces one required prop
-//   `id: string`, matching `phase-00-tier1-mismatches.md` row 4.
+//   The lowering attempts single-segment root resolution first
+//   (`sample`), succeeds, projects the remaining `["id"]` path
+//   through `ProjectPath { mode: Navigate }` to `string`, then
+//   substitutes `T → string` in the instantiation body. The
+//   materialised surface produces one required prop `id: string`,
+//   matching `phase-00-tier1-mismatches.md` row 4.
 //
 //   Rule citation: TS spec §3.6 (generic substitution); CLAUDE.md
-//   "generic substitutions are part of semantic meaning". Phase 5k
-//   §5.13 closes the gap; the fixture is authored as a regression
-//   guard.
+//   "generic substitutions are part of semantic meaning". The fixture
+//   is a regression guard.
 const GENERIC_SUBSTITUTION_VIA_TYPEOF_VUE: &str = r#"<script setup lang="ts">
 interface Sample { id: string }
 const sample: Sample = { id: "abc" };
@@ -262,8 +247,7 @@ defineProps<IdShape<typeof sample.id>>();
 //   `{ [K in 'A' | 'B' as `prefix${K}`]: number }` iterates
 //   K = 'A' | 'B' and uses the `as <template>` clause to interpolate
 //   K into a template literal, producing keys `prefixA` and
-//   `prefixB`. The mapped value is always `number`. Phase 5i §5.11
-//   (re-homed from 5k per §5.13 r15 table) closes the gap by
+//   `prefixB`. The mapped value is always `number`. Handled by
 //   applying `mapper.name_remap` during member iteration in
 //   `build_mapped_type` and folding `TemplateLiteral` nodes into a
 //   `Literal::String` when every expression resolves to a literal.
@@ -275,11 +259,11 @@ defineProps<R>();
 "#;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Phase 0b — Class A property fixtures (component-meta macros).
+// Class A property fixtures (component-meta macros).
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // Each fixture exercises one component-meta macro surface so the
-// §0p.A.5 discriminating self-test can target one MutationKind per
+// discriminating self-test can target one MutationKind per
 // row. Sources are minimal and hermetic — no cross-file imports —
 // and the rule citation is in the companion derivation note.
 
@@ -306,7 +290,7 @@ defineEmits<{ click: [evt: string] }>();
 //   Two slots, each with a single typed binding on the slot
 //   function's first parameter Object literal. The binding types
 //   are primitives so no cross-file imports are needed.
-//   `phase-00b-tier1-mismatches.md` row 1; closed by Phase 5j §5.12.
+//   `phase-00b-tier1-mismatches.md` row 1.
 const FIXTURE_SLOTS_TYPED_VUE: &str = r#"<script setup lang="ts">
 defineSlots<{
   default(props: { item: string }): any;
@@ -321,8 +305,7 @@ defineSlots<{
 //   `modelValue`) and `defineModel<number>('count')`. Both
 //   optional, no defaults, surfacing as model + prop +
 //   update:<name> event triples per Vue's documented contract.
-//   `phase-00b-tier1-mismatches.md` row 2 (re-homed from 5k to 5j
-//   per parent §5.13 r15 table); closed by Phase 5j §5.12.
+//   `phase-00b-tier1-mismatches.md` row 2.
 const FIXTURE_MODELS_VUE: &str = r#"<script setup lang="ts">
 defineModel<string>();
 defineModel<number>('count');
@@ -331,7 +314,7 @@ defineModel<number>('count');
 "#;
 
 // ── defineExpose — Verter macros §expose ────────────────────────────────────
-//   §0.6.1 small decision: Vue's documented public API uses the value
+//   Vue's documented public API uses the value
 //   form `defineExpose({ ... })`; type-only `defineExpose<T>()` is
 //   not part of the documented Vue 3 surface. The discriminating
 //   self-test only checks `ExposedDropped` (the rule "every key of T
@@ -381,7 +364,7 @@ defineProps<{ label: string }>();
 "#;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Phase 0b — Class B regression sources (corpus_representatives).
+// Class B regression sources (corpus_representatives).
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // Each source is the same SFC + cross-file types pair used by the
@@ -500,7 +483,7 @@ const AVATAR_GROUP_AVATAR_TYPES_TS: &str = r#"export type AvatarSize = 'xs' | 's
 "#;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Phase 0b — Class C regression sources (pathological fixtures).
+// Class C regression sources (pathological fixtures).
 // ═══════════════════════════════════════════════════════════════════════════
 
 const PATH_TABLE_VUE: &str = include_str!("../../test_fixtures/table.vue");
@@ -518,10 +501,10 @@ const PATH_TABS_HELPER_TS: &str = include_str!("../../test_fixtures/tabs_helper.
 // Per-fixture file sets.
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// All Phase 0a fixtures are self-contained — no cross-file imports.
-// This is deliberate: Phase 0a's scope is mapped-type and structural
-// resolution semantics, not import-graph traversal (covered by the
-// existing component_meta_audit/external_type test).
+// The mapped-type and structural fixtures are self-contained — no
+// cross-file imports. This is deliberate: their scope is mapped-type
+// and structural resolution semantics, not import-graph traversal
+// (covered by the existing component_meta_audit/external_type test).
 
 const F_MAPPED_PICK_TWO_KEYS: &[(&str, &str)] = &[("/c.vue", MAPPED_PICK_TWO_KEYS_VUE)];
 const F_MAPPED_OMIT_TWO_KEYS: &[(&str, &str)] = &[("/c.vue", MAPPED_OMIT_TWO_KEYS_VUE)];
@@ -541,7 +524,7 @@ const F_TEMPLATE_LITERAL_AS_KEY: &[(&str, &str)] = &[("/c.vue", TEMPLATE_LITERAL
 const F_GENERIC_SUBSTITUTION_VIA_TYPEOF: &[(&str, &str)] =
     &[("/c.vue", GENERIC_SUBSTITUTION_VIA_TYPEOF_VUE)];
 
-// ── Phase 0b Class A property fixture file sets ─────────────────────────────
+// ── Class A property fixture file sets ─────────────────────────────
 const F_FIXTURE_PROPS_WITH_DEFAULTS: &[(&str, &str)] =
     &[("/c.vue", FIXTURE_PROPS_WITH_DEFAULTS_VUE)];
 const F_FIXTURE_EVENTS_TYPED: &[(&str, &str)] = &[("/c.vue", FIXTURE_EVENTS_TYPED_VUE)];
@@ -555,7 +538,7 @@ const F_FIXTURE_FALLTHROUGH_ROOT_INHERIT: &[(&str, &str)] = &[
     ("/inner.vue", FIXTURE_FALLTHROUGH_ROOT_INHERIT_INNER_VUE),
 ];
 
-// ── Phase 0b Class B regression file sets ───────────────────────────────────
+// ── Class B regression file sets ───────────────────────────────────
 const F_ACCORDION: &[(&str, &str)] = &[
     ("/accordion.vue", ACCORDION_VUE),
     ("/accordion_types.ts", ACCORDION_TYPES_TS),
@@ -579,7 +562,7 @@ const F_AVATAR_GROUP: &[(&str, &str)] = &[
     ("/avatar_types.ts", AVATAR_GROUP_AVATAR_TYPES_TS),
 ];
 
-// ── Phase 0b Class C regression file sets ───────────────────────────────────
+// ── Class C regression file sets ───────────────────────────────────
 const F_PATH_TABLE_LOADING: &[(&str, &str)] = &[
     ("/table.vue", PATH_TABLE_VUE),
     ("/table_types.ts", PATH_TABLE_TYPES_TS),
@@ -595,21 +578,21 @@ const F_PATH_TABS_DYNAMIC_HELPER: &[(&str, &str)] = &[
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Phase 0a + 0b registry.
+// Fixture registry.
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // Iteration-order discipline: Class B + C fixtures are listed
 // FIRST so that under `UPDATE_SNAPSHOTS=1` the regression baselines
 // are captured before the harness's by-design panic on Class A
 // (see `correctness_snapshot_for_every_fixture` in
-// `tests/correctness.rs`). The post-cutover normal run iterates the
+// `tests/correctness.rs`). The normal run iterates the
 // same list and validates every entry against its committed
 // snapshot — Class A against `expected.rs` via
 // `ensure_class_a_expected_matches_snapshot`, Class B+C against the
 // captured `<id>.regression.snap.json`. Test order is independent
 // of correctness.
 pub const FIXTURES: &[CorrectnessFixture] = &[
-    // ── Phase 0b Class B — corpus_representatives regression baselines ──────
+    // ── Class B — corpus_representatives regression baselines ──────
     CorrectnessFixture {
         id: "accordion",
         files: F_ACCORDION,
@@ -646,7 +629,7 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
         target: "/avatar_group.vue",
         class: FixtureClass::ClassB,
     },
-    // ── Phase 0b Class C — pathological regression baselines ────────────────
+    // ── Class C — pathological regression baselines ────────────────
     CorrectnessFixture {
         id: "pathological_table_loading_animation",
         files: F_PATH_TABLE_LOADING,
@@ -665,7 +648,7 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
         target: "/tabs.vue",
         class: FixtureClass::ClassC,
     },
-    // ── Phase 0a Class A — mapped types + structural ────────────────────────
+    // ── Class A — mapped types + structural ────────────────────────
     CorrectnessFixture {
         id: "mapped_pick_two_keys",
         files: F_MAPPED_PICK_TWO_KEYS,
@@ -732,24 +715,19 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
         target: "/c.vue",
         class: FixtureClass::ClassA,
     },
-    // Phase 5h §5.10 — re-homed Class A fixture authored after the
-    // resolver-context `ScopeShadowing` thread closes the
-    // userland-shadow-pick gap (was deferred per §0p.A.4 case 2 in
-    // Phase 0a's first spawn, recorded in `phase-00-tier1-mismatches.md`
-    // row 5 / §5.B.5).
+    // Class A fixture for the userland-shadow-pick case, handled by
+    // the resolver-context `ScopeShadowing` thread (recorded in
+    // `phase-00-tier1-mismatches.md` row 5).
     CorrectnessFixture {
         id: "userland_shadowing_pick",
         files: F_USERLAND_SHADOWING_PICK,
         target: "/c.vue",
         class: FixtureClass::ClassA,
     },
-    // Phase 5i §5.11 — re-homed Class A fixtures authored after the
-    // `Exclude` / `Extract` literal-type reduction lands (rows 1, 2)
-    // and after the mapper `name_remap` + `TemplateLiteral` fold
-    // lands (row 3 — re-homed from 5k per §5.13 r15 table). All
-    // three were deferred per §0p.A.4 case 2 in Phase 0a's first
-    // spawn and recorded in `phase-00-tier1-mismatches.md`
-    // rows 1-3 / §5.B.5.
+    // Class A fixtures for the `Exclude` / `Extract` literal-type
+    // reduction (rows 1, 2) and the mapper `name_remap` +
+    // `TemplateLiteral` fold (row 3), recorded in
+    // `phase-00-tier1-mismatches.md` rows 1-3.
     CorrectnessFixture {
         id: "mapped_exclude",
         files: F_MAPPED_EXCLUDE,
@@ -768,28 +746,22 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
         target: "/c.vue",
         class: FixtureClass::ClassA,
     },
-    // Phase 5k §5.13 — re-homed Class A fixture authored after the
+    // Class A fixture for the value-member typeof case, handled by the
     // single-segment-first lookup in `shallow_lower_type_expr`'s
-    // `TypeExpr::TypeOf` arm closes the value-member typeof gap.
-    // Was deferred per §0p.A.4 case 2 in Phase 0a's first spawn and
-    // recorded in `phase-00-tier1-mismatches.md` row 4 / §5.B.5.
+    // `TypeExpr::TypeOf` arm (recorded in
+    // `phase-00-tier1-mismatches.md` row 4).
     CorrectnessFixture {
         id: "generic_substitution_via_typeof",
         files: F_GENERIC_SUBSTITUTION_VIA_TYPEOF,
         target: "/c.vue",
         class: FixtureClass::ClassA,
     },
-    // ── Phase 0b Class A — component-meta property macros ───────────────────
+    // ── Class A — component-meta property macros ───────────────────
     //
-    // 5 of the 7 brief-listed property fixtures land here. 2 are
-    // deferred per §0p.A.4 case 2 (rule-correct expected does not
-    // match Verter's current output — see
-    // `phase-00b-tier1-mismatches.md` for rule citations and the
-    // diff). The deferred ids are `fixture_slots_typed` (slot
-    // binding type literals not resolved) and `fixture_models`
-    // (`defineModel<T>()` type T not resolved through the macro
-    // path). Both are Verter resolver defects to be fixed in a
-    // later phase.
+    // The `fixture_slots_typed` (slot binding type literals) and
+    // `fixture_models` (`defineModel<T>()` type T through the macro
+    // path) cases are documented in `phase-00b-tier1-mismatches.md`
+    // with rule citations and the diff.
     CorrectnessFixture {
         id: "fixture_props_with_defaults",
         files: F_FIXTURE_PROPS_WITH_DEFAULTS,
@@ -802,14 +774,12 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
         target: "/c.vue",
         class: FixtureClass::ClassA,
     },
-    // ── Phase 5j §5.12 — slot-binding + defineModel fixtures ──────────────
+    // ── slot-binding + defineModel fixtures ──────────────
     //
-    // Originally deferred per §0p.A.4 case 2 in Phase 0b's first
-    // spawn (see `phase-00b-tier1-mismatches.md` rows 1-2). Phase 5j
-    // closes both gaps:
+    // Documented in `phase-00b-tier1-mismatches.md` rows 1-2:
     // - `fixture_slots_typed` via `project_slot_binding_member`.
-    // - `fixture_models` (re-homed from 5k per §5.13 r15 table)
-    //   via the `expand_field_expr` `DefineModel` branch.
+    // - `fixture_models` via the `expand_field_expr` `DefineModel`
+    //   branch.
     CorrectnessFixture {
         id: "fixture_slots_typed",
         files: F_FIXTURE_SLOTS_TYPED,

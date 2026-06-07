@@ -1,22 +1,20 @@
-//! Block 1.6 — ARCH GUARD — `ResolvedImportFacts*` MUST NOT carry a
+//! ARCH GUARD — `ResolvedImportFacts*` MUST NOT carry a
 //! `lib_env_hash` field.
 //!
-//! Plan citation: `D:/tmp/verter-stage7-final-cutover-plan.md` §R21
-//! / §"Cache Architecture". `ResolvedImportFacts` does NOT include
-//! `lib_env_hash`; `RouteDb`, typed-IR resolve, `MaterializeStructureDb`,
+//! Per R21 / the Cache Architecture rule: `ResolvedImportFacts` does NOT
+//! include `lib_env_hash`; `RouteDb`, typed-IR resolve, `MaterializeStructureDb`,
 //! `RefCycleResultDb`, `SemanticGraphStore`, `ComponentMetaResultDb` DO
 //! include `lib_env_hash`. This guard locks the scoping decision so a
 //! future refactor cannot silently add `lib_env_hash` to `ResolvedImportFactsKey`
 //! and re-conflate the syntactic-resolution layer with the lib-data
 //! domain.
 //!
-//! Discrimination chain: the guard scans the on-disk source of
+//! The guard scans the on-disk source of
 //! `crates/verter_session/src/resolved_import_facts.rs` for every
 //! `pub struct ResolvedImportFacts*` definition and asserts none of
 //! them name a `lib_env_hash` field. The guard FAILS if a future
 //! refactor introduces such a field; it PASSES against the current
-//! tree (and against the pre-Block-1.6 tree — the rule is older than
-//! this block).
+//! tree.
 //!
 //! The guard is intentionally text-based (not `syn`-based) so it
 //! catches the simplest plausible violation: a developer typing

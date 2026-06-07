@@ -1,4 +1,4 @@
-//! Block 1.C matrix slice — `RouteSurface`.
+//! Cross-consumer × fact-kind matrix slice — `RouteSurface`.
 //!
 //! Verifies the slot-binding-graph dual-emit fact-tracer fan-out
 //! substrate delivers `FactVersionRef::RouteSurface` facts —
@@ -48,14 +48,14 @@ fn slot_binding_graph_fact_tracer_carries_route_surface() {
     let captured = match finalise {
         FactReadSetFinalise::Ok(sig) => sig,
         FactReadSetFinalise::Overflow => panic!(
-            "Block 1.C matrix slice: tracer overflowed on a single-fact \
+            "matrix slice: tracer overflowed on a single-fact \
              signature — substrate bug, not test bug"
         ),
     };
 
     assert!(
         captured.iter().any(|f| f == &route_fact),
-        "Block 1.C matrix slice: the fact-tracer substrate MUST carry \
+        "matrix slice: the fact-tracer substrate MUST carry \
          the `RouteSurface` fact through the fan-out path emitted by \
          the slot-binding-graph dual-emit helper. captured={captured:?}"
     );
@@ -69,7 +69,7 @@ fn slot_binding_graph_fact_tracer_carries_route_surface() {
     let src = read_session_src("meta_resolve/slot_binding_graph.rs");
     assert!(
         src.contains("observe_fact_signature(&bridged)"),
-        "Block 1.C matrix slice (arch guard): \
+        "matrix slice (arch guard): \
          `slot_binding_graph.rs` MUST call \
          `observe_fact_signature(&bridged)` so RouteSurface and \
          other derived-domain facts reach the active tracer scope. \

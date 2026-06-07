@@ -5836,9 +5836,9 @@ defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
     // macro-payload shape under the shallow-by-default architecture
     // (non-Conditional `Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>`
     // rides transit-shallow at the macro-shape boundary and produces
-    // no member enumeration at publication time — the rescue
-    // projection's eager widening was retired by the shallow-by-default
-    // cutover). The `evaluate_types` API contract here is "resolution
+    // no member enumeration at publication time — the shallow-by-default
+    // architecture has no rescue projection that eagerly widens
+    // it). The `evaluate_types` API contract here is "resolution
     // ran and produced a coherent payload", witnessed by the `Some(_)`
     // return.
     let _ = &evaluated;
@@ -19281,7 +19281,7 @@ defineProps<Props>()
 }
 
 // ---------------------------------------------------------------------------
-// WS0A: Real-shape regression tests for the semantic-DB cutover
+// Real-shape regression tests for the semantic-DB resolver.
 // ---------------------------------------------------------------------------
 
 /// Real nuxt-ui DynamicSlots pattern with conditional template-literal keys

@@ -1,7 +1,7 @@
 //! R20 multi-candidate substrate characterisation.
 //!
-//! Validates Stage 5 Sub-task B's `ValidatedFactCache` evolution
-//! (`Mutex<FxHashMap>` → `DashMap + ArcSwap<SmallVec>`):
+//! Validates the `ValidatedFactCache` design
+//! (`DashMap + ArcSwap<SmallVec>`):
 //!
 //! 1. **Candidates coexist.** Two writes to the same key produce two
 //!    candidates inside the same `CacheEntry`. Both candidates are
@@ -59,11 +59,10 @@ fn view_with(facts: &[FactVersionRef]) -> TestView {
 }
 
 /// R20 — two concurrent versions of the SAME key produce TWO
-/// candidates that coexist. Pre-Stage-5b: `Mutex<FxHashMap>` keeps
-/// exactly one entry per key, so the second insert overwrites the
-/// first. Post-Stage-5b: both candidates live inside one
+/// candidates that coexist. Both candidates live inside one
 /// `CacheEntry::candidates` slot, each independently validatable
-/// against its own fact set.
+/// against its own fact set. (A single-entry-per-key map would have
+/// the second insert overwrite the first.)
 #[test]
 fn r20_two_candidates_coexist_for_same_key() {
     let cache = ValidatedFactCache::<String, usize>::default();
@@ -129,8 +128,7 @@ fn r20_fifo_eviction_on_cap_overflow() {
 
 /// R20 — concurrent reads on a hot candidate produce zero atomic
 /// writes via `ArcSwap.store`. Validated by reading the
-/// `ValidatedFactCache::arcswap_store_count` counter (added in
-/// Stage 5b for this exact verification).
+/// `ValidatedFactCache::arcswap_store_count` counter.
 #[test]
 fn r20_hot_read_path_zero_atomic_writes() {
     let cache = Arc::new(ValidatedFactCache::<String, usize>::default());

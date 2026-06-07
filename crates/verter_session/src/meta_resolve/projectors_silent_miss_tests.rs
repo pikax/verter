@@ -156,7 +156,7 @@ defineEmits<MissingEmits>()
 
 /// `defineSlots<T>()` where T references a type that does not
 /// resolve. Either the projector (the projector decomposition §7.5) or the slot-binding
-/// graph synthesis (the slot-binding graph cutover) must publish a
+/// graph synthesis must publish a
 /// `MacroExpansionDiagnostics` entry for `DefineSlots`.
 #[test]
 fn project_slots_unresolved_import_publishes_diagnostic() {

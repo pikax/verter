@@ -1,28 +1,18 @@
-//! Phase 5b §5.A — TDD seed for resolver coverage gap: utility-type
-//! mapped/conditional evaluation does not currently distribute through
-//! the macro path.
+//! Resolver coverage for utility-type mapped/conditional evaluation:
+//! the macro path must distribute through utility types.
 //!
 //! Source: `phase-00-tier1-mismatches.md` row 1 (`mapped_exclude`,
 //! line 28). TS spec §4.4: `Exclude<T,U> = T extends U ? never : T`
 //! distributes over the union T and removes every member matching U.
 //!
-//! **Pre-Phase-5i behaviour:** the macro path surfaced the
-//! unresolved `Exclude<>` utility as `Unknown { raw: "semanticMiss" }`
-//! because `build_builtin_utility`'s `_` arm emitted an
-//! `Opaque(Miss)` shell for any union-filter utility.
-//!
-//! **Post-Phase-5i:** the `Extract` / `Exclude` arms of
-//! `build_builtin_utility` (`crates/verter_session/src/project_semantic_dispatch/build.rs`)
+//! The `Extract` / `Exclude` arms of `build_builtin_utility`
+//! (`crates/verter_session/src/project_semantic_dispatch/build.rs`)
 //! distribute the source union, dispatch each member through
 //! `relate_nodes` against the filter argument, and reconstitute the
 //! survivors via `intern_normalized_union_or_intersection`. The
 //! resolver therefore emits a `Union` containing exactly
 //! `Literal::String("a")` and `Literal::String("c")` for
 //! `Exclude<'a' | 'b' | 'c', 'b'>`.
-//!
-//! Discrimination contract: this test FAILS on the pre-Phase-5i
-//! tree (no `Union` of `'a' | 'c'` surfaces; the type_expr is
-//! `Unknown`) and PASSES once 5i's reduction lands.
 
 use verter_type_expr::{LiteralValue, TypeExpr};
 

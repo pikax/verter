@@ -1,4 +1,4 @@
-//! U2B.5 guards — the class / namespace / enum / overload key surface.
+//! Guards for the class / namespace / enum / overload key surface.
 //!
 //! These tests pin the IDENTITY contract of the
 //! [`SemanticQueryKey`] variants `ResolveClassSurface`,
@@ -11,8 +11,8 @@
 //! `slot_candidate_count_for_tests(b)` is `> 0` iff `a` and `b` project to
 //! the SAME `(FamilyKey, ModeSlot)`. This is the same probe
 //! `family_slots_multi_candidate.rs` uses, and it discriminates the exact
-//! property the brief requires: a warm entry under one identity is
-//! returned for another ONLY when they share a slot.
+//! property: a warm entry under one identity is returned for another ONLY
+//! when they share a slot.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -252,9 +252,9 @@ fn resolve_class_surface_key_covers_side_demand_type_args_and_context() {
     assert_distinct_identity(&base, &with_args);
 
     // A context env-hash difference (resolve_env) is part of identity.
-    // `ClassSurfaceContext` carries the FULL planned identity `{P, R} + mode`
-    // (design §419) — both `parse_env` (P, forward-declared for the decorator-
-    // reading reducer) and `resolve_env` (R) are identity axes; the parse_env
+    // `ClassSurfaceContext` carries the full identity `{P, R} + mode` —
+    // both `parse_env` (P, forward-declared for the decorator-reading
+    // reducer) and `resolve_env` (R) are identity axes; the parse_env
     // axis is exercised independently by
     // `resolve_class_surface_identity_covers_parse_env_axis`.
     let other_resolve_env =
@@ -382,8 +382,8 @@ fn resolve_ambient_namespace_identity_covers_mode_axis() {
 
 #[test]
 fn resolve_ambient_namespace_key_covers_context() {
-    // `AmbientNamespaceContext` carries the FULL planned identity `{P, R} +
-    // mode` (design §414); here we vary `resolve_env` (R). The `parse_env` (P)
+    // `AmbientNamespaceContext` carries the full identity `{P, R} +
+    // mode`; here we vary `resolve_env` (R). The `parse_env` (P)
     // axis is exercised by `resolve_ambient_namespace_identity_covers_parse_env_axis`.
     let base = ambient_namespace_key("/n.ts", "N", 0);
     assert_distinct_identity(&base, &ambient_namespace_key("/n.ts", "N", 9));
@@ -623,7 +623,7 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
     // Instantiate(type slot) slot. The composed key matches
     // `build_class_surface` exactly — the class slot canonicalized to the
     // TYPE symbol space, and an `InstantiateContext` whose `resolve_env_hash`
-    // is derived from the defining canonical's live host env (U2B.9 FORK-A).
+    // is derived from the defining canonical's live host env.
     let inner_resolve_env = host
         .host_view_env_hashes_for(&decl_slot.defining_canonical)
         .resolve_env_hash;

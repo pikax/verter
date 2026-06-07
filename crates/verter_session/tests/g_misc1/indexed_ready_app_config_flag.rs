@@ -14,11 +14,10 @@
 //!
 //! Discrimination: each assertion compares the flag on the
 //! materialized `IndexedReady` artifact against the expected value
-//! for the upserted source. Pre-Block-1.H the field did not exist;
-//! a pre-flag tree fails to compile this test, and a post-flag tree
-//! with a buggy producer would observe `false` for the positive
-//! cases. The dual positive/negative coverage discriminates a real
-//! detector from a hard-coded constant.
+//! for the upserted source. A tree without the flag fails to compile
+//! this test, and a tree with a buggy producer would observe `false`
+//! for the positive cases. The dual positive/negative coverage
+//! discriminates a real detector from a hard-coded constant.
 
 use std::sync::Arc;
 

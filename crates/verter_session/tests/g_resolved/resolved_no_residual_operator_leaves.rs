@@ -1,4 +1,4 @@
-//! Umbrella native-side gate for Plan §3 Step 6 (Phase 3 §4.1 fold-in).
+//! Umbrella native-side gate for residual operator leaves.
 //!
 //! After `raise_and_reduce` runs, the resolved `TypeExpr` payload MUST NOT
 //! contain `IndexedAccess` / `Conditional` / `Mapped` / `KeyOf` / `TypeOf` /
@@ -16,18 +16,13 @@
 //!   symbolic forms; eliminating them would lose information per
 //!   CLAUDE.md "Macro Type Traversal Rule").
 //!
-//! Per Plan §3 Step 6.3:
-//! > NOT a post-bridge string check — this is the NATIVE-side gate.
-//! > Pre-fix: at least one residual operator leaf observed (failing case).
-//! > Post-fix: zero residual leaves outside the three exceptions.
+//! This is the NATIVE-side gate, not a post-bridge string check: the
+//! resolved payload must carry zero residual operator leaves outside
+//! the three exceptions.
 //!
-//! Plan §3 Step 4.1 row "Step 6":
-//! > `tests/resolved_no_residual_operator_leaves.rs`
-//!
-//! This test intentionally uses fixtures that previously produced
-//! `graphNode_leak` per `phase3-native-payload-correctness-plan.md` §1.3
-//! cite: `Avatar.vue`'s `size` prop and a `Pick<HelperProps, ...>` style
-//! macro fixture mirroring the corpus's most common offender.
+//! The fixtures are `Avatar.vue`'s `size` prop and a
+//! `Pick<HelperProps, ...>`-style macro fixture mirroring the corpus's
+//! most common offender.
 
 use std::sync::Arc;
 
@@ -94,8 +89,7 @@ fn host_with_fixtures() -> Arc<VerterHost> {
 }
 
 /// Returns true if the type expression transitively contains a free
-/// `TypeParameter` (open-deferred form exception, Plan §3 Step 6.3
-/// exception class (c)).
+/// `TypeParameter` (open-deferred form, exception class (c)).
 fn contains_free_type_parameter(expr: &TypeExpr) -> bool {
     match expr {
         TypeExpr::TypeParameter(_) => true,
@@ -352,7 +346,7 @@ fn avatar_concrete_inline_props_have_no_residual_operator_leaves() {
     let violations = find_residual_operator_leaves(&meta);
     assert!(
         violations.is_empty(),
-        "Plan §3 Step 6.3 umbrella gate (Avatar.vue): resolved type_expr \
+        "umbrella gate (Avatar.vue): resolved type_expr \
          payload contains residual operator leaves outside the three \
          documented exceptions. raise_and_reduce should reduce concrete \
          operators or convert hard-stops to Unknown {{ raw }}. \
@@ -366,7 +360,7 @@ fn card_pick_utility_has_no_residual_operator_leaves() {
     // Card.vue uses `Pick<HelperProps, 'size' | 'name'>` — a concrete
     // utility application. After raise_and_reduce, the result should
     // be a concrete object shape, no IndexedAccess / Conditional / etc.
-    // residual leaves. Phase 3 §4.1's headline use case.
+    // residual leaves.
     let host = host_with_fixtures();
     let meta = host
         .get_component_meta("/Card.vue")
@@ -375,7 +369,7 @@ fn card_pick_utility_has_no_residual_operator_leaves() {
     let violations = find_residual_operator_leaves(&meta);
     assert!(
         violations.is_empty(),
-        "Plan §3 Step 6.3 umbrella gate (Card.vue Pick<...>): resolved \
+        "umbrella gate (Card.vue Pick<...>): resolved \
          type_expr payload contains residual operator leaves outside the \
          three documented exceptions. The `Pick<HelperProps, 'size' | \
          'name'>` macro should resolve to concrete object members. \

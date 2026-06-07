@@ -20,7 +20,7 @@
 //!    original entry would force a cold re-resolve and advance
 //!    `route_cold_fact_bubble_emissions` instead.
 //!
-//! ## Why this could not be expressed pre-cutover
+//! ## Why this could not be expressed before the consumer migration
 //!
 //! Before the consumer migration, the observing entry-point did not
 //! expose a per-branch counter set. A regression that over-evicted

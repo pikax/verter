@@ -1,15 +1,14 @@
-//! Block 6.i Round 9 — inherited-emits branch-merge regression guard.
+//! Inherited-emits branch-merge regression guard.
 //!
-//! Locked at the round-9 boundary. Round 8 reverted the naive non-slot
-//! Class A transit-shallow migration because admitting root
-//! `Conditional` carriers regressed two inherited-emits locked-down
-//! tests: `resolver_coverage_inherited_emits_branch_merged_surface`
-//! and `round7_inherited_emits_branch_merged_surface_survives_transit_cutover`.
-//! Round 9 lands a *path-precise* migration that branches on the
-//! lowered root's semantic shape: an Object/Intersection/Mapped/Ref/
-//! InstantiationRef root dispatches via the transit-shallow helper;
-//! a Conditional root retains `Published(Expanded)` so the
-//! inherited-emits branch-merge protocol (`resolve_payload_surface_with_scope(EmitClassMacroObject)`)
+//! A naive non-slot Class A transit-shallow migration regresses two
+//! inherited-emits locked-down tests when admitting root `Conditional`
+//! carriers: `resolver_coverage_inherited_emits_branch_merged_surface`
+//! and `round7_inherited_emits_branch_merged_surface_survives_transit`.
+//! The *path-precise* migration branches on the lowered root's
+//! semantic shape: an Object/Intersection/Mapped/Ref/InstantiationRef
+//! root dispatches via the transit-shallow helper; a Conditional root
+//! retains `Published(Expanded)` so the inherited-emits branch-merge
+//! protocol (`resolve_payload_surface_with_scope(EmitClassMacroObject)`)
 //! continues to enumerate both branches' event rows at the macro
 //! publication surface.
 //!
@@ -18,7 +17,7 @@
 //! Parent SFC inherits emits from a child whose `defineEmits` payload
 //! is an OPEN CONDITIONAL `Mode extends 'editor' ? EditorEmits :
 //! ViewerEmits`. Parent's `accepted_events` MUST include events from
-//! BOTH branches. A round-9 regression where the path-precision
+//! BOTH branches. A regression where the path-precision
 //! predicate mis-classifies the Conditional root and dispatches it
 //! through transit-shallow would drop one branch's events from the
 //! merged surface — this test fires loudly.
@@ -59,22 +58,21 @@ fn round9_inherited_emits_branch_merge_survives_path_precise_transit_shallow() {
     for required in ["itemEdited", "itemViewed"] {
         assert!(
             accepted_event_names.iter().any(|n| n == required),
-            "Block 6.i Round 9 — path-precise non-slot transit-shallow MUST NOT \
+            "path-precise non-slot transit-shallow MUST NOT \
              regress the inherited-emits branch-merge surface. The parent's \
              `accepted_events` MUST include the child's `{required}` from BOTH \
              branches of the conditional `Mode extends 'editor' ? EditorEmits : \
-             ViewerEmits`. A round-9 regression here means the path-precision \
+             ViewerEmits`. A regression here means the path-precision \
              predicate mis-classified the Conditional macro payload root and \
-             routed it through the transit-shallow helper; the round-8 closure \
-             of two locked-down inherited-emits tests demands that Conditional \
-             roots retain `Published(Expanded)` so `resolve_payload_surface_with_scope` \
+             routed it through the transit-shallow helper; Conditional \
+             roots must retain `Published(Expanded)` so `resolve_payload_surface_with_scope` \
              can enumerate both branches' event rows. Got events: {accepted_event_names:?}"
         );
     }
 
     assert!(
         !accepted_event_names.iter().any(|n| n == "phantomEventXyz"),
-        "Block 6.i Round 9 — branch-merge MUST stay scoped to macro object \
+        "branch-merge MUST stay scoped to macro object \
          publication; no phantom event names may leak. Got: {accepted_event_names:?}"
     );
 }

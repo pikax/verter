@@ -3,7 +3,7 @@
  * substrate.
  *
  * Wraps `@verter/native`'s `VerterHost` to expose three audited
- * methods (per typeinfo plan §5):
+ * methods:
  *
  * 1. {@link TypeInfoSession.listSymbols} — shallow-state symbol inventory.
  * 2. {@link TypeInfoSession.resolveSymbol} — audited resolution of a

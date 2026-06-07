@@ -250,10 +250,9 @@ fn distinct_triples_miss_hash_cons_memo() {
     let miss_delta = after.substitute_memo_misses - baseline.substitute_memo_misses;
     let hit_delta = after.substitute_memo_hits - baseline.substitute_memo_hits;
 
-    // After the Phase H recursive memo wire, both the top-level
-    // entry AND the recursive `substitute_with_change_tracking`
-    // helper probe the SAME store-owned `substitute_memo` — the
-    // helper used to bypass it. The unified memo is keyed by
+    // Both the top-level entry AND the recursive
+    // `substitute_with_change_tracking` helper probe the SAME
+    // store-owned `substitute_memo`. The unified memo is keyed by
     // `(node, parameter_node, arg)`, which is identical key
     // composition at both layers, so a top-level call now produces
     // exactly one probe per distinct intermediate subtree it

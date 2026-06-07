@@ -1,4 +1,4 @@
-//! Block 1.9 — budget oracle #4: path-precise navigation — intermediate
+//! Budget oracle: path-precise navigation — intermediate
 //! hops run in Navigate mode, terminal hop at caller's mode.
 //!
 //! Drives `A['c']['full']['bar']` against an Expanded caller. The
@@ -24,7 +24,7 @@
 //! A regression that ran ALL hops in Expanded would surface
 //! `expansions == hops` and `navigations == 0`. A regression that
 //! ran ALL hops in Navigate (including the terminal) would surface
-//! `expansions == 0`. The post-budget tree records BOTH counters at
+//! `expansions == 0`. The correct path records BOTH counters at
 //! non-zero, with `expansions >= 1` (the terminal Expanded) and
 //! `navigations + expansions <= hops` (the dispatcher may emit
 //! sub-dispatches that don't all map to a hop slot).
@@ -54,21 +54,21 @@
 //!
 //! ### Why the discrimination is non-trivial
 //!
-//! Pre-budget shape (over-expansion regression): the path projection
+//! Over-expansion regression: the path projection
 //! ran ALL intermediate hops in Expanded too — the dispatcher would
 //! emit an Expanded sub-dispatch per intermediate, ballooning
 //! `expansions` past the path-length budget. We catch this with
 //! `expansions <= path_length + EXPANSION_SLACK`.
 //!
-//! Pre-budget shape (under-expansion regression): the terminal hop
+//! Under-expansion regression: the terminal hop
 //! ran in Navigate — the caller's mode is lost in dispatch. We catch
 //! this with `expansions >= 1` AND `query_mode == Expanded`.
 //!
-//! Pre-budget shape (caller-mode loss): the outer dispatch reaches
+//! Caller-mode loss: the outer dispatch reaches
 //! the audit with mode != caller's mode. We catch this with
 //! `query_mode == Expanded`.
 //!
-//! Post-budget shape: `query_mode == Expanded`, `expansions >= 1`
+//! Correct shape: `query_mode == Expanded`, `expansions >= 1`
 //! AND `<= path_length + EXPANSION_SLACK`, `hops >= 1`,
 //! `navigations + expansions <= hops` (within the request's
 //! accounting buckets).

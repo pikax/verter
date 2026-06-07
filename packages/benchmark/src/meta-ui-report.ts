@@ -27,7 +27,7 @@ export interface ComponentResultRow {
 }
 
 /**
- * Plan §3 Step 10 / F9 — SLA bucket counts.
+ * SLA bucket counts.
  *
  * Splits the metric (SLA threshold = `slaMs`) from the kill threshold
  * (hard timeout = `queryTimeoutMs`). Components whose `latencyMs <=
@@ -50,7 +50,7 @@ export interface MetaUiBenchmarkRunRepeat {
   endToEndMs: number;
   componentResults: ComponentResultRow[];
   outcomeCounts: Record<"success" | "degraded" | "query_error" | "crash", number>;
-  /// Plan §3 Step 10 / F9: SLA bucket counts for the regression gate.
+  /// SLA bucket counts for the regression gate.
   slaCount: MetaUiSlaCount;
   deviationTotals: {
     exactMatches: number;
@@ -87,7 +87,7 @@ export interface MetaUiBenchmarkRun {
     steadyStateMs: NumericSummary;
     endToEndMs: NumericSummary;
     outcomeCounts: Record<"success" | "degraded" | "query_error" | "crash", number>;
-    /// Plan §3 Step 10 / F9: aggregated SLA counts across all repeats.
+    /// Aggregated SLA counts across all repeats.
     slaCount: MetaUiSlaCount;
     deviationTotals: {
       exactMatches: number;

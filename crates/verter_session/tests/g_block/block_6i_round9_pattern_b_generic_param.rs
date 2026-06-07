@@ -1,5 +1,5 @@
-//! Block 6.i Round 9 — Pattern B discriminator (generic-parameter library
-//! Mapped publication leak).
+//! Pattern B discriminator (generic-parameter library Mapped
+//! publication leak).
 //!
 //! Same root mechanism as Pattern A but the leak originates from a
 //! generic parameter that, when instantiated, contains an external
@@ -14,7 +14,7 @@
 //! `UIMessage<…, …, TTools>` exposes the leaking `outputSchema` and
 //! `execute` members through `tools: TTools = UITools`.
 //!
-//! Architecturally identical fix surface to Pattern A — Commit 2's
+//! Architecturally identical fix surface to Pattern A — the
 //! path-precise transit-shallow swap in
 //! [`produce_one_macro_object_shape`] keeps both the Pattern A flat
 //! Mapped chain AND the Pattern B generic-parameter-substituted Mapped
@@ -80,7 +80,7 @@ fn pattern_b_generic_parameter_substitution_does_not_leak_inherited_library_memb
         .as_ref()
         .expect("footprint_capture is enabled in this harness");
 
-    // Block 6.j R18 — scope leak counter to intermediate provenances.
+    // R18 — scope leak counter to intermediate provenances.
     // `MemberEdgeProvenance::PublishedField` is the producer-side
     // declaration of the user-visible surface; the leak this test
     // pins is intermediate enumeration (`MappedKeyEnumerated` /
@@ -127,7 +127,7 @@ fn pattern_b_generic_parameter_substitution_does_not_leak_inherited_library_memb
 
     assert_eq!(
         total, 0,
-        "Block 6.i Round 9 Pattern B — generic-parameter library-Mapped \
+        "Pattern B — generic-parameter library-Mapped \
          publication leak MUST close at the macro-publication boundary. \
          A `defineProps<Partial<UIMessage<unknown, unknown, UITools>>>()` \
          (architectural class of the corpus singular `ChatMessage.vue`'s \
@@ -136,11 +136,11 @@ fn pattern_b_generic_parameter_substitution_does_not_leak_inherited_library_memb
          projection-path Member segments through the audit derivation \
          subgraph. Got: outputSchema(edges)={outputschema_count}, \
          execute(edges)={execute_count}, projection_path_member_hits={projection_path_count}. \
-         At HEAD `23c866eb1` the non-slot path's Published(Expanded) \
+         A non-slot path's Published(Expanded) \
          lowering reduces `Partial<UIMessage<…>>` via the Mapped \
          publication path; `build_mapped_type` / `intern_keyspace_names` \
          then emits one `ProjectMember` edge per enumerated key. \
-         Commit 2's path-precise transit-shallow swap (non-Conditional \
+         The path-precise transit-shallow swap (non-Conditional \
          root → transit-shallow) keeps the Mapped carrier deferred; the \
          consumer's per-member projection walks specific members only \
          when explicitly demanded."

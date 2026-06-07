@@ -797,7 +797,7 @@ fn remove_by_alias_works() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Phase 1: Integration tests for uncovered behaviors
+// Integration tests for uncovered behaviors
 // ═══════════════════════════════════════════════════════════
 
 /// @ai-generated - Non-SFC reupsert with different content reports changed=true
@@ -1022,7 +1022,7 @@ fn template_change_then_error_no_fallback() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Phase 1 HIGH priority: behavioral contract tests
+// Behavioral contract tests
 // ═══════════════════════════════════════════════════════════
 
 /// @ai-generated - Verify get_virtual_file returns correct lang per node kind:
@@ -1359,7 +1359,7 @@ fn get_virtual_file_missing_node_returns_error() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Phase 2 MEDIUM priority: important behavioral tests
+// Important behavioral tests
 // ═══════════════════════════════════════════════════════════
 
 /// @ai-generated - __file present in dev mode, absent in prod mode
@@ -1651,7 +1651,7 @@ fn get_diagnostics_without_compilation() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Smart invalidation tests (Tier 2: export-level)
+// Smart invalidation tests (export-level)
 // ═══════════════════════════════════════════════════════════
 
 /// @ai-generated - Dep file type export changes → SFC using that type invalidated
@@ -2690,7 +2690,7 @@ fn template_only_scoped_style_exposes_script_node_with_scope_id() {
     );
 }
 
-// ── Phase 4: Template analysis through host API ────────────────────
+// ── Template analysis through host API ────────────────────
 
 /// @ai-generated - Template analysis is populated after compilation when scope includes template flags
 #[test]

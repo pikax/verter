@@ -70,13 +70,13 @@ fn unrelated_edit_keeps_component_meta_result_warm() {
     let misses_after = prov.component_meta_result_cache_misses.load(Relaxed);
     assert!(
         hits_after > hits_before,
-        "Block 1.B: editing an unrelated file (Comp.vue does NOT import \
+        "editing an unrelated file (Comp.vue does NOT import \
          other.ts) MUST keep the ComponentMetaResultDb warm hit alive. \
          hits_before={hits_before} hits_after={hits_after}"
     );
     assert_eq!(
         misses_after, misses_before,
-        "Block 1.B: misses must NOT advance after an unrelated edit. \
+        "misses must NOT advance after an unrelated edit. \
          misses_before={misses_before} misses_after={misses_after}"
     );
 }

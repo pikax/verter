@@ -1,4 +1,4 @@
-//! Stage-5 landing-gap A discriminating production-flow tests.
+//! Discriminating production-flow tests for session-view warm reuse.
 //!
 //! Binds **R17** (sessions are views; query paths never call host.upsert)
 //! and **R18** (SessionView is passed explicitly through ResolverContext
@@ -9,19 +9,20 @@
 //!
 //! Discriminating contract:
 //!
-//! - Pre-wiring: `MetaSession::get_component_meta` reads the base host's
-//!   content hash regardless of the session's overlay, so a session with
-//!   an overlay whose hash differs from the base would still hit the
-//!   base-keyed cache slot. The `view_aware_cache_key_lookups` counter
-//!   is invariant — no wiring exists to bump it.
-//! - Post-wiring: the session constructs an `OverlaidView` and the
+//! - Without the wiring: `MetaSession::get_component_meta` reads the base
+//!   host's content hash regardless of the session's overlay, so a
+//!   session with an overlay whose hash differs from the base would still
+//!   hit the base-keyed cache slot. The `view_aware_cache_key_lookups`
+//!   counter is invariant — nothing bumps it.
+//! - With the wiring: the session constructs an `OverlaidView` and the
 //!   host's consumer path reads the view's hash. The
 //!   `view_aware_cache_key_lookups` counter increments per session
 //!   query, the cache key for the second read (with overlay) differs
 //!   from the base-warmed slot, and `host.upsert` is never called.
 //!
-//! Each test is structured to FAIL pre-fix and PASS post-fix without
-//! relying on key-shape `HashSet` checks or compile-time signal alone.
+//! Each test is structured to FAIL without the wiring and PASS with it,
+//! without relying on key-shape `HashSet` checks or compile-time signal
+//! alone.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -72,7 +73,7 @@ fn component_meta_entry_count(project: &Arc<MetaProject>) -> usize {
         .len()
 }
 
-/// **Gap A primary test** — proves the consumer path is routed through
+/// Primary test — proves the consumer path is routed through
 /// `SessionView::content_hash_for(canonical)` when deriving the cache key.
 ///
 /// Discrimination strategy:
@@ -83,11 +84,12 @@ fn component_meta_entry_count(project: &Arc<MetaProject>) -> usize {
 /// 2. Open a `MetaSession` and install an overlay with DIFFERENT
 ///    content (different prop set) — hash `H_overlay != H_base`.
 /// 3. Query through the session. The session MUST consult its
-///    `OverlaidView` for the content hash; pre-fix it reads the base
-///    hash and incorrectly hits the warm slot (causing a wrong
+///    `OverlaidView` for the content hash; without the wiring it reads
+///    the base hash and incorrectly hits the warm slot (causing wrong
 ///    overlay semantics, but more importantly failing to bump
-///    `view_aware_cache_key_lookups`). Post-fix the counter increments
-///    AND the second cache entry is keyed under the overlay hash.
+///    `view_aware_cache_key_lookups`). With the wiring the counter
+///    increments AND the second cache entry is keyed under the overlay
+///    hash.
 /// 4. R17 invariant: `host.upsert` is invariant under all session
 ///    queries.
 #[test]
@@ -162,7 +164,7 @@ fn metasession_query_routes_through_session_view_content_hash() {
     );
 }
 
-/// **Gap A — two-session isolation.** Two concurrent sessions with
+/// **Two-session isolation.** Two concurrent sessions with
 /// conflicting overlays on the same canonical produce DIFFERENT
 /// view-derived cache keys, so the `ComponentMetaResultDb` accumulates
 /// separate entries per overlay hash.
@@ -232,7 +234,7 @@ fn two_concurrent_sessions_with_conflicting_overlays_isolated_in_cache() {
     );
 }
 
-/// **Gap A — session teardown does not mutate base.** Confirms R17:
+/// **Session teardown does not mutate base.** Confirms R17:
 /// after `drop(session)`, the base host's view of the canonical is
 /// unchanged.
 #[test]

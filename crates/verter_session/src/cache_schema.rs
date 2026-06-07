@@ -12,7 +12,7 @@
 //! Bumping per-Db version constants in lockstep is an ergonomic and a
 //! correctness hazard: it is easy to forget one Db, leaving a partial cohort
 //! that returns torn (some-fresh, some-stale) data on first read after a
-//! cutover. A single workspace-wide [`CACHE_CLUSTER_SCHEMA_VERSION`] cascades
+//! schema bump. A single workspace-wide [`CACHE_CLUSTER_SCHEMA_VERSION`] cascades
 //! to every Db wired through [`CacheSchemaVersioned`].
 //!
 //! ## Invalidation contract
@@ -61,9 +61,9 @@
 /// - `1` — original cohort (`FileArtifactStore`, `AnalysisReadyDb`,
 ///   `ComponentMetaResultDb`, etc.) without per-Db schema gating; entries had
 ///   no embedded typed fields.
-/// - `2` — typed-IR cutover. Adds `*_expr` / `*_expr_scope` on the
+/// - `2` — typed-IR fields. Adds `*_expr` / `*_expr_scope` on the
 ///   analyzer/parser-published surfaces. Every cache that transitively stores
-///   these structs reject any entry stored under version `1`.
+///   these structs rejects any entry stored under version `1`.
 pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 2;
 
 /// Trait surface every participating Db implements. The implementation is a

@@ -1,5 +1,5 @@
 /**
- * Plan §3 Commit 8 / §2.8 single-walker rule inspection tests.
+ * Single-walker rule inspection tests.
  *
  * The Rust walker at `verter_session::component_meta_audit::assertions`
  * (via `RustAuditRecord::why_loaded` / `why_instantiated`) is the sole
@@ -39,8 +39,8 @@ describe("ts_helpers_do_not_reimplement_walker_logic", () => {
     // Consumers receive a `ProvenanceChain` JSON from the Rust walker
     // and must not peek inside the derivation tables. If a TS helper
     // references `derivation_subgraph`, it is almost certainly about
-    // to walk edges — which is precisely the duplication this rule
-    // forbids. Plan §2.8.
+    // to walk edges — which is precisely the duplication the
+    // single-walker rule forbids.
     for (const file of FILES) {
       expect(
         file.content.includes("derivation_subgraph"),

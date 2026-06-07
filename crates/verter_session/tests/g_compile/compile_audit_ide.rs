@@ -1,4 +1,4 @@
-//! Slice 3.B end-to-end test for the IDE (`CompileTarget::IDE`) codegen
+//! End-to-end test for the IDE (`CompileTarget::IDE`) codegen
 //! path through `VerterHost::compile_with_audit`.
 //!
 //! IDE target is the LSP/tsgo path — emits valid TSX. The audit kind

@@ -7,9 +7,9 @@
 //! facts are DERIVED from the typed `augmentation_scopes` inventory the
 //! binder retains on `ShallowFileState` (`fact_emission::collect_augmentations`)
 //! — NOT a raw-source byte-scan. The cross-project `augmentation_index`
-//! is populated lazily by the augmentation stitch once resolve-domain
-//! dimensions are available; this file only exercises the per-file
-//! emission, so that index stays empty here.
+//! is populated lazily by the augmentation stitch at dispatch time once
+//! resolve-domain dimensions are available; this file only exercises the
+//! per-file parse-time emission, so that index stays empty here.
 //!
 //! Tests load the path-precise fixtures under
 //! `tests/fixtures/path_precise/module_augmentation_*.ts`, build an
@@ -154,7 +154,7 @@ fn global_archetype_emits_module_augmentation_fact_via_global_tag() {
     assert!(
         has_global,
         "expected $global sentinel specifier in augmentations \
-         (Stage 6c maps this to AugmentationTargetKind::GlobalAugmentation)"
+         (the dispatch-time stitch maps this to AugmentationTargetKind::GlobalAugmentation)"
     );
 }
 
@@ -179,24 +179,24 @@ fn augmentation_facts_land_in_fact_registry() {
     }
     assert!(
         found_in_registry > 0,
-        "Phase 1 emitter MUST land ModuleAugmentation facts in the registry"
+        "the parse-time emitter MUST land ModuleAugmentation facts in the registry"
     );
 }
 
 #[test]
-fn augmentation_index_on_file_artifact_store_remains_empty_at_stage_3() {
-    // R29 / Stage 3: the per-file `FileArtifacts.augmentations` list
-    // is populated by Phase 1, but the cross-project
+fn augmentation_index_on_file_artifact_store_remains_empty_after_parse_time_emission() {
+    // R29: the per-file `FileArtifacts.augmentations` list is
+    // populated by the parse-time emitter, but the cross-project
     // `FileArtifactStore.augmentation_index` (keyed on
-    // `AugmentationTargetKey`) is NOT — Stage 6c populates it
-    // lazily on first augmentation-sensitive query.
+    // `AugmentationTargetKey`) is NOT — the dispatch-time stitch
+    // populates it lazily on first augmentation-sensitive query.
     use verter_session::file_artifact_store::FileArtifactStore;
     let store = FileArtifactStore::new();
-    // No production code path populates the index at Stage 3.
+    // No production code path populates the index at parse time.
     assert_eq!(
         store.augmentation_index_len(),
         0,
-        "augmentation_index MUST stay empty at Stage 3 (populated at Stage 6c)"
+        "augmentation_index MUST stay empty after parse-time emission (populated lazily at dispatch time)"
     );
 }
 

@@ -1,6 +1,6 @@
 //! R6 meta-guard.
 //!
-//! Codex Round-2 Rule 6 (BINDING): every `(CRITICAL)` architecture
+//! BINDING: every `(CRITICAL)` architecture
 //! rule in `CLAUDE.md` and `.claude/skills/*/SKILL.md` must ship with
 //! at least one named guard — a static architecture test, a
 //! discriminating regression test, or a grep / AST-walk scanner. A
@@ -341,7 +341,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
     (
         "Component-Meta Heuristic Prevention",
         &[
-            // Heuristic-prevention rule from `4062d1b72` — pinned by
+            // Heuristic-prevention rule — pinned by
             // the typed-IR-only resolver guard cluster, which
             // mechanically forbids the forbidden patterns the rule
             // text names (string parsing, format!-then-reparse, Pick/
@@ -362,14 +362,11 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
     (
         "Component-Meta Completeness Contract",
         &[
-            // Completeness-contract substrate (typed degraded states,
-            // no `Complete(None)` for missing inputs) is a follow-up
-            // batch (Codex Round-2 Rule 2). The interim guard pins the
-            // current invariant via the audit-validator's
-            // PublishedField gate + the no-silent-skip guard. The
-            // completeness substrate (typed degraded states, no
-            // `Complete(None)` for missing inputs) is a follow-up
-            // batch; the interim guards pin today's contract.
+            // The completeness-contract substrate (typed degraded
+            // states, no `Complete(None)` for missing inputs) is a
+            // future addition. The current guard pins the
+            // present invariant via the audit-validator's
+            // PublishedField gate + the no-silent-skip guard.
             "macro_impacting_constructs_fail_lowering_not_silent_skip",
             "audit_publishes_member_edge_with_published_field_provenance_at_macro_boundaries",
         ],
@@ -413,14 +410,14 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
     (
         "Block-vocabulary ban",
         &[
-            // H19 (cache-runtime overhaul): production source under
-            // `crates/*/src/**` must not contain plan vocabulary
-            // (`\bblock \d+\b`, `cache-runtime overhaul`,
-            // `runtime cutover`). The discriminator is the H19 test
-            // inside `architecture_guards.rs`; the broader walker
-            // (`no_phase_archaeology_in_production_code`) consumes
-            // the same predicate and fails the build on any
-            // production-source violation.
+            // Production source under `crates/*/src/**` must not contain
+            // plan-management vocabulary (numbered blocks, named overhaul
+            // plans, or migration-stage labels). The discriminator is the
+            // `guard7_predicate_rejects_block_vocabulary` test inside
+            // `architecture_guards.rs`; the broader walker
+            // (`no_phase_archaeology_in_production_code`) consumes the same
+            // predicate and fails the build on any production-source
+            // violation.
             "guard7_predicate_rejects_block_vocabulary",
         ],
     ),
@@ -470,9 +467,9 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         ],
     ),
     // ───────────────── U2 query-value-domain design gate ─────────────────
-    // Two NEW CRITICAL rules landed by the U2 design
+    // Two CRITICAL rules from the U2 design
     // (`docs/arch/u2-query-value-domain-design.md`). The design-gate
-    // guards below are discriminating TODAY; the STAGE-B behavioural
+    // guards below are discriminating TODAY; the behavioural
     // guards are named in the owning skill sections (gap tracked per
     // the architecture-guard rule).
     (
@@ -646,8 +643,8 @@ fn every_critical_rule_in_docs_has_registered_guard() {
          in `CRITICAL_RULE_GUARDS` (in \
          `crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs`) \
          with at least one guard reference. Prose-only CRITICAL rules \
-         are documentation that nothing enforces. Codex Round-2 Rule 6 \
-         (BINDING): every CRITICAL rule needs a static architecture \
+         are documentation that nothing enforces. Every CRITICAL rule \
+         needs a static architecture \
          guard OR a discriminating test in the same change that adds \
          the rule. Missing registry entries:\n\n{list}\n\n\
          To fix: open \
@@ -815,9 +812,9 @@ fn collect_known_guard_names() -> std::collections::HashSet<String> {
         // attribute on the adjacent attribute block is NOT a test
         // and MUST NOT be accepted — `cargo test <name>` cannot run
         // such a function, so a registry entry naming it is a
-        // dangling reference (R6 validity gap closed in Round 19a
-        // Commit 2; reopened post-Round-19a if this predicate
-        // relaxes back to accepting non-`#[test]` declarations).
+        // dangling reference (an R6 validity gap that reopens if this
+        // predicate relaxes back to accepting non-`#[test]`
+        // declarations).
         let mut files = Vec::new();
         walk_rs_files(&tests_dir, &mut files);
         let src_dir = crate_path.join("src");

@@ -1,4 +1,4 @@
-//! Stage-5 landing-gap B discriminating production-flow tests.
+//! Cross-owner-reuse discriminating production-flow tests.
 //!
 //! Binds **R7 / R8** cross-owner reuse: N consumer scopes reaching
 //! the same `(base, scope_axis, mode)` collapse to ONE entry in
@@ -10,12 +10,11 @@
 //!
 //! Discriminating contract:
 //!
-//! - Pre-Stage-5d (legacy `#[derive(Hash, PartialEq)]` including
-//!   `scope_canonical_id`): N owners produce N entries — one per
-//!   owner scope.
-//! - Post-Stage-5d (hand-rolled `Hash`/`PartialEq` excluding
-//!   `scope_canonical_id`): N owners collapse to a single entry per
-//!   semantic slot.
+//! - A legacy `#[derive(Hash, PartialEq)]` including
+//!   `scope_canonical_id` would make N owners produce N entries — one
+//!   per owner scope.
+//! - The hand-rolled `Hash`/`PartialEq` excluding `scope_canonical_id`
+//!   collapses N owners to a single entry per semantic slot.
 //!
 //! The test boots a real `VerterHost` against a small workspace
 //! fixture with N Vue components that all import and use a single
@@ -109,7 +108,7 @@ defineProps<{
 <template><div /></template>
 "#;
 
-/// **Gap B primary test — production-flow `get_component_meta`.**
+/// **Primary test — production-flow `get_component_meta`.**
 ///
 /// Drive `get_component_meta` from N=4 owners that all consume the
 /// SAME inner type `ChatMessageProps` via `Pick<ChatMessageProps,'id'>`.
@@ -123,9 +122,9 @@ defineProps<{
 /// - Capture `entry_count()` AFTER all owners run.
 /// - Compare against a `single_owner_baseline_entries()` control
 ///   measurement.
-/// - Post-Stage-5d (cross-owner-keying impl): N owners reach the
+/// - Under the cross-owner-keying impl: N owners reach the
 ///   same `(base, scope_axis, mode)` slot for the inner type → ONE
-///   entry per slot. Under the legacy `scope_canonical_id`-included
+///   entry per slot. Under a legacy `scope_canonical_id`-included
 ///   impl, N owners would produce ~N × baseline entries because
 ///   each per-owner scope makes the cache key distinct.
 ///
@@ -200,7 +199,7 @@ fn n_owners_sharing_inner_type_materialise_once_in_production_flow() {
     );
 }
 
-/// **Gap B primary discrimination — `materialize_surface` dispatch
+/// **Primary discrimination — `materialize_surface` dispatch
 /// over N owners.**
 ///
 /// Directly exercise the
@@ -316,7 +315,7 @@ fn single_owner_baseline_entries() -> usize {
         .entry_count()
 }
 
-/// **Gap B — Hash/PartialEq structural arch-guard.** This is the
+/// **Hash/PartialEq structural arch-guard.** This is the
 /// arch-guard companion to the production-flow test. It pins the
 /// cache key's `Hash`/`PartialEq` invariant:
 /// `scope_canonical_id` is EXCLUDED from equality and hashing, so
@@ -382,7 +381,7 @@ fn r7_cache_key_hash_partial_eq_excludes_scope_canonical_id() {
     );
 }
 
-/// **Gap B — entry_count accessor visibility.** Pins that
+/// **entry_count accessor visibility.** Pins that
 /// `MaterializeStructureDb::entry_count()` is `pub` (non-test) so the
 /// production-flow tests can call it. A regression that gates this
 /// behind `#[cfg(test)]` would silently disable the cross-owner reuse

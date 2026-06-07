@@ -19,19 +19,19 @@ use verter_session::for_tests::ReadSetSignature;
 
 static DISCRIMINATOR_MUTEX: Mutex<()> = Mutex::new(());
 
-/// Discriminator 1 (codex 1) — `execute_read_cold_build_persists_traced_facts`.
+/// Discriminator — `execute_read_cold_build_persists_traced_facts`.
 ///
-/// The previous tree's `ProjectSemanticDispatch::execute_read` did
+/// A tree where `ProjectSemanticDispatch::execute_read` does
 /// NOT wrap its cold build with `install_fact_tracer`. So a memo
 /// entry first warmed through `execute_read` would carry only
 /// `fact_signature_from_fence(dep_signature)`'s `FileWholeHash`
 /// subset; path-precise `Parse(...)`, `ResolveImports(...)`, and
 /// `RouteSurface(...)` observations would be silently dropped.
 ///
-/// After the shared cold-build helper refactor, both `execute` and
-/// `execute_read` route through the same tracer-wrapped helper.
-/// The discriminating signal: a memo entry warmed through any
-/// cold-build path now carries the path-precise fact signature.
+/// Both `execute` and `execute_read` route through the same
+/// tracer-wrapped helper. The discriminating signal: a memo entry
+/// warmed through any cold-build path carries the path-precise fact
+/// signature.
 ///
 /// Discriminating assertion: the carrier helper exists with the
 /// `arch-guard:single-execute-cooperative-call` marker AND
@@ -70,19 +70,19 @@ fn execute_read_cold_build_persists_traced_facts() {
     assert!(
         raise_src.contains("self.execute_via_cold_build_helper(key)"),
         "execute_read must delegate to the shared cold-build helper so its cold builds \
-         install the fact tracer (closes codex round-2 P1.C)"
+         install the fact tracer"
     );
     assert!(
         !raise_src.contains("graph.execute_cooperative("),
-        "execute_read must NOT call graph.execute_cooperative directly. The pre-refactor \
-         tree had a separate `graph.execute_cooperative(...)` call inside execute_read \
-         that bypassed install_fact_tracer."
+        "execute_read must NOT call graph.execute_cooperative directly. A separate \
+         `graph.execute_cooperative(...)` call inside execute_read \
+         would bypass install_fact_tracer."
     );
 }
 
-/// Discriminator 2 (codex 2) — `semantic_memo_fact_only_invalidation_drops_slot`.
+/// Discriminator — `semantic_memo_fact_only_invalidation_drops_slot`.
 ///
-/// The previous tree's `invalidate_canonical` walked only the
+/// A tree whose `invalidate_canonical` walks only the
 /// reverse index registered from the legacy `DepSignature`
 /// canonicals. A memo entry whose `read_set_signature` referenced
 /// canonical `dep.ts` (via a `Parse(...)` fact) but whose legacy
@@ -189,7 +189,7 @@ fn semantic_memo_fact_only_invalidation_drops_slot() {
     );
 }
 
-/// Behavioural discriminator for codex P2.B —
+/// Behavioural discriminator —
 /// `semantic_memo_invalidate_drains_fact_only_canonical_entry`.
 ///
 /// Publishes a memo entry whose carrier has:
@@ -294,11 +294,11 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
     );
 }
 
-/// Discriminator 3 (codex 3) — `semantic_memo_warm_hit_validates_before_bubble`.
+/// Discriminator — `semantic_memo_warm_hit_validates_before_bubble`.
 ///
-/// The previous tree's `SemanticGraphStore::get` and
-/// `try_warm_hit_fast_path` bubbled `entry.read_set_signature`
-/// unconditionally. A stale entry (carrier no longer validates
+/// A tree whose `SemanticGraphStore::get` and
+/// `try_warm_hit_fast_path` bubble `entry.read_set_signature`
+/// unconditionally has a hole: a stale entry (carrier no longer validates
 /// against the live view) would return the cached value AND pollute
 /// the outer tracer with stale observations.
 ///
@@ -361,10 +361,10 @@ fn semantic_memo_warm_hit_validates_before_bubble() {
     );
 }
 
-/// Discriminator 4 (codex 4) — `materialize_structure_peek_and_register_use_carrier`.
+/// Discriminator — `materialize_structure_peek_and_register_use_carrier`.
 ///
-/// The previous tree's `MaterializeStructureDb::peek` validated only
-/// the legacy `dep_signature` rail. An entry whose facts rail
+/// A tree whose `MaterializeStructureDb::peek` validates only
+/// the legacy `dep_signature` rail has a hole: an entry whose facts rail
 /// referenced a stale fact (e.g. a `Parse(MemberPresence(Foo, a))`
 /// fact for a member that no longer exists) would survive the peek
 /// even though the path-precise observation was stale.
@@ -459,7 +459,7 @@ fn materialize_structure_peek_and_register_use_carrier() {
     );
 }
 
-/// Discriminator 5 — `cooperative_return_only_not_shared_to_joiners`.
+/// Discriminator — `cooperative_return_only_not_shared_to_joiners`.
 ///
 /// The materialiser's stack-local `non_cacheable_outcome:
 /// RefCell<...>` side channel held the valid-but-non-cacheable
@@ -613,7 +613,7 @@ fn cooperative_return_only_not_shared_to_joiners() {
 }
 
 /// Bonus discriminator — `ComputeAdmission::Failed` must be
-/// constructible. The codex three-variant contract requires a
+/// constructible. The three-variant contract requires a
 /// `Failed` case alongside `Cacheable` and `ReturnOnly`; this test
 /// exercises construction so the variant cannot be dead-removed by
 /// future refactors.
@@ -634,7 +634,7 @@ fn compute_admission_failed_variant_is_constructible() {
             admission,
             verter_session::for_tests::ComputeAdmission::Failed
         ),
-        "ComputeAdmission::Failed must be constructible — the codex three-variant \
+        "ComputeAdmission::Failed must be constructible — the three-variant \
          contract requires Cacheable / ReturnOnly / Failed."
     );
 }

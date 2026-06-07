@@ -1,4 +1,4 @@
-//! Wave 2 Slice 2.3 — `SchedulerAudit::worker_thread_id` /
+//! `SchedulerAudit::worker_thread_id` /
 //! `SchedulerAudit::worker_pool` discriminating coverage.
 //!
 //! Drives 16 concurrent requests through the real scheduler with
@@ -8,10 +8,9 @@
 //! slot must end up populated with a non-empty `worker_thread_id`
 //! and a `worker_pool` of either `Cpu` or `Io`.
 //!
-//! Discriminating: against the pre-Slice-2.3 tree, the
-//! `record_scheduler_dispatch` observer trait method does not exist
-//! and the `scheduler_audit` slot is unpopulated — every assertion
-//! below would either fail to compile or fail at runtime.
+//! Discriminating: without the `record_scheduler_dispatch` observer
+//! trait method, the `scheduler_audit` slot is unpopulated — every
+//! assertion below would either fail to compile or fail at runtime.
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::Arc;
@@ -126,14 +125,14 @@ fn scheduler_audit_records_non_empty_worker_thread_id_and_known_pool_under_load(
         h.join().expect("worker joined");
     }
 
-    // EVERY context's scheduler_audit slot must be populated. Pre-
-    // Slice-2.3: the slot does not exist (compilation failure) or
+    // EVERY context's scheduler_audit slot must be populated. If the
+    // dispatch path never calls `record_scheduler_dispatch`, the slot
     // is never written (runtime panic on `unwrap`).
     for (idx, ctx) in contexts.iter().enumerate() {
         let snap = ctx.scheduler_audit.lock().clone().unwrap_or_else(|| {
             panic!(
                 "request {} (/file{}.vue): scheduler_audit slot was never \
-                     populated — pre-Slice-2.3 the dispatch path did not call \
+                     populated — the dispatch path did not call \
                      record_scheduler_dispatch on the active observer",
                 ctx.request_id, idx,
             )

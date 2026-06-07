@@ -1,7 +1,7 @@
-//! Plan ↔ skill H ↔ R mapping discriminator (B1).
+//! Plan ↔ skill H ↔ R mapping discriminator.
 //!
-//! The cache-runtime overhaul plan declares a new `H1–H20` rule
-//! namespace and maps each H entry to the corresponding `R<n>` rule
+//! The `docs/arch/cache-runtime-overhaul-plan.md` document declares an
+//! `H1–H20` rule namespace and maps each H entry to the corresponding `R<n>` rule
 //! in `.claude/skills/type-cache-architecture/SKILL.md`. This test
 //! walks the H ↔ R cross-reference table at the head of the plan,
 //! extracts each `(H<n>, R<m>)` pair, reads the corresponding `R<m>`
@@ -369,7 +369,7 @@ fn h_to_r_mapping_is_semantically_accurate() {
             )
         });
         // Exact-equality on the R-set so a wrong-extra-R-ID in the
-        // plan ALSO fails (the brief's F3 explicit ask).
+        // plan ALSO fails.
         let plan_rs_sorted: Vec<&str> = {
             let mut v: Vec<&str> = plan_rs.iter().map(String::as_str).collect();
             v.sort();
@@ -411,7 +411,7 @@ fn h_to_r_mapping_is_semantically_accurate() {
 
 #[test]
 fn h_to_r_mapping_discriminator_rejects_synthetic_remap() {
-    // Negative case: the brief calls out specifically that remapping
+    // Negative case: remapping
     // `H5` → `R5 + R28` MUST fail because R5/R28's vocabulary
     // diverges from H5's `{overflow, NonCacheable, BudgetExceeded}`
     // keyword set. This self-test proves the rule-body extractor
@@ -442,7 +442,7 @@ fn h_to_r_mapping_discriminator_rejects_synthetic_remap() {
 
 #[test]
 fn parse_rule_bodies_bounds_last_rule_to_owning_section() {
-    // F5/F6 discriminator. The last rule (R31) MUST NOT absorb the
+    // The last rule (R31) MUST NOT absorb the
     // post-rule SKILL.md content (e.g. the `## Cache layer key
     // composition` table or the `## Two-phase emission map`
     // section). Without the section-header bound, R31's body would

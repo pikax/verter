@@ -1,5 +1,5 @@
 #![allow(deprecated)]
-//! Discriminating test for `WorkspaceAccess::audit_op` (Slice 3.D)
+//! Discriminating test for `WorkspaceAccess::audit_op`
 //! covering the `DepGraphTraverse` operation.
 //!
 //! Wires a real forward-dep graph (`root.vue` → `mid.ts` → `leaf.ts`)
@@ -11,9 +11,9 @@
 //!   * the touched-file set contains every transitively-reachable
 //!     canonical from the root.
 //!
-//! **Discriminating against pre-change tree**: `audit_op` did not
-//! exist before this slice, so this test would not even compile
-//! against the pre-change tree.
+//! **Discriminating**: the test exercises `audit_op`; a stub that
+//! returned a zero edge count would fail the `dep_edges_traversed`
+//! assertions.
 
 use std::sync::Arc;
 
@@ -103,8 +103,7 @@ fn audit_op_dep_graph_traverse_walks_real_edges_and_reports_count() {
     let payload = record.workspace_payload().expect("workspace payload");
 
     // Discriminating: the BFS must traverse at least the root→mid and
-    // mid→leaf edges (2 edges total). Pre-change tree (no `audit_op`)
-    // does not even compile this test; a stub that returned `0`
+    // mid→leaf edges (2 edges total). A stub that returned `0`
     // would fail this assertion.
     assert!(
         payload.dep_edges_traversed > 0,

@@ -1,5 +1,5 @@
 //! Shared test harness + fixture constants for the authored
-//! correctness suite (plan §3 Commit 7 / F6). Each sibling test
+//! correctness suite. Each sibling test
 //! module injects the relevant fixtures into a hermetic
 //! [`AuditedRequest`], resolves a canonical SFC, and asserts on
 //! the resulting [`RequestAuditRecord`].
@@ -122,10 +122,10 @@ pub fn footprint_of(record: &RequestAuditRecord) -> &RequestFootprintAudit {
         .expect("footprint_capture is always enabled in this suite")
 }
 
-/// Hand-authored mapped-type subset of `lib.es5.d.ts` (Phase 5a §5 commit 0b).
+/// Hand-authored mapped-type subset of `lib.es5.d.ts`.
 ///
-/// Same discipline as Phase 0 §0p.A.0: hand-derived from the TS spec so the
-/// harness never silently disagrees with `tsc --lib` on what `Pick` means.
+/// Hand-derived from the TS spec so the harness never silently disagrees
+/// with `tsc --lib` on what `Pick` means.
 /// Use through [`build_hermetic_host_with_lib`].
 pub const STUB_LIB_ES5: &str = r#"
 type Pick<T, K extends keyof T> = { [P in K]: T[P] };
@@ -139,7 +139,7 @@ type Extract<T, U> = T extends U ? T : never;
 type NonNullable<T> = T extends null | undefined ? never : T;
 "#;
 
-/// Phase 5a §5 commit 0b harness: build a hermetic host with regular SFC /
+/// Build a hermetic host with regular SFC /
 /// TS files **and** ambient TypeScript lib files registered via
 /// [`WorkspaceAccess::register_ambient_lib`].
 ///
@@ -204,7 +204,7 @@ pub fn build_hermetic_host_with_lib(
 
 #[cfg(test)]
 mod self_tests {
-    //! Phase 5a §5 commit 0b self-tests:
+    //! Harness self-tests:
     //! - `stub_lib_pick_resolves` proves the harness puts `Pick` in scope.
     //! - `register_ambient_lib_idempotent` proves the harness's
     //!   `build_hermetic_host_with_lib` is itself idempotent — repeated
@@ -223,8 +223,8 @@ mod self_tests {
     #[test]
     fn stub_lib_pick_resolves() {
         let host = build_hermetic_host_with_lib(&[], &[("lib.es5.d.ts", STUB_LIB_ES5)]);
-        // Phase 6b sub-plan §6b.D2b — read consumers route through
-        // `host.workspace_read()` (the `WorkspaceRead` trait surface).
+        // Read consumers route through `host.workspace_read()` (the
+        // `WorkspaceRead` trait surface).
         let workspace = host.workspace_read();
         let key = workspace
             .project_stable_key(ProjectId(0))
@@ -257,8 +257,7 @@ mod self_tests {
     fn register_ambient_lib_idempotent() {
         let host_a = build_hermetic_host_with_lib(&[], &[("lib.es5.d.ts", STUB_LIB_ES5)]);
         let host_b = build_hermetic_host_with_lib(&[], &[("lib.es5.d.ts", STUB_LIB_ES5)]);
-        // Phase 6b sub-plan §6b.D2b — read consumers route through
-        // `host.workspace_read()`.
+        // Read consumers route through `host.workspace_read()`.
         let key_a = host_a
             .workspace_read()
             .project_stable_key(ProjectId(0))
@@ -270,8 +269,8 @@ mod self_tests {
         // Same configured project (same workspace_root + tsconfig) → same
         // ProjectStableKey across hosts (A3 determinism).
         assert_eq!(key_a, key_b);
-        // Both registries expose Pick. Phase 6b sub-plan §6b.D2b — read
-        // consumers route through `host.workspace_read()`.
+        // Both registries expose Pick. Read consumers route through
+        // `host.workspace_read()`.
         assert!(host_a
             .workspace_read()
             .lookup_ambient_symbol(key_a, "Pick")
@@ -288,9 +287,8 @@ mod self_tests {
     #[test]
     fn vfs_shadowing_overlay_wins() {
         let host = build_hermetic_host_with_lib(&[], &[("lib.es5.d.ts", STUB_LIB_ES5)]);
-        // Phase 6b sub-plan §6b.D2b — read consumers route through
-        // `host.workspace_read()`; mutators (`notify_upsert`) go through
-        // the dedicated host wrapper.
+        // Read consumers route through `host.workspace_read()`; mutators
+        // (`notify_upsert`) go through the dedicated host wrapper.
         let workspace = host.workspace_read();
         let key = workspace.project_stable_key(ProjectId(0)).unwrap();
         // Initial state: ambient lib reachable.

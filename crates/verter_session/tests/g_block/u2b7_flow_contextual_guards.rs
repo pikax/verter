@@ -1,16 +1,16 @@
-//! U2B.7 guards — the `FlowNarrowingAt` + `ContextualTypeAt` key surface.
+//! Guards for the `FlowNarrowingAt` + `ContextualTypeAt` key surface.
 //!
-//! These tests pin the IDENTITY contract of the two new program-analysis
+//! These tests pin the IDENTITY contract of the two program-analysis
 //! [`SemanticQueryKey`] variants `FlowNarrowingAt` and `ContextualTypeAt`,
 //! their env-in-context dimensions (these keys have NO slot, so their FULL
 //! R21 `P R T L J` env dims ride INSIDE the [`ProgramAnalysisContext`]), the
 //! HONEST-PENDING behaviour of BOTH (non-producing — the flow engine and the
-//! contextual-typing engine land in U6, so there is no execute-side reducer),
-//! and the value-domain mapping (both resolve to the `ProgramAnalysis` value
-//! domain, NEVER `TypeNode`).
+//! contextual-typing engine are not yet wired, so there is no execute-side
+//! reducer), and the value-domain mapping (both resolve to the
+//! `ProgramAnalysis` value domain, NEVER `TypeNode`).
 //!
 //! Identity is probed BEHAVIORALLY through the family memo exactly as the
-//! sibling U2B.5 / U2B.6 guards do: publishing a synthetic candidate under
+//! sibling key-surface guards do: publishing a synthetic candidate under
 //! key `a` and then reading `slot_candidate_count_for_tests(b)` is `> 0` iff
 //! `a` and `b` project to the SAME `(FamilyKey, ModeSlot)`. A warm entry
 //! under one identity is returned for another ONLY when they share a slot.
@@ -450,9 +450,8 @@ fn contextual_type_at_execute_is_non_producing_miss() {
 
 // ---------------------------------------------------------------------------
 // (5) VALUE-DOMAIN mapping — both keys map to `ProgramAnalysis`, NOT
-//     `TypeNode`. Reads the authoritative spec table directly. This is the
-//     guard tightened for U2B.7: it FAILS if either row drifts to `TypeNode`
-//     (the easy default) or any other domain.
+//     `TypeNode`. Reads the authoritative spec table directly. It FAILS if
+//     either row drifts to `TypeNode` (the easy default) or any other domain.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -501,7 +500,7 @@ fn every_semantic_query_key_maps_to_exactly_one_value_domain() {
             rows.len()
         );
     }
-    // And the two U2B.7 keys specifically land on ProgramAnalysis.
+    // And the two program-analysis keys specifically land on ProgramAnalysis.
     let domain = |tag: SemanticQueryKeyTag| {
         specs
             .iter()

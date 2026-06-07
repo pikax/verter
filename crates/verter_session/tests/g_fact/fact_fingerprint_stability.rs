@@ -1,6 +1,6 @@
-//! Stage 3 fact-fingerprint stability discrimination tests.
+//! Fact-fingerprint stability discrimination tests.
 //!
-//! Verify-bullet binding:
+//! Invariants:
 //!
 //! - Bullet 1 — Cosmetic edits: `semantic_hash` unchanged across all
 //!   parse-domain facts; `display_hash` may change.
@@ -20,9 +20,9 @@
 //!
 //! Tests synthesise `IndexedReady` directly via `build_indexed`
 //! (no parser invocation) and run `emit_parse_facts` to inspect the
-//! emitted `FileFacts.registry()`. Without the Stage 3 emitter,
+//! emitted `FileFacts.registry()`. Without the fact emitter,
 //! these tests would fail because every variant lookup would
-//! return `None` (the Stage 1 placeholder).
+//! return `None`.
 //!
 //! Architectural rules bound: R10, R11, R12, R13, R14, R16, R28.
 
@@ -44,7 +44,7 @@ fn empty_external(
     Arc::new(verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default())
 }
 
-/// Builder for a synthetic `IndexedReady` that drives Phase 1 fact
+/// Builder for a synthetic `IndexedReady` that drives parse-time fact
 /// emission. The `member_bodies` map per-symbol describes the
 /// member name list (used by `MemberShape` + `MemberPresence`) and
 /// the synthesized body `TypeExpr`.
@@ -360,7 +360,7 @@ fn type_and_value_namespace_keys_coexist_for_same_name() {
 
 #[test]
 fn decl_reorder_does_not_change_emitted_fact_set() {
-    // R10 + R27 canonical visit order. The Phase 1 emitter sorts
+    // R10 + R27 canonical visit order. The fact emitter sorts
     // type symbols and value symbols by name before emission, so
     // the same file rewritten with decls in reverse declaration
     // order produces a byte-identical fact set.
@@ -451,13 +451,12 @@ fn removing_export_drops_export_fact_key() {
     );
 }
 
-/// Stage 0 → Stage 3 corpus-anchored binding: load the
-/// `cosmetic_edit_comment.ts` fixture and verify the documented
-/// invariant — that the file declares an `interface Foo` with
-/// members `a` and `b` plus a top-of-file standalone comment.
-/// The Stage 6d discriminator will assert that re-running the
-/// fact emitter on a comment-edited variant of this file
-/// produces the same semantic_hashes.
+/// Corpus-anchored binding: load the `cosmetic_edit_comment.ts`
+/// fixture and verify the documented invariant — that the file
+/// declares an `interface Foo` with members `a` and `b` plus a
+/// top-of-file standalone comment. The fact-emitter discriminator
+/// asserts that re-running the fact emitter on a comment-edited
+/// variant of this file produces the same semantic_hashes.
 #[test]
 fn cosmetic_edit_comment_fixture_declares_documented_shape() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

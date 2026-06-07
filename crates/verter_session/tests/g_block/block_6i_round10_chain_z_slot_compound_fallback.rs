@@ -1,29 +1,27 @@
-//! Block 6.i Round 10 — Chain Z discriminator (slot compound-objects
-//! fallback transit-shallow).
+//! Chain Z discriminator (slot compound-objects fallback
+//! transit-shallow).
 //!
 //! Closes Chain Z, the residual slot-publication leak on ChatMessages
-//! fresh-cold (8.2% / 30 of 364 captured ProjectMember emissions per
-//! the round-10 diagnostic at `D:/tmp/round10-diagnostic-report.md`).
-//! The chain enters through the slot publication's `Option::or_else`
-//! fallback in `produce_one_macro_object_shape_for_slots`
-//! (`macro_shapes.rs:2228-2240`):
+//! fresh-cold. The chain enters through the slot publication's
+//! `Option::or_else` fallback in
+//! `produce_one_macro_object_shape_for_slots`:
 //!
 //! ```text
 //! project_expr_class_a_via_dispatch_transit_shallow(...)
 //!     .or_else(|| project_expr_surface_expr_with_compound_objects_via_host_threaded(...))
 //! ```
 //!
-//! Pre-Commit-4 the `.or_else` branch called the Expanded helper
+//! An `.or_else` branch that called the Expanded helper
 //! `project_expr_surface_expr_with_compound_objects_via_host_threaded`
-//! which lowered the slot binding's TypeExpr in
+//! leaks: it lowered the slot binding's TypeExpr in
 //! `ProjectionMode::Expanded` and projected under
 //! `Published(Expanded)`. The Expanded demand re-entered
 //! `build_key_of` / `build_mapped_type` for the slot payload's
 //! `Mapped<...>` body and emitted per-key `ProjectMember` edges for
 //! the inherited library member names on the fresh-cold pass where
-//! the round-8 transit-shallow primary path returned `None`.
+//! the transit-shallow primary path returned `None`.
 //!
-//! Post-Commit-4 the slot fallback uses the new sibling
+//! The slot fallback instead uses the sibling
 //! `project_expr_surface_expr_with_compound_objects_transit_shallow_via_host_threaded`
 //! which mirrors the transit-shallow Class A helper's demand
 //! profile (`Navigate` lowering + `Published(Shallow)` terminal).
@@ -60,8 +58,8 @@ export type ChatMessagesSlots<TTools extends UITools = UITools> = {
 // `outputSchema` / `execute`. The slot publication's primary
 // transit-shallow Class A path may return `None` for this compound
 // shape; the `.or_else` fallback then drives the compound-objects
-// helper. Pre-Commit-4 (Expanded) emitted the per-key edges;
-// post-Commit-4 (transit-shallow) keeps the Mapped carrier deferred.
+// helper. The Expanded helper would emit the per-key edges; the
+// transit-shallow sibling keeps the Mapped carrier deferred.
 const CHAT_MESSAGES_VUE: &str = r#"<script setup lang="ts" generic="T extends import('./ui_tools').UITools = import('./ui_tools').UITools">
 import type { ChatMessagesSlots } from './ui_tools';
 defineSlots<ChatMessagesSlots<T>>();
@@ -125,17 +123,14 @@ fn chain_z_slot_compound_fallback_does_not_leak_inherited_library_members() {
 
     assert_eq!(
         total, 0,
-        "Block 6.i Round 10 Chain Z — slot publication's compound-objects \
+        "Chain Z — slot publication's compound-objects \
          fallback MUST NOT emit `ProjectMember` edges for inherited \
          generic-substituted library members (`outputSchema`, `execute`). \
          The slot fallback in `produce_one_macro_object_shape_for_slots` \
-         (`macro_shapes.rs:2228-2240`) must call the transit-shallow \
+         must call the transit-shallow \
          sibling `project_expr_surface_expr_with_compound_objects_transit_shallow_via_host_threaded`, \
          NOT the retired Expanded helper. Got: leak_edges={leak_edge_count} \
          (names={leak_edge_names:?}), \
-         projection_path_member_hits={leak_path_count}. \
-         See `D:/tmp/round10-diagnostic-report.md` Chain Z (8.2% / 30 of \
-         364 captured emissions on ChatMessages fresh-cold) and the codex \
-         5th consult Q1-Z verdict at `D:/tmp/round10-codex-reconsult-out.txt`."
+         projection_path_member_hits={leak_path_count}."
     );
 }

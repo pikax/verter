@@ -2,24 +2,23 @@
 //! `compile_slots.insert` when the finalised fact tracer reports
 //! `Overflow`.
 //!
-//! Pre-fix (`finalise_signature_or_empty` collapses overflow → empty
-//! signature → publish anyway): the warm-hit oracle's `is_empty()`
-//! short-circuit validates the empty signature trivially, so the
-//! compile slot stays "warm" indefinitely and downstream cross-file
-//! edits are masked. The integration test pins the carrier invariant
+//! If overflow collapsed to an empty signature and published anyway,
+//! the warm-hit oracle's `is_empty()` short-circuit would validate the
+//! empty signature trivially, so the compile slot would stay "warm"
+//! indefinitely and downstream cross-file edits would be masked. The
+//! integration test pins the carrier invariant
 //! `present in compile_slots ⇒ admitted cache entry`: on overflow, no
 //! slot lands.
 //!
-//! Post-fix (typed `SignatureAdmission`): the cold-build path matches
+//! With typed `SignatureAdmission`: the cold-build path matches
 //! on `SignatureAdmission::from_finalise(...)` and skips the
 //! `compile_slots.insert` on the `NonCacheable` arm. The freshly
 //! computed virtual file is still returned to the caller; only the
 //! cache admission is refused.
 //!
-//! Discrimination: against the pre-change tree (commit `7b84404b` or
-//! earlier), this test would FAIL because the slot is admitted with
-//! an empty signature. Against the post-change tree, the assertion
-//! holds.
+//! Discrimination: a build that admits the slot with an empty signature
+//! on overflow would FAIL this test; the overflow-refusing build holds
+//! the assertion.
 
 use verter_session::for_tests::{
     compile_force_overflow_observations_for_tests, compile_scheduler_artifact_present_for_tests,
@@ -54,10 +53,9 @@ fn prime_compile(host: &VerterHost, canonical: &str) {
 /// (forced by `compile_force_overflow_observations_for_tests`), the
 /// resulting `CompileSlot` MUST NOT be published into `compile_slots`.
 ///
-/// Pre-fix `finalise_signature_or_empty` collapsed overflow into an
-/// empty signature and the slot was published anyway with an empty
-/// fact rail that trivially validated forever — a stale-cacheable
-/// state. Post-fix the producer refuses the insert on overflow.
+/// Collapsing overflow into an empty signature would publish the slot
+/// anyway with an empty fact rail that trivially validated forever — a
+/// stale-cacheable state. The producer refuses the insert on overflow.
 #[test]
 fn compile_fact_signature_overflow_does_not_publish_compile_slot() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -89,7 +87,7 @@ fn compile_fact_signature_overflow_does_not_publish_compile_slot() {
         "carrier invariant: compile cold-build MUST refuse `compile_slots.insert` when \
          the finalised fact tracer reports `Overflow`. A published slot here means \
          the producer collapsed overflow into an empty signature and published \
-         anyway — the pre-fix `finalise_signature_or_empty` collapse defect."
+         anyway."
     );
     // The warm-hit predicate must also report false, since no slot
     // exists — discriminator half-check that the producer's refusal
@@ -110,11 +108,11 @@ fn compile_fact_signature_overflow_does_not_publish_compile_slot() {
 /// current version (any prior slot whose re-compute overflowed is
 /// removed)".
 ///
-/// Pre-fix the refusal-only branch skipped `compile_slots.insert` but
-/// did NOT remove any prior slot, so a stale-cacheable entry from the
-/// earlier successful compile satisfied warm-hit reads after the
-/// re-compute overflowed. Post-fix the producer's `NonCacheable` arm
-/// calls `compile_slots.remove(&profile_hash)` first.
+/// A refusal-only branch that skipped `compile_slots.insert` but did
+/// NOT remove any prior slot would let a stale-cacheable entry from the
+/// earlier successful compile satisfy warm-hit reads after the
+/// re-compute overflowed. The producer's `NonCacheable` arm calls
+/// `compile_slots.remove(&profile_hash)` first.
 #[test]
 fn overflow_recompile_removes_prior_slot_for_same_key() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -156,16 +154,16 @@ fn overflow_recompile_removes_prior_slot_for_same_key() {
     );
     prime_compile(&host, "/src/Comp.vue");
 
-    // Post-fix: the prior slot MUST be removed. Pre-fix this returns
-    // `Some(...)` (the stale-cacheable slot from phase 1 with the
-    // first compile's `fact_dep_signature`).
+    // The prior slot MUST be removed. A refusal branch that only
+    // skips the insert returns `Some(...)` (the stale-cacheable slot
+    // from the first compile with that compile's `fact_dep_signature`).
     assert!(
         host.compile_slot_fact_dep_signature("/src/Comp.vue", &profile)
             .is_none(),
         "carrier invariant: a re-compute that overflows MUST remove \
-         any prior slot for the same `(canonical, profile)`. Pre-fix \
-         the refusal branch skipped the insert but did not remove the \
-         prior slot, so stale data survived an overflowed re-compute."
+         any prior slot for the same `(canonical, profile)`. A refusal \
+         branch that skipped the insert but did not remove the prior \
+         slot would let stale data survive an overflowed re-compute."
     );
 }
 
@@ -176,11 +174,11 @@ fn overflow_recompile_removes_prior_slot_for_same_key() {
 /// insert leaks the overflowed result via the scheduler artifact
 /// path.
 ///
-/// Pre-fix the `scheduler.commit_artifact(...)` block ran
-/// unconditionally for both `Cacheable` and `NonCacheable` admission,
-/// so `try_get_artifact(canonical, profile_hash)` returned
-/// `Some(snapshot)` after an overflowed compile. Post-fix the artifact
-/// commit is gated on `Cacheable` admission.
+/// If the `scheduler.commit_artifact(...)` block ran unconditionally
+/// for both `Cacheable` and `NonCacheable` admission, then
+/// `try_get_artifact(canonical, profile_hash)` would return
+/// `Some(snapshot)` after an overflowed compile. The artifact commit is
+/// gated on `Cacheable` admission.
 #[test]
 fn overflow_skips_scheduler_artifact_commit() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -208,9 +206,9 @@ fn overflow_skips_scheduler_artifact_commit() {
         "carrier invariant: an overflowed compile MUST NOT commit a \
          scheduler artifact snapshot. The artifact substrate is the \
          second warm-hit observation path; refusing only the \
-         `compile_slots.insert` (pre-fix) left `try_get_artifact` \
-         returning the overflowed result. Post-fix the artifact \
-         commit is gated on `Cacheable` admission."
+         `compile_slots.insert` would leave `try_get_artifact` \
+         returning the overflowed result. The artifact commit is \
+         gated on `Cacheable` admission."
     );
 }
 

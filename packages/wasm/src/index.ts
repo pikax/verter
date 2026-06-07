@@ -1,6 +1,6 @@
 // Re-export audit helpers so `@verter/wasm` consumers can import
 // `whyLoaded`, `whyInstantiated`, `assertLoadedFilesExactly`, etc.
-// directly from the package root. Plan §3 Commit 8.
+// directly from the package root.
 export * from "./audit";
 
 export interface CodegenOptions {
@@ -326,8 +326,8 @@ export class Host {
   }
 
   /**
-   * Sets the resolved import dependencies for a file, enabling Tier 2/3
-   * smart invalidation (cross-file change tracking).
+   * Sets the resolved import dependencies for a file, enabling
+   * cross-file smart invalidation (change tracking).
    */
   setImportDependencies(canonicalOrAlias: string, resolutions: HostDependencyResolution[]): void {
     this.inner.setImportDependencies(canonicalOrAlias, resolutions);

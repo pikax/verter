@@ -1,4 +1,4 @@
-//! Authored correctness suite (plan §3 Commit 7 / F6).
+//! Authored correctness suite.
 //!
 //! Each submodule resolves a curated SFC fixture under a hermetic
 //! [`AuditedRequest`] and asserts on the resulting
@@ -46,13 +46,10 @@ mod path_precise_projection;
 #[path = "component_meta_audit/single_file_generic.rs"]
 mod single_file_generic;
 
-// Phase 5b §5.A — TDD seed characterisation tests for the 5 resolver
-// coverage gaps the variant + dispatch helpers close. 1 of 5
-// (`slot_shapes`) flips green inside Phase 5b after commits 2+3 land
-// the `ResolveMacroPayload` variant body. The other 4 remain RED
-// until callsite migrations land in 5d/5e/5f. Each seed must FAIL on
-// the pre-Phase-5b tree — if any passes, STOP (gap is not real or
-// closed elsewhere).
+// Characterisation tests for the 5 resolver coverage gaps the variant
+// + dispatch helpers close, exercising the `ResolveMacroPayload`
+// variant body and the inherited-emits / indexed-path / mapped-type /
+// package-backed callsites.
 #[path = "component_meta_audit/resolver_coverage_cross_package_wildcard_reexport.rs"]
 mod resolver_coverage_cross_package_wildcard_reexport;
 #[path = "component_meta_audit/resolver_coverage_indexed_paths.rs"]
@@ -66,17 +63,15 @@ mod resolver_coverage_package_backed;
 #[path = "component_meta_audit/resolver_coverage_slot_shapes.rs"]
 mod resolver_coverage_slot_shapes;
 
-// Phase 5 §5.C (commit N+1) — lib parity tests. Exercise the
-// `MaterializeSurface` variant against ambient-lib and userland
-// mapped types, plus userland-shadowing-pick. Run via
-// `build_hermetic_host_with_lib`.
+// Lib parity tests. Exercise the `MaterializeSurface` variant against
+// ambient-lib and userland mapped types, plus userland-shadowing-pick.
+// Run via `build_hermetic_host_with_lib`.
 #[path = "component_meta_audit/lib_parity.rs"]
 mod lib_parity;
 
-// Phase 4 (Issue #3) — field-level fast-path counterfixtures.
-// Asserts the Phase 4 gate's two sub-assertions
-// (Expanded-mode dispatch counter, heritage canonical not in
-// loaded-files) plus a counterfixture for the predicate's
+// Field-level fast-path counterfixtures. Asserts the fast-path's two
+// sub-assertions (Expanded-mode dispatch counter, heritage canonical
+// not in loaded-files) plus a counterfixture for the predicate's
 // negative branch and an owner-edit invalidation regression.
 #[path = "component_meta_audit/field_fast_path_counterfixtures.rs"]
 mod field_fast_path_counterfixtures;

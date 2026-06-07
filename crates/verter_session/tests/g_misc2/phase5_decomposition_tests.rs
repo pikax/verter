@@ -179,7 +179,7 @@ fn getcomponentmeta_decomposes_through_dispatch_primitives() {
     );
 
     // Structural concrete-leaf check: the projector is the sole
-    // authority post-§7.3 cutover. If it fails to reduce, props
+    // authority. If it fails to reduce, props
     // surface as `IndexedAccess` / `Ref` / `Unknown` shells. The
     // primitive `Props` interface must publish `string` / `number`
     // primitives — anything else proves the projector did not
@@ -393,7 +393,7 @@ defineProps<BigProps>()
 /// REGRESSION: typeinfo's `resolve_named_symbol` and component-meta's
 /// `get_component_meta` resolve the same imported `Props` interface
 /// to the same shape — proving they share the dispatch primitives'
-/// semantic_query_memo cache. Plan §7.7 #3.
+/// semantic_query_memo cache.
 ///
 /// Discriminating contract: a warm `get_component_meta` on the
 /// component does NOT inflate `MaterializeStructureDb` rows AND

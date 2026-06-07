@@ -1,47 +1,29 @@
-//! Block 6.i — runtime architecture guards.
+//! Runtime architecture guards.
 //!
-//! These 6 guards encode the architectural invariants that Commits
-//! A → F establish at the projector / registry / cache / NAPI
-//! boundaries. They MUST hold AT EVERY commit boundary post-A (per
-//! the corresponding test's flip marker).
+//! These guards encode the architectural invariants at the projector
+//! / registry / cache / NAPI boundaries.
 //!
-//! ## F4 discrimination framing
+//! ## Discrimination framing
 //!
-//! Per Block 6.i Batch 1 review (P1-4), guards 1/2/3 are protective
-//! forward-looking, not discriminating against the C0-baseline
-//! defect. The defect manifests at scale (deep generic chain +
-//! Conditional + `infer` — the ChatMessages-shaped pattern); the
-//! synthetic in-memory fixtures often already path-precise at the
-//! projector entry.
+//! Guards 1/2/3 are protective forward-looking, not discriminating
+//! against the baseline defect. The defect manifests at scale (deep
+//! generic chain + Conditional + `infer` — the ChatMessages-shaped
+//! pattern); the synthetic in-memory fixtures are often already
+//! path-precise at the projector entry. Their fixtures explicitly
+//! REPRODUCE the baseline structural pattern (Pick over unused keys,
+//! closed Conditional, Mapped + indexed-access).
 //!
-//! F4 mitigates by:
-//!   1. Guards 1/2/3 — fixtures explicitly REPRODUCE the C0-baseline
-//!      structural pattern (Pick over unused keys, closed Conditional,
-//!      Mapped + indexed-access). Each guard's body references the
-//!      concrete scenario from the brief.
-//!   2. Guard 4 — the prior assertion `route_cold_fact_bubble_emissions
-//!      == 0` is trivially true (the test inserts via
-//!      `insert_route_with_facts` which never bumps the cold counter).
-//!      Replaced with a real warm-collapse assertion: drive `RouteDb`
-//!      via the resolve path (which DOES bump cold), then re-query
-//!      and assert the second call did NOT bump it again — the warm-
-//!      collapse property guard 4 actually intends to characterise.
-//!   3. Guards 1/2/3 remain `#[ignore]`'d (with explicit reason)
-//!      until Commit F lands the operator-level path-walker
-//!      narrowing — at which point the synthetic fixtures will
-//!      reliably FAIL pre-F + PASS post-F. The brief explicitly
-//!      authorises this stance: "the guards can stay #[ignore]'d
-//!      or be modified to assert 'would fail if Rule 5 is violated
-//!      on this fixture'."
+//! Guard 4 drives a real warm-collapse assertion: drive `RouteDb`
+//! via the resolve path (which bumps the cold counter), then re-query
+//! and assert the second call did NOT bump it again — the warm-collapse
+//! property the guard characterises. (A bare `insert_route_with_facts`
+//! never bumps the cold counter, so an assertion against it would be
+//! trivially true.)
 //!
-//! Per the Block 6.i brief, the load-bearing discriminating gate for
-//! the Rule 5 / cache / path-precision violations is the **audit
-//! footprint inspection** at the commit boundary:
-//!
-//! ```bash
-//! grep -E "(outputSchema|execute)" \
-//!   D:/tmp/verter-audit-6i-{A,B,C,D,E,F}/cold-seq/ChatMessages.json
-//! ```
+//! The load-bearing discriminating gate for the Rule 5 / cache /
+//! path-precision violations is the **audit footprint inspection** on
+//! the `outputSchema` / `execute` member names in the cold-seq
+//! `ChatMessages.json` corpus.
 //!
 //! Each test body branches on inputs and uses non-trivial assertions
 //! — no stub bodies, no always-true predicates (CLAUDE.md Stub
@@ -288,25 +270,16 @@ fn reachable_refs_in_registry(registry: &[ResolvedTypeAnalysis]) -> Vec<String> 
 // =====================================================================
 // Guard 1 — `Pick<Foo, 'bar'>` MUST NOT materialise Foo's other members.
 //
-// On post-6.h tree: registry contains Foo with ALL 4 members expanded,
-// including `other_with_huge_ref: HugeRecursive`, leaking HugeRecursive
-// into the published surface. Discriminating: HugeRecursive must NOT
-// appear in any reachable ref name set.
+// A non-path-precise tree would put Foo with ALL 4 members expanded
+// into the registry, including `other_with_huge_ref: HugeRecursive`,
+// leaking HugeRecursive into the published surface. Discriminating:
+// HugeRecursive must NOT appear in any reachable ref name set.
 //
-// F4 status: ignored until Commit F lands the operator-level
-// path-walker narrowing. The synthetic fixture is small enough that
-// the projector entry already path-precises; the assertion holds
-// pre-6.i, so un-ignoring at Batch 1 is gate-bypass per CLAUDE.md
-// Stub Prevention. Re-un-ignore when Commit F closes the
-// `outputSchema`/`execute` audit footprint on `ChatMessages.json`.
-// =====================================================================
-// Block 6.i Commit F — un-ignored: `Pick<Foo, 'bar'>` becomes a
-// key-filter producer at the operator level (build.rs `Pick` arm
-// already produces a filtered `Object`; the registry walker's
-// `cursor.admits_key` gate at component_meta_registry.rs:1528 emits
-// entries only for refs that the published surface reaches). The
-// projector pipeline therefore stops eagerly materialising the
-// non-picked members of `Foo`.
+// `Pick<Foo, 'bar'>` is a key-filter producer at the operator level
+// (build.rs `Pick` arm produces a filtered `Object`; the registry
+// walker's `cursor.admits_key` gate emits entries only for refs that
+// the published surface reaches). The projector pipeline therefore
+// does not eagerly materialise the non-picked members of `Foo`.
 #[test]
 fn pick_with_unused_members_not_projected() {
     let project = make_project();
@@ -376,16 +349,12 @@ defineProps<{
 // known to be `string` resolves to `OnString`. The registry MUST NOT
 // contain `OnOther` if `OnOther` is reachable ONLY through the
 // unselected false-branch.
-//
-// F4 status: ignored until Commit F lands the operator-level
-// path-walker narrowing. Same rationale as Guard 1.
 // =====================================================================
-// Block 6.i Commit F — un-ignored: closed conditional checks
-// (`T extends X ? A : B` where X is decidable) select one branch in
-// `build_conditional`'s relation evaluator and do NOT walk the
-// unselected branch's reachable refs. The registry walker's
-// Conditional arm gates on `is_whole_surface()` (Block 6.i G1) so
-// narrowed cursors only walk the result-side branches, never the
+// Closed conditional checks (`T extends X ? A : B` where X is
+// decidable) select one branch in `build_conditional`'s relation
+// evaluator and do NOT walk the unselected branch's reachable refs.
+// The registry walker's Conditional arm gates on `is_whole_surface()`
+// so narrowed cursors only walk the result-side branches, never the
 // predicate operands.
 #[test]
 fn conditional_unselected_branch_not_projected() {
@@ -428,12 +397,9 @@ defineProps<{
 // `type Wrapped<T> = { [K in keyof T]: { wrapped: T[K] } }`
 // `Wrapped<{ a: A; b: B; c: C; … }>['a']` should resolve to
 // `{ wrapped: A }` — `b`, `c` etc. should NOT enter the surface.
-//
-// F4 status: ignored until Commit F lands the operator-level
-// path-walker narrowing. Same rationale as Guard 1.
 // =====================================================================
-// Block 6.i Commit F — un-ignored: the per-key Mapped narrowing in
-// `PathWalker` (walk.rs ~691) substitutes K=path[index] and projects
+// The per-key Mapped narrowing in
+// `PathWalker` substitutes K=path[index] and projects
 // only the requested value when the walker hits a deferred
 // `SemanticNodeData::Mapped` shell with a literal-keyed path. The
 // synthetic fixture (`Wrapped<Bag>['a']`) reaches this arm when the
@@ -494,12 +460,11 @@ defineProps<{
 // second identical lookup must hit warm WITHOUT re-driving the cold
 // resolver closure.
 //
-// F4 (Batch 1 fix): the pre-F4 version of this guard used
-// `insert_route_with_facts` (the direct-insertion API) and asserted
-// `route_cold_fact_bubble_emissions == 0`. That assertion was
+// A guard that used `insert_route_with_facts` (the direct-insertion
+// API) and asserted `route_cold_fact_bubble_emissions == 0` would be
 // trivially true regardless of any cache machinery — `insert_route_with_facts`
 // does NOT bump the cold counter; only the singleflight resolve path
-// does. F4 rewrites the test to drive `get_or_resolve_route_observing_facts`
+// does. This test drives `get_or_resolve_route_observing_facts`
 // (which IS the path that bumps the cold counter), then asserts the
 // warm-collapse property: cold counter advances by EXACTLY 1 across
 // the (cold + N warm) sequence, AND the resolver closure runs EXACTLY
@@ -526,7 +491,7 @@ fn per_key_route_builds_bounded() {
     let cold_before = db.route_cold_fact_bubble_emissions();
     assert_eq!(
         cold_before, 0,
-        "F4 baseline: cold counter should be 0 before any resolve"
+        "baseline: cold counter should be 0 before any resolve"
     );
 
     // First resolve: cold path, runs the resolver closure exactly once
@@ -539,13 +504,13 @@ fn per_key_route_builds_bounded() {
     let cold_after_first = db.route_cold_fact_bubble_emissions();
     assert_eq!(
         cold_after_first, 1,
-        "F4 discrimination: first resolve MUST bump cold counter by 1 \
+        "first resolve MUST bump cold counter by 1 \
          (was {cold_before}, now {cold_after_first})"
     );
     assert_eq!(
         cold_resolver_calls.load(Ordering::Relaxed),
         1,
-        "F4: resolver closure must run EXACTLY once on cold path"
+        "resolver closure must run EXACTLY once on cold path"
     );
 
     // Three consecutive warm lookups: none must re-drive the cold
@@ -554,31 +519,31 @@ fn per_key_route_builds_bounded() {
     // `get_route_with_facts`.
     for i in 0..3 {
         let warm = db.get_or_resolve_route_observing_facts("o.ts", "X", &view, || {
-            // F4 discrimination: this closure MUST NOT run on warm
-            // hits. If it does, the warm-collapse contract is broken.
+            // This closure MUST NOT run on warm hits. If it does, the
+            // warm-collapse contract is broken.
             cold_resolver_calls.fetch_add(1, Ordering::Relaxed);
             Some((route.clone(), vec![fact.clone()]))
         });
         assert!(warm.is_some(), "warm hit {} must succeed", i);
     }
 
-    // F4 discriminating assertion: cold counter must STILL be 1
-    // (only the first resolve bumped it; the 3 warm hits did NOT).
+    // Cold counter must STILL be 1 (only the first resolve bumped it;
+    // the 3 warm hits did NOT).
     let cold_after_warm = db.route_cold_fact_bubble_emissions();
     assert_eq!(
         cold_after_warm, 1,
-        "F4 discrimination: 3 warm hits MUST NOT bump cold counter; \
+        "3 warm hits MUST NOT bump cold counter; \
          expected 1, got {cold_after_warm}. If this fails, the warm-\
          collapse contract in `get_or_resolve_route_observing_facts` \
          is broken."
     );
 
-    // F4 discriminating assertion: cold resolver closure ran exactly
-    // once across all 4 lookups (1 cold + 3 warm).
+    // Cold resolver closure ran exactly once across all 4 lookups
+    // (1 cold + 3 warm).
     assert_eq!(
         cold_resolver_calls.load(Ordering::Relaxed),
         1,
-        "F4 discrimination: resolver closure ran more than once across \
+        "resolver closure ran more than once across \
          cold + 3 warm hits — warm-collapse broken."
     );
 }
@@ -650,10 +615,9 @@ defineProps<DepUser>()
 // invocation must NOT trigger a second native enter via the
 // `get_component_meta_calls` provenance counter.
 // =====================================================================
-// Block 6.i Commit F — un-ignored. The compat boundary makes
-// exactly one native call per `getComponentMeta` invocation; the
-// provenance counter tracks that invariant. Block 6.i closes the
-// JS=1 NAPI call contract per the brief's universal invariant #3.
+// The compat boundary makes exactly one native call per
+// `getComponentMeta` invocation; the provenance counter tracks that
+// invariant — the JS=1 NAPI call contract.
 #[test]
 fn compat_one_napi_call_audit() {
     let project = make_project();
@@ -1109,7 +1073,7 @@ defineProps<{
 // integer-convention `IndexKey::Number(1)` into the walker would
 // decode it as `f64::from_bits(1u64)` = 5e-324 instead of `1.0`.
 //
-// Empirically the codex example (`Lookup<NumberIdentity, 1>`)
+// Empirically the example (`Lookup<NumberIdentity, 1>`)
 // does not reach the walker's `Index(Number)` arm in the current
 // dispatch topology — `Lookup`'s instantiation result is reduced
 // upstream and the numeric literal is interned via
@@ -1301,7 +1265,7 @@ defineProps<{
 // `IndexKey::TypeNode` for non-integer numeric literals (e.g. `1.5`)
 // because they cannot round-trip through `i64`.
 //
-// The G4.4 cutover left a soundness gap: the Mapped narrowing path in
+// This guards a soundness gap: the Mapped narrowing path in
 // `walk.rs` only constructs a numeric `LiteralKey` from
 // `IndexKey::Number`. For `{ [K in number]: K }[1.5]`, the producer
 // emits `IndexKey::TypeNode(node)` where `node` resolves to a concrete

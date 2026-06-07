@@ -149,7 +149,7 @@ fn indexed_access_slot_binding_does_not_expand_nested_callback_payload() {
         })
         .expect("toolbar slot must publish a controls binding");
 
-    // S3 typed-IR cutover: the producer mints `SyntheticSlotBinding`
+    // Typed-IR slot bindings: the producer mints `SyntheticSlotBinding`
     // at the no-parser branch of `publish_merged_bindings`. The
     // variant carries the FULL identity tuple (scope + surface_kind +
     // slot_name + binding_name + value_node) as a typed-IR primitive

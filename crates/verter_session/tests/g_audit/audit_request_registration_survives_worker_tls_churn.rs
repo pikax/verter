@@ -1,19 +1,17 @@
-//! Critical P0 discriminator (Slice 2.5 / plan §1.8 + §1.8.2):
 //! `AuditRequestRegistration` membership in
 //! `HostAuditRuntime::active_requests` MUST survive worker-thread TLS
 //! churn.
 //!
 //! ## Why this test exists
 //!
-//! v4.1/v4.2 of the audit plan keyed the active-request registry
-//! off `RequestContextGuard::install` / drop. That TLS guard is
-//! installed/dropped once per scheduler worker stage — i.e. many
-//! times per logical request. Using the TLS guard's lifecycle as the
-//! registry's lifecycle causes the request to flicker out of the
-//! map between worker stages, so the host-owned peak-RSS sampler
-//! misses the in-flight window.
+//! Keying the active-request registry off `RequestContextGuard::install`
+//! / drop would be wrong: that TLS guard is installed/dropped once per
+//! scheduler worker stage — i.e. many times per logical request. Using
+//! the TLS guard's lifecycle as the registry's lifecycle would cause
+//! the request to flicker out of the map between worker stages, so the
+//! host-owned peak-RSS sampler would miss the in-flight window.
 //!
-//! v4.3 (this slice) keys `active_requests` off the
+//! Instead, `active_requests` is keyed off the
 //! `AuditRequestRegistration` lifecycle: insert ONLY in
 //! `AuditRequestRegistration::new`; remove ONLY in `finalize`
 //! (idempotent) or defensive `Drop`. The TLS guard is a separate

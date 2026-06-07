@@ -2,9 +2,9 @@
 //!
 //! Discrimination: this is the producer's PRIMARY fact-kind —
 //! every owner-direct-import binding adds a FileWholeHash
-//! observation for the resolved canonical. Block 1.H Track 1
-//! wraps the cold body with `install_fact_tracer`; the counter
-//! advances on a fresh cross-file import fixture.
+//! observation for the resolved canonical. The cold body is
+//! wrapped with `install_fact_tracer`; the counter advances on a
+//! fresh cross-file import fixture.
 
 use std::sync::Arc;
 

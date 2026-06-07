@@ -1,4 +1,4 @@
-//! Block 6.i Transit-Shallow Publication — discriminator #1 (PRIMARY GATE).
+//! Transit-Shallow Publication — primary gate.
 //!
 //! Counts `OriginEdgeKind::ProjectMember` edges in the audit's
 //! derivation subgraph whose `OriginEdgeMetaDto::ProjectMember.member_name`
@@ -9,9 +9,9 @@
 //!
 //! ## Why this discriminates
 //!
-//! At HEAD `8a8c97b7e`, `produce_one_macro_object_shape_for_slots`
+//! A publication path where `produce_one_macro_object_shape_for_slots`
 //! lowers the slot expression at `ProjectionMode::Expanded`
-//! (`project_expr_class_a_via_dispatch_threaded`). The Expanded
+//! (`project_expr_class_a_via_dispatch_threaded`) leaks: the Expanded
 //! lowering reduces nested `BuiltinUtility` shells; reducing the
 //! Mapped's keyspace `keyof Tool<I,O>` triggers `build_key_of` over
 //! the instantiated `Tool<I,O>` Object, which calls
@@ -19,7 +19,7 @@
 //! `OriginEdgeKind::ProjectMember` edge per enumerated key (one for
 //! `outputSchema`, one for `execute`).
 //!
-//! After the Commit-3 atomic cutover the publication helper lowers at
+//! The publication helper instead lowers at
 //! `structural_transit_with_mode(Navigate)`. The Mapped carrier-stops;
 //! the KeyOf carrier-stops; `build_key_of` never reaches the
 //! `intern_keyspace_names` arm; no ProjectMember edges with member
@@ -28,16 +28,9 @@
 //! reads members via the source-surface helper which dispatches
 //! `ProjectPath { source, [], Published(Shallow) }` and walks the
 //! Tool Object's surface directly (a member-surface read, not a
-//! KeyOf reduction — no `intern_keyspace_names` involvement).
-//!
-//! ## Discrimination progression
-//!
-//! - **Commit 1 (no substrate, no cutover):** FAIL — Expanded
-//!   publication reduces KeyOf → emits ProjectMember edges → count > 0.
-//! - **Commit 2 (substrate added, no cutover):** FAIL — publication
-//!   path unchanged.
-//! - **Commit 3 (atomic cutover):** PASS — StructuralTransit(Navigate)
-//!   publication does not reduce KeyOf, count = 0.
+//! KeyOf reduction — no `intern_keyspace_names` involvement). The
+//! `StructuralTransit(Navigate)` publication does not reduce KeyOf,
+//! so the count is 0.
 
 #![allow(clippy::too_many_lines, dead_code, unused_imports)]
 
@@ -87,7 +80,7 @@ fn chatmessages_shape_audit_has_zero_outputschema_execute_project_member_edges()
     // Sum ProjectMember edges in the derivation subgraph whose
     // member_name is one of the leak keys.
     //
-    // Block 6.j R18 — scope the leak counter to intermediate
+    // R18 — scope the leak counter to intermediate
     // provenances (`PathProjection` / `KeyOfEnumerated` /
     // `MappedKeyEnumerated`). The `PublishedField` provenance is the
     // producer-side declaration "this member is admitted to the
@@ -139,15 +132,15 @@ fn chatmessages_shape_audit_has_zero_outputschema_execute_project_member_edges()
 
     assert_eq!(
         total, 0,
-        "Block 6.i Transit-Shallow Publication PRIMARY GATE — the ChatMessages-shape \
+        "Transit-Shallow Publication primary gate — the ChatMessages-shape \
          hermetic fixture MUST NOT emit any `outputSchema` / `execute` ProjectMember \
          edges through the audit derivation subgraph or projections. Got: \
          outputSchema(edges)={outputschema_count}, execute(edges)={execute_count}, \
          projection_path_member_hits={projection_path_count}. \
-         At HEAD `8a8c97b7e` the Expanded publication path fires `build_key_of` over \
+         An Expanded publication path fires `build_key_of` over \
          the imported `Tool` interface, reducing `keyof Tool` to a literal-anchor union \
-         and recording one `ProjectMember` edge per enumerated key. The Commit-3 atomic \
-         cutover migrates the publication to `StructuralTransit(Navigate)` which \
+         and recording one `ProjectMember` edge per enumerated key. The publication runs \
+         on `StructuralTransit(Navigate)` which \
          carrier-stops the KeyOf; the consumer reads source members via the source-surface \
          helper without invoking KeyOf reduction.",
     );

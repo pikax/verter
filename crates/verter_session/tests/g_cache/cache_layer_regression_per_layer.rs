@@ -1,12 +1,12 @@
-//! Slice 2.1 — one regression test per cache layer (plan §5).
+//! One regression test per cache layer.
 //!
 //! Each test in this file installs a fresh `RequestContext` in TLS,
 //! invokes the get/peek path of one specific cache layer, and asserts
 //! the per-request `cache_counters.<layer>.{hits,misses}` increment.
-//! The discrimination contract: pre-change tree has no
-//! `cache_counters` field on `RequestContext`, so these tests will not
-//! compile. Post-change, each layer's counter must increment exactly
-//! once per call and must NOT leak across layers.
+//! The discrimination contract: a design without a `cache_counters`
+//! field on `RequestContext` would not compile. Each layer's counter
+//! must increment exactly once per call and must NOT leak across
+//! layers.
 //!
 //! These tests are unit-style, exercising the bump sites directly
 //! rather than running the full audited resolver. Each layer's bump

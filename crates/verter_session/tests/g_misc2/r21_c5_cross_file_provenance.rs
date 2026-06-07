@@ -44,7 +44,7 @@ fn metahost() -> ComponentMetaHost {
 ///
 /// Discrimination note (honest): this test exercises the resolver
 /// stack end-to-end for the imported-own-body shape, but it does
-/// NOT uniquely discriminate any single commit in the
+/// NOT uniquely discriminate any single stage in the
 /// `declared_in_macro_type_arg` chain — the upstream pipeline
 /// (parser stamping, semantic propagation, prepared-surface walker)
 /// already populates `field.declared_in_macro_type_arg` for own-body
@@ -188,11 +188,11 @@ fn cross_file_omit_then_reintroduce_own_body_members_carry_declared_true() {
             "cross-file-omit-then-reintroduce: own-body \
              re-introduced member `{}` MUST carry \
              declared_in_macro_type_arg=true. Got declared={}. A \
-             `false` here means the c4 prepared-surface walker did \
+             `false` here means the prepared-surface walker did \
              NOT preserve `from_root_body=true` for the intersection \
              arm produced by `Omit<Vendor, …> & {{ {} }}` — the \
              own-body literal arm of an intersection MUST stamp its \
-             members with the caller's body flag, per the c4 \
+             members with the caller's body flag, per the \
              `arm_is_own_body_literal && from_root_body` rule.",
             own_body_name, p.declared_in_macro_type_arg, own_body_name,
         );
@@ -200,10 +200,11 @@ fn cross_file_omit_then_reintroduce_own_body_members_carry_declared_true() {
 
     // Heritage-only `other` member: MUST carry declared=false.
     // Reaches the surface only through `extends Omit<Vendor, …>` —
-    // i.e. through the heritage descent. The c2 parser stamps it
-    // `false`, c3 propagates, c4 the prepared-surface walker
-    // descends into the `Omit` argument at `from_root_body=false`,
-    // and c5 surfaces the structural fact through `ExpandedField`.
+    // i.e. through the heritage descent. The parser stamps it
+    // `false`, semantic propagation carries it, the prepared-surface
+    // walker descends into the `Omit` argument at
+    // `from_root_body=false`, and the resolver surfaces the
+    // structural fact through `ExpandedField`.
     let other =
         meta.props.iter().find(|p| p.name == "other").expect(
             "cross-file-omit-then-reintroduce: meta.props contains `other` heritage member",
@@ -212,10 +213,10 @@ fn cross_file_omit_then_reintroduce_own_body_members_carry_declared_true() {
         !other.declared_in_macro_type_arg,
         "cross-file-omit-then-reintroduce: heritage-only member \
          `other` MUST carry declared_in_macro_type_arg=false. Got \
-         declared={}. A `true` here means the c4 walker incorrectly \
+         declared={}. A `true` here means the walker incorrectly \
          propagated `from_root_body=true` into the `Omit` first \
-         argument's descent, OR c2's heritage-descent stamping is \
-         broken in the parser.",
+         argument's descent, OR the parser's heritage-descent \
+         stamping is broken.",
         other.declared_in_macro_type_arg,
     );
 }
@@ -277,14 +278,14 @@ fn cross_file_no_own_body_name_heritage_reached_member_carries_declared_false() 
         "cross-file-no-own-body-name: `contested` reaches Carrier's \
          surface ONLY through `extends Vendor`. It MUST carry \
          declared_in_macro_type_arg=false. Got declared={}. A `true` \
-         here is a P0 break — c2 parser is leaking the body flag \
-         into heritage descent, OR c5 component_meta.rs is reading a \
-         wrong source. Reverting c5 to the pre-c5 \
+         here is a break — the parser is leaking the body flag \
+         into heritage descent, OR component_meta.rs is reading a \
+         wrong source. Reverting component_meta.rs to the \
          `source_field.unwrap_or(false)` form would PASS this \
          assertion BY ACCIDENT (the analyzer never saw `contested`, \
-         so source_field is None, and the old code defaults to \
+         so source_field is None, and that code defaults to \
          `false`). The cross-file-simple test discriminates that \
-         accident: pre-c5 returns false for own-body members too.",
+         accident: that form returns false for own-body members too.",
         contested.declared_in_macro_type_arg,
     );
 

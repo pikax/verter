@@ -29,9 +29,9 @@ fn fact_emission_source() -> String {
 #[test]
 fn fact_emission_does_not_invoke_cross_decl_oxc_walks() {
     let src = fact_emission_source();
-    // Banned: any direct OXC parser/walker invocation. Phase 1
-    // consumes pre-extracted `ShallowFileState`; it MUST NOT
-    // re-parse or re-walk the full source.
+    // Banned: any direct OXC parser/walker invocation. The
+    // parse-phase emitter consumes pre-extracted `ShallowFileState`;
+    // it MUST NOT re-parse or re-walk the full source.
     let banned_substrings: &[&str] = &[
         // OXC entry points
         "oxc_parser",
@@ -39,12 +39,12 @@ fn fact_emission_does_not_invoke_cross_decl_oxc_walks() {
         "Parser::new",
         "oxc::parser",
         // Cross-decl walker entry points in the existing parser
-        // crate — Phase 1 MUST NOT call these.
+        // crate — the parse-phase emitter MUST NOT call these.
         "parse_module(",
         "parse_script(",
         "analyze_external_type_program",
-        // Internal session resolver entry points — Phase 1 MUST
-        // NOT cross into resolve-domain code.
+        // Internal session resolver entry points — the parse-phase
+        // emitter MUST NOT cross into resolve-domain code.
         "resolver_runtime::",
         "RouteDb::",
         "ImportedRootDb::",
@@ -53,7 +53,7 @@ fn fact_emission_does_not_invoke_cross_decl_oxc_walks() {
     for banned in banned_substrings {
         assert!(
             !src.contains(banned),
-            "Phase 1 fact emitter MUST NOT reference `{banned}` — \
+            "parse-phase fact emitter MUST NOT reference `{banned}` — \
              R28 arch-guard forbids cross-decl AST traversal in \
              parse-phase emission"
         );
@@ -62,7 +62,7 @@ fn fact_emission_does_not_invoke_cross_decl_oxc_walks() {
 
 #[test]
 fn fact_emission_reads_only_shallow_state_never_raw_source() {
-    // The SOLE legal Phase 1 input is `IndexedReady.shallow_state`
+    // The SOLE legal parse-phase input is `IndexedReady.shallow_state`
     // (pre-extracted by the shallow walk). Module-augmentation facts
     // are derived from the typed augmentation inventory on the shallow
     // state — there is NO raw-source byte-scan.
@@ -90,15 +90,15 @@ fn fact_emission_reads_only_shallow_state_never_raw_source() {
     for banned in banned_state_refs {
         assert!(
             !src.contains(banned),
-            "fact_emission MUST NOT reference `{banned}` — Phase 1 is parse-domain only"
+            "fact_emission MUST NOT reference `{banned}` — the parse-phase emitter is parse-domain only"
         );
     }
 }
 
 #[test]
 fn fact_emission_emits_only_parse_domain_fact_keys() {
-    // Phase 1 emits parse-domain fact keys only. The emitter
-    // source MUST NOT construct resolve-domain or route-surface
+    // The parse-phase emitter emits parse-domain fact keys only. The
+    // emitter source MUST NOT construct resolve-domain or route-surface
     // `FactKey` variants.
     let src = fact_emission_source();
     let banned_fact_keys: &[&str] = &[
@@ -110,9 +110,9 @@ fn fact_emission_emits_only_parse_domain_fact_keys() {
     for banned in banned_fact_keys {
         assert!(
             !src.contains(banned),
-            "Phase 1 fact emitter MUST NOT construct `{banned}` — \
+            "parse-phase fact emitter MUST NOT construct `{banned}` — \
              those are resolve-domain / route-surface variants \
-             populated by Stage 6 (R12)"
+             populated in the resolve domain (R12)"
         );
     }
 }

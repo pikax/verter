@@ -1,5 +1,5 @@
-//! Phase 0 — programmatic Class A expected values, hand-authored
-//! from the rules cited in `derivation_notes/<id>.md` (§0p.A.0).
+//! Programmatic Class A expected values, hand-authored
+//! from the rules cited in `derivation_notes/<id>.md`.
 //!
 //! The harness regenerates `<id>.correctness.snap.json` from these
 //! functions whenever the worker runs `--ignored
@@ -7,11 +7,11 @@
 //! programmatic value and the .snap.json is a worker bug; drift
 //! between Verter and the programmatic value is a Verter defect.
 //!
-//! Authorship discipline (§0p.A.0): each `pub fn` here is derived
+//! Authorship discipline: each `pub fn` here is derived
 //! from the TypeScript spec section (or Verter rule) cited in the
 //! companion `derivation_notes/<id>.md`. NO REFERENCE
 //! IMPLEMENTATION (Volar, vue-component-meta, vue-tsc, TSGo) was
-//! consulted while writing these constants. Phase 0 is the gate
+//! consulted while writing these constants. These values are the gate
 //! against which those reference implementations are later
 //! cross-checked (Tier 3, informational).
 
@@ -172,7 +172,7 @@ pub fn intersection_of_objects() -> SnapshotView {
 //
 //   Rule citation: Verter rule `./.claude/skills/type-resolution`
 //   ("user shadowing wins" / TS-first resolution priority).
-//   `phase-00-tier1-mismatches.md` row 5; closed by Phase 5h §5.10.
+//   `phase-00-tier1-mismatches.md` row 5.
 pub fn userland_shadowing_pick() -> SnapshotView {
     shell(vec![
         required_prop("alpha", "string"),
@@ -190,7 +190,7 @@ pub fn userland_shadowing_pick() -> SnapshotView {
 //   left-to-right occurrence of the surviving members in T.
 //
 //   Rule citation: TS spec §4.4 (distributive conditional / Exclude).
-//   `phase-00-tier1-mismatches.md` row 1; closed by Phase 5i §5.11.
+//   `phase-00-tier1-mismatches.md` row 1.
 pub fn mapped_exclude() -> SnapshotView {
     shell(vec![required_prop("kind", "\"a\" | \"c\"")])
 }
@@ -204,7 +204,7 @@ pub fn mapped_exclude() -> SnapshotView {
 //   the union in source order (`"a" | "b"`).
 //
 //   Rule citation: TS spec §4.4 (distributive conditional / Extract).
-//   `phase-00-tier1-mismatches.md` row 2; closed by Phase 5i §5.11.
+//   `phase-00-tier1-mismatches.md` row 2.
 pub fn mapped_extract() -> SnapshotView {
     shell(vec![required_prop("kind", "\"a\" | \"b\"")])
 }
@@ -219,19 +219,14 @@ pub fn mapped_extract() -> SnapshotView {
 //   substitutes `T → string`, surfacing one required prop
 //   `id: string`.
 //
-//   Pre-Phase-5k: the `shallow_lower_type_expr`'s `TypeExpr::TypeOf`
-//   arm joined the first two segments into `"sample.id"`, missed
-//   on the value-symbol lookup, and propagated `Opaque(Miss)` up
-//   through `Instantiate`. Substitution into `{ id: T }` left T
-//   unsubstituted; the prop surfaced as `id: T`.
-//   Post-Phase-5k: the single-segment-first lookup resolves
-//   `typeof sample` via `build_typeof`, projects `[id]` through
+//   The single-segment-first lookup resolves `typeof sample` via
+//   `build_typeof`, projects `[id]` through
 //   `ProjectPath { mode: Navigate }` to `string`, then substitutes
 //   T → string in the body. Result: `id: string`.
 //
 //   Rule citation: TS spec §3.6 (generic substitution); CLAUDE.md
 //   "generic substitutions are part of semantic meaning".
-//   `phase-00-tier1-mismatches.md` row 4; closed by Phase 5k §5.13.
+//   `phase-00-tier1-mismatches.md` row 4.
 pub fn generic_substitution_via_typeof() -> SnapshotView {
     shell(vec![required_prop("id", "string")])
 }
@@ -249,8 +244,7 @@ pub fn generic_substitution_via_typeof() -> SnapshotView {
 //   `[prefixA, prefixB]`.
 //
 //   Rule citation: TS spec §4.5 (template-literal types in mapped
-//   key positions). `phase-00-tier1-mismatches.md` row 3; closed by
-//   Phase 5i §5.11 (re-homed from 5k per §5.13 r15 table).
+//   key positions). `phase-00-tier1-mismatches.md` row 3.
 pub fn template_literal_as_key() -> SnapshotView {
     shell(vec![
         required_prop("prefixA", "number"),
@@ -269,15 +263,15 @@ pub fn template_literal_as_key() -> SnapshotView {
 //   top-level reference rather than the (potentially infinite)
 //   expansion". TS spec §3.7 + Verter rule. Replaces the legacy
 //   one-level eager-expansion behavior that surfaced
-//   `{ children?: /*recursive*/ Tree[]; label: string }` — that was
-//   the pre-F1 nominal-classifier output and contradicted the
-//   shallow-by-default contract.
+//   `{ children?: /*recursive*/ Tree[]; label: string }` — the
+//   nominal-classifier output that contradicted the shallow-by-default
+//   contract.
 pub fn recursive_alias_via_typeof() -> SnapshotView {
     shell(vec![required_prop("root", "Tree")])
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Phase 0b — Class A property fixtures (component-meta macros).
+// Class A property fixtures (component-meta macros).
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Convenience for non-required props that have a default value
@@ -329,7 +323,7 @@ pub fn fixture_events_typed() -> SnapshotView {
 }
 
 // ── defineExpose — Verter macros §expose ────────────────────────────────────
-//   §0.6.1: Vue's documented public API uses the value form
+//   Vue's documented public API uses the value form
 //   `defineExpose({ ... })`. Each exposed binding declares its
 //   function type explicitly so the resolver surfaces a typed
 //   signature. The view sorts exposed entries alphabetically.
@@ -415,8 +409,8 @@ pub fn fixture_fallthrough_root_inherit() -> SnapshotView {
 //
 //   Rule citation: Verter macros §slots
 //   (`./.claude/skills/component-meta`).
-//   `phase-00b-tier1-mismatches.md` row 1; closed by Phase 5j §5.12
-//   via `ProjectSemanticDispatch::project_slot_binding_member` and
+//   `phase-00b-tier1-mismatches.md` row 1; handled via
+//   `ProjectSemanticDispatch::project_slot_binding_member` and
 //   the `expand_field_expr` SlotBinding branch.
 pub fn fixture_slots_typed() -> SnapshotView {
     SnapshotView {
@@ -462,8 +456,7 @@ pub fn fixture_slots_typed() -> SnapshotView {
 //
 //   Rule citation: Verter macros §model
 //   (`./.claude/skills/component-meta`).
-//   `phase-00b-tier1-mismatches.md` row 2; re-homed from 5k to 5j
-//   per parent §5.13 r15 table; closed by Phase 5j §5.12 via the
+//   `phase-00b-tier1-mismatches.md` row 2; handled via the
 //   `expand_field_expr` `DefineModel` branch in
 //   `host_manage.rs::compute_evaluated_types*`.
 pub fn fixture_models() -> SnapshotView {
@@ -520,7 +513,7 @@ pub fn fixture_models() -> SnapshotView {
 
 pub fn lookup_class_a_expected(fixture_id: &str) -> Option<SnapshotView> {
     match fixture_id {
-        // Phase 0a — mapped + structural.
+        // mapped + structural.
         "mapped_pick_two_keys" => Some(mapped_pick_two_keys()),
         "mapped_omit_two_keys" => Some(mapped_omit_two_keys()),
         "mapped_partial" => Some(mapped_partial()),
@@ -532,33 +525,25 @@ pub fn lookup_class_a_expected(fixture_id: &str) -> Option<SnapshotView> {
         "conditional_distributive" => Some(conditional_distributive()),
         "intersection_of_objects" => Some(intersection_of_objects()),
         "recursive_alias_via_typeof" => Some(recursive_alias_via_typeof()),
-        // Phase 5h §5.10 — fixture authored after the
-        // ScopeShadowing thread closes the userland-shadow-pick gap.
+        // userland-shadow-pick, handled by the ScopeShadowing thread.
         "userland_shadowing_pick" => Some(userland_shadowing_pick()),
-        // Phase 5i §5.11 — fixtures authored after the
-        // Exclude/Extract literal-type reduction (rows 1, 2) and
-        // the mapper name_remap + template-literal fold (row 3,
-        // re-homed from 5k per §5.13 r15) close the deferred gaps.
+        // Exclude/Extract literal-type reduction (rows 1, 2) and the
+        // mapper name_remap + template-literal fold (row 3).
         "mapped_exclude" => Some(mapped_exclude()),
         "mapped_extract" => Some(mapped_extract()),
         "template_literal_as_key" => Some(template_literal_as_key()),
-        // Phase 5k §5.13 — fixture authored after the
-        // single-segment-first lookup in `shallow_lower_type_expr`'s
-        // `TypeExpr::TypeOf` arm closes the value-member typeof gap
+        // Value-member typeof, handled by the single-segment-first
+        // lookup in `shallow_lower_type_expr`'s `TypeExpr::TypeOf` arm
         // (`phase-00-tier1-mismatches.md` row 4).
         "generic_substitution_via_typeof" => Some(generic_substitution_via_typeof()),
-        // Phase 0b — component-meta property macros (5 of 7 land;
-        // `fixture_slots_typed` and `fixture_models` originally
-        // deferred per §0p.A.4 case 2 — see
-        // `phase-00b-tier1-mismatches.md`. Phase 5j §5.12 closes
-        // both gaps and authors the fixtures.
+        // component-meta property macros (see
+        // `phase-00b-tier1-mismatches.md` for `fixture_slots_typed`
+        // and `fixture_models`).
         "fixture_props_with_defaults" => Some(fixture_props_with_defaults()),
         "fixture_events_typed" => Some(fixture_events_typed()),
-        // Phase 5j §5.12 — fixtures authored after the slot-binding
-        // dispatch helper closes `fixture_slots_typed` (row 1) and
-        // the DefineModel `expand_field_expr` branch closes
-        // `fixture_models` (row 2, re-homed from 5k per §5.13 r15
-        // table).
+        // slot-binding dispatch helper for `fixture_slots_typed`
+        // (row 1) and the DefineModel `expand_field_expr` branch for
+        // `fixture_models` (row 2).
         "fixture_slots_typed" => Some(fixture_slots_typed()),
         "fixture_models" => Some(fixture_models()),
         "fixture_exposed_methods" => Some(fixture_exposed_methods()),

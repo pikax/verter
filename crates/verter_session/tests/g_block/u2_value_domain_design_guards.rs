@@ -1,7 +1,7 @@
 //! Design-gate architecture guards for the U2 query-value-domain
 //! design (`docs/arch/u2-query-value-domain-design.md`).
 //!
-//! These guards land AT the design gate — before the STAGE-B
+//! These guards land AT the design gate — ahead of the
 //! implementation — and are discriminating TODAY (each can FAIL if
 //! the corresponding invariant is violated on the current tree).
 //!
@@ -31,7 +31,7 @@
 //!    `SemanticNodeData`, `GraphTypeNode`, or the typeinfo proto.
 //! 3. `u2_value_domain_design_doc_locks_invariants` — the design doc
 //!    pins the load-bearing locked decisions; this guards against
-//!    silent drift of the locked text before STAGE B.
+//!    silent drift of the locked text ahead of implementation.
 //!
 //! Each scanner ships a discriminator self-test that injects the
 //! forbidden token / a deliberately-absent phrase into a local
@@ -379,7 +379,7 @@ fn u2_value_domain_design_doc_locks_invariants_discriminator_self_test() {
     // A deliberately-absent phrase that is NOT one of the locked
     // phrases must never be reported (the predicate keys on the
     // registered phrases, not on arbitrary absence).
-    let absent = "FORK-Z = DELETE_EVERYTHING_AND_REPARSE";
+    let absent = "UNREGISTERED-PHRASE = DELETE_EVERYTHING_AND_REPARSE";
     assert!(
         !LOCKED_DESIGN_PHRASES.contains(&absent),
         "scanner self-test: a deliberately-absent phrase unexpectedly \
@@ -438,8 +438,8 @@ fn typeinfo_proto_retires_envless_decl_slot_ref() {
     assert!(
         !code.contains("message GraphDeclSlotRef"),
         "TYPEINFO WIRE (CRITICAL): `message GraphDeclSlotRef` must be \
-         DELETED from `{}` — the env-less decl-slot roots carrier was \
-         retired in favour of `GraphResolvedDeclSlotIdentity`.",
+         DELETED from `{}` — the env-less decl-slot roots carrier is \
+         replaced by `GraphResolvedDeclSlotIdentity`.",
         path.display(),
     );
     assert!(

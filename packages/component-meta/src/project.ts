@@ -264,7 +264,7 @@ export class ComponentMetaSession {
   }
 
   /**
-   * Tier 1B selective surface (D32 + D101). Returns the
+   * Selective surface. Returns the
    * `verter.v1.ComponentMetaSurface` proto bytes — eager scalars
    * combined with `NamedTypeHandle` for every type-bearing field.
    * Consumers walk one layer at a time via {@link
@@ -282,7 +282,7 @@ export class ComponentMetaSession {
   }
 
   /**
-   * Tier 1B selective surface (D32 + D101). Resolves a
+   * Selective surface. Resolves a
    * `verter.v1.TypeHandle` to a one-layer
    * `verter.v1.TypeExpansion`. Caller pre-encodes the handle via the
    * proto module. Returned bytes carry an error envelope (first byte

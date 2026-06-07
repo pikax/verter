@@ -25,18 +25,18 @@
 use std::path::{Path, PathBuf};
 
 const RETIRED_SYMBOLS: &[&str] = &[
-    // Phase 9 cutover (plan §11.2): the inner walker helpers are
-    // DELETED. Re-introduction at any site is forbidden.
+    // The inner walker helpers are DELETED. Re-introduction at any
+    // site is forbidden.
     "walker_cycle_key_node",
     "expand_generic_ref_via_scope_iteration",
     "walk_component_meta_member_surface_expr_with_visited",
     // The dispatch-iteration module that hosted the visited-set +
-    // generic-rescue helpers was deleted in the same commit.
+    // generic-rescue helpers is deleted.
     "component_meta_dispatch_iteration",
     "WalkerVisitedNodes",
     "VisitedPushOutcome",
-    // Plan §11.2 cleanup: the legacy walker's `MaterializedMemberSurfaceDb`
-    // family had zero callers post-Phase-9 (the walker shim now delegates
+    // The legacy walker's `MaterializedMemberSurfaceDb`
+    // family has zero callers (the walker shim now delegates
     // to `materialize_component_meta_structure` which publishes through
     // `MaterializeStructureDb`). Re-introducing any of these names at a
     // call site would re-wire the dead cache lane.
@@ -44,24 +44,22 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "MaterializedMemberSurfaceEntry",
     "MaterializedMemberSurfaceKey",
     "MaterializedMemberSurfaceTarget",
-    // Commit E (plan §6.6) — inline-registry-route legacy chain.
+    // Inline-registry-route legacy chain.
     "walk_member_route_via_alias_body",
     "materialize_inline_registry_member_route_from_decl_body",
     "materialize_inline_registry_member_route_if_materializable",
-    // Commit D (plan §6.5) — TypeExpr legacy package-ref check (the
-    // `_node` graph-native variant is retained).
+    // TypeExpr legacy package-ref check (the `_node` graph-native
+    // variant is retained).
     "component_meta_ref_resolves_to_package",
-    // Commit F (plan §6.7) — TypeExpr legacy cycle walker.
+    // TypeExpr legacy cycle walker.
     "decl_body_reaches_cycle_via_walker",
-    // Commit G (plan §6.8) — walker shim outer entry.
+    // Walker shim outer entry.
     "walk_component_meta_member_surface_expr",
-    // Commit I (plan §6.10 sub-task 4 / §4.19) — unconditionally
-    // retired post-§4.19 deterministic deletion. The composition
-    // predicate had zero production callers post-Phase-9 cutover; its
+    // Unconditionally retired by deterministic deletion. The
+    // composition predicate had zero production callers; its
     // sole consumer was a unit test that has also been deleted.
     "registry_member_route_inline_materializable_node",
-    // Commit I (plan §6.10 sub-task 4 / §4.19) — `raw_member_path_leaf`
-    // was retired in commit E. The shared object-member navigation
+    // `raw_member_path_leaf` is gone. The shared object-member navigation
     // logic that `explicit_object_member` provided is now inlined
     // into `component_meta_registry_raw_member_path_surface`'s body
     // as the private nested `navigate_object_member` helper.
@@ -71,7 +69,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // counterparts are the sole authority. The cycle/package/route
     // checks consume `SemanticNodeId` directly — re-introducing the
     // TypeExpr-walking versions would resurrect the dual-path
-    // (TypeExpr-walk + node-walk) materialiser this cutover deletes.
+    // (TypeExpr-walk + node-walk) materialiser is deleted.
     // Identifier-boundary matching keeps suffixed names like `_node`
     // and the renamed `lowered_*` migration helpers from tripping the
     // gate.
@@ -95,31 +93,27 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "slot_binding_param_can_stay_symbolic_node",
     "node_value_is_concrete_or_symbolic",
     "node_has_non_object_top_level_surface",
-    // Commit O (plan §6.15) — the temporary
-    // `engine.is_package_backed_decl` adapter (introduced in commit D
-    // to satisfy the TypeExpr-walking caller migrations) is deleted.
-    // After commit N migrated the last production caller to graph-
-    // native predicates that consume `DeclIdentity` directly via
-    // `component_meta_ref_resolves_to_package_node`, the adapter has
-    // zero callers and is retired.
+    // The temporary `engine.is_package_backed_decl` adapter is deleted.
+    // Production callers consume graph-native predicates that take a
+    // `DeclIdentity` directly via
+    // `component_meta_ref_resolves_to_package_node`, so the adapter has
+    // zero callers and is gone.
     "is_package_backed_decl",
-    // Commit P (plan §6.15) — the temporary
-    // `typeexpr_root_reaches_transitive_cycle` adapter (introduced in
-    // commit F as a TypeExpr→graph-native cycle bridge) is deleted.
-    // The 4 surviving callers (`expr_needs_projection_rescue` + 3
-    // sites inside `materialize_component_meta_macro_shape_member_type_expr`)
-    // are migrated to call `lowered_root_reaches_transitive_cycle` —
-    // the lowered_*-named migration helper introduced for these
-    // callers (consistent with the convention introduced in commit N
-    // for `lowered_needs_member_route_materialization` and friends).
+    // The temporary `typeexpr_root_reaches_transitive_cycle` adapter
+    // (a TypeExpr→graph-native cycle bridge) is deleted. Callers
+    // (`expr_needs_projection_rescue` + 3 sites inside
+    // `materialize_component_meta_macro_shape_member_type_expr`)
+    // call `lowered_root_reaches_transitive_cycle` — the lowered_*-named
+    // migration helper for these callers (consistent with
+    // `lowered_needs_member_route_materialization` and friends).
     // The graph-native primitive `ref_root_reaches_transitive_cycle_node`
     // is the canonical cycle-detection authority.
     "typeexpr_root_reaches_transitive_cycle",
-    // SA-1.D (plan §3.8) — legacy parser-side slot-binding enrichment
-    // helpers superseded by graph-native synthesis
+    // Legacy parser-side slot-binding enrichment helpers superseded by
+    // graph-native synthesis
     // (`slot_binding_graph::resolve_slot_bindings_graph_native`).
-    // All five had zero production callers after SA-1.C removed the
-    // two `enrich_missing_slot_bindings` call sites from
+    // All five have zero production callers since the two
+    // `enrich_missing_slot_bindings` call sites were removed from
     // `compute_component_meta_state_inner`. Re-introducing any of these
     // at a production call site would re-wire the retired parser path.
     "enrich_missing_slot_bindings",
@@ -127,11 +121,11 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "decide_typeexpr_conditional_with_function_extends",
     "substitute_infer_in_typeexpr",
     "collect_expanded_slot_bindings_from_object_type",
-    // §7.3 cutover — the legacy outer macro-shape walker driver is
-    // retired. Production routes through
+    // The legacy outer macro-shape walker driver is gone. Production
+    // routes through
     // `meta_resolve::projectors::project_evaluated_types`.
     "walk_component_meta_macro_shape_member_types",
-    // §7.3 follow-up cutover — the per-member rescue cascade is
+    // The per-member rescue cascade is
     // DELETED. The projector self-reduces nested `IndexedAccess` /
     // `KeyOf` / `TypeOf` / `Conditional` / `Mapped` / `Infer` chains
     // via `materialize_component_meta_type_expr_until_stable` on the
@@ -143,7 +137,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // there is no per-member rescue helper behind the projector.
     //
     // Re-introducing any of these symbols at a production call site
-    // would re-wire the retired dual-path rescue cascade.
+    // would re-wire the deleted dual-path rescue cascade.
     "materialize_component_meta_macro_shape_member_type_expr",
     "publish_member_route_result",
     "MemberRouteResultDb",
@@ -157,13 +151,13 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "FIELD_PROPS_MEMBER_ROUTE_LOOP_CALLS",
     "FIELD_PROPS_MEMBER_ROUTE_LOOP_NS",
     "define_props_member_can_stay_symbolic_without_rescue",
-    // Retired in this commit: the per-field rescue cascade driver and
+    // Deleted: the per-field rescue cascade driver and
     // its helpers, the ComponentConfig fast-path, and the test-only
     // counters that observed them. The projector path
     // (`reduce_published_field_types` + `reduce_field_type_expr`) is
     // the sole post-projection authority for finalising published
     // field types — re-introducing any of these symbols would resurrect
-    // the dual-path rescue architecture this cutover deletes.
+    // the deleted dual-path rescue architecture.
     "materialize_component_meta_field_types",
     "rescue_field",
     "MEMBER_ROUTE_CALLS_COUNTER",
@@ -193,7 +187,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // Dead scaffold deletion: `MacroFieldGraphState` and the
     // `dispatch_lower_counter_*` test instrumentation never had a
     // production caller. The struct was added for the rescue-cascade
-    // pipeline that the projector cutover deleted. The only consumers
+    // pipeline that the projector deleted. The only consumers
     // were 12 scaffold-shape tests that have also been deleted.
     // Re-introducing any of these names would resurrect a dead
     // architectural exploration.
@@ -201,10 +195,10 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "dispatch_lower_counter_get",
     "dispatch_lower_counter_reset",
     "dispatch_lower_counter_increment",
-    // Dead graph-native predicate that had no production caller after
-    // member-route-materialisation was deleted in 3b4af1ca / 2bb34a78.
+    // Dead graph-native predicate that had no production caller once
+    // member-route-materialisation was deleted.
     // The TypeExpr predecessor `lowered_needs_member_route_materialization`
-    // was already retired in the rescue cascade deletion. This is the
+    // is gone with the rescue cascade deletion. This is the
     // graph-native counterpart that survived as `#[allow(dead_code)]`
     // scaffolding consumed only by 4 characterization tests; both the
     // predicate and its tests are deleted.
@@ -213,8 +207,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // shape assertion that never landed; CLAUDE.md "Don't add features
     // beyond what the task requires" forbids carrying it as scaffolding.
     "assert_route_union_surface",
-    // String-resolver eradication cutover (see
-    // D:/tmp/eradicate-string-resolver-paths.md §8): the typed-IR-only
+    // String-resolver eradication: the typed-IR-only
     // resolver rule deletes every hand-rolled type-text splitter,
     // source-slicing helper, `parse_type_annotation` reparse fallback,
     // and node_modules substring router from the analyzer / projector /
@@ -277,9 +270,8 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // scanner treats the module name identically to a function name.
     "parse_checker_text_to_type_expr",
     "checker_text_adapter",
-    // F1 cutover (eradicate-string-resolver follow-up F1) — the
-    // component-meta policy's nominal `name.ends_with("Props")`
-    // classifier is DELETED. The structural §3.4 macro-participation
+    // The component-meta policy's nominal `name.ends_with("Props")`
+    // classifier is DELETED. The structural macro-participation
     // predicate (`PolicyCtx::is_macro_participating`) is the sole
     // authority for role-bearing-ref classification. Reintroducing
     // `is_props_suffix` at any production site would resurrect
@@ -299,7 +291,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "dependent_eviction",
     "run_dependent_cascade",
     "register_facts_for_new_content_without_eviction",
-    // U3c eager macro-surface cutover: the eager/lazy macro-surface bridge +
+    // The eager/lazy macro-surface bridge +
     // its readers are DELETED. Production resolves props/emits/slots through the
     // typeinfo Vue surface (`VerterHost::vue_macro_dtos`). Re-introducing any of
     // these names at a production site would revive the deleted eager rail or
@@ -356,9 +348,8 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "synthesize_macro_shape_from_registry_lowered_root",
     "synthesize_macro_object_surface_shape",
     // The macro-shape cursor finaliser that the materialiser subgraph
-    // drove (introduced in the block-6.i AX-WIP substrate, deleted with
-    // the rest of the subgraph in `af3b6c324`). define_* finalisation
-    // now lives in the dispatch projectors.
+    // drove is deleted with the rest of the subgraph. define_*
+    // finalisation now lives in the dispatch projectors.
     "finalize_macro_shape_through_cursor",
     "project_named_ref_prepared_surface_shape",
     "expr_needs_projection_rescue",
@@ -382,14 +373,14 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "resolve_prepared_surface_target",
     "prepared_string_literal_keys",
     "engine_fact_signature_for_prepared_target",
-    // Prepared-structural-substitution slow-lane cutover. The engine-side
+    // Prepared-structural-substitution slow-lane removal. The engine-side
     // generic-Ref instantiation helper + the 6 whole-body substitution
     // rewriters are DELETED: generic-Ref instantiation now goes through
     // the dispatch `build_instantiate` path
     // (`instantiate_local_generic_ref_via_dispatch`), which binds args
     // into the lowering env and substitutes while lowering. Re-introducing
     // any of these names would resurrect the structural whole-substitution
-    // slow lane this cutover eliminated. (`type_expr_references_names` —
+    // slow lane that is eliminated. (`type_expr_references_names` —
     // the surviving general-purpose name predicate — is NOT retired; only
     // its substitution-keyed wrapper `type_expr_references_substitutions`
     // is.)
@@ -410,15 +401,15 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // ONE type-resolution engine — instead of cloning and rewriting the
     // prepared body's `TypeExpr` in place. Re-introducing any of these
     // names would resurrect the parallel structure-preserving substitution
-    // walker this cutover eliminated.
+    // walker that is eliminated.
     "component_meta_owner_local_shallow_substituted_alias_body",
     "walk_substitute_typeexpr",
     "component_meta_substitute_typeexpr",
-    // §3.4 materialised-record-point satisfaction: the unconditional
+    // Materialised-record-point satisfaction: the unconditional
     // enum-rank backfill fan-out helper `backfill_targets` was replaced
     // by the directional + `cached_satisfies`-gated `slot_domain_siblings`.
     // Re-introducing the enum-rank fan-out would resurrect the
-    // lattice-unsound `Shallow → Navigate` clone the §3.4 gate rejects.
+    // lattice-unsound `Shallow → Navigate` clone the satisfaction gate rejects.
     "backfill_targets",
 ];
 
@@ -787,10 +778,10 @@ fn retired_symbols_absent_from_production_source() {
 //    constructs a synthetic production file with a live reference to
 //    a retired identifier and asserts the scanner FINDS it.
 //
-// Together they discriminate the W8.1-fix upgrade: on the pre-fix
-// scanner (which scanned `.md` files, comments, and test files
-// indiscriminately) the first test fails. On the post-fix scanner
-// both tests pass.
+// Together they discriminate the scanner-restriction upgrade: a
+// scanner that scanned `.md` files, comments, and test files
+// indiscriminately fails the first test. The restricted scanner
+// passes both.
 
 #[test]
 fn scanner_ignores_test_files_and_inline_test_modules() {

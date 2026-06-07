@@ -1,4 +1,4 @@
-//! F1 (Plan §3 Step 3 Test 4) — consumer-audit grep gate.
+//! Consumer-audit grep gate.
 //!
 //! Asserts that every TypeScript / JavaScript consumer of `meta.origin`
 //! across `packages/` honors the audit-only contract D34 — the field is
@@ -116,7 +116,7 @@ fn no_bare_origin_reads_outside_audit_paths() {
 
     assert!(
         violations.is_empty(),
-        "F1 D34 consumer contract: bare `meta.origin.X` / \
+        "D34 consumer contract: bare `meta.origin.X` / \
          `origin.{{nodes,edges,metaStrings}}` reads must be gated by \
          `audit_enabled`, optional-chained, or block-guarded by \
          `origin !== undefined`. New violations:\n  {}",

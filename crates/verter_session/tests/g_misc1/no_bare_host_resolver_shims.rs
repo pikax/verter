@@ -1,20 +1,20 @@
-//! Block 6.g C4 — ARCH GUARD — pin the production-panic disposition
+//! ARCH GUARD — pin the production-panic disposition
 //! of the `impl ResolverContext for VerterHost` resolver methods.
 //!
-//! After Block 6.g C4 landed, the `impl ResolverContext for VerterHost`
+//! The `impl ResolverContext for VerterHost`
 //! resolver methods MUST panic in production with a `#[cfg(test)]`
 //! arm that performs the one-shot owned-view rebuild. This guard pins
 //! that disposition in place — a future commit cannot silently revert
 //! a panic body to a `route through bare-host` shim without failing
 //! this test.
 //!
-//! The architectural rule (per the rev-3 brief):
+//! The architectural rule:
 //!
 //! > Production paths are correct as-written OR they panic. No
 //! > production shims. Test-only `#[cfg(test)]` arms perform the
 //! > one-shot owned-view rebuild for test fixtures.
 //!
-//! Methods panic-shimmed in C4 (`impl ResolverContext for VerterHost`):
+//! Methods panic-shimmed (`impl ResolverContext for VerterHost`):
 //! - `prepared_decl_bundle`
 //! - `prepared_type_decl`
 //! - `prepared_value_decl`
@@ -22,7 +22,7 @@
 //! - `resolve_named_type_export_target`
 //! - `resolve_named_type_export_target_shallow`
 //! - `resolve_owner_direct_import`
-//! - `resolve_type_declaration_for_dep` (added in C7 / P1-1)
+//! - `resolve_type_declaration_for_dep`
 //!
 //! Each method MUST contain BOTH a `#[cfg(any(test, debug_assertions))]`
 //! arm AND a `#[cfg(not(any(test, debug_assertions)))] { panic!(...) }`
@@ -112,10 +112,10 @@ fn bare_host_resolver_methods_panic_in_production() {
 
     assert!(
         missing.is_empty(),
-        "Block 6.g C4 invariant: `impl ResolverContext for VerterHost` resolver methods \
+        "`impl ResolverContext for VerterHost` resolver methods \
          MUST retain their `#[cfg(not(test))] panic!(...)` arms. A future commit cannot \
          revert these to route-through-bare-host shims without re-introducing the \
-         architectural violation Block 6.g C4 eliminated. {} violation(s):\n - {}",
+         eliminated architectural violation. {} violation(s):\n - {}",
         missing.len(),
         missing.join("\n - "),
     );
@@ -166,7 +166,7 @@ fn bare_host_resolver_methods_retain_cfg_test_arm() {
         .count();
     assert!(
         cfg_test_count >= EXPECTED_PANIC_METHODS.len(),
-        "Block 6.g C4 invariant: `impl ResolverContext for VerterHost` MUST retain \
+        "`impl ResolverContext for VerterHost` MUST retain \
          at least {} `#[cfg(any(test, debug_assertions))]` arms (one per panic-shim \
          resolver method). Found {}.",
         EXPECTED_PANIC_METHODS.len(),
@@ -174,7 +174,7 @@ fn bare_host_resolver_methods_retain_cfg_test_arm() {
     );
     assert!(
         cfg_not_test_count >= EXPECTED_PANIC_METHODS.len(),
-        "Block 6.g C4 invariant: `impl ResolverContext for VerterHost` MUST retain \
+        "`impl ResolverContext for VerterHost` MUST retain \
          at least {} `#[cfg(not(any(test, debug_assertions)))]` arms (one per panic-shim \
          resolver method). Found {}.",
         EXPECTED_PANIC_METHODS.len(),

@@ -1,7 +1,7 @@
 //! Shared canonical denylist for the
 //! `audit_no_hot_loop_instrumentation` architecture guard.
 //!
-//! Per plan §6 Slice 3.B and §1.6: instrumentation
+//! Instrumentation
 //! (`record_phase_timing`, `record_event(CompileCodeTransformOp)`,
 //! and similar producer-side audit emits) MUST fire at phase
 //! boundaries only — never inside any per-element / per-attribute /
@@ -13,10 +13,10 @@
 //! `#[path]`-included from BOTH
 //! `tests/architecture_guards.rs` (the canonical home for arch
 //! guards) and `tests/compile_audit_no_hot_loop_instrumentation.rs`
-//! (the focused regression for Slice 3.B).
+//! (the focused regression).
 //!
-//! When adding entries: keep this list small (4–8 entries; see plan
-//! §6 — escalate at >20). Format is `(crate_name, fully_qualified_path)`
+//! When adding entries: keep this list small (4–8 entries; escalate
+//! at >20). Format is `(crate_name, fully_qualified_path)`
 //! where `fully_qualified_path` is the symbol's `name_path` per
 //! Serena / standard module-path conventions and matches the test's
 //! AST visitor output (the visitor walks `mod`/`impl`/`fn` nodes and

@@ -63,17 +63,15 @@ fn file_artifacts_carry_indexed_facts_edges_augmentations() {
     let payload = make_artifacts(0xcc);
     store.insert_artifacts(key.clone(), payload);
     let got = store.get_artifacts(&key).expect("entry MUST exist");
-    // Stage 1 invariant: every FileArtifacts has the four placeholder
-    // sub-fields wired (facts, parsed_edges, augmentations, plus
-    // parse_stable_hash) along with the canonical IndexedReady.
+    // Every FileArtifacts has the four sub-fields wired (facts,
+    // parsed_edges, augmentations, plus parse_stable_hash) along with
+    // the canonical IndexedReady.
     assert_eq!(got.indexed.whole_hash, [0xccu8; 16]);
-    // FileFacts is a zero-size placeholder at Stage 1 — its existence
-    // is the API contract Stage 3 fills.
     let _facts: &verter_session::file_artifact_store::FileFacts = &got.facts;
     let _edges: &verter_session::file_artifact_store::ParsedEdges = &got.parsed_edges;
     assert!(
         got.augmentations.is_empty(),
-        "Stage 1: augmentations are empty (Stage 3 populates)"
+        "augmentations are empty for this fixture"
     );
     // parse_stable_hash is deterministic (the same payload twice produces
     // the same hash).

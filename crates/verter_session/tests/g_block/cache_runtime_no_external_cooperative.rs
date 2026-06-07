@@ -1,6 +1,6 @@
 //! Architecture guard: the `cooperative_*` cold-compute admission
 //! primitives are cache-runtime-internal. Only `crates/verter_session/
-//! src/cache_runtime/**` may name them. After the C2 cutover every
+//! src/cache_runtime/**` may name them. Every
 //! query-identity and content-addressed cache routes its cold build
 //! through a cache-runtime node entry point (`lookup` / `query::lookup`)
 //! or the consumer-facing `*Db::get_or_compute_admit` wrapper, never the
@@ -333,7 +333,7 @@ fn no_external_cooperative_primitive_callers() {
             hits.is_empty(),
             "cache-runtime-internal primitive `{symbol}` is referenced in \
              `verter_session` production source OUTSIDE `src/cache_runtime/`. \
-             After the C2 cutover every cache routes its cold build through a \
+             Every cache routes its cold build through a \
              cache-runtime node entry point (`lookup` / `query::lookup`) or a \
              `*Db::get_or_compute_admit` wrapper — never the raw primitive. \
              Route the cold build through the node surface instead.\nHits:\n{hits:#?}"

@@ -1,18 +1,15 @@
-//! Block 1.H RED test — two sequential cold computes on the same
-//! host MUST NOT serve a stale entry from a prior tracer's scope.
+//! Two sequential cold computes on the same host MUST NOT serve a
+//! stale entry from a prior tracer's scope.
 //!
-//! This is the discriminator for the retired v6
-//! `EmptyUnderOuterTracer` rule: an inner cold compute that runs
-//! inside an outer tracer must not have its empty/partial
-//! signature exposed to a SUBSEQUENT independent request after
-//! the outer scope completes.
+//! An inner cold compute that runs inside an outer tracer must not
+//! have its empty/partial signature exposed to a SUBSEQUENT
+//! independent request after the outer scope completes.
 //!
-//! Pre-Block-1.H the Family B/C/D caches could admit entries
-//! observed inside an outer tracer's scope; later requests
-//! could see stale entries. Post-Block-1.H the producer
-//! installs its OWN tracer per cold compute; admitted entries
-//! reflect ONLY the producer's observations, not any outer
-//! tracer's drift.
+//! A design where the Family B/C/D caches could admit entries observed
+//! inside an outer tracer's scope would let later requests see stale
+//! entries. Instead, the producer installs its OWN tracer per cold
+//! compute; admitted entries reflect ONLY the producer's observations,
+//! not any outer tracer's drift.
 //!
 //! Discrimination: a request driven INSIDE an outer tracer
 //! scope and a request driven OUTSIDE one must produce

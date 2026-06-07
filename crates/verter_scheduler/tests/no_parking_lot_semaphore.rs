@@ -1,6 +1,6 @@
 //! Arch guard: `parking_lot::Semaphore` is NOT used in the scheduler src.
 //!
-//! BINDING DECISION (Block 7): `CpuConcurrencyPermit` is a hand-rolled
+//! `CpuConcurrencyPermit` is a hand-rolled
 //! `parking_lot::Mutex<usize>` + `Condvar` permit counter. The project
 //! forbids `parking_lot::Semaphore` — a hand-rolled counter gives the
 //! RAII `#[must_use]` non-`Clone` permit semantics + panic-safe release
@@ -77,7 +77,7 @@ fn parking_lot_semaphore_not_used_in_scheduler_src() {
     for needle in ["parking_lot::Semaphore", "lot::Semaphore"] {
         assert!(
             !code.contains(needle),
-            "Block 7: `{needle}` re-appeared in scheduler code — \
+            "`{needle}` re-appeared in scheduler code — \
              the CPU-concurrency limiter MUST be the hand-rolled \
              `parking_lot::Mutex<usize>` + `Condvar` counter, never \
              `parking_lot::Semaphore`",
@@ -90,7 +90,7 @@ fn parking_lot_semaphore_not_used_in_scheduler_src() {
         if trimmed.starts_with("use parking_lot::") {
             assert!(
                 !line.contains("Semaphore"),
-                "Block 7: a `use parking_lot::{{...}}` import names `Semaphore` — \
+                "a `use parking_lot::{{...}}` import names `Semaphore` — \
                  the CPU-concurrency limiter MUST be the hand-rolled \
                  `Mutex<usize>` + `Condvar` counter, never `parking_lot::Semaphore`",
             );

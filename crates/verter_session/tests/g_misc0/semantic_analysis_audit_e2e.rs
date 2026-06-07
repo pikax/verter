@@ -1,6 +1,5 @@
 //! End-to-end coverage for `VerterHost::analyze_with_audit` — the
-//! public audited entry-point for `RequestKind::SemanticAnalysis`
-//! (Wave 3 Slice 3.C).
+//! public audited entry-point for `RequestKind::SemanticAnalysis`.
 //!
 //! Discrimination contract:
 //!

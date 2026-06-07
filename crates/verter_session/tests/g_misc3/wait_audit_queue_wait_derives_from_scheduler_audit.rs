@@ -5,12 +5,12 @@
 //! every record where the scheduler attribution captured a dwell, the
 //! per-request `WaitAudit::queue_wait_ns` aggregate is at least as
 //! large as the first-dispatch dwell (within rounding). This proves
-//! Slice 2.4's queue-wait derivation reads from Slice 2.3's per-
-//! dispatch capture rather than zero-filling the field.
+//! the queue-wait derivation reads from the per-dispatch capture
+//! rather than zero-filling the field.
 //!
 //! Discriminator: a stub that always wrote `0` to `queue_wait_ns`
 //! would fail when the scheduler dispatch observed a non-zero dwell.
-//! An implementation that ignored Slice 2.3's `record_scheduler_dispatch`
+//! An implementation that ignored the `record_scheduler_dispatch`
 //! observer hook would also fail because the per-request aggregate
 //! would never be incremented.
 //!
@@ -101,14 +101,14 @@ fn queue_wait_ns_is_at_least_observed_first_dispatch_dwell() {
                 .as_ref()
                 .expect("waits is Some when timing_capture is on");
             // Convert ms (f64) → ns. Floor to u64; the aggregate is
-            // u64 nanoseconds. Slice 2.4 derives queue_wait_ns by
+            // u64 nanoseconds. queue_wait_ns is derived by
             // truncation in the dispatch observer, so the derived
             // value is the floor of the dwell.
             let dwell_ns_floor = (sched.queue_dwell_ms * 1_000_000.0).max(0.0) as u64;
             assert!(
                 waits.queue_wait_ns >= dwell_ns_floor,
                 "request {}: queue_wait_ns ({}) must be >= floor(scheduler.queue_dwell_ms ({} ms) * 1_000_000) = {} ns. \
-                 Pre-Slice-2.4 the field does not exist; a stub that always wrote 0 would fail this assertion when dwell > 0.",
+                 A stub that always wrote 0 would fail this assertion when dwell > 0.",
                 r.request_id,
                 waits.queue_wait_ns,
                 sched.queue_dwell_ms,

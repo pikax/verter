@@ -9,8 +9,7 @@
 //! rails) and `ProjectSemanticDispatch::execute_read` (which keeps
 //! them) route through the helper. A second production call site
 //! would mean a cold-build path slipped through bypassing
-//! `install_fact_tracer` — exactly the codex round-2 P1.C finding
-//! the carrier substrate closes.
+//! `install_fact_tracer` — the defect the carrier substrate closes.
 //!
 //! The scan walks `crates/verter_session/src/**/*.rs`, strips any
 //! `#[cfg(test)]` regions (so the existing test-only memo driver
@@ -222,7 +221,7 @@ fn execute_read_does_not_call_execute_cooperative_directly() {
         !src.contains("graph.execute_cooperative("),
         "execute_read must NOT call `graph.execute_cooperative(` directly. It must \
          delegate to `execute_via_cold_build_helper` so the fact tracer is always \
-         installed around the cold-build closure (closes codex round-2 P1.C)."
+         installed around the cold-build closure."
     );
     assert!(
         src.contains("execute_via_cold_build_helper"),

@@ -1,9 +1,8 @@
-//! Phase 5 §5.C (commit N+1) — Lib parity tests.
+//! Lib parity tests.
 //!
-//! Two parity tests verify Phase 5's engine retirement produces
-//! identical output for ambient-lib mapped types and userland mapped
-//! types, AND that userland declarations correctly shadow ambient lib
-//! declarations.
+//! Two parity tests verify the resolver produces identical output for
+//! ambient-lib mapped types and userland mapped types, AND that userland
+//! declarations correctly shadow ambient lib declarations.
 //!
 //! **Test 1: `pick_and_my_pick_produce_identical_props`**
 //!
@@ -12,8 +11,8 @@
 //! - Host B: userland `MyPick<T,K extends keyof T> = { [P in K]: T[P] }`,
 //!   `defineProps<MyPick<Cfg, 'alpha' | 'beta'>>()`.
 //!
-//! Discriminating: post-Phase-5, both produce `[alpha, beta]` with
-//! identical type descriptors. Negative: neither contains `gamma`.
+//! Discriminating: both produce `[alpha, beta]` with identical type
+//! descriptors. Negative: neither contains `gamma`.
 //!
 //! **Test 2: `shadowed_pick_is_userland_not_intrinsic`**
 //!
@@ -71,7 +70,7 @@ defineProps<Pick<Cfg, 'alpha'>>();
 <template><div /></template>
 "#;
 
-/// Phase 5 §5.C — userland MyPick<T,K> = { [P in K]: T[P] } MUST
+/// Userland MyPick<T,K> = { [P in K]: T[P] } MUST
 /// produce the same surface as the ambient lib's `Pick<T,K>`. The
 /// `MaterializeSurface` variant must drive both paths to the same
 /// resolved structure: two required props `alpha: string` and
@@ -120,9 +119,8 @@ fn pick_and_my_pick_produce_identical_props() {
     }
 
     // Discriminating semantic equality: alpha is `string` in both,
-    // beta is `number` in both. The §5.C contract is structural
-    // identity, so we project to (name, render(type_expr)) tuples
-    // and compare.
+    // beta is `number` in both. The contract is structural identity,
+    // so we project to (name, render(type_expr)) tuples and compare.
     use crate::lib_parity::render_pair;
     let mut pairs_a: Vec<(String, String)> = analysis_a.props.iter().map(render_pair).collect();
     let mut pairs_b: Vec<(String, String)> = analysis_b.props.iter().map(render_pair).collect();
@@ -135,26 +133,20 @@ fn pick_and_my_pick_produce_identical_props() {
     );
 }
 
-/// Phase 5 §5.C — userland `Pick<T,_K> = T` MUST shadow the ambient
+/// Userland `Pick<T,_K> = T` MUST shadow the ambient
 /// lib's `Pick`. The discriminating proof is that all three
 /// members of `Cfg` (`alpha`, `beta`, `gamma`) surface — the lib's
 /// `Pick<Cfg, 'alpha'>` would surface only `alpha`.
 ///
-/// **Phase 5h status (closed):** Phase 5h §5.10 introduced the
-/// resolver-context [`ScopeShadowing`] struct in
-/// `verter_session::resolver_core::scope_shadowing` and threaded it
+/// The resolver-context [`ScopeShadowing`] struct in
+/// `verter_session::resolver_core::scope_shadowing` is threaded
 /// through both the dispatch-lowering entry
 /// (`shallow_lower_type_expr`) and the materialise-path registry
 /// route fast-path (`project_expr_class_a_via_dispatch_threaded`).
-/// The dispatch lowering path's foundation gate (`524f469d`)
-/// already suppressed `__builtin__/Pick` when the SFC's scope
-/// declared a userland alias of the same name; 5h's commit
-/// `refactor(meta): thread ScopeShadowing through materialize-path
-/// registry route` extends the same scope check to the TypeExpr
-/// route extractors so the materialise path also defers to
-/// userland declarations. The `#[ignore]` attribute is removed
-/// because the gap is closed — the test is now a regression
-/// guard.
+/// The dispatch lowering path suppresses `__builtin__/Pick` when the
+/// SFC's scope declares a userland alias of the same name, and the
+/// same scope check extends to the TypeExpr route extractors so the
+/// materialise path also defers to userland declarations.
 #[test]
 fn shadowed_pick_is_userland_not_intrinsic() {
     let host = build_hermetic_host_with_lib(

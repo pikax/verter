@@ -1,13 +1,12 @@
-//! `SchedulerCacheId` is an opaque newtype relocated into `cache_id.rs`.
+//! `SchedulerCacheId` is an opaque newtype that lives in `cache_id.rs`.
 //!
-//! BINDING DECISION (Block 7): the opaque `SchedulerCacheId(pub u64)`
-//! newtype WINS over the proposed `enum SchedulerCacheId` — the scheduler
-//! must NOT interpret cache-family semantics; the session owns cache
-//! meaning and issues these ids. B7a relocates the existing newtype from
-//! `dag.rs` into a dedicated `cache_id.rs` module (single canonical
-//! definition, no duplicate, no shim) and updates all import sites.
+//! The opaque `SchedulerCacheId(pub u64)` newtype is preferred over an
+//! `enum SchedulerCacheId` — the scheduler must NOT interpret
+//! cache-family semantics; the session owns cache meaning and issues
+//! these ids. The newtype lives in a dedicated `cache_id.rs` module
+//! (single canonical definition, no duplicate, no shim).
 //!
-//! These tests pin both the opacity contract and the new module location:
+//! These tests pin both the opacity contract and the module location:
 //!
 //! 1. The type lives at `verter_scheduler::cache_id::SchedulerCacheId`.
 //! 2. It constructs from a raw `u64` and exposes the inner value (opaque
@@ -17,8 +16,8 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-// MUST resolve at the NEW location. Fails to compile until the newtype is
-// relocated into `cache_id.rs` and re-exported / made reachable there.
+// MUST resolve at the canonical location: the newtype is defined in
+// `cache_id.rs` and re-exported / made reachable there.
 use verter_scheduler::cache_id::SchedulerCacheId;
 
 /// The newtype constructs from a raw id and round-trips its inner value.

@@ -2,7 +2,7 @@
 //!
 //! Discrimination: the `RefCycleResultDb` producer is exercised by
 //! component-meta resolution on fixtures with recursive type
-//! aliases. Block 1.H Track 1 wraps the BFS cold compute in
+//! aliases. The BFS cold compute is wrapped in
 //! `install_fact_tracer`; the counter advances when the BFS is
 //! invoked.
 

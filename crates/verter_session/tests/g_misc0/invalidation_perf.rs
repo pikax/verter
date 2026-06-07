@@ -1,11 +1,10 @@
-//! Phase 12.A12 — O(1) invalidation index regression test.
+//! O(1) invalidation index regression test.
 //!
 //! Asserts the per-canonical secondary index drains entries in
 //! O(K) (where K = entries owned by the canonical id), NOT O(N)
 //! (total entries in the DB). The deterministic structural gate
 //! is "entries visited equals entries actually owned by the
-//! canonical id" — wall-clock timing assertions are forbidden per
-//! plan Invariant #15 / Codex P1 #7.
+//! canonical id" — wall-clock timing assertions are forbidden.
 //!
 //! The test populates `ImportedRegistryDb` with ~10 000 entries
 //! spanning 1 000 distinct canonical ids; one target canonical

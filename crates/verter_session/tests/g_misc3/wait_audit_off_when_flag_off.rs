@@ -13,8 +13,8 @@
 //! populate `waits = Some(WaitAudit { ... })` because the locks ARE
 //! still acquired (the lock-acquisition counter aggregate is
 //! unconditional) — the only thing the flag controls is whether the
-//! envelope surfaces them. A pre-Slice-2.4 tree without the field
-//! also fails compilation against this test.
+//! envelope surfaces them. A tree without the field also fails
+//! compilation against this test.
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::Arc;

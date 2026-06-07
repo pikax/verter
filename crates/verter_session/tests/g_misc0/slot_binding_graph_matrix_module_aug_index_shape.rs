@@ -1,4 +1,4 @@
-//! Block 1.C matrix slice — `ModuleAugmentationIndexShape`.
+//! Slot-binding-graph dual-emit matrix — `ModuleAugmentationIndexShape`.
 //!
 //! Verifies the slot-binding-graph dual-emit fact-tracer fan-out
 //! substrate delivers `FactVersionRef::ModuleAugmentationIndexShape`
@@ -55,14 +55,14 @@ fn slot_binding_graph_fact_tracer_carries_module_aug_index_shape() {
     let captured = match finalise {
         FactReadSetFinalise::Ok(sig) => sig,
         FactReadSetFinalise::Overflow => panic!(
-            "Block 1.C matrix slice: tracer overflowed on a single-fact \
+            "Matrix slice: tracer overflowed on a single-fact \
              signature — substrate bug, not test bug"
         ),
     };
 
     assert!(
         captured.iter().any(|f| f == &aug_index_fact),
-        "Block 1.C matrix slice: the fact-tracer substrate MUST carry \
+        "Matrix slice: the fact-tracer substrate MUST carry \
          the `ModuleAugmentationIndexShape` fact through the fan-out \
          path emitted by the slot-binding-graph dual-emit helper. \
          captured={captured:?}"
@@ -74,7 +74,7 @@ fn slot_binding_graph_fact_tracer_carries_module_aug_index_shape() {
     let src = read_session_src("meta_resolve/slot_binding_graph.rs");
     assert!(
         src.contains("fact_signature_helpers::observe_fact_signature"),
-        "Block 1.C matrix slice (arch guard): \
+        "Matrix slice (arch guard): \
          `slot_binding_graph.rs` MUST route through \
          `fact_signature_helpers::observe_fact_signature` so the \
          `ModuleAugmentationIndexShape` fact-kind (and every other \

@@ -6,12 +6,12 @@
 //! - **R5**: content-addressed caches carry `content_hash` AND
 //!   `parse_env_hash` (and `parser_version` for `FileArtifactKey`).
 //! - **R6**: cache keys NEVER include `fact_dep_signature` or other
-//!   version-tracking payload — those live on the cached value. Stage 1's
-//!   `FileArtifactKey` predates fact-dep-signature so this test
+//!   version-tracking payload — those live on the cached value.
+//!   `FileArtifactKey` carries no fact-dep-signature, so this test
 //!   characterises the LEGAL key shape: only the four documented
 //!   dimensions are part of the key's identity.
 //!
-//! Stage 1's invariant is: reordering or omitting any of the four key
+//! The invariant is: reordering or omitting any of the four key
 //! dimensions changes hash equality. Omitting a dimension is structurally
 //! impossible because Rust enforces the field set; but a different value
 //! for any of the four MUST yield a non-equal key.
@@ -88,9 +88,9 @@ fn identical_inputs_produce_equal_keys() {
 fn r6_key_struct_has_no_fact_dep_signature_field() {
     // R6 codification by structural assertion: the FileArtifactKey type
     // has exactly four fields (canonical, content_hash, parse_env_hash,
-    // parser_version). If a future commit adds `fact_dep_signature` or
-    // similar to the key, this test fails at compile time (the
-    // destructuring pattern below would not match).
+    // parser_version). If `fact_dep_signature` or similar is added to the
+    // key, this test fails at compile time (the destructuring pattern
+    // below would not match).
     let key = make_key("/a.ts", [1u8; 16], [2u8; 16], 1);
     let FileArtifactKey {
         canonical,

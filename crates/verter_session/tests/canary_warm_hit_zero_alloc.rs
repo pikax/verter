@@ -106,7 +106,7 @@ fn dummy_fact(canonical: &str, name: &str, expected_hash: HashValue) -> FactVers
     })
 }
 
-/// Stage-10 R24 canary: warm hit on a populated cache allocates
+/// R24 canary: warm hit on a populated cache allocates
 /// nothing across 10 000 iterations. The `PermissiveStoreView`
 /// accepts every fact, so this measures the steady-state warm-hit
 /// path: shard-read on the outer `DashMap`, `ArcSwap.load()`, fact
@@ -161,7 +161,7 @@ fn warm_hit_validates_with_zero_allocations() {
     let delta = after - baseline;
     // R24 admits a non-zero baseline driven by the substrate's
     // refcounting machinery — observed empirically on the
-    // post-Stage-7 substrate at ~3000 allocations per 10k hits
+    // substrate at ~3000 allocations per 10k hits
     // (DashMap mapref guard pool churn + ArcSwap TLS slot top-up
     // on the hot path). The contract this canary enforces is
     // BOUNDED allocation, not literally-zero: a regression that

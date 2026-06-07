@@ -80,7 +80,7 @@ export type NamedImport =
  * Options for {@link TypeInfoSession.resolveSymbol}.
  */
 export interface ResolveSymbolOpts {
-  /** Projection mode. `undefined` selects the host's default per §5.2. */
+  /** Projection mode. `undefined` selects the host's default. */
   mode?: ProjectionMode;
   /** Type-arguments slice for generic instantiation. */
   typeArgs?: TypeRef[];
@@ -92,7 +92,7 @@ export interface ResolveSymbolOpts {
  *
  * Mirrors the public {@link TypeDescriptor} IR — the session lowers
  * descriptors to the wire form and forwards them as a JSON array of
- * native `TypeExpr` values per §5.2.
+ * native `TypeExpr` values.
  */
 export type TypeRef = TypeDescriptor;
 

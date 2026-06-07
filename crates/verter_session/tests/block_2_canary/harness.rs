@@ -1,4 +1,4 @@
-//! Shared harness for the Block 2 canary suite.
+//! Shared harness for the canary suite.
 //!
 //! The canary suite proves that the lazy fact-validation substrate
 //! backs every cross-file invalidation scenario. The owner-upsert path

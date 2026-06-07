@@ -1,10 +1,9 @@
-//! Architecture guard: the R22 + R22-fix carrier-verdict +
-//! carrier-provenance substrate was removed by Block 6.j R22-final
-//! (commit S4). The typed-IR `TypeExpr::SyntheticSlotBinding`
-//! variant introduced in S1 fully replaces the old R22 substrate
-//! at the projector / registry / reducer surface. Re-introducing
-//! any of these symbols outside test fixtures / docs / guards is
-//! a regression and must fail this static-grep gate.
+//! Architecture guard: the R22 carrier-verdict + carrier-provenance
+//! substrate was removed. The typed-IR `TypeExpr::SyntheticSlotBinding`
+//! variant fully replaces the old R22 substrate at the projector /
+//! registry / reducer surface. Re-introducing any of these symbols
+//! outside test fixtures / docs / guards is a regression and must fail
+//! this static-grep gate.
 //!
 //! Discipline mirrors `no_legacy_walker.rs`:
 //!
@@ -18,14 +17,14 @@
 //! Self-exclusion: the first 5 lines of this file contain
 //! `R22_CARRIER_GATE_SELF` so the recursive walk skips this file.
 //!
-//! Per Phase 4 codex Q5 amendment: `PublishedSurfaceKind` is NOT
-//! forbidden — `crate::meta_resolve::projection_demand::PublishedSurfaceKind`
+//! `PublishedSurfaceKind` is NOT forbidden —
+//! `crate::meta_resolve::projection_demand::PublishedSurfaceKind`
 //! is a separate, live type that legitimately owns the same
 //! identifier. Forbidding the bare token would false-positive on it.
 
 use std::path::{Path, PathBuf};
 
-/// Symbols deleted by Block 6.j R22-final. Any occurrence in
+/// Symbols deleted with the R22 carrier substrate. Any occurrence in
 /// `crates/*/src/**` (excluding this guard file and the sibling
 /// `architecture_guards.rs`, which carry literal needle strings
 /// for their own assertions) is a regression and must fail the
@@ -49,7 +48,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // NOTE: `PublishedSurfaceKind` is INTENTIONALLY omitted — the
     // live `crate::meta_resolve::projection_demand::PublishedSurfaceKind`
     // is a different, kept type that legitimately owns the same
-    // identifier (Phase 4 codex Q5 amendment).
+    // identifier.
 ];
 
 /// File names whose presence at the head of the path should make us
@@ -379,8 +378,8 @@ fn no_carrier_verdict_db_in_production() {
         assert!(
             hits.is_empty(),
             "retired R22 symbol `{symbol}` reintroduced in production source. \
-             Block 6.j R22-final (commit S4) deleted the carrier-verdict + \
-             carrier-provenance substrate; the typed-IR \
+             The carrier-verdict + carrier-provenance substrate was deleted; \
+             the typed-IR \
              `TypeExpr::SyntheticSlotBinding` variant replaces it at the \
              projector / registry / reducer surface. If the symbol is \
              legitimately back in use as a new construct, justify and \
@@ -390,8 +389,7 @@ fn no_carrier_verdict_db_in_production() {
 }
 
 /// Self-test: synthetic-fixture proves the scanner catches a
-/// retired symbol. Per Phase 4 improvement 4 + amendment 6 — a
-/// guard that does not discriminate is a stub.
+/// retired symbol. A guard that does not discriminate is a stub.
 #[test]
 fn no_carrier_verdict_db_self_test() {
     let synthetic = "pub fn caller() { let _x: CarrierVerdictDb = todo!(); }";
@@ -705,8 +703,8 @@ fn synthetic_carrier_explicit_deepen_guard_self_test() {
     // Part 2 — narrowing: the per-line scanner DOES match the deref
     // shape, but the upstream-window check exempts it when the
     // legitimate cache-route call opener appears in the upstream
-    // window. This is the rustfmt-broken legitimate shape codex
-    // flagged as previously banned.
+    // window. This is the rustfmt-broken legitimate shape that would
+    // otherwise be flagged.
     // -----------------------------------------------------------------
 
     let legit_split_call: &[&str] = &[

@@ -1171,8 +1171,8 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
 /// path (`Navigate ⊅ Expanded`), but MUST serve a `Navigate` request at
 /// that path (`Navigate ⊒ Navigate`).
 ///
-/// DISCRIMINATING: FAILS against the pre-cutover memo (slot presence +
-/// `validate` alone with no `cached_satisfies` gate ⇒ the Expanded request
+/// DISCRIMINATING: FAILS against a memo that gates on slot presence +
+/// `validate` alone with no `cached_satisfies` gate (⇒ the Expanded request
 /// HITS the slot-present entry); PASSES against the §3.4 two-gate warm hit
 /// (the recorded `Navigate` point fails `cached_satisfies` for the
 /// `Expanded` request). If `cached_satisfies` were keyed on the candidate's

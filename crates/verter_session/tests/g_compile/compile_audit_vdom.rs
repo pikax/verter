@@ -1,16 +1,11 @@
-//! Slice 3.B end-to-end test for the VDOM (`CompileTarget::BUNDLER`)
+//! End-to-end test for the VDOM (`CompileTarget::BUNDLER`)
 //! codegen path through `VerterHost::compile_with_audit`.
 //!
-//! Discrimination contract:
-//! - **Pre-change tree**: no `compile_with_audit` entry-point exists,
-//!   no producer-side instrumentation, no audit record published.
-//!   The test would fail to compile (missing method) AND the
-//!   payload assertions could not run.
-//! - **Post-change tree**: `compile_with_audit` exists, producer
-//!   crate emits `record_phase_timing` and `record_event(...)` at
-//!   phase boundaries, and the assembled `CompilePayload` carries
-//!   non-trivial `code_transform_ops`, `output_bytes`,
-//!   `num_script_blocks`, and the `target == Vdom` tag.
+//! Contract: `compile_with_audit` publishes an audit record; the
+//! producer crate emits `record_phase_timing` and `record_event(...)`
+//! at phase boundaries, and the assembled `CompilePayload` carries
+//! non-trivial `code_transform_ops`, `output_bytes`,
+//! `num_script_blocks`, and the `target == Vdom` tag.
 
 use std::sync::Arc;
 

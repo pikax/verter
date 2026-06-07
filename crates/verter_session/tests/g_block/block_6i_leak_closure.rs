@@ -1,4 +1,4 @@
-//! Block 6.i leak-closure — Q7 deletion architecture (leak-close-3).
+//! Leak-closure — Q7 deletion architecture (leak-close-3).
 //!
 //! Architectural guard for the deletion of the
 //! `deep_resolve_slot_function_refs` / `deep_resolve_type_refs` /
@@ -22,9 +22,9 @@
 //!     occurrences of the names are comment archaeology that does not
 //!     match the `name(` pattern — guard PASSES.
 //!
-//! Verified empirically by stashing the Commit-3 deletion changes,
-//! running the guard (FAIL: 4 violations across 2 files), unstashing,
-//! and re-running (PASS).
+//! Verified empirically by stashing the deletion changes, running the
+//! guard (FAIL: 4 violations across 2 files), unstashing, and
+//! re-running (PASS).
 //!
 //! ## Why the leak-count audit invariant is NOT the test
 //!
@@ -135,7 +135,7 @@ fn deep_resolve_chain_stays_deleted_in_production_source() {
 
     assert!(
         violations.is_empty(),
-        "Block 6.i leak-close-3 (Q7): the deep_resolve_* chain was \
+        "leak-close-3 (Q7): the deep_resolve_* chain was \
          deleted because its per-Ref Expanded recursion was the \
          ChatMessages `outputSchema|execute` audit-footprint leak. \
          Any reintroduction in production source re-opens the leak. \

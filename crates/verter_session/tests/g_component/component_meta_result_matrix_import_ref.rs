@@ -1,4 +1,4 @@
-//! Block 1.B matrix slice — `ComponentMetaResultEntry.fact_dep_signature`
+//! Matrix slice — `ComponentMetaResultEntry.fact_dep_signature`
 //! must be able to carry `FactKey::ImportRef` facts so warm-hit
 //! validation invalidates when an importer's binding-to-export
 //! resolution shifts (e.g. a barrel reexport flips target).
@@ -35,7 +35,7 @@ fn component_meta_result_signature_carries_import_ref() {
     assert!(
         window.contains("read_set_signature: crate::fact_signature_helpers::ReadSetSignature")
             || window.contains("read_set_signature: ReadSetSignature"),
-        "Block 1.B matrix slice: ComponentMetaResultEntry must carry \
+        "Matrix slice: ComponentMetaResultEntry must carry \
          `read_set_signature: ReadSetSignature`. Window:\n{window}"
     );
 
@@ -60,7 +60,7 @@ fn component_meta_result_signature_carries_import_ref() {
     };
     assert!(
         !entry.read_set_signature.facts.is_empty(),
-        "Block 1.B matrix slice: the constructed entry must carry the \
+        "Matrix slice: the constructed entry must carry the \
          ImportRef fact in its read_set_signature.facts"
     );
 

@@ -179,8 +179,8 @@ Supported flags:
 
 The generated JSON artifacts land under `packages/benchmark/benchmark-results/meta-ui/` by default, while reusable expected artifacts default to `packages/benchmark/benchmark-results/meta-ui/.expected-vue-component-meta/`. CI builds the expected artifact set once, uploads it, and reuses it across the backend/scenario matrix in the `/meta-benchmark` workflow.
 
-Correctness validation is now driven by the audit record emitted from
-the Rust-side `RustAuditRecord` (plan §3 Commit 8 / F8 cutover).
+Correctness validation is driven by the audit record emitted from the
+Rust-side `RustAuditRecord`.
 Specifications live under `packages/benchmark/audit-specs/component-meta/`
 and are consumed by `packages/benchmark/src/audit-validator.ts`. The
 legacy regex-validator CLI (`trace-check.ts`) and its

@@ -1,4 +1,4 @@
-//! §6c cutover tests — `compile_many`'s Stage-B upsert path is a SINGLE
+//! Atomic Stage-B upsert tests — `compile_many`'s Stage-B upsert path is a SINGLE
 //! atomic batch (`Scheduler::submit_batch_atomic` + one `wait_batch`)
 //! driven through the one shared upsert engine `upsert_many_with_priority`.
 //!

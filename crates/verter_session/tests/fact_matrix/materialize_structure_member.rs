@@ -1,10 +1,9 @@
 //! Matrix slice: `materialize_structure` × `member`.
 //!
 //! Discrimination: same substrate as `..._member_presence.rs`. The
-//! Block 1.H Track 1 wiring on `MaterializeStructureDb` ensures the
-//! producer is wrapped in `install_fact_tracer`; the counter is
-//! the discriminating observable. Per-fact-kind capture
-//! verification belongs to Block 1.8.
+//! wiring on `MaterializeStructureDb` ensures the producer is
+//! wrapped in `install_fact_tracer`; the counter is the
+//! discriminating observable.
 
 use std::sync::Arc;
 

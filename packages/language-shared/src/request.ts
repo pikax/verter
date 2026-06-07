@@ -34,7 +34,7 @@ export enum RequestType {
   GetComponentParents = "$/verter/getComponentParents",
   ApplyStyleOverrides = "$/verter/applyStyleOverrides",
   GetRouteTree = "$/verter/getRouteTree",
-  /** D113 — full Volar-shape component metadata (Tier 1B). */
+  /** Full Volar-shape component metadata. */
   GetComponentMeta = "$/verter/getComponentMeta",
   /** D102 — selective surface envelope as protobuf-encoded bytes. */
   GetComponentMetaSurface = "$/verter/getComponentMetaSurface",

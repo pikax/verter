@@ -1,18 +1,17 @@
-//! Stage 6c — RouteDb fact-validation discrimination tests.
+//! RouteDb fact-validation discrimination tests.
 //!
-//! Each test was written so it would FAIL against the pre-Stage-6c
-//! tree (no `effective_export_sets` cache; no
-//! `BarrelRouteSurface.fact_dep_signature`; no
-//! `validates_route_surface_domain` wiring) and PASS against the
-//! post-Stage-6c tree.
+//! Each test FAILS against a tree without the
+//! `effective_export_sets` cache, the
+//! `BarrelRouteSurface.fact_dep_signature`, or the
+//! `validates_route_surface_domain` wiring.
 //!
-//! Plan §763-781 verify bullets covered here:
+//! Invariants covered here:
 //!
 //! - Cross-consumer route hit produces ONE per-name `RouteDb` entry
 //!   (per R6 query-identity cache).
 //! - `SyntacticExportSet` (parse-domain) ≠ `EffectiveExportSet`
 //!   (resolve-domain) (per R15).
-//! - `whole_hash_migration_audit` site #2 is GONE.
+//! - The redundant whole-hash route-surface oracle is gone.
 //! - `paths` (resolve_env_hash) edit invalidates RouteDb entries.
 //! - lib_env_hash change invalidates `EffectiveExportSet` cache
 //!   entries (R21 scoping rule on route surface).
@@ -229,12 +228,11 @@ fn syntactic_export_set_differs_from_effective_export_set() {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Test 3 — whole_hash_migration_audit site #2 elimination.
+// Test 3 — redundant whole-hash route-surface oracle elimination.
 // ────────────────────────────────────────────────────────────────
 
-/// Co-asserts the whole_hash_migration_audit.rs site-#2 inversion
-/// from a different angle: the new BarrelRouteSurface field shape
-/// works through the entire route_db API.
+/// Asserts that the `BarrelRouteSurface` field shape works through the
+/// entire route_db API without a redundant whole-hash oracle.
 #[test]
 fn whole_hash_migration_audit_route_db_318_eliminated() {
     let db = RouteDb::new();

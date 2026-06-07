@@ -62,7 +62,7 @@ fn read_file(path: &Path) -> String {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Legacy deletion grep tests (plan §6 item 11).
+// Legacy deletion grep tests.
 // ──────────────────────────────────────────────────────────────────────
 
 /// The legacy macros `component_meta_trace_scope!` /
@@ -92,7 +92,7 @@ fn legacy_session_trace_macros_deleted_from_workspace() {
     assert!(
         violations.is_empty(),
         "Legacy `component_meta_trace_scope!` / `component_meta_trace_event!` macro calls \
-         must be deleted (plan §3.A Commit 6.E). Found:\n{}",
+         must be deleted. Found:\n{}",
         violations.join("\n")
     );
 }
@@ -123,7 +123,7 @@ fn legacy_session_trace_helpers_deleted_from_host_manage() {
     }
     assert!(
         violations.is_empty(),
-        "Legacy trace impl helpers must be deleted (plan §3.A Commit 6.E). Found:\n{}",
+        "Legacy trace impl helpers must be deleted. Found:\n{}",
         violations.join("\n")
     );
 }
@@ -155,7 +155,7 @@ fn legacy_trace_env_vars_not_consumed_anywhere() {
     assert!(
         violations.is_empty(),
         "Legacy `VERTER_COMPONENT_META_TRACE*` env vars must not be consumed \
-         anywhere (plan §3.A Commit 6.E). Found:\n{}",
+         anywhere. Found:\n{}",
         violations.join("\n")
     );
 }
@@ -241,7 +241,7 @@ fn every_custom_variant_construction_site_has_justification_comment() {
     assert!(
         violations.is_empty(),
         "Every `StructuredAuditEvent::Custom {{ … }}` construction site must \
-         document why a typed variant isn't available (plan §3.A Commit 6.E). Found:\n{}",
+         document why a typed variant isn't available. Found:\n{}",
         violations.join("\n")
     );
 }

@@ -1,15 +1,15 @@
 //! Runtime guard — R20 admission contract: `insert_arc_with_kind`
 //! refuses an empty signature for every production cache kind.
 //!
-//! Block 0 substrate establishes the strict admission method
+//! The strict admission method
 //! `ValidatedFactCache::insert_arc_with_kind(key, value, facts, kind)`
-//! which gates fact-completeness: an empty `facts` vector causes the
+//! gates fact-completeness: an empty `facts` vector causes the
 //! admission to be REFUSED — the cache entry is NOT recorded, the
 //! `admission_refused_count()` counter advances, and a
 //! `FactSignatureAdmissionRefused { cache_kind: <kind> }` structured
 //! audit event fires.
 //!
-//! Block 1.7 augments `admission_guard.rs`'s generic empty-signature
+//! This complements `admission_guard.rs`'s generic empty-signature
 //! refusal test with a PER-KIND enumeration over every production
 //! cache that goes through `insert_arc_with_kind`. The discriminating
 //! property: each kind's refusal must independently land — both on

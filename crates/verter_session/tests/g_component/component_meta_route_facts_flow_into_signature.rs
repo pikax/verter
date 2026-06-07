@@ -1,10 +1,10 @@
-//! Block 1.J.2 — route facts in the published `ComponentMetaResultEntry`
+//! Route facts in the published `ComponentMetaResultEntry`
 //! signature: CROSS-FILE route facts flow in, the OWNER's own Route
 //! fact is filtered.
 //!
-//! Block 1.J.2 sourced the signature from the finalised fact tracer
-//! read set. The cold compute's macro-root route walk genuinely
-//! observes the route's participant facts — including the owner's own
+//! The signature is sourced from the finalised fact tracer read set.
+//! The cold compute's macro-root route walk genuinely observes the
+//! route's participant facts — including the owner's own
 //! `DerivedFactHash{Route}` — into the active tracer.
 //!
 //! The owner's own Route fact does not round-trip on warm validation:
@@ -19,9 +19,9 @@
 //! Discrimination:
 //!  1. `cross_file_route_facts_flow_owner_route_filtered` asserts the
 //!     published `facts` rail carries the route DEP's
-//!     `DerivedFactHash{Route}` fact but NOT the owner's own. PRE-FIX
-//!     (Block 1.J.2 with no publish-site filter) the owner's Route
-//!     fact IS present and the negative assertion FAILS.
+//!     `DerivedFactHash{Route}` fact but NOT the owner's own. Without
+//!     the publish-site filter the owner's Route fact would be present
+//!     and the negative assertion would FAIL.
 //!  2. `editing_route_dep_invalidates_warm_hit` asserts that editing
 //!     the route's source type invalidates the warm hit and the
 //!     post-edit result reflects the new shape — the cross-file route
@@ -102,8 +102,8 @@ fn cross_file_route_facts_flow_owner_route_filtered() {
     // `publish_component_meta_cache_entry` strips it via
     // `strip_owner_route_fact` because the owner's own export route is
     // dual-sourced on `HostStoreView::derived_hashes` and does not
-    // round-trip on warm validation. PRE-FIX (no publish-site filter)
-    // the owner's Route fact is present and this assertion FAILS.
+    // round-trip on warm validation. Without the publish-site filter
+    // the owner's Route fact would be present and this assertion FAILS.
     let owner_route_facts: Vec<&FactVersionRef> = sig
         .facts
         .iter()

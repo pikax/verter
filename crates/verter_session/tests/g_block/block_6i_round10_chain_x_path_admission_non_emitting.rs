@@ -1,10 +1,7 @@
-//! Block 6.i Round 10 — Chain X discriminator (PathWalker Mapped
-//! admission non-emitting).
+//! Chain X discriminator (PathWalker Mapped admission non-emitting).
 //!
-//! Closes Chain X, the second-largest residual emitter on the
-//! nuxt-ui corpus (31.3% / 114 of 364 captured ProjectMember
-//! emissions per the round-10 diagnostic at
-//! `D:/tmp/round10-diagnostic-report.md`). The chain enters
+//! Closes Chain X, a large residual emitter on the nuxt-ui corpus
+//! of captured ProjectMember emissions. The chain enters
 //! through the host's evaluated-types cold path:
 //!
 //! ```text
@@ -20,19 +17,18 @@
 //!   ⇧ build_key_of / build_mapped_type  →  ProjectMember emit
 //! ```
 //!
-//! Pre-Commit-3 the PathWalker's Tier-2 Mapped admission at
-//! `walk.rs:955-959` called
+//! A PathWalker whose Tier-2 Mapped admission called
 //! `dispatch.key_names_from_keyspace_node(mapper.key_space)` to test
-//! "does this Mapped contain `needle`?". That helper enumerates the
-//! ENTIRE keyspace through `evaluate_deferred_semantic_node` +
+//! "does this Mapped contain `needle`?" leaks: that helper enumerates
+//! the ENTIRE keyspace through `evaluate_deferred_semantic_node` +
 //! `key_names_from_base_node` — and the enumerator routes
 //! `Instantiate(Published(Expanded))` for deferred shells. Result:
 //! `build_key_of` / `build_mapped_type` emit one `ProjectMember` edge
 //! per key for every segment admission, even though the walker only
 //! cares about ONE literal.
 //!
-//! Post-Commit-3 the walker calls the new non-emitting predicate
-//! `keyspace_admits_literal_non_emitting` (added in
+//! The walker instead calls the non-emitting predicate
+//! `keyspace_admits_literal_non_emitting` (in
 //! `enumerate.rs`) which decides admission structurally without
 //! ever calling `evaluate_deferred_semantic_node` on a deferred
 //! shell, without ever calling `key_names_from_base_node`. When
@@ -42,11 +38,8 @@
 //!
 //! ## Hermetic shape
 //!
-//! Carousel-like fixture (Round-10 diagnostic Chain X dominant
-//! emitter). Per the diagnostic table at
-//! `D:/tmp/round10-diagnostic-report.md` §"Per-component
-//! attribution", **Carousel emits 100% through Chain X** (48 of 48
-//! observed emissions) — the cleanest empirical isolate for the
+//! Carousel-like fixture (the Chain X dominant emitter). Carousel
+//! emits 100% through Chain X — the cleanest empirical isolate for the
 //! chain. The shape: `CarouselProps<T> extends
 //! Omit<EmblaOptionsType, …>`.
 
@@ -85,8 +78,8 @@ export type EmblaOptionsType = {
 // to 'align' | 'loop', value: EmblaOptionsType[K] }`. For each
 // macro-declared field name, the cold evaluated-types path dispatches
 // `ProjectPath { base: PickMapped, path: [Member(name)], context:
-// Published(Expanded) }`. The PathWalker's Tier-2 Mapped admission
-// (pre-Commit-3) calls `key_names_from_keyspace_node` which enumerates
+// Published(Expanded) }`. A PathWalker Tier-2 Mapped admission that
+// calls `key_names_from_keyspace_node` enumerates
 // the whole `keyof EmblaOptionsType` — emitting one `ProjectMember`
 // edge per `EmblaOptionsType` member, even for the names that aren't
 // in the Pick narrow.
@@ -172,7 +165,7 @@ fn chain_x_path_admission_non_emitting_does_not_leak_inherited_library_members()
 
     assert_eq!(
         total, 0,
-        "Block 6.i Round 10 Chain X — `PathWalker`'s Mapped admission \
+        "Chain X — `PathWalker`'s Mapped admission \
          MUST NOT emit `ProjectMember` edges for inherited library \
          members. The Tier-2 admission must use the non-emitting \
          membership predicate `keyspace_admits_literal_non_emitting`, \
@@ -181,12 +174,8 @@ fn chain_x_path_admission_non_emitting_does_not_leak_inherited_library_members()
          `key_names_from_base_node`. Got: leak_edges={leak_edge_count} \
          (names={leak_edge_names:?}), \
          projection_path_member_hits={leak_path_count}. \
-         Pre-Commit-3 the walker at `walk.rs:955-959` called \
-         `key_names_from_keyspace_node` for path admission — the \
-         enumeration emitted one `ProjectMember` edge per enumerated \
-         key. Commit 3 of Round 10 wires the non-emitting predicate. \
-         See `D:/tmp/round10-diagnostic-report.md` Chain X (31.3% / \
-         114 of 364 captured emissions) and the codex 5th consult \
-         Q1-X verdict at `D:/tmp/round10-codex-reconsult-out.txt`."
+         A walker that called `key_names_from_keyspace_node` for path \
+         admission would emit one `ProjectMember` edge per enumerated \
+         key; the non-emitting predicate avoids that."
     );
 }

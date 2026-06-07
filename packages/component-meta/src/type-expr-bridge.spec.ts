@@ -567,9 +567,9 @@ describe("typeExprToDescriptor", () => {
       ]),
     );
 
-    // Post-W0.6: unresolvable indexed access surfaces as the dedicated
-    // `IndexedAccessType` variant so structural consumers (W7.2 compat
-    // checker rewrite) can match `t.kind === "indexedAccess"` instead
+    // Unresolvable indexed access surfaces as the dedicated
+    // `IndexedAccessType` variant so structural consumers (the compat
+    // checker) can match `t.kind === "indexedAccess"` instead
     // of regex-scanning a raw-type string.
     expect(result.kind).toBe("indexedAccess");
     if (result.kind === "indexedAccess") {
@@ -579,8 +579,8 @@ describe("typeExprToDescriptor", () => {
   });
 
   it("emits IndexedAccessType when no native registry is supplied", () => {
-    // Discriminating fixture for W0.6: pre-cutover this would collapse
-    // to `kind: "unknown"`; post-cutover the structural form survives.
+    // Discriminating fixture: the legacy path would collapse
+    // to `kind: "unknown"`; the structural form survives here.
     const result = typeExprToDescriptor({
       kind: "indexedAccess",
       object: { kind: "ref", name: "NuxtLinkProps", typeArguments: [] },
@@ -595,10 +595,10 @@ describe("typeExprToDescriptor", () => {
   });
 
   it("emits IndexedAccessType for non-literal index types (T[K])", () => {
-    // Pre-W0.6 this would return `unknown("T[K]")` — the regex-based
+    // The legacy path returned `unknown("T[K]")` — the regex-based
     // `looksLikeIndexedAccessType` heuristic in compat/checker.ts
     // existed precisely because the structural shape was lost here.
-    // Post-W0.6 the descriptor preserves both sub-shapes.
+    // The descriptor now preserves both sub-shapes.
     const result = typeExprToDescriptor({
       kind: "indexedAccess",
       object: { kind: "ref", name: "T", typeArguments: [] },

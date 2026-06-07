@@ -1,15 +1,15 @@
-//! Block 1.J.1 item 7 — semantic-graph production warm reads validated.
+//! Semantic-graph production warm reads validated.
 //!
-//! Codex Block 1.J diagnosis: "production warm reads must validate
+//! Contract: production warm reads must validate
 //! `ReadSetSignature`. Raw `get` should be test/debug only or renamed
-//! to make that explicit."
+//! to make that explicit.
 //!
-//! Block 1.I added `SemanticGraphStore::get_validated(key, ctx)` — the
+//! `SemanticGraphStore::get_validated(key, ctx)` is the
 //! carrier-aware warm read that validates the entry's
 //! `ReadSetSignature` against the live store view BEFORE bubbling its
-//! fact observations. The unvalidated raw read was renamed
-//! `get` → `get_unvalidated` so the unvalidated nature is explicit at
-//! every call site (codex Block 1.J item 7).
+//! fact observations. The unvalidated raw read is named
+//! `get_unvalidated` so the unvalidated nature is explicit at
+//! every call site.
 //!
 //! This guard enforces that the renamed `get_unvalidated` is reachable
 //! from EXACTLY ONE production file — `semantic_query_memo/mod.rs`,
@@ -92,7 +92,7 @@ fn code_before_line_comment(line: &str) -> &str {
 
 /// Every production caller of `SemanticGraphStore::get_unvalidated`
 /// must live in the sanctioned cooperative-admission file. A new
-/// seal-scope caller is the unvalidated-warm-read hole codex item 7
+/// seal-scope caller is the unvalidated-warm-read hole this guard
 /// closes.
 #[test]
 fn get_unvalidated_only_called_from_cooperative_admission_file() {
@@ -129,9 +129,9 @@ fn get_unvalidated_only_called_from_cooperative_admission_file() {
     );
 }
 
-/// The sanctioned file MUST actually define `get_unvalidated` (the
-/// rename landed) and MUST NOT still expose the old `pub fn get(`
-/// signature — the rename codex item 7 mandates is "renamed to make
+/// The sanctioned file MUST actually define `get_unvalidated` and
+/// MUST NOT still expose the old `pub fn get(`
+/// signature — the read is "renamed to make
 /// the unvalidated nature explicit".
 #[test]
 fn semantic_graph_store_exposes_renamed_unvalidated_read() {
@@ -140,7 +140,7 @@ fn semantic_graph_store_exposes_renamed_unvalidated_read() {
     assert!(
         src.contains("pub fn get_unvalidated("),
         "SemanticGraphStore must expose the renamed `get_unvalidated` — the \
-         explicit-name form codex item 7 mandates for the unvalidated read.",
+         explicit-name form for the unvalidated read.",
     );
     assert!(
         !src.contains("pub fn get(&self, key: &SemanticQueryKey)"),

@@ -1,10 +1,7 @@
 /**
- * Workspace-level invariants enforced by plan §3 Commit 8.
+ * Workspace-level invariants.
  *
- * Three plan-required tests that never landed in the original Commit
- * 8 squash — added here by the 2026-04-24 review-fix pass (see
- * `.claude/feedback/feedback-2026-04-24-audit-footprint-review.md`
- * finding F3). Colocated with the benchmark specs because they
+ * Colocated with the benchmark specs because they
  * already have a vitest runner and exercise repo-wide invariants;
  * the benchmark package is the de-facto home for CI-harness
  * cross-package tests.
@@ -17,7 +14,7 @@
  *   `pnpm -r` with no excludes that would omit known packages.
  * - `every_workspace_package_has_test_script_or_is_documented_as_no_tests`
  *   — every `packages/*` directory's `package.json` has a `test`
- *   script OR a documented no-op (echo-based) per the plan's
+ *   script OR a documented no-op (echo-based) per the
  *   "escape hatch" clause.
  * - `audit_generated_ts_file_compiles_via_packages_types_tsc_noemit`
  *   — shells out `tsc --noEmit` for `@verter/types` so a tsc-level
@@ -51,12 +48,11 @@ function packagesDirs(): string[] {
     .sort();
 }
 
-describe("workspace invariants — plan §3 Commit 8", () => {
+describe("workspace invariants", () => {
   it("root_pnpm_test_runs_every_workspace_package_test_script", () => {
     // The root package.json `test` script must fan out to every
-    // workspace package. Plan §0.2 gate: "from Commit 8 onward,
-    // `pnpm test` covers every workspace package with a `test`
-    // script". Discriminating: a refactor that narrows the root
+    // workspace package: `pnpm test` covers every workspace package
+    // with a `test` script. Discriminating: a refactor that narrows the root
     // script (e.g. via `--filter !@verter/wasm`) breaks this test.
     const root = readJson(resolve(REPO_ROOT, "package.json"));
     const scripts = (root.scripts ?? {}) as Record<string, string>;
@@ -76,7 +72,7 @@ describe("workspace invariants — plan §3 Commit 8", () => {
 
   it("every_workspace_package_has_test_script_or_is_documented_as_no_tests", () => {
     // Every `packages/*/package.json` must declare a `test` script.
-    // Plan §3 Commit 8 allows a no-op (echo-based) script as a
+    // A no-op (echo-based) script is allowed as a
     // documented escape hatch for packages with pre-existing test
     // gaps, but the script itself MUST be present so `pnpm -r run
     // test` exits 0 for that package rather than failing on a

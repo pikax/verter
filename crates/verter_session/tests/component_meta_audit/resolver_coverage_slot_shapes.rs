@@ -1,22 +1,17 @@
-//! Phase 5j §5.12 — TDD seed for resolver coverage gap: typed slot
-//! payload bindings (`defineSlots<{ default(props: { item: string }) }>`)
-//! lower the binding parameter type to `Unknown { raw: "semanticMiss" }`
-//! instead of `Primitive(String)`.
-//!
-//! Source: `phase-00b-tier1-mismatches.md` row 1 (`fixture_slots_typed`).
-//! Verter macros §slots: every key of T surfaces as a slot, with
-//! bindings extracted from each slot function's first parameter.
-//!
-//! **Pre-Phase-5j behaviour:** the slot NAME is extracted, the binding
-//! NAME is extracted, but the binding's `TypeExpr` lowers to
+//! Resolver coverage for typed slot payload bindings
+//! (`defineSlots<{ default(props: { item: string }) }>`): the binding
+//! parameter type must lower to `Primitive(String)`, not
 //! `Unknown { raw: "semanticMiss" }`.
 //!
-//! **Post-Phase-5j expected:** the binding's `TypeExpr` is
-//! `Primitive(String)` for `item: string` and `Primitive(Number)` for
-//! `row: number`.
+//! Source: `phase-00b-tier1-mismatches.md` row 1 (`fixture_slots_typed`).
+//! Slot macros: every key of T surfaces as a slot, with bindings
+//! extracted from each slot function's first parameter.
 //!
-//! Phase 5j adds `ProjectSemanticDispatch::project_slot_binding_member`
-//! which composes existing variants to descend through `Function` ->
+//! The binding's `TypeExpr` is `Primitive(String)` for `item: string`
+//! and `Primitive(Number)` for `row: number`.
+//!
+//! `ProjectSemanticDispatch::project_slot_binding_member` composes
+//! existing variants to descend through `Function` ->
 //! `params[0].ty` -> `Member(binding)`. The `expand_field_expr` closure
 //! (`host_manage.rs::compute_evaluated_types*`) routes
 //! `FieldKind::SlotBinding` through this helper instead of the generic
@@ -95,8 +90,7 @@ fn resolver_coverage_slot_shapes_typed_bindings_lower_to_primitive() {
     );
 
     // Negative: the `Unknown { raw: "semanticMiss" }` sentinel must
-    // not appear anywhere in the slot bindings — that is the
-    // pre-fix behaviour and Phase 5b closes it.
+    // not appear anywhere in the slot bindings.
     for slot in &analysis.slots {
         for binding in &slot.bindings {
             assert!(

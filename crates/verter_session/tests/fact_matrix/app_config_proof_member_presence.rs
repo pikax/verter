@@ -1,8 +1,8 @@
 //! Matrix slice: `app_config_proof` × `member_presence`.
 //!
 //! Degenerate cell — the AppConfigNoOverrideProofDb producer
-//! observes only `FileWholeHash` for the decl canonical (Block 1.H
-//! Track 2.4 scope). It does NOT walk per-member presence facts
+//! observes only `FileWholeHash` for the decl canonical. It does
+//! NOT walk per-member presence facts
 //! because the `declares_interface_app_config` IndexedReady flag
 //! is the only structural input the producer's substrate consults.
 //!

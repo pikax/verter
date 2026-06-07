@@ -1,17 +1,14 @@
-//! Slice 3.B focused regression: the
+//! Focused regression: the
 //! `audit_no_hot_loop_instrumentation` architecture guard MUST run
 //! cleanly. The same denylist used by the canonical guard in
 //! `tests/architecture_guards.rs` is consumed here via `#[path]`
 //! mod-include — the constant lives in
 //! `tests/audit_hot_loop_denylist.rs`.
 //!
-//! Discrimination contract:
-//! - **Pre-change tree**: no denylist exists, no guard runs, this
-//!   file does not compile (missing test helper) AND any compile
-//!   producer emit landing inside one of the listed hot loops would
-//!   not be observable until profiling caught the regression.
-//! - **Post-change tree**: the AST visitor finds every denylisted
-//!   function body and confirms each is free of audit-emit calls.
+//! Contract: the AST visitor finds every denylisted function body and
+//! confirms each is free of audit-emit calls. A compile producer emit
+//! landing inside one of the listed hot loops would otherwise not be
+//! observable until profiling caught the regression.
 //!
 //! This file replicates the same scan as the canonical guard so that
 //! a regression is caught even when the umbrella `architecture_guards`
@@ -182,7 +179,7 @@ fn slice_3b_audit_no_hot_loop_instrumentation_focused_regression() {
         let crate_src = workspace_root().join("crates").join(krate).join("src");
         if !crate_src.exists() {
             panic!(
-                "Slice 3.B focused regression: crate `{krate}` listed in denylist \
+                "crate `{krate}` listed in denylist \
                  but `crates/{krate}/src/` does not exist; denylist is stale."
             );
         }
@@ -255,14 +252,14 @@ fn slice_3b_audit_no_hot_loop_instrumentation_focused_regression() {
 
     assert!(
         stale.is_empty(),
-        "Slice 3.B focused regression: denylist entries did NOT match any \
+        "denylist entries did NOT match any \
          function in the corresponding source tree. Denylist is stale:\n{}",
         stale.join("\n"),
     );
 
     assert!(
         violations.is_empty(),
-        "Slice 3.B focused regression: producer-side audit emits MUST NOT \
+        "producer-side audit emits MUST NOT \
          appear inside the hot-path denylist. Move emits to phase \
          boundaries. Found:\n{}",
         violations.join("\n"),

@@ -900,9 +900,9 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
 // Real discriminating bodies for the relation engine. Each test
 // constructs SemanticNodeData fixtures directly on the shared graph and
 // exercises `ProjectSemanticDispatch::relate_nodes` against them. A
-// characterization test body must FAIL against the pre-cutover tree
-// (where `relate_nodes` was a `todo!()` / shallow stub) and PASS against
-// the  tree where the real decision table lives.
+// characterization test body must FAIL against a tree where
+// `relate_nodes` is a `todo!()` / shallow stub and PASS against the
+// tree where the real decision table lives.
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
@@ -1103,8 +1103,8 @@ fn relate_object_record_shaped_mapped_with_inner_record_succeeds() {
 /// per-call recursion: two `relate_nodes` calls with the same pair
 /// warm-hit on the second call.
 ///
-/// Discriminates: pre-cutover code had separate shallow checks at
-/// `build_conditional` and no memo; any stub that recomputes on each
+/// Discriminates: code with separate shallow checks at
+/// `build_conditional` and no memo — any stub that recomputes on each
 /// call fails this test because the memo count would not grow.
 #[test]
 fn relate_conditional_check_uses_dispatch_memo_not_private_recursion() {
@@ -1170,8 +1170,8 @@ fn relate_infer_binds_substituted_type_for_true_branch() {
 /// Static coverage gate for the arena relate tests. The expected-case
 /// names are hard-coded here as a `const`-style array so the test
 /// survives the §5.8 deletion of `relate.rs` without an
-/// `include_str!` dependency on the retiring file. Every pre-cutover
-/// arena test name must map onto a  semantic concept —
+/// `include_str!` dependency on the removed file. Every arena test
+/// name must map onto a semantic concept —
 /// the assertion is a cardinality check: the semantic engine covers
 /// at least as many distinct relation outcomes as the arena engine
 /// did.
@@ -1522,7 +1522,7 @@ fn relation_memo_overflow_returns_result_without_admission() {
 }
 
 // ============================================================================
-// Authority-cutover invariants — file-absence
+// Single-authority invariants — file-absence
 // ============================================================================
 
 #[test]
@@ -1622,7 +1622,7 @@ fn solver_host_module_deleted() {
 }
 
 // ============================================================================
-// Authority-cutover invariants — identifier-absence
+// Single-authority invariants — identifier-absence
 // ============================================================================
 
 #[test]
@@ -1850,7 +1850,7 @@ fn host_named_type_cache_adapter_uses_semantic_graph_store_directly() {
 }
 
 // ============================================================================
-// Authority-cutover invariants — single-authority cardinality
+// Single-authority invariants — cardinality
 // ============================================================================
 //
 // Each test walks the workspace source and greps for exactly-one

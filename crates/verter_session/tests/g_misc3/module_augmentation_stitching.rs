@@ -1,16 +1,16 @@
-//! Stage 6c — module-augmentation stitching discrimination tests.
+//! Module-augmentation stitching discrimination tests.
 //!
-//! Each test was written so it would FAIL against the pre-Stage-6c
-//! tree (no augmentation-index population, no augmenter-set
-//! fingerprint observation in `EffectiveExportSet.fact_dep_signature`,
-//! no `ModuleAugmentationStitched` audit event) and PASS against the
-//! post-Stage-6c tree.
+//! Each test discriminates the stitching behaviour: a tree without
+//! augmentation-index population, without augmenter-set fingerprint
+//! observation in `EffectiveExportSet.fact_dep_signature`, and without
+//! the `ModuleAugmentationStitched` audit event would FAIL; the
+//! correct tree PASSES.
 //!
-//! Plan §763-781 verify bullets covered here:
+//! Verify bullets covered here:
 //!
 //! - Module augmentation by target kind: each R29 archetype routes
 //!   through the correct `AugmentationTargetKind` and stitches.
-//! - Project isolation (Codex P0): augmenters in one project do NOT
+//! - Project isolation: augmenters in one project do NOT
 //!   poison another project under the same syntactic specifier.
 //! - Augmenter-set invalidation (G1): adding/removing an augmenter
 //!   changes `ModuleAugmentationIndexShape.fingerprint`; downstream
@@ -446,7 +446,7 @@ fn cross_project_augmenter_isolation() {
         store.augmentation_index_len(),
         2,
         "two distinct AugmentationTargetKey entries MUST coexist \
-         (project_identity + resolve_env_hash isolation per Codex P0.1)"
+         (project_identity + resolve_env_hash isolation)"
     );
 
     // Both projects see augmenter A's contribution because A's
@@ -928,8 +928,8 @@ fn rekeyed_augmenter_with_unchanged_skeleton_is_not_dropped() {
     );
 
     // The pre-edit key is genuinely drained; the post-edit key is the
-    // only live artifact. (Confirms the test reproduces codex's
-    // exact failure mode rather than a coexisting-versions one.)
+    // only live artifact. (Confirms the test reproduces the exact
+    // failure mode rather than a coexisting-versions one.)
     assert!(
         store.get_artifacts(&pre_edit_key).is_none(),
         "pre-edit FileArtifactKey MUST be drained after the re-key"
@@ -1256,7 +1256,7 @@ fn effective_export_set_session_view_stitches_overlay_augmenter() {
     );
 }
 
-/// Discriminator (SCOPE-LOCK 11 / 15e — overlay-aware augmentation index): a
+/// Discriminator (overlay-aware augmentation index): a
 /// `Session(id)` population augmenter set UNIONS the session's own overlay
 /// augmenters (matched by the overlay discriminator) with base, while the
 /// `Base` population set sees ONLY base augmenters. A session overlay's
@@ -1638,14 +1638,14 @@ fn base_augmenter_legacy_insert_invalidates_index() {
 // must invalidate the augmentation index too.
 //
 // `remove`/`remove_artifacts`/`remove_canonical` are the *public* drop
-// surfaces — round-5 wired those into the index-invalidation rail. But
+// surfaces — those are wired into the index-invalidation rail. But
 // `FileArtifactStore::evict_lru_promoted` and
 // `enforce_per_canonical_retention` drop entries from `self.artifacts`
 // internally (driven by `evict_unreachable_artifacts_with_policy` on
 // memory-pressure / long-session sweeps). If those internal drops bypass
 // the rail, an evicted augmenter's `AugmenterSet` survives stale and the
 // next `EffectiveExportSet` stitch republishes a stale fingerprint over
-// an incomplete export surface — the round-6 P1 class.
+// an incomplete export surface.
 //
 // These tests drive the REAL eviction methods and assert the index
 // transitions. They FAIL on the pre-fix tree (eviction bypassed the rail)
@@ -1803,7 +1803,7 @@ fn retention_eviction_of_augmenter_invalidates_index() {
     );
 }
 
-/// The codex-noted SEQUENCE: an artifact-only eviction followed by a
+/// The SEQUENCE: an artifact-only eviction followed by a
 /// later "normal" delete of the SAME canonical. After the eviction the
 /// canonical has NO artifact left in the store, so the subsequent
 /// `remove_canonical` finds nothing to collect and can invalidate

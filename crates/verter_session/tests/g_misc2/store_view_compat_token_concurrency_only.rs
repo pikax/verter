@@ -1,4 +1,4 @@
-//! Stage 10 arch-guard — `StoreViewCompatToken` is the concurrency
+//! Arch-guard — `StoreViewCompatToken` is the concurrency
 //! oracle, NEVER the cache-correctness oracle.
 //!
 //! Binds R19: "Fact validation is the cache-correctness oracle.
@@ -196,7 +196,7 @@ fn store_view_compat_token_is_concurrency_oracle_only() {
     }
     assert!(
         violations.is_empty(),
-        "Stage 10 R19 guard violated — {} site(s) conflate \
+        "R19 guard violated — {} site(s) conflate \
          `StoreViewCompatToken` with cache freshness / correctness \
          predicates:\n{}",
         violations.len(),
@@ -234,8 +234,8 @@ fn store_view_compat_token_every_production_site_classified() {
     }
     // The token is in active use across the resolver/singleflight
     // surface. A zero count would indicate the token has been
-    // retired entirely (which Stage 10 explicitly preserves per
-    // R19). If you are reading this assertion failure, either
+    // retired entirely (which R19 explicitly preserves). If you
+    // are reading this assertion failure, either
     // (a) you intentionally retired the token — also delete this
     // guard; or (b) the file refactor moved sites — adjust the
     // scan scope.

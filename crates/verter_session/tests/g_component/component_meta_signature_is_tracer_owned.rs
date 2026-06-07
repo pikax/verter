@@ -1,17 +1,16 @@
-//! Block 1.J.2 — item 3 discriminator: the published
-//! `ComponentMetaResultEntry` signature's `facts` rail is sourced from
-//! the FINALIZED fact-tracer read set, NOT the curated
-//! `resolved.fact_versions`.
+//! Discriminator: the published `ComponentMetaResultEntry` signature's
+//! `facts` rail is sourced from the FINALIZED fact-tracer read set, NOT
+//! the curated `resolved.fact_versions`.
 //!
-//! Pre-1.J.2: `get_component_meta`'s cold path discarded the traced
-//! facts on `FactReadSetFinalise::Ok` and published
+//! A cold path that discarded the traced facts on
+//! `FactReadSetFinalise::Ok` and published
 //! `filter_owner_round_trippable_facts(resolved.fact_versions)` — the
-//! curated accumulator set, route-filtered. The published `facts` rail
-//! therefore could NOT equal `read_set.finalise()`: it carried
+//! curated accumulator set, route-filtered — could NOT produce a
+//! published `facts` rail equal to `read_set.finalise()`: it would carry
 //! `DerivedFactHash` Route/ImportRoute entries the tracer never
-//! observes, and the route-filter dropped the owner's Route entry.
+//! observes, and the route-filter would drop the owner's Route entry.
 //!
-//! Post-1.J.2: the `FactReadSetFinalise::Ok(facts)` payload — minus
+//! Instead, the `FactReadSetFinalise::Ok(facts)` payload — minus
 //! the owner's own non-round-tripping `DerivedFactHash{Route}` fact —
 //! IS the published `read_set_signature.facts` rail. The signature is
 //! sourced from the finalized tracer read set, then
@@ -158,7 +157,7 @@ fn published_component_meta_signature_equals_finalized_tracer_read_set() {
     assert_eq!(
         sorted(&published.facts),
         sorted(&traced_minus_owner_route),
-        "Block 1.J.2: the published `ComponentMetaResultEntry` `facts` \
+        "the published `ComponentMetaResultEntry` `facts` \
          rail MUST equal the finalized fact-tracer read set minus the \
          owner's own `DerivedFactHash{{Route}}` fact. \
          published={:#?} traced(minus owner-Route)={:#?}",
@@ -180,7 +179,7 @@ fn published_component_meta_signature_equals_finalized_tracer_read_set() {
         .load(std::sync::atomic::Ordering::Relaxed);
     assert!(
         hits_after > hits_before,
-        "Block 1.J.2 item 3: an unedited second call must hit the \
+        "an unedited second call must hit the \
          warm `ComponentMetaResultDb` cache — the tracer-owned \
          signature must round-trip. hits {hits_before} -> {hits_after}",
     );

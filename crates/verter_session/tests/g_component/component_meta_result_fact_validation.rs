@@ -1,16 +1,14 @@
-//! Block 1.B — `ComponentMetaResultDb` fact-validation POSITIVE
-//! discriminator.
+//! `ComponentMetaResultDb` fact-validation POSITIVE discriminator.
 //!
-//! Pre-1.B: `ComponentMetaResultEntry` carried only the legacy
-//! `dep_signature: DepSignature` whole-hash oracle. Warm-hit
-//! revalidation was coarse — owner whole-hash + transitive
-//! whole-hashes. Editing a referenced dep WHOSE whole-hash bumped
-//! invalidated the warm hit, but no fact-precise per-domain validator
-//! discriminator existed at this cache layer. This test is structurally
-//! impossible to compile pre-1.B because `fact_dep_signature` does
-//! not exist on `ComponentMetaResultEntry`.
+//! A coarse design that carried only a `dep_signature: DepSignature`
+//! whole-hash oracle would revalidate warm hits only on owner
+//! whole-hash + transitive whole-hashes: editing a referenced dep whose
+//! whole-hash bumped would invalidate the warm hit, but no fact-precise
+//! per-domain validator discriminator would exist at this cache layer.
+//! This test cannot compile without `fact_dep_signature` on
+//! `ComponentMetaResultEntry`.
 //!
-//! Post-1.B: the entry carries `fact_dep_signature:
+//! The entry carries `fact_dep_signature:
 //! Arc<[FactVersionRef]>` populated from the cold resolver's curated
 //! observation set, and `ComponentMetaResultDb::get_with_view`
 //! validates the signature through
@@ -80,7 +78,7 @@ fn editing_dep_invalidates_component_meta_result_warm_hit() {
     let hits_after_warm = prov.component_meta_result_cache_hits.load(Relaxed);
     assert!(
         hits_after_warm > hits_before,
-        "Block 1.B: identical second call must hit the warm `ComponentMetaResultDb` cache. \
+        "identical second call must hit the warm `ComponentMetaResultDb` cache. \
          hits_before={hits_before} hits_after_warm={hits_after_warm}"
     );
 
@@ -97,7 +95,7 @@ fn editing_dep_invalidates_component_meta_result_warm_hit() {
     let misses_after_edit = prov.component_meta_result_cache_misses.load(Relaxed);
     assert!(
         misses_after_edit > misses_before,
-        "Block 1.B: editing a referenced type MUST advance \
+        "editing a referenced type MUST advance \
          `component_meta_result_cache_misses` — the validator caught \
          the dep version bump and the cache returned None. \
          misses_before={misses_before} misses_after_edit={misses_after_edit}"

@@ -1,11 +1,11 @@
 /**
  * Host-side musl detection must EXACTLY mirror the generated `dist/index.js`
- * loader's `isMusl()` (issue #90 round-3 finding 1). The matrix derivation
+ * loader's `isMusl()`. The matrix derivation
  * picks `linux-*-musl` vs `linux-*-gnu` for the CURRENT host from
  * {@link detectHostIsMusl}; if that decision diverges from the loader, the
  * host-tarball smoke and the loader-fallback spec select the WRONG triple on
  * a Linux CI runner whose `/usr/bin/ldd` read fails (e.g. a container without
- * ldd at that path) — exactly the case the round-2 host-smoke fix relied on.
+ * ldd at that path) — exactly the case the host-smoke fix relies on.
  *
  * The detection algorithm is the SINGLE {@link resolveHostMusl}, a line-for
  * line port of the loader (`dist/index.js` lines 10-61). It is exercised here

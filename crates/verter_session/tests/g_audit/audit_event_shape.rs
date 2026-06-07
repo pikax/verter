@@ -80,11 +80,10 @@ fn stage_6c_audit_event_variants_exist() {
     let _ = format!("{}", index_refresh);
 }
 
-/// Stage 6d — `FactSignatureAdmissionRefused` and
-/// `FactSignatureOverflow` are both reachable as construction sites.
-/// Compile-time check via type construction. R23 scope-fence: the
-/// Stage 6d emissions on the admission-guard call paths use typed
-/// variants, not `Custom`.
+/// `FactSignatureAdmissionRefused` and `FactSignatureOverflow` are
+/// both reachable as construction sites. Compile-time check via type
+/// construction. R23 scope-fence: the emissions on the admission-guard
+/// call paths use typed variants, not `Custom`.
 #[test]
 fn stage_6d_admission_guard_audit_event_variants_exist() {
     use std::sync::Arc;
@@ -116,7 +115,7 @@ fn stage_6d_admission_guard_audit_event_variants_exist() {
 }
 
 /// `AdmissionRefusalReason` enumerates both refusal reasons documented
-/// by the Stage 6d admission-guard contract. Compile-time enumeration
+/// by the admission-guard contract. Compile-time enumeration
 /// check via exhaustive match.
 #[test]
 fn admission_refusal_reason_covers_documented_reasons() {
@@ -163,7 +162,7 @@ fn augmentation_target_kind_tag_covers_four_archetypes() {
     );
 }
 
-/// The Stage 6c production-source paths that emit augmentation
+/// The production-source paths that emit augmentation
 /// audit events MUST NOT use `StructuredAuditEvent::Custom { ... }`.
 ///
 /// Source-grep over the route-db + file-artifact-store production
@@ -171,14 +170,14 @@ fn augmentation_target_kind_tag_covers_four_archetypes() {
 /// scope-fence violation. The general `Custom` arch guard in
 /// `no_legacy_trace_surface.rs` requires every construction site to
 /// carry a justified comment; this guard goes further on the
-/// Stage 6c surface by banning the construction entirely.
+/// augmentation surface by banning the construction entirely.
 #[test]
 fn stage_6c_augmentation_paths_do_not_emit_custom() {
     let crates = crates_dir();
     let session_src = crates.join("verter_session").join("src");
 
-    // Files whose production-emission sites are governed by Stage
-    // 6c's R23 scope fence — these are exactly the augmentation +
+    // Files whose production-emission sites are governed by the R23
+    // scope fence — these are exactly the augmentation +
     // route-db files. The route-db surface spans `route_db.rs` plus
     // every `*.rs` under the sibling `route_db/` module directory.
     let mut stage_6c_files: Vec<std::path::PathBuf> =
@@ -224,8 +223,8 @@ fn stage_6c_augmentation_paths_do_not_emit_custom() {
             if is_construct && !is_destructuring {
                 let msg = format!(
                     "R23 scope-fence violation: {}:{} uses the \
-                     `Custom` enum-construction syntax on a Stage-6c emission \
-                     surface. Augmentation-index and route-db emissions MUST \
+                     `Custom` enum-construction syntax on an augmentation \
+                     emission surface. Augmentation-index and route-db emissions MUST \
                      use the typed `ModuleAugmentationStitched` / \
                      `ModuleAugmentationIndexShape` variants instead.",
                     file.display(),
@@ -240,7 +239,7 @@ fn stage_6c_augmentation_paths_do_not_emit_custom() {
 /// Collect the source of the entire `route_db` module — the
 /// `route_db.rs` file plus every `*.rs` under the sibling `route_db/`
 /// directory (where the `EffectiveExportSet` stitch + its audit emission
-/// now live). Returns the concatenated text so the Stage 6c guards stay
+/// live). Returns the concatenated text so the augmentation guards stay
 /// correct under module splits.
 fn route_db_module_text(session_src: &std::path::Path) -> String {
     let resolver_core = session_src.join("resolver_core");
@@ -265,7 +264,7 @@ fn route_db_module_text(session_src: &std::path::Path) -> String {
     text
 }
 
-/// Both new audit-event variants are referenced from the Stage 6c
+/// Both audit-event variants are referenced from the augmentation
 /// production emission sites. Sanity check that the emission helpers
 /// exist + reference the typed variants.
 #[test]

@@ -1,4 +1,4 @@
-//! Block 1.C matrix slice — `Member`.
+//! `FactKey::Member` fan-out through the slot-binding-graph tracer.
 //!
 //! Verifies the slot-binding-graph dual-emit fact-tracer fan-out
 //! substrate delivers `FactKey::Member` facts into every active
@@ -47,14 +47,14 @@ fn slot_binding_graph_fact_tracer_carries_member() {
     let captured = match finalise {
         FactReadSetFinalise::Ok(sig) => sig,
         FactReadSetFinalise::Overflow => panic!(
-            "Block 1.C matrix slice: tracer overflowed on a single-fact \
+            "tracer overflowed on a single-fact \
              signature — substrate bug, not test bug"
         ),
     };
 
     assert!(
         captured.iter().any(|f| f == &member_fact),
-        "Block 1.C matrix slice: the fact-tracer substrate MUST carry \
+        "the fact-tracer substrate MUST carry \
          the `Member` fact through the fan-out path emitted by the \
          slot-binding-graph dual-emit helper. captured={captured:?}"
     );
@@ -66,7 +66,7 @@ fn slot_binding_graph_fact_tracer_carries_member() {
     let src = read_session_src("meta_resolve/slot_binding_graph.rs");
     assert!(
         src.contains("fn emit_slot_binding_graph_dispatch_facts"),
-        "Block 1.C matrix slice (arch guard): \
+        "arch guard: \
          `slot_binding_graph.rs` MUST declare the dual-emit helper \
          `emit_slot_binding_graph_dispatch_facts` so all five \
          `accumulate_dispatch_dep_signature` call sites route \

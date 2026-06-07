@@ -1,15 +1,14 @@
 //! R13 binding: `FactLane` separates semantic vs display
 //! observations on a `fact_dep_signature`.
 //!
-//! Verify-bullet 14 (lane test fragment): a cosmetic generic param
-//! rename MUST NOT shift the semantic-lane fact (because the
-//! hashing module alpha-normalises generic param names to
-//! binder-relative indices). The display-lane fact MAY shift.
+//! A cosmetic generic param rename MUST NOT shift the semantic-lane
+//! fact (because the hashing module alpha-normalises generic param
+//! names to binder-relative indices). The display-lane fact MAY shift.
 //!
-//! This is the producer-side discrimination — the full lane
-//! consumer at Stage 6d will branch on `ObservedFact.lane` and
-//! validate against `semantic_hash` or `display_hash` accordingly.
-//! Stage 3 codifies the alpha-normalisation contract.
+//! This is the producer-side discrimination — the lane consumer
+//! branches on `ObservedFact.lane` and validates against
+//! `semantic_hash` or `display_hash` accordingly. The emitter
+//! codifies the alpha-normalisation contract.
 //!
 //! Architectural rules bound: R13, R16.
 
@@ -118,9 +117,9 @@ fn property_value_change_shifts_semantic_hash() {
 #[test]
 fn observed_fact_lane_is_recorded_per_observation() {
     // R13: `ObservedFact` records `lane: Semantic | Display`
-    // per observation. The Stage-6d consumer branches on this
-    // field to validate against the right hash. Stage 3 verifies
-    // the substrate carries the lane.
+    // per observation. The consumer branches on this field to
+    // validate against the right hash; this verifies the substrate
+    // carries the lane.
     let key = FactKey::Export {
         name: InternedName::from("Foo"),
         space: SymbolSpace::Type,
@@ -137,7 +136,7 @@ fn observed_fact_lane_is_recorded_per_observation() {
         lane: FactLane::Display,
         expected_hash: [1u8; 16],
     };
-    // Distinct lanes — Stage 6d validator routes them to
+    // Distinct lanes — the validator routes them to
     // semantic_hash vs display_hash.
     assert_ne!(observed_semantic.lane, observed_display.lane);
 }
@@ -148,7 +147,7 @@ fn fact_semantic_and_display_independent() {
     // independently fill them. A cosmetic edit can rewrite
     // display_hash while leaving semantic_hash untouched (the
     // semantic / display fact stores are keyed differently so
-    // this is what consumers observe at Stage 6d).
+    // this is what consumers observe).
     let f = Fact {
         key: FactKey::Export {
             name: InternedName::from("Foo"),

@@ -1,11 +1,11 @@
 //! Architecture guard — the legacy `compile_many` Stage-B per-file
 //! upsert fan-out is fully retired.
 //!
-//! The §6c cutover replaced `compile_many`'s Stage-B per-file
-//! submit→wait path (an outer `HostBatchCoordinator::run_batch` over
+//! `compile_many`'s Stage-B per-file submit→wait path (an outer
+//! `HostBatchCoordinator::run_batch` over
 //! `canonical_to_upsert`, each worker issuing one
 //! `Scheduler::submit_request` + one `wait_or_drive` buried inside
-//! `upsert_via_scheduler_with_priority`) with a SINGLE
+//! `upsert_via_scheduler_with_priority`) is replaced by a SINGLE
 //! `Scheduler::submit_batch_atomic` + one `wait_batch` driven from the
 //! one shared upsert engine (`upsert_many_with_priority`). The single-
 //! file public `upsert` collapsed onto the same engine as a 1-element
@@ -232,7 +232,7 @@ fn no_legacy_compile_many_upsert_fanout() {
 
     assert!(
         hits.is_empty(),
-        "§6c cutover guard: the legacy compile_many Stage-B per-file upsert \
+        "compile_many Stage-B fan-out guard: the legacy per-file upsert \
          fan-out must be fully retired. The single shared upsert engine is \
          `upsert_many_with_priority` (one `submit_batch_atomic` + one \
          `wait_batch`); per-canonical post-commit runs through \

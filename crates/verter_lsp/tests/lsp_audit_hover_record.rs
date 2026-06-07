@@ -1,10 +1,10 @@
-//! Wave 3 Slice 3.E — basic LSP audit smoke test.
+//! Basic LSP audit smoke test.
 //!
 //! Drives the [`verter_session::host_lsp_audit::LspAuditSession`]
 //! lifecycle end-to-end: open a session, finalize with an LSP
 //! payload, observe the published record on the host's records
-//! store. Pre-Wave-3 the LSP handlers had no audit wiring and the
-//! records store stayed empty.
+//! store. Without audit wiring the LSP handlers would leave the
+//! records store empty.
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -1,4 +1,4 @@
-//! Block 1.C matrix slice — `MemberPresence`.
+//! Slot-binding-graph fact-tracer matrix slice — `MemberPresence`.
 //!
 //! Asserts that the slot-binding-graph dual-emit fact-tracer
 //! fan-out substrate can deliver `FactKey::MemberPresence` facts
@@ -65,14 +65,14 @@ fn slot_binding_graph_fact_tracer_carries_member_presence() {
     let captured = match finalise {
         FactReadSetFinalise::Ok(sig) => sig,
         FactReadSetFinalise::Overflow => panic!(
-            "Block 1.C matrix slice: tracer overflowed on a single-fact \
+            "matrix slice: tracer overflowed on a single-fact \
              signature — substrate bug, not test bug"
         ),
     };
 
     assert!(
         captured.iter().any(|f| f == &presence_fact),
-        "Block 1.C matrix slice: the fact-tracer substrate MUST carry \
+        "matrix slice: the fact-tracer substrate MUST carry \
          the `MemberPresence` fact through the fan-out path emitted \
          by the slot-binding-graph dual-emit helper. captured={captured:?}"
     );
@@ -86,7 +86,7 @@ fn slot_binding_graph_fact_tracer_carries_member_presence() {
     let src = read_session_src("meta_resolve/slot_binding_graph.rs");
     assert!(
         src.contains("crate::fact_signature_helpers::observe_fact_signature(&bridged)"),
-        "Block 1.C matrix slice (arch guard): \
+        "matrix slice (arch guard): \
          `emit_slot_binding_graph_dispatch_facts` in \
          `slot_binding_graph.rs` MUST call \
          `crate::fact_signature_helpers::observe_fact_signature(&bridged)` \
@@ -98,9 +98,9 @@ fn slot_binding_graph_fact_tracer_carries_member_presence() {
     );
     assert!(
         src.contains("dep_signature_to_fact_signature(sig)"),
-        "Block 1.C matrix slice (arch guard): \
+        "matrix slice (arch guard): \
          `emit_slot_binding_graph_dispatch_facts` MUST invoke the \
-         Block 0 bridge helper \
+         bridge helper \
          `crate::fact_signature_helpers::dep_signature_to_fact_signature(sig)` \
          before fanning out — direct calls to \
          `observe_fact_signature(&legacy_dep_signature)` would fail \
@@ -122,7 +122,7 @@ fn slot_binding_graph_fact_tracer_carries_member_presence() {
         ));
     assert!(
         bridged_empty.is_empty(),
-        "Block 1.C matrix slice: empty `DepSignature` must bridge to \
+        "matrix slice: empty `DepSignature` must bridge to \
          empty `Vec<FactVersionRef>`. observed={bridged_empty:?}"
     );
 }

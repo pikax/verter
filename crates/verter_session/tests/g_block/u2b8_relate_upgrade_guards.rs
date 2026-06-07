@@ -1,4 +1,4 @@
-//! U2B.8 guards — the upgraded full-identity `Relate` key surface.
+//! Guards for the full-identity `Relate` key surface.
 //!
 //! These tests pin the IDENTITY contract of the upgraded
 //! [`SemanticQueryKey::Relate`] variant — no longer the bare
@@ -700,7 +700,7 @@ fn relate_query_value_carries_relation_proof_and_budget_state() {
     // arm) is impossible to write if `Unknown` / `Holds` / `DoesNotHold` still
     // exist. `NotAssignable` is FIELD-LESS (Decision 4) — a unit-variant match
     // arm, not a struct pattern; re-adding `primary_reason` / `secondary_reasons`
-    // to the outcome (the superseded A.9 shape) would break this arm.
+    // to the outcome (the superseded enriched-outcome shape) would break this arm.
     let token = match &payload.outcome {
         RelationOutcome::Assignable => "assignable",
         RelationOutcome::NotAssignable => "not-assignable",
@@ -775,8 +775,8 @@ fn relation_payload_uses_payload_side_relation_proofs_table() {
     // enum is NOT embedded on the payload. The outcome is FIELD-LESS
     // `NotAssignable` (Decision 4): the failure reason rides ONLY the
     // payload-side proof entry, NEVER the outcome. Constructing `NotAssignable`
-    // with no fields here would fail to compile against the superseded A.9
-    // shape (which carried `primary_reason` / `secondary_reasons`).
+    // with no fields here would fail to compile against the superseded
+    // enriched-outcome shape (which carried `primary_reason` / `secondary_reasons`).
     let payload = RelationPayload {
         outcome: RelationOutcome::NotAssignable,
         bindings: Arc::from(
@@ -800,13 +800,13 @@ fn relation_payload_uses_payload_side_relation_proofs_table() {
     // payload-side `RelationProof::NotAssignable { reason: RelationFailureCode,
     // .. }` entry — the `RelationOutcome::NotAssignable` outcome itself carries
     // NO reason. A static scan of the value-domain source pins this: the
-    // superseded A.9 `primary_reason` / `secondary_reasons` outcome fields must
+    // superseded `primary_reason` / `secondary_reasons` outcome fields must
     // be absent from the source entirely (they are the enriched-outcome shape).
     let qvd_src = include_str!("../../src/semantic_query.rs");
     assert!(
         !qvd_src.contains("primary_reason") && !qvd_src.contains("secondary_reasons"),
         "RelationOutcome::NotAssignable must be field-less — the reason rides the \
-         payload-side RelationProof table, never the outcome (superseded A.9 shape)"
+         payload-side RelationProof table, never the outcome (superseded enriched-outcome shape)"
     );
 
     // The coinductive cycle entry stores opaque `RelateKeyId`s.
@@ -869,9 +869,9 @@ fn relation_public_outcome_has_no_unknown_display() {
 // ---------------------------------------------------------------------------
 // (5) VALUE-DOMAIN MAP: `Relate` maps to the `Relation` value domain, NOT
 //     `TypeNode`; and the spec table remains a total function (exactly one row
-//     per variant). Asserts the U2B.8 DELTA on the spec row: env == `R T L J`
-//     and the key-fields string carries the full relation identity (pre-change
-//     the row was `(source,target)` only).
+//     per variant). Asserts the spec row carries env == `R T L J`
+//     and the key-fields string carries the full relation identity (the bare
+//     `(source,target)` row would lack these).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -893,10 +893,10 @@ fn relate_key_returns_relation_value() {
         "Relate must NOT carry the TypeNode value domain"
     );
 
-    // U2B.8 DELTA: the upgraded `RelationContext` carries the `R` the bare
-    // `{source,target}` key lacked, so the env is `R T L J`. Pre-change the
-    // row's key-fields string was `(source,target)` only — these assertions
-    // FAIL against the bare-pair tree.
+    // The upgraded `RelationContext` carries the `R` the bare
+    // `{source,target}` key lacked, so the env is `R T L J`. A bare-pair
+    // row's key-fields string would be `(source,target)` only — these
+    // assertions FAIL against such a tree.
     assert_eq!(
         row.env_dims.render(),
         "R T L J",
@@ -936,7 +936,7 @@ fn every_semantic_query_key_maps_to_exactly_one_value_domain_with_relate_relatio
         .find(|s| s.variant == SemanticQueryKeyTag::Relate)
         .unwrap();
     assert_eq!(relate_row.value_domain, SemanticQueryValueTag::Relation);
-    // U2B.8 DELTA — pin the upgraded env on the total-function guard too.
+    // Pin the upgraded env on the total-function guard too.
     assert_eq!(relate_row.env_dims.render(), "R T L J");
 }
 

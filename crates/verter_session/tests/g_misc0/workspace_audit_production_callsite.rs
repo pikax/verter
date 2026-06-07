@@ -1,5 +1,5 @@
 #![allow(deprecated)]
-//! Production-path discriminator for Slice 3.D.
+//! Production-path discriminator for workspace-op auditing.
 //!
 //! Drives a real `WorkspaceOp::AuditResolve` through
 //! [`verter_session::VerterHost::audit_workspace_op`] (the

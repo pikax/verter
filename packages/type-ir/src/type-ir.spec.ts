@@ -24,8 +24,8 @@ describe("IndexedAccessType", () => {
     // The descriminator is structural: a value typed as `TypeDescriptor`
     // must accept the `indexedAccess` kind without an `as` cast. If the
     // variant were missing from the union, this assignment would fail
-    // at compile time (W0.6's primary contract — pre-cutover this file
-    // would not type-check).
+    // at compile time (the variant's primary contract — without it this
+    // file would not type-check).
     const td: TypeDescriptor = indexedAccess(ref("NuxtLinkProps"), literal("to"));
 
     expect(td.kind).toBe("indexedAccess");
@@ -51,8 +51,8 @@ describe("IndexedAccessType", () => {
   });
 
   it("supports non-literal index types (T[K] where K is a generic param)", () => {
-    // The index type is not constrained to literals — the W7.2 rewrite
-    // of `looksLikeIndexedAccessType` keys off `t.kind === "indexedAccess"`,
+    // The index type is not constrained to literals — the structural
+    // `looksLikeIndexedAccessType` keys off `t.kind === "indexedAccess"`,
     // not on the literalness of the index. A generic-parameter index
     // must round-trip through the descriptor.
     const descriptor = indexedAccess(ref("T"), ref("K"));
@@ -73,10 +73,10 @@ describe("IndexedAccessType", () => {
     expect(descriptor).not.toHaveProperty("name");
   });
 
-  it("the audit-flagged W7.2 predicates discriminate against the new variant", () => {
-    // W7.2 will replace the regex-based `looksLikeIndexedAccessType`
-    // with a structural predicate. The post-W0.6 test below is exactly
-    // the predicate body W7.2 will use; it MUST yield `true` for the
+  it("the structural predicates discriminate against the new variant", () => {
+    // The structural predicate replaces the regex-based
+    // `looksLikeIndexedAccessType`. The test below is exactly
+    // the predicate body; it MUST yield `true` for the
     // new variant and `false` for non-indexed-access shapes.
     const isIndexedAccess = (t: TypeDescriptor) => t.kind === "indexedAccess";
 
@@ -84,7 +84,7 @@ describe("IndexedAccessType", () => {
     expect(isIndexedAccess(ref("Foo"))).toBe(false);
     expect(isIndexedAccess(primitive("string"))).toBe(false);
 
-    // The W7.2 slots/ui helper predicates additionally key off the
+    // The slots/ui helper predicates additionally key off the
     // index type being a string-literal with a fixed value.
     const isSlotsHelper = (t: TypeDescriptor) =>
       t.kind === "indexedAccess" && t.indexType.kind === "literal" && t.indexType.value === "slots";

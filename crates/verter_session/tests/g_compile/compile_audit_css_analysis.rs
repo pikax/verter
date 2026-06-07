@@ -1,13 +1,14 @@
-//! Slice 3.B test: CSS-analysis phase timing surfaces through
+//! CSS-analysis phase timing surfaces through
 //! `CompilePayload::css_analysis_ms` when the SFC has a `<style>` block
 //! and the producer is exercising `compile.css_analysis` instrumentation.
 //!
 //! Discrimination contract:
-//! - **Pre-change tree**: `record_phase_timing("compile.css_analysis", ...)`
-//!   call site does not exist; the per-request `compile_css_analysis_us`
-//!   accumulator stays at 0; `payload.css_analysis_ms` is `None`.
-//! - **Post-change tree**: producer emits at the boundary; payload is
-//!   `Some(>= 0)` for SFCs that have at least one `<style>` block.
+//! - Without the producer emit: the
+//!   `record_phase_timing("compile.css_analysis", ...)` call site does
+//!   not run; the per-request `compile_css_analysis_us` accumulator
+//!   stays at 0; `payload.css_analysis_ms` is `None`.
+//! - With the producer emit: the producer emits at the boundary; payload
+//!   is `Some(>= 0)` for SFCs that have at least one `<style>` block.
 
 use std::sync::Arc;
 
@@ -75,7 +76,7 @@ fn compile_with_audit_populates_css_analysis_ms_when_style_block_present() {
     assert!(
         payload.css_analysis_ms.is_some(),
         "SFC with <style> block must surface css_analysis_ms = Some; \
-         pre-change tree (no producer emit) leaves it as None. payload = {payload:?}",
+         a missing producer emit leaves it as None. payload = {payload:?}",
     );
     let css_ms = payload.css_analysis_ms.unwrap();
     assert!(

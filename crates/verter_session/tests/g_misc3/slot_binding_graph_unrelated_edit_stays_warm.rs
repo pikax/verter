@@ -1,14 +1,14 @@
-//! Block 1.C — `slot_binding_graph` dual-emit NEGATIVE discriminator.
+//! `slot_binding_graph` dual-emit NEGATIVE discriminator.
 //!
 //! Asserts that an unrelated dep edit (a sibling TS file that does
 //! NOT participate in the slot-binding-graph traversal of the Vue
 //! owner) does NOT advance the dual-emit counters on the second
-//! call beyond what the Block 1.B warm-cache fast-path requires.
+//! call beyond what the warm-cache fast-path requires.
 //!
 //! Concretely: after the first `get_component_meta` call primes
 //! `ComponentMetaResultDb` for the owner, the second call must hit
-//! the warm cache (Block 1.B `component_meta_result_cache_hits`
-//! advances) and MUST NOT re-run the slot-binding-graph traversal
+//! the warm cache (`component_meta_result_cache_hits` advances) and
+//! MUST NOT re-run the slot-binding-graph traversal
 //! (so neither dual-emit counter advances between calls 1 and 2).
 //! Editing an UNRELATED file then forces a third call; the third
 //! call must STILL warm-hit (the unrelated edit's facts are not in
@@ -91,7 +91,7 @@ fn unrelated_edit_does_not_advance_slot_binding_graph_emission_counters() {
         .load(Relaxed);
     assert!(
         tracer_after_prime >= 1 && legacy_after_prime >= 1,
-        "Block 1.C negative: prime call must have advanced both \
+        "negative: prime call must have advanced both \
          dual-emit counters (sanity floor — the positive test \
          covers the lockstep delta in detail). \
          tracer={tracer_after_prime} legacy={legacy_after_prime}"
@@ -106,7 +106,7 @@ fn unrelated_edit_does_not_advance_slot_binding_graph_emission_counters() {
     // warm entry intact.
     upsert_ts(&host, "/src/unrelated.ts", "export const UNRELATED = 43;\n");
 
-    // Second call after the unrelated edit. Block 1.B's
+    // Second call after the unrelated edit. The
     // `ComponentMetaResultDb` warm-hit fast-path returns the cached
     // entry BEFORE installing a `with_fact_tracer` scope (see
     // `component_meta_entry.rs:109-118`). The slot-binding-graph
@@ -124,14 +124,14 @@ fn unrelated_edit_does_not_advance_slot_binding_graph_emission_counters() {
 
     assert!(
         hits_after_unrelated > hits_before_warm,
-        "Block 1.C negative sanity: the second call after an \
+        "negative sanity: the second call after an \
          unrelated edit MUST hit the warm `ComponentMetaResultDb` \
          cache. hits_before={hits_before_warm} \
          hits_after={hits_after_unrelated}"
     );
     assert_eq!(
         tracer_after_unrelated, tracer_after_prime,
-        "Block 1.C: an unrelated edit MUST NOT advance \
+        "an unrelated edit MUST NOT advance \
          `slot_binding_graph_fact_tracer_emissions` — the warm-hit \
          fast-path returns before the slot-binding-graph traversal \
          runs. tracer_after_prime={tracer_after_prime} \
@@ -139,7 +139,7 @@ fn unrelated_edit_does_not_advance_slot_binding_graph_emission_counters() {
     );
     assert_eq!(
         legacy_after_unrelated, legacy_after_prime,
-        "Block 1.C: an unrelated edit MUST NOT advance \
+        "an unrelated edit MUST NOT advance \
          `slot_binding_graph_legacy_accumulator_emissions` — the \
          warm-hit fast-path returns before the slot-binding-graph \
          traversal runs. legacy_after_prime={legacy_after_prime} \

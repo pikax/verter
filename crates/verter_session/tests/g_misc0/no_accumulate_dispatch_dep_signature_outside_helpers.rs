@@ -364,7 +364,7 @@ fn format_violations(violations: &[Violation]) -> String {
 ///   call, but the scanner allows the name so the function head is
 ///   not mis-flagged if a future refactor were to introduce one).
 /// - `emit_slot_binding_graph_dispatch_facts` in
-///   `slot_binding_graph.rs` (the Block 1.C dual-emit helper).
+///   `slot_binding_graph.rs` (the dual-emit helper).
 ///
 /// Every other production-source caller fails this guard with a
 /// pointer to the offending file and function. The fix is to rewire

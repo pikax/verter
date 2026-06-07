@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
  * AuditTree — renders a `ProvenanceChain` JSON as an interactive
- * tree. Plan §3 Commit 8.
+ * tree.
  *
  * This component is display-only: it never walks the audit graph
- * itself (plan §2.8 — the walker is in Rust, TS consumers render
+ * itself (the walker is in Rust, TS consumers render
  * JSON). Given a `chain: ProvenanceChain`, it displays the steps
  * BFS-ordered with collapsible sections per depth-level and
  * surface the `terminated` + `shared_load_terminals` trailers.

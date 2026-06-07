@@ -143,9 +143,9 @@ fn imported_registry_seed_refresh_does_not_engage_skip_under_graph_only_authorit
     // `imported_declaration_surface_is_authoritative` returns false at
     // the cold-classification site (no typed body in scope), so the
     // skip-refresh fast path never engages from the imported direct
-    // macro seed. The pre-cutover branch that read declaration text
-    // and detected "no heritage markers" to authorise skipping has been
-    // retired with the typed-IR migration. The integration test
+    // macro seed. The typed-IR contract has no branch that reads
+    // declaration text and detects "no heritage markers" to authorise
+    // skipping. The integration test
     // `append_component_meta_registry_entries_seeds_explicit_object_surface_for_imported_props`
     // covers the surviving invariant: the imported seed still carries
     // an explicit object surface in the initial registry.

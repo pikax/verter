@@ -2,7 +2,7 @@
 //!
 //! Degenerate cell — same rationale as
 //! `app_config_proof_member_presence.rs`. The producer never walks
-//! the AppConfig interface body's member facts in Block 1.H scope.
+//! the AppConfig interface body's member facts.
 //!
 //! Discrimination: the cold compute advances installs by exactly 1
 //! and admits a non-empty fact_dep_signature whose entries are only
@@ -32,7 +32,7 @@ fn app_config_proof_does_not_observe_member_body_facts() {
         "cold compute must advance installs by 1"
     );
 
-    // Block 1.H Track 2.4 scope: producer observes ONLY the
+    // Producer observes ONLY the
     // `FileWholeHash` of the decl canonical, not per-member body
     // facts. Verify the signature is non-empty AND contains no
     // member-body Parse facts.

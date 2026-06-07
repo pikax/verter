@@ -1,6 +1,6 @@
-//! Block 1.J.2 — item 4 discriminator: every component-meta family
-//! producer records its COMPLETE cross-file dependency set into the
-//! published `ComponentMetaResultEntry` signature.
+//! Discriminator: every component-meta family producer records its
+//! COMPLETE cross-file dependency set into the published
+//! `ComponentMetaResultEntry` signature.
 //!
 //! Each producer family is exercised by a fixture whose owner SFC
 //! depends on a SEPARATE dep file. After a cold `get_component_meta`,
@@ -12,11 +12,11 @@
 //!
 //! Discrimination — each assertion checks the EXACT presence of the
 //! dep canonical in the signature's canonical-id set, not a bare
-//! `is_some()` on the signature. Pre-1.J.2 the fallthrough producer
-//! did not observe recursive child-component facts into the tracer; a
-//! child-root edit could not invalidate the parent's warm hit. The
+//! `is_some()` on the signature. A fallthrough producer that did not
+//! observe recursive child-component facts into the tracer would let a
+//! child-root edit slip past the parent's warm hit. The
 //! `child_dep_present_for_fallthrough` case is the load-bearing
-//! discriminator for the fallthrough producer-completeness fix.
+//! discriminator for fallthrough producer completeness.
 
 #![cfg(test)]
 
@@ -82,7 +82,7 @@ fn routed_expression_and_registry_dep_present_for_define_props() {
     let canons = published_signature_canonicals(&host, "/src/Comp.vue");
     assert!(
         canons.contains("/src/props.ts"),
-        "Block 1.J.2 item 4 (routed-expression / registry): the \
+        "(routed-expression / registry): the \
          published signature MUST reference the cross-file prop type \
          dep `/src/props.ts`. signature canonicals = {canons:?}",
     );
@@ -112,7 +112,7 @@ fn slot_binding_graph_carrier_dep_present_for_define_slots() {
     let canons = published_signature_canonicals(&host, "/src/Comp.vue");
     assert!(
         canons.contains("/src/slots.ts"),
-        "Block 1.J.2 item 4 (slot-binding graph): the published \
+        "(slot-binding graph): the published \
          signature MUST reference the `defineSlots` carrier dep \
          `/src/slots.ts`. signature canonicals = {canons:?}",
     );
@@ -143,7 +143,7 @@ fn materialization_and_transitive_dep_present_for_pick_over_imported_type() {
     let canons = published_signature_canonicals(&host, "/src/Comp.vue");
     assert!(
         canons.contains("/src/cfg.ts"),
-        "Block 1.J.2 item 4 (materialization / transitive deps): the \
+        "(materialization / transitive deps): the \
          published signature MUST reference the `Pick` source dep \
          `/src/cfg.ts`. signature canonicals = {canons:?}",
     );
@@ -180,13 +180,13 @@ fn owner_import_surface_barrel_dep_present_for_barrel_reexport() {
     let canons = published_signature_canonicals(&host, "/src/Comp.vue");
     assert!(
         canons.contains("/src/barrel.ts"),
-        "Block 1.J.2 item 4 (owner import surface): the published \
+        "(owner import surface): the published \
          signature MUST reference the barrel dep `/src/barrel.ts`. \
          signature canonicals = {canons:?}",
     );
     assert!(
         canons.contains("/src/leaf.ts"),
-        "Block 1.J.2 item 4 (owner import surface): the published \
+        "(owner import surface): the published \
          signature MUST reference the barrel's re-export leaf dep \
          `/src/leaf.ts` — the chain walk observes the full route. \
          signature canonicals = {canons:?}",
@@ -200,11 +200,11 @@ fn child_dep_present_for_fallthrough() {
     // must reach the published signature so a child-root edit
     // invalidates the parent's warm hit.
     //
-    // This is the load-bearing discriminator for the fallthrough
-    // producer-completeness fix: pre-1.J.2 the fallthrough resolver
-    // built a complete curated `fact_versions` covering the recursive
-    // child dep but never observed it into the active tracer, so the
-    // tracer-owned signature omitted the child.
+    // This is the load-bearing discriminator for fallthrough producer
+    // completeness: a fallthrough resolver that built a complete curated
+    // `fact_versions` covering the recursive child dep but never
+    // observed it into the active tracer would leave the
+    // tracer-owned signature missing the child.
     let host = build_host();
     upsert(
         &host,
@@ -227,7 +227,7 @@ fn child_dep_present_for_fallthrough() {
     let canons = published_signature_canonicals(&host, "/src/Parent.vue");
     assert!(
         canons.contains("/src/Child.vue"),
-        "Block 1.J.2 item 4 (fallthrough producer completeness): the \
+        "(fallthrough producer completeness): the \
          published signature for the parent MUST reference the child \
          component `/src/Child.vue` — the fallthrough resolver \
          recurses into the child's inherited surface and that \
@@ -268,13 +268,13 @@ fn prepared_decl_dep_present_for_imported_alias_chain() {
     let canons = published_signature_canonicals(&host, "/src/Comp.vue");
     assert!(
         canons.contains("/src/alias.ts"),
-        "Block 1.J.2 item 4 (prepared declarations): the published \
+        "(prepared declarations): the published \
          signature MUST reference the imported alias dep \
          `/src/alias.ts`. signature canonicals = {canons:?}",
     );
     assert!(
         canons.contains("/src/base.ts"),
-        "Block 1.J.2 item 4 (prepared declarations): the published \
+        "(prepared declarations): the published \
          signature MUST reference the transitive `Base` dep \
          `/src/base.ts` — the alias body resolves through it. \
          signature canonicals = {canons:?}",

@@ -82,7 +82,7 @@ mod shallow_walk_invariant;
 mod slot_binding_graph_matrix_member;
 #[path = "g_misc2/store_view_compat_token_concurrency_only.rs"]
 mod store_view_compat_token_concurrency_only;
-#[path = "g_misc2/u3c_chatmessages_cutover_audit.rs"]
-mod u3c_chatmessages_cutover_audit;
+#[path = "g_misc2/u3c_chatmessages_audit.rs"]
+mod u3c_chatmessages_audit;
 #[path = "g_misc2/workspace_bookkeeping_invariants.rs"]
 mod workspace_bookkeeping_invariants;

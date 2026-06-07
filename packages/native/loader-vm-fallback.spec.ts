@@ -181,7 +181,7 @@ describe("issue #90 — generated loader per-platform optional-dependency fallba
     expect(result.threwMessage).toMatch(/native binding/i);
   });
 
-  // ---- Accepted-not-attempted discrimination (issue #90 round-2 item 3) ----
+  // ---- Accepted-not-attempted discrimination ----
   // Prove the per-triple assertions are checking ACCEPTANCE, not merely that
   // the right id was ATTEMPTED. Construct the case where the loader STILL
   // requests the right package (it is win32-x64-msvc) but that package is NOT
@@ -212,7 +212,7 @@ describe("issue #90 — generated loader per-platform optional-dependency fallba
     expect(result.threwMessage).not.toBeNull();
   });
 
-  // ---- Export-then-throw gate (issue #90 round-3 finding 2) ---------------
+  // ---- Export-then-throw gate ---------------------------------------------
   // The ACCEPTED fields must gate on no-throw. A loader that RETURNS the
   // sentinel from `require`, ASSIGNS it to `module.exports`, and THEN throws
   // (a post-export version check, or any export-then-throw shape) must NOT be

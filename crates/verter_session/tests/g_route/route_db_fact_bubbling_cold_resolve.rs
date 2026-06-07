@@ -23,7 +23,7 @@
 //! redundant safety check for this test — the resolve closure here
 //! MUST run, and the test asserts it ran exactly once.
 //!
-//! ## Why this could not be expressed pre-cutover
+//! ## Why this could not be expressed before the consumer migration
 //!
 //! Before the consumer migration, the cold-resolve path returned the
 //! result Arc without a post-admission re-read. The closure's

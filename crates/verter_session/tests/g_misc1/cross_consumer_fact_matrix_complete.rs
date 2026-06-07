@@ -1,5 +1,4 @@
-//! Block 1.8 — cross-consumer × fact-kind matrix completeness
-//! arch guard.
+//! Cross-consumer × fact-kind matrix completeness arch guard.
 //!
 //! This test enforces that every (consumer, fact-kind) cell on the
 //! 10 × 5 cross-consumer matrix has a discriminating slice file under
@@ -10,19 +9,19 @@
 //!
 //! `REQUIRED_CONSUMERS` is the union of:
 //!
-//! - the 5 caches Block 1.H wired in `fact_matrix/`
+//! - the 5 caches wired under `fact_matrix/`
 //!   (`materialize_structure`, `ref_cycle`, `memo_entry`,
 //!   `app_config_proof`, `owner_import_surface`); and
-//! - the 5 caches Blocks 1.A / 1.B / 1.C wired in earlier top-level
+//! - the 5 caches wired in the top-level
 //!   slices (`compile_tier`, `component_meta`, `fallthrough`,
 //!   `route_surface`, `slot_binding_graph`).
 //!
 //! Each slice MUST live at
 //! `crates/verter_session/tests/fact_matrix/{consumer}_{fact_kind}.rs`
-//! so the arch guard finds it by deterministic path. Top-level
-//! pre-Block-1.H matrix tests (e.g.
+//! so the arch guard finds it by deterministic path. The top-level
+//! matrix tests (e.g.
 //! `component_meta_result_matrix_member.rs`) remain in place as
-//! substrate-correctness anchors; the new `fact_matrix/`-rooted
+//! substrate-correctness anchors; the `fact_matrix/`-rooted
 //! slices give the completeness arch guard one filename per cell.
 //!
 //! Discrimination: each REQUIRED_CONSUMERS entry whose slice file
@@ -33,14 +32,13 @@
 use std::path::Path;
 
 const REQUIRED_CONSUMERS: &[&str] = &[
-    // Block 1.H caches (already in `fact_matrix/`).
+    // Caches in `fact_matrix/`.
     "materialize_structure",
     "ref_cycle",
     "memo_entry",
     "app_config_proof",
     "owner_import_surface",
-    // Block 1.A / 1.B / 1.C caches (newly filed under `fact_matrix/`
-    // by Block 1.8 — see commit feat(session): block-1.8).
+    // Caches filed under `fact_matrix/` from the top-level slices.
     "compile_tier",
     "component_meta",
     "fallthrough",
@@ -76,7 +74,7 @@ fn cross_consumer_matrix_completeness() {
 
     assert!(
         missing.is_empty(),
-        "Block 1.8 cross-consumer matrix completeness arch guard:\n\
+        "cross-consumer matrix completeness arch guard:\n\
          {} matrix slice(s) missing:\n  {}\n\n\
          Every (consumer, fact_kind) cell on the {}\u{00d7}{} \
          cross-consumer matrix MUST have a discriminating slice at \
@@ -101,21 +99,21 @@ fn cross_consumer_matrix_grid_size_matches_expected() {
     assert_eq!(
         REQUIRED_CONSUMERS.len(),
         10,
-        "Block 1.8: REQUIRED_CONSUMERS must list the 10 cache-bearing \
-         consumers (5 Block 1.H + 5 Blocks 1.A/1.B/1.C). Shrinking the \
+        "REQUIRED_CONSUMERS must list the 10 cache-bearing \
+         consumers. Shrinking the \
          list bypasses the completeness guard."
     );
     assert_eq!(
         REQUIRED_FACT_KINDS.len(),
         5,
-        "Block 1.8: REQUIRED_FACT_KINDS must list the 5 fact-kinds \
+        "REQUIRED_FACT_KINDS must list the 5 fact-kinds \
          (member_presence, member, import_ref, route_surface, \
          module_augmentation_index_shape)."
     );
     let cells = REQUIRED_CONSUMERS.len() * REQUIRED_FACT_KINDS.len();
     assert_eq!(
         cells, 50,
-        "Block 1.8: cross-consumer matrix size must be 10\u{00d7}5 = 50; \
+        "cross-consumer matrix size must be 10\u{00d7}5 = 50; \
          observed {cells}. A regression that drops a consumer OR a \
          fact-kind reduces the grid size below this floor."
     );

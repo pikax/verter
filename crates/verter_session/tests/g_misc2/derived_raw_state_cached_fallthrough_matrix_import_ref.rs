@@ -1,10 +1,9 @@
-//! Block 1A matrix slice — `DerivedRawState.cached_fallthrough`
+//! Matrix slice — `DerivedRawState.cached_fallthrough`
 //! (`CachedFallthroughEntry`) must carry `FactKey::ImportRef` facts
 //! in its `fact_versions: Arc<[FactVersionRef]>` signature.
 //!
-//! Pre-1A: wrapper holds `Vec<FactVersionRef>` and source-grep
-//! FAILS. Post-1A: substrate is `Arc<[FactVersionRef]>` and an
-//! `ImportRef` fact validates through the per-domain fast-path.
+//! The substrate is `Arc<[FactVersionRef]>` and an `ImportRef` fact
+//! validates through the per-domain fast-path.
 
 use std::sync::Arc;
 use std::{fs, path};
@@ -26,8 +25,7 @@ fn read_session_src(rel: &str) -> String {
 /// fact. Used to prove the `validates_fact_signature` dispatch on the
 /// Arc-stored substrate makes a real validator decision — a fabricated
 /// signature combined with a non-permissive view discriminates the
-/// per-domain validator wiring from the permissive identity case (per
-/// codex P2, path (b)).
+/// per-domain validator wiring from the permissive identity case.
 struct RejectImportRefView;
 
 impl StoreView for RejectImportRefView {
@@ -62,8 +60,8 @@ fn cached_fallthrough_signature_carries_import_ref() {
     let window = &src[idx..idx + end];
     assert!(
         window.contains("fact_versions: Arc<[crate::resolver_core::FactVersionRef]>"),
-        "Block 1A matrix slice: CachedFallthroughEntry must carry \
-         `fact_versions: Arc<[FactVersionRef]>` after the Block 1A migration. \
+        "matrix slice: CachedFallthroughEntry must carry \
+         `fact_versions: Arc<[FactVersionRef]>`. \
          Window:\n{window}"
     );
 
@@ -88,7 +86,7 @@ fn cached_fallthrough_signature_carries_import_ref() {
         "permissive view must accept an ImportRef fact in the Arc-stored signature"
     );
 
-    // Discriminator (per codex P2 path (b)): a view that explicitly
+    // Discriminator: a view that explicitly
     // rejects ImportRef facts must cause `validates_fact_signature`
     // to return false. Without this assertion the permissive view
     // alone is non-discriminating — a regression that breaks the
@@ -98,7 +96,7 @@ fn cached_fallthrough_signature_carries_import_ref() {
     let rejecting = RejectImportRefView;
     assert!(
         !rejecting.validates_fact_signature(&signature),
-        "Block 1A: `validates_fact_signature` must propagate a per-fact \
+        "`validates_fact_signature` must propagate a per-fact \
          rejection on the Arc-stored substrate. A view that rejects \
          ImportRef must turn the whole-signature decision negative; \
          otherwise the dispatch is not actually consulting per-fact \

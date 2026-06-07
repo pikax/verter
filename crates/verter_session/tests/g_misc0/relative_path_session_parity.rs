@@ -1,4 +1,4 @@
-//! Sub-plan §4.5 — session-side parity test for `id::resolve_external`.
+//! Session-side parity test for `id::resolve_external`.
 //!
 //! Tests both branches: the relative branch (delegated to
 //! `verter_workspace::relative_path::join_relative`) AND the absolute /

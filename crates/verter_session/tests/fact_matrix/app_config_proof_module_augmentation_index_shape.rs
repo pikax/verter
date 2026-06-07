@@ -2,8 +2,7 @@
 //!
 //! Degenerate cell — the AppConfigNoOverrideProofDb producer
 //! observes only the decl canonical's `FileWholeHash`. Module
-//! augmentation index facts are not part of its Block 1.H
-//! substrate contract.
+//! augmentation index facts are not part of its substrate contract.
 //!
 //! Discrimination: the published `fact_dep_signature` is a single
 //! `FileWholeHash` entry without any augmentation-index references.
@@ -37,12 +36,11 @@ fn app_config_proof_does_not_observe_module_augmentation_index_facts() {
 
     // Module augmentation index facts surface as either Parse-domain
     // facts (per-file augmentation declarations) or DerivedFactHash
-    // facts (route-domain). The producer must observe neither in
-    // Block 1.H scope.
+    // facts (route-domain). The producer must observe neither.
     for fact in proof.fact_dep_signature.iter() {
         assert!(
             matches!(fact, FactVersionRef::FileWholeHash { .. }),
-            "AppConfigNoOverrideProofDb producer must observe only FileWholeHash facts in Block 1.H scope. \
+            "AppConfigNoOverrideProofDb producer must observe only FileWholeHash facts. \
              Got non-WholeHash fact: {fact:?}",
         );
     }

@@ -4936,8 +4936,10 @@ mod foundations_guards {
     // when ANY line matches the regex below.
     //
     // Forbidden patterns:
-    //   - `d-cutover` / `D-Cutover` — cutover stage from the d-phase plan.
-    //   - `post-cutover` / `Post-Cutover` — narrative of a completed cutover.
+    //   - `cutover` (case-insensitive) — any cutover-stage reference,
+    //     including `cutover`, `pre-cutover`, `d-cutover`,
+    //     `post-cutover`, `runtime cutover`, `typed-IR cutover`, etc.
+    //     CLAUDE.md bans cutover-stage vocabulary outright.
     //   - `pre-Phase` / `Pre-Phase` — narrative of pre-phase state.
     //   - `Phase \d+` / `phase \d+` — explicit phase reference.
     //   - `Phase-\d+` / `phase-\d+` — explicit hyphenated phase reference.
@@ -4947,7 +4949,9 @@ mod foundations_guards {
     //     explicit stage reference (the dominant project-management
     //     noun used by the fact-based cache refactor's stage list).
     //   - `deleted in 5[a-z]` — deletion history from the 5-series plan.
-    //   - `retired in` — retirement history of any kind.
+    //   - `retired in <stage>` (`retired in 5g`, `retired in §3.2.4`)
+    //     — retirement history with an explicit plan-stage reference.
+    //     Ordinary `for retired in <expr>` loop syntax is preserved.
     //   - `Γ.A` / `Γ.B` / any Greek capital + `.<alnum>` — bare
     //     Greek-letter plan-phase codenames.
     //   - `pre-C\d` / `post-C\d` / `Pass C\d` — pre/post/Pass narrative
@@ -4965,19 +4969,23 @@ mod foundations_guards {
     /// numeric-only `Commit \d+` scan does not see.
     pub fn line_has_phase_archaeology(line: &str) -> bool {
         let bytes = line.as_bytes();
+        // Single lowercased view of the line, reused by every
+        // digit-bearing prefix-family scan below (phase / stage / block /
+        // slice / round). Scanning the already-lowercased line catches
+        // every capitalisation — including ALL-CAPS forms like `PHASE-1A`
+        // — in one pass, so the families never enumerate a brittle
+        // hand-written casing list. `to_ascii_lowercase` leaves digits,
+        // `:`, `-`, `.`, and byte indices unchanged, so the carve-out and
+        // word-boundary byte logic stays index-compatible with the
+        // original line.
+        let lower = line.to_ascii_lowercase();
         // Substring matches for fixed vocabulary. These are unambiguous
         // in production source and never appear as legitimate prose.
         const FIXED_NEEDLES: &[&str] = &[
-            "d-cutover",
-            "D-Cutover",
-            "post-cutover",
-            "Post-Cutover",
-            "Post-cutover",
             "pre-Phase",
             "Pre-Phase",
             "post-Phase",
             "Post-Phase",
-            "retired in",
             "phase-archaeology",
             // Stage-family phase-archaeology mirroring the Phase
             // family. The Stage vocabulary is the dominant
@@ -5026,6 +5034,17 @@ mod foundations_guards {
             if line.contains(needle) {
                 return true;
             }
+        }
+        // Bare `cutover` (case-insensitive) — any cutover-stage
+        // reference. CLAUDE.md bans cutover-stage vocabulary outright
+        // (`cutover`, `pre-cutover`, `Pre-cutover`, `C2 cutover`,
+        // `§6c cutover`, `typed-IR cutover`, `G4.4 cutover`,
+        // `runtime cutover`, the former `d-cutover` / `post-cutover`
+        // fixed needles). Production source must read as final-state.
+        // This single substring check subsumes every cutover-prefixed
+        // and cutover-suffixed form regardless of capitalisation.
+        if line.to_ascii_lowercase().contains("cutover") {
+            return true;
         }
         // Case-insensitive `codex` vocabulary scan with separator
         // tolerance. The companion phrases `codex audit`,
@@ -5175,13 +5194,16 @@ mod foundations_guards {
         // vocabulary referring to the Wave/Slice plan vocabulary.
         // ASCII digit immediately after the separator distinguishes
         // these from legitimate prose (`a slice of bytes`, etc.).
-        for prefix in ["Slice ", "Slice-", "slice ", "slice-"] {
+        // Scanned against the lowercased line so every capitalisation
+        // (including ALL-CAPS `SLICE 3`) trips in one pass.
+        for prefix in ["slice ", "slice-"] {
+            let lower_bytes = lower.as_bytes();
             let mut search_from = 0usize;
-            while let Some(rel) = line[search_from..].find(prefix) {
+            while let Some(rel) = lower[search_from..].find(prefix) {
                 let abs = search_from + rel;
                 let after = abs + prefix.len();
-                if after < line.len() {
-                    let next = line.as_bytes()[after];
+                if after < lower_bytes.len() {
+                    let next = lower_bytes[after];
                     if next.is_ascii_digit() {
                         return true;
                     }
@@ -5195,7 +5217,6 @@ mod foundations_guards {
         // the past-tense `deleted in ` or noun `deletion in ` is the
         // archaeology marker; legitimate prose like `deleted in the
         // refactor` lacks the digit and is preserved.
-        let lower = line.to_ascii_lowercase();
         for prefix in ["deleted in ", "deletion in "] {
             let mut search_from = 0usize;
             while let Some(rel) = lower[search_from..].find(prefix) {
@@ -5208,52 +5229,81 @@ mod foundations_guards {
                 search_from = abs + prefix.len();
             }
         }
-        // `Phase \d+` / `phase \d+` / `Phase-\d+` / `phase-\d+`
-        // (case-insensitive on the verb). Carve-out: `Phase 1: …` is
-        // algorithm-phase prose (colon-prefixed verb after the digit
-        // run); preserve it. Any other byte after the digit run
-        // (letter, `-`, `.`, space, EOL, `,`, `)`, `—`, etc.) is
-        // archaeology.
-        for prefix in ["phase ", "phase-", "Phase ", "Phase-"] {
+        // `retired in <stage>` — retirement history with an explicit
+        // plan-stage reference (e.g. `retired in 5g`, `retired in 11d`,
+        // `retired in §3.2.4`). The stage token — a digit or a `§`
+        // section mark immediately after `retired in ` — is the
+        // archaeology marker. Ordinary Rust `for retired in <expr>`
+        // loop syntax (the next token is an identifier / `[` / `(`) and
+        // prose like `retired in favour of X` lack that tail and are
+        // preserved. `to_ascii_lowercase` leaves digit and `§` bytes
+        // (and byte indices) unchanged, so the slice below is valid.
+        {
+            let prefix = "retired in ";
             let mut search_from = 0usize;
-            while let Some(rel) = line[search_from..].find(prefix) {
+            while let Some(rel) = lower[search_from..].find(prefix) {
+                let abs = search_from + rel;
+                let after = abs + prefix.len();
+                let rest = &lower[after..];
+                if rest.as_bytes().first().is_some_and(u8::is_ascii_digit) || rest.starts_with('§')
+                {
+                    return true;
+                }
+                search_from = abs + prefix.len();
+            }
+        }
+        // `Phase \d+` / `phase \d+` / `Phase-\d+` / `phase-\d+` /
+        // ALL-CAPS `PHASE-\d+` (case-insensitive on the verb — scanned
+        // against the lowercased line so every capitalisation trips in
+        // one pass). Carve-out: `Phase 1: …` is algorithm-phase prose
+        // (colon-prefixed verb after the digit run); preserve it.
+        // Lowercasing leaves digits and `:` unchanged, so the carve-out
+        // byte check is index-compatible with `lower`. Any other byte
+        // after the digit run (letter, `-`, `.`, space, EOL, `,`, `)`,
+        // `—`, etc.) is archaeology.
+        for prefix in ["phase ", "phase-"] {
+            let lower_bytes = lower.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = lower[search_from..].find(prefix) {
                 let abs = search_from + rel;
                 let mut after = abs + prefix.len();
                 let digit_start = after;
-                while after < bytes.len() && bytes[after].is_ascii_digit() {
+                while after < lower_bytes.len() && lower_bytes[after].is_ascii_digit() {
                     after += 1;
                 }
                 if after > digit_start {
-                    if after >= bytes.len() {
+                    if after >= lower_bytes.len() {
                         return true;
                     }
-                    if bytes[after] != b':' {
+                    if lower_bytes[after] != b':' {
                         return true;
                     }
                 }
                 search_from = abs + prefix.len();
             }
         }
-        // `Stage \d+` / `Stage-\d+` / `stage \d+` / `stage-\d+` —
-        // parallel shape to the Phase scan above with the same `:`
-        // carve-out for algorithm-stage prose (`Stage 1: read …`).
-        // Stage is the project-management noun used by the
-        // fact-based cache refactor's plan; it leaks into production
-        // source the same way Phase does.
-        for prefix in ["stage ", "stage-", "Stage ", "Stage-"] {
+        // `Stage \d+` / `Stage-\d+` / `stage \d+` / `stage-\d+` /
+        // ALL-CAPS `STAGE-\d+` — parallel shape to the Phase scan above
+        // with the same `:` carve-out for algorithm-stage prose
+        // (`Stage 1: read …`). Stage is the project-management noun used
+        // by the fact-based cache refactor's plan; it leaks into
+        // production source the same way Phase does. Scanned against the
+        // lowercased line so every capitalisation trips in one pass.
+        for prefix in ["stage ", "stage-"] {
+            let lower_bytes = lower.as_bytes();
             let mut search_from = 0usize;
-            while let Some(rel) = line[search_from..].find(prefix) {
+            while let Some(rel) = lower[search_from..].find(prefix) {
                 let abs = search_from + rel;
                 let mut after = abs + prefix.len();
                 let digit_start = after;
-                while after < bytes.len() && bytes[after].is_ascii_digit() {
+                while after < lower_bytes.len() && lower_bytes[after].is_ascii_digit() {
                     after += 1;
                 }
                 if after > digit_start {
-                    if after >= bytes.len() {
+                    if after >= lower_bytes.len() {
                         return true;
                     }
-                    if bytes[after] != b':' {
+                    if lower_bytes[after] != b':' {
                         return true;
                     }
                 }
@@ -5277,27 +5327,32 @@ mod foundations_guards {
         // violation; the ordinary noun `block` followed by a digit is
         // already archaeology (a sentence does not start
         // "block 5 ..." or "block-5 ..."). The hyphenated form
-        // catches per-block code-names like `block-6.i`.
-        for prefix in ["block ", "Block ", "block-", "Block-"] {
+        // catches per-block code-names like `block-6.i`. Scanned against
+        // the lowercased line so every capitalisation (including ALL-CAPS
+        // `BLOCK 5`) trips in one pass; lowercasing preserves byte
+        // indices and word-char-ness, so the leading/trailing
+        // word-boundary checks stay sound.
+        for prefix in ["block ", "block-"] {
+            let lower_bytes = lower.as_bytes();
             let mut search_from = 0usize;
-            while let Some(rel) = line[search_from..].find(prefix) {
+            while let Some(rel) = lower[search_from..].find(prefix) {
                 let abs = search_from + rel;
                 let after = abs + prefix.len();
-                let bytes = line.as_bytes();
                 // Leading word-boundary: the byte before `block ` is
                 // either start-of-line or a non-word byte.
-                let leading_ok =
-                    abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
-                if leading_ok && after < bytes.len() && bytes[after].is_ascii_digit() {
+                let leading_ok = abs == 0
+                    || !(lower_bytes[abs - 1].is_ascii_alphanumeric()
+                        || lower_bytes[abs - 1] == b'_');
+                if leading_ok && after < lower_bytes.len() && lower_bytes[after].is_ascii_digit() {
                     // Consume the digit run.
                     let mut end = after;
-                    while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    while end < lower_bytes.len() && lower_bytes[end].is_ascii_digit() {
                         end += 1;
                     }
                     // Trailing word-boundary: the byte after the
                     // digit run is either EOL or a non-word byte.
-                    let trailing_ok = end == bytes.len()
-                        || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
+                    let trailing_ok = end == lower_bytes.len()
+                        || !(lower_bytes[end].is_ascii_alphanumeric() || lower_bytes[end] == b'_');
                     if trailing_ok {
                         return true;
                     }
@@ -5305,38 +5360,13 @@ mod foundations_guards {
                 search_from = abs + prefix.len();
             }
         }
-        // `Block \d+\.[a-z]` — orchestrator's project-management
-        // vocabulary (e.g. `Block 6.i`, `Block 6.j`, `Block 12.a`).
-        // The decimal+letter suffix is unique to orchestrator block
-        // references and does not appear in legitimate code prose
-        // (a basic block, allocator block, etc. never carries that
-        // shape). Case-sensitive on the leading B to avoid flagging
-        // ordinary uses of the noun "block". This stays as a
-        // narrower discriminator even though `\bblock \d+\b` above
-        // already catches `Block 12` itself — the decimal+letter
-        // form (`Block 12.a`) is what the orchestrator emits and is
-        // listed explicitly so the deliberate-violation test cases
-        // continue to characterise the original surface.
-        for prefix in ["Block "] {
-            let mut search_from = 0usize;
-            while let Some(rel) = line[search_from..].find(prefix) {
-                let abs = search_from + rel;
-                let mut after = abs + prefix.len();
-                let bytes = line.as_bytes();
-                let digit_start = after;
-                while after < bytes.len() && bytes[after].is_ascii_digit() {
-                    after += 1;
-                }
-                if after > digit_start
-                    && after + 1 < bytes.len()
-                    && bytes[after] == b'.'
-                    && bytes[after + 1].is_ascii_lowercase()
-                {
-                    return true;
-                }
-                search_from = abs + prefix.len();
-            }
-        }
+        // The decimal+letter form (`Block 6.i`, `Block 12.a`) is
+        // already fully covered by the `\bblock \d+\b` scan above: the
+        // digit run is always terminated by the `.` separator (a
+        // non-word byte → `trailing_ok`), so every `block <digit>.<x>`
+        // line trips the boundary-checked broad scan. No separate
+        // decimal+letter branch is needed — and a boundary-less one
+        // false-positives on compounds like `subblock 12.a`.
         // `Commit \d+` — explicit numeric commit reference. The
         // orchestrator's plan documents enumerate commits as `Commit
         // 3`, `Commit 12`, etc.; production source must never cite
@@ -5570,23 +5600,29 @@ mod foundations_guards {
         // (`background`, `surround`). The trailing digit must be at
         // a word boundary so `roundtrip` is NOT flagged. The
         // separator-less form (`round20`) catches scratch-file path
-        // references like `D:/tmp/round20-fix2-report.md`.
-        for needle in ["round ", "round-", "round", "Round ", "Round-", "Round"] {
-            let bytes = line.as_bytes();
+        // references like `D:/tmp/round20-fix2-report.md`. Scanned
+        // against the lowercased line so every capitalisation (including
+        // ALL-CAPS `ROUND-7`) trips in one pass; lowercasing preserves
+        // byte indices and word-char-ness, so the word-boundary checks
+        // stay sound.
+        for needle in ["round ", "round-", "round"] {
+            let lower_bytes = lower.as_bytes();
             let mut search_from = 0usize;
-            while let Some(rel) = line[search_from..].find(needle) {
+            while let Some(rel) = lower[search_from..].find(needle) {
                 let abs = search_from + rel;
-                let is_word_start =
-                    abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
+                let is_word_start = abs == 0
+                    || !(lower_bytes[abs - 1].is_ascii_alphanumeric()
+                        || lower_bytes[abs - 1] == b'_');
                 if is_word_start {
                     let mut after = abs + needle.len();
                     let digit_start = after;
-                    while after < bytes.len() && bytes[after].is_ascii_digit() {
+                    while after < lower_bytes.len() && lower_bytes[after].is_ascii_digit() {
                         after += 1;
                     }
                     if after > digit_start {
-                        let is_word_end = after >= bytes.len()
-                            || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
+                        let is_word_end = after >= lower_bytes.len()
+                            || !(lower_bytes[after].is_ascii_alphanumeric()
+                                || lower_bytes[after] == b'_');
                         if is_word_end {
                             return true;
                         }
@@ -5995,7 +6031,7 @@ mod foundations_guards {
         // Lowercased necessary roots covering every branch except the
         // uppercase-anchored `PE\d+` scan.
         const LOWER_ROOTS: &[&str] = &[
-            "cutover",                   // d-cutover / post-cutover / runtime cutover
+            "cutover",                   // bare cutover + pre-/post-/d-/runtime-cutover
             "phase",                     // pre-Phase / phase \d / phase-archaeology
             "retired in",                // retirement history
             "stage",                     // pre-Stage / stage \d
@@ -6124,7 +6160,7 @@ mod foundations_guards {
              files reference plan phases, plan stages, cutover stages, or deletion history.\n\
              Once a plan is over, the code should read as final-state. Durable architecture\n\
              insights belong in `.claude/skills/*` or `docs/arch/`, not in source comments.\n\n\
-             Forbidden patterns: `d-cutover`, `post-cutover`, `pre-Phase`, `pre-Stage`,\n\
+             Forbidden patterns: `cutover` (any form), `pre-Phase`, `pre-Stage`,\n\
              `post-Stage`, `phase \\d+`, `phase-\\d+`, `Stage \\d+`, `Stage-\\d+`,\n\
              `deleted in 5[a-z]`, `deletion in 5[a-z]`, `retired in`, bare Greek-letter\n\
              phase codenames (`Γ.A`, `Γ.B`), `pre-C\\d`, `post-C\\d`, `Pass C\\d`.\n\n\
@@ -6154,6 +6190,7 @@ mod foundations_guards {
         "#[allow(dead_code)] // deletion in 5g per call-graph closure",
         "// they retire alongside the engine deletion in 5g.",
         "// `legacy_first_pass` was retired in 11d.",
+        "/// the host-parsed thread-locals were retired in §3.2.4.",
         "/// phase-1b cutover deleted the declared component-meta query.",
         // Audit-infrastructure plan archaeology — fixed-needle and
         // `plan §` matches added when the audit-substrate cutover
@@ -6180,6 +6217,13 @@ mod foundations_guards {
         "// Block 6.j R18 — emit PublishedField at the macro publication boundary.",
         "/// Block 6.c per-request hoist read this counter.",
         "// Block 12.a substrate cutover deleted the legacy walker.",
+        // Decimal+letter block forms — caught by the boundary-checked
+        // `\bblock \d+\b` broad scan (the digit run is terminated by
+        // the `.` separator). No dedicated decimal+letter branch
+        // exists; the broad scan flags these with a correct leading
+        // word boundary.
+        "// Block 6.i descends the per-member cursor.",
+        "// block 12.a handles the merged surface.",
         // Commit XY — alpha-suffixed commit markers.
         "// Commit AX (codex-hybrid): the call-site provides the cursor.",
         "// see Commit BX for the carrier-stop closure.",
@@ -6347,6 +6391,25 @@ mod foundations_guards {
         "// C0. Eagerly populate the type-provider workspace roots.", // `.` + UPPERCASE
         "// Distributive distribution is dispatch's job (C2 + lazy block).", // ` +`
         "//   sub-queries (C3).",                                  // `(C3)` parenthesised
+        // ALL-CAPS phase label — pins the case-insensitive
+        // digit-bearing prefix scan. Before the predicate scanned the
+        // lowercased line, the hand-enumerated `["phase ", "phase-",
+        // "Phase ", "Phase-"]` casing list missed the ALL-CAPS form, so
+        // this line would have slipped through `line_has_phase_archaeology`.
+        "/// PHASE-1A — function generic shadowing through the dispatch",
+        // ALL-CAPS Stage / Block / Round / Slice siblings — same
+        // case-insensitive digit-bearing scan, one fixture per family.
+        "// STAGE-4D retired the per-session overlay-mutation lifecycle.",
+        "// BLOCK 6 descends the per-member cursor.",
+        "// ROUND-7 substrate extension closes the publication boundary.",
+        "// SLICE 3 of the wave plan owns the projector surface.",
+        // Bare `cutover` with NO old fixed needle and NO prefix — pins
+        // the standalone case-insensitive `cutover` branch. Every other
+        // cutover fixture above carries a second needle (`D-Cutover`,
+        // `post-cutover`, `runtime cutover`, `Block 12.a … cutover`), so
+        // only these isolate the bare branch.
+        "// G9 cutover left a soundness gap",
+        "// typed-IR cutover note",
     ];
 
     #[test]
@@ -6385,12 +6448,24 @@ mod foundations_guards {
             "// Phase 1: collect import statements.",
             "// Phase 2: emit lowered IR.",
             "// phase 3: walk dependency graph.",
+            // The `:` algorithm-phase carve-out is case-insensitive too:
+            // the scan runs against the lowercased line, so an ALL-CAPS
+            // `PHASE 1:` algorithm step is still exempt (lowercasing
+            // leaves the digits and the `:` unchanged).
+            "// PHASE 1: tokenizer pass.",
             // Algorithm-stage carve-out — the Stage family inherits
-            // the same `:`-prefixed carve-out as Phase.
+            // the same `:`-prefixed carve-out as Phase, case-insensitively.
             "// Stage 1: read parser input.",
             "// stage 2: lower to typed IR.",
+            "// STAGE 1: read parser input.",
             // Legitimate `rev` usage that's not a number.
             "// Reverses (rev) the iteration order.",
+            // `retired in` negatives — ordinary `for retired in <expr>`
+            // Rust loop syntax, and prose without a plan-stage tail,
+            // must NOT flag. Only `retired in <digit>` / `retired in §…`
+            // is the retirement-history archaeology form.
+            "    for retired in [\"OldType\", \"GoneType\"] {",
+            "// the slot was retired in favour of the graph identity.",
             // Stage-family negative cases — Stage followed by a
             // letter (not a digit), or "stage" used in a legitimate
             // prose sense, must not flag.
@@ -6463,6 +6538,14 @@ mod foundations_guards {
             // not flag this.
             "// the request loop blocks once per flight",
             "// `block_until_idle` blocks the worker until drained.",
+            // Compound-noun negatives — a `block <digit>.<letter>`
+            // substring embedded in a longer word (`subblock`,
+            // `superblock`) is NOT orchestrator vocabulary. The
+            // leading word-boundary check on the `\bblock \d+\b` scan
+            // rejects these; a boundary-less decimal+letter branch
+            // would have false-flagged them.
+            "// subblock 12.a handles the nested allocator region.",
+            "// the superblock 3.b cache line",
             // SCOPE-LOCK / Codex-P negatives — benign prose where the
             // banned token does not appear in its marker form.
             "// scope-limited to the owning file's surface.", // `scope-l` but not `scope-lock`
@@ -8864,6 +8947,326 @@ fn phase_archaeology_test_files_count_zero() {
             .cloned()
             .collect::<Vec<_>>()
             .join("\n")
+    );
+}
+
+mod general_test_archaeology {
+    use walkdir::WalkDir;
+
+    use super::workspace_root;
+
+    /// Files under `crates/*/tests/` that legitimately retain
+    /// plan/phase/cutover/block vocabulary because that vocabulary is
+    /// LOAD-BEARING in them — it is detection data, an asserted value, a
+    /// real file path the test reads, or an `#[ignore]` reason a manifest
+    /// pins. Each entry is justified; this is not a silent escape hatch.
+    /// A new test file MUST NOT be added here to dodge the scrub — only a
+    /// file whose vocabulary cannot be removed without breaking the test
+    /// belongs here.
+    pub(super) const ARCHAEOLOGY_ALLOWLIST: &[&str] = &[
+        // This guard file itself: it defines the detection predicate and
+        // carries the `POSITIVE_ARCHAEOLOGY_FIXTURES` deliberate-violation
+        // strings. The vocabulary IS the test subject.
+        "crates/verter_session/tests/architecture_guards.rs",
+        // Detection guards: their job is to find the vocabulary, so their
+        // needle arrays / regexes / docstrings name it.
+        "crates/verter_session/tests/g_misc2/no_post_cutover_deferrals.rs",
+        "crates/verter_session/tests/g_misc3/cutover_state_arch_guard.rs",
+        "crates/verter_session/tests/g_block/typeinfo_wire_surface_guards.rs",
+        "crates/verter_session/tests/g_misc2/is_facts_irrelevant_eligibility.rs",
+        // Module-declaration roots that `#[path]`/`mod`-include the
+        // `.cutover-state` guard modules above; the included filenames
+        // (`no_post_cutover_deferrals`, `cutover_state_arch_guard`) carry
+        // the term load-bearingly, so the declarations cannot be reworded.
+        "crates/verter_session/tests/g_misc2.rs",
+        "crates/verter_session/tests/g_misc3.rs",
+        // Fixture/provenance: cite or read real `phase-00*-tier1-mismatches.md`
+        // fixture files by name, or carry on-disk fixture row provenance.
+        "crates/verter_session/tests/correctness/deferred_fixtures_rule_correct.rs",
+        "crates/verter_session/tests/correctness/expected.rs",
+        "crates/verter_session/tests/correctness/fixtures.rs",
+        "crates/verter_session/tests/component_meta_audit/resolver_coverage_mapped_types.rs",
+        "crates/verter_session/tests/component_meta_audit/resolver_coverage_slot_shapes.rs",
+        // Asserted `#[ignore]` reason pinned to a pending deletion.
+        "crates/verter_session/tests/g_misc3/legacy_accumulate_dispatch_dep_signature_gone.rs",
+    ];
+
+    /// Walk every `crates/*/tests/**/*.rs` file and return each
+    /// archaeology line as `"<rel>:<line_no>"`. Files on
+    /// [`ARCHAEOLOGY_ALLOWLIST`] are skipped. Empty result == invariant
+    /// satisfied. Uses the same `foundations_guards` predicate as the
+    /// production and src-test guards (single source of truth).
+    pub(super) fn collect_general_test_archaeology_violations() -> Vec<String> {
+        let workspace = workspace_root();
+        let allow: std::collections::BTreeSet<&str> =
+            ARCHAEOLOGY_ALLOWLIST.iter().copied().collect();
+        let mut violations = Vec::<String>::new();
+        for crate_entry in std::fs::read_dir(workspace.join("crates")).expect("read crates/") {
+            let crate_dir = crate_entry.expect("crate dir entry").path();
+            let tests = crate_dir.join("tests");
+            if !tests.is_dir() {
+                continue;
+            }
+            for entry in WalkDir::new(&tests) {
+                let entry = entry.expect("walkdir entry");
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&workspace)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if allow.contains(rel.as_str()) {
+                    continue;
+                }
+                let src_text =
+                    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+                // Whole-file pre-reject (coverage-safe).
+                if !super::foundations_guards::file_may_have_phase_archaeology(&src_text) {
+                    continue;
+                }
+                for (line_no, line) in src_text.lines().enumerate() {
+                    if super::foundations_guards::line_has_phase_archaeology(line) {
+                        violations.push(format!("{rel}:{}", line_no + 1));
+                    }
+                }
+            }
+        }
+        violations.sort();
+        violations
+    }
+
+    /// Every path in [`ARCHAEOLOGY_ALLOWLIST`] must exist and must still
+    /// contain at least one archaeology line — otherwise the entry is dead
+    /// and the file should be removed from the allowlist (the scrub is
+    /// complete for it).
+    pub(super) fn dead_allowlist_entries() -> Vec<String> {
+        let workspace = workspace_root();
+        let mut dead = Vec::new();
+        for rel in ARCHAEOLOGY_ALLOWLIST {
+            let path = workspace.join(rel);
+            let Ok(src) = std::fs::read_to_string(&path) else {
+                dead.push(format!("{rel} (missing)"));
+                continue;
+            };
+            let has = src
+                .lines()
+                .any(super::foundations_guards::line_has_phase_archaeology);
+            if !has {
+                dead.push(format!("{rel} (no archaeology — remove from allowlist)"));
+            }
+        }
+        dead
+    }
+}
+
+#[test]
+fn no_phase_archaeology_in_general_test_code() {
+    // Strict invariant: zero phase-archaeology references in the general
+    // `crates/*/tests/**` test tree, EXCEPT the curated
+    // `ARCHAEOLOGY_ALLOWLIST` of files whose vocabulary is load-bearing.
+    // This closes the gap left by `phase_archaeology_test_files_count_zero`
+    // (which covers only `crates/*/src/` test files and `tests/*_data/`).
+    // The classifier is the unified `foundations_guards` predicate, so the
+    // production-code, src-test, and general-test guards stay byte-identical.
+    let violations = general_test_archaeology::collect_general_test_archaeology_violations();
+    assert!(
+        violations.is_empty(),
+        "no_phase_archaeology_in_general_test_code: {} violations remain in `crates/*/tests/**`.\n\
+         Test files must read as final-state, not as a plan changelog. Strip the plan/phase/\n\
+         cutover/block vocabulary and keep the technical content. If a violation is genuinely\n\
+         load-bearing (detection data, asserted value, real file path, pinned `#[ignore]`\n\
+         reason), add the file to `ARCHAEOLOGY_ALLOWLIST` with a justification.\nFirst 20:\n{}",
+        violations.len(),
+        violations
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn general_test_archaeology_allowlist_has_no_dead_entries() {
+    // The allowlist must not rot: every entry must exist and still carry
+    // archaeology. A dead entry means the file was fully scrubbed and the
+    // exemption should be deleted so the guard tightens automatically.
+    let dead = general_test_archaeology::dead_allowlist_entries();
+    assert!(
+        dead.is_empty(),
+        "general_test_archaeology_allowlist_has_no_dead_entries: these allowlist entries are \
+         dead and must be removed:\n{}",
+        dead.join("\n")
+    );
+}
+
+mod packages_ts_archaeology {
+    use walkdir::WalkDir;
+
+    use super::workspace_root;
+
+    /// TypeScript / Vue source files under `packages/` that legitimately
+    /// retain plan/phase/cutover/block vocabulary because it is
+    /// LOAD-BEARING in them — the file's job is to NAME the vocabulary it
+    /// detects, or it is generated output whose schema field text cites a
+    /// rule id. Each entry is justified; this is not a silent escape
+    /// hatch. Keep it minimal — only a file whose vocabulary cannot be
+    /// removed without breaking the file belongs here.
+    pub(super) const PACKAGES_TS_ARCHAEOLOGY_ALLOWLIST: &[&str] = &[
+        // (intentionally empty — all package source reads as final-state)
+    ];
+
+    /// `.ts` / `.tsx` / `.vue` source extension, or a package `readme.md`
+    /// / `README.md`.
+    fn is_scanned_file(path: &std::path::Path) -> bool {
+        if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("ts") | Some("tsx") | Some("vue")
+        ) {
+            return true;
+        }
+        matches!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("readme.md") | Some("README.md")
+        )
+    }
+
+    fn rel(workspace: &std::path::Path, path: &std::path::Path) -> String {
+        path.strip_prefix(workspace)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    /// Walk every package's `src/**` tree plus each package's root-level
+    /// source files (`packages/<pkg>/*.{ts,tsx,vue}`) and root `readme`,
+    /// returning each archaeology line as `"<rel>:<line_no>"`. Files on
+    /// [`PACKAGES_TS_ARCHAEOLOGY_ALLOWLIST`] are skipped. Uses the same
+    /// `foundations_guards` predicate as the Rust guards (single source of
+    /// truth).
+    pub(super) fn collect_packages_ts_archaeology_violations() -> Vec<String> {
+        let workspace = workspace_root();
+        let allow: std::collections::BTreeSet<&str> =
+            PACKAGES_TS_ARCHAEOLOGY_ALLOWLIST.iter().copied().collect();
+        let packages = workspace.join("packages");
+        let mut violations = Vec::<String>::new();
+        let Ok(pkgs) = std::fs::read_dir(&packages) else {
+            return violations;
+        };
+        let mut scan = |path: &std::path::Path| {
+            let r = rel(&workspace, path);
+            if allow.contains(r.as_str()) {
+                return;
+            }
+            let Ok(src) = std::fs::read_to_string(path) else {
+                return;
+            };
+            if !super::foundations_guards::file_may_have_phase_archaeology(&src) {
+                return;
+            }
+            for (line_no, line) in src.lines().enumerate() {
+                if super::foundations_guards::line_has_phase_archaeology(line) {
+                    violations.push(format!("{r}:{}", line_no + 1));
+                }
+            }
+        };
+        for pkg_entry in pkgs.flatten() {
+            let pkg_dir = pkg_entry.path();
+            if !pkg_dir.is_dir() {
+                continue;
+            }
+            // Root-level source files (non-recursive): `audit.ts`,
+            // `index.ts`, `readme.md`, etc.
+            if let Ok(root_entries) = std::fs::read_dir(&pkg_dir) {
+                for entry in root_entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() && is_scanned_file(&path) {
+                        scan(&path);
+                    }
+                }
+            }
+            // `src/**` recursive.
+            let src_dir = pkg_dir.join("src");
+            if src_dir.is_dir() {
+                for entry in WalkDir::new(&src_dir) {
+                    let entry = entry.expect("walkdir entry");
+                    let path = entry.path();
+                    if entry.file_type().is_file() && is_scanned_file(path) {
+                        scan(path);
+                    }
+                }
+            }
+        }
+        violations.sort();
+        violations
+    }
+
+    pub(super) fn dead_allowlist_entries() -> Vec<String> {
+        let workspace = workspace_root();
+        let mut dead = Vec::new();
+        for rel_path in PACKAGES_TS_ARCHAEOLOGY_ALLOWLIST {
+            let path = workspace.join(rel_path);
+            let Ok(src) = std::fs::read_to_string(&path) else {
+                dead.push(format!("{rel_path} (missing)"));
+                continue;
+            };
+            let has = src
+                .lines()
+                .any(super::foundations_guards::line_has_phase_archaeology);
+            if !has {
+                dead.push(format!(
+                    "{rel_path} (no archaeology — remove from allowlist)"
+                ));
+            }
+        }
+        dead
+    }
+}
+
+#[test]
+fn no_phase_archaeology_in_packages_ts_source() {
+    // Strict invariant: zero phase-archaeology references in the TypeScript
+    // / Vue package SOURCE tree (`packages/*/src/**`, each package's
+    // root-level source files, and package `readme.md`/`README.md`),
+    // EXCEPT the curated `PACKAGES_TS_ARCHAEOLOGY_ALLOWLIST`. Package
+    // source must read as final-state, not as a plan changelog. The
+    // classifier is the unified `foundations_guards` predicate, so the
+    // Rust and TypeScript surfaces share one detection source of truth.
+    let violations = packages_ts_archaeology::collect_packages_ts_archaeology_violations();
+    assert!(
+        violations.is_empty(),
+        "no_phase_archaeology_in_packages_ts_source: {} violations remain in `packages/*/src/**`.\n\
+         Package source must read as final-state. Strip the plan/phase/cutover/block vocabulary\n\
+         and keep the technical content. If a violation is genuinely load-bearing (a detection\n\
+         needle, an asserted value, generated schema text), add the file to\n\
+         `PACKAGES_TS_ARCHAEOLOGY_ALLOWLIST` with a justification.\nFirst 30:\n{}",
+        violations.len(),
+        violations
+            .iter()
+            .take(30)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn packages_ts_archaeology_allowlist_has_no_dead_entries() {
+    // The TS allowlist must not rot: every entry must exist and still carry
+    // archaeology. A dead entry means the file was fully scrubbed and the
+    // exemption should be deleted so the guard tightens automatically.
+    let dead = packages_ts_archaeology::dead_allowlist_entries();
+    assert!(
+        dead.is_empty(),
+        "packages_ts_archaeology_allowlist_has_no_dead_entries: these allowlist entries are \
+         dead and must be removed:\n{}",
+        dead.join("\n")
     );
 }
 

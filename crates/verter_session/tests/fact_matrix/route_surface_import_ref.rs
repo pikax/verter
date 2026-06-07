@@ -30,10 +30,9 @@ fn route_surface_signature_carries_import_ref() {
     assert!(
         src.contains("pub struct BarrelRouteSurface")
             && src.contains("fact_dep_signature: Arc<[FactVersionRef]>"),
-        "Block 1.8 route_surface matrix slice: `BarrelRouteSurface` \
+        "route_surface matrix slice: `BarrelRouteSurface` \
          MUST declare `fact_dep_signature: Arc<[FactVersionRef]>` in \
-         `resolver_core/route_db.rs` after the Stage 6c substrate \
-         migration."
+         `resolver_core/route_db.rs`."
     );
 
     let import_fact = FactVersionRef::Parse(ParseFactRef {

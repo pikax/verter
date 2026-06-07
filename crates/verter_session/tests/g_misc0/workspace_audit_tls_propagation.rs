@@ -1,6 +1,5 @@
 #![allow(deprecated)]
-//! TLS-observer propagation through `WorkspaceAccess::audit_op`
-//! (Wave 3 Slice 3.D follow-up).
+//! TLS-observer propagation through `WorkspaceAccess::audit_op`.
 //!
 //! `audit_op` is a trait method on `WorkspaceAccess`; the
 //! session-level wrapper [`VerterHost::audit_workspace_op`] installs

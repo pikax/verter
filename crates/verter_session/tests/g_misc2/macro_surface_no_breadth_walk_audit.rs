@@ -3,7 +3,7 @@
 //! follow ONLY the import graph reachable from the requested type's declaration
 //! graph, never breadth-walk the owner SFC's OTHER (unrelated) imports.
 //!
-//! Unlike the `u3c_chatmessages_cutover_audit` gate — which polices breadth on
+//! Unlike the `u3c_chatmessages_audit` gate — which polices breadth on
 //! the real ChatMessages fixture whose package imports are unresolvable in the
 //! hermetic setup (so they never produce a probe) — this is a MINIMAL,
 //! controlled fixture where the unrelated import is a RESOLVABLE workspace file.

@@ -1,14 +1,14 @@
-//! Phase 0 — test-only stable projection of `ComponentMetaAnalysis`.
+//! Test-only stable projection of `ComponentMetaAnalysis`.
 //!
 //! This view exists ONLY in tests. It does NOT add `Serialize` to
-//! production types (verified at plan-write time per §0p.A.1.5). The
+//! production types. The
 //! projection drops fields that are known-non-deterministic (raw
 //! spans, source positions tied to byte offsets, internal cache
 //! identifiers) and sorts every collection by a stable key so the
 //! JSON output is identical between runs and across machines.
 //!
 //! Every field that affects type-resolution correctness is
-//! included — the §0p.A.5 discriminating self-test row table is the
+//! included — the discriminating self-test row table is the
 //! coverage contract: adding a new SnapshotView field requires
 //! adding a `MutationKind` row in `correctness.rs`. Without that, the
 //! gate is silently blind to the new field.
@@ -203,7 +203,7 @@ fn exposed_view_from(exposed: &ExposedAnalysis) -> ExposedView {
 }
 
 fn build_fallthrough_view(analysis: &ComponentMetaAnalysis) -> Option<FallthroughView> {
-    // Projection rule (§0.6.1 small decision): the fallthrough view
+    // Projection rule: the fallthrough view
     // is emitted ONLY when the SFC's fallthrough surface is
     // *meaningful* for component-meta semantics — that is, either
     // (a) the SFC explicitly opted out via `inheritAttrs: false`, or
@@ -211,10 +211,10 @@ fn build_fallthrough_view(analysis: &ComponentMetaAnalysis) -> Option<Fallthroug
     // entry (the propagation case from §"Fallthrough / Root
     // Inheritance" in CLAUDE.md). The default native-tag fallthrough
     // (e.g., a `<div />` root surfacing every HTMLAttributes member)
-    // is suppressed because it is identical for every Phase 0a SFC
-    // and would dominate the snapshot diff. Phase 0b's
+    // is suppressed because it is identical for every default-root SFC
+    // and would dominate the snapshot diff. The
     // `fixture_fallthrough_inherit` and `fixture_fallthrough_root_inherit`
-    // both trigger one of (a) or (b).
+    // fixtures both trigger one of (a) or (b).
     match &analysis.fallthrough_surface {
         FallthroughSurface::None { reason } => match reason {
             NoFallthroughReason::InheritAttrsFalse => Some(FallthroughView {
