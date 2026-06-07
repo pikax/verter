@@ -5,13 +5,11 @@ description: "Rust performance optimization patterns: batch operations, allocati
 
 # Rust Performance Guide
 
-Principles for writing performant Rust in `verter_compiler`, grounded in the crate's APIs and patterns.
+Principles for writing performant Rust in `verter_compiler`.
 
 ## 1. Batch Over Incremental
 
-The highest-impact pattern. `CodeTransform` operations like `overwrite()` and `prepend_left()` each walk the chunk list in O(n). Calling them in a loop is O(n\*N).
-
-Instead, collect operations into `Vec`s and apply with the batch APIs:
+`CodeTransform` operations like `overwrite()` and `prepend_left()` each walk the chunk list in O(n). Calling them in a loop is O(n\*N). Collect operations into `Vec`s and apply with batch APIs:
 
 - `batch_overwrite(ops: &[(u32, u32, &str)])` — sorted overwrites in one chunk-list pass
 - `batch_prepend_left_static(ops: &[(u32, &str)])` — sorted inserts in one pass
@@ -27,7 +25,7 @@ replacements.sort_by_key(|(start, _, _)| *start);
 code_transform.batch_overwrite(&replacements);
 ```
 
-General principle: if you're calling a mutating method in a loop, ask whether the operations can be collected and applied in one traversal.
+If calling a mutating method in a loop, ask whether operations can be collected and applied in one traversal.
 
 ## 2. Allocation Hierarchy
 
@@ -39,13 +37,13 @@ Prefer allocations in this order (fastest to slowest):
 4. **Reusable `&mut String` buffer** — amortized cost via capacity reuse
 5. **`String`** — heap-allocated, avoid in hot paths
 
-| Need                                          | Use                                             |
-| --------------------------------------------- | ----------------------------------------------- |
-| Known constant value                          | `&'static str`                                  |
+| Need | Use |
+| ---- | --- |
+| Known constant value | `&'static str` |
 | Generated text that outlives current function | `code_transform.alloc_str(buf)` → `&'alloc str` |
-| Substring of source input                     | `&ctx.input[start..end]`                        |
-| Temporary text build-up                       | Shared `&mut String` buffer (see below)         |
-| Truly owned, long-lived, mutable text         | `String`                                        |
+| Substring of source input | `&ctx.input[start..end]` |
+| Temporary text build-up | Shared `&mut String` buffer (see below) |
+| Truly owned, long-lived, mutable text | `String` |
 
 ## 3. Reusable Buffer Pattern
 
@@ -61,7 +59,7 @@ self.buf = buf; // return — retains capacity for next element
 // Use `buf` directly, not `&mut buf` (it's already &mut String).
 ```
 
-After building text in `buf`, persist it via bump allocator:
+After building text in `buf`, persist via bump allocator:
 
 ```rust
 buf.clear();
@@ -74,7 +72,7 @@ pending_overwrites.push((start, end, s));
 
 ### Save/Truncate for Nested Buffer Use
 
-When you need to build a temporary string inside a function that already uses `buf`, use save/truncate instead of allocating a second buffer:
+To build a temporary string inside a function already using `buf`, use save/truncate instead of allocating a second buffer:
 
 ```rust
 let saved = buf.len();
@@ -88,11 +86,11 @@ let result = code_transform.alloc_str(&buf[saved..]);
 buf.truncate(saved); // restore buf to previous state
 ```
 
-This avoids per-element heap allocation when building intermediate strings like hoisted props.
+Avoids per-element heap allocation when building intermediate strings like hoisted props.
 
 ## 4. Object Pooling
 
-`StateStack` (per-element state during tree walk) contains multiple `Vec` fields. Instead of allocating/dropping per element, pool them:
+`StateStack` (per-element state during tree walk) contains multiple `Vec` fields. Pool instead of allocating/dropping per element:
 
 ```rust
 // Take from pool — Vecs retain capacity from previous use:
@@ -111,7 +109,7 @@ fn return_state(&mut self, state: StateStack) {
 }
 ```
 
-Apply this pattern to any struct with inner collections that is repeatedly created/dropped in a loop. `Vec::clear()` retains allocated capacity.
+Apply to any struct with inner collections repeatedly created/dropped in a loop. `Vec::clear()` retains allocated capacity.
 
 ## 5. Borrow Source Instead of Cloning
 
@@ -127,11 +125,11 @@ let name: &str = &ctx.input[start as usize..end as usize];
 buf.push_str(name);
 ```
 
-For struct fields, prefer `&'alloc str` (bump-allocated) when the struct's lifetime allows it. If adding a lifetime would cascade through too many types, `String` is acceptable.
+For struct fields, prefer `&'alloc str` (bump-allocated) when the struct's lifetime allows. If adding a lifetime would cascade through too many types, `String` is acceptable.
 
 ## 6. Static Fast Paths
 
-For functions that frequently return one of a small set of constants, return `&'static str` directly. Note that `&'static str` coerces to `&'alloc str`, so static constants can be used anywhere bump-allocated strings are expected.
+For functions frequently returning one of a small set of constants, return `&'static str` directly. `&'static str` coerces to `&'alloc str`, so static constants can be used anywhere bump-allocated strings are expected.
 
 ```rust
 // Common close strings — no bump allocation needed
@@ -147,7 +145,7 @@ let close_str: &'alloc str = if patch_flag.0 == 0 && !is_block_root {
 
 ## 7. Pre-size Collections
 
-Use `with_capacity` when the expected size is known or estimable:
+Use `with_capacity` when expected size is known or estimable:
 
 ```rust
 pending_overwrites: Vec::with_capacity(512),
@@ -232,27 +230,27 @@ Agent MCP config template: `mcp/hotpath.mcp.json`
 
 ### Where NOT to Look for Further Gains
 
-| Area                                        | Why it won't help                                              |
-| ------------------------------------------- | -------------------------------------------------------------- |
-| `offset_to_line_col` binary search          | Already fast for typical file sizes                            |
-| `emit_mapped_content` signature             | Changing parameters causes LLVM optimization regressions       |
-| `memchr_iter` in source map                 | Already optimal — memchr uses SIMD                             |
-| `Vec<ChildRecord>` reuse                    | Small Vec allocations (1-10 items) are already fast            |
+| Area | Why it won't help |
+| ---- | ----------------- |
+| `offset_to_line_col` binary search | Already fast for typical file sizes |
+| `emit_mapped_content` signature | Changing parameters causes LLVM optimization regressions |
+| `memchr_iter` in source map | Already optimal — memchr uses SIMD |
+| `Vec<ChildRecord>` reuse | Small Vec allocations (1-10 items) are already fast |
 | `resolve_simple_expr` per-expression String | ~10-20 calls per component, ~20 bytes each — below noise floor |
-| Component resolution String allocation      | Per-component, unavoidable (tag names are dynamic)             |
+| Component resolution String allocation | Per-component, unavoidable (tag names are dynamic) |
 
 ## Anti-Patterns
 
-| Pattern                                              | Problem                                                  | Fix                                         |
-| ---------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------- |
-| `overwrite()`/`prepend_left()` in a loop             | O(n) per call                                            | Collect into Vec + batch API                |
-| `buf.clone()` for storage                            | Heap alloc per clone                                     | `code_transform.alloc_str(buf)`             |
-| `.to_string()` on `ctx.input` slices                 | Unnecessary heap copy                                    | `&ctx.input[start..end]`                    |
-| Fresh Vec-heavy structs per iteration                | Alloc/dealloc churn                                      | Pool + `reset()` with `.clear()`            |
-| `Instant::now()` unconditionally                     | Panics in WASM                                           | `#[cfg(not(target_arch = "wasm32"))]` guard |
-| SmallVec with large types (>64B) in Box'd structs    | Inflates allocation size, 40-50% regression              | Keep `Vec`                                  |
-| `Vec<String>` for bump-allocatable content           | Per-element heap alloc                                   | `Vec<&'alloc str>` + save/truncate          |
-| Explicit `is_sorted` check before sort               | Rust's TimSort already detects sorted runs               | Just call `.sort_by_key()`                  |
-| Changing hot function signatures                     | Causes LLVM optimization regressions                     | Keep hot function signatures stable         |
-| Linear sweep replacing binary search on <1K elements | Binary search already in CPU branch predictor sweet spot | Only consider at >10K elements              |
-| Reusing small Vecs (1-10 items)                      | Allocator handles small allocations efficiently          | Only pool/reuse Vecs with >50 items         |
+| Pattern | Problem | Fix |
+| ------- | ------- | --- |
+| `overwrite()`/`prepend_left()` in a loop | O(n) per call | Collect into Vec + batch API |
+| `buf.clone()` for storage | Heap alloc per clone | `code_transform.alloc_str(buf)` |
+| `.to_string()` on `ctx.input` slices | Unnecessary heap copy | `&ctx.input[start..end]` |
+| Fresh Vec-heavy structs per iteration | Alloc/dealloc churn | Pool + `reset()` with `.clear()` |
+| `Instant::now()` unconditionally | Panics in WASM | `#[cfg(not(target_arch = "wasm32"))]` guard |
+| SmallVec with large types (>64B) in Box'd structs | Inflates allocation size, 40-50% regression | Keep `Vec` |
+| `Vec<String>` for bump-allocatable content | Per-element heap alloc | `Vec<&'alloc str>` + save/truncate |
+| Explicit `is_sorted` check before sort | Rust's TimSort already detects sorted runs | Just call `.sort_by_key()` |
+| Changing hot function signatures | Causes LLVM optimization regressions | Keep hot function signatures stable |
+| Linear sweep replacing binary search on <1K elements | Binary search already in CPU branch predictor sweet spot | Only consider at >10K elements |
+| Reusing small Vecs (1-10 items) | Allocator handles small allocations efficiently | Only pool/reuse Vecs with >50 items |

@@ -6,7 +6,7 @@ description: Generate copy-pasteable prompts for driving separate Claude Code se
 
 # Agent Prompts
 
-Generate prompts for driving separate Claude Code sessions. Emit prompts INLINE in the chat (never save as files) so the user can copy-paste directly into fresh agent sessions. Every generated prompt preserves fixed invariants that close specific failure modes observed in prior runs.
+Generate prompts for driving separate Claude Code sessions. Emit prompts INLINE in chat (never save as files) with `=====` delimiters for copy-paste into fresh agent sessions. Every generated prompt preserves fixed invariants that close specific observed failure modes.
 
 ## Variants
 
@@ -18,7 +18,7 @@ Generate prompts for driving separate Claude Code sessions. Emit prompts INLINE 
 | Fix-implementer | 1 prompt | "fix prompt", "fix-implementer prompt", "apply the review" |
 | **Review workflow** | **2 prompts (pair)** | "review workflow", "two prompts for two sessions", "generate the pair", "review + fix pair", "prompts for two agent sessions" |
 
-The review-workflow is the common case when the user wants TWO distinct prompts for TWO separate clean sessions (one reviews, the other applies fixes).
+Review-workflow is the common case for TWO distinct prompts for TWO separate clean sessions.
 
 ## Required inputs
 
@@ -26,7 +26,7 @@ Ask concise questions if not provided; do not invent values.
 
 **All variants:**
 - Plan file path (absolute).
-- Repo path (default: current working directory).
+- Repo path (default: cwd).
 - Starting / staging branch.
 - Target / mainline branch (e.g. `refactor/<track>` or `main`).
 
@@ -36,7 +36,7 @@ Ask concise questions if not provided; do not invent values.
   - `git log --oneline <target>..HEAD` to enumerate actual commits.
   - `git status --short` to check working tree.
   - File-existence spot checks on paths the handoff claims deleted/kept.
-  - If handoff claims diverge from reality, note the discrepancies in the generated continuation prompt so the next agent is warned.
+  - If handoff claims diverge from reality, note discrepancies in the continuation prompt.
 
 **Review / workflow additionally:**
 - Reviewer persona (default: `harsh reviewer, in a bad mood, DRY / KISS / long-term-maintainability focused`).
@@ -48,16 +48,16 @@ Ask concise questions if not provided; do not invent values.
 
 ## Generation workflow
 
-1. Identify variant from the user's trigger phrase.
-2. Ask for any missing required inputs in a single concise message.
+1. Identify variant from trigger phrase.
+2. Ask for missing required inputs in a single message.
 3. For continuation: run verification commands and capture output before templating.
-4. Parameterise the matching template(s) below with inputs + verified state.
-5. Emit the prompt(s) INLINE in the chat as markdown code blocks with `=====` delimiters. Do NOT save to files. Do NOT reference paths.
-6. Brief reporting line after the prompt block(s) — see Output format.
+4. Parameterise matching template(s) with inputs + verified state.
+5. Emit prompt(s) INLINE as markdown code blocks with `=====` delimiters. Do NOT save to files. Do NOT reference paths.
+6. Brief reporting line after the prompt block(s).
 
 ## Invariants (NEVER strip from any generated prompt)
 
-Each closes a specific failure mode observed in prior runs. If the user asks to omit any of these, refuse and state which failure mode the invariant prevents.
+Each closes a specific failure mode. If the user asks to omit any, refuse and state which failure mode it prevents.
 
 1. **Stub Prevention citation.** Name `C:/Users/david/.claude/CLAUDE.md` `# Stub Prevention` (global) and project-level `CLAUDE.md` `### Stub Prevention (CRITICAL)` if present. Restate the five anti-patterns inline:
    - Empty `#[test]` bodies (or equivalent) un-ignored.
@@ -113,7 +113,7 @@ Open TWO fresh Claude Code 1M Context sessions.
 Workflow: Session A reviews and emits findings → paste findings into Session B → Session B applies them, runs the gate, squashes.
 ```
 
-The `=====` delimiters make the copy-paste boundaries unambiguous. Never concatenate the pair.
+The `=====` delimiters make copy-paste boundaries unambiguous. Never concatenate the pair.
 
 ---
 
@@ -466,9 +466,9 @@ Start. Apply the first finding now. Do not ask for confirmation.
 
 ## Operational notes
 
-- **Never save generated prompts to files.** Emit them inline in the chat as markdown code blocks with `=====` delimiters. Users copy from the chat directly into fresh sessions.
+- **Never save generated prompts to files.** Emit inline as markdown code blocks with `=====` delimiters.
 - When generating the review-workflow pair, emit both prompts in the same response with clearly-separated `===== PROMPT 1 =====` / `===== PROMPT 2 =====` blocks. Never concatenate.
 - Substitute every `{{PLACEHOLDER}}` from user input + verification. Don't leave placeholders in output.
-- If the user's project lacks a `CLAUDE.md` Stub Prevention section, inline the rule body in the generated prompt anyway — the prompt is the only rule reference the downstream agent will load.
+- If the project lacks a `CLAUDE.md` Stub Prevention section, inline the rule body in the generated prompt anyway.
 - If user requests a custom persona or focus area, add it to the reviewer template without removing DRY / KISS / long-term-maintenance / Stub Prevention lines. Those stay.
 - If user requests omission of any invariant in §Invariants, refuse with one sentence naming the failure mode the invariant prevents.

@@ -7,7 +7,7 @@ description: "Build dependency chains, rebuild sequences, profiling with MCP, an
 
 ## Build Dependency Chain
 
-When changing Rust code, you must rebuild downstream artifacts in order:
+When changing Rust code, rebuild downstream artifacts in order:
 
 ```
 verter_compiler + verter_semantic + verter_session + verter_ffi (Rust crates)
@@ -37,9 +37,9 @@ playground E2E tests
 ## Key Details
 
 - `@verter/unplugin` depends on `@verter/native` — compiles `.vue` files at build time via the Rust native binary
-- `@verter/playground` uses `@verter/unplugin` (devDep) for its own Vue SFC compilation, and `@verter/wasm` (dep) for the in-browser editor
-- The native binary lives in `packages/native/dist/` after `build:native`
-- The LSP binary lives in `target/debug/verter-lsp` (or `target/release/verter-lsp` with `build:lsp:release`)
+- `@verter/playground` uses `@verter/unplugin` (devDep) for Vue SFC compilation, and `@verter/wasm` (dep) for the in-browser editor
+- Native binary lives in `packages/native/dist/` after `build:native`
+- LSP binary lives in `target/debug/verter-lsp` (or `target/release/verter-lsp` with `build:lsp:release`)
 - Clear Vite cache (`node_modules/.vite`) when rebuilding playground after native changes
 
 ## Quick Rebuild (Native)
@@ -51,7 +51,7 @@ cargo build --release --package verter_napi && rm -f packages/native/dist/verter
 
 ## Profiling with Hotpath
 
-The `hotpath` feature flag enables `#[hotpath::measure]` annotations on key functions for timing/allocation profiling. It propagates across 7 crates:
+The `hotpath` feature flag enables `#[hotpath::measure]` annotations on key functions for timing/allocation profiling. Propagates across 7 crates:
 
 ```
 verter_bench --features hotpath
@@ -93,7 +93,7 @@ Requires `VERTER_TEST_REPOS` env var or a sibling `verter-test-repos` directory.
 
 ## Analysis MCP Server (`verter_mcp`)
 
-The `verter-mcp` binary exposes Verter's full analysis, diagnostics, compilation, and scoring pipeline via MCP. It provides 33 tools for AI agents to deeply understand Vue codebases without reading files directly.
+`verter-mcp` exposes Verter's full analysis, diagnostics, compilation, and scoring pipeline via MCP. Provides 33 tools for AI agents to understand Vue codebases without reading files directly.
 
 ```bash
 # Build
@@ -108,7 +108,7 @@ verter-mcp --transport http --project-root /path/to/vue-project
 # Serves at http://localhost:6772/mcp
 ```
 
-MCP config files are checked in at:
+MCP config files:
 
 - `mcp/verter.mcp.json` (stdio)
 - `mcp/verter-http.mcp.json` (HTTP)
@@ -117,7 +117,7 @@ For the full tool catalog and agent workflow guide, see [mcp/README.md](../../..
 
 ## Meta UI Benchmark
 
-The repository-owned real-project component-meta benchmark lives in `packages/benchmark`:
+Repository-owned real-project component-meta benchmark in `packages/benchmark`:
 
 ```bash
 pnpm --filter @verter/benchmark bench:meta:ui:setup
@@ -153,9 +153,9 @@ Interpretation:
 - `query_ms_from_stdout` is the best lightweight request-latency number.
 - `wall_ms` includes Node/bootstrap/teardown overhead.
 - `trace_resolve_ms` is only the primary `resolve_component_meta` root span.
-- `trace_query_ms` is the sum of all traced root spans in the request and is better when secondary extraction/fallthrough/imported-local work matters.
+- `trace_query_ms` is the sum of all traced root spans in the request; better when secondary extraction/fallthrough/imported-local work matters.
 
-The trace checker can validate both performance rules and expected metadata artifacts:
+Trace checker validates both performance rules and expected metadata artifacts:
 
 ```bash
 npx tsx packages/benchmark/src/trace-check.ts \
@@ -167,7 +167,7 @@ npx tsx packages/benchmark/src/trace-check.ts \
 
 ### Real Component-Meta Profiler
 
-For real-project native hotspot attribution, use the dedicated profiler example:
+For real-project native hotspot attribution:
 
 ```bash
 cargo run -p verter_bench --example profile_real_component_meta --release --features=hotpath -- Accordion
@@ -182,9 +182,9 @@ Useful environment variables:
 
 Practical guidance:
 
-- first use `trace-component-corpus.mjs --no-trace` to confirm a real regression
-- then use traced runs to identify the owning stage
-- only then use `profile_real_component_meta` or an external sampler for native call-tree attribution
+- First use `trace-component-corpus.mjs --no-trace` to confirm a real regression.
+- Then use traced runs to identify the owning stage.
+- Only then use `profile_real_component_meta` or an external sampler for native call-tree attribution.
 
 ### External Sampling Profilers
 
@@ -194,4 +194,4 @@ Practical guidance:
 
 ### Canonical Corpus for Component-Meta Baselines
 
-The canonical corpus for component-meta perf baselines is `nuxt-ui-codex-bench`, NOT `nuxt-ui`. The `.integration-tests/repos/nuxt-ui` symlink points to a checkout that lacks `src/runtime/components/`; treat it as a stale clone destination and ignore it. Always pass `--ui-root=.integration-tests/repos/nuxt-ui-codex-bench` (or `VERTER_AUDIT_PROJECT_ROOT=...nuxt-ui-codex-bench`) to baseline runners. The corpus commit is locked at integration-branch creation time in `tmp/perf-baselines/pre/baseline-commit.txt` (gitignored), which records `baseline-commit`, `corpus-path`, and `corpus-commit` entries; downstream verification re-reads `corpus-commit` and asserts the live corpus tree still matches before dispatching dependent waves. Bound JSONs under `crates/verter_session/tests/perf_bounds/{component-id}.json` use portable component IDs (lower-kebab) plus relative corpus paths plus the corpus-commit SHA; they MUST NOT contain absolute host paths because they ship to `main` and would break every contributor's checkout.
+Canonical corpus for component-meta perf baselines is `nuxt-ui-codex-bench`, NOT `nuxt-ui`. The `.integration-tests/repos/nuxt-ui` symlink points to a checkout that lacks `src/runtime/components/`; treat it as a stale clone destination and ignore it. Always pass `--ui-root=.integration-tests/repos/nuxt-ui-codex-bench` (or `VERTER_AUDIT_PROJECT_ROOT=...nuxt-ui-codex-bench`) to baseline runners. Corpus commit is locked at integration-branch creation time in `tmp/perf-baselines/pre/baseline-commit.txt` (gitignored), recording `baseline-commit`, `corpus-path`, and `corpus-commit` entries; downstream verification re-reads `corpus-commit` and asserts the live corpus tree still matches before dispatching dependent waves. Bound JSONs under `crates/verter_session/tests/perf_bounds/{component-id}.json` use portable component IDs (lower-kebab) plus relative corpus paths plus the corpus-commit SHA; they MUST NOT contain absolute host paths because they ship to `main` and would break every contributor's checkout.

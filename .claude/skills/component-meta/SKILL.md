@@ -7,53 +7,20 @@ description: "Component metadata: native vs compat boundary, fallthrough/root in
 
 ## Audit & footprint
 
-Per-request semantic footprint observability is split across two
-crates:
+Per-request semantic footprint observability splits across two crates:
 
-- **`verter_audit`** (substrate) — owns the `RequestAuditRecord`
-  envelope, `RequestKind` / `RequestKindPayload` discriminants, all
-  per-kind payload structs (`ComponentMetaPayload`,
-  `TypeResolutionPayload`, `SemanticAnalysisPayload`,
-  `CompilePayload`, `WorkspacePayload`, `LspRequestPayload`,
-  `McpToolPayload`, `BundlerBatchPayload`), the producer-side
-  `AuditObserver` trait + `AuditEvent` counter hook, the
-  `StructuredAuditEvent` enum + variant payloads (in
-  `verter_audit::origin_graph`), `AuditConfig` +
-  `AuditConsumerFilter`, and the trivial `NoOpObserver`.
-- **`verter_session`** — owns the concrete `HostAuditRuntime`,
-  `AuditRecordsStore`, the `AuditRequestRegistration` lifecycle
-  (Active / Noop arms with RAII drop), the per-request
-  `RequestContext` + TLS observer guard, the accumulator, the
-  footprint miner, the host-owned peak-RSS sampler thread (native
-  only), structured-trace macros, and the `AuditedRequest` test
-  harness.
+- **`verter_audit`** (substrate) — owns `RequestAuditRecord` envelope, `RequestKind` / `RequestKindPayload` discriminants, all per-kind payload structs (`ComponentMetaPayload`, `TypeResolutionPayload`, `SemanticAnalysisPayload`, `CompilePayload`, `WorkspacePayload`, `LspRequestPayload`, `McpToolPayload`, `BundlerBatchPayload`), producer-side `AuditObserver` trait + `AuditEvent` counter hook, `StructuredAuditEvent` enum + variant payloads (in `verter_audit::origin_graph`), `AuditConfig` + `AuditConsumerFilter`, trivial `NoOpObserver`.
+- **`verter_session`** — owns concrete `HostAuditRuntime`, `AuditRecordsStore`, `AuditRequestRegistration` lifecycle (Active / Noop arms, RAII drop), per-request `RequestContext` + TLS observer guard, accumulator, footprint miner, host-owned peak-RSS sampler thread (native only), structured-trace macros, `AuditedRequest` test harness.
 
-Opt-in via `HostConfig::audit_enabled + footprint_capture` (and
-`audit_timing_capture` for the timing surface).
+Opt-in via `HostConfig::audit_enabled + footprint_capture` (and `audit_timing_capture` for timing surface).
 
-The component-meta-specific store counters and solver counters live
-on `ComponentMetaPayload` (paired with `RequestKind::ComponentMeta`).
-`RequestFootprintAudit::loaded_files()` is the exact-read answer;
-`declared_dependency_files()` is the broader dependency-closure
-answer. Audit endpoints (`why_loaded` / `why_instantiated`) read
-from the audit accumulator; TS helpers only render JSON.
+Component-meta store counters and solver counters live on `ComponentMetaPayload` (paired with `RequestKind::ComponentMeta`). `RequestFootprintAudit::loaded_files()` is the exact-read answer; `declared_dependency_files()` is the broader dependency-closure answer. Audit endpoints (`why_loaded` / `why_instantiated`) read from the audit accumulator; TS helpers only render JSON.
 
-NAPI + WASM + LSP consumers route through the shared session-layer
-materialiser at
-`crates/verter_session/src/component_meta_materialize.rs`
-(`materialize_component_meta_structure` entry), backed by
-graph-native policy predicates in `meta_resolve.rs`
-(`extract_route_root_identity_node`,
-`ref_root_reaches_transitive_cycle_node`,
-`component_meta_ref_resolves_to_package_node`). Benchmark correctness is
-validated by `packages/benchmark/src/audit-validator.ts` against
-`packages/benchmark/audit-specs/component-meta/*.json`.
+NAPI + WASM + LSP consumers route through the shared session-layer materialiser at `crates/verter_session/src/component_meta_materialize.rs` (`materialize_component_meta_structure` entry), backed by graph-native policy predicates in `meta_resolve.rs` (`extract_route_root_identity_node`, `ref_root_reaches_transitive_cycle_node`, `component_meta_ref_resolves_to_package_node`). Benchmark correctness validated by `packages/benchmark/src/audit-validator.ts` against `packages/benchmark/audit-specs/component-meta/*.json`.
 
 ### Audited entry-points on `VerterHost`
 
-Component-meta consumers should always go through one of the
-audited entry-points so the `RequestAuditRecord` is published into
-the host's records store:
+Component-meta consumers should always go through an audited entry-point so the `RequestAuditRecord` publishes into the host's records store:
 
 | Method                                              | When to use                                                                            |
 | --------------------------------------------------- | -------------------------------------------------------------------------------------- |
@@ -61,28 +28,22 @@ the host's records store:
 | `get_component_meta_with_resolution(canonical_id)`  | Same producer used by the test harness; returns `(analysis, resolution, record)`.      |
 | `take_audit_record(request_id)`                     | Drain a published record by id.                                                        |
 
-Sibling audited entry-points (`resolve_type_with_audit`,
-`compile_with_audit`, `analyze_with_audit`, `audit_workspace_op`,
-`lsp_audit_begin`, `audit_mcp_tool_call`) follow the same pattern
-when the component-meta layer is being driven from another surface
-(LSP, MCP, bundler, workspace ops).
+Sibling audited entry-points (`resolve_type_with_audit`, `compile_with_audit`, `analyze_with_audit`, `audit_workspace_op`, `lsp_audit_begin`, `audit_mcp_tool_call`) follow the same pattern when the component-meta layer is driven from another surface (LSP, MCP, bundler, workspace ops).
 
-For full architecture, API reference, and debug workflows see
-[`docs/audit-footprint/`](../../docs/audit-footprint/) and the
-`/audit-infrastructure` skill.
+For full architecture, API reference, and debug workflows see [`docs/audit-footprint/`](../../docs/audit-footprint/) and the `/audit-infrastructure` skill.
 
 ## Final-Result Cache (post-rewrite)
 
 `get_component_meta(owner)` consults `ProjectTypeStore::component_meta_results()` before running the resolver. The cache is typed `ComponentMetaResultDb<ComponentMetaAnalysis>` and keyed by `(owner_canonical, owner_whole_hash, ComponentMetaQueryKind, options_fingerprint)`.
 
-Flow on each call:
+Flow per call:
 
 1. Look up `shallow_file_state(owner)` for the current whole-hash.
 2. Build `ComponentMetaResultKey` with `component_meta_options_fingerprint(&ComponentMetaOptions::default())` — xxh3-128 over a manually-versioned encoding (schema + `compat` + `include_fallthrough`).
-3. Try `component_meta_results().get_with_view(&key, &store_view)`. On hit, the entry's `ReadSetSignature.facts` (the path-precise fact-tracer observation set) revalidates against the live `StoreView` — `get_with_view` counts a warm hit only when validation passes and the value is returned. Stable signatures return `Arc<ComponentMetaAnalysis>` with zero resolver work.
+3. Try `component_meta_results().get_with_view(&key, &store_view)`. On hit, the entry's `ReadSetSignature.facts` (path-precise fact-tracer observation set) revalidates against the live `StoreView` — `get_with_view` counts a warm hit only when validation passes and the value is returned. Stable signatures return `Arc<ComponentMetaAnalysis>` with zero resolver work.
 4. On miss or stale signature, run the existing resolver and publish the result with the transitive fact signature (`ReadSetSignature.facts`).
 
-Cache eviction is automatic: `host.upsert(...)` calls `project_type_store.evict_canonical(owner)` which `invalidate_owner`s every key for the changed canonical. Workspace-shape shifts (tsconfig / SDK / project-graph) call `bump_project_generation_and_evict`, clearing all result entries.
+Cache eviction is automatic: `host.upsert(...)` calls `project_type_store.evict_canonical(owner)`, which `invalidate_owner`s every key for the changed canonical. Workspace-shape shifts (tsconfig / SDK / project-graph) call `bump_project_generation_and_evict`, clearing all result entries.
 
 Direct owner imports take the `OwnerImportSurfaceDb` path via `resolve_owner_direct_import`; no legacy `resolve_imported_type_root` caller survives for direct-owner resolution, though the helper remains the authority for transitive chain walks inside route/barrel code.
 
@@ -90,22 +51,22 @@ Direct owner imports take the `OwnerImportSurfaceDb` path via `resolve_owner_dir
 
 The official/native component-meta payload is the semantic authority. `@verter/component-meta/compat` is a projection layer for `vue-component-meta` interoperability, not a second semantic pipeline.
 
-- Fix missing or incorrect metadata in the shared/native owner layer first. Compat should only remap representation when the native payload is already correct enough.
+- Fix missing/incorrect metadata in the shared/native owner layer first. Compat should only remap representation when the native payload is already correct enough.
 - Rust is the component-meta semantic authority. Resolution, declaration routing, recursion handling, graph construction, payload shaping, and the full Verter API response belong on the native side.
-- `@verter/component-meta` must issue one async native request per query and receive the full Verter API response needed for that query. Do not introduce JS/native follow-up calls to progressively resolve missing types, missing graph nodes, or deferred declarations.
-- The only intentional off-spec difference versus `vue-component-meta` is that Verter's native boundary is async instead of sync. Apart from that boundary difference, compat should behave like a projection over one completed native response, not a coordinator of extra native work.
+- `@verter/component-meta` must issue one async native request per query and receive the full Verter API response for that query. Do not introduce JS/native follow-up calls to progressively resolve missing types, missing graph nodes, or deferred declarations.
+- The only intentional off-spec difference versus `vue-component-meta` is that Verter's native boundary is async instead of sync. Apart from that, compat should behave like a projection over one completed native response, not a coordinator of extra native work.
 - Rust should send the smallest semantically complete payload possible. Prefer compact symbolic graph structure, shared arenas/tables, and explicit recursion nodes over oversized expanded trees, raw-text-only fallbacks, or `unknown` when a graph-backed representation is possible.
-- JS may decode, reconstruct recursive descriptors, memoize shared graph nodes, and adapt the native response into compat output, but that work must stay mechanical. JS may transform structure, but it must not recover meaning that native code failed to provide.
-- Do not let JS become a second resolver, a second expander, or a second semantic authority. Compat must not reinterpret unresolved symbols, invent fallback semantics, or silently repair native payload gaps.
+- JS may decode, reconstruct recursive descriptors, memoize shared graph nodes, and adapt the native response into compat output, but that work must stay mechanical. JS may transform structure but must not recover meaning that native code failed to provide.
+- Do not let JS become a second resolver, expander, or semantic authority. Compat must not reinterpret unresolved symbols, invent fallback semantics, or silently repair native payload gaps.
 - Do not weaken native TypeScript meaning to imitate Volar formatting. Example: keep native `boolean` as `boolean`; any `true | false` expansion belongs only in compat-specific display/schema logic if we choose to support it.
 - Indexed-access members may be resolved/expanded when that improves real type fidelity. Targeted compat expansion such as `Alert['variants']['color']` to the concrete color union is acceptable; blanket ref flattening is not.
-- Compat `exposed` parity should be derived from a shared cached public-instance surface (for example a `ComponentPublicInstance` extraction owned by the host/public-instance path). Do not redefine native `exposed` to mean public-instance unless the public API is deliberately expanded.
+- Compat `exposed` parity should derive from a shared cached public-instance surface (e.g. a `ComponentPublicInstance` extraction owned by the host/public-instance path). Do not redefine native `exposed` to mean public-instance unless the public API is deliberately expanded.
 - Native-only extensions such as `models`, `acceptedProps`, `acceptedEvents`, `acceptedSurfaceCompleteness`, `rootReachability`, and `fallthroughSurface` are part of Verter's official API. Benchmark them separately from Volar-surface parity instead of treating them as regressions.
 - Component-meta type recovery must stay cache-owned. When changing `verter_session`, `verter_session::resolver_core`, or `packages/component-meta` type paths, rely on cached lookup/eval state and expand only on demand; do not rewalk AST/source as a fallback to recover missing types.
-- Component-meta registry publication must stay shallow. Publish only the symbols demanded by the current query path, and do not eagerly materialize unrelated owner/package helpers just to populate the registry.
+- Component-meta registry publication must stay shallow. Publish only the symbols demanded by the current query path; do not eagerly materialize unrelated owner/package helpers just to populate the registry.
 - Component-meta companion/file-target selection must stay shallow too. Choosing between runtime and declaration companions may probe cached raw source existence, but must not build export analysis, snapshots, or eval envs just to decide the target file.
 - Imported component-meta hydration must stay cache-owned too. Once shallow imported dependency state exists, later alias/registry/fallthrough resolver stages must read only from that cache-owned state and must not jump back to raw snapshot/source builders for imported files.
-- Component-meta resolvers must deepen in exactly one place per requested symbol/query path. Do not let a file-level helper widen into sibling symbols/files that are not on the active declaration route.
+- Component-meta resolvers must deepen in exactly one place per requested symbol/query path. Do not let a file-level helper widen into sibling symbols/files not on the active declaration route.
 - Component-meta metadata/fallthrough projection must stay query-scoped. Reuse the resolved state plus captured `HostStoreView`/session view; do not re-enter a fresh top-level meta/fallthrough query when a resolved query already exists.
 - Imported symbol collection for component-meta must stay single-path and lazy. Do not introduce eager collection modes or reparsing fallbacks from stored source text; selected imported symbols must be hydrated through the host-owned cache and resolved via the solver only.
 - Resolver, solver, recursion tracking, and graph interning should share one stable semantic identity model: defining symbol identity plus type arguments and any relevant conditional context. Do not let cache keys drift by layer.
@@ -125,7 +86,7 @@ Forbidden patterns:
 - Compatibility paths that keep old heuristic behavior alive. If native payloads are missing meaning, fix the native producer, extend `@verter/type-ir`, or return a structured unsupported result with diagnostics.
 - Shape-scoring a candidate as "better" unless the result carries explicit exactness/provenance proving which candidate is authoritative.
 - Using package-boundary, shallow/deep, recursion, cycle, or budget decisions as hidden local predicates. These decisions must be explicit projection-plan policy and must appear in semantic identity or cached-value validation metadata when they can affect output.
-- Publishing `unknown` or raw text for a TypeScript construct that the typed IR can represent or should be extended to represent.
+- Publishing `unknown` or raw text for a TypeScript construct the typed IR can represent or should be extended to represent.
 - Encoding semantic miss, unsupported, cycle, unstable-state, or budget information inside `Unknown.raw`, descriptor `rawType`, or string prefixes. These states are API facts and must be typed.
 
 Allowed performance gates must fail closed. A gate may decide "do not expand yet", "do not cache this degraded result", or "enter the shared resolver"; it must not invent members, flatten aliases, hide unresolved branches, or silently replace representable structure with raw text.
@@ -133,7 +94,7 @@ Allowed performance gates must fail closed. A gate may decide "do not expand yet
 Best-architecture target for component-meta:
 
 - Native Rust owns semantic completeness. The TS bridge and compat layer perform mechanical schema adaptation only.
-- Published metadata is derived from typed `TypeExpr` / `TypeDescriptor` structures plus explicit exactness/provenance, never from display strings.
+- Published metadata derives from typed `TypeExpr` / `TypeDescriptor` structures plus explicit exactness/provenance, never from display strings.
 - Projection planning is explicit: shallow publication, path walking, package-backed object preservation, cycle handling, and fuse behavior are modeled as policy data, not scattered predicates.
 - Unsupported cases are visible API states with diagnostics/provenance, not fallback strings.
 - TS adapters may be lossy only through explicit unsupported/partial output. They must not silently erase typed structure to `unknown`, prefer raw display text over typed descriptors, or turn structured degraded state back into strings.
@@ -144,7 +105,7 @@ Component-meta completeness is part of the public API surface.
 
 - `acceptedSurfaceCompleteness`, expansion exactness, bridge-depth state, unsupported operators, unresolved branches, and budget exits must remain explicit through Rust payloads, protocol conversion, the TS bridge, native component-meta, and compat adapters.
 - Missing native data is a native bug or a structured unsupported result, not a compat repair opportunity.
-- `Complete` / `Exact` means all required semantic inputs were current and all required branches were represented. Stale cache data, missing analysis, unavailable providers, bridge truncation, unsupported operators, and budget exits must produce partial/degraded state and must not warm final-result caches as exact.
+- `Complete` / `Exact` means all required semantic inputs were current and all required branches represented. Stale cache data, missing analysis, unavailable providers, bridge truncation, unsupported operators, and budget exits must produce partial/degraded state and must not warm final-result caches as exact.
 
 ## Typed-IR-Only Resolver Rule (CRITICAL)
 
@@ -152,7 +113,7 @@ The native component-meta / typeinfo type resolver — analyzer (`verter_semanti
 
 **Producer contract** — OXC AST is lowered once during shallow analysis:
 
-- `lower_ts_type(ts_type, source)` (in `verter_semantic::analysis::type_expr_lower`) is the single allowed lowering call. The analyzer takes the OXC `TSType` AST node it already has in scope and stores the resulting `TypeExpr` on the analyzed struct. There is no source-slice + reparse step.
+- `lower_ts_type(ts_type, source)` (in `verter_semantic::analysis::type_expr_lower`) is the single allowed lowering call. The analyzer takes the OXC `TSType` AST node it already has in scope and stores the resulting `TypeExpr` on the analyzed struct. No source-slice + reparse step.
 - `Analyzed*Field` carries the typed form alongside the raw display string:
   - `AnalyzedPropField.type_expr: Option<TypeExpr>` (raw text on `type_annotation`)
   - `AnalyzedEmitField.payload_expr: Option<TypeExpr>` (raw text on `payload_type`)
@@ -174,13 +135,13 @@ The native component-meta / typeinfo type resolver — analyzer (`verter_semanti
 
 - Use `ResolverContext::workspace_is_workspace_owned(canonical_id)` and `workspace_is_package_backed(canonical_id)`.
 - `path.contains("/node_modules/")` and `path.contains("\\node_modules\\")` are forbidden in production source.
-- The `workspace_is_*` API is path-agnostic (handles symlinked / pnpm-hoisted / Windows-backslash / workspace-linked-package cases that the substring approach silently mishandled).
+- The `workspace_is_*` API is path-agnostic (handles symlinked / pnpm-hoisted / Windows-backslash / workspace-linked-package cases the substring approach silently mishandled).
 
 **Type-role classification is structural, not nominal** — a type's role in a Vue SFC (prop / emit / model / slot) is determined by which macro consumes it: `defineProps` / `withDefaults` / `defineModel` for props, `defineEmits` for emits, `defineSlots` for slots, etc. The structural fact is recorded on `AnalyzedMacro` (`kind`, `parsed_type_argument: Option<Arc<TypeExpr>>`, `type_references: Vec<String>`) and propagated through `resolved.snapshot.macros` / `resolved.snapshot.macro_type_deps`. Identifier-name suffix heuristics (`name.ends_with("Props")` / `"Emits"` / `"Events"` / `"Slots"` / `"Model"`) are forbidden inside the resolver — they are Vue community naming conventions, not type-system facts. Walk `AnalyzedMacro` to compute the macro-participation closure of any ref; do not test the ref's identifier text. Architecture guard `no_role_inference_from_name_suffix` enforces this.
 
 **Single allowed exception** — JSDoc tag-type payloads (`{Type}` text inside `@type`, `@param`, `@returns`, …) are inherently text. They are parsed via `verter_semantic::analysis::jsdoc` / `host_manage::jsdoc_resolve::resolve_jsdoc_tag_type` only. Treating any other text as JSDoc-like to dodge this rule is itself a bug.
 
-**Why** — the resolver was specified as a typed pipeline: read each canonical file once, lower OXC `TSType` once, cache the typed form, walk it. Every time a downstream stage needs to "look at the type" through a regex on a stored string, that round-trip drops generic substitutions / negative literals / brand information / function-param metadata / readonly modifiers / qualified-name segments that `lower_ts_type` already preserved. The hand-rolled string parsers (`split_top_level_*`, `find_top_level_char`, `extract_pick_slot_bindings`, `splitTopLevelTypeOperator`) duplicate OXC's TS parser, drift from it as TS evolves, and re-introduce the bugs OXC has already fixed.
+**Why** — the resolver was specified as a typed pipeline: read each canonical file once, lower OXC `TSType` once, cache the typed form, walk it. Every time a downstream stage needs to "look at the type" through a regex on a stored string, that round-trip drops generic substitutions / negative literals / brand information / function-param metadata / readonly modifiers / qualified-name segments `lower_ts_type` already preserved. The hand-rolled string parsers (`split_top_level_*`, `find_top_level_char`, `extract_pick_slot_bindings`, `splitTopLevelTypeOperator`) duplicate OXC's TS parser, drift from it as TS evolves, and re-introduce bugs OXC already fixed.
 
 **Diagnosing a violation** — `parse_type_annotation` callers, `format!(...).parse_*` patterns, `starts_with("Pick<") | starts_with("Omit<") | starts_with("Required<") | starts_with("Partial<")` shape sniffing, and `path.contains("/node_modules/")` substring tests are caught by architecture-guard tests in `crates/verter_session/tests/architecture_guards.rs`. The compat-side equivalent (no `prop.rawType` reads inside `buildCompat*` / `looksLike*` / `extract*`) is enforced by an ESLint rule / Vitest assertion in `packages/component-meta`.
 
@@ -235,7 +196,7 @@ Concrete contract:
 
 - Plain alias references (`type Foo = ...`) — the published prop type stays as `TypeExpr::Ref { name: "Foo", type_arguments: [] }`. Consumers re-resolve `Foo` through the registry on demand. **The projector does not eagerly inline the alias body.**
 - `Pick<Foo, "bar">` — materialises ONLY the `bar` member of Foo. Other Foo properties stay shallow (path-precise). Built-in utility types (`Pick`, `Omit`, `Required`, `Partial`) are recognised as shortcuts and behave identically to a userland implementation that referenced the same keys.
-- `Omit<Foo, "bar">` — keeps `bar` shallow (it is excluded from the surface) and materialises the others.
+- `Omit<Foo, "bar">` — keeps `bar` shallow (excluded from the surface) and materialises the others.
 - `Foo['a']['b']` — path-precise: only the `a` and `b` hops are loaded. Other Foo keys never enter the published surface.
 - Recursive aliases (`type Self = Pick<Self>`) — TRUE recursive types are NOT supported. The published surface stays as the bare `Ref { name: "Self" }`; the resolver does not attempt unbounded expansion.
 - Imported alias names (workspace-owned OR package-backed) — stay shallow regardless of where they live. The rule is the same for `node_modules`-imported aliases as for project-local aliases: the consumer drives any expansion through subsequent lookups.
@@ -265,7 +226,7 @@ Concrete contract:
 
 ## Component-Meta Resolver Rules
 
-These are the canonical component-meta resolver rules. They govern how the shared cross-file resolver operates when serving component-meta queries.
+Canonical component-meta resolver rules. They govern how the shared cross-file resolver operates when serving component-meta queries.
 
 **Resolver ownership rule:** host-backed component-meta and analysis must share one cross-file resolver. Do not build separate resolver logic for script-setup macros, Options API metadata, compat wrappers, or consumer-specific adapters.
 
@@ -277,7 +238,7 @@ These are the canonical component-meta resolver rules. They govern how the share
 
 **Backfill rule:** broader successful results may backfill narrower caches they actually satisfied, but narrower results must not pretend broader work is cached. Cancelled, partial, or budget-exceeded work must not be promoted as warm shared cache entries.
 
-**Navigation-not-expansion rule:** component-meta should navigate intermediate type paths as narrowly as possible. When resolving a path like `A['c']['full']['bar']`, the intermediate hops should stay in navigation or shallow projection mode; only the terminal requested projection should expand unless limited normalization is required to continue.
+**Navigation-not-expansion rule:** component-meta should navigate intermediate type paths as narrowly as possible. When resolving a path like `A['c']['full']['bar']`, intermediate hops should stay in navigation or shallow projection mode; only the terminal requested projection should expand unless limited normalization is required to continue.
 
 **Generic-instantiation rule:** component-meta navigation and expansion must respect generic substitutions. Member projection or indexed access on instantiated generic types must operate on the substituted meaning, and the shared cache keys must include the relevant type arguments or substitution environment.
 
@@ -287,7 +248,7 @@ These are the canonical component-meta resolver rules. They govern how the share
 
 **Traversal rule:** only follow the import graph reachable from the requested type's declaration graph. Unrelated imports in the same file are out of scope.
 
-**Caching rule:** when parsing a `.ts` / `.js` / declaration file for type resolution, cache discovered symbol name to canonical location mappings. Cache direct re-exports, barrelled exports, and any discovered `export *` hops as well, because repeated wildcard-barrel scanning is expensive.
+**Caching rule:** when parsing a `.ts` / `.js` / declaration file for type resolution, cache discovered symbol name to canonical location mappings. Cache direct re-exports, barrelled exports, and any discovered `export *` hops too, because repeated wildcard-barrel scanning is expensive.
 
 **Component-meta cache rule:** when changing `verter_session`, `verter_session::resolver_core`, `verter_semantic`, or `packages/component-meta` type paths, use cached lookup/eval state as the only source of truth after the cache-owning pass. Do not rewalk AST/source as a fallback to recover or expand types.
 
@@ -311,7 +272,7 @@ These are the canonical component-meta resolver rules. They govern how the share
 
 ## Semantic Dispatch Integration (Post Phase-D)
 
-All type expansion for component-meta goes through `ProjectSemanticDispatch::execute(SemanticQueryKey::...)` against the shared `SemanticGraphStore` (see `/type-resolution` for the full authority contract). The component-meta layer is a pure `SemanticQueryApi` consumer — it does not own a separate solver, a separate relation engine, or a separate lowering path.
+All type expansion for component-meta goes through `ProjectSemanticDispatch::execute(SemanticQueryKey::...)` against the shared `SemanticGraphStore` (see `/type-resolution` for the full authority contract). The component-meta layer is a pure `SemanticQueryApi` consumer — it does not own a separate solver, relation engine, or lowering path.
 
 **Call-site pattern** (plan §9 appendix — canonical migration shape):
 
@@ -355,19 +316,7 @@ The 3 originally-proposed variants — `MaterializeSurface`, `ResolvePublicInsta
 
 ### Engine-internal authority model
 
-The authoritative caches that survive across requests are
-`MaterializeMemoDb`, `ComponentMetaResultDb`, `SemanticGraphStore`,
-`RefCycleResultDb`, and `MaterializeStructureDb`. The engine sits
-above these and below the public component-meta API; it does not own
-any durable cache state. Per-request scratch (`prepared_surface_cache`,
-`routed_expr_surface_cache`, `prepared_member_cache`, type-param
-substitution maps, projection-chain scopes) dies when the engine
-drops and is never promoted. Cancelled, superseded, interrupted,
-budget-exceeded, and partial results MUST NOT be admitted to the
-authoritative caches. The full ownership-boundary contract lives in
-the file-level doc-comment of
-`crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs` —
-read it before introducing new cache state inside the engine.
+The authoritative caches that survive across requests are `MaterializeMemoDb`, `ComponentMetaResultDb`, `SemanticGraphStore`, `RefCycleResultDb`, and `MaterializeStructureDb`. The engine sits above these and below the public component-meta API; it does not own any durable cache state. Per-request scratch (`prepared_surface_cache`, `routed_expr_surface_cache`, `prepared_member_cache`, type-param substitution maps, projection-chain scopes) dies when the engine drops and is never promoted. Cancelled, superseded, interrupted, budget-exceeded, and partial results MUST NOT be admitted to the authoritative caches. The full ownership-boundary contract lives in the file-level doc-comment of `crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs` — read it before introducing new cache state inside the engine.
 
 ## Component-Meta Perf / Debug Workflow
 

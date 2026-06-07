@@ -5,32 +5,32 @@ description: "Verter audit infrastructure — RequestAuditRecord, RequestKind va
 
 # Audit Infrastructure
 
-Verter's audit infrastructure provides per-request observability for every public host entry-point: component-meta resolution, compile, semantic analysis, type resolution, workspace operations, LSP request handlers, MCP tool invocations, and bundler-batch summaries. Each audited request produces one `RequestAuditRecord` envelope carrying timing, memory, store counters, scheduler attribution, per-file reads, optional semantic footprint, and a strongly-typed kind-specific payload.
+Per-request observability for every public host entry-point: component-meta resolution, compile, semantic analysis, type resolution, workspace ops, LSP handlers, MCP tool invocations, and bundler-batch summaries. Each audited request produces one `RequestAuditRecord` envelope carrying timing, memory, store counters, scheduler attribution, per-file reads, optional semantic footprint, and a strongly-typed kind-specific payload.
 
 For end-user API reference and debug workflows see [`docs/audit-footprint/`](../../docs/audit-footprint/).
 
 ## Architecture Overview — Substrate Vs Session
 
-Audit state is split between a leaf substrate crate (`verter_audit`) and the session crate (`verter_session`). The split is enforced architecturally — `verter_audit` may depend only on `verter_span` plus ecosystem crates, never on `verter_session` or any other `verter_*` crate.
+Audit state is split between a leaf substrate crate (`verter_audit`) and the session crate (`verter_session`). `verter_audit` may depend only on `verter_span` plus ecosystem crates — never on `verter_session` or any other `verter_*` crate.
 
 | Layer | Crate | Owns |
 | --- | --- | --- |
 | **Substrate** (DTOs + observer trait) | `verter_audit` | `RequestAuditRecord`, `RequestKind`, `RequestKindPayload`, per-kind payload structs, `AuditedResult<T, E>` (audit-bearing execution carrier), `AuditObserver` trait, `current_observer()` TLS accessor, `NoOpObserver`, `AuditConfig` + `AuditConsumerFilter`, `BatchAuditAggregator` + `AuditRecordSource`, `IncidentalFields` masking trait, `WALKER_DEPTH_CAP` |
 | **Session** (lifecycle + runtime) | `verter_session` | `HostAuditRuntime`, `AuditRequestRegistration::{Active, Noop}`, `AuditRecordsStore`, `RequestContext` (implements `AuditObserver`), `RequestContextGuard`, peak-RSS sampler thread, `LspAuditSession`, audited entry-points (`compile_with_audit`, `analyze_with_audit`, `resolve_type_with_audit`, `audit_workspace_op`, `audit_mcp_tool_call`, `get_component_meta_with_resolution`) |
 
-Substrate/session isolation is mechanically enforced by the `verter_audit_no_upward_deps` guard (rejects any `verter_*` dependency in `verter_audit/Cargo.toml` other than `verter_span`) and the `audit_substrate_isolation` guard (rejects any `use verter_*` reference under `crates/verter_audit/src/` other than `verter_span`).
+Isolation enforced by: `verter_audit_no_upward_deps` guard (rejects any `verter_*` dep in `verter_audit/Cargo.toml` other than `verter_span`) and `audit_substrate_isolation` guard (rejects any `use verter_*` under `crates/verter_audit/src/` other than `verter_span`).
 
 ## `RequestAuditRecord` Envelope
 
-The top-level record (`crates/verter_audit/src/record.rs`) is the single shape every consumer reads:
+Top-level record (`crates/verter_audit/src/record.rs`):
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `request_id` | `u64` (decimal-string transport) | Monotonic id stamped at the public entry-point. Unique per audited request |
-| `canonical_id` | `String` | Canonical file id the request targeted. Empty for kinds without a single canonical (some MCP tools) |
+| `canonical_id` | `String` | Canonical file id targeted. Empty for kinds without a single canonical (some MCP tools) |
 | `kind` | `RequestKind` | Discriminant naming the producer surface |
-| `parent_request_id` | `Option<String>` | Correlation id for nested audited requests (sniffed from the scheduler-side TLS slot at construction) |
-| `from_cache` | `bool` | `true` when the request was satisfied from a warm result cache |
+| `parent_request_id` | `Option<String>` | Correlation id for nested audited requests (sniffed from scheduler-side TLS slot at construction) |
+| `from_cache` | `bool` | `true` when satisfied from warm result cache |
 | `timings` | `RequestTimingAudit` | Per-phase wall-clock timings (ms) |
 | `memory` | `RequestMemoryAudit` | RSS snapshots (before/after/delta + peak from sampler) |
 | `store` | `RequestStoreAudit` | Generic store/view counters |
@@ -56,7 +56,7 @@ The top-level record (`crates/verter_audit/src/record.rs`) is the single shape e
 
 ### Typed Payload Accessors
 
-`RequestAuditRecord` exposes typed accessors so tests and consumers can fetch the kind-specific payload without pattern-matching:
+`RequestAuditRecord` typed accessors (each returns `None` when `kind_payload` is not the matching variant):
 
 - `component_meta_payload() -> Option<&ComponentMetaPayload>`
 - `type_resolution_payload() -> Option<&TypeResolutionPayload>`
@@ -68,15 +68,13 @@ The top-level record (`crates/verter_audit/src/record.rs`) is the single shape e
 - `bundler_batch_payload() -> Option<&BundlerBatchPayload>`
 - `typeinfo_graph_payload() -> Option<&TypeInfoGraphPayload>`
 
-Each returns `None` when `kind_payload` is not the matching variant.
-
 ## `AuditedResult<T, E>` Carrier
 
-`AuditedResult<T, E>` (`crates/verter_audit/src/audited_result.rs`) is the audit-bearing execution envelope: it pairs the outcome of an audited request — success `T` or typed error `E` — with the `RequestAuditRecord` captured while producing it. It is a `#[serde(tag = "kind")]` discriminated enum (`Ok { value, audit }` / `Err { error, audit }`); both arms carry the record so the observability envelope survives regardless of outcome.
+`AuditedResult<T, E>` (`crates/verter_audit/src/audited_result.rs`) pairs the outcome — success `T` or typed error `E` — with the `RequestAuditRecord` captured while producing it. `#[serde(tag = "kind")]` discriminated enum (`Ok { value, audit }` / `Err { error, audit }`); both arms carry the record so the envelope survives regardless of outcome.
 
-It lives in `verter_audit`, **not** `verter_protocol`: it is generic over `T`/`E` (which protobuf cannot express) and embeds `RequestAuditRecord` (an audit-substrate type). Putting it in the protobuf-authoritative `verter_protocol` would invert the dependency or force a hand-written TS mirror. Instead it rides the existing ts-rs path, exporting as a generic `export type AuditedResult<T, E>` into `packages/types/audit.generated.ts`; `packages/typeinfo` imports that generated type. The typeinfo native session's `_with_audit` methods return `AuditedResult<Arc<...>, TypeInfoRequestError>`.
+Lives in `verter_audit`, not `verter_protocol`: it is generic over `T`/`E` (protobuf cannot express) and embeds `RequestAuditRecord` — putting it in the protobuf-authoritative `verter_protocol` would invert the dependency or force a hand-written TS mirror. Rides the ts-rs path, exporting as `export type AuditedResult<T, E>` into `packages/types/audit.generated.ts`; `packages/typeinfo` imports the generated type. The typeinfo native session's `_with_audit` methods return `AuditedResult<Arc<...>, TypeInfoRequestError>`.
 
-Surface: `ok(value, audit)` / `err(error, audit)` constructors; `audit()`, `as_result()`, `into_parts()`, `into_result()`, `map()`, `map_err()`. The home + export rule is pinned by `audited_result_lives_in_audit_and_exports_through_generated_ts` (`crates/verter_session/tests/typeinfo_audit_contract_guards.rs`).
+Surface: `ok(value, audit)` / `err(error, audit)` constructors; `audit()`, `as_result()`, `into_parts()`, `into_result()`, `map()`, `map_err()`. Home + export rule pinned by `audited_result_lives_in_audit_and_exports_through_generated_ts` (`crates/verter_session/tests/typeinfo_audit_contract_guards.rs`).
 
 ## Producer Entry-Points
 
@@ -84,25 +82,25 @@ Every public audited entry-point follows the same lifecycle: stamp a request id,
 
 ### Component-Meta
 
-`VerterHost::get_component_meta_with_resolution(canonical_id, mode)` is the canonical component-meta entry-point. It returns `(Option<ComponentMetaAnalysis>, Option<ResolvedComponentMetaState>)`. The audit record is published into the host's bounded `AuditRecordsStore` and drained via `VerterHost::take_audit_record(request_id)`.
+`VerterHost::get_component_meta_with_resolution(canonical_id, mode)` returns `(Option<ComponentMetaAnalysis>, Option<ResolvedComponentMetaState>)`. The audit record is published into the host's bounded `AuditRecordsStore` and drained via `VerterHost::take_audit_record(request_id)`.
 
-The `AuditedRequest` builder (`crates/verter_session/src/audited_request.rs`) wraps one such call in a request-scoped audit harness that resets per-thread counters, validates exactly one request was created, and returns `(ComponentMetaAnalysis, ResolvedComponentMetaState, RequestAuditRecord)` as a single triple. `AuditedRequestBuilder::resolve_component_meta` is the test-facing convenience surface; `AuditedRequestBuilder::run_custom` lets a closure issue arbitrary single-request audited work.
+`AuditedRequest` builder (`crates/verter_session/src/audited_request.rs`) wraps one call in a request-scoped audit harness, resets per-thread counters, validates exactly one request was created, and returns `(ComponentMetaAnalysis, ResolvedComponentMetaState, RequestAuditRecord)` as a triple. `AuditedRequestBuilder::resolve_component_meta` is the test-facing convenience; `AuditedRequestBuilder::run_custom` lets a closure issue arbitrary single-request audited work.
 
 ### Compile
 
-`VerterHost::compile_with_audit(canonical_id, target) -> (VerterCompileResult, Option<RequestAuditRecord>)` and the variant `compile_with_audit_options(canonical_id, target, verter_options)` for callers that need explicit `force_vapor` / `force_js` control. The `target` bitset maps to a `CompileTargetTag` (`Vdom`, `Ide`, `Vapor`) on the record's `kind` discriminant. Producer-side instrumentation in `verter_compiler` emits `record_phase_timing` at parse / transform / codegen / css_analysis / sourcemap boundaries and `record_event(CompileCodeTransformOp)` at every `CodeTransform` operation entry — the session-side `RequestContext` accumulates these into per-request atomics that `assemble_compile_payload` reads at finalize time.
+`VerterHost::compile_with_audit(canonical_id, target) -> (VerterCompileResult, Option<RequestAuditRecord>)` and `compile_with_audit_options(canonical_id, target, verter_options)` for explicit `force_vapor` / `force_js` control. The `target` bitset maps to `CompileTargetTag` (`Vdom`, `Ide`, `Vapor`) on `kind`. Producer-side instrumentation in `verter_compiler` emits `record_phase_timing` at parse/transform/codegen/css_analysis/sourcemap boundaries and `record_event(CompileCodeTransformOp)` at every `CodeTransform` operation — the session-side `RequestContext` accumulates these into per-request atomics that `assemble_compile_payload` reads at finalize time.
 
 ### Semantic Analysis
 
-`VerterHost::analyze_with_audit(canonical_id) -> (Option<AnalysisReady>, Option<RequestAuditRecord>)`. Probes the `FileArtifactStore` cache before constructing the registration so the observed `from_cache` state is unaffected by the audit work itself. Audit-disabled fast path runs `materialize_analysis_ready` with no `RequestContextGuard` installed.
+`VerterHost::analyze_with_audit(canonical_id) -> (Option<AnalysisReady>, Option<RequestAuditRecord>)`. Probes `FileArtifactStore` cache before constructing the registration so `from_cache` is unaffected by audit work. Audit-disabled fast path runs `materialize_analysis_ready` with no `RequestContextGuard`.
 
 ### Type Resolution
 
-`VerterHost::resolve_type_with_audit(query: SemanticQueryKey, canonical_hint: &str) -> (Option<TypeResolutionResult>, Option<RequestAuditRecord>)`. Drives one `ProjectSemanticDispatch::execute(query)` call inside the audit window. The `TypeResolutionPayload` reports the caller's projection mode (derived from the query variant) plus per-mode counters mined off the active `RequestContext`.
+`VerterHost::resolve_type_with_audit(query: SemanticQueryKey, canonical_hint: &str) -> (Option<TypeResolutionResult>, Option<RequestAuditRecord>)`. Drives one `ProjectSemanticDispatch::execute(query)` inside the audit window. `TypeResolutionPayload` reports the caller's projection mode (derived from the query variant) plus per-mode counters mined off the active `RequestContext`.
 
 ### Workspace
 
-`VerterHost::audit_workspace_op(op: WorkspaceOp) -> RequestAuditRecord`. Drives `WorkspaceAccess::audit_op(op)` under audit. The trait method itself does not enter the active-request registry — the wrapper constructs the `AuditRequestRegistration` first so the registry slot precedes the workspace traversal. Returns the record unconditionally; the `Noop` arm only suppresses the records-store side effect, not the producer's output.
+`VerterHost::audit_workspace_op(op: WorkspaceOp) -> RequestAuditRecord`. Drives `WorkspaceAccess::audit_op(op)` under audit. Constructs the `AuditRequestRegistration` first so the registry slot precedes the workspace traversal. Returns the record unconditionally; `Noop` arm only suppresses the records-store side effect.
 
 ### LSP
 
@@ -117,7 +115,7 @@ Audit-disabled fast path returns `body.await` directly without any registration 
 
 ### MCP
 
-`VerterHost::audit_mcp_tool_call(tool_name, canonical_id, args_size_bytes, f) -> (T, Option<RequestAuditRecord>)` wraps a closure `FnOnce(&Arc<Self>) -> McpToolOutcome<T>` under audit. The closure's `McpToolOutcome { value, result_size_bytes, error }` carries the two facts the wrapper cannot infer (response size and optional error message). Sub-requests the closure spawns inherit the MCP request's id as their `parent_request_id` via the scheduler-side TLS slot.
+`VerterHost::audit_mcp_tool_call(tool_name, canonical_id, args_size_bytes, f) -> (T, Option<RequestAuditRecord>)` wraps a closure `FnOnce(&Arc<Self>) -> McpToolOutcome<T>` under audit. `McpToolOutcome { value, result_size_bytes, error }` carries the two facts the wrapper cannot infer (response size and optional error message). Sub-requests inherit the MCP request's id as `parent_request_id` via the scheduler-side TLS slot.
 
 ## `AuditRequestRegistration` Lifecycle
 
@@ -127,29 +125,29 @@ Every audited entry-point allocates exactly one `AuditRequestRegistration` (`cra
 AuditRequestRegistration ::= Active(ActiveRegistration) | Noop
 ```
 
-- **`Active`** — captures a `Weak<RequestContext>` slot in `HostAuditRuntime::active_requests`. `finalize(record)` atomically removes the slot and publishes the record into `AuditRecordsStore` (idempotent — first call wins). `Drop` defensively sweeps the slot when `finalize` did not run (panic / cancellation paths).
-- **`Noop`** — returned when `AuditConfig::consumer_filter` rejects the request's `RequestKind`. Holds no state; `finalize` returns `false` and downstream emits no record.
+- **`Active`** — captures a `Weak<RequestContext>` slot in `HostAuditRuntime::active_requests`. `finalize(record)` atomically removes the slot and publishes the record into `AuditRecordsStore` (idempotent — first call wins). `Drop` defensively sweeps the slot when `finalize` did not run (panic/cancellation paths).
+- **`Noop`** — returned when `AuditConfig::consumer_filter` rejects the request's `RequestKind`. Holds no state; `finalize` returns `false` and emits no record.
 
-The three lifecycle methods on `HostAuditRuntime` (`register_active_request`, `finalize_active_request`, `drop_active_request`) are crate-private and have exactly ONE in-tree call site each, all in `host_audit_runtime.rs`. The `audit_request_registration_lifecycle` architecture guard mechanically enforces this — adding a caller anywhere else fails the build.
+The three lifecycle methods on `HostAuditRuntime` (`register_active_request`, `finalize_active_request`, `drop_active_request`) are crate-private and have exactly ONE in-tree call site each, all in `host_audit_runtime.rs`. The `audit_request_registration_lifecycle` architecture guard mechanically enforces this.
 
 ## Substrate TLS — `current_observer()`
 
-Lower crates emit audit signals through `verter_audit::current_observer() -> Option<Arc<dyn AuditObserver>>` (declared in `crates/verter_audit/src/observer.rs`). The accessor reads a thread-local slot installed by either `RequestContextGuard::install` (active path) or `install_noop_observer()` (filtered path).
+Lower crates emit audit signals through `verter_audit::current_observer() -> Option<Arc<dyn AuditObserver>>` (`crates/verter_audit/src/observer.rs`). Reads a thread-local slot installed by either `RequestContextGuard::install` (active) or `install_noop_observer()` (filtered).
 
-The `AuditObserver` trait carries default no-op implementations so producers only override what they care about:
+`AuditObserver` trait carries default no-op implementations; producers override only what they care about:
 
 - `record_event(event: AuditEvent)` — counter-style attribution (`InflightAbortedRetry`, `ColdAbortSwept`, `CompileCodeTransformOp`).
-- `record_cache_event(layer: &'static str, hit: bool)` — per-layer hit/miss decision.
+- `record_cache_event(layer: &'static str, hit: bool)` — per-layer hit/miss.
 - `record_file(canonical_id, layer: VfsLayer, bytes_read, cache_hit)` — workspace file read.
 - `record_lock_acquisition(lock_name: &'static str, wait_ns: u64)` — single lock acquisition wait.
 - `record_phase_timing(phase: &'static str, elapsed_ms: f64)` — phase-boundary timing.
-- `record_scheduler_dispatch(audit: SchedulerAudit)` — first-dispatch attribution (subsequent calls bump the dispatch counter).
+- `record_scheduler_dispatch(audit: SchedulerAudit)` — first-dispatch attribution (subsequent calls bump dispatch counter).
 
-The session-side `RequestContext` provides full implementations; the substrate's `NoOpObserver` leaves them defaulted. The `audit_observer_single_accessor` architecture guard enforces that the five lower crates (`verter_compiler`, `verter_semantic`, `verter_workspace`, `verter_lsp`, `verter_mcp_server`) reach audit state ONLY through `verter_audit::current_observer()` — the session-internal `current_request_context()` typed accessor is forbidden in those crates.
+Session-side `RequestContext` provides full implementations; `NoOpObserver` leaves them defaulted. The `audit_observer_single_accessor` architecture guard enforces that the five lower crates (`verter_compiler`, `verter_semantic`, `verter_workspace`, `verter_lsp`, `verter_mcp_server`) reach audit state ONLY through `verter_audit::current_observer()` — the session-internal `current_request_context()` typed accessor is forbidden in those crates.
 
 ## Consumer Filter (Install-Time)
 
-`AuditConfig::consumer_filter` (`crates/verter_audit/src/config.rs`) is a `u32` bitset deciding which `RequestKind` variants emit records. Bits are positionally stable via the `KindBit` enum (`ComponentMeta = 0`, `TypeResolution = 1`, `SemanticAnalysis = 2`, `Compile = 3`, `Workspace = 4`, `Lsp = 5`, `Mcp = 6`, `BundlerBatch = 7`, `Custom = 8`).
+`AuditConfig::consumer_filter` (`crates/verter_audit/src/config.rs`) is a `u32` bitset deciding which `RequestKind` variants emit records. Bits are positionally stable via `KindBit` enum (`ComponentMeta = 0`, `TypeResolution = 1`, `SemanticAnalysis = 2`, `Compile = 3`, `Workspace = 4`, `Lsp = 5`, `Mcp = 6`, `BundlerBatch = 7`, `Custom = 8`).
 
 | Constructor | Behaviour |
 | --- | --- |
@@ -158,7 +156,7 @@ The session-side `RequestContext` provides full implementations; the substrate's
 | `allow_only([KindBit::…, …])` | Allow only the listed kinds |
 | `.allow(KindBit::…)` / `.deny(KindBit::…)` | Toggle a single bit (chainable) |
 
-The filter is read ONCE at registration time inside `AuditRequestRegistration::new` and CANNOT change for that request's lifetime — filtered kinds skip `active_requests` and never produce a record. The current `AuditConfig` snapshot is mirrored from `HostConfig` flags in `host_construction.rs` (today only `audit_timing_capture` is wired through; the consumer filter defaults to allow-all). Tests that need a non-default filter swap the runtime's `AuditConfig` via a test-only helper without bypassing the `active_requests` privacy boundary.
+Filter is read ONCE at registration time inside `AuditRequestRegistration::new` and CANNOT change for that request's lifetime. The current `AuditConfig` snapshot is mirrored from `HostConfig` flags in `host_construction.rs` (today only `audit_timing_capture` is wired; consumer filter defaults to allow-all). Tests that need a non-default filter swap the runtime's `AuditConfig` via a test-only helper without bypassing `active_requests` privacy.
 
 ## `HostAuditRuntime` & Sampler Thread
 
@@ -171,31 +169,29 @@ The filter is read ONCE at registration time inside `AuditRequestRegistration::n
 - `snapshot() -> AuditRuntimeSnapshot` — read-only view of `(active_request_count, active_request_ids, records_store_size, records_store_capacity)`.
 - `take_record(request_id) -> Option<RequestAuditRecord>` — drain a specific record.
 
-The `audit_records_store` is bounded — `AUDIT_RECORDS_STORE_CAPACITY = 256`. Insertion at capacity evicts the oldest entry by insertion order.
+`audit_records_store` is bounded — `AUDIT_RECORDS_STORE_CAPACITY = 256`. Insertion at capacity evicts the oldest entry by insertion order.
 
 ### Peak-RSS sampler thread (native only)
 
-On native targets, each runtime owns at most ONE peak-RSS sampler thread:
-
 - Spawns lazily on the first `AuditRequestRegistration::new` call when `AuditConfig::audit_timing_capture` is on (single-shot start latch via `compare_exchange`).
-- Holds a `Weak<HostAuditRuntime>` so the runtime ↔ thread cycle is broken — runtime drop releases the strong count, the next `weak.upgrade()` returns `None`, the thread terminates.
-- Ticks every 50 ms and writes `fetch_max(current_process_rss())` into each in-flight request's `process_rss_peak_bytes` slot.
-- The runtime's `Drop` impl explicitly joins the handle so dropped hosts do not leak threads. Process-static `SAMPLER_THREAD_SPAWN_COUNT` and `SAMPLER_THREAD_JOIN_COUNT` counters discriminate "sampler did not spawn" from "sampler spawned but did not join".
+- Holds a `Weak<HostAuditRuntime>` — runtime drop releases the strong count, the next `weak.upgrade()` returns `None`, thread terminates.
+- Ticks every 50 ms; writes `fetch_max(current_process_rss())` into each in-flight request's `process_rss_peak_bytes` slot.
+- Runtime's `Drop` impl explicitly joins the handle so dropped hosts do not leak threads. Process-static `SAMPLER_THREAD_SPAWN_COUNT` and `SAMPLER_THREAD_JOIN_COUNT` counters discriminate "sampler did not spawn" from "sampler spawned but did not join".
 
-WASM targets are gated off via `#[cfg(not(target_arch = "wasm32"))]` — no sampler thread, `process_rss_peak_bytes` stays at `0` regardless of `audit_timing_capture` state.
+WASM targets gated off via `#[cfg(not(target_arch = "wasm32"))]` — no sampler thread, `process_rss_peak_bytes` stays at `0` regardless of `audit_timing_capture`.
 
 ## Architecture Guards
 
-The audit infrastructure ships with a set of mechanical guards that enforce the architectural invariants. All live in `crates/verter_session/tests/architecture_guards.rs` unless noted:
+All live in `crates/verter_session/tests/architecture_guards.rs` unless noted:
 
 | Guard | Role |
 | --- | --- |
 | `verter_audit_no_upward_deps` | `verter_audit/Cargo.toml` may declare only `verter_span` from the `verter_*` namespace |
-| `audit_substrate_isolation` | Source files under `crates/verter_audit/src/` may `use` only `verter_span`, `std`, and external crates — no other `verter_*` reference |
+| `audit_substrate_isolation` | Source files under `crates/verter_audit/src/` may `use` only `verter_span`, `std`, and external crates |
 | `audit_request_registration_lifecycle` | The three lifecycle methods (`register_active_request`, `finalize_active_request`, `drop_active_request`) on `HostAuditRuntime` have exactly ONE in-tree caller each, all inside `host_audit_runtime.rs` |
 | `audit_observer_single_accessor` | The five lower crates (`verter_compiler`, `verter_semantic`, `verter_workspace`, `verter_lsp`, `verter_mcp_server`) reach the substrate ONLY via `verter_audit::current_observer()` — `current_request_context` is forbidden |
 | `audit_no_hot_loop_instrumentation` | Phase-boundary instrumentation only; the canonical `(crate, function_path)` denylist forbids `current_observer()` calls inside hot-loop bodies |
-| `audit_counter_single_helper` | The two `record_inflight_aborted_retry` / `record_cold_abort_swept` increments live in helper bodies only — no inline `fetch_add` callers anywhere else in the codebase |
+| `audit_counter_single_helper` | The two `record_inflight_aborted_retry` / `record_cold_abort_swept` increments live in helper bodies only — no inline `fetch_add` callers anywhere else |
 | `wave_3_entry_points_propagate_tls` | Each audited `*_with_audit` entry-point has at least one paired test that drives it AND calls `assert_observer_reaches(...)` so TLS propagation is mechanically verified |
 | `every_consumer_has_production_call_site` | Every `RequestKind` variant has at least one production producer under `crates/*/src/` that constructs the variant in expression context (not match-arm pattern). `Custom` and `BundlerBatch` are documented exemptions in `KIND_EXEMPTIONS` |
 | `audit_ts_bindings_are_in_sync` (in `tests/ts_bindings.rs`) | `packages/types/audit.generated.ts` matches what `ts-rs` would regenerate from current Rust DTOs |
@@ -215,11 +211,9 @@ The general `no_phase_archaeology_in_production_code` and `external_corpus_paths
 | `verter_lsp::audit_harness::run_with_audit` | `crates/verter_lsp/tests/lsp_audit_tls_propagation.rs` |
 | `audit_mcp_tool_call` | `crates/verter_session/tests/mcp_audit_tls_propagation.rs` |
 
-The guard's `MISSING_TLS_TEST` allow-list is empty: every Wave-3 entry-point is paired. Adding a new audited entry-point requires landing a paired TLS driver in the same change and pinning the pair into `WAVE_3_ENTRY_POINTS`; the guard's stale-allow-list check rejects an unpaired entry that has a TLS driver already, so the list cannot drift back to a documenting role.
+The guard's `MISSING_TLS_TEST` allow-list is empty: every Wave-3 entry-point is paired. Adding a new audited entry-point requires landing a paired TLS driver in the same change and pinning the pair into `WAVE_3_ENTRY_POINTS`; the stale-allow-list check rejects an unpaired entry that has a TLS driver already.
 
 ## NAPI / WASM Bindings
-
-The native and WASM hosts expose the same set of typed audited entry-points alongside two non-destructive query surfaces:
 
 | JS export | Rust binding | Returns |
 | --- | --- | --- |
@@ -232,11 +226,11 @@ The native and WASM hosts expose the same set of typed audited entry-points alon
 | `getAuditRecords({ kind?, sinceRequestId?, limit? })` | non-destructive filtered query | `Buffer` (JSON array) |
 | `getBundlerBatchSummary({ kind?, sinceRequestId? })` | invokes `BatchAuditAggregator` over the store | `Buffer` (JSON `BundlerBatchPayload`) |
 
-NAPI bindings live in `crates/verter_napi/src/audit.rs` (helper types + decoders) and the inline `#[napi] impl NapiVerterHost` block in `crates/verter_napi/src/lib.rs`. WASM bindings live in `crates/verter_wasm/src/audit.rs` + `crates/verter_wasm/src/lib.rs`. All exports return `Buffer` (JSON UTF-8 payload) for parity with the original `getComponentMetaWithAudit` contract; consumers decode against `@verter/types/audit.generated.ts`.
+NAPI bindings: `crates/verter_napi/src/audit.rs` (helper types + decoders) and inline `#[napi] impl NapiVerterHost` in `crates/verter_napi/src/lib.rs`. WASM bindings: `crates/verter_wasm/src/audit.rs` + `crates/verter_wasm/src/lib.rs`. All exports return `Buffer` (JSON UTF-8 payload) for parity with the original `getComponentMetaWithAudit` contract; consumers decode against `@verter/types/audit.generated.ts`.
 
 ## `BatchAuditAggregator`
 
-`BatchAuditAggregator` (`crates/verter_audit/src/batch.rs`) folds an `AuditRecordSource` into a `BundlerBatchPayload`. The substrate stays leaf — the aggregator depends only on the trait callback contract and never on owning crates:
+`BatchAuditAggregator` (`crates/verter_audit/src/batch.rs`) folds an `AuditRecordSource` into a `BundlerBatchPayload`. The substrate stays leaf — the aggregator depends only on the trait callback contract:
 
 ```text
 trait AuditRecordSource {
@@ -244,17 +238,17 @@ trait AuditRecordSource {
 }
 ```
 
-`AuditRecordsStore` implements `AuditRecordSource`; non-destructive iteration exposes each stored record together with its insertion `Instant`. `BatchAuditAggregator::summarize(since)` partitions the window by `RequestKind`, accumulates total duration, total bytes parsed, `from_cache_count`, and `cache_hit_rate`, and tracks the top-`SLOWEST_RECORD_LIMIT` (= 5) slowest records as `SlowRecordSummary` entries. Empty sources yield a zeroed payload with no division-by-zero on `cache_hit_rate`.
+`AuditRecordsStore` implements `AuditRecordSource`; non-destructive iteration exposes each record with its insertion `Instant`. `BatchAuditAggregator::summarize(since)` partitions by `RequestKind`, accumulates total duration, total bytes parsed, `from_cache_count`, and `cache_hit_rate`, and tracks the top-`SLOWEST_RECORD_LIMIT` (= 5) slowest records as `SlowRecordSummary` entries. Empty sources yield a zeroed payload with no division-by-zero on `cache_hit_rate`.
 
-`since` filters records inserted strictly after the supplied `Instant`. Bundler integrations call `summarize(Some(last_summary_instant))` on every flush so each batch reports only the work completed since the last call.
+`since` filters records inserted strictly after the supplied `Instant`. Bundler integrations call `summarize(Some(last_summary_instant))` on every flush so each batch reports only work since the last call.
 
 ## Tests & TLS-Propagation Harness
 
-`verter_session::tests::audit_tls_harness::assert_observer_reaches(install_audit, f)` is the primary verification primitive for TLS propagation. It runs the supplied closure under either a `RequestContextGuard` (`install_audit = true`) or no guard (`install_audit = false`, the control case), records whether `verter_audit::current_observer().is_some()` was visible on the calling thread, and exposes a `WorkerSinkHandle` so workers spawned inside the closure can report their own observation via `report_worker_observer_presence`.
+`verter_session::tests::audit_tls_harness::assert_observer_reaches(install_audit, f)` is the primary verification primitive for TLS propagation. Runs the closure under either a `RequestContextGuard` (`install_audit = true`) or no guard (`install_audit = false`, the control case), records whether `verter_audit::current_observer().is_some()` was visible on the calling thread, and exposes a `WorkerSinkHandle` so workers spawned inside the closure can report their own observation via `report_worker_observer_presence`.
 
-Worker threads spawned bare via `std::thread::spawn` get a fresh TLS slot by construction. Closures that need observer propagation into a worker pool must either install the guard again on the worker or rely on a runtime that already plumbs `RequestContextGuard` through to its workers (the production scheduler does this for its rayon pool).
+Worker threads spawned bare via `std::thread::spawn` get a fresh TLS slot by construction. Closures needing observer propagation into a worker pool must either install the guard again on the worker or rely on a runtime that plumbs `RequestContextGuard` through to its workers (the production scheduler does this for its rayon pool).
 
-The `wave_3_entry_points_propagate_tls` architecture guard pins the `(entry_point_symbol, paired_test_files)` invariant — every `*_with_audit` entry-point has at least one test that both invokes the symbol AND calls `assert_observer_reaches(...)`. Tests living in `crates/verter_session/tests/tls_harness_in_crate.rs`, `tls_harness_cross_crate.rs`, and `semantic_analysis_audit_tls_propagation.rs` exercise the harness across in-crate, cross-crate, and analysis-specific propagation.
+The `wave_3_entry_points_propagate_tls` guard pins the `(entry_point_symbol, paired_test_files)` invariant — every `*_with_audit` entry-point has at least one test that both invokes the symbol AND calls `assert_observer_reaches(...)`. Tests living in `crates/verter_session/tests/tls_harness_in_crate.rs`, `tls_harness_cross_crate.rs`, and `semantic_analysis_audit_tls_propagation.rs` exercise the harness across in-crate, cross-crate, and analysis-specific propagation.
 
 ## Key Files
 

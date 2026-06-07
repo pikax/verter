@@ -5,20 +5,19 @@ description: Verter scheduler — Scheduler, submit_request/submit_batch/submit_
 
 # Scheduler
 
-This skill is the concise reference for the `verter_scheduler` crate.
+Concise reference for the `verter_scheduler` crate.
 
-The **live** surface (current tree) is: the `submit_request` /
-`submit_batch` / `submit_batch_atomic` submission API, the live
-`TaskKind` variant set (`Source` / `Analysis` / `Artifact`), CPU vs I/O
-pool routing, and the dual pool ownership — the scheduler-owned stage
-`cpu_pool` (+ `io_pool`) plus the host-owned `HostCpuPool` coordinator
-shared by every host batch API, with per-batch
-`account_batch_submission` accounting. The *Dual pool ownership* section
-is the authority for the live pool model.
+**Live** surface (current tree): the `submit_request` / `submit_batch` /
+`submit_batch_atomic` submission API, the live `TaskKind` variant set
+(`Source` / `Analysis` / `Artifact`), CPU vs I/O pool routing, and dual
+pool ownership — the scheduler-owned stage `cpu_pool` (+ `io_pool`) plus
+the host-owned `HostCpuPool` coordinator shared by every host batch API,
+with per-batch `account_batch_submission` accounting. *Dual pool
+ownership* is the authority for the live pool model.
 
 `submit_batch` is non-atomic (N separate `Submission::NewRequest` items;
-the pump may observe the batch half-admitted, and `submit_count` is
-bumped per item). `submit_batch_atomic` lands ONE
+the pump may observe the batch half-admitted, `submit_count` bumped per
+item). `submit_batch_atomic` lands ONE
 `Submission::NewRequestBatch { requests: Vec<QueuedRequest> }` that the
 driver drains as a unit and admits under a SINGLE `dag.lock()`
 acquisition via `handle_new_request_batch` (generation bumps + supersede
@@ -29,9 +28,9 @@ supersedes every file's old generation atomically. Both paths share one
 admission core — `prepare_request` (pre-lock: tombstone gate + node
 ensure, cloning the `FileNode` `Arc` out of the `nodes` DashMap BEFORE
 locking, the AB-BA-safe DAG-first ordering), `admit_prepared_under_lock`
-(the sole place a request bumps generation, runs the supersede sweep,
-registers the waiter, and admits work), and an `AdmissionPostWork`
-accumulator that fires deferred dedup callbacks + clears auto-ingest
+(sole place a request bumps generation, runs the supersede sweep,
+registers the waiter, admits work), and an `AdmissionPostWork`
+accumulator firing deferred dedup callbacks + clearing auto-ingest
 tracking AFTER the lock releases. `SchedulerDag::register_request`
 returns `Option<DedupJoinerEvent>` (fired post-unlock via
 `DedupJoinerEvent::fire`) instead of invoking `on_dedup_joiner` under the
@@ -39,27 +38,27 @@ DAG lock — the callback may re-enter the scheduler, so it must not run
 while admission holds the mutex. `BatchHandle` carries one
 `CompletionHandle` per input in submission order; `wait_batch(&self,
 &BatchHandle)` returns results in INPUT order and never surfaces a
-partial set. The pump discipline is preserved throughout: dispatch /
-wait / parse / compile / callbacks all run outside the DAG lock, and
-capacity stays reserved at dequeue time. `compile_many` IS wired onto
-atomic batch admission: its source-upsert stage routes every input
-through `VerterHost::upsert_many_with_priority` (the upsert engine),
-which lands ONE `submit_batch_atomic` + ONE `wait_batch` for the whole
-batch rather than one upsert per file. Per-call worker count is NOT a
-parameter of `compile_many` — concurrency is the construction-time
-host-owned `HostCpuPool` (`HostConfig::host_cpu_threads`); see the *Dual
-pool ownership* section.
+partial set. Pump discipline is preserved throughout: dispatch / wait /
+parse / compile / callbacks all run outside the DAG lock, and capacity
+stays reserved at dequeue time. `compile_many` IS wired onto atomic
+batch admission: its source-upsert stage routes every input through
+`VerterHost::upsert_many_with_priority` (the upsert engine), which lands
+ONE `submit_batch_atomic` + ONE `wait_batch` for the whole batch rather
+than one upsert per file. Per-call worker count is NOT a parameter of
+`compile_many` — concurrency is the construction-time host-owned
+`HostCpuPool` (`HostConfig::host_cpu_threads`); see *Dual pool
+ownership*.
 
-A **leaf substrate** for the cache-runtime DAG design has landed
-(present on the tree but UNWIRED — no submission path takes it as an
-argument yet): the hand-rolled `CpuConcurrencySemaphore` +
-`CpuConcurrencyPermit` (`cpu_concurrency.rs`), the `CancellationToken`
-(`cancellation.rs`), the opaque `SchedulerCacheId` newtype relocated
-into `cache_id.rs`, the caller-side `DedupeHook` trait + `DedupeJoiner`
-+ `NoDedupeHook` (`dedupe_hook.rs`), and the `SubmissionResult<T>`
-substrate (`Admitted` / `DedupeJoined` / `Backpressured`). These
-primitives are correct and tested in isolation, but the submission API
-does not yet consume them. The sections below describe each.
+A **leaf substrate** for the cache-runtime DAG design has LANDED but is
+UNWIRED (no submission path takes it as an argument yet): the
+hand-rolled `CpuConcurrencySemaphore` + `CpuConcurrencyPermit`
+(`cpu_concurrency.rs`), the `CancellationToken` (`cancellation.rs`), the
+opaque `SchedulerCacheId` newtype relocated into `cache_id.rs`, the
+caller-side `DedupeHook` trait + `DedupeJoiner` + `NoDedupeHook`
+(`dedupe_hook.rs`), and the `SubmissionResult<T>` substrate (`Admitted` /
+`DedupeJoined` / `Backpressured`). These primitives are correct and
+tested in isolation; the submission API does not yet consume them.
+Sections below describe each.
 
 The rest of the **cache-runtime DAG design target** is still NOT on the
 tree: the `submit_dag` / `CacheNodeDag` DAG surface, the `KeyedJob` /
@@ -71,27 +70,25 @@ backpressure), and the wiring of `CpuConcurrencySemaphore` onto DAG
 node dispatch. Every section describing those un-landed surfaces carries
 an explicit "Not yet implemented" banner.
 
-The binding implementation spec lives in
-`docs/arch/cache-runtime-overhaul-plan.md` (Blocks 6 and 7). When in
-doubt, the plan wins; this skill derives from the plan body.
+Binding implementation spec: `docs/arch/cache-runtime-overhaul-plan.md`
+(Blocks 6 and 7). When in doubt, the plan wins; this skill derives from
+the plan body.
 
 ## Crate dependency invariant
 
-`verter_scheduler` MUST NOT depend on any higher-level crate. The
-dependency runs one-way: higher-level crates depend on
-`verter_scheduler`, never the reverse. The skill never names a
-symbol that lives in a higher-level crate — any such reference is a
-cycle and a violation.
+`verter_scheduler` MUST NOT depend on any higher-level crate. Dependency
+runs one-way: higher-level crates depend on `verter_scheduler`, never the
+reverse. The skill never names a symbol living in a higher-level crate —
+any such reference is a cycle and a violation.
 
 Guard:
 `crates/verter_scheduler/tests/no_session_dep.rs::scheduler_does_not_depend_on_verter_session`
 walks `crates/verter_scheduler/Cargo.toml`, every `.rs` file under
-`crates/verter_scheduler/src/**` (parsed with `syn::parse_file`),
-AND this skill markdown. It asserts NO mention of any higher-level
-crate appears in any `use` statement, any `dependencies` /
-`dev-dependencies` table, OR any skill prose substring. The guard
-treats the skill as a substrate input so a relapse in this file
-fails the build.
+`crates/verter_scheduler/src/**` (parsed with `syn::parse_file`), AND
+this skill markdown. Asserts NO mention of any higher-level crate appears
+in any `use` statement, any `dependencies` / `dev-dependencies` table, OR
+any skill prose substring. The guard treats the skill as a substrate
+input so a relapse in this file fails the build.
 
 ## Generic dedupe-hook surface
 
@@ -99,17 +96,17 @@ The `DedupeHook` trait IS on the current tree, in
 `crates/verter_scheduler/src/dedupe_hook.rs`. It is the **caller-side
 pre-admission singleflight** hook: the calling crate implements it over
 its own in-flight table and the scheduler probes it BEFORE a submission
-reaches the DAG, so a caller that already has an equivalent flight live
+reaches the DAG, so a caller already holding an equivalent live flight
 can skip the scheduler round-trip entirely and attach as a joiner. The
-scheduler itself owns NO in-flight cache table — the calling crate
-deduplicates BEFORE submitting.
+scheduler owns NO in-flight cache table — the calling crate deduplicates
+BEFORE submitting.
 
-This is DISTINCT from the scheduler-internal post-unlock
-`DedupJoinerEvent` (`crate::dag`): that one is the waiter-notify fired,
-after the DAG lock is released, once admission has already joined a
-request onto an existing waiter group. `DedupeHook` runs on the caller's
-side before a submission is even constructed; `DedupJoinerEvent` runs
-inside admission. Two different lifecycle points, two different types.
+DISTINCT from the scheduler-internal post-unlock `DedupJoinerEvent`
+(`crate::dag`): that is the waiter-notify fired after the DAG lock
+releases, once admission has already joined a request onto an existing
+waiter group. `DedupeHook` runs on the caller's side before a submission
+is even constructed; `DedupJoinerEvent` runs inside admission. Two
+different lifecycle points, two different types.
 
 ```rust
 // crates/verter_scheduler/src/dedupe_hook.rs
@@ -134,29 +131,28 @@ pub struct NoDedupeHook;
 ```
 
 The probe key is `crate::dag::WorkNodeIdentity` — the scheduler's own
-dedupe identity and the **single dedupe-identity authority**. There is
-NO parallel `DedupKey` type: any public dedupe key is a thin
-wrapper/derivation of `WorkNodeIdentity`, never a separate key, so there
-is one source of truth for dedupe identity (leaf-boundary invariant
-H20). The trait, `DedupeJoiner`, and `NoDedupeHook` are fully owned by
-`verter_scheduler`; no method signature or struct field on any of them
-references a higher-level crate.
+dedupe identity and the **single dedupe-identity authority**. NO parallel
+`DedupKey` type: any public dedupe key is a thin wrapper/derivation of
+`WorkNodeIdentity`, never a separate key, so there is one source of truth
+for dedupe identity (leaf-boundary invariant H20). The trait,
+`DedupeJoiner`, and `NoDedupeHook` are fully owned by `verter_scheduler`;
+no method signature or struct field on any references a higher-level
+crate.
 
-The submission path probes the hook before admission. When the probe
-returns `Some`, the caller blocks on the existing flight and the
-scheduler skips enqueue (surfaced as `SubmissionResult::DedupeJoined`,
-see *SubmissionResult substrate*); when it returns `None`, the
-submission proceeds to admission. The scheduler never imports any
-concrete in-flight-table type from a higher-level crate. Wiring the hook
-into `submit_request` / `submit_dag` as an explicit `&dyn DedupeHook`
-argument on those entry points is a future sub-block — the trait
-substrate is landed and unwired.
+The submission path probes the hook before admission. On `Some`, the
+caller blocks on the existing flight and the scheduler skips enqueue
+(surfaced as `SubmissionResult::DedupeJoined`, see *SubmissionResult
+substrate*); on `None`, the submission proceeds to admission. The
+scheduler never imports any concrete in-flight-table type from a
+higher-level crate. Wiring the hook into `submit_request` / `submit_dag`
+as an explicit `&dyn DedupeHook` argument on those entry points is a
+future sub-block — the trait substrate is landed and unwired.
 
 ## SubmissionResult substrate
 
 `SubmissionResult<T>` (`scheduler.rs`, LANDED) is the typed result of a
 submission attempt, generic over the success-handle type `T`. Exactly
-three variants — there is no speculative fourth case:
+three variants — no speculative fourth case:
 
 ```rust
 pub enum SubmissionResult<T> {
@@ -171,7 +167,7 @@ pub enum SubmissionResult<T> {
 }
 ```
 
-It is landed substrate, UNWIRED: the live submission entry points
+Landed substrate, UNWIRED: the live submission entry points
 (`submit_request` / `submit_batch` / `submit_batch_atomic`) still return
 their existing `CompletionHandle` / `BatchHandle` shapes, not
 `SubmissionResult`. Routing those entry points through `SubmissionResult`
@@ -192,14 +188,13 @@ UNWIRED — no submission path or work node carries one yet.
 
 > **Not yet implemented — cache-runtime DAG design.** The `KeyedJob` /
 > `DedupKey` / `CacheNodeDagNode` / `CacheNodeDag` / `submit_dag` types
-> and the whole lifecycle in this section are the un-landed design
-> target from `docs/arch/cache-runtime-overhaul-plan.md`; none of them
-> are on the current tree. The live submission surface is
-> `Scheduler::submit_request` / `submit_batch` (returning a
-> `BatchHandle`) over the live `TaskKind` set `Source` / `Analysis` /
-> `Artifact`, dispatched onto the scheduler-owned `cpu_pool` via
-> `cpu_pool.spawn(...)` (see *Dual pool ownership*). The types and steps
-> below describe the intended shape.
+> and the whole lifecycle here are the un-landed design target from
+> `docs/arch/cache-runtime-overhaul-plan.md`; none are on the current
+> tree. Live submission surface: `Scheduler::submit_request` /
+> `submit_batch` (returning a `BatchHandle`) over the live `TaskKind` set
+> `Source` / `Analysis` / `Artifact`, dispatched onto the scheduler-owned
+> `cpu_pool` via `cpu_pool.spawn(...)` (see *Dual pool ownership*). Types
+> and steps below describe the intended shape.
 >
 > **Dedupe-identity reconciliation:** the LANDED dedupe authority is
 > `crate::dag::WorkNodeIdentity` (the `DedupeHook::probe` key — see
@@ -209,9 +204,9 @@ UNWIRED — no submission path or work node carries one yet.
 > parallel key type. There is one dedupe-identity source of truth.
 
 `KeyedJob` is the submission identity. `CacheNodeDagNode` is the
-ready-queue envelope that the driver dispatches. The inbox-level
-enum `driver::Submission` is a separate type that owns its own
-discriminator variants.
+ready-queue envelope the driver dispatches. The inbox-level enum
+`driver::Submission` is a separate type owning its own discriminator
+variants.
 
 ```rust
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -233,95 +228,90 @@ pub struct KeyedJob {
 }
 ```
 
-`KeyedJob` carries NO `task` / `task_kind` field. The task
-discriminator lives on `CacheNodeDagNode.task_kind` only — there is
-one source of truth.
+`KeyedJob` carries NO `task` / `task_kind` field. The task discriminator
+lives on `CacheNodeDagNode.task_kind` only — one source of truth.
 
 > **Not yet implemented — cache-runtime DAG design (Block 7).** The
 > `submit_dag` / `CacheNodeDag` / `SchedulerCpuPool` / per-task
 > `cpu_concurrency_semaphore` lifecycle below is the Block 7 design
-> target from `docs/arch/cache-runtime-overhaul-plan.md`; it is NOT on
-> the current tree. On the current tree the scheduler exposes
-> `submit_request` (no `submit_dag`), the live `TaskKind` set is
-> `Source` / `Analysis` / `Artifact`, and CPU stage work dispatches via
-> the scheduler-owned `cpu_pool.spawn(...)` (see *Dual pool ownership*
-> for the authoritative live pool model). The steps below describe the
-> intended DAG flow once Block 7 lands.
+> target from `docs/arch/cache-runtime-overhaul-plan.md`; NOT on the
+> current tree. On the current tree the scheduler exposes `submit_request`
+> (no `submit_dag`), the live `TaskKind` set is `Source` / `Analysis` /
+> `Artifact`, and CPU stage work dispatches via the scheduler-owned
+> `cpu_pool.spawn(...)` (see *Dual pool ownership* for the authoritative
+> live pool model). Steps below describe the intended DAG flow once Block
+> 7 lands.
 
 Lifecycle (Block 7 design target):
 
-1. **Caller-side dedupe.** Cache-runtime callers consult their
-   in-flight table FIRST. A matching flight short-circuits — no
-   scheduler submission happens.
-2. **Submit.** The caller invokes `Scheduler::submit_request(req)` or
+1. **Caller-side dedupe.** Cache-runtime callers consult their in-flight
+   table FIRST. A matching flight short-circuits — no scheduler
+   submission happens.
+2. **Submit.** Caller invokes `Scheduler::submit_request(req)` or
    `Scheduler::submit_dag(dag)` (optionally passing a `DedupeHook`).
    `submit_request` lands a `driver::Submission::NewRequest` on the
-   inbox. `submit_dag` constructs a `CacheNodeDag` and pushes its
-   ready nodes into the bounded ready queue as upstream gates fire.
-3. **Scheduler-side dedupe probe.** The driver computes
-   `dedup_key_for(req)` and consults `pending_requests` (the
-   scheduler's own per-process inbox-level dedupe). A duplicate
-   `DedupKey` attaches the caller's `CompletionSender<RequestResult>`
-   as a joiner on the existing flight; no new job is enqueued.
+   inbox. `submit_dag` constructs a `CacheNodeDag` and pushes its ready
+   nodes into the bounded ready queue as upstream gates fire.
+3. **Scheduler-side dedupe probe.** Driver computes `dedup_key_for(req)`
+   and consults `pending_requests` (the scheduler's own per-process
+   inbox-level dedupe). A duplicate `DedupKey` attaches the caller's
+   `CompletionSender<RequestResult>` as a joiner on the existing flight;
+   no new job enqueued.
 4. **Admission.** A non-dedup submission is admitted to the priority
    ready queue
-   (`Arc<crossbeam_queue::ArrayQueue<Arc<CacheNodeDagNode>>>` — the
-   inner `Arc` is required because `CacheNodeDagNode` is not
-   `Clone`: its `CacheNodeCompletionSender` wraps a single-use
-   `tokio::sync::oneshot::Sender`, so the same node lives on both
-   the ready queue and `DagState.nodes` only via `Arc`-sharing),
-   subject to
+   (`Arc<crossbeam_queue::ArrayQueue<Arc<CacheNodeDagNode>>>` — the inner
+   `Arc` is required because `CacheNodeDagNode` is not `Clone`: its
+   `CacheNodeCompletionSender` wraps a single-use
+   `tokio::sync::oneshot::Sender`, so the same node lives on both the
+   ready queue and `DagState.nodes` only via `Arc`-sharing), subject to
    the bounded-admission policy below. Per-call CPU concurrency is
    enforced by the worker dispatch site (per-task
    `cpu_concurrency_semaphore.acquire()`), not by admission.
-5. **Execution.** The driver pops a ready node and dispatches via
-   `TaskKind` routing:
+5. **Execution.** Driver pops a ready node and dispatches via `TaskKind`
+   routing:
    - `Load` → `IoPool::submit`;
    - `Parse` / `CacheNode` / CPU `Analysis` / CPU `Artifact` →
      `SchedulerCpuPool::submit`.
-6. **Completion.** `pending_requests` is cleared; every joiner
-   receives the result through their attached
-   `CompletionSender<RequestResult>`; DAG dependents are
-   re-evaluated for readiness. The worker's per-task
-   `CpuConcurrencyPermit` drops via RAII immediately after the task
-   body returns, releasing the semaphore counter and notifying one
-   waiter.
+6. **Completion.** `pending_requests` cleared; every joiner receives the
+   result through their attached `CompletionSender<RequestResult>`; DAG
+   dependents are re-evaluated for readiness. The worker's per-task
+   `CpuConcurrencyPermit` drops via RAII immediately after the task body
+   returns, releasing the semaphore counter and notifying one waiter.
 
 ## Dual pool ownership
 
 Two distinct `rayon::ThreadPool`s cooperate so the batch-orchestration
-outer wait and the scheduler's CPU stage executor cannot deadlock on
-the same workers. They are owned by DIFFERENT layers — the split is
-the deadlock-isolation invariant.
+outer wait and the scheduler's CPU stage executor cannot deadlock on the
+same workers. Owned by DIFFERENT layers — the split is the
+deadlock-isolation invariant.
 
-- **Scheduler stage pool (`cpu_pool`)** — owned BY the scheduler,
-  built internally in `Scheduler::with_executor` /
-  `new_sync_with_executor` from `SchedulerConfig::cpu_threads`. It is
-  the ONLY pool for CPU stage execution: the driver dispatches the live
-  `TaskKind::Source` CPU step (the parse folded into `Source`) plus
-  `TaskKind::Analysis` and `TaskKind::Artifact` onto it via
-  `cpu_pool.spawn(...)`. Workers register `CallerKind::CpuWorker` so
-  `wait_or_drive` routes them to the cooperative-pump branch. The
-  scheduler also owns the bounded `io_pool`
+- **Scheduler stage pool (`cpu_pool`)** — owned BY the scheduler, built
+  internally in `Scheduler::with_executor` / `new_sync_with_executor`
+  from `SchedulerConfig::cpu_threads`. The ONLY pool for CPU stage
+  execution: the driver dispatches the live `TaskKind::Source` CPU step
+  (the parse folded into `Source`) plus `TaskKind::Analysis` and
+  `TaskKind::Artifact` onto it via `cpu_pool.spawn(...)`. Workers register
+  `CallerKind::CpuWorker` so `wait_or_drive` routes them to the
+  cooperative-pump branch. The scheduler also owns the bounded `io_pool`
   (`SchedulerConfig::io_threads`) for the pure-I/O step of
   `TaskKind::Source` (reading bytes off disk).
 - **Coordinator pool (`HostCpuPool`)** —
   `crates/verter_scheduler/src/host_cpu_pool.rs`. Constructed once at
   startup by the external host/runtime layer via
-  `verter_scheduler::HostCpuPool::new(num_threads)` and owned THERE,
-  as a sibling of the `Scheduler` — NOT passed into the scheduler and
-  NOT a field on it. Shared by the outer batch coordinator of EVERY
-  host batch API (batch component-meta, batch SFC compile, and any
-  future host batch fan-out) for its synchronous wait points. Its
-  workers register `CallerKind::External` (8 MiB stacks), so they PARK
-  in `wait_or_drive` rather than inline-executing scheduler CPU tasks,
-  and the driver's inline-execute branch excludes `External` —
-  coordinator-pool workers therefore NEVER run scheduler CPU stage work
-  (`TaskKind::Source` / `Analysis` / `Artifact`).
+  `verter_scheduler::HostCpuPool::new(num_threads)` and owned THERE, as a
+  sibling of the `Scheduler` — NOT passed into the scheduler and NOT a
+  field on it. Shared by the outer batch coordinator of EVERY host batch
+  API (batch component-meta, batch SFC compile, and any future host batch
+  fan-out) for its synchronous wait points. Its workers register
+  `CallerKind::External` (8 MiB stacks), so they PARK in `wait_or_drive`
+  rather than inline-executing scheduler CPU tasks, and the driver's
+  inline-execute branch excludes `External` — coordinator-pool workers
+  therefore NEVER run scheduler CPU stage work (`TaskKind::Source` /
+  `Analysis` / `Artifact`).
 
 The scheduler constructor takes only `(config, source_loader[,
-executor])` — there is NO pool parameter. The scheduler builds and owns
-its `cpu_pool` + `io_pool`; the coordinator pool lives entirely in the
+executor])` — NO pool parameter. The scheduler builds and owns its
+`cpu_pool` + `io_pool`; the coordinator pool lives entirely in the
 external layer:
 
 ```rust
@@ -356,25 +346,24 @@ pub struct Scheduler {
 ```
 
 **Single batch-coordination primitive (lives in the external host/
-runtime layer, not in this crate).** Every host/runtime batch API
-(batch component-meta, batch SFC compile, and any future batch
-fan-out) routes its outer wait through ONE coordinator primitive owned
-by the external layer, parameterised by a small per-client batch
-policy/context. That primitive — not the scheduler — owns:
-coordinator-pool `install`; the empty / single-item fast path;
-deterministic per-input ordering; a generic per-item panic boundary
-(it catches a panicking item and hands it to the client's policy for
-domain conversion, so one item never aborts the batch); the per-batch
-submission accounting (when the policy carries a scheduler handle); a
-per-batch tracing span; and the non-reentrant policy below. Each client
-supplies only its item work and its domain panic→result conversion. The
-primitive does NOT own cancellation/shutdown — the scheduler exposes no
-batch-cancellation facility today, so a batch runs to completion. The
-scheduler crate exposes NO outer-fan-out API and performs NO
-`par_iter().install(...)` outer wait on its `cpu_pool`; a batch's
-per-batch submission accounting is a pool-free counter bump
-(`Scheduler::account_batch_submission`), which the coordinator invokes
-once per non-empty batch.
+runtime layer, not in this crate).** Every host/runtime batch API (batch
+component-meta, batch SFC compile, and any future batch fan-out) routes
+its outer wait through ONE coordinator primitive owned by the external
+layer, parameterised by a small per-client batch policy/context. That
+primitive — not the scheduler — owns: coordinator-pool `install`; the
+empty / single-item fast path; deterministic per-input ordering; a
+generic per-item panic boundary (catches a panicking item and hands it to
+the client's policy for domain conversion, so one item never aborts the
+batch); per-batch submission accounting (when the policy carries a
+scheduler handle); a per-batch tracing span; and the non-reentrant policy
+below. Each client supplies only its item work and its domain
+panic→result conversion. The primitive does NOT own
+cancellation/shutdown — the scheduler exposes no batch-cancellation
+facility today, so a batch runs to completion. The scheduler crate
+exposes NO outer-fan-out API and performs NO `par_iter().install(...)`
+outer wait on its `cpu_pool`; a batch's per-batch submission accounting is
+a pool-free counter bump (`Scheduler::account_batch_submission`), which
+the coordinator invokes once per non-empty batch.
 
 **Non-reentrant host-batch contract.** A batch item closure may call
 scalar scheduler operations, but a nested batch fan-out reached from
@@ -382,14 +371,14 @@ inside an item closure must NOT issue a fresh coordinator-pool install.
 The external primitive detects re-entrancy (a per-thread marker scoped
 around each item's execution) and runs the nested fan-out INLINE /
 sequentially on the current coordinator worker. Stacking a second outer
-wait on the same finite coordinator pool would reintroduce the
-starvation class one level up.
+wait on the same finite coordinator pool would reintroduce the starvation
+class one level up.
 
 **Deadlock-free property + new invariant.** The two pools are distinct
 and owned by different layers: **no worker waits for a job in its OWN
 pool.** A coordinator-pool worker may block on scheduler stage work
-without deadlock because the scheduler's `cpu_pool` has its own worker
-set that proceeds independently; a `cpu_pool` worker running
+without deadlock because the scheduler's `cpu_pool` has its own
+independently-proceeding worker set; a `cpu_pool` worker running
 `TaskKind::Source` stage work is not a coordinator worker and does not
 gate the outer coordinator's wait. The invariant in full:
 
@@ -408,15 +397,15 @@ reentrancy test pins the inline collapse of a nested batch.
 
 ## Per-call concurrency semaphore
 
-Current state: batch fan-out has no per-call `threads` option — the
-host coordinator pool's worker count is sized once at host construction
-(from the host's CPU-thread config) and reused across every batch call,
-and the scheduler's stage `cpu_pool` runs at its configured concurrency.
+Current state: batch fan-out has no per-call `threads` option — the host
+coordinator pool's worker count is sized once at host construction (from
+the host's CPU-thread config) and reused across every batch call, and the
+scheduler's stage `cpu_pool` runs at its configured concurrency.
 
 The `CpuConcurrencySemaphore` / `CpuConcurrencyPermit` TYPES are LANDED
 (`crates/verter_scheduler/src/cpu_concurrency.rs`) and tested in
-isolation, but they are UNWIRED — no submission path or DAG node
-consumes a semaphore handle yet.
+isolation, but UNWIRED — no submission path or DAG node consumes a
+semaphore handle yet.
 
 > **Not yet implemented.** The `Scheduler::cpu_concurrency_semaphore(n)`
 > constructor method and per-call concurrency capping on
@@ -442,111 +431,104 @@ impl Scheduler {
 ```
 
 `CpuConcurrencySemaphore` (LANDED) is a hand-rolled counting primitive.
-The substrate is `parking_lot::Mutex<usize>` (the free-permit count) +
+Substrate: `parking_lot::Mutex<usize>` (the free-permit count) +
 `parking_lot::Condvar` — the only synchronisation primitives
 `parking_lot 0.12` exports (`parking_lot::Semaphore` does NOT exist in
-that version; its absence is pinned by
-`tests/no_parking_lot_semaphore.rs`). `new(capacity)` PANICS on
-`capacity == 0` (a release-active assert: a zero-permit semaphore would
-deadlock every `acquire`; the cap is configured once at construction so
-the check is off the hot path). `acquire()` BLOCKS in a
-predicate-rechecking `while *available == 0` loop until a permit is
-free, then decrements and returns the RAII `CpuConcurrencyPermit`
-(`#[must_use]`, non-`Clone` — one permit is exactly one held slot).
-`Drop` increments the count and `notify_one`s a single waiter, on BOTH
-the normal path AND stack-unwind on panic, so a panicking holder still
-frees its slot. The `Mutex<usize>` count is the single source of truth
-for available permits. Guards: `tests/cpu_concurrency_semaphore.rs`
-pins the capacity cap (deterministic channel-handshake blocking proof),
-RAII normal-drop release, and panic-unwind release; the
-`cpu_concurrency` module is `#[cfg(not(target_arch = "wasm32"))]` (the
-limiter caps the native-only scheduler CPU pool — wasm runs the
-scheduler inline), so the test file compiles native-only.
+that version; absence pinned by `tests/no_parking_lot_semaphore.rs`).
+`new(capacity)` PANICS on `capacity == 0` (a release-active assert: a
+zero-permit semaphore would deadlock every `acquire`; the cap is
+configured once at construction so the check is off the hot path).
+`acquire()` BLOCKS in a predicate-rechecking `while *available == 0` loop
+until a permit is free, then decrements and returns the RAII
+`CpuConcurrencyPermit` (`#[must_use]`, non-`Clone` — one permit is exactly
+one held slot). `Drop` increments the count and `notify_one`s a single
+waiter, on BOTH the normal path AND stack-unwind on panic, so a panicking
+holder still frees its slot. The `Mutex<usize>` count is the single
+source of truth for available permits. Guards:
+`tests/cpu_concurrency_semaphore.rs` pins the capacity cap (deterministic
+channel-handshake blocking proof), RAII normal-drop release, and
+panic-unwind release; the `cpu_concurrency` module is
+`#[cfg(not(target_arch = "wasm32"))]` (the limiter caps the native-only
+scheduler CPU pool — wasm runs the scheduler inline), so the test file
+compiles native-only.
 
 Propagation model: every `CacheNodeDagNode` carries
-`cpu_concurrency_semaphore: Option<Arc<CpuConcurrencySemaphore>>` —
-the SEMAPHORE HANDLE, NOT a pre-acquired permit. The worker
-dispatch site calls `sem.acquire()` per task immediately before the
-executor runs the body; the permit drops on task completion.
-Cloning the `Arc<CpuConcurrencySemaphore>` across N DAG nodes does
-NOT pre-acquire N permits — only `acquire()` consumes a permit. This
-is the only shape that enforces "max `capacity` concurrent CPU
-tasks" across the DAG. A design propagating a shared pre-acquired
-`Arc<CpuConcurrencyPermit>` would acquire ONE permit at submission
-and let N>capacity tasks run concurrently.
+`cpu_concurrency_semaphore: Option<Arc<CpuConcurrencySemaphore>>` — the
+SEMAPHORE HANDLE, NOT a pre-acquired permit. The worker dispatch site
+calls `sem.acquire()` per task immediately before the executor runs the
+body; the permit drops on task completion. Cloning the
+`Arc<CpuConcurrencySemaphore>` across N DAG nodes does NOT pre-acquire N
+permits — only `acquire()` consumes a permit. This is the only shape that
+enforces "max `capacity` concurrent CPU tasks" across the DAG. A design
+propagating a shared pre-acquired `Arc<CpuConcurrencyPermit>` would
+acquire ONE permit at submission and let N>capacity tasks run
+concurrently.
 
 ## TaskKind routing
 
 > **Current state.** The live `TaskKind` set is `Source` / `Analysis` /
-> `Artifact`. CPU stage work (`Analysis` / `Artifact`, and the parse
-> step folded into `Source`) dispatches onto the scheduler-owned
-> `cpu_pool` via `cpu_pool.spawn(...)`; `Load`-style I/O runs on the
-> `io_pool`. See *Dual pool ownership* for the authoritative live pool
-> model.
+> `Artifact`. CPU stage work (`Analysis` / `Artifact`, and the parse step
+> folded into `Source`) dispatches onto the scheduler-owned `cpu_pool` via
+> `cpu_pool.spawn(...)`; `Load`-style I/O runs on the `io_pool`. See *Dual
+> pool ownership* for the authoritative live pool model.
 >
 > **Not yet implemented — cache-runtime DAG design (Block 7).** The
 > expanded `TaskKind` shape below (`Load` / `Parse` / `CacheNode`
 > variants) and the `SchedulerCpuPool::submit` dispatch form are the
-> Block 7 design target from
-> `docs/arch/cache-runtime-overhaul-plan.md`; they are NOT on the
-> current tree. Wherever a routing bullet below says
+> Block 7 design target from `docs/arch/cache-runtime-overhaul-plan.md`;
+> NOT on the current tree. Wherever a routing bullet below says
 > `SchedulerCpuPool::submit`, the current tree dispatches the equivalent
 > stage work onto `cpu_pool` via `cpu_pool.spawn(...)`. The bullets
 > describe the intended Block 7 routing.
 
 The scheduler routes (Block 7 design target):
 
-- `TaskKind::Load { canonical }` → I/O pool (pure I/O — reads bytes
-  off disk; no executor dispatch, the source loader drives the I/O
-  directly).
+- `TaskKind::Load { canonical }` → I/O pool (pure I/O — reads bytes off
+  disk; no executor dispatch, the source loader drives the I/O directly).
 - `TaskKind::Parse { canonical, source, file_kind }` → stage CPU pool
-  (pure CPU; payload carries `file_kind` so `execute_source`
-  classifies without re-deriving from path).
+  (pure CPU; payload carries `file_kind` so `execute_source` classifies
+  without re-deriving from path).
 - `TaskKind::Analysis { canonical, source_snapshot }` →
-  `SchedulerCpuPool::submit`. Dispatch destructures `canonical` off
-  the payload and passes the snapshot reference to
-  `execute_analysis`. The substrate `SourceSnapshot` has no
-  `canonical_id()` accessor — `canonical` lives on the variant.
+  `SchedulerCpuPool::submit`. Dispatch destructures `canonical` off the
+  payload and passes the snapshot reference to `execute_analysis`. The
+  substrate `SourceSnapshot` has no `canonical_id()` accessor —
+  `canonical` lives on the variant.
 - `TaskKind::Artifact { canonical, source_snapshot, analysis_snapshot, profile_hash }`
   → `SchedulerCpuPool::submit`. Same payload-bearing shape.
-- `TaskKind::CacheNode { cache_id: SchedulerCacheId, key_hash: u64 }`
-  → `SchedulerCpuPool::submit`. The worker dispatches through
-  `execute_cache_node(&node, &ctx) -> CacheNodeOutcome` (direct
-  return, NOT `Result`-wrapped). `SchedulerCacheId` is the
-  scheduler-local OPAQUE NEWTYPE
-  `pub struct SchedulerCacheId(pub u64)` defined in
+- `TaskKind::CacheNode { cache_id: SchedulerCacheId, key_hash: u64 }` →
+  `SchedulerCpuPool::submit`. The worker dispatches through
+  `execute_cache_node(&node, &ctx) -> CacheNodeOutcome` (direct return,
+  NOT `Result`-wrapped). `SchedulerCacheId` is the scheduler-local OPAQUE
+  NEWTYPE `pub struct SchedulerCacheId(pub u64)` defined in
   `crates/verter_scheduler/src/cache_id.rs` (`Clone, Copy, Debug, Eq,
-  Hash, Ord`). It is deliberately NOT an enum — an enum would leak
-  session cache-family meaning into the scheduler and create a second
-  source of truth for cache identity. The scheduler stays
-  domain-agnostic: the opaque `u64` is the discriminator on
-  `WorkNodeIdentity::CacheNode`, and the session owns its
-  interpretation. There is no `dag.rs` re-export shim for the type —
-  it lives in `cache_id.rs` and is re-exported from the crate root
+  Hash, Ord`). Deliberately NOT an enum — an enum would leak session
+  cache-family meaning into the scheduler and create a second source of
+  truth for cache identity. The scheduler stays domain-agnostic: the
+  opaque `u64` is the discriminator on `WorkNodeIdentity::CacheNode`, and
+  the session owns its interpretation. No `dag.rs` re-export shim for the
+  type — it lives in `cache_id.rs` and is re-exported from the crate root
   only.
 
 `TaskKind` is no longer `Copy` — payload-bearing variants carry
-`Arc<str>` / `Arc<SourceSnapshot>` etc. Every existing `Copy` call
-site (e.g. `supersede_old_generations` at `scheduler.rs:388`)
-becomes an `Arc` clone. The discriminating test
-`task_kind_clone_is_cheap_arc_clone` pins the clone cost at < 100ns
-p99.
+`Arc<str>` / `Arc<SourceSnapshot>` etc. Every existing `Copy` call site
+(e.g. `supersede_old_generations` at `scheduler.rs:388`) becomes an `Arc`
+clone. The discriminating test `task_kind_clone_is_cheap_arc_clone` pins
+the clone cost at < 100ns p99.
 
-Under the Block 7 design target, `TaskKind::Source` (which on the
-current tree combines load + parse, with the I/O step on `io_pool` and
-the parse step folded onto `cpu_pool`) is split: the source loader
-synthesises a `Load → Parse` DAG edge. **On the current tree
-`TaskKind::Source` is the live first stage and is NOT split or
-retired** — `Load` / `Parse` are not separate variants yet.
-`SchedulerJobKind` (the existing non-staged component-meta
-batch enum at `stage.rs:19`) is **retained** unchanged — it
-discriminates `ComponentMeta { canonical_id }`. The scheduler does
-NOT own the batch fan-out for it: the external host/runtime layer maps
-these job items and fans them out through its own batch-coordination
-primitive (see *Dual pool ownership*), calling
-`Scheduler::account_batch_submission` once per non-empty batch for the
-O(1) submission accounting. The Block 7 `TaskKind::CacheNode` variant
-lives alongside it on the new ready-queue envelope.
+Under the Block 7 design target, `TaskKind::Source` (which on the current
+tree combines load + parse, with the I/O step on `io_pool` and the parse
+step folded onto `cpu_pool`) is split: the source loader synthesises a
+`Load → Parse` DAG edge. **On the current tree `TaskKind::Source` is the
+live first stage and is NOT split or retired** — `Load` / `Parse` are not
+separate variants yet. `SchedulerJobKind` (the existing non-staged
+component-meta batch enum at `stage.rs:19`) is **retained** unchanged —
+it discriminates `ComponentMeta { canonical_id }`. The scheduler does NOT
+own the batch fan-out for it: the external host/runtime layer maps these
+job items and fans them out through its own batch-coordination primitive
+(see *Dual pool ownership*), calling `Scheduler::account_batch_submission`
+once per non-empty batch for the O(1) submission accounting. The Block 7
+`TaskKind::CacheNode` variant lives alongside it on the new ready-queue
+envelope.
 
 ### StageExecutor dispatch surface
 
@@ -554,14 +536,14 @@ lives alongside it on the new ready-queue envelope.
 > five-method dispatch surface, the `CacheNodeDispatchCtx` /
 > `execute_cache_node` machinery, and the `Parse` / `CacheNode` / `Load`
 > rows below are the Block 7 design target from
-> `docs/arch/cache-runtime-overhaul-plan.md`; they are NOT on the current
-> tree. On the current tree the `StageExecutor` dispatches the live
+> `docs/arch/cache-runtime-overhaul-plan.md`; NOT on the current tree. On
+> the current tree the `StageExecutor` dispatches the live
 > `TaskKind::Source` / `Analysis` / `Artifact` stages. The surface below
 > describes the intended Block 7 dispatch.
 
 The `StageExecutor` trait exposes five dispatch methods, one per
-`TaskKind` variant. Workers route through `TaskKind` at dispatch
-time; there is no bare `executor.execute(node)` method.
+`TaskKind` variant. Workers route through `TaskKind` at dispatch time; no
+bare `executor.execute(node)` method.
 
 | TaskKind         | StageExecutor method   | Return                                |
 |------------------|------------------------|---------------------------------------|
@@ -579,11 +561,10 @@ The trait also requires `fn as_any(&self) -> &dyn std::any::Any`
 
 The worker's `dispatch_cpu_task` constructs a `CacheNodeDispatchCtx<'_>`
 (dedup key, generation, optional audit observer, cancellation token)
-BEFORE the `match` and passes a non-owning borrow to
-`execute_cache_node`. The default body returns
-`CacheNodeOutcome::stub()`; the host overrides to drive the
-cache-runtime artifact / query node trait surface. The other three
-CPU dispatch methods return their stage-specific result, and the
+BEFORE the `match` and passes a non-owning borrow to `execute_cache_node`.
+The default body returns `CacheNodeOutcome::stub()`; the host overrides to
+drive the cache-runtime artifact / query node trait surface. The other
+three CPU dispatch methods return their stage-specific result, and the
 worker maps each into the unified `CacheNodeOutcome` via the
 `CacheNodeOutcome::from_source` / `from_analysis` / `from_artifact`
 adapters before writing it on `node.completion`.
@@ -591,19 +572,19 @@ adapters before writing it on `node.completion`.
 ## DAG submission semantics
 
 > **Not yet implemented — cache-runtime DAG design (Block 7).** The
-> `submit_dag` / `CacheNodeDag` / `submit_batch`-as-DAG-shim surface
-> described in this whole section is the Block 7 design target from
-> `docs/arch/cache-runtime-overhaul-plan.md`; it is NOT on the current
-> tree. On the current tree the scheduler exposes `submit_request` (no
-> `submit_dag` and no `CacheNodeDag` envelope), and the live `TaskKind`
-> set is `Source` / `Analysis` / `Artifact` dispatched onto the
-> scheduler-owned `cpu_pool` via `cpu_pool.spawn(...)` (see *Dual pool
-> ownership* for the authoritative live pool model). The DAG submission
-> contract below describes the intended flow once Block 7 lands.
+> `submit_dag` / `CacheNodeDag` / `submit_batch`-as-DAG-shim surface in
+> this whole section is the Block 7 design target from
+> `docs/arch/cache-runtime-overhaul-plan.md`; NOT on the current tree. On
+> the current tree the scheduler exposes `submit_request` (no `submit_dag`
+> and no `CacheNodeDag` envelope), and the live `TaskKind` set is
+> `Source` / `Analysis` / `Artifact` dispatched onto the scheduler-owned
+> `cpu_pool` via `cpu_pool.spawn(...)` (see *Dual pool ownership* for the
+> authoritative live pool model). The DAG submission contract below
+> describes the intended flow once Block 7 lands.
 
 The DAG API (Block 7 design target) is one method, one type, one
-signature, carrying every field the driver requires to dispatch each
-node as an executable unit of work:
+signature, carrying every field the driver requires to dispatch each node
+as an executable unit of work:
 
 ```rust
 pub struct CacheNodeDag {
@@ -656,45 +637,42 @@ impl Scheduler {
 }
 ```
 
-The nine-field `CacheNodeDagNode` envelope is complete: the
-`task_kind` discriminator lives on the node only (NOT on
-`KeyedJob`). No node enters the ready queue without all nine
-fields populated; the driver does NOT enrich nodes after
-submission. Guard:
+The nine-field `CacheNodeDagNode` envelope is complete: the `task_kind`
+discriminator lives on the node only (NOT on `KeyedJob`). No node enters
+the ready queue without all nine fields populated; the driver does NOT
+enrich nodes after submission. Guard:
 `cache_node_dag_carries_required_fields_for_executable_dispatch`.
 
 DAG contract:
 
-- **Dependency gating.** A downstream node is not admitted to the
-  ready queue until ALL of its upstream nodes have completed per
-  their `EdgeGate` policy.
+- **Dependency gating.** A downstream node is not admitted to the ready
+  queue until ALL of its upstream nodes have completed per their
+  `EdgeGate` policy.
 - **Priority inheritance.** Effective priority is
   `max(node_priority, max(root_priority for every reachable root))`.
 - **Cancellation propagation.** Dropping a `DagHandle` triggers
   `CancellationToken::cancel()` on every node not yet completed;
   cancellation propagates transitively through edges.
-- **Bounded admission / backpressure.** The ready queue is bounded
-  by `MAX_READY_QUEUE_DEPTH = 64`
-  (`crates/verter_scheduler/src/queue.rs`). When full, additional
-  submissions either block or return
+- **Bounded admission / backpressure.** The ready queue is bounded by
+  `MAX_READY_QUEUE_DEPTH = 64` (`crates/verter_scheduler/src/queue.rs`).
+  When full, additional submissions either block or return
   `SubmissionResult::Backpressure` per caller preference.
-  `Scheduler::ready_queue_depth()` exposes the current bounded
-  depth for observability only.
-- **In-flight dedupe inside a DAG.** Two nodes in the same DAG
-  sharing a `dedup_key` collapse via scheduler-side
-  `pending_requests`. Cross-DAG dedupe uses the consumer-side
-  in-flight table via `DedupeHook::probe` BEFORE submission.
+  `Scheduler::ready_queue_depth()` exposes the current bounded depth for
+  observability only.
+- **In-flight dedupe inside a DAG.** Two nodes in the same DAG sharing a
+  `dedup_key` collapse via scheduler-side `pending_requests`. Cross-DAG
+  dedupe uses the consumer-side in-flight table via `DedupeHook::probe`
+  BEFORE submission.
 
 Under Block 7, `submit_batch(reqs: Vec<Request>)` becomes a thin shim
-that constructs a no-edge `CacheNodeDag` and calls `submit_dag`. On the
-current tree it loops over `submit_request` (see the surface table
-below).
+constructing a no-edge `CacheNodeDag` and calling `submit_dag`. On the
+current tree it loops over `submit_request` (see the surface table below).
 
 ## Scheduler surface (current → Block 7 planned)
 
 The right column is the Block 7 cache-runtime design target from
-`docs/arch/cache-runtime-overhaul-plan.md`; it is NOT on the current
-tree. The left column is the live surface.
+`docs/arch/cache-runtime-overhaul-plan.md`; NOT on the current tree. The
+left column is the live surface.
 
 | Method | Current | Block 7 (planned) |
 |---|---|---|
@@ -710,75 +688,73 @@ tree. The left column is the live surface.
 
 The live `TaskKind` set is `Source` / `Analysis` / `Artifact`. (The
 expanded `Load` / `Parse` / `CacheNode` shape and the
-`SchedulerCpuPool::submit` dispatch form are the demarcated Block 7
-design target — see *TaskKind routing* and *Scheduler surface*; they are
-NOT current routing rules.)
+`SchedulerCpuPool::submit` dispatch form are the demarcated Block 7 design
+target — see *TaskKind routing* and *Scheduler surface*; NOT current
+routing rules.)
 
 - **`io_pool`** owns the pure-I/O step of `TaskKind::Source` (reading
-  bytes off disk) and any other pure-I/O work. A parse closure on the
-  I/O pool is a bug
+  bytes off disk) and any other pure-I/O work. A parse closure on the I/O
+  pool is a bug
   (`pool_isolation::source_parse_runs_on_cpu_pool_not_io_pool`).
-- **Scheduler stage pool (`cpu_pool`)** owns the CPU stage work —
-  the parse step folded into `TaskKind::Source`, plus `TaskKind::Analysis`
-  and `TaskKind::Artifact` — dispatched via `cpu_pool.spawn(...)`. The
+- **Scheduler stage pool (`cpu_pool`)** owns the CPU stage work — the
+  parse step folded into `TaskKind::Source`, plus `TaskKind::Analysis` and
+  `TaskKind::Artifact` — dispatched via `cpu_pool.spawn(...)`. The
   scheduler builds and owns it internally from
-  `SchedulerConfig::cpu_threads`; it is NOT passed into the constructor.
-  This is the only pool the driver dispatches stage work onto.
-- **Coordinator pool (`HostCpuPool`)** owns the outer batch
-  coordinator's wait points for EVERY host batch API (batch
-  component-meta, batch SFC compile, and any future host batch fan-out).
-  The external host/runtime layer constructs it once at startup and OWNS
-  it (a sibling of the `Scheduler`, never handed into the constructor).
-  The scheduler does NOT reference it and NEVER dispatches tasks onto it;
-  equally, no scheduler API installs an outer wait on the stage pool. The
-  coordinator pool is reused across batch calls (sized once from the
-  external layer's config). Guard (external layer):
-  `two_back_to_back_compile_many_share_pool`.
+  `SchedulerConfig::cpu_threads`; NOT passed into the constructor. The
+  only pool the driver dispatches stage work onto.
+- **Coordinator pool (`HostCpuPool`)** owns the outer batch coordinator's
+  wait points for EVERY host batch API (batch component-meta, batch SFC
+  compile, and any future host batch fan-out). The external host/runtime
+  layer constructs it once at startup and OWNS it (a sibling of the
+  `Scheduler`, never handed into the constructor). The scheduler does NOT
+  reference it and NEVER dispatches tasks onto it; equally, no scheduler
+  API installs an outer wait on the stage pool. The coordinator pool is
+  reused across batch calls (sized once from the external layer's config).
+  Guard (external layer): `two_back_to_back_compile_many_share_pool`.
 
 ## Test-support helpers (`feature = "test-support"`)
 
 > **Not yet implemented — cache-runtime DAG design (Block 7).** The
-> `feature = "test-support"` gate itself is live, but on the current
-> tree it exposes only `host_cpu_pool_token` (see *Dual pool
-> ownership*). The fixture catalogue below — `Scheduler::new_for_test`,
-> `enqueue_analysis`, `last_dispatched_task`, `LastDispatchedTaskRecorder`,
-> the `KeyedJob` / `CacheNodeDagNode` / `DedupKey` / `SchedulerCacheId`
-> stubs, etc. — is the Block 7 design target from
+> `feature = "test-support"` gate itself is live, but on the current tree
+> it exposes only `host_cpu_pool_token` (see *Dual pool ownership*). The
+> fixture catalogue below — `Scheduler::new_for_test`, `enqueue_analysis`,
+> `last_dispatched_task`, `LastDispatchedTaskRecorder`, the `KeyedJob` /
+> `CacheNodeDagNode` / `DedupKey` / `SchedulerCacheId` stubs, etc. — is
+> the Block 7 design target from
 > `docs/arch/cache-runtime-overhaul-plan.md` and is NOT on the current
 > tree. The helpers below describe the intended Block 7 test surface.
 
 The crate gates a small set of fixture helpers behind
-`feature = "test-support"` so the production build never compiles
-them. Integration tests under `crates/verter_scheduler/tests/`
-enable the feature via
-`verter_scheduler = { path = ".", features = ["test-support"] }`
-in their `[dev-dependencies]`.
+`feature = "test-support"` so the production build never compiles them.
+Integration tests under `crates/verter_scheduler/tests/` enable the
+feature via
+`verter_scheduler = { path = ".", features = ["test-support"] }` in their
+`[dev-dependencies]`.
 
 - `Scheduler::new_for_test() -> Arc<Self>` — single-thread pools +
   `LastDispatchedTaskRecorder` executor.
 - `Scheduler::enqueue_analysis(&FileNode)` — routes through
-  `submit_request` with `TargetStage::Analysis`. Drives to
-  quiescence by polling
+  `submit_request` with `TargetStage::Analysis`. Drives to quiescence by
+  polling
   `last_dispatched_task() -> Some((_, TaskKind::Analysis { canonical, .. })) if canonical == fixture_canonical`
   (matches specifically on `Analysis`, not on the upstream `Parse`
-  dispatch that the driver completes first).
-- `Scheduler::last_dispatched_task() -> Option<(KeyedJob, TaskKind)>`
-  — downcasts `Arc<dyn StageExecutor>` to
-  `LastDispatchedTaskRecorder` via `as_any` and reads its internal
-  cell.
-- `LastDispatchedTaskRecorder` — records the last
-  `(KeyedJob, TaskKind)` per dispatch.
-- `NoopSourceLoader` — full `SourceLoader` impl (four methods:
-  `load`, `exists`, `classify`, `realpath`).
-- `FileNode::stub_with_canonical(&str)` — populates `canonical_id`
-  from the argument; zero-state for other fields.
+  dispatch the driver completes first).
+- `Scheduler::last_dispatched_task() -> Option<(KeyedJob, TaskKind)>` —
+  downcasts `Arc<dyn StageExecutor>` to `LastDispatchedTaskRecorder` via
+  `as_any` and reads its internal cell.
+- `LastDispatchedTaskRecorder` — records the last `(KeyedJob, TaskKind)`
+  per dispatch.
+- `NoopSourceLoader` — full `SourceLoader` impl (four methods: `load`,
+  `exists`, `classify`, `realpath`).
+- `FileNode::stub_with_canonical(&str)` — populates `canonical_id` from
+  the argument; zero-state for other fields.
 - `OpaqueRequestContext::test_stub()` — wraps a private no-op
   `RequestContextLike` impl.
 - `KeyedJob::stub()`, `DedupKey::new_for_test()`,
   `CacheNodeDagNode::stub()`,
   `CacheNodeDispatchCtx::stub_with(&dedup_key, &cancellation)`,
-  `SchedulerCacheId(0)` (the opaque newtype constructed directly —
-  there is no `::Test` variant; `SchedulerCacheId` is
+  `SchedulerCacheId(0)` (the opaque newtype constructed directly — no
+  `::Test` variant; `SchedulerCacheId` is
   `pub struct SchedulerCacheId(pub u64)`, not an enum).
 
 See also:

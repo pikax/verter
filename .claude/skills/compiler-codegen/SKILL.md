@@ -7,7 +7,7 @@ description: "Rust compiler pipeline, template codegen (VDOM/IDE), CodeTransform
 
 ## Rust Compiler Architecture
 
-The Rust compiler uses an AST-based pipeline. The `compile()` orchestrator drives a linear 5-phase pipeline:
+AST-based pipeline. `compile()` orchestrator drives a linear 5-phase pipeline:
 
 ```
 Vue SFC Source
@@ -89,7 +89,7 @@ utils/
 
 ## Arena-Based Template AST
 
-The parser builds a flat `Vec<AstNode>` arena with O(1) navigation:
+Parser builds a flat `Vec<AstNode>` arena with O(1) navigation:
 
 ```rust
 pub struct TemplateAst {
@@ -131,11 +131,11 @@ Key features:
 
 ## CodeTransform Is the Single Source of Truth (CRITICAL)
 
-**All modifications to generated code MUST go through `CodeTransform` operations** (`overwrite`, `prepend_left`, `append_left`, `move_with_suffix`, etc.). Never apply string replacements, regex transforms, or manual splicing to the output of `build_string()` or to content that was produced by a `CodeTransform`.
+**All modifications to generated code MUST go through `CodeTransform` operations** (`overwrite`, `prepend_left`, `append_left`, `move_with_suffix`, etc.). Never apply string replacements, regex transforms, or manual splicing to the output of `build_string()` or to content produced by a `CodeTransform`.
 
-Post-hoc string manipulation breaks sourcemap accuracy: the `CodeTransform` generates source maps by tracking chunks (Original, Inserted, Moved, Overwritten). If you modify the string after the transform, byte offsets in the source map no longer match the actual content. This causes position mismatches in the LSP (e.g., hover landing on the wrong token, go-to-definition jumping to wrong locations).
+Post-hoc string manipulation breaks sourcemap accuracy: `CodeTransform` generates source maps by tracking chunks (Original, Inserted, Moved, Overwritten). Modifying the string after the transform makes byte offsets in the source map no longer match the content, causing position mismatches in the LSP (e.g. hover landing on the wrong token, go-to-definition jumping to wrong locations).
 
-**Correct:** Use `ct.prepend_left(pos, ".ts")` to insert text at a known position -- the chunk list and source map stay consistent.
+**Correct:** Use `ct.prepend_left(pos, ".ts")` to insert text at a known position -- chunk list and source map stay consistent.
 
 **Wrong:** Call `content.replace(".vue'", ".vue.ts'")` on the built string -- the source map still reflects the pre-replace byte offsets.
 
@@ -148,9 +148,9 @@ Post-hoc string manipulation breaks sourcemap accuracy: the `CodeTransform` gene
 
 ## IDE Prefixed-Expression Emit Substrate (`ide/template/emit.rs`)
 
-IDE template codegen emits a Vue binding value as JSX through the typed `EmitOp` vocabulary so the user expression keeps an exact source-map mapping while synthetic JSX scaffolding stays unmapped. `EmitText` (`Static`/`Borrowed`/`Owned`) is the text payload; `EmitOp` variants are `InsertUnmapped` (order-preserving unmapped insert, lowers via `prepend_ordered_unmapped`), `InsertMapped` (`InsertedMapped` chunk, mapped at `source_start`+`content_offset`), `PreserveOriginal` (pure no-op — the bytes stay an `Original` 1:1 chunk), `OverwriteSyntheticBoundary` (delete + unmapped insert; NEVER a mapped `out.overwrite`), and `MoveOriginal`. `emit_op` is the single lowering point. `emit_jsx_binding_value` emits a `JsxBindingValue` (`source_expr`/`prefix`/`suffix`/`occurrences`/`bindings`) `occurrences` times for RELOCATED emission (native `v-model` emits the expression 2-3x); in-place sites (v-html, v-text, `:[key]`, `.foo=`, `v-bind="obj"`, static `:prop`) preserve the bytes and emit `OverwriteSyntheticBoundary` + `collect_binding_patches` around them. A function-typed `:prop` under a v-if scope (e.g. `<div v-if="ok" :onX="() => handle()">`) gets a type-narrowing guard: `compute_function_guard_injection` (props.rs) locates the injection point in SOURCE coordinates from the OXC AST (arrow-EXPRESSION body start → ternary `!((cond))?undefined:`; arrow-BLOCK / `function` body `{`+1 → block `if(!((cond))) return;`), then the value is kept IN PLACE (boundary split + `collect_binding_patches`) and the guard is an UNMAPPED `prepend_alloc` spliced into the middle — emitted BEFORE `collect_binding_patches` so an arrow-expr body identifier at the injection offset stable-sorts as `<guard><accessor-prefix><identifier>`. The guard is never baked into a mapped overwrite. The v-on inline-handler guard (von.rs) is likewise a synthetic PREFIX inside `out.overwrite(prop.start, trimmed_vs, …)` with the handler body preserved in place — it never bakes the resolved value, so it is not migrated.
+IDE template codegen emits a Vue binding value as JSX through the typed `EmitOp` vocabulary so the user expression keeps an exact source-map mapping while synthetic JSX scaffolding stays unmapped. `EmitText` (`Static`/`Borrowed`/`Owned`) is the text payload; `EmitOp` variants: `InsertUnmapped` (order-preserving unmapped insert, lowers via `prepend_ordered_unmapped`), `InsertMapped` (`InsertedMapped` chunk, mapped at `source_start`+`content_offset`), `PreserveOriginal` (pure no-op — bytes stay an `Original` 1:1 chunk), `OverwriteSyntheticBoundary` (delete + unmapped insert; NEVER a mapped `out.overwrite`), `MoveOriginal`. `emit_op` is the single lowering point. `emit_jsx_binding_value` emits a `JsxBindingValue` (`source_expr`/`prefix`/`suffix`/`occurrences`/`bindings`) `occurrences` times for RELOCATED emission (native `v-model` emits the expression 2-3x); in-place sites (v-html, v-text, `:[key]`, `.foo=`, `v-bind="obj"`, static `:prop`) preserve the bytes and emit `OverwriteSyntheticBoundary` + `collect_binding_patches` around them. A function-typed `:prop` under a v-if scope (e.g. `<div v-if="ok" :onX="() => handle()">`) gets a type-narrowing guard: `compute_function_guard_injection` (props.rs) locates the injection point in SOURCE coordinates from the OXC AST (arrow-EXPRESSION body start → ternary `!((cond))?undefined:`; arrow-BLOCK / `function` body `{`+1 → block `if(!((cond))) return;`), then the value is kept IN PLACE (boundary split + `collect_binding_patches`) and the guard is an UNMAPPED `prepend_alloc` spliced into the middle — emitted BEFORE `collect_binding_patches` so an arrow-expr body identifier at the injection offset stable-sorts as `<guard><accessor-prefix><identifier>`. The guard is never baked into a mapped overwrite. The v-on inline-handler guard (von.rs) is likewise a synthetic PREFIX inside `out.overwrite(prop.start, trimmed_vs, …)` with the handler body preserved in place — it never bakes the resolved value, so it is not migrated.
 
-The bug this replaces: baking `prefix + identifier` into one `out.overwrite(prop.start, prop_end, &format!(...))` produced a `Chunk::Overwritten` mapping the whole run back to the prop start (identifier hover/go-to-definition landed on the prop name). The flat-string IDE producers `resolve_prefixed_expr`/`resolve_prefixed_dynamic_arg` were deleted; wrapped/transformed flat-string consumers (v-on spreads, dynamic event-name keys, v-show) call the shared `build_prefixed_expr` directly. Guard: `crates/verter_compiler/tests/ide_no_baked_prefix_overwrite.rs` — it scans `ide/template/**` for both the INLINE bake (`out.overwrite(.., &format!(..<resolver-var>..))`) and the `let`-INDIRECTION (`let v = …format!(..<resolver-var>..)… / build_prefixed_expr(..) / resolve_simple_expr(..); out.overwrite(.., &v)`), EXCLUDING self-anchored overwrites (`out.overwrite(base + node.start, base + node.end, &v)` replaces one node's own span → navigable; the partial-interpolation recovery path is the canonical example). The allowlist is EMPTY.
+Bug this replaces: baking `prefix + identifier` into one `out.overwrite(prop.start, prop_end, &format!(...))` produced a `Chunk::Overwritten` mapping the whole run back to the prop start (identifier hover/go-to-definition landed on the prop name). The flat-string IDE producers `resolve_prefixed_expr`/`resolve_prefixed_dynamic_arg` were deleted; wrapped/transformed flat-string consumers (v-on spreads, dynamic event-name keys, v-show) call the shared `build_prefixed_expr` directly. Guard: `crates/verter_compiler/tests/ide_no_baked_prefix_overwrite.rs` — scans `ide/template/**` for both the INLINE bake (`out.overwrite(.., &format!(..<resolver-var>..))`) and the `let`-INDIRECTION (`let v = …format!(..<resolver-var>..)… / build_prefixed_expr(..) / resolve_simple_expr(..); out.overwrite(.., &v)`), EXCLUDING self-anchored overwrites (`out.overwrite(base + node.start, base + node.end, &v)` replaces one node's own span → navigable; partial-interpolation recovery path is the canonical example). The allowlist is EMPTY.
 
 ## Template Codegen Backends
 
@@ -168,11 +168,11 @@ The Rust compiler has **two separate template codegen paths**. Modifying one doe
 | **VDOM/Vapor** | `template/code_gen/vdom/` | Runtime render functions for bundler output | `_createElementVNode(...)` calls |
 | **IDE**        | `ide/template/`           | Valid JSX/TSX for LSP/TSGO type checking    | `<div prop={expr}>` JSX elements |
 
-The **LSP uses the IDE path** via `host.ensure_compiled()` with `CompileTarget::IDE`. TSGO type-checks this output. Changes to VDOM codegen do NOT affect LSP hover/completions. The IDE codegen auto-detects the script language: TS SFCs produce `.tsx` (TypeScript + JSX), while JS SFCs (no `lang` or `lang="js"`) produce `.jsx` (JavaScript + JSDoc annotations).
+The **LSP uses the IDE path** via `host.ensure_compiled()` with `CompileTarget::IDE`. TSGO type-checks this output. Changes to VDOM codegen do NOT affect LSP hover/completions. IDE codegen auto-detects the script language: TS SFCs produce `.tsx` (TypeScript + JSX); JS SFCs (no `lang` or `lang="js"`) produce `.jsx` (JavaScript + JSDoc annotations).
 
 ## Strict Slot Children Type Checking (Experimental)
 
-When `strict_slots: true` (VS Code: `verter.experimental.strictSlots`), the IDE template codegen emits `strictRenderSlot` calls after the JSX tree. These enforce that slot children match the parent component's `defineSlots()` type signature ([RFC #733](https://github.com/vuejs/rfcs/discussions/733)).
+When `strict_slots: true` (VS Code: `verter.experimental.strictSlots`), the IDE template codegen emits `strictRenderSlot` calls after the JSX tree, enforcing that slot children match the parent component's `defineSlots()` type signature ([RFC #733](https://github.com/vuejs/rfcs/discussions/733)).
 
 **Generated pattern** (inside the block scope, after JSX):
 
@@ -188,7 +188,7 @@ ___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Com
 
 ## Cached Directive Fields on ElementNode
 
-The parser extracts structural directives from `el.props` via `prop.take()` and caches them as dedicated fields on `ElementNode` (`ast/types.rs`):
+Parser extracts structural directives from `el.props` via `prop.take()` and caches them as dedicated fields on `ElementNode` (`ast/types.rs`):
 
 | Field         | Directive                     | In `el.props`? | Notes                                            |
 | ------------- | ----------------------------- | -------------- | ------------------------------------------------ |
@@ -202,14 +202,14 @@ The parser extracts structural directives from `el.props` via `prop.take()` and 
 
 ## IDE Script Error Recovery
 
-When OXC encounters parse errors during typing (e.g., `count.` mid-expression), the IDE script codegen (`ide/script.rs`) uses a **truncate-and-reparse** strategy instead of falling back to degraded file-scope output:
+When OXC encounters parse errors during typing (e.g. `count.` mid-expression), the IDE script codegen (`ide/script.rs`) uses a **truncate-and-reparse** strategy instead of falling back to degraded file-scope output:
 
 1. Find the earliest error offset from OXC diagnostics.
 2. Truncate source at the last newline before that offset -- the "clean prefix".
-3. Re-parse only the clean prefix (which succeeds since the broken code is removed).
+3. Re-parse only the clean prefix (succeeds since the broken code is removed).
 4. Use the clean prefix AST for normal codegen (import hoisting, binding extraction, macro processing). The broken tail passes through unchanged in the CodeTransform.
 
-A lightweight token scanner (`ide/script_recover.rs`) recovers macro binding names from the broken tail so template bindings still resolve. This means typing `count.` at the end of a script preserves hover, completions, and go-to-definition for all declarations above the cursor.
+A lightweight token scanner (`ide/script_recover.rs`) recovers macro binding names from the broken tail so template bindings still resolve. So typing `count.` at the end of a script preserves hover, completions, and go-to-definition for all declarations above the cursor.
 
 **Fallback**: When the clean prefix is empty (error on first line) or the clean prefix itself fails to parse, the system falls back to file-scope error recovery mode (`process_tsx_script_setup_error_mode`).
 
@@ -220,15 +220,15 @@ Style blocks with `lang="scss"`, `lang="sass"`, or `lang="less"` require preproc
 **Vite mode** (Vite-owned preprocessing, matching `@vitejs/plugin-vue`):
 
 1. During main `.vue` `transform()`, the plugin parses the SFC with `compiler.parse()` and caches raw style block content in `styleBlockCache`. Style preprocessing is **skipped** in `applyPreprocessorRequests()`.
-2. `load()` returns raw style source (e.g., SCSS with `$variables`) from `styleBlockCache`.
+2. `load()` returns raw style source (e.g. SCSS with `$variables`) from `styleBlockCache`.
 3. Style URLs preserve the original lang (`lang.scss`, not `lang.css`) since `meta.style_langs` is never overwritten.
 4. Vite's CSS pipeline preprocesses SCSS/SASS/Less/Stylus automatically between `load()` and `transform()`.
-5. `transform()` always runs `compiler.compileStyleAsync()` for Vue-specific post-processing: scoped CSS attribute selectors (`[data-v-...]`) and CSS `v-bind()` rewriting. This runs even for unscoped plain CSS blocks (CSS `v-bind()` still needs rewriting).
+5. `transform()` always runs `compiler.compileStyleAsync()` for Vue-specific post-processing: scoped CSS attribute selectors (`[data-v-...]`) and CSS `v-bind()` rewriting. Runs even for unscoped plain CSS blocks (CSS `v-bind()` still needs rewriting).
 
 **Non-Vite mode** (preprocessor fallback):
 Style preprocessing goes through `preprocessBlock()` -> `preprocessStyle()` which calls Vite's `preprocessCSS()` in-process (if Vite config is available). The compiled CSS is sent to the Rust host via `applyBlockOverrides()`, and `apply_style_overrides()` updates `meta.style_langs` to `"css"`. The `transform()` hook uses Rust `processStyle()` for CSS scoping only.
 
-**Compiler resolution**: `vue/compiler-sfc` is resolved once per plugin instance from the project root in `configResolved()` via `createRequire(join(root, "package.json"))("vue/compiler-sfc")`. This is stored in the `compiler` variable and used for both SFC parsing (`compiler.parse()`) and style post-processing (`compiler.compileStyleAsync()`).
+**Compiler resolution**: `vue/compiler-sfc` is resolved once per plugin instance from the project root in `configResolved()` via `createRequire(join(root, "package.json"))("vue/compiler-sfc")`, stored in the `compiler` variable and used for both SFC parsing (`compiler.parse()`) and style post-processing (`compiler.compileStyleAsync()`).
 
 **Key files**: `packages/unplugin/src/index.ts` (`styleBlockCache`, `compileStyleAsync` in transform, style load from cache), `packages/unplugin/src/core/preprocessor.ts` (non-Vite style preprocessing via `preprocessStyle()`), `crates/verter_session/src/host_upsert.rs` (`apply_style_overrides` -- lang update, non-Vite only), `crates/verter_session/src/id.rs` (`render_ids` -- URL generation).
 

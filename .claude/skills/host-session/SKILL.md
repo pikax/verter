@@ -7,30 +7,30 @@ description: "LSP host integration: TypeProvider (TSGO/tsserver), workspace mana
 
 ## Project-Global Cache on `VerterHost` (post-rewrite)
 
-`VerterHost` owns one `Arc<ProjectTypeStore>` per loaded project, exposed via `.project_type_store()`. The store is the single shared cache graph for component-meta and cross-file type resolution:
+`VerterHost` owns one `Arc<ProjectTypeStore>` per loaded project, exposed via `.project_type_store()` — the single shared cache graph for component-meta and cross-file type resolution:
 
 - `FileArtifactStore` — canonical post-parse artifacts.
 - `AnalysisReadyDb` — scope-parameterised analysis augmentation.
 - `RouteDb` (rehomed) — barrel / route surface cache.
 - `OwnerImportSurfaceDb` — direct-owner-imports cache. Reached via `VerterHost::owner_import_surface` / `resolve_owner_direct_import`.
 - `ComponentMetaResultDb<ComponentMetaAnalysis>` — final component-meta payload cache consulted by `get_component_meta` before any cold work.
-- `SemanticGraphStore` — host-owned semantic-query memo, dispatched through `ProjectSemanticDispatch::execute`. Post Phase-D it is the canonical lazy semantic layer and the sole authority for reusable type-resolution work. Two parallel memos:
+- `SemanticGraphStore` — host-owned semantic-query memo, dispatched through `ProjectSemanticDispatch::execute`. The canonical lazy semantic layer and sole authority for reusable type-resolution work. Two parallel memos:
   - **Node memo** (mode-erased `FamilyKey` → `FamilySlots`) for single-node queries (`ResolveDecl`, `Instantiate`, `KeyOf`, `MappedType`, `Conditional`, `ProjectPath`, `TypeOf`, `NormalizeUnion`, `NormalizeIntersection`, `ResolvedNamedType`).
-  - **Relation memo** (keyed by the full-identity `RelateMemoKey` — source / target / relation kind / policy / source freshness / inference context / env+substitution+projection-reduction context) for `Relate` judgements (plan §2 Relation engine). `RelationResult` is `{ Assignable { bindings }, NotAssignable, Unknown }` — all three cache-with-fence.
-  - Also owns Vue macro resolution artifacts (`SemanticNodeData::VueMacroElements`, keyed by `HostResolvedNamedTypeKey` through an internal identity map) — the former `ResolvedNamedTypesDb` has been folded in; the parser's `NamedTypeCache` adapter hits the graph directly on the refcount-only hot path via `get_resolved_named_type` / `insert_resolved_named_type`.
-  - Canonical node variants include the new `SemanticNodeData::Function { params, return_type, type_parameters }` (added Phase D §5.6 WIP-L; plan §2 "the only new variant" — class/interface lower to `Object` with heritage merged).
+  - **Relation memo** (keyed by full-identity `RelateMemoKey` — source / target / relation kind / policy / source freshness / inference context / env+substitution+projection-reduction context) for `Relate` judgements. `RelationResult` is `{ Assignable { bindings }, NotAssignable, Unknown }` — all three cache-with-fence.
+  - Also owns Vue macro resolution artifacts (`SemanticNodeData::VueMacroElements`, keyed by `HostResolvedNamedTypeKey` through an internal identity map) — the former `ResolvedNamedTypesDb` folded in; the parser's `NamedTypeCache` adapter hits the graph directly on the refcount-only hot path via `get_resolved_named_type` / `insert_resolved_named_type`.
+  - Canonical node variants include `SemanticNodeData::Function { params, return_type, type_parameters }` (class/interface lower to `Object` with heritage merged).
 - `IntrinsicRegistry` — SDK-intrinsic dispatch table.
 - `ProjectTypeStoreCounters` — per-layer live / stale / in-flight counters.
 
-The **own-canonical drain** runs on every `upsert` for the upserted canonical itself: `resolver.runtime.evict_canonical(&canonical_id)` + `project_type_store.evict_canonical(&canonical_id)` + `resolved_type_cache().clear()` — drained together so a file-content change cannot leave one cache authority stale for that file. There is NO reverse-dependent cascade: an `upsert` never iterates `reverse_deps_for` to drain a file's dependents. Cross-file consumers revalidate lazily on read through their own `fact_dep_signature` checks. (The own-canonical drain is retained until the query-identity caches self-version-root a same-canonical content edit.) Workspace-shape changes (tsconfig / SDK / project-graph) call `bump_project_generation_and_evict` which clears route-sensitive layers (`OwnerImportSurfaceDb`, `ComponentMetaResultDb`, `SemanticGraphStore`) atomically.
+**Own-canonical drain** runs on every `upsert` for the upserted canonical itself: `resolver.runtime.evict_canonical(&canonical_id)` + `project_type_store.evict_canonical(&canonical_id)` + `resolved_type_cache().clear()` — drained together so a file-content change cannot leave one cache authority stale for that file. NO reverse-dependent cascade: an `upsert` never iterates `reverse_deps_for` to drain dependents. Cross-file consumers revalidate lazily on read via their own `fact_dep_signature` checks. (Retained until query-identity caches self-version-root a same-canonical content edit.) Workspace-shape changes (tsconfig / SDK / project-graph) call `bump_project_generation_and_evict`, clearing route-sensitive layers (`OwnerImportSurfaceDb`, `ComponentMetaResultDb`, `SemanticGraphStore`) atomically.
 
-Host view: resolver-path helpers receive `&HostStoreView` directly as the result-DB fence authority. `RequestStoreView` (`crates/verter_session/src/resolver_core/request_store_view.rs`) remains a live `pub(crate)` overlay `StoreView`; only the `CURRENT_REQUEST_VIEW` thread-local / `EffectiveView` / `_in_view` helpers are retired. `IndexedReady` is the single canonical post-parse artifact (the former `ModuleFactsDb` has been deleted). Validated-cache writes record a `ReadSetSignature.facts` fact signature; warm hits revalidate that signature against the live `StoreView` before returning.
+Host view: resolver-path helpers receive `&HostStoreView` directly as result-DB fence authority. `RequestStoreView` (`crates/verter_session/src/resolver_core/request_store_view.rs`) remains a live `pub(crate)` overlay `StoreView`; only the `CURRENT_REQUEST_VIEW` thread-local / `EffectiveView` / `_in_view` helpers are retired. `IndexedReady` is the single canonical post-parse artifact (former `ModuleFactsDb` deleted). Validated-cache writes record a `ReadSetSignature.facts` fact signature; warm hits revalidate it against the live `StoreView` before returning.
 
-**Resolver-context seal (Phase 10a):** resolver-path code does NOT take `&VerterHost` directly. It takes `ctx: &'a dyn ResolverContext` — a `pub(crate)` sealed super-trait defined at `crates/verter_session/src/resolver_core/resolver_context.rs`. Only `VerterHost` implements `ResolverContext` (the `sealed::Sealed` marker is closed at trait definition). The architecture guard `no_concrete_verter_host_in_seal_scope` mechanically forbids re-introducing `&VerterHost` parameters under the resolver_core/meta_resolve/host_manage/component_meta_query_engine seal scope. New methods on the trait surface are an architectural decision, not a small-decision; widen with care.
+**Resolver-context seal:** resolver-path code does NOT take `&VerterHost` directly. It takes `ctx: &'a dyn ResolverContext` — a `pub(crate)` sealed super-trait at `crates/verter_session/src/resolver_core/resolver_context.rs`. Only `VerterHost` implements `ResolverContext` (`sealed::Sealed` marker closed at trait definition). Guard `no_concrete_verter_host_in_seal_scope` mechanically forbids re-introducing `&VerterHost` parameters under the resolver_core/meta_resolve/host_manage/component_meta_query_engine seal scope. New trait-surface methods are an architectural decision; widen with care.
 
 ## Language Server Architecture
 
-The LSP is a standalone Rust binary (`verter-lsp`) that communicates with VS Code over stdio.
+The LSP is a standalone Rust binary (`verter-lsp`) communicating with VS Code over stdio.
 
 ```
 main.rs (stdio transport + CLI args + provider selection)
@@ -51,11 +51,11 @@ sync_coordinator.rs  -> Debounced type provider sync during typing
 
 ### Per-Project Configuration (`config.rs`)
 
-`ProjectRegistry` groups per-project config for multi-root workspaces. Each `ProjectConfig` has: root path, `TsConfigPathResolver`, `ResolvedLintConfig`, `Linter` instance, and optional `vite_config_path`/`vite_config_deps`. Tsconfig-backed projects use only tsconfig paths; fallback projects get Vite aliases via OXC static analysis (`vite_config.rs`) or trusted Node.js execution.
+`ProjectRegistry` groups per-project config for multi-root workspaces. Each `ProjectConfig` has: root path, `TsConfigPathResolver`, `ResolvedLintConfig`, `Linter` instance, optional `vite_config_path`/`vite_config_deps`. Tsconfig-backed projects use only tsconfig paths; fallback projects get Vite aliases via OXC static analysis (`vite_config.rs`) or trusted Node.js execution.
 
 ### TypeProvider Trait (`tsgo/traits.rs`)
 
-Both TSGO and tsserver implement the `TypeProvider` trait. Methods include: hover, completions, diagnostics, definition, references, rename, signature help, code actions, semantic tokens, highlights, inlay hints, open/update/close file, shutdown. The trait is object-safe (`dyn TypeProvider`) so the server is backend-agnostic.
+Both TSGO and tsserver implement `TypeProvider`. Methods: hover, completions, diagnostics, definition, references, rename, signature help, code actions, semantic tokens, highlights, inlay hints, open/update/close file, shutdown. Object-safe (`dyn TypeProvider`) so the server is backend-agnostic.
 
 ### TSGO Module (`tsgo/`)
 
@@ -121,14 +121,14 @@ Request (stdio) -> server/mod.rs -> Find document in host cache -> Feature handl
 
 ## TypeProvider Architecture
 
-The LSP delegates TypeScript type checking to an external **TypeProvider** process. Two backends are supported:
+The LSP delegates TypeScript type checking to an external **TypeProvider** process. Two backends:
 
 | Backend      | Binary             | Protocol                                   | Use Case                             |
 | ------------ | ------------------ | ------------------------------------------ | ------------------------------------ |
 | **TSGO**     | `tsgo` (Go binary) | LSP over stdio (Content-Length + JSON-RPC) | Fast, native TS checking (preview)   |
 | **tsserver** | `node tsserver.js` | Newline-delimited JSON over stdio          | Workspace TS version, plugin support |
 
-**tsserver kind mapping**: `parse_tsserver_completion()` in `tsserver/ipc.rs` maps tsserver's `ScriptElementKind` strings to LSP `CompletionItemKind`. This mapping MUST match VS Code's `MyCompletionItem.convertKind()` exactly. Test coverage: `test_parse_tsserver_completion_kinds_match_vscode`. Sync with VS Code source when updating TypeScript dependencies.
+**tsserver kind mapping**: `parse_tsserver_completion()` in `tsserver/ipc.rs` maps tsserver's `ScriptElementKind` strings to LSP `CompletionItemKind`. MUST match VS Code's `MyCompletionItem.convertKind()` exactly. Test coverage: `test_parse_tsserver_completion_kinds_match_vscode`. Sync with VS Code source when updating TypeScript dependencies.
 
 **Key modules** (`crates/verter_lsp/src/`):
 
@@ -140,23 +140,23 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 
 ### Background File Sync
 
-During `initialized()`, the LSP spawns a `WorkspaceScanner` background task that compiles ALL workspace `.vue` files to TSX and syncs them to the type provider asynchronously. For TSGO, both `.vue.tsx` (IDE artifact) and `.vue.ts` (public API) are synced; cross-file imports resolve through `.vue.ts` (via `rewrite_vue_imports_for_tsgo`). This ensures imports of non-open `.vue` files resolve to actual component types rather than the wildcard `declare module '*.vue'` fallback.
+During `initialized()`, the LSP spawns a `WorkspaceScanner` background task that compiles ALL workspace `.vue` files to TSX and syncs them to the type provider asynchronously. For TSGO, both `.vue.tsx` (IDE artifact) and `.vue.ts` (public API) are synced; cross-file imports resolve through `.vue.ts` (via `rewrite_vue_imports_for_tsgo`). Ensures imports of non-open `.vue` files resolve to actual component types rather than the wildcard `declare module '*.vue'` fallback.
 
 ### Barrel-Import Eager Sync (TSGO)
 
-When a Vue file imports components through a barrel (non-Vue re-export file like `components/index.ts`), the LSP eagerly syncs the barrel and its Vue dependencies to TSGO during `did_open` and `resync_aliased_imports_for_open_files`. The process: (1) discover barrels from `TemplateComponentUsage.import_source` resolving to non-Vue files, (2) scan barrel's `module_references` for `.vue` specifiers, (3) sync Vue dependencies first, (4) sync barrel file. Without this, TSGO only receives barrels from the background scanner, which may not complete before hover/completion requests.
+When a Vue file imports components through a barrel (non-Vue re-export file like `components/index.ts`), the LSP eagerly syncs the barrel and its Vue dependencies to TSGO during `did_open` and `resync_aliased_imports_for_open_files`. Process: (1) discover barrels from `TemplateComponentUsage.import_source` resolving to non-Vue files, (2) scan barrel's `module_references` for `.vue` specifiers, (3) sync Vue dependencies first, (4) sync barrel file. Without this, TSGO only receives barrels from the background scanner, which may not complete before hover/completion requests.
 
 ### Freeze Prevention (Fast Typing)
 
 Three layers prevent tokio runtime starvation during rapid typing:
 
-1. **SyncCoordinator** (`sync_coordinator.rs`): Single long-lived task replaces spawn-per-keystroke debounce. Uses mpsc channel + 300ms deadline map to guarantee exactly one sync per file after typing stops. After syncing, computes and publishes merged (Verter lint + TS type) diagnostics via push. Holds shared `Arc<VerterHost>`, `ProjectSync`, `TypeProvider`, `cached_verter_diags`, and `PositionEncodingKind`.
-2. **Push diagnostics only**: The LSP uses push diagnostics exclusively (no pull/`diagnostic_provider`). During typing, no new diagnostics are published -- VS Code automatically adjusts existing push diagnostic positions as the document changes. The SyncCoordinator publishes fresh merged diagnostics after 300ms of silence.
+1. **SyncCoordinator** (`sync_coordinator.rs`): Single long-lived task replaces spawn-per-keystroke debounce. Uses mpsc channel + 300ms deadline map to guarantee exactly one sync per file after typing stops. After syncing, computes and publishes merged (Verter lint + TS type) diagnostics via push. Holds shared `Arc<VerterHost>`, `ProjectSync`, `TypeProvider`, `cached_verter_diags`, `PositionEncodingKind`.
+2. **Push diagnostics only**: LSP uses push diagnostics exclusively (no pull/`diagnostic_provider`). During typing, no new diagnostics published -- VS Code auto-adjusts existing push diagnostic positions as the document changes. SyncCoordinator publishes fresh merged diagnostics after 300ms of silence.
 3. **Hang detection** (`tsgo/ipc.rs`): `LspTransport` tracks `consecutive_failures` (AtomicU32). After 3 consecutive request timeouts, fires `crash_notify` to trigger `ResilientTypeProvider`'s existing restart machinery. Notifications use `try_send()` (non-blocking) to prevent channel backpressure.
 
 ### Heartbeat Watchdog
 
-The server sends `$/verter/heartbeat` every 5s from `initialized()`. The VS Code extension monitors heartbeats -- if none arrive for 30s, it auto-restarts the server. This is the last-resort safety net for runtime starvation.
+The server sends `$/verter/heartbeat` every 5s from `initialized()`. The VS Code extension monitors heartbeats -- if none arrive for 30s, it auto-restarts the server. Last-resort safety net for runtime starvation.
 
 ### Async Workspace Scanning
 
@@ -166,7 +166,7 @@ During `initialized()`, the LSP spawns a `WorkspaceScanner` background task inst
 2. **Tier 1**: Project source files covered by `tsconfig.json` -- siblings of open files first, then expanding outward
 3. **Tier 2**: Remaining `.vue` files not covered by any tsconfig
 
-TSGO sync is throttled (yield every 10 files) to prevent flooding. The scanner receives priority signals from `did_open` to dynamically re-order its queue. This makes `initialized()` return in <1s instead of blocking for the full scan duration.
+TSGO sync is throttled (yield every 10 files) to prevent flooding. The scanner receives priority signals from `did_open` to dynamically re-order its queue. Makes `initialized()` return in <1s instead of blocking for the full scan.
 
 **Key module**: `crates/verter_lsp/src/workspace_scanner.rs` -- `WorkspaceScannerHandle`, `spawn_workspace_scanner()`, priority sorting, throttled sync loop.
 
@@ -184,7 +184,7 @@ The VFS publishes workspace snapshots atomically via `PublishedRoot`. Each snaps
 
 **Readiness-gated sync rules**:
 
-- `ensure_current_file_synced()`: During bootstrap, provisional sync is allowed. With a ready snapshot, only files with a project owner are synced -- unowned files are queued in `pending_snapshot_provider_sync` for later drain.
+- `ensure_current_file_synced()`: During bootstrap, provisional sync allowed. With a ready snapshot, only files with a project owner are synced -- unowned files are queued in `pending_snapshot_provider_sync` for later drain.
 - `sync_imported_vue_api_lightweight()`: Same rule -- provisional sync only during bootstrap.
 - `SyncCoordinator::sync_file()`: Always queues files with no owner for retry. Uses `ownership_ready` for log level (warn vs info).
 
@@ -198,7 +198,7 @@ The VFS publishes workspace snapshots atomically via `PublishedRoot`. Each snaps
 
 ### Editor-Liveness Provider-Sync Invariant (CRITICAL)
 
-Open-document provider-sync state is an editor-liveness invariant. An OPEN `.vue` document must keep a usable IDE TSX (`{src}.vue.tsx` / `.jsx`) live in the type provider so hover / completion / diagnostics keep working — regardless of ownership. Every `.vue` IDE/API provider sync, in every context (the snapshot drain, the aliased-import resync, the barrel Vue-dependency pass, the foreground `ensure_current_file_synced`, the debounced `SyncCoordinator`, the background API twin, and the workspace scanner), obeys the same discipline:
+Open-document provider-sync state is an editor-liveness invariant. An OPEN `.vue` document must keep a usable IDE TSX (`{src}.vue.tsx` / `.jsx`) live in the type provider so hover / completion / diagnostics keep working — regardless of ownership. Every `.vue` IDE/API provider sync, in every context (snapshot drain, aliased-import resync, barrel Vue-dependency pass, foreground `ensure_current_file_synced`, debounced `SyncCoordinator`, background API twin, workspace scanner), obeys the same discipline:
 
 - **Ownership None / ambiguous never removes an open `.vue`'s state nor closes its IDE TSX.** A ready snapshot that resolves no owner for an OPEN document converts the committed state to `Unresolved` (preserving the owner-independent IDE TSX) and keeps the file QUEUED for a future owner — it does NOT clear state or close the TSX. Only a genuinely non-open import is removed + closed.
 - **Owner transitions sync-new → commit → close-stale, per kind (never close-before-sync).** On an owner change the new paths are opened/updated FIRST; only after a kind's replacement sync succeeds is its genuinely-stale path closed (`genuinely_stale_after_sync` gates on synced-kind AND non-active). A kind whose replacement sync FAILS reverts to its previous live path (`revert_unsynced_kinds`) and that path stays open — a failed reconciliation leaves the prior path alive. On total failure nothing is committed or closed.
@@ -210,7 +210,7 @@ Open-document provider-sync state is an editor-liveness invariant. An OPEN `.vue
 
 ## Multi-Root Workspace & Per-Project Configuration
 
-In monorepo / multi-root VS Code workspaces, different packages have different `tsconfig.json` paths aliases, `.verterrc.json` lint rules, and `vite.config` resolve aliases. The LSP stores all workspace folders (`workspace_roots: Mutex<Vec<String>>`) and builds a `ProjectRegistry` that groups per-project configuration.
+In monorepo / multi-root VS Code workspaces, different packages have different `tsconfig.json` paths aliases, `.verterrc.json` lint rules, and `vite.config` resolve aliases. The LSP stores all workspace folders (`workspace_roots: Mutex<Vec<String>>`) and builds a `ProjectRegistry` grouping per-project config.
 
 **Key types** (`crates/verter_lsp/src/config.rs`):
 
@@ -223,7 +223,7 @@ In monorepo / multi-root VS Code workspaces, different packages have different `
 **Tsconfig/vite config discovery** delegates to `verter_workspace::config` -- all tsconfig parsing, membership, references, and `raw_paths_json` live in VFS. Fallback projects (no tsconfig) get Vite aliases via two-tier analysis in `vite_config.rs`:
 
 1. **Static analysis** (OXC): Parses `vite.config.{ts,js,mjs,cjs,mts,cts}` without executing code. Handles object/array alias forms, `defineConfig()`, template literals, `path.resolve()`, `new URL()`, `fileURLToPath()`. Returns `Complex` for configs using env vars, dynamic imports, or non-allowlisted packages.
-2. **Trusted execution** (opt-in): For complex configs, spawns Node.js with `loadConfigFromFile` if the file is in `verter.viteConfig.trustedFiles`. Includes env sanitization, 10s timeout, and last-known-good caching.
+2. **Trusted execution** (opt-in): For complex configs, spawns Node.js with `loadConfigFromFile` if the file is in `verter.viteConfig.trustedFiles`. Includes env sanitization, 10s timeout, last-known-good caching.
 
 The server sends `$/verter/viteConfigTrustRequired` notifications for complex configs not yet trusted, and the extension shows a trust prompt. Config file changes (detected via file watcher) trigger a full registry rebuild.
 
@@ -233,7 +233,7 @@ The server sends `$/verter/viteConfigTrustRequired` notifications for complex co
 
 ## Async File Scheduler (`verter_scheduler`)
 
-The scheduler provides per-file async staging with priority queuing. Files progress independently through **Source -> Analysis -> Artifact** stages. Cross-file blocking (macro type deps, external `src`) is declarative -- the scheduler manages wakeups.
+Per-file async staging with priority queuing. Files progress independently through **Source -> Analysis -> Artifact** stages. Cross-file blocking (macro type deps, external `src`) is declarative -- the scheduler manages wakeups.
 
 **Key types** (`crates/verter_scheduler/src/`):
 
@@ -253,21 +253,21 @@ All stage outputs are immutable `Arc`-wrapped. Replacement is atomic via ArcSwap
 
 ### Host Integration
 
-Feature-gated (`scheduler`): `VerterHost` holds an `Arc<Scheduler>`. During `upsert()`, the host submits to the scheduler, awaits the `CompletionHandle`, reads back the result, and populates the compile cache. The `HostStageExecutor` calls real `parse_vue_snapshot`/`parse_non_sfc_snapshot` for the Source stage. Host-specific data is stored in snapshots via the `SnapshotData` trait (opaque `Arc<dyn Any>`), avoiding circular dependencies between scheduler and host.
+Feature-gated (`scheduler`): `VerterHost` holds an `Arc<Scheduler>`. During `upsert()`, the host submits to the scheduler, awaits the `CompletionHandle`, reads back the result, populates the compile cache. The `HostStageExecutor` calls real `parse_vue_snapshot`/`parse_non_sfc_snapshot` for the Source stage. Host-specific data is stored in snapshots via the `SnapshotData` trait (opaque `Arc<dyn Any>`), avoiding circular dependencies between scheduler and host.
 
 ### Batch Compile & Concurrency Model (current state)
 
-`compile_many(inputs, CompileBatchOptions)` is the host-backed parallel SFC batch compile. Its concurrency is **construction-time**, not per-call:
+`compile_many(inputs, CompileBatchOptions)` is the host-backed parallel SFC batch compile. Concurrency is **construction-time**, not per-call:
 
-- **Worker count is fixed at host construction** via `HostConfig::host_cpu_threads`. The host owns a `verter_scheduler::HostCpuPool` coordinator (shared by every host batch API); the pool is never resized per call. `CompileBatchOptions` carries only `priority` + `default_mode` — there is **NO** `threads` / `thread_count` / `num_threads` field (locked by the `compile_batch_options_has_no_thread_field` static guard). A per-call concurrency cap (`CpuConcurrencySemaphore`) is a Block-7 design concept, not on the tree.
-- **Source upserts route through the one upsert engine.** `compile_many`'s source-updating stage calls `upsert_many_with_priority`, which lands ONE `Scheduler::submit_batch_atomic` + ONE `wait_batch` for the whole batch (atomic admission — no per-file upsert fan-out).
-- **Per-input requested mode, classifier-owned actual mode.** Each input carries a `requested_mode` (`CompileBatchInput.requested_mode`, defaulting to `CompileBatchOptions.default_mode` → `Session`). The `compile_cache_mode` classifier is the SOLE authority for the `actual_mode`: `Session` stays `Session` under every eligibility reason (its fact rail handles them); `Content` downgrades to `Stateless` on any reason (its pure key cannot represent cross-file / session-scoped input); `Stateless` is the floor. Compile dedup is keyed by `(canonical, effective requested_mode)`.
+- **Worker count fixed at host construction** via `HostConfig::host_cpu_threads`. The host owns a `verter_scheduler::HostCpuPool` coordinator (shared by every host batch API); never resized per call. `CompileBatchOptions` carries only `priority` + `default_mode` — there is **NO** `threads` / `thread_count` / `num_threads` field (locked by `compile_batch_options_has_no_thread_field` static guard). A per-call concurrency cap (`CpuConcurrencySemaphore`) is a Block-7 design concept, not on the tree.
+- **Source upserts route through the one upsert engine.** `compile_many`'s source-updating stage calls `upsert_many_with_priority`, landing ONE `Scheduler::submit_batch_atomic` + ONE `wait_batch` for the whole batch (atomic admission — no per-file upsert fan-out).
+- **Per-input requested mode, classifier-owned actual mode.** Each input carries a `requested_mode` (`CompileBatchInput.requested_mode`, defaulting to `CompileBatchOptions.default_mode` → `Session`). The `compile_cache_mode` classifier is SOLE authority for `actual_mode`: `Session` stays `Session` under every eligibility reason (its fact rail handles them); `Content` downgrades to `Stateless` on any reason (its pure key cannot represent cross-file / session-scoped input); `Stateless` is the floor. Compile dedup keyed by `(canonical, effective requested_mode)`.
 - **Session-only compile-tier prefetch.** The cold compute installs `prefetch_compile_tier_observation_targets` (cross-file import-route cache + dependency `IndexedReady` pre-population) ONLY for `actual_mode == Session`, because the compile-tier fact tracer it feeds is installed only for `Session`. `Content` / `Stateless` compile correctness (external `src=` resolution, macro-type collection, dep sync) is produced independently by `compile_entry`.
-- **Empty-`macro_type_deps` collector skip.** When an input has no macro type deps, the cold path skips building the external-macro-type collector (it would return an empty result anyway) but still calls `sync_transitive_macro_type_dependencies` with the empty set — that semantic-axis clearing (`replace_semantic_transitive`) is unconditional.
+- **Empty-`macro_type_deps` collector skip.** When an input has no macro type deps, the cold path skips building the external-macro-type collector (it would return empty anyway) but still calls `sync_transitive_macro_type_dependencies` with the empty set — that semantic-axis clearing (`replace_semantic_transitive`) is unconditional.
 
 ### LSP Integration
 
-LSP file ingestion goes through the one shared upsert engine: `did_open`/`did_change` call `VerterHost::upsert` (→ `upsert_many_with_priority` → one `Scheduler::submit_batch_atomic`), which owns generation tracking, request-context propagation, post-commit cache invalidation, and the canonical-uniqueness contract. There is no separate LSP-side `submit_request` shim — a file is never source-updated outside the engine (the sole direct `submit_request` is `host_lifecycle.rs` disk-reload with `source: None`, a read). `compile_blockers.rs` is deprecated -- the scheduler's blocker model replaces imperative hydration.
+LSP file ingestion goes through the one shared upsert engine: `did_open`/`did_change` call `VerterHost::upsert` (→ `upsert_many_with_priority` → one `Scheduler::submit_batch_atomic`), which owns generation tracking, request-context propagation, post-commit cache invalidation, and the canonical-uniqueness contract. No separate LSP-side `submit_request` shim — a file is never source-updated outside the engine (the sole direct `submit_request` is `host_lifecycle.rs` disk-reload with `source: None`, a read). `compile_blockers.rs` is deprecated -- the scheduler's blocker model replaces imperative hydration.
 
 ### Authority Chain (Final State)
 
@@ -289,9 +289,9 @@ The `CURRENT_REQUEST_VIEW` thread-local, `EffectiveView`, and `*_in_view` helper
 
 Key rules:
 
-- Resolver-path helpers read state directly from the host and `ProjectTypeStore`. There is no request-private extension store — canonicals loaded mid-request via `ensure_loaded` publish to `ProjectTypeStore` / `FileArtifactStore` and become visible to all readers.
+- Resolver-path helpers read state directly from the host and `ProjectTypeStore`. No request-private extension store — canonicals loaded mid-request via `ensure_loaded` publish to `ProjectTypeStore` / `FileArtifactStore` and become visible to all readers.
 - `VerterHost::is_evalable(canonical)` is the canonical shallow-probe API; it calls `get_whole_hash(canonical).is_some()` directly.
-- `ensure_loaded` publishes to the scheduler + `FileArtifactStore`; there is no extension-store plumbing.
+- `ensure_loaded` publishes to the scheduler + `FileArtifactStore`; no extension-store plumbing.
 - Cache-validation staleness is enforced by the `ReadSetSignature.facts` path-precise fact signature on cache entries. Warm hits revalidate every recorded fact against the live `StoreView` before returning; stale entries miss and force a cold rebuild.
 - Host-scoped caches (final `ComponentMetaResultDb`, `OwnerImportSurfaceDb`, `SemanticGraphStore`) validate through dep-signatures; transient `TypeSurfaceDb` writes only happen through `publish_with_facts` which attaches dep-signatures.
 

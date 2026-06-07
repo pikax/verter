@@ -9,7 +9,7 @@ For VS Code extension E2E fixtures, helpers API, and warm-session rules, see `/e
 
 ## Server Cleanup
 
-**IMPORTANT**: After starting any dev server, preview server, or other long-running process for testing purposes, **always kill it when done**. This prevents stale servers from interfering with subsequent test runs (e.g., Playwright's `reuseExistingServer: true` will use a stale server serving old builds).
+Always kill dev/preview servers or other long-running test processes when done — stale servers interfere with subsequent runs (e.g., Playwright's `reuseExistingServer: true` uses old builds).
 
 ```bash
 # After finishing with a server, kill it
@@ -22,7 +22,7 @@ taskkill //F //PID <pid>   # Windows
 
 ## Test Output Best Practices
 
-When running E2E tests or test suites where you need to inspect output, **redirect output to a temp file first**, then grep/read the file. This avoids re-running expensive builds and tests just to search for different patterns:
+Redirect output to a temp file, then grep — avoids re-running expensive builds:
 
 ```bash
 # Good: capture once, search multiple times
@@ -37,9 +37,9 @@ pnpm exec playwright test --project=preview 2>&1 | grep "error"  # wasteful re-r
 
 ## TypeScript Test Patterns
 
-**Test locations**: Unit tests are co-located as `*.spec.ts` next to source files. Type tests in `packages/types/` use `vitest --typecheck`.
+**Test locations**: Unit tests co-located as `*.spec.ts` next to source. Type tests in `packages/types/` use `vitest --typecheck`.
 
-**AI-generated tests**: Add appropriate comments indicating AI assistance:
+**AI-generated tests**: Add comments indicating AI assistance:
 
 ```typescript
 // For new test files, add a JSDoc at the top:
@@ -64,8 +64,7 @@ const map = s.generateMap({ source: "test.vue" });
 
 **Type testing best practices** (`packages/types/`):
 
-- Always include **both** a positive assertion and a `@ts-expect-error` negative assertion
-- This prevents `any`/`unknown`/`never` types from silently passing tests
+- Always include both a positive assertion and a `@ts-expect-error` negative assertion — prevents `any`/`unknown`/`never` types from silently passing.
 
 ```typescript
 it("type is correctly inferred", () => {
@@ -103,18 +102,18 @@ mod analysis_tests;
 mod tests;
 ```
 
-The extracted file contains the module contents directly — `use super::*;`, helpers, and `#[test]` functions. No wrapping `mod tests { }` block.
+Extracted file contains module contents directly — `use super::*;`, helpers, and `#[test]` fns. No wrapping `mod tests { }` block.
 
 ### TDD Workflow
 
 1. Write failing tests first
-2. Implement the minimum code to pass
-3. Run the relevant tests and verify they pass
+2. Implement minimum code to pass
+3. Run relevant tests, verify pass
 4. Refactor while keeping tests green
 
 ### End-of-change Checks
 
-After the TDD loop, run the full verification pass:
+After TDD loop, run the full verification pass:
 
 1. `cargo nextest run --workspace` — CANONICAL completeness gate; runs every workspace test target INCLUDING the ~25 verter_session integration binaries
 2. `cargo test -p verter_session --tests` — shared-process surface for the verter_session integration suite
@@ -122,13 +121,13 @@ After the TDD loop, run the full verification pass:
 4. `cargo fmt --all --check`
 5. `pnpm test` for TypeScript changes
 
-Bare `cargo test --workspace --tests` silently SKIPS the verter_session integration suite (~4404 tests): `session_metrics` feature unification drops those binaries from the workspace test set, so the run reports green while never compiling them. It must NOT be used as the sole Rust gate — always run the `cargo nextest run --workspace` + `cargo test -p verter_session --tests` pair above.
+Bare `cargo test --workspace --tests` silently SKIPS the verter_session integration suite (~4404 tests): `session_metrics` feature unification drops those binaries from the workspace test set, so the run reports green while never compiling them. Must NOT be used as the sole Rust gate — always run the `cargo nextest run --workspace` + `cargo test -p verter_session --tests` pair above.
 
-Do not run bare `cargo test --workspace` (no `--tests`) by default in this repo either. It also runs doctests and example builds, which are substantially slower than the normal verification loop. Run doctests (`cargo test --workspace --doc`) only when rustdoc examples changed or the user explicitly asks for them.
+Do not run bare `cargo test --workspace` (no `--tests`) by default — it also runs doctests and example builds, substantially slower. Run doctests (`cargo test --workspace --doc`) only when rustdoc examples changed or explicitly requested.
 
 ### Enum-variant ripple (silent catch-all absorption)
 
-When changing a variant of a widely-matched enum (`SemanticQueryKey`, `TypeExpr`, `WorkKind`, `EmitOp`, etc.), `cargo check` does NOT flag a `_ =>` catch-all that silently absorbs the changed variant — the build passes while the arm does the wrong thing. Grep every `match` on the enum for `_ =>` / `..` wildcards (and every TS `default:` switch) and confirm each intends the new behavior. Distinguish ANALYZER-IR consumers (which see the raw analyzer variants) from DISPATCH-RAISED consumers (which see the collapsed forms produced at `raise.rs`) — the same logical change may need edits in both.
+When changing a variant of a widely-matched enum (`SemanticQueryKey`, `TypeExpr`, `WorkKind`, `EmitOp`, etc.), `cargo check` does NOT flag a `_ =>` catch-all that silently absorbs the changed variant. Grep every `match` on the enum for `_ =>` / `..` wildcards (and every TS `default:` switch) and confirm each intends the new behavior. Distinguish ANALYZER-IR consumers (which see the raw analyzer variants) from DISPATCH-RAISED consumers (which see the collapsed forms produced at `raise.rs`) — the same logical change may need edits in both.
 
 ### Test Validation Pattern
 
@@ -151,18 +150,17 @@ assert!(parsed.errors.is_empty(), "JS parse error: {:?}\n{}", parsed.errors, tpl
 
 ### Architecture Guard Rule (MANDATORY)
 
-Every new `CRITICAL` architecture rule must ship with an executable guard in the same change: either a static architecture guard, an AST/source scanner with narrow allowlists, or a discriminating regression test that fails against the old behavior. A rule without a guard is not durable enough for this repository's migration style.
+Every new `CRITICAL` architecture rule must ship with an executable guard in the same change: static architecture guard, AST/source scanner with narrow allowlists, or a discriminating regression test that fails against old behavior. A rule without a guard is not durable enough for this repo's migration style.
 
-When the correct guard cannot be automated immediately, the owning skill/doc must name the missing guard, explain the temporary gap, and link the follow-up. Do not add broad prose-only critical rules that future changes can violate silently.
-
+When the guard cannot be automated immediately, the owning skill/doc must name it, explain the gap, and link the follow-up. Do not add prose-only critical rules that future changes can violate silently.
 
 ### Test Hermeticity (MANDATORY)
 
 Default-run tests must depend only on locally-vendored fixtures. The canonical run (`cargo nextest run --workspace` + `cargo test -p verter_session --tests`) must compile and pass on a fresh checkout without any `.integration-tests/repos/<third-party>/...` clones, sibling repositories, or other external corpora present alongside the workspace.
 
-When you need fixtures sourced from a third-party project (e.g., the nuxt-ui Vue corpus), vendor a snapshot of the upstream files into the consuming crate's `tests/<feature>/fixtures/` directory and refer to them with `include_str!("./fixtures/...")` or path-based loaders. Preserve upstream license attribution in a sibling `LICENSE.md` and `README.md` for provenance.
+When needing fixtures from a third-party project (e.g., `nuxt-ui` Vue corpus), vendor a snapshot into the consuming crate's `tests/<feature>/fixtures/` and refer to them with `include_str!("./fixtures/...")` or path-based loaders. Preserve upstream license attribution in sibling `LICENSE.md` and `README.md` for provenance.
 
-Tests that genuinely require live external corpora (e.g., periodic drift detectors comparing the vendored snapshot against the upstream submodule) must be gated behind a Cargo feature whose name names the corpus dependency:
+Tests requiring live external corpora (e.g., periodic drift detectors comparing the vendored snapshot against the upstream submodule) must be gated behind a Cargo feature naming the corpus dependency:
 
 ```toml
 # crates/<crate>/Cargo.toml
@@ -176,4 +174,4 @@ external-corpus = []
 //! stays hermetic.
 ```
 
-The architecture guard `external_corpus_paths_not_present_outside_gated_tests` (in `crates/verter_session/tests/architecture_guards.rs`) rejects `include_str!` / `include!` / path-string references to `.integration-tests/repos/...` from any test file that is not gated behind such a feature. A regression that re-introduces a non-hermetic dependency surfaces here at test time.
+Guard `external_corpus_paths_not_present_outside_gated_tests` (in `crates/verter_session/tests/architecture_guards.rs`) rejects `include_str!` / `include!` / path-string references to `.integration-tests/repos/...` from any test file not gated behind such a feature.
