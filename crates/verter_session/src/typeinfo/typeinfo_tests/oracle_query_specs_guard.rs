@@ -42,7 +42,7 @@ fn spec(row_function: &'static str, query_ordinal: u16, oracle_family: &'static 
 
 #[test]
 fn oracle_query_specs_registry_is_empty_and_well_formed() {
-    // This harness-foundation block lifts ZERO rows.
+    // The harness foundation lifts ZERO rows.
     assert!(ORACLE_QUERY_SPECS.is_empty());
     assert_eq!(registry_well_formed(ORACLE_QUERY_SPECS), Ok(()));
 }

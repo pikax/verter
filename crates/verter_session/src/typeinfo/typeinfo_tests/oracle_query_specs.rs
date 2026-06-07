@@ -21,8 +21,8 @@
 // cleanly into the `tests/` guard — an inner doc comment is illegal in an
 // `include!`d position.)
 //
-// The registry is EMPTY until the first row lifts (this harness-foundation
-// block lifts ZERO rows). The types + validation are exercised now with
+// The registry is EMPTY until the first row lifts (the harness foundation
+// lifts ZERO rows). The types + validation are exercised now with
 // synthetic specs by the discriminating guards.
 
 /// The content id of the CURRENT closed vendored oracle-env corpus — the
@@ -158,8 +158,8 @@ pub(crate) struct QuerySpec {
     pub(crate) oracle_value_kind: OracleValueKindSpec,
 }
 
-/// The closed registry table. EMPTY until the first row lifts — this
-/// harness-foundation block lifts ZERO rows.
+/// The closed registry table. EMPTY until the first row lifts — the
+/// harness foundation lifts ZERO rows.
 #[allow(dead_code)]
 pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[];
 
