@@ -33,17 +33,23 @@
 //! true` plus an explicit corpus-rooted lib list forces tsgo off its
 //! native-bundled libs while honouring the vendored ones).
 //!
-//! Remaining BLOCKING spike items (documented, not yet automated here): confluence
-//! over the FULL hard-family corpus (mapped / conditional / template / tuple /
-//! class families each need their per-class verdict beyond the object-alias core
-//! proven above).
+//! Also PROVEN here (the per-family §4-item-1a confluence corpus): for the
+//! ADMISSIBLE families each differently-spelled tsgo hover and Verter-authored
+//! spelling drive BYTE-EQUAL under the closed normalizer rule set
+//! (`spike_admissible_families_confluent`); for the REJECT families tsgo's ACTUAL
+//! hover is rejected with the EXACT §Q2 reason — the allowlist-completeness
+//! obligation, no construct silently admitted
+//! (`spike_reject_families_rejected_with_exact_reason`); and the mapped /
+//! conditional families are EMPIRICALLY shown to be eagerly collapsed by tsgo into
+//! a concrete shape that DIVERGES from Verter's shallow/navigate representation, so
+//! they stay DEFAULT-REJECTED (`spike_mapped_conditional_eager_eval_stays_deferred`).
 
 use std::time::Duration;
 
 use verter_type_runtime::tsgo::ipc::{find_tsgo_binary, TsgoTypeProvider};
 use verter_type_runtime::TypeProvider;
 
-use super::oracle::admission::AdmissionVerdict;
+use super::oracle::admission::{AdmissionVerdict, RejectReason};
 use super::oracle::normalize::ProjectionModeKind;
 use super::oracle::{admission, hover_extract, normalize, probe};
 
@@ -486,4 +492,307 @@ async fn spike_nolib_forces_off_bundled_libs() {
         diags.is_empty(),
         "noLib + a vendored `Array` decl must resolve cleanly (vendored lib honored); got {diags:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// §4 item 1a — per-family CONFLUENCE corpus (the central soundness obligation).
+//
+// The OFFLINE normalizer-confluence guards (`oracle_normalization_is_confluent`
+// et al., `oracle/normalize/tests.rs`) prove the closed rewrite system drives
+// differently-spelled SYNTHETIC inputs to one form. These spike proofs are the
+// EMPIRICAL complement: they confirm tsgo's ACTUAL hover spellings at the pinned
+// `7.0.0-dev.20260526.1` are exactly the spellings the offline rules reconcile —
+// so a class is admitted only after its tsgo spelling is observed and proven
+// confluent, never on an assumed spelling. A class whose two spellings are NOT
+// proven to converge stays DEFAULT-REJECTED (mapped / conditional below).
+// ---------------------------------------------------------------------------
+
+/// One ADMISSIBLE-family confluence case. `fixture` defines an alias the probe
+/// resolves; `authored` is a DIFFERENTLY-SPELLED but semantically-equal Verter
+/// projection of the same type. The proof: tsgo's hover RHS and `authored` both
+/// lower + normalize to the SAME canonical form (confluence), and the hover is
+/// ADMITTED. The two spellings DIFFER textually (else it is mere idempotence).
+struct ConfluenceCase {
+    family: &'static str,
+    fixture: &'static str,
+    probe_rhs: &'static str,
+    /// A differently-spelled equal projection (member reorder / parens / a
+    /// redundant arm) that must converge with tsgo's hover spelling.
+    authored: &'static str,
+    mode: ProjectionModeKind,
+}
+
+/// PROOF 6 — the ADMISSIBLE-family confluence corpus. For each family, tsgo's
+/// observed hover spelling and a DIFFERENTLY-SPELLED authored spelling normalize
+/// BYTE-EQUAL under the closed rule set, and the hover is admitted. Covers the
+/// member-sort, parenthesis-strip, literal-subsumption (`"a"|"b"|string`→`string`,
+/// tsgo collapses it), ≥3-arm boolean (`true|false|number` vs tsgo's
+/// `number|boolean`), union dedup, and semantic tuple-order rules — each over the
+/// REAL pinned-tsgo spelling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spike_admissible_families_confluent() {
+    let cases = [
+        ConfluenceCase {
+            family: "object_member_sort",
+            fixture: "type T = { a: number; b: string; c: boolean };\n",
+            probe_rhs: "T",
+            // Members authored in REVERSE order — the normalizer sorts properties.
+            authored: "{ c: boolean; b: string; a: number }",
+            mode: ProjectionModeKind::Navigate,
+        },
+        ConfluenceCase {
+            family: "nested_object_parens",
+            fixture: "type T = { a: { b: { c: number } } };\n",
+            probe_rhs: "T",
+            // Redundant parentheses on every nested object — stripped by step 1.
+            authored: "{ a: ({ b: ({ c: number }) }) }",
+            mode: ProjectionModeKind::Navigate,
+        },
+        ConfluenceCase {
+            family: "union_literal_subsumption",
+            fixture: "type T = \"a\" | \"b\" | string;\n",
+            probe_rhs: "T",
+            // tsgo collapses the literal arms to `string`; the un-reduced authored
+            // spelling must reach the SAME form via the co-presence subsumption rule.
+            authored: "\"a\" | \"b\" | string",
+            mode: ProjectionModeKind::Navigate,
+        },
+        ConfluenceCase {
+            family: "boolean_three_arm",
+            fixture: "type T = true | false | number;\n",
+            probe_rhs: "T",
+            // tsgo prints `number | boolean`; authored keeps `true | false | number`.
+            // Both must reach `boolean | number` (co-presence boolean rule + sort).
+            authored: "true | false | number",
+            mode: ProjectionModeKind::Navigate,
+        },
+        ConfluenceCase {
+            family: "intersection_arm_sort",
+            fixture: "type T = { a: number } & { b: string };\n",
+            probe_rhs: "T",
+            authored: "{ b: string } & { a: number }",
+            mode: ProjectionModeKind::Navigate,
+        },
+        ConfluenceCase {
+            family: "tuple_plain_parens",
+            fixture: "type T = [number, string, boolean];\n",
+            probe_rhs: "T",
+            // Tuple ORDER is semantic (never sorted) — only parens differ.
+            authored: "[(number), (string), (boolean)]",
+            mode: ProjectionModeKind::Navigate,
+        },
+        ConfluenceCase {
+            family: "array_parens",
+            fixture: "type T = number[];\n",
+            probe_rhs: "T",
+            authored: "(number)[]",
+            mode: ProjectionModeKind::Navigate,
+        },
+        ConfluenceCase {
+            family: "union_dedup",
+            fixture: "type T = string | number;\n",
+            probe_rhs: "T",
+            // A redundant duplicate arm must dedup to the same canonical union.
+            authored: "string | number | string",
+            mode: ProjectionModeKind::Navigate,
+        },
+    ];
+
+    for case in &cases {
+        let Some(hover) = hover_probe_under(ORACLE_TSCONFIG, case.fixture, case.probe_rhs).await
+        else {
+            return; // tsgo absent — skip the whole corpus
+        };
+        let extracted = hover_extract::extract_probe_rhs(&hover, &probe::probe_name(0))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "[{}] extract probe RHS from hover ({e:?}): {hover}",
+                    case.family
+                )
+            });
+
+        assert!(
+            matches!(
+                admission::admit_hover_text(&extracted),
+                AdmissionVerdict::Admit
+            ),
+            "[{}] tsgo hover must be ADMITTED; RHS = {extracted}",
+            case.family
+        );
+        // The two spellings must actually DIFFER — otherwise this is idempotence,
+        // not confluence.
+        assert_ne!(
+            extracted.trim(),
+            case.authored.trim(),
+            "[{}] hover + authored spellings must DIFFER for a real confluence proof",
+            case.family
+        );
+
+        let hover_expr = admission::lower_hover_rhs(&extracted)
+            .unwrap_or_else(|| panic!("[{}] hover RHS lowers cleanly: {extracted}", case.family));
+        let authored_expr = admission::lower_hover_rhs(case.authored)
+            .unwrap_or_else(|| panic!("[{}] authored RHS lowers cleanly", case.family));
+        let hover_norm = normalize::normalized_canonical_json(&hover_expr, case.mode)
+            .unwrap_or_else(|_| panic!("[{}] hover value normalizes", case.family));
+        let authored_norm = normalize::normalized_canonical_json(&authored_expr, case.mode)
+            .unwrap_or_else(|_| panic!("[{}] authored value normalizes", case.family));
+        assert_eq!(
+            hover_norm, authored_norm,
+            "[{}] tsgo hover spelling and authored spelling must normalize BYTE-EQUAL (confluence)",
+            case.family
+        );
+    }
+}
+
+/// One REJECT-family case: the family's fixture, the probe RHS, and the EXACT
+/// §Q2 `RejectReason` tsgo's ACTUAL hover must be rejected with.
+struct RejectCase {
+    family: &'static str,
+    fixture: &'static str,
+    probe_rhs: &'static str,
+    expected: RejectReason,
+}
+
+/// PROOF 7 — the REJECT-family allowlist-completeness corpus. For each REJECT
+/// family, tsgo's ACTUAL hover spelling is rejected by the admission gate with the
+/// EXACT closed `RejectReason` — proving no lossy construct is SILENTLY admitted
+/// and the reason is the specific §Q2 one (not a coarse "rejected"). The
+/// `RejectReason`s here were observed against the pinned tsgo
+/// (`spike_dump_hard_family_hovers`, since removed).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spike_reject_families_rejected_with_exact_reason() {
+    let cases = [
+        RejectCase {
+            family: "tuple_rest",
+            fixture: "type T = [number, ...string[]];\n",
+            probe_rhs: "T",
+            expected: RejectReason::TupleElementShape,
+        },
+        RejectCase {
+            family: "tuple_optional",
+            fixture: "type T = [number, string?];\n",
+            probe_rhs: "T",
+            expected: RejectReason::TupleElementShape,
+        },
+        RejectCase {
+            family: "tuple_labelled",
+            fixture: "type T = [first: number, second: string];\n",
+            probe_rhs: "T",
+            expected: RejectReason::TupleElementShape,
+        },
+        RejectCase {
+            family: "template_literal",
+            fixture: "type T = `a${string}b`;\n",
+            probe_rhs: "T",
+            expected: RejectReason::DeferredConstruct("template-literal"),
+        },
+        RejectCase {
+            family: "branded_unique_symbol",
+            fixture: "declare const s: unique symbol;\ntype T = { [s]: number };\n",
+            probe_rhs: "T",
+            expected: RejectReason::NonStaticKey,
+        },
+        RejectCase {
+            family: "constructor_type",
+            fixture: "type T = new (a: number) => { x: number };\n",
+            probe_rhs: "T",
+            expected: RejectReason::Callable,
+        },
+        RejectCase {
+            family: "enum_member_ref",
+            fixture: "enum Color { Red, Green }\ntype T = Color.Red;\n",
+            probe_rhs: "T",
+            expected: RejectReason::EnumMemberOrQualified,
+        },
+    ];
+
+    for case in &cases {
+        let Some(hover) = hover_probe_under(ORACLE_TSCONFIG, case.fixture, case.probe_rhs).await
+        else {
+            return; // tsgo absent — skip
+        };
+        let extracted = hover_extract::extract_probe_rhs(&hover, &probe::probe_name(0))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "[{}] extract probe RHS from hover ({e:?}): {hover}",
+                    case.family
+                )
+            });
+        let verdict = admission::admit_hover_text(&extracted);
+        assert_eq!(
+            verdict,
+            AdmissionVerdict::Reject(case.expected.clone()),
+            "[{}] tsgo hover `{extracted}` must be rejected with the EXACT reason {:?}",
+            case.family,
+            case.expected
+        );
+    }
+}
+
+/// PROOF 8 — mapped / conditional families are EMPIRICALLY shown to be eagerly
+/// collapsed by tsgo, and that collapse DIVERGES from Verter's shallow/navigate
+/// representation, so they stay DEFAULT-REJECTED.
+///
+/// tsgo's hover EAGERLY EVALUATES a mapped type (`{ [K in "a"|"b"]: number }` →
+/// `{ a: number; b: number }`) and a conditional (`U extends string ? 1 : 2` over
+/// `unknown` → `2`) into a concrete shape with NO mapped/conditional syntax. A
+/// Verter shallow/navigate projection does NOT collapse these — it keeps the
+/// `Mapped` / `Conditional` construct. So the hover shape and the Verter shape
+/// DIVERGE: admitting the hover would assert parity against a shape Verter never
+/// produces in these modes. Proven by normalizing the authored (un-collapsed)
+/// construct and the tsgo (collapsed) hover and asserting they are NOT byte-equal
+/// — the non-confluence that mandates deferral until a proven Expanded-mode form.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spike_mapped_conditional_eager_eval_stays_deferred() {
+    // (authored un-collapsed construct, fixture, probe rhs, a syntax token the
+    //  un-collapsed construct carries that the collapsed hover must NOT.)
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "{ [K in \"a\" | \"b\"]: number }",
+            "type T = { [K in \"a\" | \"b\"]: number };\n",
+            "T",
+            " in ",
+        ),
+        (
+            "U extends string ? 1 : 2",
+            "type T<U> = U extends string ? 1 : 2;\n",
+            "T<unknown>",
+            "extends",
+        ),
+    ];
+
+    for (authored, fixture, probe_rhs, collapse_token) in cases {
+        let Some(hover) = hover_probe_under(ORACLE_TSCONFIG, fixture, probe_rhs).await else {
+            return; // tsgo absent — skip
+        };
+        let extracted = hover_extract::extract_probe_rhs(&hover, &probe::probe_name(0))
+            .unwrap_or_else(|e| panic!("extract probe RHS from hover ({e:?}): {hover}"));
+
+        // tsgo COLLAPSED the construct: the hover carries no mapped/conditional syntax.
+        assert!(
+            !extracted.contains(collapse_token),
+            "tsgo must eagerly collapse `{authored}` (hover should not carry `{collapse_token}`); got: {extracted}"
+        );
+
+        // The collapsed hover and the un-collapsed authored construct must NOT
+        // converge — proving deferral is required (they are different shapes).
+        let hover_expr =
+            admission::lower_hover_rhs(&extracted).expect("collapsed hover lowers cleanly");
+        let authored_expr =
+            admission::lower_hover_rhs(authored).expect("authored construct lowers cleanly");
+        let hover_norm =
+            normalize::normalized_canonical_json(&hover_expr, ProjectionModeKind::Navigate)
+                .expect("collapsed hover normalizes");
+        // The authored construct may normalize or reject; either way it must NOT
+        // equal the collapsed hover's normal form.
+        if let Ok(authored_norm) =
+            normalize::normalized_canonical_json(&authored_expr, ProjectionModeKind::Navigate)
+        {
+            assert_ne!(
+                hover_norm, authored_norm,
+                "tsgo's collapsed hover for `{authored}` must DIVERGE from the un-collapsed \
+                 construct — non-confluence ⟹ the family stays deferred"
+            );
+        }
+    }
 }
