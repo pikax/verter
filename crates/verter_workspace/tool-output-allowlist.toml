@@ -63,3 +63,7 @@ rationale = "tsserver subprocess IPC — pnpm virtual store walk + scratch-dir s
 [[entries]]
 path = "crates/verter_session/src/typeinfo/typeinfo_tests/oracle/driver.rs"
 rationale = "TS7 oracle harness consumption driver (#[cfg(test)] mod typeinfo_tests) — loads checked-in snapshot TEST FIXTURES + re-enumerates the vendored env corpus via runtime std::fs::read, the mechanism the locked design (docs/arch/u0-oracle-harness-design.md §Q1) mandates and the snapshot_loading_is_runtime_fs guard pins. Not semantic/VFS state."
+
+[[entries]]
+path = "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_gen_spike.rs"
+rationale = "TS7 oracle harness §4 GENERATION SPIKE (#[cfg(all(test, feature = \"oracle-gen\"))], excluded from the default gate). Writes a tsconfig + fixture into a temp dir for the EXTERNAL tsgo subprocess to read off real disk (tsgo cannot read Verter's in-memory VFS), then re-validates the design's BLOCKING tsgo assumptions. External-tool scaffolding, not semantic/VFS state — the same category as the tsserver/tsgo IPC scratch-dir entries above."
