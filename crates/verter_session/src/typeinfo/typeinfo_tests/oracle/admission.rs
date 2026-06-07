@@ -39,13 +39,21 @@
 //! `ProjectionModeKind` is consumed. When the `Expanded` probe-form spike lands,
 //! the predicate gains its mode-aware Ref-expansion branch.
 //!
-//! What is NOT here (deferred — a later generation increment): the LIVE-resolver
-//! `resolve_source_declarations` navigation that produces a `SourceWalkResult`
-//! from a real `ResolverContext`, and the PARSE-TIME capture that populates a
-//! `RawSourceSurface` off the OXC parse tree. Those are integration concerns;
-//! the data model + the admission predicate are exercised here with synthetic
-//! contributors / parsed hover text by the discriminating guards, exactly as the
-//! shared driver's sub-fns are exercised before the registry is non-empty.
+//! The LIVE producers of the surfaces this predicate consumes now exist: the
+//! parse-time `RawSourceSurface` capture (design item G,
+//! `verter_compiler::utils::oxc::vue::raw_surface`) fills the raw facts off the
+//! OXC parse tree, and [`super::source_walk::resolve_source_declarations`]
+//! binds a `SourceLocator` through the shared resolver to the
+//! `SourceWalkResult` of contributors this gate walks. The predicate's sub-fns
+//! remain ALSO exercised here with synthetic contributors / parsed hover text
+//! by the discriminating guards (the gate must reject the named construct
+//! whether the surface arrives live or synthetic).
+//!
+//! What is still deferred (the tsgo GENERATION side, `#[cfg(feature =
+//! "oracle-gen")]`): the tsgo LSP driver that produces the hover answers, the
+//! vendored env corpus, and the probe synthesizer — never part of the default
+//! resolver build or test gate, preserving the `tsgo`-forbidden-at-runtime
+//! invariant.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
