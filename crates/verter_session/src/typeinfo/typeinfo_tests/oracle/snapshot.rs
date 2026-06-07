@@ -32,12 +32,12 @@
 //! row-lifts ride on.
 
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use verter_type_expr::type_expr_from_json;
 
 use super::identity::{
-    projection_mode_from_tag, HostProject, HostSetupKind, OracleValueKind, PinnedEnv,
-    QueryHelperKind, SnapshotIdentity, WorkspaceFileRef,
+    derive_snapshot_id, projection_mode_from_tag, projection_mode_tag, HostProject, HostSetupKind,
+    OracleValueKind, PinnedEnv, QueryHelperKind, SnapshotIdentity, WorkspaceFileRef,
 };
 use super::normalize::canonical_json_string;
 
@@ -298,6 +298,114 @@ pub(crate) fn decode_oracle_value_strict(oracle_value: &Value) -> Result<(), Sna
         return Err(SnapshotDecodeError::OracleValueLossyDecode);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot ENCODE / assembly (the generation-side write path)
+// ---------------------------------------------------------------------------
+//
+// The strict DECODE path above is the consumption authority. This ENCODE path is
+// its inverse — the generator (the `oracle-gen` binary, design §4 generator-side
+// table) ASSEMBLES the canonical snapshot document from the structured query
+// identity + pinned env + the captured oracle value + the per-stage capture /
+// env-corpus / source-admission sub-objects, deriving the `snapshot_id` from the
+// identity + env so the written filename is registry-derivable. Producing a
+// snapshot is the half a lifted row cannot run without; it is built here as a
+// pure function so it is fully exercised by a round-trip guard (encode of a
+// fixed identity == the hand-authored canonical fixture, AND the assembled
+// document strictly decodes) with NO tsgo and NO on-disk snapshot.
+
+/// The probe-locator audit axis stored on `identity` (the synthesized probe's
+/// name + its byte offset in the probe-bearing source). It is NOT a
+/// `snapshot_id` input (the probe form is versioned by `probe_synthesis_version`)
+/// — it is stored so `probe_header_names_target` can audit the wrong-hover fence
+/// offline.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProbeLocator {
+    pub(crate) probe_name: String,
+    pub(crate) offset: u64,
+}
+
+/// Render the kind-specific `structured_type_expr` `identity` object exactly as
+/// [`StructuredTypeExprIdentity`] decodes it. `workspace_files` is emitted
+/// PATH-SORTED (the canonical order the schema mandates and `snapshot_id`
+/// hashes), so the stored identity object is order-independent of upsert order.
+#[allow(dead_code)]
+pub(crate) fn render_identity_json(identity: &SnapshotIdentity, probe: &ProbeLocator) -> Value {
+    let mut files: Vec<&WorkspaceFileRef> = identity.workspace_files.iter().collect();
+    files.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+    let workspace_files: Vec<Value> = files
+        .iter()
+        .map(|f| json!({ "path": f.path, "content_hash": f.content_hash }))
+        .collect();
+
+    json!({
+        "query_helper_kind": identity.query_helper_kind.tag(),
+        "workspace_files": workspace_files,
+        "primary_canonical": identity.primary_canonical,
+        "symbol_or_expression": identity.symbol_or_expression,
+        "type_arguments": identity.type_arguments,
+        "projection_mode": projection_mode_tag(identity.projection_mode),
+        "host_project": {
+            "project_root": identity.host_project.project_root,
+            "workspace_root": identity.host_project.workspace_root,
+            "tsconfig_path": identity.host_project.tsconfig_path,
+            "host_setup_kind": identity.host_project.host_setup_kind.tag(),
+        },
+        "probe_locator": {
+            "probe_name": probe.probe_name,
+            "offset": probe.offset,
+        },
+    })
+}
+
+/// Assemble the full canonical snapshot document (§Q1 field table) from the
+/// structured query identity + pinned env + the captured / computed sub-objects.
+///
+/// The `snapshot_id` is DERIVED here from `identity` + `env` (the same
+/// registry-derivable derivation a coverage guard runs), never passed in — so an
+/// assembled document is self-consistent by construction. The
+/// `raw_capture` / `oracle_env_files` / `source_admission_digest` sub-objects are
+/// produced by their own generation stages (the hover capture, the corpus
+/// vendoring, the source-side walk) and handed in as already-canonical `Value`s;
+/// this function owns ONLY the envelope assembly + the identity rendering +
+/// the `snapshot_id` wiring.
+#[allow(dead_code, clippy::too_many_arguments)]
+pub(crate) fn assemble_snapshot_document(
+    oracle_family: &str,
+    identity: &SnapshotIdentity,
+    env: &PinnedEnv,
+    oracle_value: &Value,
+    probe: &ProbeLocator,
+    raw_capture: &Value,
+    oracle_env_files: &Value,
+    oracle_env_hash: &str,
+    source_admission_digest: &Value,
+) -> Value {
+    let snapshot_id = derive_snapshot_id(identity, env);
+    json!({
+        "oracle_schema_version": env.oracle_schema_version,
+        "normalizer_version": env.normalizer_version,
+        "probe_synthesis_version": env.probe_synthesis_version,
+        "tsgo_version": env.tsgo_version,
+        "compiler_options_hash": env.compiler_options_hash,
+        "env_corpus_id": env.env_corpus_id,
+        "oracle_env_files": oracle_env_files,
+        "oracle_env_hash": oracle_env_hash,
+        "oracle_family": oracle_family,
+        "oracle_value_kind": identity.oracle_value_kind.tag(),
+        "snapshot_id": snapshot_id,
+        "row_ref": {
+            "row_file": identity.row_file,
+            "row_function": identity.row_function,
+            "query_ordinal": identity.query_ordinal,
+        },
+        "identity": render_identity_json(identity, probe),
+        "oracle_value": oracle_value,
+        "raw_capture": raw_capture,
+        "source_admission_digest": source_admission_digest,
+    })
 }
 
 // ---------------------------------------------------------------------------

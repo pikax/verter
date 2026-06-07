@@ -15,10 +15,11 @@ use super::super::identity::{
     QueryHelperKind, SnapshotIdentity, WorkspaceFileRef, ORACLE_SCHEMA_VERSION,
     PROBE_SYNTHESIS_VERSION, TSGO_VERSION,
 };
-use super::super::normalize::{ProjectionModeKind, NORMALIZER_VERSION};
+use super::super::normalize::{canonical_json_string, ProjectionModeKind, NORMALIZER_VERSION};
 use super::{
-    decode_identity, decode_oracle_value_strict, decode_strict, redrive_snapshot_id,
-    SnapshotDecodeError, KNOWN_VALUE_KINDS,
+    assemble_snapshot_document, decode_identity, decode_oracle_value_strict, decode_strict,
+    redrive_snapshot_id, render_identity_json, ProbeLocator, SnapshotDecodeError,
+    KNOWN_VALUE_KINDS,
 };
 
 // -- fixtures --------------------------------------------------------------
@@ -161,6 +162,112 @@ fn valid_snapshot() -> Value {
             "final_verdict": "Admit"
         }
     })
+}
+
+/// The probe-locator the valid fixture stores on `identity`.
+fn probe_locator() -> ProbeLocator {
+    ProbeLocator {
+        probe_name: "__oracle_probe__0".to_string(),
+        offset: 412,
+    }
+}
+
+// -- snapshot_encode_assembles_canonical_document --------------------------
+
+/// The ENCODE path (the generator's write step) assembles BYTE-FOR-BYTE the
+/// hand-authored canonical fixture from the structured identity + env + the
+/// per-stage sub-objects, and the assembled document strictly decodes. The
+/// hand-authored [`valid_snapshot`] is the independent oracle: if the assembler
+/// emitted a wrong field, a wrong key, a mis-rendered identity axis, or a
+/// non-derived `snapshot_id`, it would DIVERGE from the fixture (or fail decode).
+#[test]
+fn snapshot_encode_assembles_canonical_document() {
+    let fixture = valid_snapshot();
+    let id = identity();
+    let env = pinned_env();
+    let ov = oracle_value();
+
+    let assembled = assemble_snapshot_document(
+        fixture["oracle_family"].as_str().unwrap(),
+        &id,
+        &env,
+        &ov,
+        &probe_locator(),
+        &fixture["raw_capture"],
+        &fixture["oracle_env_files"],
+        fixture["oracle_env_hash"].as_str().unwrap(),
+        &fixture["source_admission_digest"],
+    );
+
+    // The assembled document equals the hand-authored canonical fixture.
+    assert_eq!(
+        canonical_json_string(&assembled),
+        canonical_json_string(&fixture),
+        "the encode path must assemble the exact canonical snapshot document"
+    );
+    // …and it strictly decodes (the encode path is the decoder's true inverse).
+    assert!(
+        decode_strict(&assembled).is_ok(),
+        "an assembled document must strictly decode"
+    );
+
+    // Discriminating: a changed identity axis (the queried symbol) MUST change
+    // the assembled document — both the rendered `identity.symbol_or_expression`
+    // AND the derived `snapshot_id` — so the assembler reflects its inputs, not a
+    // baked constant.
+    let mut other_id = identity();
+    other_id.symbol_or_expression = "DifferentSymbol".to_string();
+    let assembled_other = assemble_snapshot_document(
+        fixture["oracle_family"].as_str().unwrap(),
+        &other_id,
+        &env,
+        &ov,
+        &probe_locator(),
+        &fixture["raw_capture"],
+        &fixture["oracle_env_files"],
+        fixture["oracle_env_hash"].as_str().unwrap(),
+        &fixture["source_admission_digest"],
+    );
+    assert_ne!(
+        assembled_other["snapshot_id"], assembled["snapshot_id"],
+        "a changed identity must derive a different snapshot_id"
+    );
+    assert_eq!(
+        assembled_other["identity"]["symbol_or_expression"],
+        json!("DifferentSymbol")
+    );
+}
+
+// -- render_identity_json_sorts_workspace_files ----------------------------
+
+/// `render_identity_json` emits `workspace_files` PATH-SORTED regardless of the
+/// `SnapshotIdentity`'s stored order, matching the canonical order `snapshot_id`
+/// hashes (upsert order is never an identity input).
+#[test]
+fn render_identity_json_sorts_workspace_files() {
+    let mut id = identity();
+    id.workspace_files = vec![
+        WorkspaceFileRef {
+            path: "/fixtures/z.ts".to_string(),
+            content_hash: "sha256:aaaa".to_string(),
+        },
+        WorkspaceFileRef {
+            path: "/fixtures/a.ts".to_string(),
+            content_hash: "sha256:bbbb".to_string(),
+        },
+    ];
+    let rendered = render_identity_json(&id, &probe_locator());
+    let paths: Vec<&str> = rendered["workspace_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["/fixtures/a.ts", "/fixtures/z.ts"],
+        "workspace_files must be path-sorted in the rendered identity"
+    );
 }
 
 // -- strict_snapshot_decode ------------------------------------------------
