@@ -48,6 +48,7 @@ mod narrow_instanceof;
 mod narrow_truthiness;
 mod narrow_typeof;
 mod no_infer;
+mod oracle;
 mod recursive_conditional;
 mod recursive_union;
 mod relation_semantics;
