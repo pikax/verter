@@ -33,14 +33,14 @@ use verter_type_expr::TypeExprScope;
 
 use crate::common::Span;
 
-use super::raw_surface::{
-    capture_statement_surfaces, merge_overload_groups, RawSourceSurface, SymbolSpace,
-};
 use super::{
     build_type_context, extract_heritage_type_names, get_expression_reference_name,
     get_type_reference_name, resolve_class_with_heritage_ctx_ref,
     resolve_interface_with_extends_ctx_ref, resolve_named_local_type_with_ctx_ref,
     resolve_value_declaration_type, ResolvedElements, RuntimeType, TypeResolutionContext,
+};
+use crate::utils::oxc::vue::script::raw_surface::{
+    capture_statement_surfaces, merge_overload_groups, RawSourceSurface, SymbolSpace,
 };
 
 /// Resolve an imported type by name from a dependency file's source.

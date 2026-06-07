@@ -63,7 +63,7 @@ use verter_type_expr::{MemberVisibility, ObjectMember, PrimitiveName, TypeExpr};
 // the live `resolve_source_declarations` path feeds this gate without a second
 // type. The admission VERDICT model (`SourceContributor` / `SourceWalkResult` /
 // `AdmissionVerdict` / `RejectReason`) is admission-specific and stays here.
-use verter_compiler::utils::oxc::vue::resolve_type::{
+use verter_compiler::utils::oxc::vue::raw_surface::{
     OverloadSignature, RawDeclKind, RawKey, RawMemberKind, RawSourceSurface, TupleElementShape,
     TypeParamModifiers, UniqueSymbolOp,
 };

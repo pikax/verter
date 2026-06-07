@@ -16,6 +16,7 @@
 pub mod bindings;
 pub mod macros;
 pub mod options;
+pub mod raw_surface;
 pub mod resolve_type;
 pub mod setup;
 pub mod shared;

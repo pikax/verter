@@ -1883,14 +1883,6 @@ mod infer;
 pub use infer::infer_runtime_type;
 use infer::{extract_heritage_type_names, get_type_reference_name, resolve_value_declaration_type};
 
-mod raw_surface;
-pub use raw_surface::{
-    capture_declaration_surfaces, capture_statement_surfaces, lowered_body_rejectable_variant,
-    merge_overload_groups, CapturedSurface, OverloadSignature, RawDeclKind, RawKey, RawMemberKind,
-    RawSourceSurface, SymbolSpace, TransitiveReferent, TupleElementShape, TypeParamModifiers,
-    UniqueSymbolOp,
-};
-
 mod external;
 use external::collect_type_reference_names;
 pub use external::{
