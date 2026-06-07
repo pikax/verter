@@ -46,8 +46,19 @@ const CANONICAL_FIXTURE: &str =
 
 /// A minimal standalone-host oracle tsconfig (the §Q2 canonical config shape; the
 /// full closed effective-option pin + vendored corpus is a separate increment).
-const ORACLE_TSCONFIG: &str =
-    "{ \"compilerOptions\": { \"strict\": true, \"target\": \"es2020\", \"moduleResolution\": \"bundler\" } }\n";
+///
+/// `exactOptionalPropertyTypes: true` is LOAD-BEARING for the confluence proof
+/// (§4 item 1a, the central soundness obligation): Verter's `TypeExpr` models an
+/// optional member as `{ optional: true, ty: T }` with NO `| undefined` arm, so
+/// for the hover-lowered side to converge with Verter's projection, tsgo must
+/// print an optional member as `tag?: T` (NOT `tag?: T | undefined`). Under
+/// tsgo's default (`exactOptionalPropertyTypes: false`, NOT enabled by `strict`)
+/// an optional property's APPARENT type includes `| undefined` in hover, which
+/// diverges from Verter's representation. The option is a print-affecting member
+/// of the §Q2 closed effective-option table — pinned `true` here so the two sides
+/// are confluent for optional members. This is the `exactOptionalPropertyTypes`
+/// row of the `oracle_options_delivery_proven` matrix proven below.
+const ORACLE_TSCONFIG: &str = "{ \"compilerOptions\": { \"strict\": true, \"exactOptionalPropertyTypes\": true, \"target\": \"es2020\", \"moduleResolution\": \"bundler\" } }\n";
 
 /// Spawn tsgo over a temp workspace, open `source` as `<root>/fixture.ts`, and
 /// return the spawned provider + the absolute fixture path. Returns `None` if
