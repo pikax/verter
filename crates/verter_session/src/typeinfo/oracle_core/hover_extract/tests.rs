@@ -18,7 +18,7 @@ fn extracts_canonical_object_body_with_nested_semicolons() {
 }
 
 /// The EXACT shape the adopted LSP driver's hover (empty client caps,
-/// `verter_type_runtime/src/tsgo/ipc.rs` `capabilities: {}`) delivers — the BARE
+/// `tsgo/ipc.rs` `capabilities: {}`) delivers — the BARE
 /// `type <probe> = <body>` with NO markdown fence. The whole-text plaintext shape
 /// must extract it.
 #[test]
