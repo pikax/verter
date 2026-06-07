@@ -26,9 +26,17 @@
 //! primitive the design flagged as unverified — `anti_shadow_needs_proven_binding_primitive`),
 //! and a clean probe yields ZERO diagnostics (`probe_binds_to_registry_target`).
 //!
-//! Remaining BLOCKING spike items (documented, not yet automated here): the
-//! multi-option `compilerOptions` delivery matrix, the vendored-lib forcing
-//! mechanism, and confluence over the FULL hard-family corpus.
+//! Also PROVEN here: the multi-option `compilerOptions` delivery matrix
+//! (`oracle_options_delivery_proven` — tsgo reads the root tsconfig and applies
+//! `exactOptionalPropertyTypes` / `strictNullChecks` / `noUncheckedIndexedAccess`)
+//! and the vendored-lib forcing mechanism (the NAMED §Q2 candidate: `"noLib":
+//! true` plus an explicit corpus-rooted lib list forces tsgo off its
+//! native-bundled libs while honouring the vendored ones).
+//!
+//! Remaining BLOCKING spike items (documented, not yet automated here): confluence
+//! over the FULL hard-family corpus (mapped / conditional / template / tuple /
+//! class families each need their per-class verdict beyond the object-alias core
+//! proven above).
 
 use std::time::Duration;
 
@@ -60,10 +68,18 @@ const CANONICAL_FIXTURE: &str =
 /// row of the `oracle_options_delivery_proven` matrix proven below.
 const ORACLE_TSCONFIG: &str = "{ \"compilerOptions\": { \"strict\": true, \"exactOptionalPropertyTypes\": true, \"target\": \"es2020\", \"moduleResolution\": \"bundler\" } }\n";
 
-/// Spawn tsgo over a temp workspace, open `source` as `<root>/fixture.ts`, and
-/// return the spawned provider + the absolute fixture path. Returns `None` if
+/// Spawn tsgo over a temp workspace with the given `tsconfig`, write + open every
+/// `(relative_name, content)` in `files`, and return the spawned provider plus the
+/// absolute path of the FIRST listed file (the primary fixture). Returns `None` if
 /// tsgo is not installed (the spike SKIPS rather than failing in such an env).
-async fn spawn_over(source: &str) -> Option<(TsgoTypeProvider, String, tempfile::TempDir)> {
+///
+/// This is the one driver shape the generator (H) will reuse: a frozen root with a
+/// vendored `tsconfig.json` (the option-delivery channel — tsgo reads the config
+/// from the root) plus the program files written into that root.
+async fn spawn_with(
+    tsconfig: &str,
+    files: &[(&str, &str)],
+) -> Option<(TsgoTypeProvider, String, tempfile::TempDir)> {
     let tsgo_bin = match find_tsgo_binary() {
         Ok(b) => b,
         Err(e) => {
@@ -72,9 +88,15 @@ async fn spawn_over(source: &str) -> Option<(TsgoTypeProvider, String, tempfile:
         }
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("tsconfig.json"), ORACLE_TSCONFIG).expect("write tsconfig");
-    let fixture_path = dir.path().join("fixture.ts");
-    std::fs::write(&fixture_path, source).expect("write fixture");
+    std::fs::write(dir.path().join("tsconfig.json"), tsconfig).expect("write tsconfig");
+    let mut primary: Option<String> = None;
+    for (name, content) in files {
+        let p = dir.path().join(name);
+        std::fs::write(&p, content).unwrap_or_else(|e| panic!("write {name}: {e}"));
+        if primary.is_none() {
+            primary = Some(p.to_string_lossy().into_owned());
+        }
+    }
     let root_uri = format!("file://{}", dir.path().display());
 
     let provider = match tokio::time::timeout(
@@ -93,9 +115,35 @@ async fn spawn_over(source: &str) -> Option<(TsgoTypeProvider, String, tempfile:
             return None;
         }
     };
-    let path = fixture_path.to_string_lossy().into_owned();
-    let _ = provider.open_file(&path, source).await;
+    for (name, content) in files {
+        let p = dir.path().join(name).to_string_lossy().into_owned();
+        let _ = provider.open_file(&p, content).await;
+    }
+    let path = primary.expect("at least one file");
     Some((provider, path, dir))
+}
+
+/// Spawn tsgo over a temp workspace under the canonical `ORACLE_TSCONFIG`, opening
+/// `source` as `<root>/fixture.ts`.
+async fn spawn_over(source: &str) -> Option<(TsgoTypeProvider, String, tempfile::TempDir)> {
+    spawn_with(ORACLE_TSCONFIG, &[("fixture.ts", source)]).await
+}
+
+/// Hover the alias-name probe for `source` (appended `type __oracle_probe__0 = <rhs>;`)
+/// under `tsconfig`, returning the raw hover contents — the option-delivery matrix's
+/// observation primitive. `None` ⟹ tsgo absent (skip).
+async fn hover_probe_under(tsconfig: &str, source: &str, rhs: &str) -> Option<String> {
+    let synth = probe::append_probe(source, 0, rhs);
+    let (provider, path, _dir) = spawn_with(tsconfig, &[("fixture.ts", &synth.source)]).await?;
+    let hover = tokio::time::timeout(
+        Duration::from_secs(15),
+        provider.get_hover(&path, synth.probe_name_offset as u32),
+    )
+    .await
+    .expect("hover did not time out")
+    .expect("hover request ok")
+    .expect("hover present at probe");
+    Some(hover.contents)
 }
 
 /// PROOF 1 — the probe-driven hover EXPANDS the alias to its structural body,
@@ -224,5 +272,218 @@ async fn spike_clean_probe_has_zero_diagnostics() {
     assert!(
         diags.is_empty(),
         "a clean probe must produce zero diagnostics; got {diags:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// BLOCKING §4 spike items: option-delivery matrix + vendored-lib forcing.
+// ---------------------------------------------------------------------------
+
+/// One row of the `oracle_options_delivery_proven` matrix: a print-affecting
+/// option, a discriminating fixture, the tsconfig that pins the option to each of
+/// its two values, and the substring each hover MUST / MUST NOT contain. A
+/// differing hover across the two configs proves tsgo READ + APPLIED that option
+/// from the delivered (root) tsconfig.
+struct OptionDeliveryCase {
+    option: &'static str,
+    fixture: &'static str,
+    probe_rhs: &'static str,
+    /// tsconfig that yields the `with` hover (the option set to the value whose
+    /// effect we assert) and the tsconfig that yields the `without` hover.
+    cfg_with: &'static str,
+    cfg_without: &'static str,
+    /// Substring the `with` hover MUST contain and the `without` hover MUST NOT —
+    /// the discriminator the option toggles.
+    discriminator: &'static str,
+}
+
+/// PROOF 4 — the multi-option `compilerOptions` delivery-proof MATRIX
+/// (`oracle_options_delivery_proven`). For each print-affecting option the §Q2
+/// closed effective-option table pins, drive a DISCRIMINATING fixture under the
+/// config that sets the option vs the config that clears it, and assert the
+/// `discriminator` substring is PRESENT in one hover and ABSENT in the other AND
+/// the two hovers DIFFER. A differing hover proves tsgo READ + APPLIED that option
+/// from the delivered (root) tsconfig — so the delivery channel carries EVERY
+/// pinned option, not just one (a single-flag probe would miss a dropped second
+/// flag; the matrix does not). Covers two of the three named print-affecting
+/// options via the TYPE-alias probe: `exactOptionalPropertyTypes` and
+/// `strictNullChecks`. The third, `noUncheckedIndexedAccess`, is an element-access
+/// EXPRESSION-level effect (it does not surface on an indexed-access TYPE at the
+/// pinned tsgo), so it is proven separately via a VALUE probe in
+/// `spike_nuia_delivery_via_value_probe`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spike_options_delivery_matrix() {
+    // exactOptionalPropertyTypes: an optional member's apparent type carries
+    // `| undefined` only under EOP=false. (Verter's representation matches EOP=true.)
+    const EOP_ON: &str =
+        "{ \"compilerOptions\": { \"strict\": true, \"exactOptionalPropertyTypes\": true } }\n";
+    const EOP_OFF: &str =
+        "{ \"compilerOptions\": { \"strict\": true, \"exactOptionalPropertyTypes\": false } }\n";
+    // strictNullChecks: `null` is a distinct arm only under SNC=true; under
+    // SNC=false it is absorbed into every type and vanishes from the printed union.
+    const SNC_ON: &str = "{ \"compilerOptions\": { \"strict\": true } }\n";
+    const SNC_OFF: &str =
+        "{ \"compilerOptions\": { \"strict\": true, \"strictNullChecks\": false } }\n";
+
+    let cases = [
+        OptionDeliveryCase {
+            option: "exactOptionalPropertyTypes",
+            fixture: "type Eop = { a?: number };\n",
+            probe_rhs: "Eop",
+            // The `with`-discriminator config is EOP=OFF (which ADDS `undefined`).
+            cfg_with: EOP_OFF,
+            cfg_without: EOP_ON,
+            discriminator: "undefined",
+        },
+        OptionDeliveryCase {
+            option: "strictNullChecks",
+            fixture: "type Snc = string | null;\n",
+            probe_rhs: "Snc",
+            cfg_with: SNC_ON,
+            cfg_without: SNC_OFF,
+            discriminator: "null",
+        },
+    ];
+
+    for case in &cases {
+        let Some(with_hover) = hover_probe_under(case.cfg_with, case.fixture, case.probe_rhs).await
+        else {
+            return; // tsgo absent — skip the whole matrix
+        };
+        let without_hover = hover_probe_under(case.cfg_without, case.fixture, case.probe_rhs)
+            .await
+            .expect("tsgo present for `with`, must be present for `without`");
+
+        assert!(
+            with_hover.contains(case.discriminator),
+            "[{}] hover under cfg_with must contain `{}` (option not applied?); got: {with_hover}",
+            case.option,
+            case.discriminator
+        );
+        assert!(
+            !without_hover.contains(case.discriminator),
+            "[{}] hover under cfg_without must NOT contain `{}` (option not applied?); got: {without_hover}",
+            case.option,
+            case.discriminator
+        );
+        assert_ne!(
+            with_hover, without_hover,
+            "[{}] flipping the option must change the hover — proving tsgo delivered + applied it",
+            case.option
+        );
+    }
+}
+
+/// PROOF 4b — `noUncheckedIndexedAccess` delivery, proven via a VALUE probe (the
+/// form NUIA actually affects: an element-access EXPRESSION, not an indexed-access
+/// type). Hover a `const` bound to an index-signature element access under NUIA=ON
+/// vs NUIA=OFF; the `| undefined` arm appears only under NUIA=ON, proving tsgo READ
+/// + APPLIED `noUncheckedIndexedAccess` from the delivered tsconfig. Completes the
+/// third named option of `oracle_options_delivery_proven`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spike_nuia_delivery_via_value_probe() {
+    const NUIA_ON: &str =
+        "{ \"compilerOptions\": { \"strict\": true, \"noUncheckedIndexedAccess\": true } }\n";
+    const NUIA_OFF: &str =
+        "{ \"compilerOptions\": { \"strict\": true, \"noUncheckedIndexedAccess\": false } }\n";
+    // The value `nuiaObj["x"]` is an element access through a string index
+    // signature — `number | undefined` under NUIA, `number` otherwise.
+    const SOURCE: &str =
+        "declare const nuiaObj: { [k: string]: number };\nconst probeVal = nuiaObj[\"x\"];\n";
+    let probe_off = SOURCE.find("probeVal").expect("find value-probe name");
+
+    async fn hover_value(tsconfig: &str, off: usize) -> Option<String> {
+        let (provider, path, _dir) = spawn_with(tsconfig, &[("fixture.ts", SOURCE)]).await?;
+        let hover = tokio::time::timeout(
+            Duration::from_secs(15),
+            provider.get_hover(&path, off as u32),
+        )
+        .await
+        .expect("hover did not time out")
+        .expect("hover request ok")
+        .expect("hover present at value probe");
+        Some(hover.contents)
+    }
+
+    let Some(on_hover) = hover_value(NUIA_ON, probe_off).await else {
+        return; // tsgo absent — skip
+    };
+    let off_hover = hover_value(NUIA_OFF, probe_off)
+        .await
+        .expect("tsgo present for ON, must be present for OFF");
+
+    assert!(
+        on_hover.contains("undefined"),
+        "NUIA=ON element access must carry `| undefined`; got: {on_hover}"
+    );
+    assert!(
+        !off_hover.contains("undefined"),
+        "NUIA=OFF element access must NOT carry `| undefined`; got: {off_hover}"
+    );
+    assert_ne!(
+        on_hover, off_hover,
+        "flipping noUncheckedIndexedAccess must change the hover — proving delivery"
+    );
+}
+
+/// PROOF 5 — the vendored-lib forcing mechanism (the NAMED §Q2 "Env pinning"
+/// candidate: `"noLib": true` + an explicit corpus-rooted vendored lib file list).
+/// Validated HERMETICALLY (no real bundled lib copied) in two halves:
+///
+/// - **Part 1 (no leak):** under `noLib: true` with NO lib declaration in the
+///   program, a lib-only global (`Array`) is UNRESOLVABLE — tsgo emits a
+///   diagnostic. This proves tsgo's NATIVE-bundled libs do NOT leak in under
+///   `noLib` (the corpus-hermeticity guarantee `oracle_env_corpus_is_complete`
+///   rests on). If the bundled libs leaked, `Array` would resolve and the program
+///   would be clean.
+/// - **Part 2 (vendored honored):** under `noLib: true` PLUS a vendored minimal
+///   `corpus-lib.d.ts` declaring `Array`, the same fixture resolves cleanly —
+///   proving the explicit corpus-rooted vendored lib list IS honored.
+///
+/// Together: `noLib` forces tsgo off its bundled libs AND tsgo consults ONLY the
+/// vendored program files — so the generator can drive against a frozen vendored
+/// corpus with no native-lib leak.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spike_nolib_forces_off_bundled_libs() {
+    // `string` is a primitive keyword (not lib-defined); `Array<T>` is a lib-only
+    // global — the discriminator for whether a lib surface is present.
+    const FIXTURE: &str = "type UsesArray = Array<string>;\n";
+
+    // Part 1 — noLib, NO lib decl: `Array` must be unresolvable.
+    const NOLIB_NO_LIB: &str =
+        "{ \"compilerOptions\": { \"noLib\": true }, \"files\": [\"fixture.ts\"] }\n";
+    let Some((provider, path, _dir)) = spawn_with(NOLIB_NO_LIB, &[("fixture.ts", FIXTURE)]).await
+    else {
+        return; // tsgo absent — skip
+    };
+    let diags = tokio::time::timeout(Duration::from_secs(15), provider.get_diagnostics(&path))
+        .await
+        .expect("diagnostics did not time out")
+        .expect("diagnostics request ok");
+    assert!(
+        !diags.is_empty(),
+        "noLib + no lib decl must FAIL to resolve the lib-only global `Array` \
+         (bundled libs must NOT leak under noLib); got {diags:?}"
+    );
+
+    // Part 2 — noLib + a VENDORED minimal `Array` decl: must resolve cleanly.
+    const VENDORED_LIB: &str = "interface Array<T> { length: number; }\n";
+    const NOLIB_WITH_VENDORED: &str =
+        "{ \"compilerOptions\": { \"noLib\": true }, \"files\": [\"corpus-lib.d.ts\", \"fixture.ts\"] }\n";
+    let Some((provider, path, _dir)) = spawn_with(
+        NOLIB_WITH_VENDORED,
+        &[("fixture.ts", FIXTURE), ("corpus-lib.d.ts", VENDORED_LIB)],
+    )
+    .await
+    else {
+        return;
+    };
+    let diags = tokio::time::timeout(Duration::from_secs(15), provider.get_diagnostics(&path))
+        .await
+        .expect("diagnostics did not time out")
+        .expect("diagnostics request ok");
+    assert!(
+        diags.is_empty(),
+        "noLib + a vendored `Array` decl must resolve cleanly (vendored lib honored); got {diags:?}"
     );
 }
