@@ -14,3 +14,4 @@
 
 pub(crate) mod identity;
 pub(crate) mod normalize;
+pub(crate) mod snapshot;

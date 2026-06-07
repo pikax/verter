@@ -90,11 +90,24 @@ pub(crate) enum QueryHelperKind {
 }
 
 impl QueryHelperKind {
-    fn tag(self) -> &'static str {
+    pub(crate) fn tag(self) -> &'static str {
         match self {
             Self::ResolveExpr => "ResolveExpr",
             Self::ShallowSurfaceExpr => "ShallowSurfaceExpr",
             Self::EvaluateExpr => "EvaluateExpr",
+        }
+    }
+
+    /// Inverse of [`tag`]: parse a stored snapshot `query_helper_kind` string back
+    /// to the closed enum (the strict snapshot decoder uses this to redrive
+    /// `snapshot_id` from a snapshot's stored identity). An unknown tag is `None`.
+    #[allow(dead_code)]
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "ResolveExpr" => Some(Self::ResolveExpr),
+            "ShallowSurfaceExpr" => Some(Self::ShallowSurfaceExpr),
+            "EvaluateExpr" => Some(Self::EvaluateExpr),
+            _ => None,
         }
     }
 }
@@ -111,11 +124,22 @@ pub(crate) enum HostSetupKind {
 }
 
 impl HostSetupKind {
-    fn tag(self) -> &'static str {
+    pub(crate) fn tag(self) -> &'static str {
         match self {
             Self::Standalone => "standalone",
             Self::WorkspaceFootprint => "workspace_footprint",
             Self::PackageBacked => "package_backed",
+        }
+    }
+
+    /// Inverse of [`tag`] for the strict snapshot decoder's redrive path.
+    #[allow(dead_code)]
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "standalone" => Some(Self::Standalone),
+            "workspace_footprint" => Some(Self::WorkspaceFootprint),
+            "package_backed" => Some(Self::PackageBacked),
+            _ => None,
         }
     }
 }
@@ -151,9 +175,21 @@ pub(crate) enum OracleValueKind {
 }
 
 impl OracleValueKind {
-    fn tag(self) -> &'static str {
+    pub(crate) fn tag(self) -> &'static str {
         match self {
             Self::StructuredTypeExpr => "structured_type_expr",
+        }
+    }
+
+    /// Inverse of [`tag`] for the strict snapshot decoder. An unknown
+    /// `oracle_value_kind` string is `None` — a future kind is a CLOSED-tagged
+    /// addition that bumps `ORACLE_SCHEMA_VERSION`, never a silently-accepted
+    /// open string.
+    #[allow(dead_code)]
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "structured_type_expr" => Some(Self::StructuredTypeExpr),
+            _ => None,
         }
     }
 }
@@ -192,12 +228,25 @@ pub(crate) struct SnapshotIdentity {
     pub(crate) oracle_value_kind: OracleValueKind,
 }
 
-fn projection_mode_tag(mode: ProjectionModeKind) -> &'static str {
+pub(crate) fn projection_mode_tag(mode: ProjectionModeKind) -> &'static str {
     match mode {
         ProjectionModeKind::Shallow => "Shallow",
         ProjectionModeKind::Navigate => "Navigate",
         ProjectionModeKind::Expanded => "Expanded",
         ProjectionModeKind::Skeleton => "Skeleton",
+    }
+}
+
+/// Inverse of [`projection_mode_tag`] for the strict snapshot decoder's redrive
+/// path. An unknown mode string is `None`.
+#[allow(dead_code)]
+pub(crate) fn projection_mode_from_tag(tag: &str) -> Option<ProjectionModeKind> {
+    match tag {
+        "Shallow" => Some(ProjectionModeKind::Shallow),
+        "Navigate" => Some(ProjectionModeKind::Navigate),
+        "Expanded" => Some(ProjectionModeKind::Expanded),
+        "Skeleton" => Some(ProjectionModeKind::Skeleton),
+        _ => None,
     }
 }
 
