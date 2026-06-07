@@ -49,6 +49,10 @@ mod narrow_truthiness;
 mod narrow_typeof;
 mod no_infer;
 mod oracle;
+// The §4 generation SPIKE — drives the pinned tsgo via verter_type_runtime. Gated
+// behind `oracle-gen` so the default gate stays tsgo-free (design §3 inv 1).
+#[cfg(feature = "oracle-gen")]
+mod oracle_gen_spike;
 mod oracle_query_specs;
 mod oracle_query_specs_guard;
 mod oracle_raw_surface_capture;

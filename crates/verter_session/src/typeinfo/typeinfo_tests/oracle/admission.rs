@@ -473,6 +473,32 @@ pub(crate) fn admit_hover_text(rhs: &str) -> AdmissionVerdict {
     admit_type_expr(&lowered)
 }
 
+/// Lower a hover RHS type-text to a `TypeExpr` through the SAME OXC parse +
+/// `lower_ts_type` the generator uses (reusing this module's parse so the spike
+/// / generator do not duplicate the OXC wiring). Returns `None` on a parse
+/// failure or a non-zero strict-lowering drop count. The admission verdict is a
+/// SEPARATE concern — call `admit_hover_text` for that; this is only the value.
+#[allow(dead_code)]
+pub(crate) fn lower_hover_rhs(rhs: &str) -> Option<TypeExpr> {
+    let allocator = Allocator::default();
+    let wrapped = format!("type __oracle_probe__ = {rhs};");
+    let ret = Parser::new(&allocator, &wrapped, SourceType::ts()).parse();
+    if ret.panicked {
+        return None;
+    }
+    let ts_type = ret.program.body.iter().find_map(|stmt| match stmt {
+        Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "__oracle_probe__" => {
+            Some(&alias.type_annotation)
+        }
+        _ => None,
+    })?;
+    let (lowered, drops) = lower_with_drop_count(ts_type, &wrapped);
+    if drops > 0 {
+        return None;
+    }
+    Some(lowered)
+}
+
 /// The positive-allowlist walk over the RAW OXC `TSType` AST — `default-REJECT`.
 /// The lossy constructs STILL EXIST here (before OXC's `filter_map` erases
 /// them), so this is where `unique symbol`, computed keys, `this` types,

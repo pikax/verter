@@ -18,6 +18,30 @@ fn extracts_canonical_object_body_with_nested_semicolons() {
     assert!(rhs.contains("label: string;"));
 }
 
+/// The EXACT shape the adopted LSP driver's hover (empty client caps) delivers —
+/// the BARE `type <probe> = <body>` with NO markdown fence (verified empirically
+/// in the §4 spike). The whole-text fallback must extract it.
+#[test]
+fn extracts_bare_unfenced_hover_from_plaintext_caps_driver() {
+    let hover = "type __oracle_probe__0 = {\n    id: number;\n    label: string;\n    tag?: \"a\" | \"b\";\n}";
+    let rhs = extract_probe_rhs(hover, "__oracle_probe__0").unwrap();
+    assert_eq!(
+        rhs,
+        "{\n    id: number;\n    label: string;\n    tag?: \"a\" | \"b\";\n}"
+    );
+}
+
+#[test]
+fn fallback_does_not_fire_when_any_fence_present() {
+    // A non-ts fenced block IS present, so the prose `type ...` is NOT picked up
+    // by the whole-text fallback (the fallback fires only with NO fence at all).
+    let hover = "type __oracle_probe__0 = never (in prose)\n\n```json\n{}\n```";
+    assert_eq!(
+        extract_probe_rhs(hover, "__oracle_probe__0").unwrap_err(),
+        HoverExtractError::NoProbeBlock
+    );
+}
+
 #[test]
 fn extracts_bare_alias_name_shallow() {
     // Shallow mode: tsgo prints the alias name (no trailing `;` in hover).

@@ -20,7 +20,7 @@ session_metrics = []
 # does NOT enable it, so tsgo stays out of the default dependency closure — pinned
 # by `oracle_tsgo_forbidden.rs::tsgo_not_reachable_from_resolver`. Activated via
 # `cargo test -p verter_session --features oracle-gen` (the spike).
-oracle-gen = ["dep:verter_type_runtime"]
+oracle-gen = ["dep:verter_type_runtime", "dep:tokio"]
 # Opt-in: enables tests that read from `.integration-tests/repos/...`
 # alongside the workspace. The default `cargo test --workspace --tests`
 # run MUST stay hermetic — it does NOT enable this feature. Tests that
@@ -73,6 +73,9 @@ verter_scheduler = { path = "../verter_scheduler" }
 # (tsgo is GENERATION-ONLY, design §3 inv 1). Pinned by
 # `oracle_tsgo_forbidden.rs::tsgo_not_reachable_from_resolver`.
 verter_type_runtime = { path = "../verter_type_runtime", optional = true }
+# Async runtime for the `oracle-gen` spike's `#[tokio::test]` tsgo driver. OPTIONAL
+# (only the `oracle-gen` feature activates it) so it stays off the default closure.
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "io-util", "process", "sync"], optional = true }
 bitflags = "2.11"
 dashmap = "6.2"
 hotpath = { version = "0.16", optional = true }

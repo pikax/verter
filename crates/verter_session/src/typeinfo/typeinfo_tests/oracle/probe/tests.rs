@@ -60,7 +60,9 @@ fn append_probe_inserts_newline_when_base_lacks_one() {
     // base WITHOUT a trailing newline must not merge into the probe line.
     let base = "type A = number;"; // no trailing \n
     let synth = append_probe(base, 1, "A");
-    assert!(synth.source.contains("number;\ntype __oracle_probe__1 = A;\n"));
+    assert!(synth
+        .source
+        .contains("number;\ntype __oracle_probe__1 = A;\n"));
     // base WITH a trailing newline must not double it.
     let synth2 = append_probe("type A = number;\n", 1, "A");
     assert!(!synth2.source.contains("\n\ntype __oracle_probe__1"));

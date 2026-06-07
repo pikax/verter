@@ -9,12 +9,23 @@
 //! Versioned by `PROBE_SYNTHESIS_VERSION`.
 //!
 //! The grammar (FIXED): the FIRST fenced ```` ```typescript ```` / ```` ```ts ````
-//! block that contains the probe header `type <probe_name>` (prose / inline
-//! ignored); leading JSDoc/comment lines inside the block are skipped; the RHS
-//! runs from after the alias `=` to the DEPTH-0 `;` — a `;` nested inside
-//! `{}` / `[]` / `()` / `<>` or a string/template literal does NOT terminate —
-//! or to end-of-block when tsgo omits the trailing `;` (as it does for a
-//! type-alias hover). An UNCLOSED fence FAILS.
+//! block that contains the probe header `type <probe_name>` (prose / inline /
+//! other-language blocks ignored); leading JSDoc/comment lines inside the block
+//! are skipped; the RHS runs from after the alias `=` to the DEPTH-0 `;` — a `;`
+//! nested inside `{}` / `[]` / `()` / `<>` or a string/template literal does NOT
+//! terminate — or to end-of-block when tsgo omits the trailing `;` (as it does
+//! for a type-alias hover). An UNCLOSED fence FAILS.
+//!
+//! Driver-shape note (`hover_driver_config_pinned`): the declared LSP client
+//! `textDocument.hover.contentFormat` determines whether tsgo wraps the type in a
+//! markdown ```` ```typescript ```` fence (markdown caps) or returns the BARE
+//! `type <probe_name> = <RHS>` text (the empty/plaintext caps the adopted LSP
+//! driver sends, Q3). Both are the SAME probe header; the
+//! driver config is pinned into `probe_synthesis_version`, so a shape change is a
+//! version change, never a silent mismatch. The grammar therefore accepts the
+//! bare form via a WHOLE-TEXT fallback that fires ONLY when the hover carries NO
+//! fenced code block of any language (so a markdown hover's prose/inline/other
+//! blocks are still ignored — the fallback never overrides a fenced hover).
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HoverExtractError {
@@ -31,7 +42,9 @@ pub(crate) fn extract_probe_rhs(
     probe_name: &str,
 ) -> Result<String, HoverExtractError> {
     let mut saw_unclosed = false;
-    for block in fenced_typescript_blocks(hover_markdown, &mut saw_unclosed) {
+    let mut any_fence = false;
+    let blocks = fenced_typescript_blocks(hover_markdown, &mut saw_unclosed, &mut any_fence);
+    for block in blocks {
         if let Some(rhs) = block_probe_rhs(block, probe_name) {
             return Ok(rhs);
         }
@@ -39,12 +52,25 @@ pub(crate) fn extract_probe_rhs(
     if saw_unclosed {
         return Err(HoverExtractError::UnclosedFence);
     }
+    // WHOLE-TEXT fallback for the BARE (unfenced) plaintext-caps hover shape: only
+    // when there is NO fenced code block of any language, so a markdown hover's
+    // prose / inline / other-language blocks never trigger it.
+    if !any_fence {
+        if let Some(rhs) = block_probe_rhs(hover_markdown, probe_name) {
+            return Ok(rhs);
+        }
+    }
     Err(HoverExtractError::NoProbeBlock)
 }
 
 /// Yield the inner text of each fenced ```typescript / ```ts block, in order.
-/// Sets `saw_unclosed` if a fence opened with no closing fence.
-fn fenced_typescript_blocks<'a>(md: &'a str, saw_unclosed: &mut bool) -> Vec<&'a str> {
+/// Sets `saw_unclosed` if a ts fence opened with no closing fence; sets
+/// `any_fence` if ANY fenced code block (any language) was seen.
+fn fenced_typescript_blocks<'a>(
+    md: &'a str,
+    saw_unclosed: &mut bool,
+    any_fence: &mut bool,
+) -> Vec<&'a str> {
     let mut blocks = Vec::new();
     let bytes = md.as_bytes();
     let mut i = 0;
@@ -52,6 +78,7 @@ fn fenced_typescript_blocks<'a>(md: &'a str, saw_unclosed: &mut bool) -> Vec<&'a
         // A fence opener is ``` at the start of the string or right after a `\n`.
         let at_line_start = i == 0 || bytes[i - 1] == b'\n';
         if at_line_start && md[i..].starts_with("```") {
+            *any_fence = true;
             let after_ticks = i + 3;
             // The info string runs to the end of the line.
             let line_end = md[after_ticks..]

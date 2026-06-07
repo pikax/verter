@@ -36,9 +36,7 @@ fn tsgo_not_reachable_from_resolver() {
     let parsed: toml::Value = toml::from_str(&cargo_toml).expect("parse Cargo.toml");
 
     if let Err(why) = tsgo_dep_is_generation_only(&parsed) {
-        panic!(
-            "verter_session Cargo.toml violates the tsgo-generation-only rule: {why}"
-        );
+        panic!("verter_session Cargo.toml violates the tsgo-generation-only rule: {why}");
     }
 }
 
@@ -74,7 +72,12 @@ fn tsgo_dep_is_generation_only(parsed: &toml::Value) -> Result<(), String> {
             .map(|arr| {
                 arr.iter().any(|e| {
                     e.as_str()
-                        .map(|s| s == dep || s == format!("dep:{dep}") || s.starts_with(&format!("{dep}/")) || s.starts_with(&format!("dep:{dep}/")))
+                        .map(|s| {
+                            s == dep
+                                || s == format!("dep:{dep}")
+                                || s.starts_with(&format!("{dep}/"))
+                                || s.starts_with(&format!("dep:{dep}/"))
+                        })
                         .unwrap_or(false)
                 })
             })
