@@ -22,8 +22,10 @@
 
 pub(crate) mod admission;
 pub(crate) mod driver;
+pub(crate) mod hover_extract;
 pub(crate) mod identity;
 pub(crate) mod normalize;
+pub(crate) mod probe;
 pub(crate) mod snapshot;
 pub(crate) mod source_walk;
 
