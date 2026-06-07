@@ -15,6 +15,7 @@ repository = "https://github.com/pikax/verter"
 homepage = "https://verterjs.dev/"
 
 [workspace.dependencies]
+blake3 = "1.5"
 oxc_allocator = "0.126.0"
 oxc_ast = "0.126.0"
 oxc_parser = "0.126.0"

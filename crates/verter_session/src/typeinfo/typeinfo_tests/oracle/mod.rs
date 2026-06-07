@@ -12,4 +12,5 @@
 //! never enters the default resolver build or the default test gate, preserving
 //! the `tsgo`-forbidden-at-runtime invariant.
 
+pub(crate) mod identity;
 pub(crate) mod normalize;

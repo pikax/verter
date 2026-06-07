@@ -122,6 +122,10 @@ rayon = { workspace = true }
 uuid = { version = "1.23", features = ["rng-getrandom"] }
 
 [dev-dependencies]
+# Oracle harness snapshot-identity hashing (test-only — the harness lives under
+# `#[cfg(test)] mod typeinfo_tests`, so blake3 stays out of the production /
+# resolver dependency closure, preserving `tsgo_not_reachable_from_resolver`).
+blake3 = { workspace = true }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 toml = "1.1"
 verter_parser = { path = "../verter_parser" }
