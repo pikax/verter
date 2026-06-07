@@ -18,7 +18,7 @@
 //! compiler-options blob). The id is the FULL ≥256-bit BLAKE3 digest, never a
 //! truncation.
 //!
-//! Lifts ZERO rows: this is the storage/identity foundation the per-block
+//! Lifts ZERO rows: this is the storage/identity foundation that later
 //! row-lifts ride on.
 
 use serde_json::{json, Value};

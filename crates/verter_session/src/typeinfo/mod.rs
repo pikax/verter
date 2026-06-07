@@ -73,7 +73,7 @@ mod typeinfo_tests;
 // `src/bin/oracle_gen` generator reaches its `run_oracle_gen` entry — a
 // `src/bin/*` is a separate crate that sees only `pub`/`pub(crate)` lib items,
 // not the `#[cfg(test)]` `typeinfo_tests` tree). It lifts ZERO rows: it is the
-// foundation the per-block row-lifts ride on. The tsgo driver lives behind
+// shared foundation that later row-lifts consume. The tsgo driver lives behind
 // `oracle-gen` only, so the default resolver build + default test gate stay
 // tsgo-free (the `tsgo`-forbidden-at-runtime invariant, design §3 inv 1).
 #[cfg(any(test, feature = "oracle-gen"))]

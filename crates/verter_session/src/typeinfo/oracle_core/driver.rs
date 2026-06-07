@@ -23,8 +23,8 @@
 //!    snapshot's stored (already-normalized) `oracle_value` under the same
 //!    normalization. NO tsgo at consumption time.
 //!
-//! The registry is EMPTY in this harness-foundation block (it lifts ZERO rows),
-//! so `run_row` is never INVOKED at runtime here. The driver is nonetheless
+//! The registry is EMPTY (it lifts ZERO rows), so `run_row` is never INVOKED at
+//! runtime here. The driver is nonetheless
 //! built complete + correct (never stubbed): its pure sub-functions are
 //! exercised directly by discriminating unit tests, and the orchestrator is the
 //! real path the first lifted row will ride.

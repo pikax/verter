@@ -27,9 +27,9 @@
 //!    (`snapshot::assemble_snapshot_document`) and write it.
 //!
 //! [`run_oracle_gen`] is the single `pub` entry the `src/bin/oracle_gen` binary
-//! invokes. The oracle-query-spec registry is EMPTY in this harness-foundation
-//! block (it lifts ZERO rows), so `run_oracle_gen` writes ZERO snapshots — a REAL
-//! vacuous loop, not a stub. The per-spec pipeline ([`generate_snapshot`]) is
+//! invokes. The oracle-query-spec registry is EMPTY (it lifts ZERO rows), so
+//! `run_oracle_gen` writes ZERO snapshots — a REAL vacuous loop, not a stub. The
+//! per-spec pipeline ([`generate_snapshot`]) is
 //! REAL and is exercised end-to-end against the pinned tsgo over a SYNTHETIC spec
 //! by `gen_tests::oracle_gen_is_idempotent`, which is what makes the generator
 //! non-hollow.
@@ -162,9 +162,9 @@ impl GenConfig {
 }
 
 /// Generate + write every registry snapshot, returning the count written. The
-/// registry is EMPTY in this harness-foundation block, so this is a REAL vacuous
-/// loop (zero snapshots) — the per-spec body ([`generate_snapshot`]) is exercised
-/// against real tsgo by the idempotence test.
+/// registry is EMPTY, so this is a REAL vacuous loop (zero snapshots) — the
+/// per-spec body ([`generate_snapshot`]) is exercised against real tsgo by the
+/// idempotence test.
 pub fn run_oracle_gen() -> Result<usize, GenError> {
     let config = GenConfig::checked_in();
     let runtime = tokio::runtime::Builder::new_multi_thread()

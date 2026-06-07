@@ -10,8 +10,8 @@
 //!
 //! It drives the pinned tsgo, applies the two-sided positive-allowlist admission,
 //! and writes the checked-in snapshots — NEVER from a `#[test]`. The oracle-query
-//! registry is EMPTY in the harness-foundation block, so a run writes ZERO
-//! snapshots (a real vacuous loop); the per-spec body is the same one the
+//! registry is EMPTY (no rows are lifted), so a run writes ZERO snapshots (a real
+//! vacuous loop); the per-spec body is the same one the
 //! `oracle_gen_is_idempotent` gated test exercises against real tsgo.
 
 fn main() {
