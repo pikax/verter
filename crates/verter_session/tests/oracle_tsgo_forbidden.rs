@@ -17,35 +17,173 @@ use std::path::{Path, PathBuf};
 const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 /// `verter_session`'s DEFAULT-build dependency closure excludes
-/// `verter_type_runtime` (the crate that owns the tsgo LSP driver). The
-/// non-dev `[dependencies]` table is the default build closure; a future
-/// feature-gated generator would carry tsgo as an OPTIONAL / dev dependency, not
-/// here. Discriminating: adding `verter_type_runtime` (or any `tsgo` crate) to
-/// `[dependencies]` FAILS this guard.
+/// `verter_type_runtime` (the crate that owns the tsgo LSP driver). tsgo is
+/// GENERATION-ONLY; the snapshot generator + the §4 generation SPIKE live behind
+/// the `oracle-gen` feature (`docs/arch/u0-oracle-harness-design.md` §3 inv 1 —
+/// "a separate dev-only / feature-gated tool target `#[cfg(feature = "oracle-gen")]`").
+/// So `verter_type_runtime` is allowed in `[dependencies]` ONLY as an OPTIONAL dep
+/// that the `default` feature set does NOT activate and that ONLY the `oracle-gen`
+/// feature turns on — never an unconditional dep. With the feature off (the default
+/// gate, production, the canonical `cargo nextest run --workspace` / `cargo test -p
+/// verter_session` runs), tsgo is absent from the closure.
+///
+/// Discriminating: an UNCONDITIONAL `verter_type_runtime` dep, an `optional = false`
+/// one, a `default`-feature that activates it, or a `tsgo`-named crate all FAIL.
 #[test]
 fn tsgo_not_reachable_from_resolver() {
     let cargo_toml = fs::read_to_string(Path::new(MANIFEST_DIR).join("Cargo.toml"))
         .expect("read verter_session Cargo.toml");
     let parsed: toml::Value = toml::from_str(&cargo_toml).expect("parse Cargo.toml");
 
+    if let Err(why) = tsgo_dep_is_generation_only(&parsed) {
+        panic!(
+            "verter_session Cargo.toml violates the tsgo-generation-only rule: {why}"
+        );
+    }
+}
+
+/// PURE checker for the tsgo-generation-only rule (so it is discriminating over
+/// SYNTHETIC manifests, not only the live one): tsgo, behind `verter_type_runtime`,
+/// may appear in `[dependencies]` ONLY as `optional = true`, with `default` NOT
+/// activating it and the `oracle-gen` feature activating it. Any `tsgo`-named dep is
+/// banned outright.
+fn tsgo_dep_is_generation_only(parsed: &toml::Value) -> Result<(), String> {
     let deps = parsed
         .get("dependencies")
         .and_then(|d| d.as_table())
-        .expect("verter_session has a [dependencies] table");
+        .ok_or("missing [dependencies] table")?;
 
+    // No tsgo-named crate may appear at all.
     for name in deps.keys() {
-        assert!(
-            !name.contains("type_runtime"),
-            "verter_session [dependencies] must NOT carry `{name}` — tsgo \
-             (behind verter_type_runtime) is GENERATION-ONLY and must never enter \
-             the default resolver build closure"
-        );
-        assert!(
-            !name.contains("tsgo"),
-            "verter_session [dependencies] must NOT carry a tsgo crate `{name}` \
-             on the default build closure"
-        );
+        if name.contains("tsgo") {
+            return Err(format!(
+                "[dependencies] carries a tsgo crate `{name}` — tsgo is generation-only"
+            ));
+        }
     }
+
+    let empty = toml::value::Table::new();
+    let features = parsed
+        .get("features")
+        .and_then(|f| f.as_table())
+        .unwrap_or(&empty);
+    let feature_activates = |feat: &str, dep: &str| -> bool {
+        features
+            .get(feat)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter().any(|e| {
+                    e.as_str()
+                        .map(|s| s == dep || s == format!("dep:{dep}") || s.starts_with(&format!("{dep}/")) || s.starts_with(&format!("dep:{dep}/")))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    };
+
+    match deps.get("verter_type_runtime") {
+        None => {
+            // Absent from the default closure — the strongest form of the invariant.
+            // Belt-and-suspenders: no feature may reference a dep that is not declared.
+            if feature_activates("oracle-gen", "verter_type_runtime") {
+                return Err(
+                    "`oracle-gen` activates `dep:verter_type_runtime` but it is not declared \
+                     in [dependencies]"
+                        .into(),
+                );
+            }
+            Ok(())
+        }
+        Some(spec) => {
+            // Present — must be an OPTIONAL dep the default set does not activate and
+            // only `oracle-gen` turns on.
+            let table = spec.as_table().ok_or(
+                "`verter_type_runtime` must be a table `{ path = .., optional = true }`, \
+                 not a bare version string (a bare entry is non-optional)",
+            )?;
+            let optional = table
+                .get("optional")
+                .and_then(|o| o.as_bool())
+                .unwrap_or(false);
+            if !optional {
+                return Err(
+                    "`verter_type_runtime` is in [dependencies] but NOT `optional = true` — \
+                     tsgo would enter the default build closure"
+                        .into(),
+                );
+            }
+            if feature_activates("default", "verter_type_runtime") {
+                return Err(
+                    "the `default` feature activates `verter_type_runtime` — tsgo must stay off \
+                     the default gate"
+                        .into(),
+                );
+            }
+            if !feature_activates("oracle-gen", "verter_type_runtime") {
+                return Err(
+                    "`verter_type_runtime` is optional but the `oracle-gen` feature does not \
+                     activate `dep:verter_type_runtime` — it would be unreachable / mis-gated"
+                        .into(),
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Discriminating self-test of `tsgo_dep_is_generation_only` over SYNTHETIC
+/// manifests — proves the checker rejects every way tsgo could leak into the
+/// default closure and accepts ONLY the optional + `oracle-gen`-gated form,
+/// independent of the live Cargo.toml's current state.
+#[test]
+fn tsgo_generation_only_checker_discriminates() {
+    let parse = |s: &str| toml::from_str::<toml::Value>(s).expect("parse synthetic manifest");
+
+    // (1) Absent dep + no feature reference → OK (the pre-cutover state).
+    assert!(tsgo_dep_is_generation_only(&parse(
+        "[dependencies]\nserde = \"1\"\n[features]\ndefault = []\n"
+    ))
+    .is_ok());
+
+    // (2) Correct optional + oracle-gen-gated form → OK (the post-cutover state).
+    assert!(tsgo_dep_is_generation_only(&parse(
+        "[dependencies]\nverter_type_runtime = { path = \"../x\", optional = true }\n\
+         [features]\ndefault = []\noracle-gen = [\"dep:verter_type_runtime\"]\n"
+    ))
+    .is_ok());
+
+    // (3) UNCONDITIONAL (bare version string) dep → REJECT.
+    assert!(tsgo_dep_is_generation_only(&parse(
+        "[dependencies]\nverter_type_runtime = \"1\"\n[features]\ndefault = []\n"
+    ))
+    .is_err());
+
+    // (4) Present as a table but optional = false → REJECT.
+    assert!(tsgo_dep_is_generation_only(&parse(
+        "[dependencies]\nverter_type_runtime = { path = \"../x\", optional = false }\n\
+         [features]\noracle-gen = [\"dep:verter_type_runtime\"]\n"
+    ))
+    .is_err());
+
+    // (5) Optional but the `default` feature activates it → REJECT.
+    assert!(tsgo_dep_is_generation_only(&parse(
+        "[dependencies]\nverter_type_runtime = { path = \"../x\", optional = true }\n\
+         [features]\ndefault = [\"dep:verter_type_runtime\"]\noracle-gen = [\"dep:verter_type_runtime\"]\n"
+    ))
+    .is_err());
+
+    // (6) Optional but NO feature activates it → REJECT (mis-gated / unreachable).
+    assert!(tsgo_dep_is_generation_only(&parse(
+        "[dependencies]\nverter_type_runtime = { path = \"../x\", optional = true }\n\
+         [features]\ndefault = []\noracle-gen = []\n"
+    ))
+    .is_err());
+
+    // (7) A tsgo-named crate is banned outright.
+    assert!(tsgo_dep_is_generation_only(&parse(
+        "[dependencies]\ntsgo_client = \"1\"\n[features]\ndefault = []\n"
+    ))
+    .is_err());
 }
 
 /// The oracle CONSUMPTION path (the lift driver + the oracle test module source)
