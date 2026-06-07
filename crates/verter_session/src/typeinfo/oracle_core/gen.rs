@@ -21,10 +21,10 @@
 //!    (`resolve_source_declarations`), restricted to the PROVABLY
 //!    SINGLE-CONTRIBUTOR class (§Scope `source_is_provably_single_contributor`);
 //! 6. lower the admitted hover RHS to a `TypeExpr` and normalize it;
-//! 7. record the `source_admission_digest` (the recorded source-side admission)
-//!    + `raw_capture` + `oracle_env_files` / `oracle_env_hash`, assemble the
-//!    canonical snapshot document (`snapshot::assemble_snapshot_document`), and
-//!    write it.
+//! 7. record the `source_admission_digest` (the recorded source-side admission),
+//!    the `raw_capture`, and the `oracle_env_files` / `oracle_env_hash`, then
+//!    assemble the canonical snapshot document
+//!    (`snapshot::assemble_snapshot_document`) and write it.
 //!
 //! [`run_oracle_gen`] is the single `pub` entry the `src/bin/oracle_gen` binary
 //! invokes. The oracle-query-spec registry is EMPTY in this harness-foundation
@@ -516,7 +516,7 @@ fn build_source_digest(
         };
         let source = workspace_file_source(spec, &decl_canonical)
             .ok_or_else(|| GenError::MissingPrimaryFile(decl_canonical.clone()))?;
-        let (start, end) = find_decl_span(source, &locator.reference_name, locator.symbol_space)
+        let (start, end) = find_decl_span(source, locator.reference_name, locator.symbol_space)
             .ok_or_else(|| GenError::DeclSpanNotFound(locator.reference_name.to_string()))?;
         let content_hash = identity::content_hash(source);
         if !observed.iter().any(|(p, _)| p == &decl_canonical) {

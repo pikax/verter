@@ -4565,6 +4565,11 @@ mod foundations_guards {
         // impls, and the `validate_fact_signature*` helpers propagates
         // the warm-hit validator location back to the recorder.
         "pub use resolver_store::{dump_from_host_call_sites, reset_from_host_call_sites}",
+        // TS7 oracle harness snapshot GENERATOR entry — `pub` ONLY under the
+        // `oracle-gen` feature (off the default closure), so the
+        // `src/bin/oracle_gen` binary (a separate crate that sees only non-test
+        // `pub` lib items) can invoke it. The default build never compiles it.
+        "pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, GenError}",
     ];
 
     /// Compare the live surface against the snapshot; report any
@@ -7162,6 +7167,10 @@ mod foundations_guards {
         (
             "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_gen_spike.rs",
             "TS7 oracle harness §4 GENERATION SPIKE (`#[cfg(all(test, feature = \"oracle-gen\"))]`, excluded from the default gate). Writes a tsconfig + fixture into a temp dir for the EXTERNAL tsgo subprocess to read off real disk (tsgo cannot read Verter's in-memory VFS), then re-validates the design's BLOCKING tsgo assumptions. External-tool scaffolding, not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
+        ),
+        (
+            "crates/verter_session/src/typeinfo/oracle_core/gen.rs",
+            "TS7 oracle harness snapshot GENERATOR (`#[cfg(feature = \"oracle-gen\")]`, excluded from the default gate). Seeds a hermetic temp tsgo sandbox + WRITES the checked-in snapshot TEST FIXTURES + enumerates/copies the vendored env corpus via `std::fs` — the build/test-time generation step the locked design (docs/arch/u0-oracle-harness-design.md §2, §4) mandates. External-tool scaffolding (tsgo cannot read Verter's in-memory VFS), not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
         ),
         (
             "crates/verter_lsp/src/audit_harness.rs",
