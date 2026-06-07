@@ -1,0 +1,22 @@
+[package]
+name = "verter_session_oracle_macro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# The `#[oracle_row]` attribute proc-macro for the TS7 oracle harness
+# (`docs/arch/u0-oracle-harness-design.md` §Q4). A proc-macro crate cannot also
+# export non-proc-macro items, so it is its own crate; it is a DEV-dependency of
+# `verter_session` (the lifted bodies are `#[cfg(test)]` unit tests), keeping it
+# out of the production build + the resolver dep closure.
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }

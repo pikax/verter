@@ -4090,6 +4090,7 @@ dependencies = [
  "verter_protocol",
  "verter_scheduler",
  "verter_semantic",
+ "verter_session_oracle_macro",
  "verter_span",
  "verter_type_expr",
  "verter_type_expr_oxc",
@@ -4098,6 +4099,15 @@ dependencies = [
  "web-time",
  "windows-sys",
  "xxhash-rust",
+]
+
+[[package]]
+name = "verter_session_oracle_macro"
+version = "0.0.1-beta.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

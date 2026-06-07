@@ -126,6 +126,9 @@ uuid = { version = "1.23", features = ["rng-getrandom"] }
 # `#[cfg(test)] mod typeinfo_tests`, so blake3 stays out of the production /
 # resolver dependency closure, preserving `tsgo_not_reachable_from_resolver`).
 blake3 = { workspace = true }
+# `#[oracle_row]` attribute proc-macro for lifted TS7 oracle rows (test-only,
+# §Q4). Dev-dependency keeps it out of the production / resolver dep closure.
+verter_session_oracle_macro = { path = "../verter_session_oracle_macro" }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 toml = "1.1"
 verter_parser = { path = "../verter_parser" }
