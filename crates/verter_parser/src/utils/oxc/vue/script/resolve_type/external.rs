@@ -284,7 +284,7 @@ impl AnalyzedExternalTypeSource {
 
     /// The ORDERED contributor vector of parse-time `RawSourceSurface` raw-fact
     /// records for one `(name, symbol_space)` declared in this file (oracle
-    /// harness design item G). A MERGED declaration — same-name interfaces, an
+    /// harness). A MERGED declaration — same-name interfaces, an
     /// overload group, repeated `declare`s — shares ONE `(name, space)` triple
     /// across several contributors, so the capture retains them as a SOURCE-
     /// ORDER vector (a single-value map would silently drop all but one). Each
@@ -797,7 +797,7 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
         }
     }
 
-    // Oracle harness design item G: capture the parse-time `RawSourceSurface`
+    // Oracle harness: capture the parse-time `RawSourceSurface`
     // raw-fact inventory while the OXC arena is still live (same parse pass that
     // built the shallow inventory above). Overload groups merge by name so a
     // multi-signature `function f` surfaces its overload-SET arity.

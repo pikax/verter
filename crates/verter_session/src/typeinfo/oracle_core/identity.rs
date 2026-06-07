@@ -49,7 +49,7 @@ pub(crate) const PROBE_SYNTHESIS_VERSION: u32 = 1;
 // They are GENERATION-derived: `compiler_options_hash` hashes the EFFECTIVE
 // committed `oracle.tsconfig.json`, and `env_corpus_id` is the content id of the
 // vendored `oracle_env/<env_corpus_id>/` corpus. Both are computed and committed
-// by the generation increment when the corpus is first vendored (see the
+// by the snapshot generator when the corpus is first vendored (see the
 // module-level handoff). Until then no real snapshot exists, so no real
 // `snapshot_id` is computed on the consumption path; the derivation below is a
 // pure function over an explicit `PinnedEnv` so it is fully exercised by the
@@ -58,7 +58,7 @@ pub(crate) const PROBE_SYNTHESIS_VERSION: u32 = 1;
 /// The pinned env + algorithm versions that enter every `snapshot_id`.
 ///
 /// `compiler_options_hash` and `env_corpus_id` are `sha256:` / `blake3:`
-/// family-prefixed strings the generation increment fills from the vendored
+/// family-prefixed strings the snapshot generator fills from the vendored
 /// corpus.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]

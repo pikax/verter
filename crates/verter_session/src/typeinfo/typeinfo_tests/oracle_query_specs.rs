@@ -28,15 +28,15 @@
 /// The content id of the CURRENT closed vendored oracle-env corpus — the
 /// pinned-env constant the registry + every guard read to derive a
 /// `snapshot_id` and locate `oracle_env/<env_corpus_id>/` WITHOUT opening a
-/// snapshot (§Q4). It is EMPTY until the generation increment first vendors the
-/// corpus and pins it (design item I); while empty no real snapshot exists, so
+/// snapshot (§Q4). It is EMPTY until the snapshot generator first vendors the
+/// corpus and pins it; while empty no real snapshot exists, so
 /// no real `snapshot_id` is derived on the consumption path.
 #[allow(dead_code)]
 pub(crate) const CURRENT_ENV_CORPUS_ID: &str = "";
 
 /// Stable hash of the EFFECTIVE canonical `oracle.tsconfig.json` (§Q2 "Env
-/// pinning"). EMPTY until the generation increment vendors the canonical config
-/// and computes it (design item I).
+/// pinning"). EMPTY until the snapshot generator vendors the canonical config
+/// and computes it.
 #[allow(dead_code)]
 pub(crate) const COMPILER_OPTIONS_HASH: &str = "";
 
@@ -50,7 +50,7 @@ pub(crate) enum SymbolSpace {
 }
 
 /// The projection mode the helper resolves under. Only `Shallow` / `Navigate`
-/// are admissible in the first block; `Expanded` / `Skeleton` are carried for
+/// are admissible initially; `Expanded` / `Skeleton` are carried for
 /// schema totality (their rows stay deferred to the probe-form spikes).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,4 +1,4 @@
-//! Design item G guard: `raw_source_surface_captured_pre_lowering`.
+//! Guard: `raw_source_surface_captured_pre_lowering`.
 //!
 //! Proves the parse-time `RawSourceSurface` raw-fact inventory is captured
 //! during the file's INITIAL PARSE, stored on the content-addressed artifact

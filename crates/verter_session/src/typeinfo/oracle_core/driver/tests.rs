@@ -1,5 +1,5 @@
 //! Discriminating guards for the shared registry driver (§2 consumption / §Q4 /
-//! §4). The registry lifts ZERO rows in this block, so `run_row` is never
+//! §4). The registry lifts ZERO rows, so `run_row` is never
 //! invoked end-to-end here; instead every PURE sub-function the orchestrator is
 //! built from is exercised directly, each test built so the VALID case passes
 //! and each MUTATION proves the function rejects exactly the drift it guards.

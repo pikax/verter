@@ -30,7 +30,7 @@
 //!   source contributor clean AND the drop count zero AND the backstops pass,
 //!   and applies the mode-dependent shallow-expansion fence.
 //!
-//! The allowlist PREDICATE is mode-INDEPENDENT in this first block: only the
+//! The allowlist PREDICATE is mode-INDEPENDENT in the initial admissible set: only the
 //! `Shallow` / `Navigate` modes are admissible, and every deferred construct
 //! (`Expanded` / `Skeleton`-only, `Conditional`, `Mapped`, `KeyOf`, …) REJECTs
 //! regardless of mode, so the predicate does not branch on the projection mode.
@@ -40,7 +40,7 @@
 //! the predicate gains its mode-aware Ref-expansion branch.
 //!
 //! The LIVE producers of the surfaces this predicate consumes now exist: the
-//! parse-time `RawSourceSurface` capture (design item G,
+//! parse-time `RawSourceSurface` capture (in
 //! `verter_compiler::utils::oxc::vue::raw_surface`) fills the raw facts off the
 //! OXC parse tree, and [`super::source_walk::resolve_source_declarations`]
 //! binds a `SourceLocator` through the shared resolver to the
@@ -65,7 +65,7 @@ use oxc_span::SourceType;
 use verter_type_expr::{MemberVisibility, ObjectMember, PrimitiveName, TypeExpr};
 
 // The source-side raw-fact data model is the PRODUCTION parse-time capture
-// (design item G — `verter_parser` / re-exported through `verter_compiler`).
+// (in `verter_parser`, re-exported through `verter_compiler`).
 // There is ONE `RawSourceSurface` type: the admission predicate here consumes
 // the exact records the parse pass stores on the content-addressed artifact, so
 // the live `resolve_source_declarations` path feeds this gate without a second

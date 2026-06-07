@@ -45,10 +45,9 @@ pub fn oracle_row(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// call keyed by the fn's own identifier.
 //
 // (Named `synthesize_body` rather than the bare verb `expand` so it does not
-// collide with the retired-dispatch-helper symbol the guard
-// `expand_variant_and_expand_mode_absent_from_workspace` scans for — that guard
-// rejects a reappearance of the retired `expand` dispatch helper, an unrelated
-// symbol.)
+//  collide with the `expand` symbol the guard
+//  `expand_variant_and_expand_mode_absent_from_workspace` asserts is absent
+//  from the workspace — an unrelated symbol.)
 fn synthesize_body(item_fn: &ItemFn) -> proc_macro2::TokenStream {
     let attrs = &item_fn.attrs;
     let vis = &item_fn.vis;

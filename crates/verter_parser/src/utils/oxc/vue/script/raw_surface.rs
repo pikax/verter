@@ -1,6 +1,6 @@
 //! Parse-time `RawSourceSurface` raw-fact capture for the TS7
 //! `TypeExpr`-projection oracle harness (`docs/arch/u0-oracle-harness-design.md`
-//! §Q2, design item G).
+//! §Q2).
 //!
 //! When a canonical file is parsed, OXC's `lower_ts_type` SILENTLY ERASES a
 //! closed set of identity-bearing constructs (`oxc/lib.rs:99,126,171,223,427,921`):
@@ -36,7 +36,7 @@ use oxc_ast::ast::{Expression, TSTypeQuery};
 use verter_type_expr::{MemberVisibility, TypeExpr};
 
 // ===========================================================================
-// Source-side raw-fact data model (design item G — the closed §Q2 fact set).
+// Source-side raw-fact data model (the closed §Q2 fact set).
 //
 // `RawSourceSurface` retains EXACTLY the pre-lowering admission facts the OXC
 // lowering would erase (each the catch-target of a §Q2 REJECT row), and NOTHING

@@ -24,7 +24,7 @@
 //! 2. **Merged-contributor enumeration.** A `MergedDecl` (same-name interfaces)
 //!    surfaces every contributor body via `TypeDeclBody::contributors()`, paired
 //!    by ORDINAL with the parse-time `RawSourceSurface` contributor vector
-//!    (design item G's `raw_source_surfaces_for`). EVERY contributor is returned
+//!    (the `raw_source_surfaces_for` capture). EVERY contributor is returned
 //!    so the admission predicate can check ALL — a single clean contributor does
 //!    NOT admit a merge whose peer carries a REJECT construct (§Q2).
 //! 3. **Type-vs-value space selection.** `symbol_space` selects the TYPE

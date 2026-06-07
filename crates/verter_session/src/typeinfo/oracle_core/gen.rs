@@ -117,8 +117,8 @@ pub enum GenError {
     /// primary fixture source (so the `source_admission_digest.decl_span` could
     /// not be recorded).
     DeclSpanNotFound(String),
-    /// The `EvaluateExpr` scratch-prelude generation model is not yet wired in
-    /// this block (it needs the scope's `eval_source` prelude — a generation-time
+    /// The `EvaluateExpr` scratch-prelude generation model is not yet wired
+    /// (it needs the scope's `eval_source` prelude — a generation-time
     /// step gated on its own spike). A loud rejection, never a silent skip.
     UnsupportedHelperKind(&'static str),
     /// An I/O error writing the snapshot / seeding the sandbox.
@@ -285,7 +285,7 @@ struct Synthesized {
 /// append-model helpers (`ResolveExpr` / `ShallowSurfaceExpr`) clone the primary
 /// file and append `type __oracle_probe__N = <rhs>;` so the probe resolves in the
 /// same scope Verter did. `EvaluateExpr` (the scratch + `eval_source`-prelude
-/// model) is not yet wired in this block — a loud rejection.
+/// model) is not yet wired — a loud rejection.
 fn synthesize_probe(spec: &QuerySpec) -> Result<Synthesized, GenError> {
     let primary_source = workspace_file_source(spec, spec.primary_canonical)
         .ok_or_else(|| GenError::MissingPrimaryFile(spec.primary_canonical.to_string()))?;
@@ -465,7 +465,7 @@ fn to_walk_space(space: SymbolSpace) -> RawSymbolSpace {
 
 /// Construct the standalone footprint host for the source-side walk and upsert
 /// every workspace file (the `make_host_with_footprint` shape — the only
-/// admissible host class in this block). `workspace_footprint` /
+/// admissible host class currently). `workspace_footprint` /
 /// package-backed kinds are deferred (§Scope); a spec carrying one still
 /// constructs a host so the walk runs, but the snapshot's `host_setup_kind`
 /// (set in [`build_identity`]) will fail `standalone_host_is_default_canonical_config`.

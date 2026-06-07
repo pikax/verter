@@ -11,7 +11,7 @@
 //! `RawSourceSurface` records, so it lives in-tree and is exercised by the
 //! discriminating guards now. The live-resolver `resolve_source_declarations`
 //! navigation (`source_walk`) and the parse-time `RawSourceSurface` capture
-//! (design item G, in `verter_compiler`) now BIND the gate to real declarations
+//! (in `verter_compiler`) now BIND the gate to real declarations
 //! through the one shared resolver — they add no tsgo and no query-time
 //! resolution path (the whole `typeinfo_tests` tree is `#[cfg(test)]`). The
 //! GENERATION side that DRIVES the hover answers (the `#[cfg(feature =

@@ -118,7 +118,7 @@ pub(crate) fn row_basename(file: &str) -> &str {
 /// The pinned env the registry + every guard read to derive a `snapshot_id`
 /// WITHOUT opening a snapshot or running tsgo (§Q4). The version constants live
 /// on `identity`; the corpus / option pins live in the registry's pinned-env
-/// block (filled by the generation increment).
+/// block (filled by the snapshot generator).
 #[allow(dead_code)]
 pub(crate) fn pinned_env() -> PinnedEnv {
     PinnedEnv {
