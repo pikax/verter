@@ -72,8 +72,7 @@ use verter_type_expr::{MemberVisibility, ObjectMember, PrimitiveName, TypeExpr};
 // type. The admission VERDICT model (`SourceContributor` / `SourceWalkResult` /
 // `AdmissionVerdict` / `RejectReason`) is admission-specific and stays here.
 use verter_compiler::utils::oxc::vue::raw_surface::{
-    OverloadSignature, RawDeclKind, RawKey, RawMemberKind, RawSourceSurface, TupleElementShape,
-    TypeParamModifiers, UniqueSymbolOp,
+    RawKey, RawMemberKind, RawSourceSurface, TupleElementShape,
 };
 
 use super::normalize::ProjectionModeKind;

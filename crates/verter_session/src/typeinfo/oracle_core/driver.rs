@@ -35,15 +35,15 @@ use std::sync::Arc;
 use serde_json::Value;
 use verter_type_expr::{type_expr_from_json, TypeExpr};
 
-use super::super::oracle_query_specs::{
-    HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec, ProjectionModeSpec, QueryHelperSpec,
-    QuerySpec, COMPILER_OPTIONS_HASH, CURRENT_ENV_CORPUS_ID, ORACLE_QUERY_SPECS,
-};
 use super::identity::{
     self, HostProject, HostSetupKind, OracleValueKind, PinnedEnv, QueryHelperKind,
     SnapshotIdentity, WorkspaceFileRef,
 };
 use super::normalize::{self, ProjectionModeKind};
+use super::query_specs::{
+    HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec, ProjectionModeSpec, QueryHelperSpec,
+    QuerySpec, COMPILER_OPTIONS_HASH, CURRENT_ENV_CORPUS_ID, ORACLE_QUERY_SPECS,
+};
 use super::snapshot::{self, OracleSnapshot};
 
 /// The relative infix from `CARGO_MANIFEST_DIR` (= `crates/verter_session/`) to
@@ -513,7 +513,7 @@ pub(crate) fn compare_oracle_value(
 /// produce Verter's in-process `TypeExpr`.
 #[allow(dead_code)]
 fn run_helper(spec: &QuerySpec) -> Result<TypeExpr, DriverError> {
-    use super::super::support::{
+    use crate::typeinfo::typeinfo_tests::support::{
         evaluate_expr, make_host_with_footprint, make_host_with_workspace_files_footprint,
         resolve_expr, shallow_surface_expr, upsert_ts,
     };

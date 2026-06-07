@@ -21,7 +21,6 @@
 //! `tsgo`-forbidden-at-runtime invariant.
 
 pub(crate) mod admission;
-pub(crate) mod driver;
 pub(crate) mod hover_extract;
 pub(crate) mod identity;
 pub(crate) mod normalize;
@@ -29,5 +28,26 @@ pub(crate) mod probe;
 pub(crate) mod snapshot;
 pub(crate) mod source_walk;
 
+// The pure-data oracle-query-spec registry. It lives physically at the
+// design-pinned path `typeinfo_tests/oracle_query_specs.rs`
+// (`registry_in_src_carries_oracle_family`, and the `tests/` guards `include!`
+// it from there), but it is PURE context-neutral data (closed enums + owned
+// `&'static str`, no `use super`), so it compiles here as `oracle_core::query_specs`
+// via `#[path]` — reachable in non-test `oracle-gen` mode by the generator. The
+// `#[cfg(test)]` tree reaches the SAME table through the `oracle::query_specs`
+// alias, so there is exactly one in-crate compilation of it.
+#[path = "../typeinfo_tests/oracle_query_specs.rs"]
+pub(crate) mod query_specs;
+
+// The consumption-side shared registry driver + helper dispatch — it builds a
+// `VerterHost`, runs the `support.rs` test helpers, and compares Verter's
+// in-process `TypeExpr` against the checked-in snapshot. It depends on the
+// `#[cfg(test)]`-only `typeinfo_tests::support` helpers, so it is itself
+// test-only; the `oracle-gen` generator never consults the resolver (it drives
+// tsgo), so the generator build does not compile it.
+#[cfg(test)]
+pub(crate) mod driver;
+
+#[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use driver::run_row;

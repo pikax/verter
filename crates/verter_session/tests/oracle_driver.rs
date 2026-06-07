@@ -15,7 +15,7 @@ const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 #[test]
 fn snapshot_loading_is_runtime_fs() {
-    let driver = Path::new(MANIFEST_DIR).join("src/typeinfo/typeinfo_tests/oracle/driver.rs");
+    let driver = Path::new(MANIFEST_DIR).join("src/typeinfo/oracle_core/driver.rs");
     let src =
         fs::read_to_string(&driver).unwrap_or_else(|e| panic!("read {}: {e}", driver.display()));
 

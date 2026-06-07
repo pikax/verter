@@ -5,7 +5,7 @@
 //! well-formedness validation is genuinely discriminating, with SYNTHETIC specs
 //! (the real table is empty until the first row lifts).
 
-use super::oracle_query_specs::{
+use super::oracle::query_specs::{
     registry_well_formed, HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec,
     ProjectionModeSpec, QueryHelperSpec, QuerySpec, RegistryError, SourceLocatorSpec, SymbolSpace,
     ORACLE_QUERY_SPECS,

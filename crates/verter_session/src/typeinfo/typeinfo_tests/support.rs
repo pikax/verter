@@ -86,7 +86,7 @@ pub(super) const FLOW_RETURN_PACKAGE_DECLARATIONS: &str =
 pub(super) const FLOW_RETURN_EDGE_PACKAGE_DECLARATIONS: &str =
     include_str!("fixtures/flow_return_edge_package_declarations.ts");
 
-pub(super) fn make_host_with_footprint() -> Arc<VerterHost> {
+pub(crate) fn make_host_with_footprint() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig {
         audit_enabled: true,
         footprint_capture: true,
@@ -94,7 +94,7 @@ pub(super) fn make_host_with_footprint() -> Arc<VerterHost> {
     }))
 }
 
-pub(super) fn make_host_with_workspace_files_footprint(files: &[(&str, &str)]) -> Arc<VerterHost> {
+pub(crate) fn make_host_with_workspace_files_footprint(files: &[(&str, &str)]) -> Arc<VerterHost> {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -119,7 +119,7 @@ pub(super) fn make_host_with_workspace_files_footprint(files: &[(&str, &str)]) -
     host
 }
 
-pub(super) fn upsert_ts(host: &VerterHost, canonical_id: &str, source: &str) {
+pub(crate) fn upsert_ts(host: &VerterHost, canonical_id: &str, source: &str) {
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
@@ -129,7 +129,7 @@ pub(super) fn upsert_ts(host: &VerterHost, canonical_id: &str, source: &str) {
     });
 }
 
-pub(super) fn resolve_expr(
+pub(crate) fn resolve_expr(
     host: &VerterHost,
     canonical_id: &str,
     name: &str,
@@ -157,7 +157,7 @@ pub(super) fn resolve_expr(
 /// heritage-vs-authored merge. `resolve_named_symbol` alone dispatches
 /// `Instantiate` (not an empty-path `ProjectPath`), so it does NOT exercise the
 /// synthesiser; this helper does.
-pub(super) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: &str) -> TypeExpr {
+pub(crate) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: &str) -> TypeExpr {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{
         ProjectionReductionContext, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
@@ -205,7 +205,7 @@ pub(super) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: 
         .unwrap_or_else(|| panic!("{name} empty-path Shallow surface must project to TypeExpr"))
 }
 
-pub(super) fn evaluate_expr(
+pub(crate) fn evaluate_expr(
     host: &VerterHost,
     scope: &str,
     expression: &str,

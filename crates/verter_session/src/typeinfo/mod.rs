@@ -64,3 +64,17 @@ mod tests;
 
 #[cfg(test)]
 mod typeinfo_tests;
+
+// The TS7 `TypeExpr`-projection oracle harness core (normalizer, snapshot
+// schema, identity derivation, admission gate, probe synthesis, hover
+// extraction, source-side walk, pure-data registry, and — under `oracle-gen` —
+// the tsgo-driving snapshot generator). Compiled in `test` mode (the lifted
+// unit-test rows consume it) AND under the `oracle-gen` feature (the
+// `src/bin/oracle_gen` generator reaches its `run_oracle_gen` entry — a
+// `src/bin/*` is a separate crate that sees only `pub`/`pub(crate)` lib items,
+// not the `#[cfg(test)]` `typeinfo_tests` tree). It lifts ZERO rows: it is the
+// foundation the per-block row-lifts ride on. The tsgo driver lives behind
+// `oracle-gen` only, so the default resolver build + default test gate stay
+// tsgo-free (the `tsgo`-forbidden-at-runtime invariant, design §3 inv 1).
+#[cfg(any(test, feature = "oracle-gen"))]
+pub(crate) mod oracle_core;

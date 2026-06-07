@@ -20,7 +20,11 @@ session_metrics = []
 # does NOT enable it, so tsgo stays out of the default dependency closure — pinned
 # by `oracle_tsgo_forbidden.rs::tsgo_not_reachable_from_resolver`. Activated via
 # `cargo test -p verter_session --features oracle-gen` (the spike).
-oracle-gen = ["dep:verter_type_runtime", "dep:tokio"]
+# `dep:blake3` is also activated here: `oracle_core` computes `snapshot_id` /
+# `env_corpus_id` via BLAKE3, and the generator compiles `oracle_core` in
+# NON-test mode (where the `[dev-dependencies]` blake3 is absent). It stays out
+# of the default/production closure — `default` does not list it.
+oracle-gen = ["dep:verter_type_runtime", "dep:tokio", "dep:blake3"]
 # Opt-in: enables tests that read from `.integration-tests/repos/...`
 # alongside the workspace. The default `cargo test --workspace --tests`
 # run MUST stay hermetic — it does NOT enable this feature. Tests that
@@ -73,6 +77,11 @@ verter_scheduler = { path = "../verter_scheduler" }
 # (tsgo is GENERATION-ONLY, design §3 inv 1). Pinned by
 # `oracle_tsgo_forbidden.rs::tsgo_not_reachable_from_resolver`.
 verter_type_runtime = { path = "../verter_type_runtime", optional = true }
+# BLAKE3 for the oracle harness `snapshot_id` / `env_corpus_id` digests. OPTIONAL
+# + activated ONLY by `oracle-gen` (so the generator's non-test `oracle_core`
+# build resolves it); in `#[cfg(test)]` builds the `[dev-dependencies]` entry
+# below provides it. NEVER on the default/production closure (`default` omits it).
+blake3 = { workspace = true, optional = true }
 # Async runtime for the `oracle-gen` spike's `#[tokio::test]` tsgo driver. OPTIONAL
 # (only the `oracle-gen` feature activates it) so it stays off the default closure.
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "io-util", "process", "sync"], optional = true }

@@ -7156,7 +7156,7 @@ mod foundations_guards {
     /// `WorkspaceAccess` (or a deletion of the callsite).
     pub const D14_ALLOW_LIST: &[(&str, &str)] = &[
         (
-            "crates/verter_session/src/typeinfo/typeinfo_tests/oracle/driver.rs",
+            "crates/verter_session/src/typeinfo/oracle_core/driver.rs",
             "TS7 oracle harness consumption driver (`#[cfg(test)] mod typeinfo_tests`) — loads checked-in snapshot TEST FIXTURES + re-enumerates the vendored env corpus via runtime `std::fs::read`, the mechanism the locked design (docs/arch/u0-oracle-harness-design.md §Q1) mandates and the `snapshot_loading_is_runtime_fs` guard pins. Not a NativeFs/VFS disk-boundary bypass — it reads in-repo test fixtures, never workspace/semantic state.",
         ),
         (

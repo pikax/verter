@@ -7,12 +7,12 @@
 use serde_json::{json, Value};
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
-use super::super::super::oracle_query_specs::{
+use super::super::identity;
+use super::super::normalize::ProjectionModeKind;
+use super::super::query_specs::{
     HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec, ProjectionModeSpec, QueryHelperSpec,
     QuerySpec, SourceLocatorSpec, SymbolSpace, WorkspaceFileSpec,
 };
-use super::super::identity;
-use super::super::normalize::ProjectionModeKind;
 use super::super::snapshot::{decode_strict, EnvFileEntry};
 use super::{
     compare_oracle_value, corpus_root, identity_from_spec, lookup_row_entries, pinned_env,

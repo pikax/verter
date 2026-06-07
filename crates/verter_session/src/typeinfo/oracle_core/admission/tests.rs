@@ -9,7 +9,15 @@ use std::sync::Arc;
 use verter_type_expr::{MemberVisibility, TypeExpr};
 
 use super::*;
-use crate::typeinfo::typeinfo_tests::oracle::normalize::ProjectionModeKind;
+// The raw-fact constructor types these guards build synthetic surfaces from. The
+// parent `admission` module imports only the raw-fact types its (non-test)
+// predicate references; these four are exercised only by the guards, so they are
+// imported here at the consumer rather than left as an unused parent import in
+// the non-test (`oracle-gen`) build.
+use crate::typeinfo::oracle_core::normalize::ProjectionModeKind;
+use verter_compiler::utils::oxc::vue::raw_surface::{
+    OverloadSignature, RawDeclKind, TypeParamModifiers, UniqueSymbolOp,
+};
 
 const SHALLOW: ProjectionModeKind = ProjectionModeKind::Shallow;
 

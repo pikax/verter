@@ -207,7 +207,7 @@ fn oracle_consumption_path_has_no_tsgo_spawn() {
         "Command::new",
     ];
 
-    let oracle_root = Path::new(MANIFEST_DIR).join("src/typeinfo/typeinfo_tests/oracle");
+    let oracle_root = Path::new(MANIFEST_DIR).join("src/typeinfo/oracle_core");
     let registry =
         Path::new(MANIFEST_DIR).join("src/typeinfo/typeinfo_tests/oracle_query_specs.rs");
 

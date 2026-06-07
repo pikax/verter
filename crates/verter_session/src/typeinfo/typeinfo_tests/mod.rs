@@ -48,12 +48,19 @@ mod narrow_instanceof;
 mod narrow_truthiness;
 mod narrow_typeof;
 mod no_infer;
-mod oracle;
+// The oracle harness core now lives at `crate::typeinfo::oracle_core` (moved out
+// of the `#[cfg(test)]` `typeinfo_tests` tree so the `oracle-gen` generator can
+// reach it). This alias keeps every `super::oracle::*` / `oracle::*` call site in
+// the test tree (the spike, the guards, future lifted rows) working unchanged.
+pub(crate) use crate::typeinfo::oracle_core as oracle;
 // The §4 generation SPIKE — drives the pinned tsgo via verter_type_runtime. Gated
 // behind `oracle-gen` so the default gate stays tsgo-free (design §3 inv 1).
 #[cfg(feature = "oracle-gen")]
 mod oracle_gen_spike;
-mod oracle_query_specs;
+// `oracle_query_specs` (the pure-data registry) lives physically at
+// `typeinfo_tests/oracle_query_specs.rs` (design-pinned path) but is compiled as
+// `oracle_core::query_specs` (reachable in non-test `oracle-gen` mode). The test
+// tree reaches it via the `oracle::query_specs` alias above.
 mod oracle_query_specs_guard;
 mod oracle_raw_surface_capture;
 mod recursive_conditional;
@@ -61,7 +68,11 @@ mod recursive_union;
 mod relation_semantics;
 mod shallow_surface_facts;
 mod substitution_types;
-mod support;
+// `pub(crate)` so the moved `oracle_core::driver` (consumption side, `#[cfg(test)]`)
+// can reach the shared test helpers it dispatches through — it is no longer a
+// descendant of `typeinfo_tests`, so the previously-private visibility no longer
+// covers it.
+pub(crate) mod support;
 mod surface_jsdoc_provenance;
 mod surface_spans;
 mod table_like;
