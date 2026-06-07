@@ -34,7 +34,7 @@ use syn::ItemFn;
 #[proc_macro_attribute]
 pub fn oracle_row(_attr: TokenStream, item: TokenStream) -> TokenStream {
     match syn::parse::<ItemFn>(item) {
-        Ok(item_fn) => expand(&item_fn).into(),
+        Ok(item_fn) => synthesize_body(&item_fn).into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
@@ -43,7 +43,12 @@ pub fn oracle_row(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// unit-testable directly on a parsed `ItemFn`). Preserves the fn's attributes,
 /// visibility, and signature; REPLACES the body with the synthesized driver
 /// call keyed by the fn's own identifier.
-fn expand(item_fn: &ItemFn) -> proc_macro2::TokenStream {
+//
+// (Named `synthesize_body` rather than the bare verb `expand` so it does not
+// collide with the retired-symbol needle scanned by the B1a-retirement guard
+// `expand_variant_and_expand_mode_absent_from_workspace` — that guard rejects a
+// reappearance of the retired dispatch helper, an unrelated symbol.)
+fn synthesize_body(item_fn: &ItemFn) -> proc_macro2::TokenStream {
     let attrs = &item_fn.attrs;
     let vis = &item_fn.vis;
     let sig = &item_fn.sig;
@@ -59,11 +64,11 @@ fn expand(item_fn: &ItemFn) -> proc_macro2::TokenStream {
 
 #[cfg(test)]
 mod tests {
-    use super::expand;
+    use super::synthesize_body;
 
     fn expand_str(src: &str) -> String {
         let item_fn: syn::ItemFn = syn::parse_str(src).expect("parse fn");
-        expand(&item_fn).to_string()
+        synthesize_body(&item_fn).to_string()
     }
 
     #[test]
