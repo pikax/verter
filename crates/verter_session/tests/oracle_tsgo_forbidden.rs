@@ -213,6 +213,16 @@ fn oracle_consumption_path_has_no_tsgo_spawn() {
 
     let mut files: Vec<PathBuf> = Vec::new();
     collect_rs(&oracle_root, &mut files);
+    // The generator module (`oracle_core/gen.rs` + its `gen_tests`) IS the
+    // GENERATION side — it legitimately drives tsgo and is behind the `oracle-gen`
+    // feature, NEVER on the default/consumption build (proven separately by
+    // `tsgo_not_reachable_from_resolver` at the crate-graph level + the
+    // `required-features` bin gate). Exclude it from the CONSUMPTION-path scan;
+    // every OTHER `oracle_core` file must stay tsgo-free.
+    files.retain(|p| {
+        let s = p.to_string_lossy();
+        !s.contains("oracle_core/gen.rs") && !s.contains("oracle_core/gen/")
+    });
     if registry.exists() {
         files.push(registry);
     }

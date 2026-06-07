@@ -343,6 +343,13 @@ pub mod typeinfo;
 mod types;
 mod upsert;
 
+// The TS7 oracle harness snapshot GENERATOR entry — `pub` ONLY under the
+// `oracle-gen` feature, so the `src/bin/oracle_gen` binary (a separate crate that
+// sees only non-test `pub` lib items) can invoke it. NEVER on the default build:
+// the default closure has no tsgo (design §3 inv 1).
+#[cfg(feature = "oracle-gen")]
+pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, GenError};
+
 // Test harness module — defines the per-request `CaptureToken` API
 // consumed by counter assertions across the verter_session test suite.
 // Capture-token test/diagnosis instrumentation. Gated `cfg(any(test,

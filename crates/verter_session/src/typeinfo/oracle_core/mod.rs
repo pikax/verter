@@ -48,6 +48,17 @@ pub(crate) mod query_specs;
 #[cfg(test)]
 pub(crate) mod driver;
 
+// The tsgo-driving snapshot GENERATOR — behind `oracle-gen` only, so the default
+// resolver build + default test gate stay tsgo-free (design §3 inv 1). It is the
+// build/test-time tool that produces the checked-in snapshots; it is NEVER on the
+// consumption path. The `src/bin/oracle_gen` binary invokes its `run_oracle_gen`.
+#[cfg(feature = "oracle-gen")]
+pub(crate) mod gen;
+
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use driver::run_row;
+
+#[cfg(feature = "oracle-gen")]
+#[allow(unused_imports)]
+pub(crate) use gen::run_oracle_gen;

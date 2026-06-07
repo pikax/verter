@@ -24,7 +24,7 @@ session_metrics = []
 # `env_corpus_id` via BLAKE3, and the generator compiles `oracle_core` in
 # NON-test mode (where the `[dev-dependencies]` blake3 is absent). It stays out
 # of the default/production closure — `default` does not list it.
-oracle-gen = ["dep:verter_type_runtime", "dep:tokio", "dep:blake3"]
+oracle-gen = ["dep:verter_type_runtime", "dep:tokio", "dep:blake3", "dep:tempfile"]
 # Opt-in: enables tests that read from `.integration-tests/repos/...`
 # alongside the workspace. The default `cargo test --workspace --tests`
 # run MUST stay hermetic — it does NOT enable this feature. Tests that
@@ -82,6 +82,10 @@ verter_type_runtime = { path = "../verter_type_runtime", optional = true }
 # build resolves it); in `#[cfg(test)]` builds the `[dev-dependencies]` entry
 # below provides it. NEVER on the default/production closure (`default` omits it).
 blake3 = { workspace = true, optional = true }
+# Temp sandbox dirs for the `oracle-gen` generator's hermetic tsgo drive. OPTIONAL
+# + activated ONLY by `oracle-gen`; in `#[cfg(test)]` builds the
+# `[dev-dependencies]` entry below provides it. NEVER on the default closure.
+tempfile = { version = "3.27", optional = true }
 # Async runtime for the `oracle-gen` spike's `#[tokio::test]` tsgo driver. OPTIONAL
 # (only the `oracle-gen` feature activates it) so it stays off the default closure.
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "io-util", "process", "sync"], optional = true }
@@ -197,6 +201,15 @@ quote = "1.0.45"
 [[bin]]
 name = "gen-query-key-spec"
 path = "src/bin/gen_query_key_spec.rs"
+
+# The TS7 oracle harness snapshot GENERATOR. `required-features` gates it behind
+# `oracle-gen` so a default `cargo build` / `cargo clippy --workspace` SKIPS it
+# entirely — the default closure stays tsgo-free (design §3 inv 1). Run via
+# `cargo run -p verter_session --features oracle-gen --bin oracle_gen`.
+[[bin]]
+name = "oracle_gen"
+path = "src/bin/oracle_gen.rs"
+required-features = ["oracle-gen"]
 
 [[bench]]
 name = "host_bench"

@@ -75,6 +75,11 @@ pub(crate) enum NormalizeReject {
 /// resolver-side alias expansion (it holds no resolver), so a `Ref` stays a
 /// `Ref` on both sides in every mode and the parameter is accepted for
 /// completeness + future mode-specific handling.
+// `allow(dead_code)`: consumed by the spike + the `#[cfg(test)]` normalize guards
+// and a convenience for callers; in the non-test `oracle-gen` bin build (where
+// the generator builds its value via `normalize` + `to_json_value` directly) it
+// is unreferenced.
+#[allow(dead_code)]
 pub(crate) fn normalized_canonical_json(
     expr: &TypeExpr,
     mode: ProjectionModeKind,
