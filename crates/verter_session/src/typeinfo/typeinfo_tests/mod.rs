@@ -51,6 +51,7 @@ mod no_infer;
 mod oracle;
 mod oracle_query_specs;
 mod oracle_query_specs_guard;
+mod oracle_raw_surface_capture;
 mod recursive_conditional;
 mod recursive_union;
 mod relation_semantics;

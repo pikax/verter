@@ -33,6 +33,9 @@ use verter_type_expr::TypeExprScope;
 
 use crate::common::Span;
 
+use super::raw_surface::{
+    capture_statement_surfaces, merge_overload_groups, RawSourceSurface, SymbolSpace,
+};
 use super::{
     build_type_context, extract_heritage_type_names, get_expression_reference_name,
     get_type_reference_name, resolve_class_with_heritage_ctx_ref,
@@ -121,6 +124,10 @@ pub struct AnalyzedExternalTypeSource {
     exported_local_type_names: FxHashSet<String>,
     local_type_symbols: FxHashMap<String, AnalyzedExternalTypeSymbol>,
     top_level_statement_count: usize,
+    /// Parse-time `RawSourceSurface` raw-fact inventory (oracle harness design
+    /// item G), keyed by `(name, symbol_space)` within this file. Captured while
+    /// the OXC arena is live, before lowering erases the §Q2 facts.
+    raw_source_surfaces: FxHashMap<(String, SymbolSpace), RawSourceSurface>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,6 +280,38 @@ impl AnalyzedExternalTypeSource {
         }
 
         dependencies
+    }
+
+    /// The parse-time `RawSourceSurface` raw-fact record for one
+    /// `(name, symbol_space)` declared in this file, if captured (oracle harness
+    /// design item G). The source-side admission gate reads this for the §Q2
+    /// erased facts the lowered body lost.
+    pub fn raw_source_surface(
+        &self,
+        name: &str,
+        symbol_space: SymbolSpace,
+    ) -> Option<&RawSourceSurface> {
+        self.raw_source_surfaces
+            .get(&(name.to_string(), symbol_space))
+    }
+
+    /// Enumerate every captured `(name, symbol_space)` raw-fact record.
+    pub fn raw_source_surfaces(
+        &self,
+    ) -> impl Iterator<Item = ((&str, SymbolSpace), &RawSourceSurface)> {
+        self.raw_source_surfaces
+            .iter()
+            .map(|((name, space), surface)| ((name.as_str(), *space), surface))
+    }
+
+    /// Stamp the owning file's canonical id onto every captured raw-fact record.
+    /// `analyze_external_type_program` captures without the file context (it sees
+    /// only the `Program`); the file-aware artifact-build path supplies it so the
+    /// `(canonical, name, symbol_space)` contributor identity is complete.
+    pub fn stamp_raw_surface_canonical(&mut self, canonical: &str) {
+        for surface in self.raw_source_surfaces.values_mut() {
+            surface.decl_canonical = canonical.to_string();
+        }
     }
 
     pub fn stats(&self) -> AnalyzedExternalTypeSourceStats {
@@ -727,6 +766,23 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
             }
             _ => {}
         }
+    }
+
+    // Oracle harness design item G: capture the parse-time `RawSourceSurface`
+    // raw-fact inventory while the OXC arena is still live (same parse pass that
+    // built the shallow inventory above). Overload groups merge by name so a
+    // multi-signature `function f` surfaces its overload-SET arity.
+    let captured = merge_overload_groups(
+        program
+            .body
+            .iter()
+            .flat_map(capture_statement_surfaces)
+            .collect(),
+    );
+    for c in captured {
+        result
+            .raw_source_surfaces
+            .insert((c.name, c.symbol_space), c.surface);
     }
 
     result

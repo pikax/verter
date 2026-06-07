@@ -662,9 +662,13 @@ impl VerterHost {
         }
 
         let program = parsed_eval_program.program.borrow_dependent();
-        Arc::new(
-            verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program(program),
-        )
+        let mut analyzed =
+            verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program(program);
+        // Oracle harness design item G: stamp the owning canonical onto the
+        // parse-time `RawSourceSurface` records so the `(canonical, name,
+        // symbol_space)` contributor identity is complete on the artifact.
+        analyzed.stamp_raw_surface_canonical(canonical_id);
+        Arc::new(analyzed)
     }
 
     pub(crate) fn build_eval_env_and_external_type_analysis(
