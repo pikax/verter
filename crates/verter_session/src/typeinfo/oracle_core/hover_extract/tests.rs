@@ -139,10 +139,15 @@ fn arrow_function_type_is_captured_whole() {
 }
 
 // ===========================================================================
-// Discriminating negatives — each of these would be WRONGLY ACCEPTED by the
-// prior loose `type <probe> = …` substring scan and is REJECTED by the strict
-// whole-hover probe-alias grammar (§Q2 "hover-extraction grammar"). Reverting the
-// strict parse back to the substring scan makes each of these FAIL.
+// Negatives REJECTED by the strict whole-hover probe-alias grammar (§Q2
+// "hover-extraction grammar"). MOST are discriminating against the prior loose
+// `type <probe> = …` substring scan: that scan would have WRONGLY ACCEPTED them
+// (header-in-prose, `export`/`declare` modifiers, type parameters, trailing
+// declarations, …), so reverting the strict parse back to the substring scan
+// makes each of those FAIL. The exception is `plaintext_wrong_probe_name_is_rejected`:
+// the old scan already keyed on the exact probe-name substring, so it would have
+// rejected a wrong name too — that case is useful correctness coverage, NOT a
+// proof of discrimination against the old scan.
 // ===========================================================================
 
 #[test]

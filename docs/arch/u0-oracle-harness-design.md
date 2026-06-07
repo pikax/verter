@@ -153,8 +153,9 @@ These are load-bearing and were confirmed by reading source:
    structured full-type query and only `hover` is a type-bearing point query.
    `textDocument/signatureHelp` exists but is a **call-surface** — relevant only to
    the deferred call-resolution families (§Scope), not to a `TypeExpr` projection.
-   tsgo's LSP answer for a type query is, today, a **markdown hover string** with no
-   range.
+   tsgo's LSP answer for a type query is, today, a **hover string** with no
+   range — under the adopted empty-caps driver a bare plaintext alias, per the
+   §Q2/Q3 grammar (a markdown-caps driver would instead return a fenced block).
 
 4. **`verter_session` does NOT depend on `verter_type_runtime`.** `tsgo` lives
    entirely behind `verter_type_runtime`; `crates/verter_session/Cargo.toml` has
@@ -3874,7 +3875,7 @@ snapshot validated against itself).
     never per-family; a query that fails stays `Ignored` and waits for a future
     structured oracle kind. For a parameterized `ResolveExpr` (non-empty `type_args`)
     the probe RHS is synthesized via the versioned `TypeExpr` → TS-source printer (§Q2);
-    the `<T>` is extracted from the markdown hover via the versioned hover-extraction
+    the `<T>` is extracted from the hover via the versioned hover-extraction
     grammar (§Q2). **Guards:** `probe_header_names_target`,
     `probe_binds_to_registry_target`, `probe_form_is_deterministic_and_versioned`,
     `parameterized_probe_rhs_synthesis`, `hover_extraction_grammar_is_versioned`,
