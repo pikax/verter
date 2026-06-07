@@ -59,3 +59,7 @@ rationale = "tsgo subprocess IPC — pnpm virtual store walk + scratch-dir setup
 [[entries]]
 path = "crates/verter_type_runtime/src/tsserver/ipc.rs"
 rationale = "tsserver subprocess IPC — pnpm virtual store walk + scratch-dir setup for the tsserver runtime"
+
+[[entries]]
+path = "crates/verter_session/src/typeinfo/typeinfo_tests/oracle/driver.rs"
+rationale = "TS7 oracle harness consumption driver (#[cfg(test)] mod typeinfo_tests) — loads checked-in snapshot TEST FIXTURES + re-enumerates the vendored env corpus via runtime std::fs::read, the mechanism the locked design (docs/arch/u0-oracle-harness-design.md §Q1) mandates and the snapshot_loading_is_runtime_fs guard pins. Not semantic/VFS state."
