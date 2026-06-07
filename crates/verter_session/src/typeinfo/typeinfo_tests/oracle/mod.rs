@@ -12,6 +12,10 @@
 //! never enters the default resolver build or the default test gate, preserving
 //! the `tsgo`-forbidden-at-runtime invariant.
 
+pub(crate) mod driver;
 pub(crate) mod identity;
 pub(crate) mod normalize;
 pub(crate) mod snapshot;
+
+#[allow(unused_imports)]
+pub(crate) use driver::run_row;
