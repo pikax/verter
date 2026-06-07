@@ -289,6 +289,164 @@ fn tsgo_version_is_pinned() {
     );
 }
 
+/// PURE checker: returns `Some(reason)` when `src` contains a tsgo RUNTIME-DRIVER
+/// symbol that would let the default build spawn or contact tsgo at query time.
+///
+/// The needle set is TSGO-SPECIFIC so legitimate non-tsgo code (and the design /
+/// module doc prose, which legitimately uses the bare word `tsgo`) never trips it:
+///   - `verter_type_runtime` — the tsgo-driver crate path; never legitimately
+///     referenced in default-build src.
+///   - `TsgoTypeProvider` — the tsgo LSP driver type.
+///   - `--lsp --stdio` — the tsgo child-process argv.
+///   - `.get_hover(` — the tsgo hover RPC call.
+///   - a raw tsgo PROCESS spawn: a LINE containing both `Command::new` and the
+///     substring `tsgo` (catches `Command::new("tsgo")` / `Command::new(tsgo_path)`),
+///     or a `.arg("tsgo")` / `.args(["tsgo"` style argv. A bare `Command::new(...)`
+///     for a NON-tsgo tool does NOT trip it.
+///
+/// The bare prose token `tsgo` is deliberately NOT forbidden — only the
+/// spawn/driver symbols above.
+fn src_has_tsgo_runtime_driver(src: &str) -> Option<&'static str> {
+    const PLAIN_NEEDLES: &[(&str, &str)] = &[
+        (
+            "verter_type_runtime",
+            "references the tsgo-driver crate `verter_type_runtime`",
+        ),
+        (
+            "TsgoTypeProvider",
+            "references the tsgo LSP driver `TsgoTypeProvider`",
+        ),
+        (
+            "--lsp --stdio",
+            "carries the tsgo child-process argv `--lsp --stdio`",
+        ),
+        (".get_hover(", "calls the tsgo hover RPC `.get_hover(`"),
+    ];
+    for (needle, reason) in PLAIN_NEEDLES {
+        if src.contains(needle) {
+            return Some(reason);
+        }
+    }
+    // Raw tsgo process spawn — evaluated per LINE so a `Command::new` for some
+    // OTHER tool on one line and a `tsgo` mention elsewhere do not combine.
+    for line in src.lines() {
+        if line.contains("Command::new") && line.contains("tsgo") {
+            return Some("spawns a raw tsgo process via `Command::new(...tsgo...)`");
+        }
+        if line.contains(".arg(\"tsgo\")") || line.contains(".args([\"tsgo\"") {
+            return Some("passes `tsgo` as a child-process argument");
+        }
+    }
+    None
+}
+
+/// Discriminating self-test of `src_has_tsgo_runtime_driver` over SYNTHETIC
+/// sources — proves the checker catches R3's exact escape scenario (a tsgo
+/// runtime driver added under `resolver_core` / `host_manage`, which add no
+/// `verter_type_runtime` Cargo dep and so slip past both crate-graph + the
+/// oracle-only source scan) while NOT false-positiving on legitimate code or the
+/// bare prose token `tsgo`.
+#[test]
+fn tsgo_runtime_driver_checker_discriminates() {
+    // (1) A `verter_type_runtime::TsgoTypeProvider` use under a fake resolver_core
+    //     path → REJECT (R3's scenario).
+    assert!(src_has_tsgo_runtime_driver(
+        "use verter_type_runtime::TsgoTypeProvider;\nfn resolve() { let _ = TsgoTypeProvider::new(); }\n"
+    )
+    .is_some());
+
+    // (2) A raw `Command::new(\"tsgo\")` spawn → REJECT.
+    assert!(src_has_tsgo_runtime_driver(
+        "fn resolve() { let _ = std::process::Command::new(\"tsgo\").arg(\"--lsp\").spawn(); }\n"
+    )
+    .is_some());
+
+    // (3) A `Command::new(tsgo_path)` spawn (non-literal path) → REJECT.
+    assert!(src_has_tsgo_runtime_driver(
+        "fn resolve(tsgo_path: &str) { let _ = Command::new(tsgo_path); }\n"
+    )
+    .is_some());
+
+    // (4) A `--lsp --stdio` argv or a `.get_hover(` call → REJECT.
+    assert!(src_has_tsgo_runtime_driver("let args = [\"--lsp --stdio\"];\n").is_some());
+    assert!(src_has_tsgo_runtime_driver("let h = provider.get_hover(pos);\n").is_some());
+
+    // (5) Clean resolver source with NO tsgo driver → PASS.
+    assert!(src_has_tsgo_runtime_driver(
+        "fn resolve_named_symbol() { let _ = ProjectSemanticDispatch::execute(key); }\n"
+    )
+    .is_none());
+
+    // (6) The bare prose word `tsgo` in a doc comment → PASS (not forbidden).
+    assert!(src_has_tsgo_runtime_driver(
+        "//! tsgo is GENERATION-ONLY; this module never contacts tsgo at query time.\n"
+    )
+    .is_none());
+
+    // (7) A `Command::new(...)` for a NON-tsgo tool → PASS (not tsgo-specific).
+    assert!(src_has_tsgo_runtime_driver(
+        "fn fmt() { let _ = std::process::Command::new(\"rustfmt\").spawn(); }\n"
+    )
+    .is_none());
+}
+
+/// Broadens the consumption-path guard to the ENTIRE default-build `verter_session`
+/// resolver/host source surface: a tsgo runtime driver added under
+/// `src/resolver_core/`, `src/host_manage/`, or anywhere else in production source
+/// (which adds NO `verter_type_runtime` Cargo dep, so it slips past both
+/// `tsgo_not_reachable_from_resolver` and the oracle-only
+/// `oracle_consumption_path_has_no_tsgo_spawn`) FAILS here. Walks every `.rs` under
+/// `src/`, EXCLUDING the legitimate tsgo-driving sites, which are ALL gated off the
+/// default closure (proven separately by the crate-graph guard + the
+/// `required-features` bin gate):
+///   - the `oracle-gen`-feature-gated generator (`src/typeinfo/oracle_core/gen.rs`
+///     + `gen/`),
+///   - the `#[cfg(feature = "oracle-gen")]` generation SPIKE
+///     (`src/typeinfo/typeinfo_tests/oracle_gen_spike.rs`),
+///   - the `#[cfg(test)]`-only `typeinfo/typeinfo_tests/mod.rs` that declares the
+///     gated spike module (it names the driver crate in a comment).
+/// The rest of the `#[cfg(test)]` `typeinfo_tests` tree (the harness's own test
+/// consumers, e.g. the lifted-row registry) is scanned: it must stay tsgo-free,
+/// and the registry is additionally covered by
+/// `oracle_consumption_path_has_no_tsgo_spawn`.
+#[test]
+fn no_tsgo_runtime_driver_anywhere_in_default_build() {
+    let src_root = Path::new(MANIFEST_DIR).join("src");
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_rs(&src_root, &mut files);
+
+    // The `oracle-gen`-gated generator + generation spike ARE the legitimate
+    // tsgo-driving sites — all gated off the default build by `oracle-gen`. The
+    // spike-declaring `typeinfo_tests/mod.rs` names the driver crate in a comment.
+    files.retain(|p| {
+        let s = p.to_string_lossy().replace('\\', "/");
+        !s.contains("typeinfo/oracle_core/gen.rs")
+            && !s.contains("typeinfo/oracle_core/gen/")
+            && !s.contains("typeinfo/typeinfo_tests/oracle_gen_spike.rs")
+            && !s.contains("typeinfo/typeinfo_tests/mod.rs")
+    });
+    assert!(
+        files.len() > 50,
+        "expected to scan the full verter_session src tree, found only {} files — \
+         walk likely misconfigured",
+        files.len()
+    );
+
+    for file in &files {
+        let src =
+            fs::read_to_string(file).unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+        if let Some(reason) = src_has_tsgo_runtime_driver(&src) {
+            panic!(
+                "default-build source file {} {reason} — tsgo is GENERATION-ONLY; the \
+                 resolver / query-time path must NEVER spawn or contact tsgo. The ONLY \
+                 legitimate tsgo-driving site is the `oracle-gen`-gated generator \
+                 (`src/typeinfo/oracle_core/gen.rs` + `gen/`).",
+                file.display()
+            );
+        }
+    }
+}
+
 fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
