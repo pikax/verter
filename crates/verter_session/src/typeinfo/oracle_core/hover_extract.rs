@@ -1,5 +1,5 @@
 //! Hover-extraction grammar — extracts the `<RHS>` of `type <probe_name> =
-//! <RHS>` from tsgo's MARKDOWN hover (`docs/arch/u0-oracle-harness-design.md`
+//! <RHS>` from tsgo's hover (`docs/arch/u0-oracle-harness-design.md`
 //! §Q2 "hover-extraction grammar", §4 `hover_extraction_grammar_is_versioned`).
 //!
 //! PURE + offline (tsgo-free): so BOTH the generator AND the offline
@@ -8,29 +8,52 @@
 //! OXC type parser and runs the backstop + positive allowlist + drop-counter).
 //! Versioned by `PROBE_SYNTHESIS_VERSION`.
 //!
-//! The grammar (FIXED): the FIRST fenced ```` ```typescript ```` / ```` ```ts ````
-//! block that contains the probe header `type <probe_name>` (prose / inline /
-//! other-language blocks ignored); leading JSDoc/comment lines inside the block
-//! are skipped; the RHS runs from after the alias `=` to the DEPTH-0 `;` — a `;`
-//! nested inside `{}` / `[]` / `()` / `<>` or a string/template literal does NOT
-//! terminate — or to end-of-block when tsgo omits the trailing `;` (as it does
-//! for a type-alias hover). An UNCLOSED fence FAILS.
+//! The grammar (FIXED) has TWO ordered shapes, both of which require the probe
+//! text to be EXACTLY one top-level type-alias declaration `type <probe_name> =
+//! <RHS>` (optional trailing `;`), naming the expected probe, with NO `export` /
+//! `declare` modifier and NO type parameters — leading/trailing line/block
+//! comments and JSDoc are the ONLY surrounding text allowed:
 //!
-//! Driver-shape note (`hover_driver_config_pinned`): the declared LSP client
-//! `textDocument.hover.contentFormat` determines whether tsgo wraps the type in a
-//! markdown ```` ```typescript ```` fence (markdown caps) or returns the BARE
-//! `type <probe_name> = <RHS>` text (the empty/plaintext caps the adopted LSP
-//! driver sends, Q3). Both are the SAME probe header; the
-//! driver config is pinned into `probe_synthesis_version`, so a shape change is a
-//! version change, never a silent mismatch. The grammar therefore accepts the
-//! bare form via a WHOLE-TEXT fallback that fires ONLY when the hover carries NO
-//! fenced code block of any language (so a markdown hover's prose/inline/other
-//! blocks are still ignored — the fallback never overrides a fenced hover).
+//! 1. **Fenced shape (markdown caps).** If ANY fenced code block exists, ONLY
+//!    fenced ```` ```typescript ```` / ```` ```ts ```` blocks are parsed (prose /
+//!    inline / other-language blocks ignored); the FIRST such block whose trimmed
+//!    body is EXACTLY the probe alias declaration wins. A hover with NO
+//!    probe-naming TS fence FAILS (`NoProbeBlock`); an unclosed fence FAILS
+//!    (`UnclosedFence`). Any fence DISABLES the plaintext fallback.
+//! 2. **Plaintext shape (empty caps).** If ZERO fenced code blocks of any
+//!    language exist, the WHOLE trimmed hover is parsed as the plaintext driver
+//!    shape — it must be EXACTLY the probe alias declaration, nothing before or
+//!    after it (modulo comments).
+//!
+//! Driver-shape note (`hover_driver_config_pinned`): the adopted LSP driver
+//! `TsgoTypeProvider::get_hover` initializes tsgo with EMPTY client capabilities
+//! (`capabilities: {}`, `verter_type_runtime/src/tsgo/ipc.rs`), which produce a
+//! BARE PLAINTEXT `type <probe_name> = <RHS>` hover with NO markdown fence (Q3).
+//! The plaintext shape (2) is therefore the live driver shape; the fenced shape
+//! (1) handles a markdown-caps driver. Both are the SAME probe header; the driver
+//! config is pinned into `probe_synthesis_version`, so a capability / content
+//! shape change is a version change, never a silent mismatch. The whole-hover
+//! plaintext parse fires ONLY when the hover carries NO fenced code block of any
+//! language (a fenced hover's prose / inline / other blocks never trigger it —
+//! any fence DISABLES the fallback).
+//!
+//! Both shapes feed the same STRICT top-level alias parse (`parse_probe_alias`):
+//! a loose substring scan is unsound (it would accept a probe header embedded in
+//! prose, an `export`/`declare` modifier, a parameterized alias header, or
+//! trailing extra declarations). The RHS bytes the strict parse returns are
+//! handed to the admission gate's OXC parser unchanged.
+
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{Statement, TSType};
+use oxc_parser::Parser;
+use oxc_span::{GetSpan, SourceType};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HoverExtractError {
-    /// No fenced ```typescript / ```ts block names the probe (the wrong-hover /
-    /// no-probe-binding case — `probe_header_names_target`).
+    /// No fenced ```typescript / ```ts block (nor — in the no-fence plaintext
+    /// shape — the whole hover) is EXACTLY the probe alias declaration (the
+    /// wrong-hover / no-probe-binding / surrounding-noise case —
+    /// `probe_header_names_target`).
     NoProbeBlock,
     /// A fenced block opened but never closed (truncated / malformed hover).
     UnclosedFence,
@@ -45,18 +68,19 @@ pub(crate) fn extract_probe_rhs(
     let mut any_fence = false;
     let blocks = fenced_typescript_blocks(hover_markdown, &mut saw_unclosed, &mut any_fence);
     for block in blocks {
-        if let Some(rhs) = block_probe_rhs(block, probe_name) {
+        if let Some(rhs) = parse_probe_alias(block, probe_name) {
             return Ok(rhs);
         }
     }
     if saw_unclosed {
         return Err(HoverExtractError::UnclosedFence);
     }
-    // WHOLE-TEXT fallback for the BARE (unfenced) plaintext-caps hover shape: only
+    // WHOLE-TEXT plaintext shape for the BARE (unfenced) empty-caps hover: only
     // when there is NO fenced code block of any language, so a markdown hover's
-    // prose / inline / other-language blocks never trigger it.
+    // prose / inline / other-language blocks never trigger it (any fence DISABLES
+    // the fallback). The whole trimmed hover must be EXACTLY the probe alias.
     if !any_fence {
-        if let Some(rhs) = block_probe_rhs(hover_markdown, probe_name) {
+        if let Some(rhs) = parse_probe_alias(hover_markdown, probe_name) {
             return Ok(rhs);
         }
     }
@@ -130,75 +154,66 @@ fn fenced_typescript_blocks<'a>(
     blocks
 }
 
-/// If `block` contains the probe header `type <probe_name>`, return its RHS.
-fn block_probe_rhs(block: &str, probe_name: &str) -> Option<String> {
-    // Find `type <probe_name>` as a token boundary (so `type Foo` does not match
-    // a longer `FooBar`). The probe name is unique per ordinal by construction.
-    let needle = format!("type {probe_name}");
-    let header_at = find_decl(block, &needle)?;
-    // After the name, skip to `=`.
-    let after_name = header_at + needle.len();
-    let eq_rel = block[after_name..].find('=')?;
-    let rhs_start = after_name + eq_rel + 1;
-    let rhs = capture_rhs(&block[rhs_start..]);
+/// STRICT parse of a candidate text against the EXACT probe-alias grammar: the
+/// WHOLE trimmed candidate (modulo leading/trailing comments) must be exactly
+/// `type <probe_name> = <RHS>` with an optional trailing `;` — ONE top-level
+/// type-alias declaration, the correct probe name, NO `export` / `declare`
+/// modifier, NO type parameters, and NO surrounding prose / trailing
+/// declarations. Returns the RHS bytes on a match, `None` otherwise.
+///
+/// This replaces the prior loose `type <probe> = …` substring scan, which would
+/// accept the header embedded in prose, behind an `export`/`declare` modifier, on
+/// a parameterized alias, or followed by extra declarations. The parse is over
+/// the OXC TS program (comments are skipped by the parser, so leading/trailing
+/// comments and JSDoc are tolerated), then the alias type-annotation span slices
+/// the original RHS bytes — fed UNCHANGED to the admission gate's OXC parser.
+fn parse_probe_alias(candidate: &str, probe_name: &str) -> Option<String> {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let allocator = Allocator::default();
+    let ret = Parser::new(&allocator, trimmed, SourceType::ts()).parse();
+    if ret.panicked || !ret.errors.is_empty() {
+        // A parse error (truncated/unbalanced/invalid) is NOT a clean probe alias.
+        return None;
+    }
+    // EXACTLY one top-level statement, and it must be a bare type-alias
+    // declaration (no `export` wrapper, no other statements before/after it).
+    let mut stmts = ret.program.body.iter();
+    let first = stmts.next()?;
+    if stmts.next().is_some() {
+        // Trailing extra declaration / statement after the alias → REJECT.
+        return None;
+    }
+    let Statement::TSTypeAliasDeclaration(alias) = first else {
+        return None;
+    };
+    // No `declare` modifier (an `export` modifier produces an
+    // `ExportNamedDeclaration` statement, already rejected by the variant match).
+    if alias.declare {
+        return None;
+    }
+    // The alias must name EXACTLY the expected probe.
+    if alias.id.name.as_str() != probe_name {
+        return None;
+    }
+    // No type parameters on the alias header (`type P<T> = …` is out of grammar).
+    if alias.type_parameters.is_some() {
+        return None;
+    }
+    // Slice the ORIGINAL RHS bytes from the alias type-annotation span (the OXC
+    // parser already balanced the body), and hand them to the admission gate
+    // unchanged.
+    let ann_span = type_annotation_span(&alias.type_annotation);
+    let rhs = &trimmed[ann_span.start as usize..ann_span.end as usize];
     Some(rhs.trim().to_string())
 }
 
-/// Find `needle` (`type <probe_name>`) where the char AFTER the name is a
-/// non-identifier char (boundary), skipping matches inside a longer identifier.
-fn find_decl(block: &str, needle: &str) -> Option<usize> {
-    let mut from = 0;
-    while let Some(rel) = block[from..].find(needle) {
-        let at = from + rel;
-        let after = at + needle.len();
-        let next = block[after..].chars().next();
-        let boundary = matches!(next, None | Some(' ') | Some('=') | Some('\t') | Some('<'));
-        // Also require the `type` keyword to be at a token boundary on its left.
-        let prev = block[..at].chars().next_back();
-        let left_ok = matches!(prev, None | Some('\n') | Some(' ') | Some('\t') | Some(';'));
-        if boundary && left_ok {
-            return Some(at);
-        }
-        from = after;
-    }
-    None
-}
-
-/// Capture from the start of `rest` (just after `=`) to the DEPTH-0 `;` or
-/// end-of-input, honoring `{}` / `[]` / `()` / `<>` nesting and string / template
-/// literals (a `;` inside any of these does not terminate).
-fn capture_rhs(rest: &str) -> &str {
-    let bytes = rest.as_bytes();
-    let mut depth: i32 = 0;
-    let mut i = 0;
-    let mut string: Option<u8> = None; // active quote char, or None
-    while i < rest.len() {
-        let c = bytes[i];
-        if let Some(q) = string {
-            if c == b'\\' {
-                i += 2;
-                continue;
-            }
-            if c == q {
-                string = None;
-            }
-            i += 1;
-            continue;
-        }
-        match c {
-            b'"' | b'\'' | b'`' => string = Some(c),
-            b'{' | b'[' | b'(' | b'<' => depth += 1,
-            b'}' | b']' | b')' | b'>' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-            }
-            b';' if depth == 0 => return &rest[..i],
-            _ => {}
-        }
-        i += 1;
-    }
-    rest
+/// The source span of a `TSType` (the alias RHS). Pulled out so the slice site is
+/// a single, named conversion.
+fn type_annotation_span(ts: &TSType<'_>) -> oxc_span::Span {
+    ts.span()
 }
 
 #[cfg(test)]
