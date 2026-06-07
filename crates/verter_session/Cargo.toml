@@ -12,6 +12,15 @@ publish = false
 [features]
 default = []
 session_metrics = []
+# Opt-in: the TS7 oracle harness GENERATION side (the §4 generation spike + the
+# snapshot generator), which drives the pinned tsgo via `verter_type_runtime`.
+# `docs/arch/u0-oracle-harness-design.md` §3 invariant 1: tsgo is GENERATION-ONLY
+# and lives behind this feature, NEVER in the default resolver/production build.
+# The default gate (`cargo nextest run --workspace`, `cargo test -p verter_session`)
+# does NOT enable it, so tsgo stays out of the default dependency closure — pinned
+# by `oracle_tsgo_forbidden.rs::tsgo_not_reachable_from_resolver`. Activated via
+# `cargo test -p verter_session --features oracle-gen` (the spike).
+oracle-gen = ["dep:verter_type_runtime"]
 # Opt-in: enables tests that read from `.integration-tests/repos/...`
 # alongside the workspace. The default `cargo test --workspace --tests`
 # run MUST stay hermetic — it does NOT enable this feature. Tests that
@@ -59,6 +68,11 @@ verter_type_expr_oxc = { workspace = true }
 verter_span = { path = "../verter_span" }
 verter_workspace = { path = "../verter_workspace" }
 verter_scheduler = { path = "../verter_scheduler" }
+# tsgo LSP driver — OPTIONAL, activated ONLY by the `oracle-gen` feature (the
+# generation spike + snapshot generator). NEVER on the default build closure
+# (tsgo is GENERATION-ONLY, design §3 inv 1). Pinned by
+# `oracle_tsgo_forbidden.rs::tsgo_not_reachable_from_resolver`.
+verter_type_runtime = { path = "../verter_type_runtime", optional = true }
 bitflags = "2.11"
 dashmap = "6.2"
 hotpath = { version = "0.16", optional = true }
