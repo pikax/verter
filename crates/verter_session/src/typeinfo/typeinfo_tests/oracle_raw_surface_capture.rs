@@ -123,3 +123,76 @@ fn raw_source_surface_recomputes_on_content_change() {
         "v2 captured the new member name"
     );
 }
+
+#[test]
+fn raw_surface_retains_all_merged_contributors() {
+    // Two same-name `interface Merged` declarations MERGE in one file. They
+    // share the SAME `(name, SymbolSpace::Type)` triple, so a single-value map
+    // (the prior last-wins `insert`) would silently drop one contributor's raw
+    // facts. The source-side walk MUST see EVERY contributor (§Q2: "a single
+    // contributor being allowlist-clean does NOT admit the merge if another
+    // contributor carries a REJECT construct"), so the capture retains an
+    // ORDERED contributor vector keyed by the triple.
+    //
+    // Contributor 0 is allowlist-clean (a plain public property); contributor 1
+    // carries a `unique symbol`-keyed member — an erased fact (`oxc/lib.rs:99,921`
+    // silently drops the non-static key) the lowered body cannot represent. If
+    // only one contributor survived storage, the clean one could win and the
+    // brand key would vanish.
+    let host = make_host();
+    upsert(
+        &host,
+        CANONICAL,
+        "declare const sym: unique symbol;\n\
+         export interface Merged { clean: string }\n\
+         export interface Merged { [sym]: number }\n",
+    );
+
+    let indexed = host.ensure_indexed_ready(CANONICAL).expect("indexed ready");
+    let analysis = &indexed.external_type_analysis;
+    let surfaces = analysis.raw_source_surfaces_for("Merged", SymbolSpace::Type);
+
+    // BOTH contributors retained, in source order — a single-value map could
+    // only ever yield one.
+    assert_eq!(
+        surfaces.len(),
+        2,
+        "both merged interface contributors retained: {surfaces:?}"
+    );
+
+    // Contributor 0 is the clean one (a plain `clean: string` property).
+    assert!(
+        surfaces[0]
+            .raw_member_keys
+            .iter()
+            .any(|k| matches!(k, RawKey::Static(s) if s == "clean")),
+        "contributor 0 is the clean property surface: {:?}",
+        surfaces[0]
+    );
+    assert!(
+        surfaces[0]
+            .member_kinds
+            .iter()
+            .all(|k| matches!(k, RawMemberKind::Property)),
+        "contributor 0 carries no accessor"
+    );
+
+    // Contributor 1's `unique symbol`-keyed member (the erased brand fact)
+    // survives as a NON-static key ONLY because the second contributor was not
+    // dropped.
+    assert!(
+        surfaces[1]
+            .raw_member_keys
+            .iter()
+            .any(|k| !matches!(k, RawKey::Static(_))),
+        "contributor 1's brand key retained pre-lowering: {:?}",
+        surfaces[1]
+    );
+    assert!(
+        !surfaces[1]
+            .raw_member_keys
+            .iter()
+            .any(|k| matches!(k, RawKey::Static(s) if s == "clean")),
+        "contributor 1 is a DISTINCT surface, not a copy of contributor 0"
+    );
+}

@@ -127,7 +127,7 @@ pub struct AnalyzedExternalTypeSource {
     /// Parse-time `RawSourceSurface` raw-fact inventory (oracle harness design
     /// item G), keyed by `(name, symbol_space)` within this file. Captured while
     /// the OXC arena is live, before lowering erases the §Q2 facts.
-    raw_source_surfaces: FxHashMap<(String, SymbolSpace), RawSourceSurface>,
+    raw_source_surfaces: FxHashMap<(String, SymbolSpace), Vec<RawSourceSurface>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,10 +282,31 @@ impl AnalyzedExternalTypeSource {
         dependencies
     }
 
-    /// The parse-time `RawSourceSurface` raw-fact record for one
-    /// `(name, symbol_space)` declared in this file, if captured (oracle harness
-    /// design item G). The source-side admission gate reads this for the §Q2
-    /// erased facts the lowered body lost.
+    /// The ORDERED contributor vector of parse-time `RawSourceSurface` raw-fact
+    /// records for one `(name, symbol_space)` declared in this file (oracle
+    /// harness design item G). A MERGED declaration — same-name interfaces, an
+    /// overload group, repeated `declare`s — shares ONE `(name, space)` triple
+    /// across several contributors, so the capture retains them as a SOURCE-
+    /// ORDER vector (a single-value map would silently drop all but one). Each
+    /// contributor's `(ordinal, raw facts)` is INDEPENDENTLY allowlist-checked by
+    /// the source-side walk: a single clean contributor does NOT admit the merge
+    /// if another carries a REJECT construct (§Q2). Empty slice when nothing was
+    /// captured for the triple.
+    pub fn raw_source_surfaces_for(
+        &self,
+        name: &str,
+        symbol_space: SymbolSpace,
+    ) -> &[RawSourceSurface] {
+        self.raw_source_surfaces
+            .get(&(name.to_string(), symbol_space))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// The FIRST captured contributor for one `(name, symbol_space)`, if any — a
+    /// convenience over [`Self::raw_source_surfaces_for`] for the
+    /// single-contributor common case. Reads the same ordered vector; callers
+    /// that must see EVERY merged contributor use `raw_source_surfaces_for`.
     pub fn raw_source_surface(
         &self,
         name: &str,
@@ -293,15 +314,21 @@ impl AnalyzedExternalTypeSource {
     ) -> Option<&RawSourceSurface> {
         self.raw_source_surfaces
             .get(&(name.to_string(), symbol_space))
+            .and_then(|v| v.first())
     }
 
-    /// Enumerate every captured `(name, symbol_space)` raw-fact record.
+    /// Enumerate every captured `(name, symbol_space)` contributor, flattening
+    /// the ordered per-triple vectors.
     pub fn raw_source_surfaces(
         &self,
     ) -> impl Iterator<Item = ((&str, SymbolSpace), &RawSourceSurface)> {
         self.raw_source_surfaces
             .iter()
-            .map(|((name, space), surface)| ((name.as_str(), *space), surface))
+            .flat_map(|((name, space), surfaces)| {
+                surfaces
+                    .iter()
+                    .map(move |surface| ((name.as_str(), *space), surface))
+            })
     }
 
     /// Stamp the owning file's canonical id onto every captured raw-fact record.
@@ -309,8 +336,10 @@ impl AnalyzedExternalTypeSource {
     /// only the `Program`); the file-aware artifact-build path supplies it so the
     /// `(canonical, name, symbol_space)` contributor identity is complete.
     pub fn stamp_raw_surface_canonical(&mut self, canonical: &str) {
-        for surface in self.raw_source_surfaces.values_mut() {
-            surface.decl_canonical = canonical.to_string();
+        for surfaces in self.raw_source_surfaces.values_mut() {
+            for surface in surfaces {
+                surface.decl_canonical = canonical.to_string();
+            }
         }
     }
 
@@ -780,9 +809,14 @@ pub fn analyze_external_type_program(program: &Program<'_>) -> AnalyzedExternalT
             .collect(),
     );
     for c in captured {
+        // Append in source order: a MERGED declaration shares one `(name, space)`
+        // triple across several contributors, so each is RETAINED (not last-wins
+        // overwritten) for the source-side walk's per-contributor allowlist check.
         result
             .raw_source_surfaces
-            .insert((c.name, c.symbol_space), c.surface);
+            .entry((c.name, c.symbol_space))
+            .or_default()
+            .push(c.surface);
     }
 
     result
