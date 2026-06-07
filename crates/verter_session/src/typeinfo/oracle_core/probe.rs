@@ -24,7 +24,7 @@ pub(crate) fn probe_name(ordinal: u16) -> String {
     format!("{PROBE_PREFIX}{ordinal}")
 }
 
-/// Why a probe RHS cannot be synthesized for the first-block admissible set —
+/// Why a probe RHS cannot be synthesized for the currently-admissible set —
 /// the construct stays `Ignored` until its named spike lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProbeRhsError {
@@ -40,7 +40,7 @@ pub(crate) enum ProbeRhsError {
 ///
 /// Empty `type_args` → the bare `symbol` RHS (admissible NOW). NON-EMPTY
 /// `type_args` → `ParameterizedTypeArgsDeferred` (the printer is not yet spiked,
-/// §4). This is the ONLY first-block-admissible RHS form for these helpers.
+/// §4). This is the ONLY currently-admissible RHS form for these helpers.
 pub(crate) fn resolve_expr_probe_rhs(
     symbol: &str,
     type_args: &[String],

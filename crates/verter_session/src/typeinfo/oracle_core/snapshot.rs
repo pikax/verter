@@ -28,8 +28,8 @@
 //! (also `deny_unknown_fields`); an unknown `oracle_value_kind` is rejected (a
 //! future kind is a closed-tagged addition that bumps `ORACLE_SCHEMA_VERSION`).
 //!
-//! Lifts ZERO rows: this is the storage-schema foundation that later
-//! row-lifts ride on.
+//! Lifts ZERO rows: this is the storage-schema foundation the
+//! `TypeExpr`-projection oracle rows build on.
 
 use serde::Deserialize;
 use serde_json::{json, Value};

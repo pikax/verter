@@ -18,8 +18,8 @@
 //! compiler-options blob). The id is the FULL ≥256-bit BLAKE3 digest, never a
 //! truncation.
 //!
-//! Lifts ZERO rows: this is the storage/identity foundation that later
-//! row-lifts ride on.
+//! Lifts ZERO rows: this is the storage/identity foundation the
+//! `TypeExpr`-projection oracle rows build on.
 
 use serde_json::{json, Value};
 
@@ -112,8 +112,8 @@ impl QueryHelperKind {
     }
 }
 
-/// The host/project setup axis. `standalone` is the only first-class kind in the
-/// first harness block; the others are carried for schema totality (their rows
+/// The host/project setup axis. `standalone` is the only currently-admissible
+/// first-class kind; the others are carried for schema totality (their rows
 /// stay deferred to the named env-pin spike).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
