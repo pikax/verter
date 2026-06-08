@@ -212,3 +212,125 @@ async fn oracle_gen_rejects_non_allowlisted_construct() {
         Err(e) => panic!("expected Rejected, got {e:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Reducer PREFLIGHT — the generator gate that, before a snapshot
+// is written, proves Verter's OWN resolver reduces the query to a CLEAN,
+// operator-free value (§Q2 "reducer-preflight before writing carve-out
+// snapshots"). These guards run Verter ONLY (no tsgo), so they do NOT skip — they
+// directly exercise `preflight_reduces_clean`'s ADMIT and REJECT verdicts.
+// ---------------------------------------------------------------------------
+
+/// A self-contained carve-out fixture covering BOTH admitted source-root shapes
+/// AND the operator-shell reject:
+/// - `PreflightKeyof = keyof <bare ref>` — Verter reduces to the clean
+///   string-literal key union (shape 1);
+/// - `PreflightIndexed = Root["nested"]["value"]` — Verter reduces to the clean
+///   terminal `string` (shape 2 — two of the three lifted rows are this shape);
+/// - `PreflightOpenLookup<T> = T["id"]` — resolved with NO type args the object
+///   stays an open `TypeParam`, so the bridge PRESERVES the `IndexedAccess`
+///   operator shell (an UN-reduced value the preflight must REJECT).
+const PREFLIGHT_KEYOF_FIXTURE: &str = "export interface PreflightKeys { a: string; b: number; }\nexport type PreflightKeyof = keyof PreflightKeys;\nexport interface PreflightNestedRoot { nested: { value: string } }\nexport type PreflightIndexed = PreflightNestedRoot[\"nested\"][\"value\"];\nexport type PreflightOpenLookup<T> = T[\"id\"];\n";
+
+const PREFLIGHT_KEYOF_FILES: &[super::super::query_specs::WorkspaceFileSpec] =
+    &[super::super::query_specs::WorkspaceFileSpec {
+        path: "/fixtures/preflight_keyof.ts",
+        source: PREFLIGHT_KEYOF_FIXTURE,
+    }];
+
+/// Build a `ResolveExpr`/`Expanded` spec over the preflight fixture for `symbol`.
+fn preflight_spec(symbol: &'static str) -> QuerySpec {
+    QuerySpec {
+        row_file: "preflight_synthetic.rs",
+        row_function: "preflight_probe",
+        query_ordinal: 0,
+        oracle_family: "preflight",
+        workspace_files: PREFLIGHT_KEYOF_FILES,
+        primary_canonical: "/fixtures/preflight_keyof.ts",
+        host_project: super::super::query_specs::HostProjectSpec {
+            project_root: "/",
+            workspace_root: "/",
+            tsconfig_path: "/oracle.tsconfig.json",
+            host_setup_kind: super::super::query_specs::HostSetupKindSpec::Standalone,
+        },
+        query_helper: QueryHelperSpec::ResolveExpr {
+            symbol,
+            type_args: &[],
+            projection_mode: ProjectionModeSpec::Expanded,
+        },
+        source_locator: super::super::query_specs::SourceLocatorSpec {
+            reference_canonical: "/fixtures/preflight_keyof.ts",
+            reference_name: symbol,
+            symbol_space: SymbolSpace::Type,
+        },
+        oracle_value_kind: super::super::query_specs::OracleValueKindSpec::StructuredTypeExpr,
+    }
+}
+
+#[test]
+fn preflight_admits_a_clean_operator_reduction() {
+    // `keyof PreflightKeys` reduces (through the landed operator-reduction bridge)
+    // to the clean `"a" | "b"` literal key union — the preflight ADMITs it, so the
+    // carve-out's source root is backed by a real, operator-free resolver result.
+    assert!(
+        preflight_reduces_clean(&preflight_spec("PreflightKeyof")).is_ok(),
+        "a keyof source root that Verter reduces to a literal key union must pass the preflight",
+    );
+}
+
+#[test]
+fn preflight_admits_a_clean_indexed_access_chain_reduction() {
+    // `PreflightNestedRoot["nested"]["value"]` is the string-literal index
+    // chain shape (shape 2 — two of the three lifted carve-out rows are this
+    // shape). Verter reduces it through the operator-reduction bridge to the
+    // clean terminal `string`, so the preflight ADMITs it. Without this case the
+    // preflight guard proved only the `keyof` shape reduces clean.
+    assert!(
+        preflight_reduces_clean(&preflight_spec("PreflightIndexed")).is_ok(),
+        "an indexed-access chain source root Verter reduces to a terminal scalar must pass the preflight",
+    );
+}
+
+#[test]
+fn preflight_rejects_an_unreduced_operator_shell() {
+    // The "operator-free value" requirement, the OTHER half of the
+    // preflight's contract: an `IndexedAccess` whose object stays an open
+    // `TypeParam` (`PreflightOpenLookup<T> = T["id"]` resolved with no args) does
+    // NOT reduce — the bridge PRESERVES the operator shell. The preflight must
+    // REFUSE that un-reduced shell so no carve-out snapshot can be written for a
+    // row whose resolver result is still an operator carrier.
+    //
+    // DISCRIMINATING: this rejects with the operator-construct reason
+    // (`indexed-access`), distinct from the `Unknown`-shell reject the sibling
+    // guard pins — proving the preflight rejects an OPERATOR shell, not only a
+    // semantic miss.
+    match preflight_reduces_clean(&preflight_spec("PreflightOpenLookup")) {
+        Err(GenError::PreflightUnclean(msg)) => {
+            assert!(
+                msg.contains("not operator-free/clean") && msg.contains("indexed-access"),
+                "the reject reason must name the un-reduced indexed-access operator shell; got {msg}"
+            );
+        }
+        other => {
+            panic!("an un-reduced operator shell must reject as PreflightUnclean, got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn preflight_rejects_an_unclean_reduction() {
+    // A symbol the resolver cannot satisfy projects to an `Unknown { semanticMiss }`
+    // shell — NOT a clean operator-free value. The preflight refuses it through the
+    // same positive-allowlist predicate the oracle VALUE must clear, so no snapshot
+    // can mask an unresolved (Unknown / operator-shell) reduction behind a clean
+    // tsgo answer.
+    match preflight_reduces_clean(&preflight_spec("DoesNotExistAnywhere")) {
+        Err(GenError::PreflightUnclean(msg)) => {
+            assert!(
+                msg.contains("not operator-free/clean") && msg.contains("Unknown"),
+                "the reject reason must name the unclean (Unknown shell) reduced value; got {msg}"
+            );
+        }
+        other => panic!("an unresolvable symbol must reject as PreflightUnclean, got {other:?}"),
+    }
+}

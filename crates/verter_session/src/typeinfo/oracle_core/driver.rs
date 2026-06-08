@@ -23,8 +23,9 @@
 //!    snapshot's stored (already-normalized) `oracle_value` under the same
 //!    normalization. NO tsgo at consumption time.
 //!
-//! The registry seats the 4 lifted rows (the two index-signature
-//! publication queries + the two built-in modifier-utility queries), so `run_row`
+//! The registry seats the 7 lifted rows (the two index-signature
+//! publication queries + the two built-in modifier-utility queries + the three
+//! U2 IndexedAccess-reduction carve-out queries), so `run_row`
 //! IS invoked at runtime by those rows' `oracle::run_row` bodies. Its pure
 //! sub-functions are additionally exercised directly by discriminating unit
 //! tests; the orchestrator is the real path every lifted row rides.

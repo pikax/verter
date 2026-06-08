@@ -48,6 +48,7 @@ mod narrow_instanceof;
 mod narrow_truthiness;
 mod narrow_typeof;
 mod no_infer;
+mod operator_reduction;
 // The oracle harness core now lives at `crate::typeinfo::oracle_core` (moved out
 // of the `#[cfg(test)]` `typeinfo_tests` tree so the `oracle-gen` generator can
 // reach it). This alias keeps every `super::oracle::*` / `oracle::*` call site in

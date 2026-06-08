@@ -1,6 +1,8 @@
 //! @ai-generated - Broad synthetic TypeScript type-system rule tests.
 
+use super::oracle;
 use super::support::*;
+use verter_session_oracle_macro::oracle_row;
 
 #[test]
 fn typescript_rules_literals_primitives_and_object_modifiers() {
@@ -210,7 +212,7 @@ fn typescript_rules_union_and_intersection_object_contributions() {
 }
 
 #[test]
-#[ignore = "typeinfo currently preserves keyof aliases instead of materializing a literal key union for named typeinfo requests; keep as the future keyof contract"]
+#[ignore = "tsgo hover cannot surface the expanded keyof literal-union ground truth; needs a future non-hover/keyof-expansion oracle-capture model"]
 fn typescript_rules_keyof_materializes_literal_key_union() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);
@@ -227,23 +229,17 @@ fn typescript_rules_keyof_materializes_literal_key_union() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `IndexedRules = KeySource["nested"]["value"]` reduces the multi-hop
+// indexed-access chain to its terminal `string`. The lifted body is the
+// registry-keyed `oracle::run_row` shared-driver call the `#[oracle_row]` macro
+// synthesizes: it resolves Verter's `Expanded` projection and compares it against
+// the checked-in tsgo snapshot. The DAG-terminal producer is
+// `IndexedAccessUnionDistribution` (block `U2.INDEXED_ACCESS`); the measured
+// dispatch trace is `[IndexedAccess, Instantiate, ResolveDecl]`, proven live by
+// `lifted_row_mechanism_trace_matches_manifest`.
+#[oracle_row]
 #[test]
-#[ignore = "multi-hop indexed-access reduction (KeySource['nested']['value']) is deferred to the separate U2 IndexedAccess Reduction resolver block"]
-fn typescript_rules_indexed_access_reduces_terminal_property() {
-    let host = make_host_with_footprint();
-    upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/typescript-rules.ts",
-        "IndexedRules",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_primitive(&expr, PrimitiveName::String);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn typescript_rules_indexed_access_reduces_terminal_property() {}
 
 #[test]
 #[ignore = "typeinfo currently does not distribute conditional aliases over union checks into a union of branch objects; keep as the future distributive conditional contract"]

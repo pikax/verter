@@ -197,10 +197,26 @@ fn walk<C: ResolverContext>(
                 symbol_space: SymbolSpace::Value,
             });
         }
+        // Source-ROOT carve-out SAME-FILE binding: for a carve-out-shaped body
+        // (`keyof Root` / `Root["a"]["b"]…`) resolve the root `Ref` through the
+        // SHARED resolver edges (TYPE space — the root is always a type) and
+        // stamp the file it defines in. The admission gate admits the operator
+        // body ONLY when this equals `def_canonical`. The transitive walk above
+        // follows `typeof` referents ONLY — it does NOT chase a `keyof` / index
+        // root — so this targeted resolution is what proves same-file. A root
+        // that does not bind stamps `None` and the gate rejects the operator.
+        let carve_out_root_def = super::admission::carve_out_root_ref_name(&lowered_body)
+            .map(str::to_string)
+            .and_then(|root_name| {
+                resolve_defining(ctx, &def_canonical, &root_name, SymbolSpace::Type)
+                    .map(|(canonical, _)| canonical)
+            });
         acc.push(SourceContributor {
             ordinal: ordinal as u16,
+            def_canonical: def_canonical.clone(),
             raw_surface: raw_surface.clone(),
             lowered_body,
+            carve_out_root_def,
         });
     }
 

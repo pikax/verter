@@ -153,15 +153,19 @@ fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
 
 /// Discriminating per-block-count pin for the lifted rows (the 2 index-signature
 /// publication rows at `U2.QUERY_VALUE_DOMAIN` + the 2 built-in modifier-utility
-/// rows at `U2.MAPPED_TEMPLATE`). Before any lift `U2.QUERY_VALUE_DOMAIN` owned
-/// 0 rows, `U2.INDEXED_ACCESS` 16, `U2.UTILITIES` 42, `U2.MAPPED_TEMPLATE` 16,
-/// with 0 lifted; after the lifts + honest re-partition the generated counts are
-/// 2 / 14 / 40 / 18 with 4 lifted (2 at QUERY_VALUE_DOMAIN, 2 at MAPPED_TEMPLATE)
-/// and 358 ignored. Each assertion FAILS against the pre-lift generated file and
-/// PASSES against the committed post-lift file — so reverting (or mis-counting)
-/// any lift's manifest re-partition breaks this test.
+/// rows + the wide/deep literal-union projection at `U2.MAPPED_TEMPLATE` + the 2
+/// terminal indexed-access projections at `U2.INDEXED_ACCESS`). Before any lift
+/// `U2.QUERY_VALUE_DOMAIN` owned 0 rows, `U2.INDEXED_ACCESS` 16, `U2.UTILITIES`
+/// 42, `U2.MAPPED_TEMPLATE` 16, with 0 lifted; after the publication/utility lifts
+/// plus the U2 IndexedAccess-reduction lifts (which also move
+/// `wide_deep_projected_token` from `U2.INDEXED_ACCESS` to `U2.MAPPED_TEMPLATE`)
+/// the generated counts are 2 / 13 / 40 / 19 with 7 lifted (2 at
+/// QUERY_VALUE_DOMAIN, 2 at INDEXED_ACCESS, 3 at MAPPED_TEMPLATE) and 355 ignored.
+/// Each assertion FAILS against the pre-lift
+/// generated file and PASSES against the committed post-lift file — so reverting
+/// (or mis-counting) any lift's manifest re-partition breaks this test.
 #[test]
-fn manifest_block_counts_reflect_index_and_utility_lifts() {
+fn manifest_block_counts_reflect_lifts() {
     let rows = workspace_root()
         .join("crates/verter_session/tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs");
     let src =
@@ -177,9 +181,10 @@ fn manifest_block_counts_reflect_index_and_utility_lifts() {
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2IndexedAccess,"),
-        14,
-        "U2.INDEXED_ACCESS must own 14 rows after the 2 publication rows moved to \
-         U2.QUERY_VALUE_DOMAIN (it owned 16 before the re-partition)",
+        13,
+        "U2.INDEXED_ACCESS must own 13 rows after the 2 publication rows moved to \
+         U2.QUERY_VALUE_DOMAIN (it owned 16 before) and `wide_deep_projected_token` \
+         moved to U2.MAPPED_TEMPLATE on the IndexedAccess-reduction lift (14 → 13)",
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2Utilities,"),
@@ -189,17 +194,19 @@ fn manifest_block_counts_reflect_index_and_utility_lifts() {
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2MappedTemplate,"),
-        18,
-        "U2.MAPPED_TEMPLATE must own 18 rows after the 2 built-in modifier-utility \
-         rows arrived lifted (it owned 16 before the re-partition)",
+        19,
+        "U2.MAPPED_TEMPLATE must own 19 rows after the 2 built-in modifier-utility \
+         rows arrived lifted (16 → 18) and `wide_deep_projected_token` moved in on \
+         the IndexedAccess-reduction lift (18 → 19)",
     );
 
     // Lifted-status counts.
     assert_eq!(
         count("status: IgnoreStatus::Lifted {"),
-        4,
-        "exactly 4 IgnoredTestRows must carry `status: Lifted` (2 index-signature \
-         publication + 2 built-in modifier-utility)",
+        7,
+        "exactly 7 IgnoredTestRows must carry `status: Lifted` (2 index-signature \
+         publication + 2 built-in modifier-utility + 2 terminal indexed-access \
+         projections + 1 wide/deep literal-union projection)",
     );
     assert_eq!(
         count(
@@ -210,16 +217,22 @@ fn manifest_block_counts_reflect_index_and_utility_lifts() {
          U2.QUERY_VALUE_DOMAIN",
     );
     assert_eq!(
-        count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2MappedTemplate }"),
+        count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2IndexedAccess }"),
         2,
-        "both built-in modifier-utility lifts must record their lifting block as \
-         U2.MAPPED_TEMPLATE",
+        "both terminal indexed-access projection lifts (typescript_rules + deep_path) \
+         must record their lifting block as U2.INDEXED_ACCESS",
+    );
+    assert_eq!(
+        count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2MappedTemplate }"),
+        3,
+        "the 2 built-in modifier-utility lifts + the wide/deep literal-union \
+         projection lift must record their lifting block as U2.MAPPED_TEMPLATE",
     );
 
-    // Total ignored (status: Ignored) rows after 4 lifts.
+    // Total ignored (status: Ignored) rows after 7 lifts.
     assert_eq!(
         count("status: IgnoreStatus::Ignored"),
-        358,
-        "exactly 358 IgnoredTestRows must remain `Ignored` (362 total − 4 lifted)",
+        355,
+        "exactly 355 IgnoredTestRows must remain `Ignored` (362 total − 7 lifted)",
     );
 }

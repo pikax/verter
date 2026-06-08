@@ -3366,8 +3366,8 @@ hover).
 Justification against Verter's per-block-lift / demand-driven discipline:
 
 - The project is explicitly **per-block-lift / demand-driven** (CLAUDE.md Build
-  Philosophy; the manifest's current state is 358 `Ignored` + 4 `Lifted` = 362 total
-  — the first four rows are seated, the remainder lift block-by-block). Snapshots
+  Philosophy; the manifest's current state is 355 `Ignored` + 7 `Lifted` = 362 total
+  — the first seven rows are seated, the remainder lift block-by-block). Snapshots
   are a rescope-gate deliverable produced block-by-block (§6.3 — "the oracle grows
   … rather than landing as one monolith"). Requiring all snapshots NOW would force
   generating oracle answers for rows whose lifting mechanism does not yet exist —

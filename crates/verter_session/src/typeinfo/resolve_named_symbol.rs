@@ -504,13 +504,23 @@ pub(crate) fn classify_dispatch_error(
 /// references that the dispatch returned as
 /// `SemanticNodeData::Alias(inner)` shells or
 /// `SemanticNodeData::Opaque(QueryError::DeclPlaceholder { … })`
-/// carriers.
+/// carriers, AND to REDUCE operator-bodied top-level aliases
+/// (`type X = Y[K]` / `type X = keyof Y`) through the shared
+/// `IndexedAccess` / `KeyOf` reducer under the publication modes.
+///
+/// This is the SINGLE canonical materializer for every typeinfo
+/// resolution entry-point — both the named-resolve path
+/// ([`resolve_named_symbol_with_audit`]) and the FFI evaluate path
+/// ([`crate::VerterHost::evaluate_type_expression_with_audit`]) route
+/// through it, so an operator alias reduces IDENTICALLY regardless of
+/// which surface requested it (the one-resolver mandate — no
+/// per-surface fork).
 ///
 /// Bounded by a small step budget so a pathological cycle can't
 /// hang the resolver — the dispatch's own cycle detection catches
 /// genuine alias cycles and returns `Opaque(AliasCycle)` long
 /// before this loop runs out of steps.
-fn materialize_through_aliases(
+pub(crate) fn materialize_through_aliases(
     host: &VerterHost,
     dispatch: &ProjectSemanticDispatch<'_>,
     start: SemanticNodeId,
@@ -559,6 +569,106 @@ fn materialize_through_aliases(
                     MaterializationStep::Stop(node) => return Ok(node),
                 }
             }
+            // Operator-bodied alias reduction bridge. A top-level alias whose
+            // body is an `IndexedAccess` (`type X = Y[K]`) or `KeyOf`
+            // (`type X = keyof Y`) operator must be REDUCED to its member type
+            // / key union under the publication modes, matching TypeScript and
+            // the canonical `SemanticQueryKey::IndexedAccess` / `KeyOf` path
+            // (which canonicalise to `ProjectPath` / the keyof builder). There
+            // is STILL ONE reducer — this dispatches the existing shared key, it
+            // does NOT hand-reduce. The carrier-stop gate is the MODE: `Skeleton`
+            // and `Identity` intentionally fall through to the carrier-preserving
+            // terminal arm below so BFS / structural-transit traversal keeps
+            // operator shells (Conditional branches would otherwise collapse for
+            // open generics). The reductions dispatch in publication context
+            // (`published(mode)`), where `may_reduce_operator` is unconditionally
+            // satisfied — so the mode `matches!` IS the whole gate; there is no
+            // second carrier-stop conjunct to consult on this always-published
+            // path.
+            Some(SemanticNodeData::IndexedAccess { object, index })
+                if matches!(
+                    mode,
+                    ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
+                ) =>
+            {
+                let key = SemanticQueryKey::IndexedAccess {
+                    base: *object,
+                    index: index.clone(),
+                    mode,
+                };
+                let step_result = match dispatch.execute_type_node(key) {
+                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                        QueryResult::Value(node)
+                    }
+                    QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                    QueryResult::Error(err) => QueryResult::Error(err),
+                };
+                match classify_operator_reduction_step(store, step_result, current)? {
+                    MaterializationStep::Continue(next) => {
+                        current = next;
+                        continue;
+                    }
+                    MaterializationStep::Stop(node) => return Ok(node),
+                }
+            }
+            Some(SemanticNodeData::KeyOf { base })
+                if matches!(
+                    mode,
+                    ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
+                ) =>
+            {
+                // The keyof keyspace is enumerated from the base operand's
+                // member surface (`build_key_of` requires a resolved
+                // `Object` / `Union` / `Intersection` base — an un-resolved
+                // `Ref` / `DeclPlaceholder` base returns the deferred carrier).
+                // At the top-level alias root the operand has only been
+                // substituted, not surfaced, so resolve it through the SHARED
+                // empty-path projection first (one engine — the same
+                // `ProjectPath` surfacing every other publication caller uses),
+                // then hand the surfaced base to the keyof reducer. A symbolic
+                // operand (open `TypeParam`, recursive / miss) round-trips
+                // unchanged and the reducer preserves the carrier.
+                // The base-surfacing pre-step must not ERASE a genuine fault: a
+                // `BudgetExceeded` / `AliasCycle` / … on the operand surfacing is
+                // a request fault that propagates, NOT a silent fall-back to the
+                // un-surfaced base (which would let the `KeyOf` reducer publish a
+                // deferred carrier instead of the fault). The decode routes
+                // through [`classify_base_surfacing`] — the same fault/miss split
+                // as the rest of the resolver.
+                let surfaced_result =
+                    match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+                        base: *base,
+                        path: Arc::from(Vec::new().into_boxed_slice()),
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            ProjectionMode::Expanded,
+                        ),
+                    }) {
+                        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                            QueryResult::Value(node)
+                        }
+                        QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                        QueryResult::Error(err) => QueryResult::Error(err),
+                    };
+                let surfaced_base = classify_base_surfacing(surfaced_result, *base)?;
+                let key = SemanticQueryKey::KeyOf {
+                    base: surfaced_base,
+                    context: crate::semantic_query::ProjectionReductionContext::published(mode),
+                };
+                let step_result = match dispatch.execute_type_node(key) {
+                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                        QueryResult::Value(node)
+                    }
+                    QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                    QueryResult::Error(err) => QueryResult::Error(err),
+                };
+                match classify_operator_reduction_step(store, step_result, current)? {
+                    MaterializationStep::Continue(next) => {
+                        current = next;
+                        continue;
+                    }
+                    MaterializationStep::Stop(node) => return Ok(node),
+                }
+            }
             _ => return Ok(current),
         }
     }
@@ -577,9 +687,9 @@ pub(crate) enum MaterializationStep {
 
 /// Decide the loop's next step from the nested `Instantiate` result.
 ///
-/// This is the single decode point the placeholder-materialisation loop
-/// (in both [`materialize_through_aliases`] and its
-/// `evaluate_type_expression` sibling) routes its nested dispatch result
+/// This is the single decode point the placeholder-materialisation loop in
+/// [`materialize_through_aliases`] — the ONE canonical materializer both
+/// typeinfo entry-points share — routes its nested dispatch result
 /// through, mirroring the top-level [`classify_dispatch_error`] split:
 /// - `Value(next)` / `Recursive(next)` → `Continue(next)`, unless the
 ///   dispatch returned the same `current` placeholder (no progress), in
@@ -602,6 +712,90 @@ pub(crate) fn classify_materialization_step(
         }
         QueryResult::Error(err) => match classify_dispatch_error(&err, Some(current)) {
             Ok(node) => Ok(MaterializationStep::Stop(node.unwrap_or(current))),
+            Err(fault) => Err(fault),
+        },
+    }
+}
+
+/// Decode the keyof base-surfacing pre-step's empty-path `ProjectPath` result
+/// into the surfaced base node.
+///
+/// The `KeyOf` reducer enumerates its keyspace from a RESOLVED operand surface;
+/// at a top-level alias root the operand has only been substituted, so the
+/// bridge surfaces it through an empty-path `ProjectPath` first. This is the
+/// single decode point for that pre-step, mirroring the resolver's
+/// [`classify_dispatch_error`] fault/miss split:
+/// - `Value(next)` / `Recursive(next)` → the surfaced node.
+/// - `Error(err)` → a genuine dispatch FAULT propagates as `Err(fault)` (so the
+///   `KeyOf` reducer never publishes a deferred carrier that MASKS the fault); a
+///   NON-fault miss falls back to the un-surfaced `base`, which the reducer then
+///   round-trips unchanged as the deferred carrier.
+pub(crate) fn classify_base_surfacing(
+    result: QueryResult<SemanticNodeId>,
+    base: SemanticNodeId,
+) -> Result<SemanticNodeId, TypeResolutionRequestError> {
+    match result {
+        QueryResult::Value(next) | QueryResult::Recursive(next) => Ok(next),
+        QueryResult::Error(err) => match classify_dispatch_error(&err, Some(base)) {
+            Ok(fallback) => Ok(fallback.unwrap_or(base)),
+            Err(fault) => Err(fault),
+        },
+    }
+}
+
+/// Decide the operator-reduction bridge's next step from the nested
+/// `IndexedAccess` / `KeyOf` dispatch result, PRESERVING the operator
+/// `carrier` whenever the shared reducer could not produce a genuine
+/// reduction.
+///
+/// Differs from [`classify_materialization_step`]: an operator alias must
+/// never *degrade* to a worse terminal than its own carrier. When the
+/// reducer returns a NON-FAULT miss carrier (`Miss` / `RecursiveRef` /
+/// `DeclPlaceholder`), a `Recursive` cycle back-edge, or makes no
+/// progress, the bridge keeps the original `IndexedAccess` / `KeyOf` shell
+/// (matching the pre-bridge carrier-publication behaviour for the cases
+/// the reducer cannot yet resolve — open `TypeParam` operands,
+/// index-signature lookups, etc.) rather than publish a `semanticMiss`.
+///
+/// A FAULT-bearing carrier still PROPAGATES. The shared `ProjectPath`
+/// reducer can return a fault opaque (`AliasCycle` / `BudgetExceeded` /
+/// `UnstableState` / `UnsupportedIntrinsic` / `Other` /
+/// `ValueDomainMismatch`) as a `QueryResult::Value(Opaque(err))` rather
+/// than a `QueryResult::Error`; treating ALL `Opaque(_)` as a
+/// carrier-preserving miss (the original wildcard) would HIDE such a
+/// failed reduction behind a deferred `T[K]` / `keyof T` shell. So the
+/// `Opaque(err)` case is partitioned through the SAME
+/// [`classify_dispatch_error`] fault/miss split the rest of the resolver
+/// uses: a fault surfaces as `Err`, a non-fault preserves the carrier.
+pub(crate) fn classify_operator_reduction_step(
+    store: &crate::semantic_query_memo::SemanticGraphStore,
+    result: QueryResult<SemanticNodeId>,
+    carrier: SemanticNodeId,
+) -> Result<MaterializationStep, TypeResolutionRequestError> {
+    match result {
+        QueryResult::Value(next) => {
+            if next == carrier {
+                // No reduction (same shell) — keep the operator carrier.
+                return Ok(MaterializationStep::Stop(carrier));
+            }
+            // A reducer that returns its result as `Value(Opaque(err))` —
+            // partition the carrier on the fault/non-fault axis. A genuine
+            // FAULT propagates (never masked behind the operator shell); a
+            // non-fault miss preserves the carrier (never degrades to a
+            // `semanticMiss` terminal).
+            if let Some(SemanticNodeData::Opaque(err)) = store.node_data(next).as_deref() {
+                return match classify_dispatch_error(err, Some(carrier)) {
+                    Ok(_) => Ok(MaterializationStep::Stop(carrier)),
+                    Err(fault) => Err(fault),
+                };
+            }
+            Ok(MaterializationStep::Continue(next))
+        }
+        // A recursive back-edge is a cycle, not a reduction: preserve the
+        // operator carrier rather than chase the cycle node.
+        QueryResult::Recursive(_) => Ok(MaterializationStep::Stop(carrier)),
+        QueryResult::Error(err) => match classify_dispatch_error(&err, Some(carrier)) {
+            Ok(_) => Ok(MaterializationStep::Stop(carrier)),
             Err(fault) => Err(fault),
         },
     }

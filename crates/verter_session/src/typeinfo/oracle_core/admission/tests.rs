@@ -71,11 +71,36 @@ fn bare_ref(name: &str) -> TypeExpr {
     }
 }
 
+/// A contributor whose body is NOT a carve-out shape (or whose carve-out root is
+/// left UNBOUND). Used for every non-carve-out guard — `carve_out_root_def` is
+/// `None`, which for a carve-out shape means "root did not bind same-file" and
+/// for a non-carve-out shape is simply unused.
 fn contributor(raw: RawSourceSurface, body: TypeExpr) -> SourceContributor {
     SourceContributor {
         ordinal: 0,
+        def_canonical: "/fixtures/clean.ts".to_string(),
         raw_surface: raw,
         lowered_body: body,
+        carve_out_root_def: None,
+    }
+}
+
+/// A carve-out contributor whose root `Ref` is stamped as resolving to
+/// `root_def` — the source walk's same-file binding. Passing the SAME file as
+/// `def_canonical` models a provably-same-file root (admitted); a DIFFERENT file
+/// models an imported / cross-file root (rejected).
+fn carve_out_contributor(
+    raw: RawSourceSurface,
+    body: TypeExpr,
+    def_canonical: &str,
+    root_def: Option<&str>,
+) -> SourceContributor {
+    SourceContributor {
+        ordinal: 0,
+        def_canonical: def_canonical.to_string(),
+        raw_surface: raw,
+        lowered_body: body,
+        carve_out_root_def: root_def.map(str::to_string),
     }
 }
 
@@ -430,12 +455,15 @@ fn hover_capture_is_lossless_or_rejected() {
     );
 
     // A reject construct on the SOURCE side fails even though the hover is clean.
+    // `keyof <bare ref>` is now a source-ROOT carve-out shape (admitted), so the
+    // genuinely-rejected source fixture here is a CONDITIONAL — never a carve-out
+    // root, still rejected by the generic predicate.
     let bad_source = SourceWalkResult::Resolved {
-        contributors: vec![contributor(clean_surface(), lower("keyof T"))],
+        contributors: vec![contributor(clean_surface(), lower("A extends B ? C : D"))],
     };
     assert_eq!(
         admit_query("{ a: number }", &bad_source, SHALLOW),
-        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("keyof"))
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("conditional"))
     );
 }
 
@@ -457,5 +485,283 @@ fn shallow_hover_expansion_rejected() {
     assert_eq!(
         admit_query("{ a: number }", &ref_source, SHALLOW),
         AdmissionVerdict::Reject(RejectReason::ShallowHoverExpansion)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Source-ROOT carve-out (the operator-reduction admission rule). The carve-out
+// ADMITS exactly two operator-bodied ROOT shapes, and ONLY at the source-body
+// root; the generic `admit_type_expr`, the hover side, and the oracle-VALUE side
+// STILL reject `keyof` / indexed-access everywhere else (incl. every nested
+// position). Each guard discriminates: it ADMITs a genuine carve-out shape AND
+// REJECTs the specific still-rejected construct it names.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn source_root_carve_out_admits_the_two_shapes() {
+    // The same-file fixture both the declaration AND its carve-out root live in.
+    let same: &str = "/fixtures/keys.ts";
+    // A carve-out contributor whose root binds SAME-FILE.
+    let admit_root = |rhs: &str| {
+        admit_source_root(&carve_out_contributor(
+            clean_surface(),
+            lower(rhs),
+            same,
+            Some(same),
+        ))
+    };
+
+    // Shape 1: `keyof Root` (Root a bare same-file ref, empty args).
+    assert_eq!(
+        classify_source_root(&lower("keyof KeySource")),
+        SourceRootShape::KeyofBareRef
+    );
+    assert_eq!(admit_root("keyof KeySource"), AdmissionVerdict::Admit);
+
+    // Shape 2: `Root["a"]["b"]…` (every segment a string literal, bare-ref base).
+    assert_eq!(
+        classify_source_root(&lower("KeySource[\"nested\"][\"value\"]")),
+        SourceRootShape::StringLiteralIndexChain
+    );
+    assert_eq!(
+        admit_root("KeySource[\"nested\"][\"value\"]"),
+        AdmissionVerdict::Admit
+    );
+    // Single-hop shape 2 is also admitted.
+    assert_eq!(admit_root("KeySource[\"nested\"]"), AdmissionVerdict::Admit);
+
+    // The carve-out admits via the SOURCE-CONTRIBUTOR walk too (the path the
+    // generator's two-sided combiner takes): a clean raw surface + a carve-out
+    // root body whose root binds same-file ADMITs the contributor.
+    let keyof_contrib =
+        carve_out_contributor(clean_surface(), lower("keyof KeySource"), same, Some(same));
+    assert_eq!(
+        admit_source_contributor(&keyof_contrib),
+        AdmissionVerdict::Admit
+    );
+    let chain_contrib = carve_out_contributor(
+        clean_surface(),
+        lower("KeySource[\"nested\"][\"value\"]"),
+        same,
+        Some(same),
+    );
+    assert_eq!(
+        admit_source_contributor(&chain_contrib),
+        AdmissionVerdict::Admit
+    );
+}
+
+#[test]
+fn source_root_carve_out_rejects_imported_or_unresolved_root() {
+    // The carve-out enforces SAME-FILE root identity, NOT just structure.
+    // A structurally-valid `keyof Imported` / `Imported["x"]` whose root resolves
+    // to ANOTHER file (an import) is NOT a same-file carve-out and must REJECT
+    // through the generic predicate (which rejects the bare operator). A root that
+    // did not bind at all (`None` stamp) likewise rejects.
+    //
+    // DISCRIMINATING: a carve-out that checked STRUCTURE ONLY — admitting the
+    // shape without resolving the root — would wrongly ADMIT these. The
+    // same-file identity check is what rejects them.
+    let decl_file = "/fixtures/consumer.ts";
+    let other_file = "/fixtures/leaf.ts";
+
+    // (a) `keyof Imported` — root resolves to a DIFFERENT file → reject as keyof.
+    let keyof_imported = carve_out_contributor(
+        clean_surface(),
+        lower("keyof Imported"),
+        decl_file,
+        Some(other_file),
+    );
+    assert_eq!(
+        admit_source_root(&keyof_imported),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("keyof")),
+        "an imported `keyof` root is not a same-file carve-out"
+    );
+    assert_eq!(
+        admit_source_contributor(&keyof_imported),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("keyof"))
+    );
+
+    // (b) `Imported["x"]` — root resolves to a DIFFERENT file → reject as
+    //     indexed-access.
+    let indexed_imported = carve_out_contributor(
+        clean_surface(),
+        lower("Imported[\"x\"]"),
+        decl_file,
+        Some(other_file),
+    );
+    assert_eq!(
+        admit_source_root(&indexed_imported),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("indexed-access")),
+        "an imported indexed-access root is not a same-file carve-out"
+    );
+
+    // (c) Root did NOT bind (`None` stamp) → reject, even with a carve-out shape.
+    let unbound = carve_out_contributor(clean_surface(), lower("keyof Imported"), decl_file, None);
+    assert_eq!(
+        admit_source_root(&unbound),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("keyof")),
+        "an unresolved carve-out root rejects"
+    );
+
+    // (d) Negative control: the SAME body with a SAME-FILE root ADMITs — proving
+    //     the reject in (a)/(c) is attributable to the cross-file/unbound root,
+    //     not to the shape.
+    let keyof_same = carve_out_contributor(
+        clean_surface(),
+        lower("keyof Imported"),
+        decl_file,
+        Some(decl_file),
+    );
+    assert_eq!(admit_source_root(&keyof_same), AdmissionVerdict::Admit);
+}
+
+#[test]
+fn source_root_carve_out_rejects_every_still_rejected_shape() {
+    // The carve-out NEVER admits these; each defers to the generic predicate and
+    // rejects with its specific reason.
+    let cases: &[(&str, RejectReason)] = &[
+        // Numeric index key — not a string literal.
+        (
+            "KeySource[42]",
+            RejectReason::DeferredConstruct("indexed-access"),
+        ),
+        // `symbol` index key — not a string literal.
+        (
+            "KeySource[symbol]",
+            RejectReason::DeferredConstruct("indexed-access"),
+        ),
+        // Union index key — not a single string literal.
+        (
+            "KeySource[\"a\" | \"b\"]",
+            RejectReason::DeferredConstruct("indexed-access"),
+        ),
+        // `T[keyof T]` value-union lookup — the index is a `keyof`, not a literal.
+        (
+            "KeySource[keyof KeySource]",
+            RejectReason::DeferredConstruct("indexed-access"),
+        ),
+        // A type-argument-carrying root on the object side (`NonNullable<…>[…]`)
+        // — the base is not a bare empty-args ref.
+        (
+            "NonNullable<KeySource>[\"value\"]",
+            RejectReason::DeferredConstruct("indexed-access"),
+        ),
+        // A nested operator body (`{ x: keyof T }`) is NOT a carve-out root; the
+        // generic predicate walks the object and rejects the nested `keyof`.
+        (
+            "{ x: keyof KeySource }",
+            RejectReason::DeferredConstruct("keyof"),
+        ),
+        // `keyof Root<Arg>` — a type-arg-carrying keyof operand is not the bare
+        // ref shape 1 requires; falls through to the keyof reject.
+        (
+            "keyof Foo<string>",
+            RejectReason::DeferredConstruct("keyof"),
+        ),
+        // Other deferred operator roots stay rejected verbatim.
+        (
+            "A extends B ? C : D",
+            RejectReason::DeferredConstruct("conditional"),
+        ),
+        (
+            "{ [K in keyof T]: T[K] }",
+            RejectReason::DeferredConstruct("mapped"),
+        ),
+        (
+            "`a${string}`",
+            RejectReason::DeferredConstruct("template-literal"),
+        ),
+    ];
+    for (text, want) in cases {
+        assert_eq!(
+            classify_source_root(&lower(text)),
+            SourceRootShape::NotCarveOut,
+            "`{text}` must NOT be a carve-out root"
+        );
+        // A NotCarveOut body rejects through the generic predicate regardless of
+        // any root stamp; wrap it in a plain (no-root) contributor.
+        assert_eq!(
+            admit_source_root(&contributor(clean_surface(), lower(text))),
+            AdmissionVerdict::Reject(want.clone()),
+            "expected REJECT({want:?}) for source root `{text}`"
+        );
+    }
+}
+
+#[test]
+fn source_root_typeof_and_infer_bodies_rejected() {
+    // The source-root reject matrix must also pin `typeof` and `Infer` bodies:
+    // neither is a carve-out shape, and each must reject with its EXACT reason
+    // through the generic predicate. Without these the guard would not
+    // discriminate against a future over-admission of either construct at the
+    // source root.
+
+    // `typeof x` lowers to `TypeExpr::TypeOf` — NotCarveOut, rejected as typeof.
+    let typeof_body = lower("typeof x");
+    assert_eq!(
+        classify_source_root(&typeof_body),
+        SourceRootShape::NotCarveOut,
+        "`typeof x` is not a carve-out root"
+    );
+    assert_eq!(
+        admit_source_root(&contributor(clean_surface(), typeof_body)),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("typeof"))
+    );
+
+    // A bare `infer U` cannot appear in valid source (it only occurs inside a
+    // conditional's extends clause), so construct the lowered `TypeExpr::Infer`
+    // directly — the predicate must reject it defensively at the source root.
+    let infer_body = TypeExpr::Infer {
+        name: "U".to_string(),
+    };
+    assert_eq!(
+        classify_source_root(&infer_body),
+        SourceRootShape::NotCarveOut,
+        "`infer U` is not a carve-out root"
+    );
+    assert_eq!(
+        admit_source_root(&contributor(clean_surface(), infer_body)),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("infer"))
+    );
+}
+
+#[test]
+fn carve_out_does_not_leak_into_generic_hover_or_value_paths() {
+    // The generic recursive predicate (the oracle-VALUE path) STILL rejects
+    // `keyof` / indexed-access — the carve-out is source-ROOT only.
+    assert_eq!(
+        admit_type_expr(&lower("keyof KeySource")),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("keyof"))
+    );
+    assert_eq!(
+        admit_type_expr(&lower("KeySource[\"nested\"][\"value\"]")),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("indexed-access"))
+    );
+
+    // The HOVER side STILL rejects `keyof` / indexed-access (a hover-lowered
+    // `TSTypeOperatorType(Keyof)` / `TSIndexedAccessType` is unchanged).
+    assert_eq!(
+        admit_hover_text("keyof KeySource"),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("keyof"))
+    );
+    assert_eq!(
+        admit_hover_text("KeySource[\"value\"]"),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("indexed-access"))
+    );
+
+    // A NESTED carve-out-looking shape inside an object body is NOT admitted: the
+    // source-root carve-out fires only at the top, so an object whose member is an
+    // indexed access still rejects through the generic predicate. (Even stamped
+    // with a same-file root, the object body is NotCarveOut so the stamp is
+    // unused.)
+    assert_eq!(
+        admit_source_root(&carve_out_contributor(
+            clean_surface(),
+            lower("{ a: KeySource[\"nested\"][\"value\"] }"),
+            "/fixtures/keys.ts",
+            Some("/fixtures/keys.ts"),
+        )),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("indexed-access"))
     );
 }

@@ -2595,8 +2595,8 @@ is created. Both tables live in this one module.
 
 ### 10.1 Two SEPARATE tables: the binding 362 vs additional coverage
 
-The binding manifest total is EXACTLY 362 test-site rows (post-lift: 358 `Ignored` +
-4 `Lifted`). Full-parity coverage adds a
+The binding manifest total is EXACTLY 362 test-site rows (post-lift: 355 `Ignored` +
+7 `Lifted`). Full-parity coverage adds a
 CLOSED set of exactly 7 coverage-only `AdditionalProofRow`s = the 6 JSX no-new-key
 submatrix rows (owned by `U2.JSX_FOUNDATIONS`) + the 1 mapped companion
 `mapped_modifier_minus_optional_preserves_explicit_undefined_on_required_property`
@@ -2605,7 +2605,7 @@ incoherent if the binding 362 and the additional fixtures share ONE table and ON
 `EXPECTED_TOTAL_IGNORED_COUNT` — additional rows would either break the exact 362
 count/bijection or be untracked. The ledger therefore SPLITS into two tables:
 `IgnoredTestRow` holds EXACTLY 362 test-site rows total (count-guarded at 362) — post-lift
-358 carry `status: Ignored` (bijective with the live source `#[ignore]`s) and 4 carry
+355 carry `status: Ignored` (bijective with the live source `#[ignore]`s) and 7 carry
 `status: Lifted` (no live `#[ignore]`, oracle-backed) — and a SEPARATE coverage-only `AdditionalProofRow`
 table holds EXACTLY the 7 closed coverage rows above. `AdditionalProofRow`s are EXCLUDED
 from the ignored-count + bijection guards (they are not source-`#[ignore]` test sites, so
@@ -2617,7 +2617,7 @@ existing ignored row stays in that `IgnoredTestRow` (it is not duplicated); only
 genuinely NEW fixtures above are `AdditionalProofRow`s.
 
 ```rust
-struct IgnoredTestRow {              // EXACTLY 362 test-site rows total (count-guarded): 358 Ignored (bijective with source #[ignore]s) + 4 Lifted; 13 fields
+struct IgnoredTestRow {              // EXACTLY 362 test-site rows total (count-guarded): 355 Ignored (bijective with source #[ignore]s) + 7 Lifted; 13 fields
     file: &'static str,
     function: &'static str,
     substrate: TargetSubstrate,
@@ -2895,8 +2895,8 @@ fixes the single owning block. The per-block counts (summing to 362) are:
 |---|---:|---|---:|
 | `U2.RELATION_INFER` | 20 | `U6.NARROW_*` (8 sub-blocks, below) | 104 |
 | `U2.UTILITIES` | 40 | `U6.PREDICATE_ASSERTION` | 3 |
-| `U2.INDEXED_ACCESS` | 14 | `U6.CALL_RESOLVE` | 21 |
-| `U2.MAPPED_TEMPLATE` | 18 | `U6.CONTEXTUAL_CALLBACK` | 15 |
+| `U2.INDEXED_ACCESS` | 13 | `U6.CALL_RESOLVE` | 21 |
+| `U2.MAPPED_TEMPLATE` | 19 | `U6.CONTEXTUAL_CALLBACK` | 15 |
 | `U2.QUERY_VALUE_DOMAIN` | 2 | `U6.VALUE_INFERENCE` | 1 |
 | `U2.CLASS_SURFACES` | 52 | `U6.ASYNC_GENERATOR` | 1 |
 | `U2.ENUMS` | 7 | `U6.CROSS_FILE` | 6 |
@@ -3022,7 +3022,7 @@ The complete partition (each entry `file::function — substrate`):
 - `variadic_tuples.rs::variadic_tuple_tail_of_sample_resolves_to_remaining_tuple` — `TupleFeatures`
 - `variadic_tuples.rs::variadic_tuple_variadic_function_with_explicit_type_args_concatenates_tuples` — `TupleFeatures`
 
-**`U2.INDEXED_ACCESS`** (14 rows):
+**`U2.INDEXED_ACCESS`** (13 rows):
 
 - `deep_path.rs::deep_path_projection_resolves_terminal_without_losing_shape` — `PathProjection`
 - `index_signatures.rs::index_signatures_dual_numeric_key_returns_numeric_signature_value` — `IndexSignatures`
@@ -3036,10 +3036,9 @@ The complete partition (each entry `file::function — substrate`):
 - `union_key_access.rs::union_key_access_two_key_union_projects_member_type_union` — `UnionDistribution`
 - `wide_deep.rs::wide_deep_flag_active_resolves_boolean_terminal` — `PathProjection`
 - `wide_deep.rs::wide_deep_projected_target_resolves_terminal_pick_intersection` — `PathProjection`
-- `wide_deep.rs::wide_deep_projected_token_resolves_literal_union` — `PathProjection`
 - `wide_deep.rs::wide_deep_row_flags_resolve_partial_record_surface` — `PathProjection`
 
-**`U2.MAPPED_TEMPLATE`** (18 rows):
+**`U2.MAPPED_TEMPLATE`** (19 rows):
 
 - `mapped_modifiers.rs::mapped_modifier_as_never_filter_drops_matching_keys` — `MappedTypes`
 - `mapped_modifiers.rs::mapped_modifier_as_rename_capitalize_rewrites_keys` — `MappedTypes`
@@ -3059,6 +3058,7 @@ The complete partition (each entry `file::function — substrate`):
 - `typescript_rules.rs::typescript_rules_template_intrinsic_evaluates_union` — `TypeScriptRules`
 - `utility_edge.rs::utility_edge_readonly_required_composes_modifiers` — `UtilityComposition`
 - `utility_edge.rs::utility_edge_required_strips_optional_markers` — `UtilityComposition`
+- `wide_deep.rs::wide_deep_projected_token_resolves_literal_union` — `PathProjection`
 
 **`U2.CLASS_SURFACES`** (52 rows):
 
@@ -3407,7 +3407,7 @@ The complete partition (each entry `file::function — substrate`):
 ### 10.5 The exact-362 count and bijection
 
 `EXPECTED_TOTAL_IGNORED_COUNT` is ALWAYS exactly `count(IgnoredTestRow where status ==
-Ignored)`; it is 358 after the first 4 lifts (362 rows total − 4 `Lifted`). It is NOT a frozen
+Ignored)`; it is 355 after the 7 lifts (362 rows total − 7 `Lifted`). It is NOT a frozen
 constant that lags the row states — it is the
 live count of `Ignored` `IgnoredTestRow`s, and the block branch that changes how many are
 `Ignored` updates it IN THE SAME BRANCH (and so in the same squash-merge) so the count guard
@@ -3417,15 +3417,16 @@ never observes a disagreement in any committed state. The count and bijection ar
 exactly equal `IgnoredTestRow`s with `status == Ignored`, and that set must also exactly equal
 `EXPECTED_TOTAL_IGNORED_COUNT`.
 
-> **Realized lifted-lifecycle state (4 rows lifted):** the `IgnoredTestRow` table holds 362 rows
-> total, of which 4 carry `status: IgnoreStatus::Lifted { block_id }` (the two index-signature
-> publication rows at `U2.QUERY_VALUE_DOMAIN` + the two built-in modifier-utility rows at
-> `U2.MAPPED_TEMPLATE`) and 358 carry `status: IgnoreStatus::Ignored`. The generator emits each
-> row's status (it unions live `#[ignore]` discovery with the lifted-row overrides); the count
-> guard pins the live-ignore count at 358. The lifted-row GENERATION + validation path — a lifted
-> row drops its `#[ignore]`, its status becomes `Lifted { block_id }`, and its body becomes the
-> registry-keyed `oracle::run_row` driver call proven against a checked-in tsgo snapshot — is
-> exercised by those four lifts. The accounting below is the contract every further lift honours.
+> **Realized lifted-lifecycle state (7 rows lifted):** the `IgnoredTestRow` table holds 362 rows
+> total, of which 7 carry `status: IgnoreStatus::Lifted { block_id }` (the two index-signature
+> publication rows at `U2.QUERY_VALUE_DOMAIN` + the two built-in modifier-utility rows + the
+> wide/deep literal-union projection at `U2.MAPPED_TEMPLATE` + the two terminal indexed-access
+> projections at `U2.INDEXED_ACCESS`) and 355 carry `status: IgnoreStatus::Ignored`. The generator
+> emits each row's status (it unions live `#[ignore]` discovery with the lifted-row overrides); the
+> count guard pins the live-ignore count at 355. The lifted-row GENERATION + validation path — a
+> lifted row drops its `#[ignore]`, its status becomes `Lifted { block_id }`, and its body becomes
+> the registry-keyed `oracle::run_row` driver call proven against a checked-in tsgo snapshot — is
+> exercised by those seven lifts. The accounting below is the contract every further lift honours.
 
 The accounting is a single coupled edit on the block's branch:
 

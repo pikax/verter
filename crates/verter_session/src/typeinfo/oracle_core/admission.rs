@@ -66,7 +66,7 @@ use oxc_ast::ast::{
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
-use verter_type_expr::{MemberVisibility, ObjectMember, PrimitiveName, TypeExpr};
+use verter_type_expr::{LiteralValue, MemberVisibility, ObjectMember, PrimitiveName, TypeExpr};
 
 // The source-side raw-fact data model is the PRODUCTION parse-time capture
 // (in `verter_parser`, re-exported through `verter_compiler`).
@@ -96,11 +96,24 @@ use super::normalize::ProjectionModeKind;
 pub(crate) struct SourceContributor {
     /// 0-based source/binder position in the merge group.
     pub(crate) ordinal: u16,
+    /// The canonical file this contributor's declaration is DEFINED in (the
+    /// source-walk's binding target). The source-ROOT carve-out's same-file
+    /// check compares the carve-out root's resolved file against THIS.
+    pub(crate) def_canonical: String,
     /// The retained parse-time raw-fact record (erased facts).
     pub(crate) raw_surface: RawSourceSurface,
     /// The already-lowered `ShallowTypeSymbol.body` / `TypeDeclInfo.body` — the
     /// non-erased rejectable variants.
     pub(crate) lowered_body: TypeExpr,
+    /// For a carve-out-shaped lowered body (`keyof Root` / `Root["a"]["b"]…`),
+    /// the canonical file the root `Ref` resolves to through the shared
+    /// resolver — stamped by [`super::source_walk`]. `None` when the body is
+    /// NOT a carve-out shape OR the root did not bind to a declaration. The
+    /// source-ROOT carve-out admits an operator body ONLY when this equals
+    /// [`Self::def_canonical`] (the root is provably same-file); an imported /
+    /// cross-file / unresolved root falls through to the generic predicate,
+    /// which rejects the bare operator.
+    pub(crate) carve_out_root_def: Option<String>,
 }
 
 /// The result of resolving a `SourceLocator` to its defining contributor(s).
@@ -170,8 +183,8 @@ pub(crate) enum RejectReason {
     /// Optional / labelled / `| undefined` tuple element.
     TupleElementShape,
     /// A deferred construct (`Conditional` / `Mapped` / `TemplateLiteral` /
-    /// `Infer` / `KeyOf` / `IndexedAccess` / `TypeOf`) outside a spike-proven
-    /// mode.
+    /// `Infer` / `KeyOf` / `IndexedAccess` / `TypeOf`) outside the source-root
+    /// carve-out that admits the two operator shapes.
     DeferredConstruct(&'static str),
     /// `RecursiveRef` — a self-referential surface cannot be a finite hover.
     RecursiveRef,
@@ -211,7 +224,7 @@ pub(crate) fn admit_source_contributor(contributor: &SourceContributor) -> Admis
     if !raw.is_admit() {
         return raw;
     }
-    admit_lowered_body(&contributor.lowered_body)
+    admit_source_root(contributor)
 }
 
 /// Walk every contributor of a resolved source walk; admission requires ALL
@@ -300,12 +313,166 @@ pub(crate) fn admit_raw_surface(raw: &RawSourceSurface) -> AdmissionVerdict {
     AdmissionVerdict::Admit
 }
 
-/// The lowered-body half of source admission — catches the NON-erased rejectable
-/// `TypeExpr` variants AND the `any`/`never`/`Unknown` backstops. Shares the
-/// recursive `TypeExpr` predicate with the oracle-value backstop.
+// ===========================================================================
+// Source-ROOT carve-out (the operator-reduction admission rule)
+// ===========================================================================
+//
+// `admit_type_expr` rejects `KeyOf` / `IndexedAccess` UNIVERSALLY — on the hover
+// side, on the oracle-VALUE side, and at every NESTED position. The source-root
+// carve-out admits exactly TWO operator-bodied shapes, and ONLY when they form
+// the ROOT of a queried source DECLARATION body (never nested, never a hover,
+// never an oracle value):
+//
+//   1. `keyof Root`            — `Root` a bare unqualified same-file `Ref`,
+//                                EMPTY type args.
+//   2. `Root["a"]["b"]…`       — `Root` a bare unqualified same-file `Ref`,
+//                                EMPTY type args, EVERY index segment a STRING
+//                                LITERAL.
+//
+// The carve-out is gated by THREE independent checks, none sufficient alone:
+//
+//   (a) STRUCTURE (here, offline-testable): the body is one of the two shapes
+//       above with a bare, UNQUALIFIED `Ref` root and (shape 2) string-literal
+//       segments — `classify_source_root` / `is_bare_unqualified_ref`.
+//   (b) SAME-FILE root identity (`admit_source_root`): the root `Ref` must
+//       PROVABLY resolve to a declaration in the SAME file as the contributor.
+//       This is NOT approximated structurally — the source walk resolves the
+//       root through the shared resolver and stamps `carve_out_root_def`;
+//       `admit_source_root` admits ONLY when it equals `def_canonical`. An
+//       IMPORTED / cross-file / unresolved root is rejected. (The walk's
+//       transitive-contributor follow is `typeof`-only — it does NOT follow a
+//       `keyof Root` / `Root["x"]` root — so without this gate an imported root
+//       would slip through; the gate closes that hole.)
+//   (c) RESOLVER PREFLIGHT (`gen::preflight_reduces_clean`): Verter's own
+//       resolver must reduce the query to a clean, operator-free value (a
+//       string-literal key union for shape 1, a named-member-resolved result
+//       for shape 2). The generator runs this before a snapshot is written so a
+//       tsgo snapshot can never mask an unresolved indexed/mapped shell.
+//
+// A non-carve-out body falls through to `admit_type_expr` VERBATIM, so every
+// previously-rejected source body still rejects identically.
+
+/// Which (if any) source-ROOT carve-out shape a contributor's lowered body is.
 #[allow(dead_code)]
-pub(crate) fn admit_lowered_body(body: &TypeExpr) -> AdmissionVerdict {
-    admit_type_expr(body)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceRootShape {
+    /// `keyof Root` — `Root` a bare unqualified `Ref` with empty type args.
+    KeyofBareRef,
+    /// `Root["a"]["b"]…` — a string-literal index chain bottoming out at a bare
+    /// unqualified `Ref` with empty type args.
+    StringLiteralIndexChain,
+    /// Not a carve-out root — the generic predicate decides.
+    NotCarveOut,
+}
+
+/// Classify a contributor's lowered body against the two source-ROOT carve-out
+/// shapes — PURE structure, no resolution. `Root` must be a bare, UNQUALIFIED
+/// `Ref` with EMPTY type args (a `Ref` carrying type args — e.g.
+/// `NonNullable<Foo>` — or a qualified name is NOT a carve-out root); every index
+/// segment of shape 2 must be a STRING LITERAL (a numeric / `symbol` / union /
+/// `keyof` segment is NOT). This recognises the SHAPE only — the SAME-FILE root
+/// identity is enforced separately by [`admit_source_root`].
+#[allow(dead_code)]
+pub(crate) fn classify_source_root(body: &TypeExpr) -> SourceRootShape {
+    match body {
+        TypeExpr::KeyOf(inner) if is_bare_unqualified_ref(inner) => SourceRootShape::KeyofBareRef,
+        TypeExpr::IndexedAccess { .. } if is_string_literal_index_chain(body) => {
+            SourceRootShape::StringLiteralIndexChain
+        }
+        _ => SourceRootShape::NotCarveOut,
+    }
+}
+
+/// The source-ROOT admission entry: ADMIT a recognised carve-out root ONLY when
+/// its root `Ref` provably resolves SAME-FILE; otherwise defer to the generic
+/// predicate VERBATIM (so non-carve-out bodies — a numeric / union /
+/// `keyof`-segment indexed access, a type-arg-carrying root, any nested operator
+/// — AND a structurally-valid carve-out whose root is IMPORTED / cross-file /
+/// unresolved all reject exactly as the bare operator would).
+///
+/// Same-file is NOT approximated: the source walk resolves the root `Ref`
+/// through the shared resolver and stamps the resolved file as
+/// [`SourceContributor::carve_out_root_def`]; admission requires it to equal the
+/// contributor's [`SourceContributor::def_canonical`]. A `None` stamp (root did
+/// not bind) or a different file is NOT a same-file carve-out.
+#[allow(dead_code)]
+pub(crate) fn admit_source_root(contributor: &SourceContributor) -> AdmissionVerdict {
+    let body = &contributor.lowered_body;
+    match classify_source_root(body) {
+        SourceRootShape::KeyofBareRef | SourceRootShape::StringLiteralIndexChain => {
+            match contributor.carve_out_root_def.as_deref() {
+                Some(root_def) if root_def == contributor.def_canonical => AdmissionVerdict::Admit,
+                // Imported / cross-file / unresolved root → NOT a same-file
+                // carve-out. Fall through to the generic predicate, which
+                // rejects the bare `keyof` / indexed-access operator.
+                _ => admit_type_expr(body),
+            }
+        }
+        SourceRootShape::NotCarveOut => admit_type_expr(body),
+    }
+}
+
+/// The root `Ref` NAME of a carve-out-shaped body (the operand of `keyof Root`,
+/// or the innermost object of a `Root["a"]["b"]…` string-literal chain) — the
+/// name the source walk resolves to enforce same-file identity. Returns `None`
+/// for a non-carve-out body. PURE structure (mirrors [`classify_source_root`]),
+/// so the walk and the classifier never disagree on what the root is.
+#[allow(dead_code)]
+pub(crate) fn carve_out_root_ref_name(body: &TypeExpr) -> Option<&str> {
+    match body {
+        TypeExpr::KeyOf(inner) => bare_unqualified_ref_name(inner),
+        TypeExpr::IndexedAccess { .. } => {
+            let mut cur = body;
+            loop {
+                match cur {
+                    TypeExpr::IndexedAccess { object, index } => {
+                        if !matches!(index.as_ref(), TypeExpr::Literal(LiteralValue::String(_))) {
+                            return None;
+                        }
+                        cur = object;
+                    }
+                    other => return bare_unqualified_ref_name(other),
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The NAME of a bare, UNQUALIFIED `Ref` with EMPTY type args — `Some(name)` for
+/// the carve-out root shape, `None` otherwise. A qualified name (`A.B`, which
+/// lowers to a dotted `Ref` name) or a type-argument-carrying `Ref`
+/// (`NonNullable<Foo>`) is NOT a carve-out root.
+fn bare_unqualified_ref_name(expr: &TypeExpr) -> Option<&str> {
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() && !name.is_empty() && !name.contains('.') => {
+            Some(name.as_ref())
+        }
+        _ => None,
+    }
+}
+
+/// A bare, UNQUALIFIED `Ref` with EMPTY type args — the carve-out root STRUCTURE
+/// predicate (same-file identity is enforced separately by [`admit_source_root`]).
+fn is_bare_unqualified_ref(expr: &TypeExpr) -> bool {
+    bare_unqualified_ref_name(expr).is_some()
+}
+
+/// Whether `expr` is an `IndexedAccess` chain whose EVERY index segment is a
+/// STRING LITERAL and whose innermost object is a bare unqualified `Ref`. A
+/// single non-string-literal segment, or a non-`Ref` / type-arg-carrying base,
+/// fails.
+fn is_string_literal_index_chain(expr: &TypeExpr) -> bool {
+    match expr {
+        TypeExpr::IndexedAccess { object, index } => {
+            matches!(index.as_ref(), TypeExpr::Literal(LiteralValue::String(_)))
+                && is_string_literal_index_chain(object)
+        }
+        other => is_bare_unqualified_ref(other),
+    }
 }
 
 /// The recursive positive-allowlist predicate over a `TypeExpr` (the lowered

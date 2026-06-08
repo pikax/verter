@@ -27,8 +27,9 @@
 //!    (`snapshot::assemble_snapshot_document`) and write it.
 //!
 //! [`run_oracle_gen`] is the single `pub` entry the `src/bin/oracle_gen` binary
-//! invokes. It walks the oracle-query-spec registry (the 4 lifted rows — two
-//! index-signature publications + two built-in modifier utilities) and writes one
+//! invokes. It walks the oracle-query-spec registry (the 7 lifted rows — two
+//! index-signature publications + two built-in modifier utilities + three U2
+//! IndexedAccess-reduction carve-outs) and writes one
 //! snapshot per spec. The per-spec pipeline ([`generate_snapshot`]) is also
 //! exercised end-to-end against the pinned tsgo over a SYNTHETIC spec by
 //! `gen_tests::oracle_gen_is_idempotent`.
@@ -124,6 +125,12 @@ pub enum GenError {
     Io(String),
     /// The async runtime could not be built.
     Runtime(String),
+    /// The reducer preflight failed: Verter's OWN resolver did not produce
+    /// a clean, operator-free reduced value for the spec's query (an opaque miss,
+    /// a carrier / operator shell, or an `Unknown`/`any`/`never`). The snapshot is
+    /// NOT written — admitting a source root requires the resolver to actually
+    /// reduce it, so no snapshot can MASK an unresolved indexed/mapped shell.
+    PreflightUnclean(String),
 }
 
 /// The generation config: where the vendored corpus lives, where snapshots are
@@ -161,7 +168,7 @@ impl GenConfig {
 }
 
 /// Generate + write every registry snapshot, returning the count written (one
-/// per `ORACLE_QUERY_SPECS` entry — the 4 lifted rows). The per-spec body
+/// per `ORACLE_QUERY_SPECS` entry — the 7 lifted rows). The per-spec body
 /// ([`generate_snapshot`]) is additionally exercised against real tsgo by the
 /// idempotence test.
 pub fn run_oracle_gen() -> Result<usize, GenError> {
@@ -203,6 +210,12 @@ pub(crate) async fn generate_snapshot(
     spec: &QuerySpec,
     config: &GenConfig,
 ) -> Result<Value, GenError> {
+    // (0) reducer preflight — BEFORE driving tsgo or writing anything, prove
+    //     Verter's own resolver reduces the query to a clean, operator-free
+    //     value. Keeps the source-root carve-out sound: a snapshot is never
+    //     written for a row whose resolver result is an unresolved shell.
+    preflight_reduces_clean(spec)?;
+
     // (1) The probe — same-file append for the two append-model helpers.
     let synth = synthesize_probe(spec)?;
 
@@ -451,6 +464,82 @@ fn source_side_walk(spec: &QuerySpec) -> SourceWalkResult {
         symbol_space: to_walk_space(spec.source_locator.symbol_space),
     };
     resolve_source_declarations(&ctx, &locator)
+}
+
+/// The reducer PREFLIGHT (`docs/arch/u0-oracle-harness-design.md` §Q2 —
+/// "reducer-preflight before writing carve-out snapshots"). Before a snapshot is
+/// assembled, run the SPEC'S query through Verter's ONE shared resolver in the
+/// declared projection mode and require the projected result is CLEAN: NO opaque
+/// miss (the resolver bound a node), NO carrier / operator shell (the node
+/// projects to a `TypeExpr`), and the value passes the SAME positive-allowlist
+/// predicate the oracle VALUE must clear (`admit_type_expr`: operator-free, no
+/// `Unknown`/`any`/`never`). This is the soundness gate that lets the source-root
+/// carve-out admit `keyof Root` / `Root["a"]["b"]...` ONLY when Verter actually
+/// reduces them — a tsgo snapshot can never mask an unresolved indexed/mapped
+/// shell. Adds NO tsgo (Verter resolution only) and NO second resolution engine
+/// (the same `resolve_named_symbol_with_audit` every consumer rides).
+fn preflight_reduces_clean(spec: &QuerySpec) -> Result<(), GenError> {
+    let (symbol, mode) = match &spec.query_helper {
+        QueryHelperSpec::ResolveExpr {
+            symbol,
+            type_args,
+            projection_mode,
+        } => {
+            if !type_args.is_empty() {
+                // A parameterized query needs the versioned type-argument printer;
+                // no carve-out row carries one — defer loudly rather than preflight
+                // a partial.
+                return Err(GenError::PreflightUnclean(format!(
+                    "{}::{}: parameterized ResolveExpr preflight is deferred",
+                    spec.row_file, spec.row_function
+                )));
+            }
+            (*symbol, resolver_mode_of(*projection_mode))
+        }
+        // `ShallowSurfaceExpr` / `EvaluateExpr` do not drive a named-symbol
+        // resolution and no carve-out row uses them; their reducer-cleanliness is
+        // covered by the two-sided admission, so the preflight is a pass-through.
+        QueryHelperSpec::ShallowSurfaceExpr { .. } | QueryHelperSpec::EvaluateExpr { .. } => {
+            return Ok(())
+        }
+    };
+
+    let host = build_source_host(spec);
+    let (outcome, _record) = host
+        .resolve_named_symbol_with_audit(spec.primary_canonical, symbol, &[], Some(mode))
+        .into_parts();
+    let node = outcome.ok().flatten().ok_or_else(|| {
+        GenError::PreflightUnclean(format!(
+            "{}::{}: resolver produced an opaque miss (no bound node) for `{symbol}`",
+            spec.row_file, spec.row_function
+        ))
+    })?;
+    let projected = host.project_node_to_type_expr(node).ok_or_else(|| {
+        GenError::PreflightUnclean(format!(
+            "{}::{}: resolved node did not project to a TypeExpr (carrier/operator shell)",
+            spec.row_file, spec.row_function
+        ))
+    })?;
+    match admission::admit_type_expr(&projected) {
+        AdmissionVerdict::Admit => Ok(()),
+        verdict => Err(GenError::PreflightUnclean(format!(
+            "{}::{}: reduced value is not operator-free/clean ({verdict:?}): {projected:?}",
+            spec.row_file, spec.row_function
+        ))),
+    }
+}
+
+/// Map the registry's `ProjectionModeSpec` onto the resolver's `ProjectionMode`
+/// (the mode the preflight resolves the query in — the same mapping the
+/// consumption driver's `map_resolver_mode` uses).
+fn resolver_mode_of(mode: ProjectionModeSpec) -> crate::semantic_query::ProjectionMode {
+    use crate::semantic_query::ProjectionMode;
+    match mode {
+        ProjectionModeSpec::Shallow => ProjectionMode::Shallow,
+        ProjectionModeSpec::Navigate => ProjectionMode::Navigate,
+        ProjectionModeSpec::Expanded => ProjectionMode::Expanded,
+        ProjectionModeSpec::Skeleton => ProjectionMode::Skeleton,
+    }
 }
 
 /// Map the registry's `SymbolSpace` onto the resolver's raw-surface `SymbolSpace`

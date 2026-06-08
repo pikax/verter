@@ -19,7 +19,6 @@ pub(super) const SCOPE_TYPES: &str = include_str!("fixtures/scope.ts");
 pub(super) const FOOTPRINT_NEEDED: &str = include_str!("fixtures/footprint_needed.ts");
 pub(super) const FOOTPRINT_OWNER: &str = include_str!("fixtures/footprint_owner.ts");
 pub(super) const FOOTPRINT_UNUSED: &str = include_str!("fixtures/footprint_unused.ts");
-pub(super) const DEEP_PATH: &str = include_str!("fixtures/deep_path.ts");
 pub(super) const MENU_LIKE: &str = include_str!("fixtures/menu_like.ts");
 pub(super) const MESSAGE_LIST_LIKE: &str = include_str!("fixtures/message_list_like.ts");
 pub(super) const TABLE_LIKE: &str = include_str!("fixtures/table_like.ts");

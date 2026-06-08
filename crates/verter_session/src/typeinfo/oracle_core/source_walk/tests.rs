@@ -301,3 +301,200 @@ fn source_walk_cycle_rejected() {
         AdmissionVerdict::Reject(RejectReason::SourceUnresolvedOrCyclic)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Source-ROOT carve-out — the LIVE stamping → admission path. These drive the
+// REAL `resolve_source_declarations` walk (which stamps
+// `SourceContributor::carve_out_root_def` by resolving the operator root through
+// the shared resolver) and assert the two-sided admission over the result. They
+// discriminate against a broken live stamp: an imported / cross-file root that
+// the walk wrongly stamped same-file (or a structure-only carve-out that never
+// resolved the root) would ADMIT here instead of REJECT. The hand-built
+// `admit_source_root` unit guards (in `admission/tests.rs`) cover the admission
+// CHECK in isolation; these cover the live STAMPING that feeds it.
+// ---------------------------------------------------------------------------
+
+/// Same-file `keyof Root` — the `keyof` root is declared in the SAME fixture, so
+/// the live walk resolves it back to this file and stamps it same-file. The
+/// carve-out fires and the contributor ADMITs.
+#[test]
+fn source_root_carve_out_admits_same_file_keyof() {
+    let host = make_host();
+    let canonical = "/fixtures/carveout_keyof_same.ts";
+    upsert(
+        &host,
+        canonical,
+        "export type KeySource = { a: string; b: number };\n\
+         export type Keys = keyof KeySource;\n",
+    );
+    host.ensure_indexed_ready(canonical).expect("indexed");
+
+    let result = walk(&host, &type_locator(canonical, "Keys"));
+    let contributors = match &result {
+        SourceWalkResult::Resolved { contributors } => contributors,
+        other => panic!("expected Resolved, got {other:?}"),
+    };
+    assert_eq!(contributors.len(), 1, "a single alias is one contributor");
+    assert_eq!(contributors[0].def_canonical, canonical);
+    // The live walk resolved the `keyof` root `KeySource` through the shared
+    // resolver and stamped it as defined in THIS file.
+    assert_eq!(
+        contributors[0].carve_out_root_def.as_deref(),
+        Some(canonical),
+        "the live stamp must resolve the keyof root same-file"
+    );
+    assert_eq!(
+        admit_source_walk(&result),
+        AdmissionVerdict::Admit,
+        "a same-file keyof carve-out is admitted"
+    );
+}
+
+/// Same-file `Root["a"]["b"]` — the indexed-access root is declared in the SAME
+/// fixture, so the live walk stamps it same-file and the carve-out ADMITs.
+#[test]
+fn source_root_carve_out_admits_same_file_indexed_access() {
+    let host = make_host();
+    let canonical = "/fixtures/carveout_indexed_same.ts";
+    upsert(
+        &host,
+        canonical,
+        "export type KeySource = { nested: { value: string } };\n\
+         export type Pick = KeySource[\"nested\"][\"value\"];\n",
+    );
+    host.ensure_indexed_ready(canonical).expect("indexed");
+
+    let result = walk(&host, &type_locator(canonical, "Pick"));
+    let contributors = match &result {
+        SourceWalkResult::Resolved { contributors } => contributors,
+        other => panic!("expected Resolved, got {other:?}"),
+    };
+    assert_eq!(contributors.len(), 1);
+    assert_eq!(contributors[0].def_canonical, canonical);
+    assert_eq!(
+        contributors[0].carve_out_root_def.as_deref(),
+        Some(canonical),
+        "the live stamp must resolve the indexed-access root same-file"
+    );
+    assert_eq!(
+        admit_source_walk(&result),
+        AdmissionVerdict::Admit,
+        "a same-file indexed-access carve-out is admitted"
+    );
+}
+
+/// Imported `keyof Imported` — the `keyof` root is declared in ANOTHER file and
+/// reached through an import edge. The live walk resolves the root to the LEAF,
+/// so the stamp is cross-file (NOT same-file): the carve-out does not fire and
+/// the bare `keyof` REJECTS. This is the discriminating case: a live stamp that
+/// wrongly marked every root same-file would ADMIT here.
+#[test]
+fn source_root_carve_out_rejects_imported_keyof_root() {
+    let host = make_host();
+    let leaf = "/fixtures/carveout-keyof-leaf.ts";
+    let consumer = "/fixtures/carveout-keyof-consumer.ts";
+    upsert(
+        &host,
+        leaf,
+        "export type Imported = { a: string; b: number };\n",
+    );
+    upsert(
+        &host,
+        consumer,
+        "import { Imported } from './carveout-keyof-leaf';\n\
+         export type Keys = keyof Imported;\n",
+    );
+    host.ensure_indexed_ready(leaf).expect("leaf indexed");
+    host.ensure_indexed_ready(consumer)
+        .expect("consumer indexed");
+
+    let result = walk(&host, &type_locator(consumer, "Keys"));
+    let contributors = match &result {
+        SourceWalkResult::Resolved { contributors } => contributors,
+        other => panic!("expected Resolved, got {other:?}"),
+    };
+    assert_eq!(contributors.len(), 1);
+    // `Keys` is defined in the consumer ...
+    assert_eq!(contributors[0].def_canonical, consumer);
+    // ... but the live walk followed the import edge and stamped the `keyof`
+    // root as resolving to the LEAF — a cross-file root, not same-file.
+    assert_eq!(
+        contributors[0].carve_out_root_def.as_deref(),
+        Some(leaf),
+        "the live stamp must resolve the imported keyof root cross-file"
+    );
+    // So the carve-out does not fire; the bare `keyof` rejects through the
+    // generic predicate.
+    assert_eq!(
+        admit_source_walk(&result),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("keyof")),
+        "an imported keyof root is not a same-file carve-out"
+    );
+}
+
+/// Imported `Imported["x"]` — the indexed-access root is declared in ANOTHER
+/// file. The live walk stamps it cross-file and the bare indexed access REJECTS.
+#[test]
+fn source_root_carve_out_rejects_imported_indexed_access_root() {
+    let host = make_host();
+    let leaf = "/fixtures/carveout-indexed-leaf.ts";
+    let consumer = "/fixtures/carveout-indexed-consumer.ts";
+    upsert(&host, leaf, "export type Imported = { x: string };\n");
+    upsert(
+        &host,
+        consumer,
+        "import { Imported } from './carveout-indexed-leaf';\n\
+         export type Pick = Imported[\"x\"];\n",
+    );
+    host.ensure_indexed_ready(leaf).expect("leaf indexed");
+    host.ensure_indexed_ready(consumer)
+        .expect("consumer indexed");
+
+    let result = walk(&host, &type_locator(consumer, "Pick"));
+    let contributors = match &result {
+        SourceWalkResult::Resolved { contributors } => contributors,
+        other => panic!("expected Resolved, got {other:?}"),
+    };
+    assert_eq!(contributors.len(), 1);
+    assert_eq!(contributors[0].def_canonical, consumer);
+    assert_eq!(
+        contributors[0].carve_out_root_def.as_deref(),
+        Some(leaf),
+        "the live stamp must resolve the imported indexed-access root cross-file"
+    );
+    assert_eq!(
+        admit_source_walk(&result),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("indexed-access")),
+        "an imported indexed-access root is not a same-file carve-out"
+    );
+}
+
+/// Unbound `keyof Missing` — the `keyof` root binds to NO declaration in the
+/// fixture set. The live walk stamps `None`, the carve-out does not fire, and the
+/// bare `keyof` REJECTS.
+#[test]
+fn source_root_carve_out_rejects_unbound_root() {
+    let host = make_host();
+    let canonical = "/fixtures/carveout_unbound.ts";
+    // `Missing` is never declared anywhere in the fixture set.
+    upsert(&host, canonical, "export type Keys = keyof Missing;\n");
+    host.ensure_indexed_ready(canonical).expect("indexed");
+
+    let result = walk(&host, &type_locator(canonical, "Keys"));
+    let contributors = match &result {
+        SourceWalkResult::Resolved { contributors } => contributors,
+        other => panic!("expected Resolved, got {other:?}"),
+    };
+    assert_eq!(contributors.len(), 1);
+    assert_eq!(contributors[0].def_canonical, canonical);
+    // The root did not bind → `None` stamp.
+    assert_eq!(
+        contributors[0].carve_out_root_def, None,
+        "an unbound carve-out root stamps None"
+    );
+    assert_eq!(
+        admit_source_walk(&result),
+        AdmissionVerdict::Reject(RejectReason::DeferredConstruct("keyof")),
+        "an unbound carve-out root rejects"
+    );
+}

@@ -36,8 +36,8 @@ use crate::instant::Instant;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::semantic_query::{
-    ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId,
-    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeId, SemanticQueryApi,
+    SemanticQueryKey, SemanticQueryOutput,
 };
 use crate::types::{FileKind, UpsertRequest};
 use crate::VerterHost;
@@ -412,12 +412,20 @@ fn evaluate_inner(
     };
 
     // Apply the requested terminal mode. `Identity` returns the
-    // alias node verbatim. Everything else walks the alias /
-    // placeholder chain to land on a concrete body — the same
-    // policy as `resolve_named_symbol`.
+    // alias node verbatim. Everything else routes through the SINGLE
+    // canonical materializer in `resolve_named_symbol` — the same helper
+    // the named-resolve path uses — so an operator-bodied alias
+    // (`type X = Y[K]` / `keyof Y`) reduces IDENTICALLY on this FFI path
+    // and the named-resolve path (the one-resolver mandate). There is no
+    // evaluate-local materialiser fork.
     let final_node = match req.mode {
         ProjectionMode::Identity => resolved_alias_node,
-        _ => match materialize_through_aliases(host, &dispatch, resolved_alias_node, req.mode) {
+        _ => match super::resolve_named_symbol::materialize_through_aliases(
+            host,
+            &dispatch,
+            resolved_alias_node,
+            req.mode,
+        ) {
             Ok(materialized) => materialized,
             // A hard dispatch fault during nested materialization
             // propagates as `Err` rather than silently degrading to the
@@ -455,69 +463,6 @@ fn cleanup_scratch(host: &VerterHost, uri: &str, cacheable: bool) {
     if !cacheable {
         host.evict(uri);
     }
-}
-
-/// Walk the alias / placeholder chain on a resolved node until we
-/// land on a concrete body, matching the
-/// [`super::resolve_named_symbol::resolve_named_symbol_with_audit`]
-/// policy. Bounded by a small step budget so a pathological cycle
-/// can't hang the resolver.
-fn materialize_through_aliases(
-    host: &VerterHost,
-    dispatch: &ProjectSemanticDispatch<'_>,
-    start: SemanticNodeId,
-    mode: ProjectionMode,
-) -> Result<SemanticNodeId, TypeResolutionRequestError> {
-    debug_assert!(!matches!(mode, ProjectionMode::Identity));
-    let store = host.project_type_store().semantic_graph();
-    let mut current = start;
-    for _ in 0..16 {
-        let data = store.node_data(current);
-        match data.as_deref() {
-            Some(SemanticNodeData::Alias(inner)) => {
-                current = *inner;
-                continue;
-            }
-            Some(SemanticNodeData::Opaque(
-                crate::semantic_query::QueryError::DeclPlaceholder {
-                    canonical_id,
-                    name,
-                    whole_hash: _,
-                },
-            )) => {
-                let base = dispatch.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
-                let key = SemanticQueryKey::Instantiate {
-                    context: dispatch.instantiate_context_for(
-                        canonical_id,
-                        crate::semantic_query::ProjectionReductionContext::published(mode),
-                    ),
-                    base,
-                    args: Arc::from(Vec::new().into_boxed_slice()),
-                };
-                let step_result = match dispatch.execute_type_node(key) {
-                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
-                        QueryResult::Value(node)
-                    }
-                    QueryResult::Recursive(node) => QueryResult::Recursive(node),
-                    QueryResult::Error(err) => QueryResult::Error(err),
-                };
-                match super::resolve_named_symbol::classify_materialization_step(
-                    step_result,
-                    current,
-                )? {
-                    super::resolve_named_symbol::MaterializationStep::Continue(next) => {
-                        current = next;
-                        continue;
-                    }
-                    super::resolve_named_symbol::MaterializationStep::Stop(node) => {
-                        return Ok(node)
-                    }
-                }
-            }
-            _ => return Ok(current),
-        }
-    }
-    Ok(current)
 }
 
 /// Compute the scratch URI for the evaluate-type-expression

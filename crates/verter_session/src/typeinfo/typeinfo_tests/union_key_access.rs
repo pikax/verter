@@ -12,7 +12,7 @@ fn upsert(host: &crate::VerterHost) {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not distribute indexed access over a union key into a union of member types; keep as the future union-key indexed-access contract"]
+#[ignore = "the U2 IndexedAccess-reduction bridge has landed (operator-bodied alias reduction in resolve_named_symbol); the remaining blocker is union-key distribution — distributing indexed access over a union key into a union of member value types"]
 fn union_key_access_two_key_union_projects_member_type_union() {
     // TS7 contract: `Surface["alpha" | "beta"]` = `Surface["alpha"] |
     // Surface["beta"]` = `number | string`. TS distributes indexed access
@@ -42,7 +42,7 @@ fn union_key_access_two_key_union_projects_member_type_union() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not reduce `T[keyof T]` to the structural value-type union of all members; keep as the future keyof-typeof value-union contract"]
+#[ignore = "the U2 IndexedAccess-reduction bridge has landed (operator-bodied alias reduction in resolve_named_symbol); the remaining blocker is `T[keyof T]` value-union — reducing keyof-self indexed access to the structural value-type union of all members"]
 fn union_key_access_keyof_self_projects_full_value_union() {
     // TS7 contract: `Surface[keyof Surface]` projects every member type into
     // a union: `number | string | boolean | null`.

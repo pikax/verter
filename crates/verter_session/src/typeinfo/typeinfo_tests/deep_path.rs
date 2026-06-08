@@ -1,23 +1,17 @@
 //! @ai-generated - Synthetic deep indexed-access path typeinfo tests.
 
-use super::support::*;
+use super::oracle;
+use verter_session_oracle_macro::oracle_row;
 
+// LIFTED: `DeepProjectedTarget` reduces a 16-hop indexed-access chain
+// (`DeepRoot["level14"]…["target"]`) to the terminal `TerminalPayload` object
+// `{ id: string; priority: 1 | 2 | 3 }` WITHOUT losing shape. The lifted body is
+// the registry-keyed `oracle::run_row` shared-driver call the `#[oracle_row]`
+// macro synthesizes: it resolves Verter's `Expanded` projection and compares it
+// against the checked-in tsgo snapshot. The DAG-terminal producer is
+// `IndexedAccessUnionDistribution` (block `U2.INDEXED_ACCESS`); the measured
+// dispatch trace is `[IndexedAccess, Instantiate, ResolveDecl]`, proven live by
+// `lifted_row_mechanism_trace_matches_manifest`.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently preserves long indexed-access chains instead of reducing them to the terminal object; keep as the future deep-path projection contract"]
-fn deep_path_projection_resolves_terminal_without_losing_shape() {
-    let host = make_host_with_footprint();
-    upsert_ts(&host, "/fixtures/deep-path.ts", DEEP_PATH);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/deep-path.ts",
-        "DeepProjectedTarget",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let target = object_props(&expr);
-    assert_primitive(&target["id"].ty, PrimitiveName::String);
-    assert_number_literal_union(&target["priority"].ty, &[1.0, 2.0, 3.0]);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn deep_path_projection_resolves_terminal_without_losing_shape() {}

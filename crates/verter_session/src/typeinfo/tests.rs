@@ -1180,10 +1180,11 @@ fn nested_materialization_hard_fault_rides_err_not_degraded_ok() {
 
     // Discriminating guard for the nested-materialization fault hop.
     //
-    // The placeholder-materialisation loop (in `materialize_through_aliases`
-    // and its evaluate-type-expression sibling) re-dispatches
-    // `Instantiate { args: [] }` against a `DeclPlaceholder`'s identity and
-    // routes the result through `classify_materialization_step`. When that
+    // The placeholder-materialisation loop (in the ONE canonical
+    // `materialize_through_aliases`, shared by both typeinfo entry-points)
+    // re-dispatches `Instantiate { args: [] }` against a `DeclPlaceholder`'s
+    // identity and routes the result through `classify_materialization_step`.
+    // When that
     // nested dispatch HARD-FAULTS (a `BudgetExceeded` / `UnstableState` /
     // `AliasCycle` / `UnsupportedIntrinsic` / `Other` `QueryResult::Error`
     // arm), the fault MUST propagate as `Err` — not silently degrade to
@@ -1228,5 +1229,143 @@ fn nested_materialization_hard_fault_rides_err_not_degraded_ok() {
         no_progress,
         Ok(MaterializationStep::Stop(current)),
         "a dispatch that returns the same placeholder stops the loop"
+    );
+}
+
+#[test]
+fn operator_reduction_step_propagates_fault_opaque_not_masked_as_carrier() {
+    use crate::semantic_query::{LiteralValue, QueryResult};
+    use crate::typeinfo::resolve_named_symbol::{
+        classify_operator_reduction_step, MaterializationStep,
+    };
+
+    // Discriminating guard for the operator-reduction step's FAULT axis.
+    //
+    // The shared `ProjectPath` / `KeyOf` reducer can hand a fault-bearing
+    // opaque back as `QueryResult::Value(Opaque(err))` (not as a
+    // `QueryResult::Error`). A naive wildcard over ALL `Opaque(_)` results to
+    // `Stop(carrier)` would hide a FAILED reduction behind a `T[K]` / `keyof T`
+    // operator carrier, making it look like a valid deferred operator. The step
+    // instead partitions the opaque through `classify_dispatch_error`: a fault
+    // PROPAGATES as `Err`, a non-fault miss preserves the carrier.
+    //
+    // This test discriminates the two: it FAILS against an undifferentiated
+    // wildcard (fault → `Ok(Stop(carrier))`) and PASSES against the partitioned
+    // step (fault → `Err`).
+    let host = make_host_with_audit();
+    let graph = host.project_type_store().semantic_graph();
+
+    // The operator carrier the step preserves on a non-fault.
+    let carrier = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
+        name: Arc::from("Carrier"),
+    }));
+
+    // (a) FAULT opaque as a Value → MUST propagate as `Err`, never mask.
+    let fault_node = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
+        "reduction blew up",
+    ))));
+    let out = classify_operator_reduction_step(graph, QueryResult::Value(fault_node), carrier);
+    assert!(
+        matches!(out, Err(TypeResolutionRequestError::Other(_))),
+        "a fault-bearing `Opaque` reduction result MUST propagate as `Err`, \
+         not be masked behind the operator carrier; got {out:?}"
+    );
+
+    // (b) NON-FAULT miss opaque as a Value → preserve the carrier (never
+    //     degrade to a `semanticMiss` terminal).
+    let miss_node = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let miss = classify_operator_reduction_step(graph, QueryResult::Value(miss_node), carrier);
+    assert_eq!(
+        miss,
+        Ok(MaterializationStep::Stop(carrier)),
+        "a non-fault miss opaque preserves the operator carrier"
+    );
+
+    // (c) A genuine reduced value (non-opaque) → advance the loop.
+    let reduced = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "id".to_string(),
+    )));
+    let step = classify_operator_reduction_step(graph, QueryResult::Value(reduced), carrier);
+    assert_eq!(
+        step,
+        Ok(MaterializationStep::Continue(reduced)),
+        "a genuine reduced value advances the loop past the operator carrier"
+    );
+
+    // (d) A `QueryResult::Error` HARD FAULT → `Err` (the Error arm, distinct
+    //     from the Value(Opaque) arm).
+    let hard = classify_operator_reduction_step(
+        graph,
+        QueryResult::Error(QueryError::BudgetExceeded(sample_budget_failure())),
+        carrier,
+    );
+    assert!(
+        matches!(hard, Err(TypeResolutionRequestError::BudgetExceeded(_))),
+        "a hard `QueryResult::Error` fault propagates as `Err`; got {hard:?}"
+    );
+
+    // (e) A `Recursive` back-edge preserves the carrier (a cycle, not a
+    //     reduction).
+    let recursive =
+        classify_operator_reduction_step(graph, QueryResult::Recursive(reduced), carrier);
+    assert_eq!(
+        recursive,
+        Ok(MaterializationStep::Stop(carrier)),
+        "a recursive back-edge preserves the operator carrier"
+    );
+}
+
+#[test]
+fn keyof_base_surfacing_propagates_fault_not_swallows_to_base() {
+    use crate::semantic_query::{QueryResult, SemanticNodeId};
+    use crate::typeinfo::resolve_named_symbol::classify_base_surfacing;
+
+    // Discriminating guard for the keyof base-surfacing step's FAULT axis.
+    //
+    // Before the keyof reducer runs, the operand must be surfaced through an
+    // empty-path `ProjectPath`. An undifferentiated `QueryResult::Error(_) =>
+    // *base` arm would swallow EVERY error — including a genuine
+    // `BudgetExceeded` / `AliasCycle` fault — and fall back to the un-surfaced
+    // base, after which the keyof reducer publishes a DEFERRED CARRIER instead
+    // of surfacing the fault. The step instead routes the `Error` arm through
+    // `classify_dispatch_error`: a fault PROPAGATES, only a non-fault miss falls
+    // back.
+    //
+    // This test discriminates the two: it FAILS against an error-swallowing arm
+    // (fault → `Ok(base)`) and PASSES against the partitioned decode (fault →
+    // `Err`).
+    let base = SemanticNodeId(11);
+
+    // HARD FAULT during surfacing → propagate as `Err` (never fall back to base).
+    let fault = classify_base_surfacing(
+        QueryResult::Error(QueryError::BudgetExceeded(sample_budget_failure())),
+        base,
+    );
+    assert!(
+        matches!(fault, Err(TypeResolutionRequestError::BudgetExceeded(_))),
+        "a fault while surfacing the keyof operand MUST propagate as `Err`, not \
+         silently fall back to the un-surfaced base; got {fault:?}"
+    );
+
+    // NON-FAULT miss → fall back to the un-surfaced base (the reducer round-trips
+    // it as the deferred carrier).
+    let miss = classify_base_surfacing(QueryResult::Error(QueryError::Miss), base);
+    assert_eq!(
+        miss,
+        Ok(base),
+        "a non-fault miss falls back to the un-surfaced base"
+    );
+
+    // A genuine surfaced value / recursive node is used verbatim.
+    let surfaced = SemanticNodeId(12);
+    assert_eq!(
+        classify_base_surfacing(QueryResult::Value(surfaced), base),
+        Ok(surfaced),
+        "a surfaced operand node is used verbatim"
+    );
+    assert_eq!(
+        classify_base_surfacing(QueryResult::Recursive(surfaced), base),
+        Ok(surfaced),
+        "a recursive surfaced node is used verbatim"
     );
 }

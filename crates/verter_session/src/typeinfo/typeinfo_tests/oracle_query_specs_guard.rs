@@ -3,13 +3,15 @@
 //! registry `include!`-compiles WITHOUT the unit-test `support` module
 //! (`oracle_query_specs_is_pure_data`); this src-side half proves the structural
 //! well-formedness validation is genuinely discriminating, with SYNTHETIC specs.
-//! The real table seats the 4 lifted rows (two index-signature publication
-//! queries + two built-in modifier-utility queries).
+//! The real table seats the 7 lifted rows (two index-signature publication
+//! queries + two built-in modifier-utility queries + three U2
+//! IndexedAccess-reduction carve-out queries).
 
 use super::oracle::query_specs::{
     registry_well_formed, HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec,
     ProjectionModeSpec, QueryHelperSpec, QuerySpec, RegistryError, SourceLocatorSpec, SymbolSpace,
-    INDEX_SIGNATURES_SOURCE, ORACLE_QUERY_SPECS, UTILITY_EDGE_SOURCE,
+    DEEP_PATH_SOURCE, INDEX_SIGNATURES_SOURCE, ORACLE_QUERY_SPECS, TYPESCRIPT_RULES_SOURCE,
+    UTILITY_EDGE_SOURCE, WIDE_DEEP_SOURCE,
 };
 
 /// The registry inlines each fixture's source bytes (`INDEX_SIGNATURES_SOURCE` /
@@ -35,6 +37,24 @@ fn inlined_registry_source_is_byte_identical_to_fixture_files() {
         include_str!("fixtures/utility_edge.ts"),
         "UTILITY_EDGE_SOURCE (inlined in the registry) drifted from \
          fixtures/utility_edge.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        TYPESCRIPT_RULES_SOURCE,
+        include_str!("fixtures/typescript_rules.ts"),
+        "TYPESCRIPT_RULES_SOURCE (inlined in the registry) drifted from \
+         fixtures/typescript_rules.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        DEEP_PATH_SOURCE,
+        include_str!("fixtures/deep_path.ts"),
+        "DEEP_PATH_SOURCE (inlined in the registry) drifted from \
+         fixtures/deep_path.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        WIDE_DEEP_SOURCE,
+        include_str!("fixtures/wide_deep.ts"),
+        "WIDE_DEEP_SOURCE (inlined in the registry) drifted from \
+         fixtures/wide_deep.ts (read by the sibling #[ignore]d tests)",
     );
 }
 
@@ -69,14 +89,16 @@ fn spec(row_function: &'static str, query_ordinal: u16, oracle_family: &'static 
 
 #[test]
 fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
-    // The lifts seat the two index-signature publication queries plus the two
-    // built-in modifier-utility queries; the table is well-formed (non-empty
-    // `oracle_family`, contiguous ordinals).
+    // The lifts seat the two index-signature publication queries, the two
+    // built-in modifier-utility queries, and the three U2 IndexedAccess-reduction
+    // carve-out queries; the table is well-formed (non-empty `oracle_family`,
+    // contiguous ordinals).
     assert_eq!(registry_well_formed(ORACLE_QUERY_SPECS), Ok(()));
 
     // The seated set is EXACTLY the two index-signature publication rows + the
-    // two built-in modifier-utility rows, one query each. A stray addition /
-    // removal FAILS here (discriminating).
+    // two built-in modifier-utility rows + the three IndexedAccess-reduction
+    // carve-out rows, one query each. A stray addition / removal FAILS here
+    // (discriminating).
     let seated: Vec<(&str, &str, u16)> = ORACLE_QUERY_SPECS
         .iter()
         .map(|s| (s.row_file, s.row_function, s.query_ordinal))
@@ -102,6 +124,21 @@ fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
             (
                 "utility_edge.rs",
                 "utility_edge_readonly_required_composes_modifiers",
+                0
+            ),
+            (
+                "typescript_rules.rs",
+                "typescript_rules_indexed_access_reduces_terminal_property",
+                0
+            ),
+            (
+                "deep_path.rs",
+                "deep_path_projection_resolves_terminal_without_losing_shape",
+                0
+            ),
+            (
+                "wide_deep.rs",
+                "wide_deep_projected_token_resolves_literal_union",
                 0
             ),
         ],

@@ -1252,6 +1252,70 @@ LIFTED_ROW_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
             "tsgo oracle snapshot via oracle::run_row"
         ),
     },
+    # ── U2 IndexedAccess-reduction carve-out lifts. The execution-true tag sets
+    #    below are the REAL dispatched-query masks measured via
+    #    `resolve_named_symbol_with_audit` + `decode_dispatch_mask` (Expanded),
+    #    confirmed by the keystone guard `lifted_row_mechanism_trace_matches_manifest`. ──
+    #
+    # `typescript_rules_indexed_access_reduces_terminal_property` +
+    # `deep_path_projection_resolves_terminal_without_losing_shape` both reduce a
+    # multi-hop indexed-access chain to a non-mapped terminal. The measured trace
+    # is `[IndexedAccess, Instantiate, ResolveDecl]`: `ResolveDecl` (→
+    # `QueryValueDomainFoundation`, non-owning) + `Instantiate` (→
+    # `QueryValueDomainFoundation`, non-owning, generic-layer substitution owned by
+    # U2.QUERY_VALUE_DOMAIN) + the terminal `IndexedAccess` (→
+    # `IndexedAccessUnionDistribution`, the OWNING producer). No `KeyOf` / `MappedType`
+    # dispatch (the terminal is a plain property / object, not a mapped remap), so
+    # the only non-owning consumed mechanism is `QueryValueDomainFoundation`.
+    ("typescript_rules.rs", "typescript_rules_indexed_access_reduces_terminal_property"): {
+        "mech": "IndexedAccessUnionDistribution",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::IndexedAccess)",
+        "semantic_queries": ["IndexedAccess", "Instantiate", "ResolveDecl"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation"],
+        "unblocker": (
+            "lifted by U2.INDEXED_ACCESS: `IndexedRules = KeySource['nested']['value']` "
+            "reduces the multi-hop indexed-access chain to its terminal `string`, "
+            "proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("deep_path.rs", "deep_path_projection_resolves_terminal_without_losing_shape"): {
+        "mech": "IndexedAccessUnionDistribution",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::IndexedAccess)",
+        "semantic_queries": ["IndexedAccess", "Instantiate", "ResolveDecl"],
+        "consumed_mechanisms": ["QueryValueDomainFoundation"],
+        "unblocker": (
+            "lifted by U2.INDEXED_ACCESS: `DeepProjectedTarget` reduces a 16-hop "
+            "indexed-access chain to the terminal `TerminalPayload` object "
+            "`{ id: string; priority: 1 | 2 | 3 }` without losing shape, proven "
+            "against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    # `wide_deep_projected_token_resolves_literal_union` reduces the chain THROUGH a
+    # terminal `Pick<TLeaf,…> & { token }` intersection to the `token` literal
+    # union. The measured trace is `[IndexedAccess, Instantiate, KeyOf, MappedType,
+    # ResolveDecl]`: the terminal `Pick` is a mapped remap, so `MappedType` (→
+    # `MappedTemplateRemap`) is the DAG-terminal OWNING producer and `IndexedAccess`
+    # (→ `IndexedAccessUnionDistribution`) + `KeyOf` (also IndexedAccess-owned) +
+    # `Instantiate`/`ResolveDecl` (→ `QueryValueDomainFoundation`) are non-owning.
+    # Hence the row MOVES from U2.INDEXED_ACCESS to U2.MAPPED_TEMPLATE in §10.4.1
+    # (proof family stays IndexedAccess — the oracle family, not the block).
+    ("wide_deep.rs", "wide_deep_projected_token_resolves_literal_union"): {
+        "mech": "MappedTemplateRemap",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::IndexedAccess)",
+        "semantic_queries": ["IndexedAccess", "Instantiate", "KeyOf", "MappedType", "ResolveDecl"],
+        "consumed_mechanisms": [
+            "QueryValueDomainFoundation",
+            "IndexedAccessUnionDistribution",
+        ],
+        "unblocker": (
+            "lifted by U2.MAPPED_TEMPLATE: `WideDeepProjectedToken` reduces the "
+            "multi-hop indexed-access chain through the terminal "
+            "`Pick<TLeaf,'id'|'score'> & { token }` intersection to the literal "
+            "union `'alpha' | 'beta' | 'gamma'`; the terminal `Pick` mapped remap is "
+            "the dominant MappedTemplateRemap producer, proven against the "
+            "checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
 }
 
 
