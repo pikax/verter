@@ -6,7 +6,9 @@
 //!   * `NonNullable<string | null | undefined>` collapses to `string`.
 //!   * `Extract` / `Exclude` over a primitive union.
 
+use super::oracle;
 use super::support::*;
+use verter_session_oracle_macro::oracle_row;
 
 const UTILITY_EDGE: &str = include_str!("fixtures/utility_edge.ts");
 
@@ -99,59 +101,25 @@ fn utility_edge_pick_all_keys_yields_input_shape() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `Required<{ a?: string; b?: number }>` = `{ a: string; b: number }`.
+// `Required<T>` is the library mapped type `{ [K in keyof T]-?: T[K] }`; the
+// `-?` optional-stripping remap is the terminal MappedTemplateRemap producer.
+// The lifted body is the registry-keyed `oracle::run_row` shared-driver call
+// that resolves Verter's `Expanded` projection and compares it against the
+// checked-in tsgo snapshot (captured in `Expanded`); the audit query-mode
+// identity is proven live by `lifted_row_audit_query_mode_matches_spec`.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not reduce `Required<T>` to a shape where every member loses its `?` marker; keep as the future Required edge contract"]
-fn utility_edge_required_strips_optional_markers() {
-    // TS7 contract: `Required<{ a?: string; b?: number }>` = `{ a: string; b: number }`.
-    // Every optional marker is removed and the slot type loses `undefined`
-    // (since `Required` strips the optional-driven `undefined`).
-    let host = make_host_with_footprint();
-    upsert(&host);
+fn utility_edge_required_strips_optional_markers() {}
 
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/utility_edge.ts",
-        "RequiredOptional",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let props = object_props(&expr);
-    assert_eq!(prop_names(&props), vec!["a", "b"]);
-    assert!(!props["a"].optional);
-    assert!(!props["b"].optional);
-    assert_primitive(&props["a"].ty, PrimitiveName::String);
-    assert_primitive(&props["b"].ty, PrimitiveName::Number);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
-
+// LIFTED: `Readonly<Required<{ a?: string; b?: number }>>` =
+// `{ readonly a: string; readonly b: number }`. Both library mapped-type
+// modifier passes compose (`-?` optional stripping, then `+readonly`); the
+// lifted body is the registry-keyed oracle comparison, verified in the same
+// `Expanded` projection mode.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not compose `Readonly<Required<T>>` to mark every required member readonly; keep as the future Readonly+Required composition contract"]
-fn utility_edge_readonly_required_composes_modifiers() {
-    // TS7 contract: `Readonly<Required<{ a?: string; b?: number }>>` =
-    // `{ readonly a: string; readonly b: number }`. Both modifier passes
-    // compose: optionality is stripped, readonly is added.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/utility_edge.ts",
-        "ReadonlyRequiredOptional",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let props = object_props(&expr);
-    assert_eq!(prop_names(&props), vec!["a", "b"]);
-    assert!(!props["a"].optional);
-    assert!(!props["b"].optional);
-    assert!(props["a"].readonly);
-    assert!(props["b"].readonly);
-    assert_primitive(&props["a"].ty, PrimitiveName::String);
-    assert_primitive(&props["b"].ty, PrimitiveName::Number);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn utility_edge_readonly_required_composes_modifiers() {}
 
 #[test]
 #[ignore = "typeinfo currently does not reduce `NonNullable<string | null | undefined>` to the bare primitive; keep as the future NonNullable nullable-primitive contract"]

@@ -104,9 +104,9 @@ pub(crate) fn normalize(
 /// discriminants for the alias-display rule). The driver maps the resolver's
 /// `ProjectionMode` onto this when it normalizes Verter's projection.
 ///
-/// Only `Shallow` / `Navigate` are currently admissible; `Expanded` / `Skeleton`
-/// stay deferred until their probe-form spikes land, so those discriminants are
-/// carried for schema totality but not yet constructed outside tests.
+/// `Shallow` / `Navigate` / `Expanded` are all in use (the lifted oracle rows
+/// are captured in `Expanded`); `Skeleton` is carried for schema totality (the
+/// BFS / generic-helper traversal mode, not yet a snapshot-row mode).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProjectionModeKind {

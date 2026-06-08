@@ -682,6 +682,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: SemanticQueryKey,
     ) -> CacheRead<QueryResult<SemanticNodeId>> {
+        // Per-request dispatch-mask trace. Record the INCOMING CALLER tag
+        // (NOT the post-canonicalisation tag) so caller intent
+        // (`ProjectMember` / `IndexedAccess`) is preserved, and record it
+        // HERE — at the top of the shared cold-build choke point, before
+        // admission-time key canonicalisation and before the budget
+        // early-exit. Both `execute` (the `SemanticQueryApi` trait method)
+        // and `execute_read` (the dep-signature-preserving subquery entry)
+        // funnel through this helper, so the mask captures every
+        // `SemanticQueryKey` variant dispatched anywhere during the request
+        // — including nested reducer sub-dispatches that enter ONLY via
+        // `execute_read` (e.g. the macro-payload `NormalizeIntersection`
+        // reduction in `build.rs`, mapped-type `ProjectPath` member
+        // projection). Idempotent per tag (sets one bit). No-op when no
+        // `RequestContext` is installed on the calling thread.
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            ctx.record_dispatched_query_tag(key.tag());
+        }
+
         // Admission-time canonicalisation per plan B1a:
         //   - `ProjectMember { base, member, mode }` rewrites to
         //     `ProjectPath { base, path: [Member(member)], mode }` BEFORE the
@@ -1256,6 +1274,14 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
             // depth via the dispatcher's `instantiate_active` stack.
             let depth = self.instantiate_active.borrow().len();
             ctx.observe_type_resolution_depth(u16::try_from(depth).unwrap_or(u16::MAX));
+            // NOTE: the per-request dispatch-mask trace
+            // (`record_dispatched_query_tag`) is recorded at the shared
+            // `execute_via_cold_build_helper` choke point, NOT here — so
+            // nested reducer sub-dispatches that enter only via
+            // `execute_read` are captured too. The hop / mode / projection
+            // / conditional counters below stay on the `execute` path:
+            // they attribute the caller's top-level dispatch intent and
+            // several path-precision guards assert them here.
             match &key {
                 SemanticQueryKey::ProjectPath { context, .. } => {
                     ctx.bump_type_resolution_hop(context.mode);

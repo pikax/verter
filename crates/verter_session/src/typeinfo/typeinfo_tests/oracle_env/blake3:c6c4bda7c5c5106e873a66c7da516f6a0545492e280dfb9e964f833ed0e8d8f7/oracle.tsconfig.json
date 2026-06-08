@@ -1,0 +1,1 @@
+{ "compilerOptions": { "strict": true, "exactOptionalPropertyTypes": true, "target": "es2020", "moduleResolution": "bundler" } }

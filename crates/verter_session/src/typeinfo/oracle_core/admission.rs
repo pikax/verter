@@ -30,14 +30,18 @@
 //!   source contributor clean AND the drop count zero AND the backstops pass,
 //!   and applies the mode-dependent shallow-expansion fence.
 //!
-//! The allowlist PREDICATE is mode-INDEPENDENT in the initial admissible set: only the
-//! `Shallow` / `Navigate` modes are admissible, and every deferred construct
-//! (`Expanded` / `Skeleton`-only, `Conditional`, `Mapped`, `KeyOf`, …) REJECTs
+//! The allowlist PREDICATE is mode-INDEPENDENT: it admits the
+//! single-contributor result surfaces (primitive / object / property / index
+//! signature / union / intersection) and REJECTs every deferred construct
+//! (`Conditional`, `Mapped`, `KeyOf`, `Skeleton` shell, `Unknown`, …)
 //! regardless of mode, so the predicate does not branch on the projection mode.
-//! The ONE mode-dependent rule — the shallow-expansion display fence (§Q2
+//! `Shallow`, `Navigate`, and `Expanded` are all admissible modes (the lifted
+//! index-signature + modifier-utility rows are captured in `Expanded`). The ONE
+//! mode-dependent rule — the shallow-expansion display fence (§Q2
 //! `shallow_hover_expansion_rejected`) — lives in `admit_query`, which is where
-//! `ProjectionModeKind` is consumed. When the `Expanded` probe-form spike lands,
-//! the predicate gains its mode-aware Ref-expansion branch.
+//! `ProjectionModeKind` is consumed: it fires only in `Shallow` / `Navigate` (a
+//! hover that expanded a source bare-`Ref` is a tsgo display artefact there), and
+//! is correctly skipped in `Expanded`, where expansion is the intended surface.
 //!
 //! The LIVE producers of the surfaces this predicate consumes now exist: the
 //! parse-time `RawSourceSurface` capture (in
@@ -383,7 +387,8 @@ pub(crate) fn admit_type_expr(expr: &TypeExpr) -> AdmissionVerdict {
         // bare `TypeParameter` is structurally harmless in shallow/navigate.
         TypeExpr::TypeParameter(_) => AdmissionVerdict::Admit,
         TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => admit_type_expr(inner),
-        // Non-erased rejectable variants — deferred outside a spike-proven mode.
+        // Non-erased rejectable variants — deferred result constructs, rejected
+        // in every currently-admissible mode.
         TypeExpr::KeyOf(_) => AdmissionVerdict::Reject(RejectReason::DeferredConstruct("keyof")),
         TypeExpr::TypeOf(_) => AdmissionVerdict::Reject(RejectReason::DeferredConstruct("typeof")),
         TypeExpr::IndexedAccess { .. } => {

@@ -314,8 +314,8 @@ integrity model.
 - **No orphan (`no_orphan_correction`):** the on-disk correction set SET-EQUALS the
   registry-derived expected set, keyed at QUERY granularity by
   `(row_file, row_function, query_ordinal, snapshot_id)` — NOT per row. The expected set is
-  derived from the divergence proof rows' per-query corrections (each
-  `Ts7OracleWithCorrections` row names one `QueryCorrection` per corrected `query_ordinal`,
+  derived from the divergence proof rows' per-query corrections (each divergence
+  `OracleAndGuard` row names one `QueryCorrection` per corrected `query_ordinal`,
   §9.2), recursively enumerated from `oracle_corrections/`. A correction file with no
   corrected query, or a corrected query with no correction file, FAILS — mirroring U0's
   `no_orphan_snapshot` (u0 §Q5). (This set-equality intentionally overlaps
@@ -766,16 +766,14 @@ a divergence row is born with its correction and never has to be unwound.
 
 `ProofRequirement` (`crates/verter_session/tests/typeinfo_ignored_test_manifest.rs`,
 arms `Ts7Oracle(OracleId)`, `StructuralGuard`, `NegativeGuard`,
-`OracleAndGuard { oracle, guard }`, `RowTestGuard`) gains a **divergence arm**, peer to
-`Ts7Oracle` / `OracleAndGuard`:
+`OracleAndGuard { oracle, guard }`, `RowTestGuard`) carries a divergence row as an
+**`OracleAndGuard { oracle, guard }`** whose `oracle` half is the `ts_compat` snapshot and
+whose `guard` half is the registered `DivergenceCorrection` prover — divergence is one of
+the five obligation KINDS that promote a row to `OracleAndGuard` (u0 §Q4), NOT a separate
+proof variant. The correction overlay machinery the prover consults stays:
 
 ```rust
-// illustrative addition — not production code
-Ts7OracleWithCorrections {
-    snapshot: OracleId,                       // the ts_compat oracle FAMILY (existing snapshot machinery) = the recorded TsCompat values
-    corrections: &'static [QueryCorrection],  // one entry per CORRECTED query_ordinal (a row may mix corrected + ordinary queries)
-},
-
+// the review-gated correction overlay the DivergenceCorrection prover consults
 // one per corrected (row, query_ordinal); the row's other queries carry none
 struct QueryCorrection {
     query_ordinal: u16,        // WHICH of the row's N queries this correction binds
@@ -812,18 +810,16 @@ Guard D (§8) and the §3.3 overlay guards.
 learns: a divergence row MUST carry, for each corrected `query_ordinal`, a correction whose
 `divergence_id` resolves to a registry entry (§5) AND asserts both recorded answers (§7.1) —
 `resolver(query) == correction.correct_value` and a present, differing `snapshot.oracle_value`
-for that query. The `LiftedRowRecord` ledger (u0 §Q5) / its derived obligations gain the
-divergence linkage — recorded in the existing typed-obligation model
-(`non_typeexpr_obligations`) as closed `ObligationKind::DivergenceCorrection` members, **not**
-a second ledger. A divergence row's obligation set contains exactly ONE `DivergenceCorrection`
-obligation PER CORRECTED query, each targeting `Query { query_ordinal }` (NOT `WholeRow`) and
-carrying `ObligationExpectation::DivergenceCorrection { correction_id, divergence_id }` that
-resolves to the named correction overlay AND a registry entry whose id equals `divergence_id`;
-the cross-arm emptiness rule is: EMPTY iff `Ts7Oracle(_)`, NON-EMPTY (footprint/audit) under
-`OracleAndGuard{..}`, and containing one per-query `DivergenceCorrection` member per corrected
-query under `Ts7OracleWithCorrections{..}` (the u0 ledger guards are threaded accordingly —
-`docs/arch/u0-oracle-harness-design.md` `lifted_row_ledger_retains_full_record`). The
-linkage is proved by `every_correction_is_discharged` + Guard C's data comparison.
+for that query. The divergence linkage is the `DivergenceCorrection` obligation KIND — one of
+the five `OracleAndGuard` obligation kinds (u0 §Q4) — proved by a registered live prover, NOT
+stored as a typed set on any ledger record. A divergence row is `OracleAndGuard { oracle, guard }`
+whose `guard` resolves to the registered `DivergenceCorrection` prover; that prover runs PER
+corrected `query_ordinal`, asserting for each corrected query that its named correction overlay
+AND a registry entry whose id equals `divergence_id` resolve to the SAME
+`(correction, registry-entry)`, never `WholeRow`. A row asserting NO independent non-`TypeExpr`
+obligation stays bare `Ts7Oracle`; a row asserting one (footprint / audit / warm-cache /
+declared-dependency / divergence-correction) is promoted to `OracleAndGuard`. The linkage is
+proved by `every_correction_is_discharged` + Guard C's data comparison.
 
 ### 9.3 What does NOT change
 
@@ -839,8 +835,9 @@ linkage is proved by `every_correction_is_discharged` + Guard C's data compariso
 - The **resolver** does not change at all — it is single-spec and produces `Correct`
   whether or not a correction exists for the row.
 
-Only the **PROOF** (the new divergence arm) and the **HARNESS DRIVER** (assert against the
-correction's `correct_value` where a correction exists) change.
+Only the **PROOF** (a divergence row seated as `OracleAndGuard` with the `DivergenceCorrection`
+prover) and the **HARNESS DRIVER** (assert against the correction's `correct_value` where a
+correction exists) change.
 
 ### 9.4 §6.3 amendment (a strengthening, not a loosening)
 

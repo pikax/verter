@@ -40,16 +40,18 @@
 > context-neutral data, and lifted row bodies just call a shared registry driver.
 > Each registry entry lives in
 > `src/typeinfo/typeinfo_tests/oracle_query_specs.rs` (reachable by the lifted
-> unit tests), carries an `oracle_family`, and the manifest generator's row-spec
-> declares an independent `oracle_query_ordinals` count (sourced independently of
-> the registry) cross-checked against the registry — so query coverage is true by
-> construction AND verified, never "true by construction" alone. The DOMINANT
+> unit tests), carries an `oracle_family`, and — in the DEFERRED §Q4 per-row-count
+> layer (not yet a shipped `IgnoredTestRow` field) — the manifest generator's
+> row-spec will declare an independent `oracle_query_ordinals` count (sourced
+> independently of the registry) cross-checked against the registry, so query
+> coverage becomes true by construction AND verified, never "true by construction" alone. The DOMINANT
 > typeinfo host is `VerterHost::new_standalone` (no project root, no tsconfig); the
 > generator drives standalone-host rows under ONE deterministic canonical oracle
 > tsconfig + synthetic root (a stable `compiler_options_hash`) vendored into
-> `oracle_env_files`. The FIRST implementation block admits only `Shallow` /
-> `Navigate` (and any spike-validated) modes — all unspiked `Expanded`-mode
-> queries stay `Ignored` until the blocking probe-form spike lands. Snapshots are
+> `oracle_env_files`. Admissible modes are `Shallow` / `Navigate` plus the
+> `Expanded` construct classes whose probe form is validated (the index-signature
+> publication + built-in modifier-utility lifts); an `Expanded` class without a
+> validated probe form stays `Ignored`. Snapshots are
 > vendored in-repo and loaded at test
 > time via runtime `std::fs::read` rooted at
 > `concat!(env!("CARGO_MANIFEST_DIR"), "/src/typeinfo/typeinfo_tests/oracle_snapshots/", …)`.
@@ -76,10 +78,11 @@
 >   overlay** (`oracle_corrections/<family>/<snapshot_id>.correction.json`) holding the
 >   `correct` value in the same `TypeExpr` codec — never inside the snapshot (which must
 >   stay recompute-gated → byte-identical);
-> - the lifted-row proof gains a **divergence arm** (a new
->   `ProofRequirement::Ts7OracleWithCorrections { snapshot, corrections }` arm carrying a
->   per-query `&[QueryCorrection { query_ordinal, correction, divergence_id }]` list, peer
->   to `Ts7Oracle` / `OracleAndGuard`). Corrections bind at `(row, query_ordinal)`
+> - a **divergence** row is seated as `ProofRequirement::OracleAndGuard { oracle, guard }`
+>   whose `guard` is the registered `DivergenceCorrection` prover (one of the five
+>   `OracleAndGuard` obligation kinds, §Q4) consulting a per-query
+>   `&[QueryCorrection { query_ordinal, correction, divergence_id }]` overlay. Corrections
+>   bind at `(row, query_ordinal)`
 >   granularity — a row issues N queries and may MIX corrected and ordinary queries. The
 >   harness runs the single-spec resolver ONCE and compares it against recorded data
 >   (`ts-compat-two-mode-model.md` §7): a CORRECTED query asserts `resolver(query) ==
@@ -216,16 +219,21 @@ These are load-bearing and were confirmed by reading source:
    `ContextualTyping`, `ValueInference`, `JsxResolution`, `ModuleAugmentation`,
    `CompositeSurface`. The proof enum is
    `ProofRequirement::Ts7Oracle(OracleId)` / `OracleAndGuard { oracle, guard }`
-   (`:427` / `:430`). The row schema `IgnoredTestRow` (`:444`) has **13 manifest
-   columns plus the `status` lifecycle field** — a partial list relevant here is
+   (`:427` / `:430`). The row schema `IgnoredTestRow`
+   (`typeinfo_ignored_test_manifest.rs:537`) has **13 fields** — 12 manifest columns
+   plus the `status` lifecycle field. The columns relevant here are
    `file: &'static str`, `function: &'static str`,
    `semantic_queries: &'static [SemanticQueryName]`, `proof: ProofRequirement`, and
    the lifecycle `status: IgnoreStatus` (`Ignored` | `Lifted { block_id }`); the
    other manifest columns (`substrate`, `capability`, `organ`, `owning_u_block`, `block_id`,
-   `mechanism_id`, `consumed_mechanisms`, `unblocker`, `oracle_query_ordinals`) are
-   ledger/ownership data. (`oracle_query_ordinals` — the declared per-row query count, a
-   §Q4 cross-check — is one of the 13 manifest columns; `status` is the separate lifecycle
-   field the regenerator substitutes on lift.)
+   `mechanism_id`, `consumed_mechanisms`, `unblocker`) are ledger/ownership data. (The
+   declared per-row oracle-query count `oracle_query_ordinals` — the §Q4 cross-check
+   verified by `registry_entry_count_matches_declared` — is NOT one of those columns and
+   NOT yet a shipped `IgnoredTestRow` field: it belongs to the DEFERRED §Q4 per-row-count /
+   migration-fidelity layer, alongside the likewise-deferred `migration_fingerprint` /
+   `original_body_tokens` body-hash fields, and is added to `IgnoredTestRow` only when that
+   layer lands. `status` is the separate lifecycle field the regenerator substitutes on
+   lift.)
    **`IgnoredTestRow.file` is a BARE filename** (`"apparent_types.rs"`,
    `manifest_data/typeinfo_ignored_test_manifest_rows.rs:11`), matching the live
    discovery key `path.file_name()` (`:796`/`:902`/`:1012`); the row→query join key reuses that
@@ -409,48 +417,46 @@ the gate is **structural, not by `OracleId` name**:
    `TypeExpr`. Once such a body is lifted to `oracle::run_row(…)` its original extra
    footprint/audit assertion is GONE, and `IgnoredTestRow` carries no assertion-kind
    field — so "exclude rows that also assert footprint/audit" is unenforceable as a
-   prose rule. The gate is made enforceable by a **machine-readable PER-OBLIGATION TYPED
-   SET** (not a coarse bool, not a single shared guard): a row that ALSO asserts any
-   non-`TypeExpr` obligation — dependency-footprint, audit-record, OR query-mode
-   (`assert_query_mode`) checks — MUST carry
-   `ProofRequirement::OracleAndGuard { oracle, guard }` (the `oracle` half proves the
-   shape; the `guard` half is the proof's PRIMARY guard) AND its ONCE-PER-ROW
-   `LiftedRowRecord.non_typeexpr_obligations` ledger set lists EVERY such obligation.
-   **The obligation set is the SOLE PROPERTY of the row's `LiftedRowRecord` ledger entry —
-   the per-query registry entries (§Q4) NEVER carry row obligations.** An obligation is a
-   property of the ROW's original BODY (which assertions it carried), not of any one of the
-   N per-`query_ordinal` registry entries, so it is stored EXACTLY ONCE on the ledger and
-   nowhere else. Each set member is a
-   `NonTypeExprObligation { kind, proving_guard, target, expected }` — the obligation KIND (closed
-   `ObligationKind`: `DependencyFootprint` / `AuditRecord` / `QueryMode` / …), the
-   SPECIFIC `GuardId` that re-proves THAT obligation, the `target` (a closed
-   `ObligationTarget`: `WholeRow` or `Query { query_ordinal }`) naming WHICH of the row's
-   N per-query results — or the whole-row aggregate — the obligation is over, AND the typed
-   EXPECTED PAYLOAD for that kind (the dependency footprint's `includes`/`excludes` paths,
-   the asserted query mode, the audit-record fields, the warm-cache facts, the
-   declared-dependency ids) extracted at lift time so the proving guard re-asserts the
-   ORIGINAL expectation against the CORRECT query's live result — indexed by `target`, never
-   "any query passes" — not merely re-runs the query (§Q4). Two SAME-kind obligations on a
-   multi-query row (e.g. a `QueryMode` for ordinal 0 AND a `QueryMode` for ordinal 2) are
-   distinguished by their `(kind, target, expected)` identity, NOT by distinct `GuardId`:
-   the closed `ObligationKind → GuardId` mapping is 1:1, so same-kind obligations SHARE the
-   one mapping-assigned `GuardId` and the prover disambiguates by `target`. A per-obligation guard is
-   required because the single `OracleAndGuard.guard` carries exactly ONE `GuardId` and
-   cannot prove MULTIPLE distinct dropped obligations on its own, and there is no
-   "transitively asserts" registry to verify such a claim. The `kind_eligibility_gate`
-   reads that set and **REJECTS a BARE `Ts7Oracle` row whose `non_typeexpr_obligations`
-   is non-empty**, AND under `OracleAndGuard` verifies that EVERY listed obligation's
-   `proving_guard` resolves to an entry in the checked-in CODE `OBLIGATION_GUARD_REGISTRY`
+   prose rule. The gate is made enforceable by **promoting the proof requirement**: a row
+   that ALSO asserts any INDEPENDENT non-`TypeExpr` obligation — dependency-footprint,
+   audit-record, warm-cache / declared-dependency facts, OR a divergence correction — MUST
+   carry `ProofRequirement::OracleAndGuard { oracle, guard }` (the `oracle` half proves the
+   shape; the `guard` half names a REGISTERED LIVE PROVER for the independent obligation),
+   rather than a bare `Ts7Oracle`. The obligation is a property of the ROW's original BODY
+   (which assertions it carried); it is expressed by the `OracleAndGuard` proof shape plus
+   the live prover the `guard` resolves to — NOT stored as a typed obligation SET on any
+   ledger record. The five obligation KINDS the `guard` provers cover are
+   `DependencyFootprint` / `AuditRecord` / `WarmCache` / `DeclaredDependency` /
+   `DivergenceCorrection`; each KIND has a registered prover (conceptually in
+   `OBLIGATION_GUARD_REGISTRY`) that re-asserts the ORIGINAL expectation against the live
+   result — the dependency footprint's `includes`/`excludes` paths, the audit-record
+   fields, the warm-cache facts, the declared-dependency ids, or the divergence-correction
+   data tie — not merely re-runs the query (§Q4). The prover re-asserts against the CORRECT
+   query's live result (the prover knows which `query_ordinal` it is over), never "any query
+   passes". The `kind_eligibility_gate` therefore **REJECTS a BARE `Ts7Oracle` row that
+   carries an INDEPENDENT non-`TypeExpr` obligation** (such a row must be promoted to
+   `OracleAndGuard`), AND under `OracleAndGuard` verifies that the proof's `guard` resolves
+   to a registered live prover in the checked-in CODE `OBLIGATION_GUARD_REGISTRY`
    (`GuardId → { obligation_kind, expectation_tag, prover fn }`, §Q4 — the §4 guard table
-   is its human-readable mirror; the gate's membership check is a registry lookup against a
-   compiled `fn` symbol, not a Markdown-name match) and that `OracleAndGuard.guard` is
-   present in / equals one listed obligation's `proving_guard` — so the rule is a
-   discriminating per-obligation check over a real typed field, not a stub. A row with
-   obligations is admissible ONLY under `OracleAndGuard` OR `Ts7OracleWithCorrections` (the
-   divergence arm, §Q4 / `ts-compat-two-mode-model.md` §9.2 — its set carries one per-query
-   `DivergenceCorrection` obligation per corrected `query_ordinal`); the set and the proof are cross-checked (a non-empty
-   set under a bare `Ts7Oracle` proof FAILS; an obligation whose `proving_guard` has no
-   `OBLIGATION_GUARD_REGISTRY` entry FAILS).
+   is its human-readable mirror; the membership check is a registry lookup against a
+   compiled `fn` symbol, not a Markdown-name match). A row carrying an independent
+   non-`TypeExpr` obligation is admissible ONLY under `OracleAndGuard` (a divergence row is
+   an `OracleAndGuard` whose `guard` is the `DivergenceCorrection` prover, §Q4 /
+   `ts-compat-two-mode-model.md` §9.2). (The round-2 stored obligation ledger was retired:
+   obligations live in the proof shape + the registered prover, not a per-row typed set.)
+
+   **Query mode is oracle query IDENTITY, not an obligation.** A row's
+   `assert_query_mode(M)` that MATCHES the oracle query's own `projection_mode` is NOT a
+   non-`TypeExpr` obligation: the driver resolves Verter's projection in mode `M`, and the
+   live audit record reporting mode `M` IS the proof (stronger than duplicating the mode
+   into a ledger). That query-mode identity is proven for every registry query by
+   `lifted_row_audit_query_mode_matches_spec` (the live audit `query_mode` equals the
+   spec's declared `projection_mode`), so a same-mode `assert_query_mode` adds NO obligation
+   and the row stays bare `Ts7Oracle`. The four seated first lifts (two index-signature
+   publications + two built-in modifier utilities) each carried exactly such a same-mode
+   `assert_query_mode(Expanded)` and are therefore seated bare `Ts7Oracle` in `Expanded`.
+   Only an INDEPENDENT non-`TypeExpr` assertion (the kinds above) promotes a row to
+   `OracleAndGuard`.
 
 **Why structural, not nominal.** Family membership (`OracleId`) is a coarse
 category; a single family can mix `TypeExpr`-projection rows and verdict rows.
@@ -644,9 +650,11 @@ The harness has three separable concerns:
   `concat!(env!("CARGO_MANIFEST_DIR"), "/src/typeinfo/typeinfo_tests/oracle_snapshots/", oracle_family, "/", snapshot_id, ".json")`,
   normalizes Verter's in-process `TypeExpr`, and asserts structural equality under the
   normalization. No tsgo at consumption time. Because the query payloads live in the
-  registry (not the body), query coverage is true **by construction** — and an
-  independent declared `oracle_query_ordinals` count on the manifest row cross-checks
-  the registry entry count so an under-counting registry cannot hide a missing query.
+  registry (not the body), query coverage is true **by construction** — and (in the
+  DEFERRED §Q4 per-row-count layer, not yet a shipped `IgnoredTestRow` field) an
+  independent declared `oracle_query_ordinals` count on the manifest row will
+  cross-check the registry entry count so an under-counting registry cannot hide a
+  missing query.
 
 ### Q1 — Snapshot directory + JSON schema (DECIDED)
 
@@ -2628,119 +2636,77 @@ coverage is true **by construction**.
      under them initially;
    - `oracle_value_kind` — `structured_type_expr` for an eligible query (the
      kind-eligibility gate, §Scope);
-   - **`non_typeexpr_obligations` is NOT a per-entry registry field — it is a
-     ONCE-PER-ROW ledger field.** An obligation is a property of the ROW's original BODY
-     (which assertions it carried), not of one of the N per-`query_ordinal` registry
-     entries; the registry entries above are per-query and carry NO obligation field.
-     The obligation set is stored EXACTLY ONCE, on the row's `LiftedRowRecord` ledger
-     entry (§Q5 `LiftedRowRecord.non_typeexpr_obligations`), as a CLOSED-ENUM SET (not a
-     bare bool) naming EVERY non-`TypeExpr` obligation the original row body asserted
-     beyond the `TypeExpr` shape. A bare `bool` was too coarse: a lifted body that only
-     calls `oracle::run_row(…)` + a `TypeExpr` compare SILENTLY DROPS any other assertion
-     the original body carried — not only dependency-footprint / audit checks (e.g.
-     `flow_return_xf04_records_barrel_route_before_selected_leaf`,
-     `flow_return_catalog.rs:1496`) but ALSO query-mode / audit-record checks (e.g. an
-     `assert_query_mode(…)` on the returned `RequestAuditRecord`). A single boolean
-     cannot say WHICH obligations were dropped, so it cannot prove each is re-asserted.
-     The field is therefore a set over a CLOSED `NonTypeExprObligation` struct, where each
-     SET MEMBER carries the obligation KIND (a closed `ObligationKind`), its TARGET (a closed
-     `ObligationTarget` naming WHICH of the row's N per-query results — or the whole-row
-     aggregate — the obligation is over), the SPECIFIC `GuardId` that re-proves THAT
-     obligation, AND the typed EXPECTED PAYLOAD (a closed `ObligationExpectation`) the
-     proving guard re-asserts:
+   - **An independent non-`TypeExpr` obligation promotes the row to `OracleAndGuard`, it
+     is NOT stored as a typed set on a ledger record.** An obligation is a property of the
+     ROW's original BODY (which assertions it carried), not of one of the N
+     per-`query_ordinal` registry entries; the registry entries above are per-query and
+     carry NO obligation field. A bare `Ts7Oracle` row that only calls `oracle::run_row(…)`
+     + a `TypeExpr` compare proves the projected shape ONLY — it SILENTLY DROPS any other
+     assertion the original body carried, e.g. dependency-footprint / audit-record checks
+     like `flow_return_xf04_records_barrel_route_before_selected_leaf`
+     (`flow_return_catalog.rs:1496`). (A same-mode `assert_query_mode(…)` is NOT such an
+     obligation — it is oracle query identity, proven live by
+     `lifted_row_audit_query_mode_matches_spec`.) A row that DOES carry an independent
+     non-`TypeExpr` obligation is therefore PROMOTED to
+     `ProofRequirement::OracleAndGuard { oracle, guard }`: the `oracle` half proves the
+     shape, and the `guard` half names a REGISTERED LIVE PROVER (conceptually in
+     `OBLIGATION_GUARD_REGISTRY`) that re-asserts the original expectation. The proof shape
+     itself — bare `Ts7Oracle` vs `OracleAndGuard` — is what records that the row carries an
+     obligation; there is no separate typed obligation SET stored on a ledger entry. (The
+     round-2 stored obligation ledger was retired.)
 
-     ```
-     enum ObligationKind {            // CLOSED — adding a variant is a schema change
-         DependencyFootprint,         // the body asserted a resolved dependency footprint
-         AuditRecord,                 // the body asserted on a returned RequestAuditRecord
-         QueryMode,                   // the body asserted assert_query_mode(…)
-         WarmCache,                   // the body asserted a warm-cache / cache-hit fact
-         DeclaredDependency,          // the body asserted a declared-dependency fact
-         DivergenceCorrection,        // a Ts7OracleWithCorrections row's correction linkage
-                                      //   (ts-compat-two-mode-model.md §9.2) — the divergence-data tie
-     }
+     **The five obligation KINDS the `OracleAndGuard.guard` provers cover.** Each KIND has a
+     registered live prover that re-asserts the ORIGINAL expectation against the live result
+     — not merely re-runs the query:
 
-     enum ObligationTarget {          // CLOSED — adding a variant is a schema change
-         WholeRow,                    // obligation over the row's whole execution (a row-level aggregate)
-         Query { query_ordinal: u16 },// obligation over ONE of the row's N per-query results
-     }
+     - `DependencyFootprint` — the body asserted a resolved dependency footprint
+       (`includes`/`excludes` leading-slash canonical paths);
+     - `AuditRecord` — the body asserted on a returned `RequestAuditRecord` (`(field, value)`
+       pairs);
+     - `WarmCache` — the body asserted a warm-cache / cache-hit fact (fact keys);
+     - `DeclaredDependency` — the body asserted a declared-dependency fact (ids);
+     - `DivergenceCorrection` — a divergence row's correction linkage
+       (`ts-compat-two-mode-model.md` §9.2) — the divergence-data tie
+       (`resolver(query) == correction.correct_value` while that query's
+       `snapshot.oracle_value` is the recorded `TsCompat` value and differs), per corrected
+       `query_ordinal`.
 
-     // CLOSED — the typed EXPECTED PAYLOAD the original body asserted, extracted at lift
-     // time by the SAME `syn` walk that builds the migration_fingerprint. The variant
-     // MUST match the member's `kind` (a mismatch is a capture bug the fidelity guard
-     // FAILS). Without it a `(kind, proving_guard)` pair could only RE-RUN the row's
-     // oracle execution, never re-prove the ORIGINAL assertion ("footprint includes
-     // /foo excludes /bar", "mode == Expanded", "audit field X == Y", …).
-     enum ObligationExpectation {     // CLOSED — adding a variant is a schema change
-         DependencyFootprint { includes: &'static [&'static str],   // leading-slash canonical paths
-                               excludes: &'static [&'static str] },
-         QueryMode { mode: ProjectionMode },                        // the asserted projection mode
-         AuditRecord { fields: &'static [(&'static str, &'static str)] }, // (field, expected-value) pairs
-         WarmCache { facts: &'static [&'static str] },              // the asserted warm-cache fact keys
-         DeclaredDependency { ids: &'static [&'static str] },       // the asserted declared-dependency ids
-         DivergenceCorrection { correction_id: &'static str,        // the named correction overlay
-                                divergence_id: &'static str },      // the divergence registry id (ts-compat §9.2)
-     }
-
-     struct NonTypeExprObligation {
-         kind: ObligationKind,
-         target: ObligationTarget,          // WHICH of the row's results the obligation is over
-         proving_guard: GuardId,
-         expected: ObligationExpectation,   // variant matched to `kind`
-     }
-     // LiftedRowRecord.non_typeexpr_obligations: &'static [NonTypeExprObligation]
-     ```
-
-     **The `expected` payload is what lets the per-obligation guard re-PROVE the original
-     assertion, not merely re-run the query.** A `(kind, proving_guard)` pair alone tells
-     the guard WHICH obligation to re-check but not WHAT the row asserted — it cannot
-     re-prove "footprint includes `/foo` excludes `/bar`", "query mode `== Expanded`",
-     "audit field X `== Y`", or "warm-cache fact Z present". The `expected` payload carries
-     exactly that recorded expectation; the proving guard re-runs the row's oracle execution
-     and asserts the recorded `expected` against the LIVE result. The payload is extracted at
-     lift time from the original body by the SAME `syn` walk that builds the
-     `migration_fingerprint` (so a lift that drops or mis-records the expectation FAILS the
-     fidelity guard) and enters the `migration_fingerprint` as part of the obligation set.
-
-     The set is non-empty exactly when the row asserts something the `TypeExpr` compare
-     cannot prove. The emptiness rule is therefore ARM-SPECIFIC across the three proof
-     arms: EMPTY iff the row's `proof` is bare `Ts7Oracle(_)`; NON-EMPTY (footprint / audit
-     / mode / cache obligations) under `OracleAndGuard{..}`; and under
-     `Ts7OracleWithCorrections{..}` (the divergence arm, `ts-compat-two-mode-model.md` §9.2)
-     it contains ONE `DivergenceCorrection` member PER CORRECTED query (each targeting
-     `Query { query_ordinal }`) — plus any footprint/audit obligations the divergence row
-     also asserts.
+     **The prover re-PROVES the original assertion, not merely re-runs the query.** A prover
+     that only re-ran the row's oracle execution could not re-prove "footprint includes
+     `/foo` excludes `/bar`", "audit field X `== Y`", or "warm-cache fact Z present". Each
+     registered prover therefore re-asserts the original expectation (the recorded paths /
+     fields / facts / ids / correction tie) against the LIVE result. A divergence /
+     footprint / audit prover knows WHICH `query_ordinal` it is over and selects that query's
+     result — never "any query passes" (unsound) nor "every query must pass" (stricter than
+     the original body).
 
      **The `GuardId` enum is EXTENDED with obligation-proving variants.** The existing
      `GuardId` (`typeinfo_ignored_test_manifest.rs:356`) carries only the six legacy
      structural-guard variants (`ModeBoundaryExactness`, `ExpansionBoundaryPrecision`,
      `DemandBoundaryPrecision`, `CacheInvalidationRoute`, `AuditFootprintAttachment`,
-     `CrossFileRouteFact`) — none of which is a generic obligation prover. The lift adds a
-     CLOSED set of obligation-proving `GuardId` variants, ONE per `ObligationKind`, each
-     a REAL registered guard in the §4 table:
+     `CrossFileRouteFact`) — none of which is a generic obligation prover. The obligation
+     model adds a CLOSED set of obligation-proving `GuardId` variants, ONE per obligation
+     KIND, each a REAL registered guard in the §4 table:
 
-     | `ObligationKind` | added `GuardId` variant | `ObligationExpectation` variant | proving guard / test (a §4-table row) |
-     | --- | --- | --- | --- |
-     | `DependencyFootprint` | `GuardId::DependencyFootprintObligation` | `DependencyFootprint { includes, excludes }` | `dependency_footprint_obligation_reproved` — re-runs the row's oracle execution and asserts the recorded `includes`/`excludes` paths against the live resolved dependency set |
-     | `AuditRecord` | `GuardId::AuditRecordObligation` | `AuditRecord { fields }` | `audit_record_obligation_reproved` — re-asserts the recorded `(field, value)` pairs against the returned `RequestAuditRecord` |
-     | `QueryMode` | `GuardId::QueryModeObligation` | `QueryMode { mode }` | `query_mode_obligation_reproved` — asserts the row's `RequestAuditRecord` records the recorded expected `mode` (the original `assert_query_mode(…)`) |
-     | `WarmCache` | `GuardId::WarmCacheObligation` | `WarmCache { facts }` | `warm_cache_obligation_reproved` — re-asserts the recorded warm-cache / cache-hit fact keys against the live cache state |
-     | `DeclaredDependency` | `GuardId::DeclaredDependencyObligation` | `DeclaredDependency { ids }` | `declared_dependency_obligation_reproved` — re-asserts the recorded declared-dependency ids against the live declared-dependency set |
-     | `DivergenceCorrection` (target `Query { query_ordinal }`) | `GuardId::DivergenceCorrectionObligation` | `DivergenceCorrection { correction_id, divergence_id }` | `divergence_correction_obligation_reproved` — re-asserts the per-query divergence-data tie (`resolver(query) == correction.correct_value` while that query's `snapshot.oracle_value` is the recorded `TsCompat` value and differs), and that the recorded `correction_id` resolves to the named correction overlay and `divergence_id` to a registry entry whose id equals it (`ts-compat-two-mode-model.md` §9.2) |
+     | obligation KIND | `GuardId` variant | proving guard / test (a §4-table row) |
+     | --- | --- | --- |
+     | `DependencyFootprint` | `GuardId::DependencyFootprintObligation` | `dependency_footprint_obligation_reproved` — re-runs the row's oracle execution and asserts the recorded `includes`/`excludes` paths against the live resolved dependency set |
+     | `AuditRecord` | `GuardId::AuditRecordObligation` | `audit_record_obligation_reproved` — re-asserts the recorded `(field, value)` pairs against the returned `RequestAuditRecord` |
+     | `WarmCache` | `GuardId::WarmCacheObligation` | `warm_cache_obligation_reproved` — re-asserts the recorded warm-cache / cache-hit fact keys against the live cache state |
+     | `DeclaredDependency` | `GuardId::DeclaredDependencyObligation` | `declared_dependency_obligation_reproved` — re-asserts the recorded declared-dependency ids against the live declared-dependency set |
+     | `DivergenceCorrection` | `GuardId::DivergenceCorrectionObligation` | `divergence_correction_obligation_reproved` — re-asserts the per-query divergence-data tie (`resolver(query) == correction.correct_value` while that query's `snapshot.oracle_value` is the recorded `TsCompat` value and differs), and that the recorded `correction_id` resolves to the named correction overlay and `divergence_id` to a registry entry whose id equals it (`ts-compat-two-mode-model.md` §9.2) |
 
-     This `ObligationKind → GuardId → guard/test` mapping is the human-readable MIRROR of a
-     CHECKED-IN CODE registry — the gate's actual input is the code, not this Markdown
-     table. A Rust test cannot introspect a Markdown table nor prove a named function
-     exists by reading prose, so the AUTHORITY is a checked-in `const` registry in the
-     oracle module (alongside `oracle_query_specs.rs`): a closed, total static slice keyed
-     by `GuardId` whose entry binds the obligation prover and its typed shape, e.g.
+     This `KIND → GuardId → guard/test` mapping is the human-readable MIRROR of a CHECKED-IN
+     CODE registry — the gate's actual input is the code, not this Markdown table. A Rust
+     test cannot introspect a Markdown table nor prove a named function exists by reading
+     prose, so the AUTHORITY is a checked-in `const` registry in the oracle module
+     (alongside `oracle_query_specs.rs`): a closed, total static slice keyed by `GuardId`
+     whose entry binds the obligation prover and its typed shape, e.g.
 
      ```
      struct ObligationGuardEntry {
          guard_id:         GuardId,                    // the obligation-proving variant
-         obligation_kind:  ObligationKind,             // the kind this guard proves
-         expectation_tag:  ObligationExpectationTag,   // the ObligationExpectation discriminant it re-asserts
-         prover:           fn(&LiftedRowRecord, &NonTypeExprObligation, &RowExecutionResults) -> Result<(), GuardFailure>,
+         prover:           fn(&RowExecutionResults) -> Result<(), GuardFailure>,
      }
      // OBLIGATION_GUARD_REGISTRY: &[ObligationGuardEntry] — one entry per *Obligation GuardId,
      //   `prover` is the ACTUAL re-proving fn path (e.g. dependency_footprint_obligation_reproved),
@@ -2753,126 +2719,84 @@ coverage is true **by construction**.
      **Helper-result availability is helper-specific — the per-helper slots are OPTIONAL and
      fail-closed.** `resolve_expr` / `evaluate_expr` produce an `AuditRecord` (carrying the
      query-mode / footprint data); `shallow_surface_expr` is `TypeExpr`-only and carries NO
-     audit record. An `AuditRecord` or `QueryMode` obligation whose `target` selects a helper
-     that produced no such record CANNOT be proven, so it FAILS the gate (the absent slot is
-     modeled as a missing `Option`, never silently waved through) — the obligation must
-     target a helper whose execution actually emits the record it re-asserts.
+     audit record. An `AuditRecord` prover targeting a query whose helper produced no such
+     record CANNOT prove it, so it FAILS the gate (the absent slot is modeled as a missing
+     `Option`, never silently waved through) — the obligation must target a helper whose
+     execution actually emits the record it re-asserts.
 
      **The prover SELECTS its target's result, never an arbitrary or all-queries blob.**
-     The prover receives BOTH the obligation (so it reads `target` and the recorded
-     `expected`) AND the per-`query_ordinal`-indexed `RowExecutionResults`: for a
-     `Query { query_ordinal }` target it asserts the recorded `expected` against THAT
-     ordinal's result (its `RequestAuditRecord` / projection mode / footprint), and for a
-     `WholeRow` target it asserts against the row-level aggregate. Indexing by `target`
-     guarantees the recorded `expected` is asserted against the CORRECT query's live
-     result — never "any query passes" (unsound) nor "every query must pass" (stricter than
-     the original body).
+     The prover receives the per-`query_ordinal`-indexed `RowExecutionResults`: a per-query
+     prover asserts against THAT ordinal's result (its `RequestAuditRecord` / projection
+     mode / footprint), and a row-level prover asserts against the row-level aggregate.
+     Selecting the right query guarantees the original expectation is asserted against the
+     CORRECT query's live result — never "any query passes" (unsound) nor "every query must
+     pass" (stricter than the original body).
 
      The §4 guard table is the human-readable mirror of this registry; the registry is the
-     authority `kind_eligibility_gate` reads. The gate looks each obligation's
-     `proving_guard` UP in `OBLIGATION_GUARD_REGISTRY` and asserts (i) the entry EXISTS
-     (membership is a registry lookup, not a Markdown-name match), (ii) its
-     `obligation_kind` EQUALS the obligation's `kind` (and equals the closed
-     `ObligationKind → GuardId` mapping's image for that `kind`), and (iii) its
-     `expectation_tag` EQUALS the obligation's `expected` `ObligationExpectation`
-     discriminant. A complementary parity check asserts the §4 guard table lists exactly
-     the registry's prover fns (the mirror stays in sync). The registry's `prover` field is
-     a real `fn` symbol the compiler resolves, so a `proving_guard` naming a guard with no
-     registry entry — or a registry entry whose `prover` does not compile — FAILS at build
-     time, not by a prose cross-reference. (`AuditFootprintAttachment` among the legacy
+     authority `kind_eligibility_gate` reads. The gate looks the proof's `OracleAndGuard.guard`
+     UP in `OBLIGATION_GUARD_REGISTRY` and asserts the entry EXISTS (membership is a registry
+     lookup, not a Markdown-name match). A complementary parity check asserts the §4 guard
+     table lists exactly the registry's prover fns (the mirror stays in sync). The registry's
+     `prover` field is a real `fn` symbol the compiler resolves, so a `guard` naming a prover
+     with no registry entry — or a registry entry whose `prover` does not compile — FAILS at
+     build time, not by a prose cross-reference. (`AuditFootprintAttachment` among the legacy
      `GuardId` variants is NOT in this registry — it is a specific structural guard, not a
      generic obligation prover; obligation proving uses the dedicated `*Obligation`
      variants above, so the gate never conflates a legacy structural guard with an
      obligation re-prover.)
 
-     **Why a PER-OBLIGATION guard, not the single `OracleAndGuard.guard`.**
-     `ProofRequirement::OracleAndGuard { oracle, guard }` carries exactly ONE `GuardId`
-     (`typeinfo_ignored_test_manifest.rs` `ProofRequirement::OracleAndGuard`). A row that dropped MULTIPLE distinct
-     obligations (say both a `DependencyFootprint` and a `QueryMode` check) cannot have
-     all of them proven by one `GuardId` unless that one guard happens to assert both —
-     and there is no "transitively asserts" registry to verify such a claim. So the
-     coverage model is per-obligation and EXPLICIT: each `NonTypeExprObligation` names
-     its OWN `proving_guard`, and the `kind_eligibility_gate` verifies, for every listed
-     obligation, (a) that its `proving_guard` is EXACTLY the `GuardId` the closed
-     `ObligationKind → GuardId` mapping above assigns to that obligation's `kind`, AND (b)
-     that this `GuardId` EXISTS as a real entry in the checked-in CODE
-     `OBLIGATION_GUARD_REGISTRY` (a registry lookup whose `prover` is a real `fn` symbol —
-     NOT a Markdown-name match against the §4 table). The single `OracleAndGuard.guard` is retained as the
-     PRIMARY shape/footprint guard the proof points at, but it is NOT the sole prover: the
-     gate's authority is the per-obligation `proving_guard` set, not the one
-     `OracleAndGuard.guard`. (A row whose obligation set has exactly one member MAY name
-     the same `GuardId` as `OracleAndGuard.guard`; a multi-obligation row names a distinct
-     guard per obligation.)
-
      The `kind_eligibility_gate` then enforces:
-     - a BARE `Ts7Oracle` row whose `non_typeexpr_obligations` is NON-EMPTY FAILS (the
-       shape compare cannot prove any obligation);
-     - a row with obligations is admissible ONLY under `OracleAndGuard` OR
-       `Ts7OracleWithCorrections` (the divergence arm, §9.2): the latter's set carries one
-       `DivergenceCorrection` obligation PER CORRECTED query (each targeting
-       `Query { query_ordinal }`, plus any footprint/audit obligations the row also asserts),
-       and a `DivergenceCorrection` obligation is admissible ONLY under
-       `Ts7OracleWithCorrections`;
-     - under `OracleAndGuard`, EVERY listed obligation's `proving_guard` must (a) equal the
-       `GuardId` the closed `ObligationKind → GuardId` mapping assigns to its `kind`, (b)
-       resolve to an entry in the checked-in CODE `OBLIGATION_GUARD_REGISTRY` whose
-       `obligation_kind` equals the obligation's `kind`, AND (c) carry an `expected`
-       payload whose `ObligationExpectation` discriminant MATCHES that entry's
-       `expectation_tag` (and its `kind`) — a listed obligation whose `proving_guard` is the
-       wrong `GuardId` for its `kind`, has no `OBLIGATION_GUARD_REGISTRY` entry, or whose
-       `expected` variant does not match its `kind`, FAILS (no obligation is left unproven
-       by a phantom guard or an unprovable empty expectation);
-     - the `OracleAndGuard.guard` itself must be present in the set (or equal one
-       listed obligation's `proving_guard`) so the proof's primary guard is accounted for;
-     - EVERY listed obligation's `target` satisfies the "Per-kind targeting rule" below
-       (a per-query obligation MUST carry a valid in-range `Query { query_ordinal }`).
+     - a BARE `Ts7Oracle` row that carries an INDEPENDENT non-`TypeExpr` obligation FAILS
+       (the shape compare cannot prove the obligation) — it must be promoted to
+       `OracleAndGuard`;
+     - a row carrying an independent non-`TypeExpr` obligation is admissible ONLY under
+       `OracleAndGuard` (a divergence row is an `OracleAndGuard` whose `guard` is the
+       `DivergenceCorrection` prover, §9.2);
+     - under `OracleAndGuard`, the proof's `guard` must resolve to a registered live prover
+       in the checked-in CODE `OBLIGATION_GUARD_REGISTRY` (a registry lookup whose `prover`
+       is a real `fn` symbol — NOT a Markdown-name match against the §4 table) — a `guard`
+       with no registry entry FAILS;
+     - a per-query prover (`AuditRecord`, `DivergenceCorrection`) selects a valid in-range
+       `query_ordinal` (the "Per-kind targeting rule" below).
 
      **Per-kind targeting rule.** A row may issue N oracle queries keyed by `query_ordinal`
-     `0..N` (§Q5 `oracle_query_ordinals`), so a per-query obligation must name WHICH query
-     it is over or it cannot be soundly proven — checking "any" query is unsound and "all"
-     is stricter than the original body. The `target` field closes that gap, and the gate
-     enforces it per kind:
-     - `QueryMode` and `AuditRecord` are INHERENTLY per-query — a projection mode and a
-       `RequestAuditRecord` are produced BY a specific oracle query, not by the row's whole
-       execution. They MUST carry `Query { query_ordinal }` with
-       `query_ordinal < oracle_query_ordinals` (the row's declared query count, §Q5). A
-       `WholeRow` target, or an out-of-range `query_ordinal`, FAILS the gate.
-     - `DependencyFootprint`, `WarmCache`, and `DeclaredDependency` MAY target either
-       `WholeRow` (the aggregate footprint/cache/deps over the row's whole execution) OR
-       `Query { query_ordinal }` (when the original body asserted on a SPECIFIC query's
-       footprint/cache/deps); the lift captures whichever the original body's assertion
-       structure indicates.
+     `0..N` (§Q5 `oracle_query_ordinals`), so a per-query prover must select WHICH query it
+     is over or it cannot soundly prove anything — checking "any" query is unsound and "all"
+     is stricter than the original body. The provers select per kind:
+     - `AuditRecord` is INHERENTLY per-query — a `RequestAuditRecord` is produced BY a
+       specific oracle query, not by the row's whole execution. Its prover selects a
+       `query_ordinal < oracle_query_ordinals` (the row's declared query count, §Q5). An
+       out-of-range / unselectable ordinal FAILS the gate.
+     - `DependencyFootprint`, `WarmCache`, and `DeclaredDependency` provers MAY assert over
+       the whole-row aggregate (the footprint/cache/deps over the row's whole execution) OR
+       a SPECIFIC query's footprint/cache/deps, whichever the original body asserted.
      - `DivergenceCorrection` is INHERENTLY per-query — the divergence-data tie
        (`resolver(query) == correction.correct_value` while that query's
        `snapshot.oracle_value` is the recorded `TsCompat` value and differs) is a property of
-       a SPECIFIC corrected query, not the row's whole execution. It MUST carry
-       `Query { query_ordinal }` with `query_ordinal < oracle_query_ordinals`; a `WholeRow`
-       target (or an out-of-range `query_ordinal`) FAILS the gate. A row may carry one
-       `DivergenceCorrection` obligation per corrected query, mixing corrected and ordinary
-       queries.
+       a SPECIFIC corrected query, not the row's whole execution. Its prover selects a
+       `query_ordinal < oracle_query_ordinals`; an out-of-range ordinal FAILS the gate. A
+       row may carry one `DivergenceCorrection` per corrected query, mixing corrected and
+       ordinary queries.
      - DEFAULT-REJECT BACKSTOP: for a row with `oracle_query_ordinals > 1`, ANY per-query
-       obligation whose `target` is not a valid in-range `Query { query_ordinal }` FAILS
-       admission — the row is default-rejected and DEFERRED rather than admitted against an
-       unaddressable obligation. A single-query row (`oracle_query_ordinals == 1`) resolves
-       `Query { query_ordinal: 0 }` or `WholeRow` unambiguously.
+       prover that cannot select a valid in-range `query_ordinal` FAILS admission — the row
+       is default-rejected and DEFERRED rather than admitted against an unaddressable
+       obligation. A single-query row (`oracle_query_ordinals == 1`) resolves ordinal `0`
+       unambiguously.
 
-     This makes the §Scope "exclude footprint/audit rows" rule enforceable PER-OBLIGATION
-     over a real typed field, not as a single coarse boolean nor a vague "transitively
-     asserts" claim (the lifted body no longer carries the extra assertions, and
-     `IgnoredTestRow` has no assertion-kind field). The schema change is: the `GuardId`
-     enum gains the six `*Obligation` variants above (one per `ObligationKind`, including
-     `DivergenceCorrectionObligation` for the divergence arm), the closed `ObligationExpectation`
-     and `ObligationTarget` enums are added, the `LiftedRowRecord` carries the once-per-row
-     `non_typeexpr_obligations: &[NonTypeExprObligation { kind, target, proving_guard, expected }]`
-     set (the registry entries do NOT), and the coverage registry the gate reads is the
-     checked-in CODE `OBLIGATION_GUARD_REGISTRY` (`GuardId → { obligation_kind,
-     expectation_tag, prover fn }`), of which the §4 guard table is the human-readable
-     mirror — so the gate's membership check is a real registry lookup against compiled
-     `fn` symbols, not a Markdown cross-reference. The driver does NOT preserve the
-     original generic assertions inline (that would re-introduce hand-authored body
-     assertions the registry model removes); instead each obligation is proven by its own
-     explicitly-named guard re-asserting its recorded `expected` payload — the typed set is
-     the discriminating record of WHICH guards must exist AND WHAT each must prove;
+     This makes the §Scope "exclude footprint/audit rows" rule enforceable through the
+     PROOF SHAPE + a real registered prover, not as a single coarse boolean nor a vague
+     "transitively asserts" claim (the lifted body no longer carries the extra assertions,
+     and `IgnoredTestRow` has no assertion-kind field). The schema change is: the `GuardId`
+     enum gains the five `*Obligation` variants above (one per obligation KIND, including
+     `DivergenceCorrectionObligation` for the divergence case), and the coverage registry
+     the gate reads is the checked-in CODE `OBLIGATION_GUARD_REGISTRY`
+     (`GuardId → prover fn`), of which the §4 guard table is the human-readable mirror — so
+     the gate's membership check is a real registry lookup against compiled `fn` symbols,
+     not a Markdown cross-reference. The driver does NOT preserve the original generic
+     assertions inline (that would re-introduce hand-authored body assertions the registry
+     model removes); instead each obligation is proven by the `OracleAndGuard.guard`'s
+     registered prover re-asserting its recorded expectation — the proof shape records WHICH
+     guard must exist AND the prover records WHAT it must prove;
    - `query_helper_kind` — a **CLOSED enum** naming which `support.rs` helper produces
      the in-process `TypeExpr`, with kind-specific payload:
      - `ResolveExpr { symbol, type_args, projection_mode }` — drives `resolve_expr`
@@ -3061,10 +2985,12 @@ coverage is true **by construction**.
    resolved symbol-space) would pass every cardinality + binding guard while validating a
    DIFFERENT query than the row authored — a silent migration error. The honest closure
    is a **migration fingerprint extracted from the original body BEFORE the body is
-   replaced by `#[oracle_row]`**, and the `migration_fingerprint` (on the ledger) is the
-   SOLE migration-fidelity authority — NOT a hand-maintained registry field. The
-   fingerprint covers EVERY value-affecting and obligation-bearing input the lift must
-   preserve:
+   replaced by `#[oracle_row]`**, and the `migration_fingerprint` (on the retained-lift
+   metadata) is the SOLE migration-fidelity authority — NOT a hand-maintained registry
+   field. (This `migration_fingerprint` body-hash fidelity layer is a GENUINELY DEFERRED
+   TODO — not yet wired; the description is the planned design.) The fingerprint covers
+   EVERY value-affecting input AND the row's proof shape (`Ts7Oracle` vs `OracleAndGuard` +
+   its `guard` id) the lift must preserve:
 
    - The lifting step, in the SAME block, mechanically extracts from the row's
      pre-replacement body (a `syn` AST parse of the body — "Extraction method" below) the
@@ -3087,85 +3013,77 @@ coverage is true **by construction**.
      )
      ```
 
-     PLUS — captured ONCE per row, NOT per query — the **`non_typeexpr_obligations` set**:
-     the lift-time AST extraction DETECTS every non-`TypeExpr` assertion the original body
-     carried beyond the `TypeExpr` shape compare — `assert_query_mode(…)` on a returned
-     `RequestAuditRecord`, dependency-footprint assertions, warm-cache / cache-hit
-     assertions, declared-dependency assertions — and records them as the typed
-     `&[NonTypeExprObligation { kind, target, proving_guard, expected }]` set (§Q4) in the ledger. The
-     extraction maps each detected obligation-bearing assertion to its `ObligationKind`
-     (`DependencyFootprint` / `AuditRecord` / `QueryMode` / `WarmCache` / …), its
-     `ObligationTarget` (`WholeRow`, or the `Query { query_ordinal }` of the SPECIFIC query
-     the original assertion read — a per-query `QueryMode`/`AuditRecord` ALWAYS binds the
-     originating query's ordinal), the
-     `GuardId` that re-proves it post-lift, AND the typed `ObligationExpectation` payload it
-     asserted — the same `syn` walk that const-folds the per-query fidelity tuple also
-     const-folds the assertion's literal arguments into the `expected` variant (e.g. the
-     footprint's `includes`/`excludes` path literals, the `assert_query_mode` mode literal,
-     the audit `(field, value)` literals). A body that asserts such behavior but whose
-     extraction yields an EMPTY set, a wrong `kind`, or an `expected` variant that does not
-     match its `kind` (or whose assertion arguments are NOT statically const-foldable) is a
-     CAPTURE BUG: the fidelity guard FAILS rather than letting a bare `Ts7Oracle` row silently
-     drop the original assertions or record an unprovable expectation.
+     PLUS — captured ONCE per row, NOT per query — the **proof shape**: the lift-time AST
+     extraction DETECTS every INDEPENDENT non-`TypeExpr` assertion the original body carried
+     beyond the `TypeExpr` shape compare — dependency-footprint assertions, audit-record
+     assertions, warm-cache / cache-hit assertions, declared-dependency assertions — and a
+     row that carries one is seated as `OracleAndGuard { oracle, guard }` whose `guard` is
+     the registered prover for that obligation KIND, rather than bare `Ts7Oracle`. (A
+     same-mode `assert_query_mode(…)` is NOT extracted as an obligation — the query's
+     `projection_mode` is part of the per-query fidelity tuple, i.e. query identity, proven
+     live by `lifted_row_audit_query_mode_matches_spec`.) The extraction maps each detected
+     obligation-bearing assertion to its KIND (`DependencyFootprint` / `AuditRecord` /
+     `WarmCache` / `DeclaredDependency`) and the registered `GuardId` prover that re-proves
+     it post-lift. A body that asserts such behavior but is seated bare `Ts7Oracle` (no
+     `guard`), or whose assertion arguments are NOT statically const-foldable, is a CAPTURE
+     BUG: the fidelity guard FAILS rather than letting a bare `Ts7Oracle` row silently drop
+     the original assertions.
 
-     The canonical-JSON **`migration_fingerprint`** is computed over the ordered
-     per-query fidelity tuple ABOVE ∪ the per-row `non_typeexpr_obligations` set, recorded
-     ONCE in the `LiftedRowRecord` ledger at lift time. The recorded obligation set carries
-     each member's `target`, so the fingerprint covers the obligation TARGETING too. Because
-     `source_locator`, `host_project`, and `non_typeexpr_obligations` (with each member's
-     `target`) are now IN the fingerprint, a lift that drops or mis-records any of them — a
-     `workspace_footprint` row migrated as `standalone`, a `source_locator` whose
-     `symbol_space` flipped Type↔Value, an empty obligation set on a row that asserted a
-     footprint, a `QueryMode` obligation recorded as `WholeRow`, or a `Query { query_ordinal }`
-     that does not match the originating query — FAILS the fidelity guard rather than
-     passing.
+     The canonical-JSON **`migration_fingerprint`** is computed over the ordered per-query
+     fidelity tuple ABOVE ∪ the row's proof shape (`Ts7Oracle` vs `OracleAndGuard` + its
+     `guard` id), recorded ONCE in the retained-lift metadata at lift time. Because
+     `source_locator`, `host_project`, and the proof shape are now IN the fingerprint, a
+     lift that drops or mis-records any of them — a `workspace_footprint` row migrated as
+     `standalone`, a `source_locator` whose `symbol_space` flipped Type↔Value, or a bare
+     `Ts7Oracle` seating for a row that asserted a footprint — FAILS the fidelity guard
+     rather than passing. (This `migration_fingerprint` / `original_body_tokens` body-hash
+     fidelity layer is a GENUINELY DEFERRED TODO — not yet wired; the description is the
+     planned design.)
    - `registry_payload_matches_migration_fingerprint` asserts that the registry entries
      for the row (their `helper_kind`, `primary_canonical`, `symbol_or_expression`,
      `type_arguments`, `projection_mode`, `workspace_files`, `source_locator`, and
-     `host_project`), taken in `query_ordinal` order, ∪ the LEDGER's once-per-row
-     `LiftedRowRecord.non_typeexpr_obligations` set (NOT a registry-entry field — registry
-     entries carry no obligation), re-canonicalize to the SAME `migration_fingerprint`
-     recorded in the ledger — the obligation set's per-member `target` is part of what must
-     re-canonicalize. A registry payload that drifted from the original body's
-     query (wrong symbol, canonical, mode, type-args, file set, source-locator/space, host
-     setup), OR a ledger obligation set that drifted (a changed/empty set, a wrong
-     `expected` payload, or a drifted `target` — a `WholeRow` recorded for a per-query
-     obligation, or a `query_ordinal` that no longer matches the originating query), FAILS
-     — proving the registry faithfully
-     reproduces the ORIGINAL hand-authored query AND the ledger preserves its obligations, not merely a
-     self-consistent target.
+     `host_project`), taken in `query_ordinal` order, ∪ the row's proof shape
+     (`Ts7Oracle` vs `OracleAndGuard` + its `guard` id), re-canonicalize to the SAME
+     `migration_fingerprint` recorded in the retained-lift metadata. A registry payload that
+     drifted from the original body's query (wrong symbol, canonical, mode, type-args, file
+     set, source-locator/space, host setup), OR a proof shape that drifted (a row demoted to
+     bare `Ts7Oracle` that originally asserted a footprint/audit/warm-cache check), FAILS —
+     proving the registry faithfully reproduces the ORIGINAL hand-authored query AND the
+     proof shape preserves its obligations, not merely a self-consistent target. (Deferred
+     alongside `migration_fingerprint`.)
 
    So the claim is NOT the weaker "the registry is authoritative AFTER lift, original
-   coverage unverified" — the migration fingerprint VERIFIES the full registry payload +
-   obligation set against the original body at lift time, and the ledger retains it so the
-   verification re-runs on every regeneration. The fingerprint is the migration-fidelity
-   AUTHORITY: the registry's `source_locator` / `host_project` (and the LEDGER's
-   once-per-row `non_typeexpr_obligations` set, NOT a registry-entry field)
-   are validated AGAINST it, never hand-maintained as the truth.
+   coverage unverified" — the planned migration fingerprint VERIFIES the full registry
+   payload + proof shape against the original body at lift time, and the retained-lift
+   metadata holds it so the verification re-runs on every regeneration. The fingerprint is
+   the migration-fidelity AUTHORITY: the registry's `source_locator` / `host_project` (and
+   the row's proof shape) are validated AGAINST it, never hand-maintained as the truth.
 
    **The ORIGINAL extraction input stays AUDITABLE — the CHECKED-IN `original_body_tokens`.** Once the
    `#[ignore]` body is replaced by `#[oracle_row]`, every downstream guard compares only
    the registry payload to the RETAINED `migration_fingerprint`. That closes registry
    DRIFT but not a WRONG INITIAL extraction: a fingerprint computed from a mis-extracted
    body is self-consistent with the registry forever, validating the wrong query. To make
-   the extraction INPUT auditable rather than only self-compared, the `LiftedRowRecord`
-   STORES THE EXTRACTION INPUT ITSELF — `original_body_tokens`, the canonical original
-   `#[test]` body `syn` token stream (`Span`-stripped, whitespace-insignificant token-tree
-   print — the EXACT bytes the extractor read) — captured at lift time in the SAME audited
-   lift command that computes `migration_fingerprint`. The `original_extraction_input_auditable`
-   guard re-runs the extractor over this CHECKED-IN `original_body_tokens` artifact and asserts
-   the re-derived fingerprint EQUALS the recorded `migration_fingerprint` — HERMETICALLY, from
-   the ledger artifact alone, with NO VCS archaeology (no shallow-checkout / archive / CI-clone
-   dependence). So a fingerprint that never matched its own claimed input is detectable, because
-   the recorded extraction input is pinned IN the ledger, not just the derived fingerprint. The
-   token stream is a migration/audit record, NOT a `snapshot_id` input. (The fingerprint is a
-   LIFT-TIME migration check on the payload's FIDELITY; it is NOT a `snapshot_id`
+   the extraction INPUT auditable rather than only self-compared, the retained-lift
+   metadata STORES THE EXTRACTION INPUT ITSELF — `original_body_tokens`, the canonical
+   original `#[test]` body `syn` token stream (`Span`-stripped, whitespace-insignificant
+   token-tree print — the EXACT bytes the extractor read) — captured at lift time in the
+   SAME audited lift command that computes `migration_fingerprint`. The
+   `original_extraction_input_auditable` guard re-runs the extractor over this CHECKED-IN
+   `original_body_tokens` artifact and asserts the re-derived fingerprint EQUALS the recorded
+   `migration_fingerprint` — HERMETICALLY, from the retained-lift artifact alone, with NO VCS
+   archaeology (no shallow-checkout / archive / CI-clone dependence). So a fingerprint that
+   never matched its own claimed input is detectable, because the recorded extraction input
+   is pinned IN the retained-lift metadata, not just the derived fingerprint. The token
+   stream is a migration/audit record, NOT a `snapshot_id` input. (This whole
+   `migration_fingerprint` / `original_body_tokens` body-hash fidelity layer is a GENUINELY
+   DEFERRED TODO — not yet wired; the description is the planned design.) (The fingerprint
+   is a LIFT-TIME migration check on the payload's FIDELITY; it is NOT a `snapshot_id`
    input — the value-affecting axes
    `symbol_or_expression`/`primary_canonical`/`type_arguments`/`projection_mode`/
    `workspace_files`/`host_project` already enter `snapshot_id` directly, and
-   `source_locator` is deliberately guard-only, §Q4. `non_typeexpr_obligations` is a
-   migration/coverage record, not a value-affecting axis, so it too stays out of
-   `snapshot_id`.)
+   `source_locator` is deliberately guard-only, §Q4. The proof shape is a migration/coverage
+   record, not a value-affecting axis, so it too stays out of `snapshot_id`.)
 
    **Extraction method — a `syn` AST parse that resolves known setup helpers, or REJECTS a
    non-statically-extractable body.** Many rows do NOT call the helpers inline with literal
@@ -3425,7 +3343,8 @@ carries the executable spec; the ONE new `IgnoredTestRow` field is the declared
 snapshot set from the REGISTRY (not from the snapshots themselves). SIX guards —
 `registry_covers_every_lifted_oracle_query` (forward), `no_orphan_snapshot` (reverse,
 set-equality + offline env re-derivation), `registry_entry_count_matches_declared` (the
-independent declared cross-check + ordinal contiguity),
+independent declared cross-check + ordinal contiguity — DEFERRED, pending the new
+`oracle_query_ordinals` field),
 `registry_family_matches_manifest_oracle_id` (entry-family ≡ proof-family),
 `oracle_env_corpus_is_closed` (the vendored-corpus set-equality re-enumeration), and
 `raw_capture_matches_oracle_value` (the stored hover re-run through the HOVER-SIDE
@@ -3447,7 +3366,8 @@ hover).
 Justification against Verter's per-block-lift / demand-driven discipline:
 
 - The project is explicitly **per-block-lift / demand-driven** (CLAUDE.md Build
-  Philosophy; the 362-all-ignored manifest is the correct current state). Snapshots
+  Philosophy; the manifest's current state is 358 `Ignored` + 4 `Lifted` = 362 total
+  — the first four rows are seated, the remainder lift block-by-block). Snapshots
   are a rescope-gate deliverable produced block-by-block (§6.3 — "the oracle grows
   … rather than landing as one monolith"). Requiring all snapshots NOW would force
   generating oracle answers for rows whose lifting mechanism does not yet exist —
@@ -3461,10 +3381,11 @@ Justification against Verter's per-block-lift / demand-driven discipline:
   manifest-declared count, and the fourth pins each entry's family to the row's proof:
   - **`registry_covers_every_lifted_oracle_query` (forward — coverage by
     construction, AND the registry→row biconditional)**: every manifest row with
-    `status = Lifted` AND `proof = Ts7Oracle(_) | OracleAndGuard{..} |
-    Ts7OracleWithCorrections{..}` has ≥1 registry entry (by `(row_file, row_function, *)`),
-    and EVERY such registry entry has an existing snapshot (the divergence arm's `snapshot`
-    field supplies its `OracleId`; its per-query review-gated `correction` overlays are
+    `status = Lifted` AND `proof = Ts7Oracle(_) | OracleAndGuard{..}` has ≥1 registry entry
+    (by `(row_file, row_function, *)`),
+    and EVERY such registry entry has an existing snapshot (a divergence row's
+    `OracleAndGuard.oracle` field supplies its `OracleId`; its per-query review-gated
+    `correction` overlays are
     SEPARATE artifacts governed by `ts-compat-two-mode-model.md` §3, not by the snapshot rail). Re-derives each `snapshot_id` from the spec + pinned env and
     FAILS if any expected snapshot is missing. Because the row body just calls the
     shared driver over its registry entries, this is the coverage-by-construction
@@ -3475,8 +3396,9 @@ Justification against Verter's per-block-lift / demand-driven discipline:
     `status = Lifted` AND oracle-bearing. A registry entry whose row is still `Ignored`
     (or non-oracle) is REJECTED: an `Ignored` row owns NO snapshot and its lifted body
     does not yet exist, so a registry entry for it is an unreachable orphan that could
-    silently pass the count cross-check (the declared `oracle_query_ordinals` is `0` for
-    an un-lifted row, so an entry with no snapshot would otherwise go undetected). The
+    silently pass the count cross-check (the deferred §Q4 `oracle_query_ordinals` count
+    would be `0` for an un-lifted row, so an entry with no snapshot would otherwise go
+    undetected). The
     biconditional closes that gap: no registry entry exists for a non-`Lifted`-oracle
     row. Discriminating: a registry entry whose `(row_file, row_function)` is an
     `Ignored` row FAILS this guard.
@@ -3502,8 +3424,8 @@ Justification against Verter's per-block-lift / demand-driven discipline:
     to the oracle; the corpus stays hermetic + closed + checked-in (Testing-Hermeticity:
     locally-vendored fixtures only). Discriminating: an unlisted `.d.ts` dropped into the
     corpus dir FAILS set-equality even though every listed file still hashes clean.
-  - **`registry_entry_count_matches_declared` (the independent cross-check — ALL rows,
-    including zero-count)**: for EVERY manifest oracle row (NOT only `Lifted` — the
+  - **`registry_entry_count_matches_declared` (DEFERRED — the independent cross-check — ALL rows,
+    including zero-count; pending the new `oracle_query_ordinals` field)**: for EVERY manifest oracle row (NOT only `Lifted` — the
     stronger all-rows form), the number of registry entries (`(row_file, row_function,
     *)`) EQUALS the row's declared `oracle_query_ordinals` count (the new `IgnoredTestRow`
     field, §Q4), AND the registry's `query_ordinal`s for that row are UNIQUE and
@@ -3520,8 +3442,8 @@ Justification against Verter's per-block-lift / demand-driven discipline:
   - **`registry_family_matches_manifest_oracle_id` (family agreement)**: for every
     `Lifted` oracle row, each registry entry's `oracle_family` EQUALS the family carried
     by the manifest row's `ProofRequirement::Ts7Oracle(OracleId)` /
-    `OracleAndGuard { oracle, .. }` / `Ts7OracleWithCorrections { snapshot, .. }` (the
-    divergence arm carries its `OracleId` in the `snapshot` field)
+    `OracleAndGuard { oracle, .. }` (a divergence row carries its `OracleId` in the
+    `OracleAndGuard.oracle` field)
     (`typeinfo_ignored_test_manifest.rs` `OracleId` / `ProofRequirement`). A
     registry entry that names a different family than the row's proof would read/write the
     wrong `oracle_snapshots/<family>/` sub-directory; this guard pins entry-family ≡
@@ -3582,142 +3504,86 @@ Justification against Verter's per-block-lift / demand-driven discipline:
 - The footprint/audit exclusion (§Scope) means a `Lifted` row whose proof is bare
   `Ts7Oracle` MUST NOT also assert non-`TypeExpr` (footprint/audit) behavior; such a
   row is only `Lifted` under `OracleAndGuard`, where the oracle proves the shape and
-  the named guard proves the footprint. The forward guard treats `Ts7Oracle(_)`,
-  `OracleAndGuard{..}`, AND `Ts7OracleWithCorrections{..}` proofs as oracle-bearing.
-- **The divergence arm `Ts7OracleWithCorrections { snapshot, corrections }` with a per-query
-  `&[QueryCorrection { query_ordinal, correction, divergence_id }]` list
+  the named guard proves the footprint. The forward guard treats `Ts7Oracle(_)` and
+  `OracleAndGuard{..}` proofs as oracle-bearing.
+- **The divergence case is an `OracleAndGuard` whose `guard` is the `DivergenceCorrection`
+  prover, consulting a per-query
+  `&[QueryCorrection { query_ordinal, correction, divergence_id }]` overlay
   (the single-spec / correction-overlay model, `ts-compat-two-mode-model.md` §9.2).** A
-  registered-divergence row carries this arm, peer to `Ts7Oracle` / `OracleAndGuard`. Its
-  `snapshot` is the existing recompute-gated `ts_compat` oracle family (the `snapshot`
-  `OracleId`, unchanged machinery) holding the recorded `TsCompat` values; each
-  `QueryCorrection` names one corrected `query_ordinal`, its review-gated overlay
-  `correction` (`oracle_corrections/`) holding the `Correct` value for that query, and a
-  `divergence_id` resolving to the divergence registry. A row may MIX corrected and ordinary
-  queries. **Correction-linkage rule (extended obligation schema, NOT a second ledger).** The
-  divergence linkage rides the EXISTING typed obligation model: `ObligationKind` gains a
-  `DivergenceCorrection` member, and a `Ts7OracleWithCorrections` row's
-  `non_typeexpr_obligations` set contains ONE `DivergenceCorrection` obligation PER CORRECTED
-  query (each targeting `Query { query_ordinal }`) whose typed
-  `ObligationExpectation::DivergenceCorrection { correction_id, divergence_id }` resolves to
-  (a) the named correction overlay and (b) a registry entry whose id equals `divergence_id`,
+  registered-divergence row is seated as `OracleAndGuard { oracle, guard }`. Its `oracle` is
+  the existing recompute-gated `ts_compat` oracle family (the `OracleId`, unchanged
+  machinery) holding the recorded `TsCompat` values; each `QueryCorrection` names one
+  corrected `query_ordinal`, its review-gated overlay `correction` (`oracle_corrections/`)
+  holding the `Correct` value for that query, and a `divergence_id` resolving to the
+  divergence registry. A row may MIX corrected and ordinary queries. **Correction-linkage
+  rule.** `DivergenceCorrection` is one of the five `OracleAndGuard` obligation KINDS (§Q4);
+  the divergence row's `guard` is the registered `DivergenceCorrection` prover, which runs
+  PER corrected `query_ordinal`, asserting that the named correction overlay and a registry
+  entry whose id equals `divergence_id` resolve to the SAME `(correction, registry-entry)`,
   proved by the per-query data comparison
-  (`resolver(query) == correction.correct_value` while that query's `snapshot.oracle_value` is the recorded
-  `TsCompat` value and differs). The updated
-  emptiness rule across all three arms is therefore: `non_typeexpr_obligations` is EMPTY
-  iff `proof == Ts7Oracle(_)`; NON-EMPTY (footprint/audit/mode/cache obligations) under
-  `OracleAndGuard{..}`; and under `Ts7OracleWithCorrections{..}` contains one
-  `DivergenceCorrection` obligation per corrected query (plus any footprint/audit obligations
-  the row also asserts). A divergence row counts toward the 362 total and carries no `Relate`
+  (`resolver(query) == correction.correct_value` while that query's snapshot `oracle_value`
+  is the recorded `TsCompat` value and differs). A row asserting NO independent
+  non-`TypeExpr` obligation stays bare `Ts7Oracle`; a row asserting one (footprint / audit /
+  warm-cache / declared-dependency / divergence-correction) is promoted to `OracleAndGuard`.
+  A divergence row counts toward the 362 total and carries no `Relate`
   (projection-divergence rows are not `Relate`-bearing).
 - An `Ignored` oracle row has NO snapshot requirement (it is not yet proven). When a
   block lifts a row (`Ignored → Lifted { block_id }`), the SAME block adds the
-  registry query specs, the declared `oracle_query_ordinals` count, AND the snapshots;
-  the six guards then enforce presence both ways, the declared-count + contiguity
-  cross-check, entry-family agreement, vendored-corpus closure, and the
-  capture↔value tie.
-- **Implementation PREREQUISITE — the FULL accurate prerequisite set for the first
-  `Ignored → Lifted` row.** Lifting a row is NOT a matter of updating "only THREE
-  guards." The complete set is THREE distinct kinds of work: (1) the regenerator's SOURCE
-  MODEL is redesigned, (2) the `ignored_test_row_table_holds_exactly_362_rows`
-  count-table guard is reconciled, and (3) THREE all-row-sensitive manifest guards are
-  status-filtered. There are FOUR all-row-sensitive manifest guards in total, but only
-  THREE need edits — the fourth (the `EXPECTED_TOTAL_IGNORED_COUNT` COUNT guard, `:595`)
-  is ALREADY status-filtered via `count_ignored_rows` and needs NO change. All of this
-  lands in the SAME block as the first lift. The complete set:
+  registry query specs AND the snapshots (and, once the DEFERRED §Q4 per-row-count
+  layer lands, the declared `oracle_query_ordinals` count);
+  the guards then enforce presence both ways, entry-family agreement, vendored-corpus
+  closure, and the capture↔value tie — plus, when the deferred layer lands, the
+  declared-count + contiguity cross-check.
+- **Implementation prerequisite (REALIZED) — the work the first `Ignored → Lifted` row
+  required, now landed.** Lifting a row was NOT a matter of updating "only THREE
+  guards." The realized set is THREE distinct kinds of work, all now in the tree: (1) the
+  regenerator's SOURCE MODEL was redesigned (it now carries `LIFTED_ROW_OVERRIDES` and
+  emits each row's `status`), (2) the `ignored_test_row_table_holds_exactly_362_rows`
+  count-table guard was reconciled (total `.len() == 362`, live-ignore count `== 358`),
+  and (3) THREE all-row-sensitive manifest guards were status-filtered. There are FOUR
+  all-row-sensitive manifest guards in total, but only THREE needed edits — the fourth
+  (the `EXPECTED_TOTAL_IGNORED_COUNT` COUNT guard, `:595`) was ALREADY status-filtered via
+  `count_ignored_rows`. The set below records what landed:
 
-  1. **The regenerator source-model redesign (a `Lifted` row must SURVIVE
-     regeneration).** `scripts/gen-typeinfo-ignore-manifest.py` builds the row table
-     EXCLUSIVELY from live `#[ignore]` discovery (it scans for `#[ignore = "…"]` sites
-     and emits one row per discovered site), HARDCODES `status: IgnoreStatus::Ignored`
-     on every emitted row (`emit_ignored_rows`), and asserts EXACTLY 362 rows were
-     built (`if len(rows) != 362: … return 5`). A LIFTED row carries NO live `#[ignore]`
-     (the lift mechanism removes it), so under the current model the row VANISHES on the
-     next regeneration — its `Lifted { block_id }` record is lost and the `!= 362` build
-     assertion fails (361 discovered). The regenerator MUST be redesigned so a `Lifted`
-     row stays in the table with `status: Lifted { block_id }` despite having no live
-     `#[ignore]`:
-     - Introduce a **retained `Lifted`-row ledger** — a checked-in source-of-truth list
-       (a `LIFTED_ROWS` table in the generator's row-spec source, alongside the
-       §10.4.1 partition the generator already reads). The ledger MUST retain the FULL
-       row record for each lifted row, NOT just `(file, function, block_id)` — because
-       once a row is lifted its `#[ignore]` is GONE and live discovery can no longer
-       supply ANY of the 13 columns the generator previously scraped from the
-       `#[ignore]` site, yet downstream guards still read those columns on EVERY row
-       (status-independent). In particular `every_manifest_row_has_non_empty_unblocker`
+  1. **The regenerator source-model redesign (a `Lifted` row SURVIVES
+     regeneration).** `scripts/gen-typeinfo-ignore-manifest.py` would, in the original
+     all-`Ignored` model, build the row table EXCLUSIVELY from live `#[ignore]` discovery
+     and hardcode `status: IgnoreStatus::Ignored` — under which a lifted row (carrying NO
+     live `#[ignore]`) would VANISH on regeneration and the `!= 362` build assertion would
+     fail (361 discovered). The regenerator now UNIONS live discovery with a retained
+     `Lifted`-row ledger so a `Lifted` row stays in the table with `status: Lifted { block_id }`
+     despite having no live `#[ignore]`:
+     - A **retained-lift metadata map** — a checked-in source-of-truth list
+       (`LIFTED_ROW_OVERRIDES` in the generator's row-spec source, alongside the
+       §10.4.1 partition the generator already reads). It retains the FULL row record for
+       each lifted row, NOT just `(file, function, block_id)` — because once a row is lifted
+       its `#[ignore]` is GONE and live discovery can no longer supply ANY of the 13 columns
+       the generator previously scraped from the `#[ignore]` site, yet downstream guards
+       still read those columns on EVERY row (status-independent). In particular
+       `every_manifest_row_has_non_empty_unblocker`
        (`typeinfo_ignored_test_manifest.rs:852`) iterates ALL rows and asserts each has a
        non-empty `unblocker`, and the generator today sources `unblocker` from the live
-       `#[ignore = "…"]` text (`:1096`) — which is removed on lift. The ledger therefore
-       stores the COMPLETE `IgnoredTestRow` payload so the regenerated table reproduces
-       the lifted row VERBATIM, only with `status: Lifted { block_id }` substituted. The
-       ledger row schema is the FULL 13-column `IgnoredTestRow` record PLUS the three
-       lift-time-derived fields (`non_typeexpr_obligations`, `migration_fingerprint`,
-       `original_body_tokens`) that live discovery cannot supply because they are extracted
-       from / captured over the original BODY, not the `#[ignore]` site:
+       `#[ignore = "…"]` text (`:1096`) — which is removed on lift. The retained-lift
+       metadata therefore stores the COMPLETE `IgnoredTestRow` payload so the regenerated
+       table reproduces the lifted row VERBATIM, only with `status: Lifted { block_id }`
+       substituted. The retained schema is the FULL 13-column `IgnoredTestRow` record. The
+       `proof` column is one of `Ts7Oracle(_)` | `OracleAndGuard{..}` (a divergence row is
+       an `OracleAndGuard` whose `guard` is the `DivergenceCorrection` prover) — there is NO
+       stored `non_typeexpr_obligations` ledger field; an independent non-`TypeExpr`
+       obligation is expressed by the `OracleAndGuard` proof shape + its registered prover,
+       not a typed set on a record. The `block_id` column is INTENTIONALLY IDENTICAL to the
+       `IgnoreStatus::Lifted { block_id }` status payload the regenerated row carries — the
+       lifting block IS the row's block; the regenerator emits `status = Lifted { block_id:
+       rec.block_id }` and the `lifted_row_block_id_matches_status` guard asserts the
+       equality so they never drift.
 
-       ```
-       LiftedRowRecord {
-           file: &'static str,                 // bare filename — the row key
-           function: &'static str,             // the row key
-           block_id: &'static str,             // the row's own `block_id` manifest column
-                                               //   (one of the 13 IgnoredTestRow columns).
-                                               //   INTENTIONALLY IDENTICAL to the
-                                               //   IgnoreStatus::Lifted { block_id } status
-                                               //   payload the regenerated row carries — the
-                                               //   lifting block IS the row's block. The
-                                               //   regenerator emits status = Lifted {
-                                               //   block_id: self.block_id }; the
-                                               //   lifted_row_block_id_matches_status guard
-                                               //   asserts the equality so they never drift.
-           // --- the remaining IgnoredTestRow columns, retained verbatim from the
-           //     row's pre-lift `#[ignore]`-sourced record so no column is lost: ---
-           semantic_queries: &'static [SemanticQueryName],
-           proof: ProofRequirement,            // Ts7Oracle(_) | OracleAndGuard{..} | Ts7OracleWithCorrections{..}
-           substrate: &'static str,
-           capability: &'static str,
-           organ: &'static str,
-           owning_u_block: &'static str,
-           mechanism_id: &'static str,
-           consumed_mechanisms: &'static [&'static str],
-           unblocker: &'static str,            // NON-EMPTY — was sourced from #[ignore=…] (:1096)
-           oracle_query_ordinals: u16,         // the declared query count (§Q4 cross-check)
-           non_typeexpr_obligations: &'static [NonTypeExprObligation], // the per-obligation
-                                               //   (kind, proving_guard, target, expected) set detected
-                                               //   from the ORIGINAL body's non-TypeExpr asserts
-                                               //   (assert_query_mode / footprint / warm-
-                                               //   cache / declared-dependency), each carrying
-                                               //   its recorded typed ObligationExpectation — §Q4
-           migration_fingerprint: &'static str,// canonical-JSON over the ORIGINAL body's
-                                               //   ordered query-payload FIDELITY tuple
-                                               //   (helper_kind, primary_canonical,
-                                               //   symbol_or_expression, type_arguments,
-                                               //   projection_mode, workspace_files,
-                                               //   source_locator incl symbol_space,
-                                               //   host_project) ∪ the per-row
-                                               //   non_typeexpr_obligations set, captured
-                                               //   ONCE at lift time before the body was
-                                               //   replaced by #[oracle_row] (§Q4); the
-                                               //   registry payload + obligation set are
-                                               //   asserted equal to it — THE migration-
-                                               //   fidelity authority, not a hand-field
-           original_body_tokens: &'static str, // the canonical ORIGINAL #[test] body
-                                               //   `syn` token stream (the EXTRACTION INPUT
-                                               //   ITSELF — Span-stripped, whitespace-
-                                               //   insignificant token-tree print), CHECKED
-                                               //   INTO the ledger at lift time. A guard
-                                               //   re-runs the extractor over THIS artifact
-                                               //   and asserts the re-derived fingerprint
-                                               //   equals migration_fingerprint —
-                                               //   HERMETICALLY (no VCS archaeology), so a
-                                               //   WRONG INITIAL extraction (a fingerprint
-                                               //   that never matched its own input) is
-                                               //   auditable, not merely self-compared to
-                                               //   the derived fingerprint forever
-       }
-       ```
-
-       The ledger is the authority for BOTH `status` AND every retained column of a
-       lifted row, NOT a hardcoded constant and NOT a re-scrape of a now-absent
-       `#[ignore]`.
+       The retained-lift metadata is the authority for BOTH `status` AND every retained
+       column of a lifted row, NOT a hardcoded constant and NOT a re-scrape of a now-absent
+       `#[ignore]`. (The round-2 full-record obligation ledger — a `LiftedRowRecord` storing
+       a typed `non_typeexpr_obligations` set — was retired. The deferred
+       `migration_fingerprint` / `original_body_tokens` body-hash fidelity layer, §Q4, would
+       ride on this same retained-lift metadata when wired — it is a GENUINELY DEFERRED
+       TODO, not yet implemented.)
      - The generator's row set becomes the **UNION** of live-`#[ignore]` discovery (rows
        still `Ignored`, columns scraped from the live `#[ignore]` site as today) and the
        retained `Lifted`-row ledger (rows now `Lifted`, columns sourced from the ledger
@@ -3725,35 +3591,47 @@ Justification against Verter's per-block-lift / demand-driven discipline:
        block_id: rec.block_id }` (the status payload's `block_id` IS the row's own
        `block_id` manifest column — they are INTENTIONALLY the same value, asserted equal by
        `lifted_row_block_id_matches_status`) and every other column taken from its
-       `LiftedRowRecord`, and is NOT
+       retained-lift metadata record, and is NOT
        expected to have a live `#[ignore]`; a row in live discovery is emitted with
        `status: IgnoreStatus::Ignored` and columns from the `#[ignore]` site. The two
        sets are DISJOINT by construction (a row is either still `#[ignore]`d OR lifted,
        never both) — the generator asserts this disjointness and FAILS if a
        `(file, function)` appears in both (a lift that forgot to remove the `#[ignore]`,
        or a ledger entry whose `#[ignore]` came back).
-     - `status` AND the retained columns are sourced FROM the ledger record, never from
-       the hardcoded `IgnoreStatus::Ignored` literal in `emit_ignored_rows` (replaced by
-       a per-row status derived from `(file, function) ∈ ledger`) and never from a
-       re-scrape of the removed `#[ignore]` text. Because the ledger supplies a
-       NON-EMPTY `unblocker` for every lifted row, `every_manifest_row_has_non_empty_unblocker`
-       (`:852`) STILL APPLIES to `Lifted` rows unchanged and is NOT status-filtered — the
-       ledger is what keeps the all-rows `unblocker` invariant satisfiable after lift.
-       The `lifted_row_ledger_retains_full_record` guard asserts every `LiftedRowRecord`
-       carries all 13 `IgnoredTestRow` columns with a non-empty `unblocker` (and `proof`
-       being `Ts7Oracle(_) | OracleAndGuard{..} | Ts7OracleWithCorrections{..}`) PLUS the
-       three lift-time fields — a non-empty `migration_fingerprint`, a non-empty
-       `original_body_tokens` (the pinned extraction input artifact, re-extracted +
-       fingerprint-compared hermetically by `original_extraction_input_auditable`), and a
-       `non_typeexpr_obligations` set whose emptiness obeys the three-arm rule: EMPTY for a
-       bare `Ts7Oracle(_)` row; NON-EMPTY for `OracleAndGuard{..}`; and containing one
-       `ObligationKind::DivergenceCorrection` member PER CORRECTED query (each targeting
-       `Query { query_ordinal }`, set-equal to the proof arm's `corrections` list) for
-       `Ts7OracleWithCorrections{..}` (the correction-linkage obligations,
-       `ts-compat-two-mode-model.md` §9.2), with every member's `proving_guard` resolving
-       to an `OBLIGATION_GUARD_REGISTRY` entry — so a
-       ledger entry cannot drop a column the all-rows guards read NOR silently drop the
-       row's non-`TypeExpr` obligations NOR drop a divergence row's correction linkage.
+     - `status` AND the retained columns are sourced FROM the retained-lift metadata,
+       never from the hardcoded `IgnoreStatus::Ignored` literal in `emit_ignored_rows`
+       (replaced by a per-row status derived from `(file, function) ∈ LIFTED_ROW_OVERRIDES`)
+       and never from a re-scrape of the removed `#[ignore]` text. Because the retained-lift
+       metadata supplies a NON-EMPTY `unblocker` for every lifted row,
+       `every_manifest_row_has_non_empty_unblocker` (`:852`) STILL APPLIES to `Lifted` rows
+       unchanged and is NOT status-filtered — the retained-lift metadata is what keeps the
+       all-rows `unblocker` invariant satisfiable after lift. The retained record carries
+       all 13 `IgnoredTestRow` columns with a non-empty `unblocker` and a `proof` of
+       `Ts7Oracle(_)` | `OracleAndGuard{..}` (a divergence row is an `OracleAndGuard` whose
+       `guard` is the `DivergenceCorrection` prover) — there is NO stored
+       `non_typeexpr_obligations` set: an independent non-`TypeExpr` obligation is expressed
+       by the `OracleAndGuard` proof shape + its registered prover, so a regenerated lifted
+       row cannot drop a column the all-rows guards read NOR demote a footprint/audit/
+       divergence row to bare `Ts7Oracle`.
+
+     - **Realized first-lift state — the four lifts are bare `Ts7Oracle`, verified in
+       their original `Expanded` mode; no obligation ledger.** The four first-lifted rows
+       (two index-signature publication + two built-in modifier-utility) carried ONE
+       non-`TypeExpr` assertion in their original bodies: `assert_query_mode(Expanded)`. A
+       same-mode `assert_query_mode` that matches the oracle query's own `projection_mode`
+       is oracle query IDENTITY, **not** a §Q4 `non_typeexpr_obligation`: the driver
+       resolves Verter's projection in that mode and the live audit record reports that
+       mode, which IS the proof (stronger than duplicating the mode into a ledger). The
+       four rows are therefore seated with `projection_mode: Expanded` (`oracle_query_specs.rs`),
+       their tsgo snapshots captured + compared in `Expanded`, and the query-mode identity
+       is proven live by `lifted_row_audit_query_mode_matches_spec`
+       (`tests/typeinfo_ignored_test_manifest.rs`) — which asserts every registry query's
+       live audit `query_mode` equals its spec's declared `projection_mode`. They stay bare
+       `ProofRequirement::Ts7Oracle` (no `OracleAndGuard`, no obligation set). The only
+       genuinely-deferred fidelity is the cryptographic `migration_fingerprint` +
+       `original_body_tokens` body-hash artifact (a `syn`-AST lift-time auto-extractor that
+       would catch a fully self-consistent wrong (spec ∧ snapshot) pair) — DEFERRED to the
+       §4 migration-ledger spike.
      - The build-count assertion changes from "exactly 362 discovered" to "exactly 362
        rows TOTAL in the union (discovered-Ignored ∪ ledger-Lifted)", so the table
        length stays 362 as rows migrate from the discovered set to the ledger. The
@@ -3827,7 +3705,8 @@ snapshot validated against itself).
 > untouched); (b) invariant 1's "tsgo forbidden at query time" is unchanged and
 > strengthened — the resolver is single-spec, has no compat mode, and never shells to
 > tsgo; tsgo stays generation-only; (c) the divergence proof
-> (`ProofRequirement::Ts7OracleWithCorrections`) and its data comparison are NEW harness
+> (`ProofRequirement::OracleAndGuard` with the `DivergenceCorrection` prover) and its data
+> comparison are NEW harness
 > checks, not changes to these invariants. The harness runs the single-spec resolver ONCE
 > per query (corrections bind at `(row, query_ordinal)` granularity): a corrected query
 > asserts `resolver(query) == correction.correct_value` (while that query's
@@ -3917,12 +3796,13 @@ snapshot validated against itself).
    `file!()` via `Path::file_name()`, §Q4). Each entry carries `oracle_family` so the
    driver can name the snapshot sub-directory. A snapshot exists iff its registry query
    spec belongs to a `Lifted` row (Q5). Coverage is NOT "true by construction" from the
-   registry alone — the `IgnoredTestRow.oracle_query_ordinals` declared count is an
-   INDEPENDENT cross-check against the registry entry count, catching a registry that
-   under-counts. Per-block lift adds the registry specs, the declared count, and the
-   snapshots together. **Guards:** `registry_covers_every_lifted_oracle_query`,
-   `no_orphan_snapshot`, `registry_entry_count_matches_declared`,
-   `lifted_body_is_self_keyed_macro`.
+   registry alone — the DEFERRED §Q4 `IgnoredTestRow.oracle_query_ordinals` declared
+   count (not yet a shipped field) would be an INDEPENDENT cross-check against the
+   registry entry count, catching a registry that under-counts. Per-block lift adds the
+   registry specs and the snapshots together (and, once the deferred layer lands, the
+   declared count). **Guards:** `registry_covers_every_lifted_oracle_query`,
+   `no_orphan_snapshot`, `registry_entry_count_matches_declared` (DEFERRED — pending the
+   new `oracle_query_ordinals` field), `lifted_body_is_self_keyed_macro`.
 
 6. **The oracle value reconciles with the IN-PROCESS output, not the wire.** The
    snapshot's `oracle_value` is a `TypeExpr`-shaped normal form (hover text lowered to
@@ -3945,29 +3825,22 @@ snapshot validated against itself).
    relation path. A non-`Relate` row that ALSO asserts non-`TypeExpr`
    obligations — dependency-footprint / audit-record / query-mode behavior (e.g.
    `flow_return_xf04_records_barrel_route_before_selected_leaf`,
-   `flow_return_catalog.rs:1496`) — lists each in the ONCE-PER-ROW
-   `LiftedRowRecord.non_typeexpr_obligations` LEDGER set (the SOLE owner — the per-query
-   registry entries NEVER carry row obligations), where each member is a
-   `NonTypeExprObligation { kind, proving_guard, target, expected }` carrying the
-   mapping-assigned `GuardId` for its `kind` (a per-obligation guard, because the single
-   `OracleAndGuard.guard` cannot prove multiple distinct obligations), its `target` (a closed
-   `ObligationTarget` naming WHICH per-query result — or the whole-row aggregate — the
-   obligation is over), AND the typed `ObligationExpectation` the proving guard re-asserts
-   against that `target`'s live result. Two same-kind obligations on a multi-query row are
-   distinguished by `(kind, target, expected)`, NOT by distinct `GuardId` (the
-   `ObligationKind → GuardId` mapping is 1:1; the prover disambiguates by `target`).
-   `kind_eligibility_gate` READS that ledger set and REJECTS
+   `flow_return_catalog.rs:1496`) — is PROMOTED to
+   `ProofRequirement::OracleAndGuard { oracle, guard }` whose `guard` names the registered
+   live prover for that obligation KIND (one of the five kinds: `DependencyFootprint` /
+   `AuditRecord` / `WarmCache` / `DeclaredDependency` / `DivergenceCorrection`). There is NO
+   stored typed obligation SET on a ledger record — the obligation is expressed by the proof
+   shape + its registered prover.
+   `kind_eligibility_gate` REJECTS
    such a row under a BARE `Ts7Oracle` proof (the shape compare cannot prove the
-   obligations). It is admissible only under `ProofRequirement::OracleAndGuard` OR
-   `ProofRequirement::Ts7OracleWithCorrections` (the divergence arm, §Q4 /
-   `ts-compat-two-mode-model.md` §9.2, whose set carries one `DivergenceCorrection`
-   obligation per corrected query, each targeting `Query { query_ordinal }`), and the
-   gate verifies every listed obligation's `proving_guard` resolves to an entry in the
-   checked-in CODE `OBLIGATION_GUARD_REGISTRY` (`GuardId → { obligation_kind,
-   expectation_tag, prover fn }` — the §4 guard table is its human-readable mirror) whose
-   `obligation_kind` + `expectation_tag` match the obligation's `kind` + `expected`
-   variant — so the rule is a discriminating per-obligation check over a real typed field
-   read against compiled `fn` symbols, not a prose stub. **Guard:** `kind_eligibility_gate`.
+   obligation). It is admissible only under `ProofRequirement::OracleAndGuard` (a divergence
+   row is an `OracleAndGuard` whose `guard` is the `DivergenceCorrection` prover, §Q4 /
+   `ts-compat-two-mode-model.md` §9.2, running per corrected query). The
+   gate verifies the proof's `guard` resolves to an entry in the
+   checked-in CODE `OBLIGATION_GUARD_REGISTRY` (`GuardId → prover fn` — the §4 guard table
+   is its human-readable mirror) — so the rule is a discriminating check over the proof
+   shape read against compiled `fn` symbols, not a prose stub. **Guard:**
+   `kind_eligibility_gate`.
 
 8. **Hover admission is a PRE-LOWERING POSITIVE ALLOWLIST (default-REJECT), checked
    TWO-SIDED on the hover AST AND the source declaration.** The gate runs on the RAW
@@ -4102,9 +3975,11 @@ snapshot validated against itself).
     count per lifted oracle row AND the registry's ordinals must be UNIQUE + CONTIGUOUS
     `0..count-1`. Cardinality + contiguity verify the COUNT, not the registry PAYLOAD's
     fidelity to the original hand-authored query; a lift-time `migration_fingerprint`
-    (recorded in the ledger from the original body BEFORE it is replaced) is re-asserted
+    (recorded in the retained-lift metadata from the original body BEFORE it is replaced —
+    a GENUINELY DEFERRED TODO) is re-asserted
     against the registry payload so a wrong-symbol/canonical/mode migration FAILS.
-    **Guards:** `registry_entry_count_matches_declared`,
+    **Guards (both DEFERRED — pending the new `oracle_query_ordinals` field /
+    `migration_fingerprint`):** `registry_entry_count_matches_declared`,
     `registry_payload_matches_migration_fingerprint`.
 
 17. **The PARITY CLAIM is structural `TypeExpr`-projection, NOT nominal/semantic
@@ -4277,9 +4152,10 @@ carries a named guard here.
 > **Reframed by the single-spec / correction-overlay model — additive guards.** The
 > model adds guards (owned by the mechanism block in `ts-compat-two-mode-model.md`
 > §8/§12), it does not relax any below. The impact on THIS table: `kind_eligibility_gate`
-> learns the new `ProofRequirement::Ts7OracleWithCorrections { snapshot, corrections:
-> &[QueryCorrection { query_ordinal, correction, divergence_id }] }` arm (peer to
-> `Ts7Oracle` / `OracleAndGuard`) — a divergence row carries one `QueryCorrection` per
+> learns that a divergence row is seated as `ProofRequirement::OracleAndGuard { oracle,
+> guard }` whose `guard` is the registered `DivergenceCorrection` prover, consulting a
+> per-query `&[QueryCorrection { query_ordinal, correction, divergence_id }]` overlay — a
+> divergence row carries one `QueryCorrection` per
 > corrected query, each whose `divergence_id` resolves to the divergence registry; the
 > harness runs the single-spec resolver ONCE per query and asserts, FOR EACH corrected
 > query, `resolver(query) == correction.correct_value` while that query's
@@ -4287,24 +4163,23 @@ carries a named guard here.
 > query asserts `resolver(query) == snapshot.oracle_value`. There is no per-mode re-run,
 > no family-key comparison, and no spec dimension — the resolver is single-spec
 > (`ts-compat-two-mode-model.md` §4, §7). The 362 partition, the
-> ≤122 `Relate`-free ceiling, and the obligation-ledger model are unchanged; a divergence
+> ≤122 `Relate`-free ceiling, and the obligation model are unchanged; a divergence
 > row counts toward 362 and does not carry `Relate`.
 
 | Guard / test | Asserts |
 | --- | --- |
-| `kind_eligibility_gate` | A query is lifted via this harness only when its registry `oracle_value_kind == structured_type_expr` AND it asserts a `TypeExpr` projection, not a relation/call verdict; `SemanticQueryName::Relate` as the asserting key is rejected; AND — enforcing the 122-row `Relate`-free CEILING (§Q2) — ANY row whose manifest `semantic_queries` CONTAINS `SemanticQueryName::Relate` ANYWHERE (not only as the asserting key) is REJECTED, until/unless a future oracle kind explicitly owns the relation path (so a `Relate`-carrying row marked `structured_type_expr` cannot slip past the ceiling even if its asserting key is not a relation). A row whose ONCE-PER-ROW `LiftedRowRecord.non_typeexpr_obligations` set (the LEDGER field — registry entries do NOT carry it) is NON-EMPTY is REJECTED under a bare `Ts7Oracle` proof and admissible only under `OracleAndGuard` OR `Ts7OracleWithCorrections` (the divergence arm, `ts-compat-two-mode-model.md` §9.2: its set carries one `ObligationKind::DivergenceCorrection` member PER CORRECTED query — each targeting `Query { query_ordinal }` — whose `ObligationExpectation::DivergenceCorrection { correction_id, divergence_id }` resolves to the named correction overlay AND a registry entry whose id equals `divergence_id`, and each corrected query is asserted as a single-spec data comparison — `resolver(query) == correction.correct_value` while that query's `snapshot.oracle_value` is the recorded `TsCompat` value and differs). The obligation set is the ONCE-PER-ROW `LiftedRowRecord.non_typeexpr_obligations` per-obligation `&[NonTypeExprObligation { kind, proving_guard, target, expected }]` (closed `ObligationKind` — `DependencyFootprint` / `AuditRecord` / `QueryMode` / `WarmCache` / `DeclaredDependency` / `DivergenceCorrection` — each member carrying its OWN proving `GuardId`, its `target` `ObligationTarget` — `WholeRow` or `Query { query_ordinal }` — naming WHICH of the row's results it is over, AND its typed `ObligationExpectation`), NOT a single shared guard and NOT a registry-entry field: the single `OracleAndGuard.guard` cannot prove multiple distinct dropped obligations. PER-KIND targeting: a `QueryMode` or `AuditRecord` obligation MUST carry a `target = Query { query_ordinal }` whose `query_ordinal` is IN RANGE for the row's `oracle_query_ordinals` (a multi-query row defaults to REJECT a `QueryMode`/`AuditRecord` obligation that carries a `WholeRow` target or an out-of-range / unspecified ordinal — the multi-query default-reject backstop), so a per-query mode/audit assertion is proved against the CORRECT query, never "any query passes". Two SAME-kind obligations on a multi-query row (e.g. a `QueryMode` for ordinal 0 AND a `QueryMode` for ordinal 2) reuse the SAME mapping-assigned `GuardId` for that `ObligationKind` (the `ObligationKind → GuardId` mapping is 1:1) and are distinguished by their `(kind, target, expected)` identity, NOT by distinct `GuardId`s — the prover disambiguates by `target`. The gate READS the checked-in CODE `OBLIGATION_GUARD_REGISTRY` (the closed static slice `&[ObligationGuardEntry { guard_id, obligation_kind, expectation_tag, prover: fn(&LiftedRowRecord, &NonTypeExprObligation, &RowExecutionResults) -> Result<(), GuardFailure> }]` keyed by `GuardId`, §Q4 — the §4 guard table is its human-readable mirror; the prover reads the obligation's `target` and selects that ordinal's `RowExecutionResults` slot) and verifies, for EVERY listed obligation, (a) that its `proving_guard` is EXACTLY the `GuardId` the closed `ObligationKind → GuardId` mapping assigns to its `kind`, (b) that this `GuardId` resolves to an `OBLIGATION_GUARD_REGISTRY` entry whose `prover` is a real compiled `fn` symbol (a registry lookup, NOT a Markdown-name match against the §4 table) and whose `obligation_kind` equals the obligation's `kind`, (c) that the member's `expected` `ObligationExpectation` variant MATCHES that entry's `expectation_tag` (and its `kind`), AND (d) that the member's `target` is valid for its `kind` (the per-kind in-range `Query { query_ordinal }` rule above), and that `OracleAndGuard.guard` is itself present in / equals one listed obligation's `proving_guard`. A complementary parity check asserts the §4 guard table lists exactly the registry's prover fns (mirror in sync). Not a coarse bool, not a vague "transitively asserts" claim, not a prose stub. Discriminating: a row whose `semantic_queries` carries `Relate` ANYWHERE (even if its asserting key is not a relation), a `Relate`-asserting row, and a non-empty-obligation bare-`Ts7Oracle` row must all be rejected; a pure `TypeExpr`-projection row (empty obligation set, no `Relate`) accepted; a row under `OracleAndGuard` where EVERY listed obligation's `proving_guard` is the mapping-assigned `GuardId` with an `OBLIGATION_GUARD_REGISTRY` entry, matching `obligation_kind`, a `kind`/`expectation_tag`-matched `expected` payload, AND a valid in-range `target`, accepted; a row whose obligation lists the WRONG `GuardId` for its `kind`, a `proving_guard` with NO registry entry (an unproven obligation), an `expected` variant mismatched to its `kind`/`expectation_tag`, or a TARGET-mismatched obligation (a `QueryMode`/`AuditRecord` with a `WholeRow` or out-of-range `query_ordinal` target on a multi-query row, so the proof would land on the wrong query), REJECTED; a multi-query row carrying two same-kind obligations distinguished by `target` (each proved against its own ordinal's result) accepted; a multi-obligation row whose obligations resolve to DISTINCT registry-present proving guards accepted. |
-| `dependency_footprint_obligation_reproved` | The OBLIGATION prover for `ObligationKind::DependencyFootprint` (the `GuardId::DependencyFootprintObligation` row the closed §Q4 mapping assigns). For a lifted row whose ledger obligation set carries a `DependencyFootprint` member, re-runs the row's oracle execution and asserts the member's recorded `ObligationExpectation::DependencyFootprint { includes, excludes }` paths against the live resolved dependency set, so the footprint behavior the original body proved is re-proven post-lift (the `TypeExpr` compare cannot). Discriminating: a row migrated as a bare oracle compare that DROPS its original footprint assertion is caught because its ledger lists this obligation and this guard re-asserts the RECORDED footprint; a guard that merely re-ran the query without comparing to the recorded `includes`/`excludes` would NOT catch a footprint regression — the recorded `expected` payload is what makes it discriminating. |
-| `audit_record_obligation_reproved` | The OBLIGATION prover for `ObligationKind::AuditRecord` (`GuardId::AuditRecordObligation`). Re-asserts the member's recorded `ObligationExpectation::AuditRecord { fields }` `(field, value)` pairs against the returned `RequestAuditRecord`, for a lifted row whose ledger obligation set carries an `AuditRecord` member. Discriminating: a lift that drops the audit-record assertion, OR a regression that changes a recorded field value, fails because the ledger carries the recorded expected fields and this guard re-asserts them. |
-| `query_mode_obligation_reproved` | The OBLIGATION prover for `ObligationKind::QueryMode` (`GuardId::QueryModeObligation`). Asserts the lifted row's `RequestAuditRecord` records the member's recorded `ObligationExpectation::QueryMode { mode }` (the original `assert_query_mode(…)`), for a lifted row whose ledger obligation set carries a `QueryMode` member. Discriminating: a lift that drops the query-mode assertion, OR a regression that resolves under a different mode, fails because the recorded expected `mode` no longer matches. |
-| `warm_cache_obligation_reproved` | The OBLIGATION prover for `ObligationKind::WarmCache` (`GuardId::WarmCacheObligation`). Re-asserts the member's recorded `ObligationExpectation::WarmCache { facts }` fact keys against the live cache state, for a lifted row whose ledger obligation set carries a `WarmCache` member. Discriminating: a lift that drops the warm-cache assertion, OR a regression that loses a recorded warm fact, fails. |
-| `declared_dependency_obligation_reproved` | The OBLIGATION prover for `ObligationKind::DeclaredDependency` (`GuardId::DeclaredDependencyObligation`). Re-asserts the member's recorded `ObligationExpectation::DeclaredDependency { ids }` against the live declared-dependency set, for a lifted row whose ledger obligation set carries a `DeclaredDependency` member. Discriminating: a lift that drops the declared-dependency assertion, OR a regression that changes the recorded ids, fails. |
-| `divergence_correction_obligation_reproved` | The OBLIGATION prover for `ObligationKind::DivergenceCorrection` (`GuardId::DivergenceCorrectionObligation`, the §Q4 mapping row added for the divergence arm). For a `Ts7OracleWithCorrections` row, re-runs PER corrected query (one `DivergenceCorrection` member per corrected `query_ordinal`, each carrying a `Query { query_ordinal }` target): re-asserts the per-query divergence-data tie — `resolver(query) == correction.correct_value` while that query's `snapshot.oracle_value` is the recorded `TsCompat` value and differs from it — and that the recorded `ObligationExpectation::DivergenceCorrection { correction_id, divergence_id }` resolves to the named correction overlay AND a divergence-registry entry whose id equals `divergence_id` (`ts-compat-two-mode-model.md` §9.2, Guard C / `every_correction_is_discharged`). Discriminating: a corrected query whose `resolver(query)` does not equal `correction.correct_value`, whose `snapshot.oracle_value` equals the correction (no real divergence), whose `target` is `WholeRow` or out-of-range, or whose `correction_id`/`divergence_id` does not resolve to the SAME `(correction, registry-entry)` it names, fails. |
-| `registry_covers_every_lifted_oracle_query` | Every `Lifted` oracle row (proof `Ts7Oracle(_)`, `OracleAndGuard{..}`, or `Ts7OracleWithCorrections{..}`) has ≥1 registry entry (by `(row_file, row_function, *)`), every entry joins to an existing manifest row, and every entry has an existing snapshot (re-derived `snapshot_id` resolves to a file). A `Ts7OracleWithCorrections` row's `snapshot` field supplies the snapshot `OracleId`; its per-query `correction` overlays are SEPARATE review-gated artifacts (`ts-compat-two-mode-model.md` §3) checked by the overlay guards (`no_orphan_correction`, keyed by `(row_file, row_function, query_ordinal, snapshot_id)`), not by this snapshot-coverage rail. |
-| `migration_fingerprint_extraction_is_static` | The `migration_fingerprint` is extracted by the one-time audited lift command via a STRUCTURED `syn` AST parse of the original `#[test]` body (NOT a text/regex scan): it walks the body's statements in order, collects every known oracle-helper + workspace-setup-helper call, RESOLVES each known setup helper through the CLOSED named helper model (§Q4 "Extraction method" — `make_host_with_footprint`, `make_host_with_workspace_files_footprint`, `upsert_ts`, `upsert_cross_file_fixture`, `resolve_expr`/`shallow_surface_expr`/`evaluate_expr`) to its concrete upserts / host-construction / query tuple, const-folds literal/constant payloads, and const-folds each obligation assertion's literal arguments into its typed `ObligationExpectation`. A body whose upserts, queries, or obligation arguments are NOT statically extractable by that closed model — a loop, a NON-MODELED wrapper helper, a MACRO-GENERATED body, a CLOSURE-bearing assertion, a runtime value, an unfoldable expression — REJECTS LOUDLY: the row is NOT auto-lifted (it stays `Ignored` for hand-lift under an EXTENDED helper model, or defers), never auto-lifted with a guessed/partial fingerprint. So the initial auto-liftable set is a SOUND SUBSET of the eligible rows (only bodies that fold entirely through the named model), never a guessed superset. Discriminating: a row that hides its upserts behind `upsert_cross_file_fixture(...)` extracts the same ordered `workspace_files` + `host_project` a literal-inline row would; a row that computes a path in a loop, or whose body is macro-generated / closure-bearing, FAILS extraction (stays `Ignored`) rather than producing an unverifiable fingerprint. |
-| `original_extraction_input_auditable` | The `LiftedRowRecord` STORES `original_body_tokens` — the canonical ORIGINAL `#[test]` body `syn` token stream (the EXACT extraction INPUT ITSELF, `Span`-stripped, whitespace-insignificant token-tree print), CHECKED INTO the ledger at lift time alongside `migration_fingerprint`. This makes the INITIAL extraction input auditable, not merely self-compared to the derived fingerprint: this guard RE-RUNS the extractor over the CHECKED-IN `original_body_tokens` artifact and asserts the re-derived fingerprint EQUALS the recorded `migration_fingerprint` — HERMETICALLY, from the ledger artifact alone, with NO VCS archaeology (no shallow-checkout / archive / CI-clone dependence). So a WRONG INITIAL extraction — a `migration_fingerprint` computed from a mis-read body that is self-consistent with the registry forever — is detectable, because the extraction INPUT is pinned in the ledger independently of the derived fingerprint. The token stream is an audit record, NOT a `snapshot_id` input. Discriminating: a `LiftedRowRecord` whose `original_body_tokens` re-extract to a fingerprint that differs from the recorded `migration_fingerprint` FAILS (the recorded fingerprint can no longer be trusted to reflect the original query); a ledger entry missing `original_body_tokens` FAILS. |
-| `registry_entry_count_matches_declared` | For EVERY manifest oracle row (not only `Lifted`), the registry entry count (`(row_file, row_function, *)`) EQUALS the row's declared `IgnoredTestRow.oracle_query_ordinals`, AND the registry's `query_ordinal`s are UNIQUE and CONTIGUOUS `0..count-1` (a `{0,1,3}` gap or `{0,0,1}` duplicate FAILS even at matching count). Includes the ZERO-COUNT rows: a row with declared `oracle_query_ordinals == 0` (every `Ignored` / non-oracle / un-lifted row) MUST have ZERO registry entries — a stray entry on a zero-count row FAILS (this is the count-side complement to the `registry_covers_every_lifted_oracle_query` biconditional that no registry entry exists for a non-`Lifted`-oracle row). The two are independent sources — catches a registry that under-counts (3 of 4), which the forward/reverse pair (both registry-derived) cannot see. Discriminating: a 3-entry registry for a row declaring 4 must FAIL; ordinals `{0,1,3}` must FAIL; any registry entry on a declared-`0` (Ignored) row must FAIL. |
-| `registry_family_matches_manifest_oracle_id` | Each registry entry's `oracle_family` EQUALS the family carried by the manifest row's `ProofRequirement::Ts7Oracle(OracleId)` / `OracleAndGuard { oracle, .. }` / `Ts7OracleWithCorrections { snapshot, .. }` (the divergence arm's `snapshot` field carries its `OracleId`) (`typeinfo_ignored_test_manifest.rs` `OracleId` / `ProofRequirement`). Discriminating: an entry naming a different family than its row's proof must FAIL (it would read/write the wrong `oracle_snapshots/<family>/` sub-directory). |
-| `registry_payload_matches_migration_fingerprint` | Cardinality (count + contiguity) does NOT prove the registry PAYLOAD matches the ORIGINAL hand-authored query, nor that the lift preserved the row's non-`TypeExpr` obligations. `migration_fingerprint` (on the `LiftedRowRecord` ledger) is THE migration-fidelity authority — NOT a hand-maintained registry field. At lift time the body (parsed as a `syn` AST, see §Q4 "Extraction method") yields the ordered per-query FIDELITY tuple — each call's `(helper_kind, primary_canonical, symbol_or_expression, type_arguments, projection_mode, workspace_files, source_locator incl symbol_space, host_project)` — ∪ the per-row `non_typeexpr_obligations` set (each member's `kind` + `proving_guard` + the typed `expected` payload) DETECTED from the body's `assert_query_mode` / dependency-footprint / warm-cache / declared-dependency assertions; the canonical-JSON over that is recorded BEFORE the body is replaced by `#[oracle_row]`. This guard asserts the row's registry entries (their full fidelity tuple INCLUDING `source_locator` + `host_project`), in `query_ordinal` order, ∪ the LEDGER's once-per-row `LiftedRowRecord.non_typeexpr_obligations` set (NOT a registry-entry field), re-canonicalize to the SAME `migration_fingerprint`. Discriminating: a registry entry with the correct COUNT but a wrong `symbol_or_expression` / `primary_canonical` / `projection_mode` / `type_arguments` / `workspace_files` / `source_locator` (incl. a flipped Type↔Value `symbol_space`) / `host_project` (e.g. a `workspace_footprint` row migrated as `standalone`), OR an EMPTY/wrong obligation set on the ledger record (a dropped obligation, a wrong `kind`, or a drifted `expected` payload) for a row that asserted a footprint/query-mode/warm-cache check, FAILS — proving the registry reproduces the ORIGINAL query AND the ledger preserves its obligations, not merely a self-consistent target. |
+| `kind_eligibility_gate` | A query is lifted via this harness only when its registry `oracle_value_kind == structured_type_expr` AND it asserts a `TypeExpr` projection, not a relation/call verdict; `SemanticQueryName::Relate` as the asserting key is rejected; AND — enforcing the 122-row `Relate`-free CEILING (§Q2) — ANY row whose manifest `semantic_queries` CONTAINS `SemanticQueryName::Relate` ANYWHERE (not only as the asserting key) is REJECTED, until/unless a future oracle kind explicitly owns the relation path (so a `Relate`-carrying row marked `structured_type_expr` cannot slip past the ceiling even if its asserting key is not a relation). A row that asserts an INDEPENDENT non-`TypeExpr` obligation is REJECTED under a bare `Ts7Oracle` proof and admissible only under `OracleAndGuard` (a divergence row is an `OracleAndGuard` whose `guard` is the `DivergenceCorrection` prover, `ts-compat-two-mode-model.md` §9.2: the prover runs PER CORRECTED query — each corrected query asserted as a single-spec data comparison, `resolver(query) == correction.correct_value` while that query's `snapshot.oracle_value` is the recorded `TsCompat` value and differs, and the named correction overlay AND a registry entry whose id equals `divergence_id` resolve to the SAME `(correction, registry-entry)`). The obligation is expressed by the `OracleAndGuard` proof shape + the registered live prover the `guard` resolves to — NOT a typed set stored on a ledger record; the five obligation KINDS the provers cover are `DependencyFootprint` / `AuditRecord` / `WarmCache` / `DeclaredDependency` / `DivergenceCorrection`. PER-KIND targeting (this sub-rule depends on the DEFERRED §Q4 per-row-count layer and only activates once the `oracle_query_ordinals` field lands — it is not yet a shipped column): the per-query provers (`AuditRecord`, `DivergenceCorrection`) select a `query_ordinal` IN RANGE for the row's `oracle_query_ordinals` (a multi-query row default-rejects a per-query prover that cannot select a valid in-range ordinal — the multi-query default-reject backstop), so a per-query assertion is proved against the CORRECT query, never "any query passes". The gate READS the checked-in CODE `OBLIGATION_GUARD_REGISTRY` (the closed static slice `&[ObligationGuardEntry { guard_id, prover: fn(&RowExecutionResults) -> Result<(), GuardFailure> }]` keyed by `GuardId`, §Q4 — the §4 guard table is its human-readable mirror; the prover selects the relevant ordinal's `RowExecutionResults` slot) and verifies that the proof's `OracleAndGuard.guard` resolves to an `OBLIGATION_GUARD_REGISTRY` entry whose `prover` is a real compiled `fn` symbol (a registry lookup, NOT a Markdown-name match against the §4 table). A complementary parity check asserts the §4 guard table lists exactly the registry's prover fns (mirror in sync). Not a coarse bool, not a vague "transitively asserts" claim, not a prose stub. Discriminating: a row whose `semantic_queries` carries `Relate` ANYWHERE (even if its asserting key is not a relation), a `Relate`-asserting row, and a bare-`Ts7Oracle` row that carries an independent non-`TypeExpr` obligation must all be rejected; a pure `TypeExpr`-projection row (no obligation, no `Relate`) accepted; a row under `OracleAndGuard` whose `guard` resolves to a registered prover with an `OBLIGATION_GUARD_REGISTRY` entry accepted; a row whose `guard` has NO registry entry (an unproven obligation), or a per-query prover that cannot select a valid in-range ordinal on a multi-query row (so the proof would land on the wrong query), REJECTED. |
+| `dependency_footprint_obligation_reproved` | The registered live prover for the `DependencyFootprint` obligation KIND (`GuardId::DependencyFootprintObligation`). For an `OracleAndGuard` lifted row whose `guard` is this prover, re-runs the row's oracle execution and asserts the recorded `includes`/`excludes` paths against the live resolved dependency set, so the footprint behavior the original body proved is re-proven post-lift (the `TypeExpr` compare cannot). Discriminating: a row migrated as a bare `Ts7Oracle` compare that DROPS its original footprint assertion is caught because such a row is promoted to `OracleAndGuard` and this prover re-asserts the RECORDED footprint; a prover that merely re-ran the query without comparing to the recorded `includes`/`excludes` would NOT catch a footprint regression. |
+| `audit_record_obligation_reproved` | The registered live prover for the `AuditRecord` obligation KIND (`GuardId::AuditRecordObligation`). Re-asserts the recorded `(field, value)` pairs against the returned `RequestAuditRecord`, for an `OracleAndGuard` lifted row whose `guard` is this prover (selecting the originating query's ordinal). Discriminating: a lift that drops the audit-record assertion (demoting to bare `Ts7Oracle`), OR a regression that changes a recorded field value, fails. |
+| `warm_cache_obligation_reproved` | The registered live prover for the `WarmCache` obligation KIND (`GuardId::WarmCacheObligation`). Re-asserts the recorded warm-cache / cache-hit fact keys against the live cache state, for an `OracleAndGuard` lifted row whose `guard` is this prover. Discriminating: a lift that drops the warm-cache assertion, OR a regression that loses a recorded warm fact, fails. |
+| `declared_dependency_obligation_reproved` | The registered live prover for the `DeclaredDependency` obligation KIND (`GuardId::DeclaredDependencyObligation`). Re-asserts the recorded declared-dependency ids against the live declared-dependency set, for an `OracleAndGuard` lifted row whose `guard` is this prover. Discriminating: a lift that drops the declared-dependency assertion, OR a regression that changes the recorded ids, fails. |
+| `divergence_correction_obligation_reproved` | The registered live prover for the `DivergenceCorrection` obligation KIND (`GuardId::DivergenceCorrectionObligation`). For a divergence row (an `OracleAndGuard` whose `guard` is this prover), re-runs PER corrected `query_ordinal`: re-asserts the per-query divergence-data tie — `resolver(query) == correction.correct_value` while that query's `snapshot.oracle_value` is the recorded `TsCompat` value and differs from it — and that the named correction overlay AND a divergence-registry entry whose id equals `divergence_id` resolve to the SAME `(correction, registry-entry)` (`ts-compat-two-mode-model.md` §9.2, Guard C / `every_correction_is_discharged`). Discriminating: a corrected query whose `resolver(query)` does not equal `correction.correct_value`, whose `snapshot.oracle_value` equals the correction (no real divergence), whose selected ordinal is out-of-range, or whose `correction_id`/`divergence_id` does not resolve to the SAME `(correction, registry-entry)` it names, fails. |
+| `registry_covers_every_lifted_oracle_query` | Every `Lifted` oracle row (proof `Ts7Oracle(_)` or `OracleAndGuard{..}`) has ≥1 registry entry (by `(row_file, row_function, *)`), every entry joins to an existing manifest row, and every entry has an existing snapshot (re-derived `snapshot_id` resolves to a file). A divergence row's `OracleAndGuard.oracle` field supplies the snapshot `OracleId`; its per-query `correction` overlays are SEPARATE review-gated artifacts (`ts-compat-two-mode-model.md` §3) checked by the overlay guards (`no_orphan_correction`, keyed by `(row_file, row_function, query_ordinal, snapshot_id)`), not by this snapshot-coverage rail. |
+| `migration_fingerprint_extraction_is_static` (DEFERRED) | The `migration_fingerprint` is extracted by the one-time audited lift command via a STRUCTURED `syn` AST parse of the original `#[test]` body (NOT a text/regex scan): it walks the body's statements in order, collects every known oracle-helper + workspace-setup-helper call, RESOLVES each known setup helper through the CLOSED named helper model (§Q4 "Extraction method" — `make_host_with_footprint`, `make_host_with_workspace_files_footprint`, `upsert_ts`, `upsert_cross_file_fixture`, `resolve_expr`/`shallow_surface_expr`/`evaluate_expr`) to its concrete upserts / host-construction / query tuple, const-folds literal/constant payloads, and detects each obligation-bearing assertion (promoting the row to `OracleAndGuard` with the matching registered prover). A body whose upserts, queries, or obligation arguments are NOT statically extractable by that closed model — a loop, a NON-MODELED wrapper helper, a MACRO-GENERATED body, a CLOSURE-bearing assertion, a runtime value, an unfoldable expression — REJECTS LOUDLY: the row is NOT auto-lifted (it stays `Ignored` for hand-lift under an EXTENDED helper model, or defers), never auto-lifted with a guessed/partial fingerprint. So the initial auto-liftable set is a SOUND SUBSET of the eligible rows (only bodies that fold entirely through the named model), never a guessed superset. Discriminating: a row that hides its upserts behind `upsert_cross_file_fixture(...)` extracts the same ordered `workspace_files` + `host_project` a literal-inline row would; a row that computes a path in a loop, or whose body is macro-generated / closure-bearing, FAILS extraction (stays `Ignored`) rather than producing an unverifiable fingerprint. |
+| `original_extraction_input_auditable` (DEFERRED) | The retained-lift metadata STORES `original_body_tokens` — the canonical ORIGINAL `#[test]` body `syn` token stream (the EXACT extraction INPUT ITSELF, `Span`-stripped, whitespace-insignificant token-tree print), CHECKED IN at lift time alongside `migration_fingerprint`. This makes the INITIAL extraction input auditable, not merely self-compared to the derived fingerprint: this guard RE-RUNS the extractor over the CHECKED-IN `original_body_tokens` artifact and asserts the re-derived fingerprint EQUALS the recorded `migration_fingerprint` — HERMETICALLY, from the retained-lift artifact alone, with NO VCS archaeology (no shallow-checkout / archive / CI-clone dependence). So a WRONG INITIAL extraction — a `migration_fingerprint` computed from a mis-read body that is self-consistent with the registry forever — is detectable, because the extraction INPUT is pinned in the retained-lift metadata independently of the derived fingerprint. The token stream is an audit record, NOT a `snapshot_id` input. Discriminating: a retained-lift record whose `original_body_tokens` re-extract to a fingerprint that differs from the recorded `migration_fingerprint` FAILS; a record missing `original_body_tokens` FAILS. (GENUINELY DEFERRED — the `migration_fingerprint` / `original_body_tokens` body-hash fidelity layer is not yet wired; this is the planned guard.) |
+| `registry_entry_count_matches_declared` (DEFERRED) | (DEFERRED — reads the not-yet-added `IgnoredTestRow.oracle_query_ordinals` field; lands with the §Q4 per-row-count layer alongside `migration_fingerprint` / `original_body_tokens`.) For EVERY manifest oracle row (not only `Lifted`), the registry entry count (`(row_file, row_function, *)`) EQUALS the row's declared `IgnoredTestRow.oracle_query_ordinals`, AND the registry's `query_ordinal`s are UNIQUE and CONTIGUOUS `0..count-1` (a `{0,1,3}` gap or `{0,0,1}` duplicate FAILS even at matching count). Includes the ZERO-COUNT rows: a row with declared `oracle_query_ordinals == 0` (every `Ignored` / non-oracle / un-lifted row) MUST have ZERO registry entries — a stray entry on a zero-count row FAILS (this is the count-side complement to the `registry_covers_every_lifted_oracle_query` biconditional that no registry entry exists for a non-`Lifted`-oracle row). The two are independent sources — catches a registry that under-counts (3 of 4), which the forward/reverse pair (both registry-derived) cannot see. Discriminating: a 3-entry registry for a row declaring 4 must FAIL; ordinals `{0,1,3}` must FAIL; any registry entry on a declared-`0` (Ignored) row must FAIL. |
+| `registry_family_matches_manifest_oracle_id` | Each registry entry's `oracle_family` EQUALS the family carried by the manifest row's `ProofRequirement::Ts7Oracle(OracleId)` / `OracleAndGuard { oracle, .. }` (a divergence row carries its `OracleId` in `OracleAndGuard.oracle`) (`typeinfo_ignored_test_manifest.rs` `OracleId` / `ProofRequirement`). Discriminating: an entry naming a different family than its row's proof must FAIL (it would read/write the wrong `oracle_snapshots/<family>/` sub-directory). |
+| `registry_payload_matches_migration_fingerprint` (DEFERRED) | Cardinality (count + contiguity) does NOT prove the registry PAYLOAD matches the ORIGINAL hand-authored query, nor that the lift preserved the row's non-`TypeExpr` obligations. `migration_fingerprint` (on the retained-lift metadata) is THE migration-fidelity authority — NOT a hand-maintained registry field. At lift time the body (parsed as a `syn` AST, see §Q4 "Extraction method") yields the ordered per-query FIDELITY tuple — each call's `(helper_kind, primary_canonical, symbol_or_expression, type_arguments, projection_mode, workspace_files, source_locator incl symbol_space, host_project)` — ∪ the row's proof shape (`Ts7Oracle` vs `OracleAndGuard` + its `guard` id) DETECTED from the body's dependency-footprint / audit-record / warm-cache / declared-dependency assertions; the canonical-JSON over that is recorded BEFORE the body is replaced by `#[oracle_row]`. This guard asserts the row's registry entries (their full fidelity tuple INCLUDING `source_locator` + `host_project`), in `query_ordinal` order, ∪ the row's proof shape, re-canonicalize to the SAME `migration_fingerprint`. Discriminating: a registry entry with the correct COUNT but a wrong `symbol_or_expression` / `primary_canonical` / `projection_mode` / `type_arguments` / `workspace_files` / `source_locator` (incl. a flipped Type↔Value `symbol_space`) / `host_project` (e.g. a `workspace_footprint` row migrated as `standalone`), OR a proof shape that drifted (a row demoted to bare `Ts7Oracle` that asserted a footprint/audit/warm-cache check), FAILS — proving the registry reproduces the ORIGINAL query AND the proof shape preserves its obligations, not merely a self-consistent target. (GENUINELY DEFERRED alongside `migration_fingerprint`.) |
 | `oracle_env_files_redrive_offline` | `no_orphan_snapshot` re-enumerates the vendored corpus + recomputes each `oracle_env_hash` by re-hashing the snapshot's stored `oracle_env_files.files` `{path, content_hash}` list against current on-disk content and validates it against the stored value — WITHOUT re-running tsgo, and WITHOUT folding it into `snapshot_id` (the filename is registry-derived from the STABLE `env_corpus_id`). Discriminating: an env file edited on disk re-derives a different `oracle_env_hash` from the stored list (snapshot invalidated as a VALUE mismatch) with no tsgo invocation in the default gate. |
 | `oracle_env_corpus_is_closed` | The vendored oracle-env corpus (`oracle_env/<env_corpus_id>/`) is CLOSED (STABILITY): the offline gate RE-ENUMERATES the vendored directory's current file listing and asserts SET-EQUALITY against the snapshot's stored `oracle_env_files.manifest` (no unlisted file, none missing) BEFORE content-hashing, and tsgo is driven against that frozen corpus root (not live `node_modules`, gitignored — `.gitignore:9`; tsgo bundles libs under `node_modules/@typescript/native-preview-*/lib/`, `ipc.rs:~2859-2874`). Discriminating: an UNLISTED `.d.ts` dropped into the corpus dir FAILS set-equality even though every listed file still hashes clean (catches an ADDITION the content re-hash alone would miss); a developer's `node_modules` change is irrelevant (the corpus is hermetic + checked-in). |
 | `oracle_env_files_manifest_matches_files` | The snapshot's two stored `oracle_env_files` path sets are INTERNALLY consistent BEFORE any hashing or on-disk re-enumeration: asserts `oracle_env_files.manifest` (the directory listing) EQUALS `oracle_env_files.files[].path` (the hashed file list) as the SAME SET — both canonical-path-sorted, duplicate-free, with no path in `manifest` absent from `files` and none in `files` absent from `manifest`. This is the precondition `oracle_env_corpus_is_closed` (manifest set-equality vs the on-disk dir) and `oracle_env_hash` recomputation (re-hashes `files`) both rely on: if `manifest` and `files` diverged, a file could be listed in `manifest` / present in the dir yet OMITTED from the `files` hash list, so it would pass the on-disk set-equality (against `manifest`) yet never be content-hashed — an un-hashed corpus member. Discriminating: a snapshot whose `manifest` lists a path absent from `files` (or vice versa), an unsorted list, or a duplicate path in either, FAILS — closing the gap where a corpus member is in the manifest/dir but excluded from the hash. |
@@ -4374,9 +4249,9 @@ carries a named guard here.
 | `raw_capture_present_for_audit` | Every snapshot stores `raw_capture` (`{ probe_name, probe_header, hover_contents }`); `probe_header_names_target` audits the wrong-hover fence offline from it without re-running tsgo. Discriminating: a snapshot missing `raw_capture` FAILS the guard. |
 | `expanded_probe_form_validated` | An `Expanded`-mode query is admissible only after the spike has validated a concrete lossless `Expanded`-probe form for its construct class; un-validated `Expanded` classes stay `Ignored`. |
 | `skeleton_probe_form_validated` | A `Skeleton`-mode query is admissible only after the spike has validated a concrete lossless `Skeleton`-probe form for its construct class — one that elicits tsgo's `TypeParameter`/`Infer` shell printing for unbound generics so Conditional branches do not collapse to `never`; un-validated `Skeleton` classes stay `Ignored` (default-REJECT, mirroring `Expanded`). Discriminating: a `Skeleton`-mode row whose construct class has no spike-validated probe form must stay `Ignored`/rejected; one in a spike-validated class is admissible. |
-| First-lift PREREQUISITE set: regenerator source-model + the 362-table guard + THREE all-row-sensitive guards (the COUNT guard `:595` is already status-filtered) | The COMPLETE, accurate prerequisite set for the first `Ignored → Lifted` row, all landing in the SAME block (§Q5): **(1) Regenerator source-model redesign** — `scripts/gen-typeinfo-ignore-manifest.py` builds rows ONLY from live `#[ignore]` discovery, hardcodes `status: IgnoreStatus::Ignored` (`emit_ignored_rows`), and asserts exactly 362 built (`if len(rows) != 362`). A `Lifted` row has no live `#[ignore]` and would VANISH on regeneration. The generator must UNION live discovery with a retained `Lifted`-row ledger (`(file, function, block_id)`), source `status` FROM the ledger (not the hardcoded constant), assert the two sets are disjoint, and assert the TOTAL union is 362 (the `Ignored` count falls as lifts accrue; the total stays 362). **(2) `ignored_test_row_table_holds_exactly_362_rows` (`:1155`) reconciliation** — asserts BOTH `EXPECTED_IGNORE_MANIFEST.len() == 362` (`:1157`, raw total — STAYS 362 because a `Lifted` row remains in the table) AND `EXPECTED_TOTAL_IGNORED_COUNT == 362` (`:1171`, the status-filtered `Ignored` count — BREAKS on the first lift). Reconcile to: total `.len() == 362` (unchanged) AND `EXPECTED_TOTAL_IGNORED_COUNT == 362 - lifted_count`. **(3) THREE all-row-sensitive guards status-filtered** — `manifest_length_matches_documented_total` (`:989`, raw `.len()` vs status-filtered count), `every_manifest_row_corresponds_to_a_live_ignored_test` (the orphan-on-no-`#[ignore]` check, `:828`), `per_file_ignored_test_counts_match_manifest` (the per-file partition, `:1018`) all over `status == Ignored` rows only (a `Lifted` row carries NO live `#[ignore]` by design). The status-filtered COUNT guard `EXPECTED_TOTAL_IGNORED_COUNT = count_ignored_rows(…)` (`:595`/`:561`/`:566-575`) needs NO edit. Not optional cleanup — a hard prerequisite; the "only THREE guards" framing was inaccurate. |
-| `lifted_row_ledger_retains_full_record` | The retained `Lifted`-row ledger (`LIFTED_ROWS`) stores the FULL `IgnoredTestRow` payload per lifted row — the 13 manifest columns (`file`, `function`, `block_id`, `semantic_queries`, `proof`, `substrate`, `capability`, `organ`, `owning_u_block`, `mechanism_id`, `consumed_mechanisms`, `unblocker`, `oracle_query_ordinals`) PLUS the three lift-time-derived fields `non_typeexpr_obligations` + `migration_fingerprint` + `original_body_tokens` (extracted from / captured over the original BODY, not the `#[ignore]` site) — so the regenerated table reproduces the lifted row VERBATIM with only `status: Lifted { block_id }` substituted, since live `#[ignore]` discovery can no longer supply ANY column once the `#[ignore]` is removed. Asserts every `LiftedRowRecord` has a NON-EMPTY `unblocker` (so `every_manifest_row_has_non_empty_unblocker` at `:852` STILL holds on lifted rows, unchanged + un-status-filtered — the ledger is its source), a `proof` of `Ts7Oracle(_)` / `OracleAndGuard{..}` / `Ts7OracleWithCorrections{..}`, a non-empty `migration_fingerprint`, a non-empty `original_body_tokens` (re-extracted + fingerprint-compared hermetically by `original_extraction_input_auditable`), and a `non_typeexpr_obligations` set (the ONCE-PER-ROW ledger field — registry entries do NOT carry it) whose emptiness obeys the THREE-arm rule: EMPTY iff `proof == Ts7Oracle(_)`; NON-EMPTY (footprint/audit/mode/cache obligations) iff `proof == OracleAndGuard{..}`; and under `proof == Ts7OracleWithCorrections{..}` it CONTAINS one `ObligationKind::DivergenceCorrection` member PER CORRECTED query (each targeting `Query { query_ordinal }`, set-equal to the proof arm's `corrections` list — a row may carry ≥2 corrected queries ⇒ ≥2 members; each member's `ObligationExpectation::DivergenceCorrection { correction_id, divergence_id }` resolves to the named correction overlay AND a registry entry whose id equals `divergence_id` — `ts-compat-two-mode-model.md` §9.2), plus any footprint/audit obligations the divergence row also asserts. Every member's `proving_guard` is EXACTLY the `GuardId` the closed §Q4 `ObligationKind → GuardId` mapping assigns to its `kind` (the mapping gains a `DivergenceCorrection → GuardId` row), resolves to an `OBLIGATION_GUARD_REGISTRY` entry (the checked-in CODE registry the §4 table mirrors), AND its `expected` `ObligationExpectation` variant matches its `kind`. Discriminating: a ledger entry that drops `unblocker` (or any column the all-rows manifest guards read), drops `migration_fingerprint`, drops `original_body_tokens`, carries a non-empty obligation set under bare `Ts7Oracle`, an empty set under `OracleAndGuard`, a `Ts7OracleWithCorrections` row LACKING a `DivergenceCorrection` obligation for SOME corrected query (or carrying a member with a `WholeRow`/out-of-range target, or whose member set is not set-equal to the proof arm's `corrections` list), an obligation whose `proving_guard` is the WRONG `GuardId` for its `kind`, or an `expected` variant mismatched to its `kind`, FAILS; a regenerated lifted row whose columns differ from the ledger record FAILS. |
-| `lifted_row_block_id_matches_status` | The `LiftedRowRecord.block_id` field (the row's own `block_id` manifest column, one of the 13 `IgnoredTestRow` columns) and the `IgnoreStatus::Lifted { block_id }` status-payload `block_id` the regenerated row carries are INTENTIONALLY the SAME value — the lifting block IS the row's block, recorded once. The regenerator emits `status: IgnoreStatus::Lifted { block_id: rec.block_id }`, so they cannot drift in a single regeneration; this guard asserts the equality on every lifted row in the table (the emitted row's `status` payload `block_id` EQUALS the row's `block_id` column). Discriminating: a regenerated `Lifted` row whose `status` payload `block_id` differs from its `block_id` manifest column FAILS — proving the two are one value, not two independently-maintained fields that could disagree. |
+| First-lift PREREQUISITE set: regenerator source-model + the 362-table guard + THREE all-row-sensitive guards (the COUNT guard `:595` is already status-filtered) | The COMPLETE, accurate prerequisite set for the first `Ignored → Lifted` row, all landing in the SAME block (§Q5): **(1) Regenerator source-model redesign** — under the original all-`Ignored` model `scripts/gen-typeinfo-ignore-manifest.py` built rows ONLY from live `#[ignore]` discovery, hardcoded `status: IgnoreStatus::Ignored`, and asserted exactly 362 built, so a `Lifted` row (no live `#[ignore]`) would VANISH on regeneration. The generator now UNIONS live discovery with a retained `Lifted`-row ledger (`LIFTED_ROW_OVERRIDES`), sources `status` FROM the ledger (not a hardcoded constant), asserts the two sets are disjoint, and asserts the TOTAL union is 362 (the `Ignored` count falls as lifts accrue; the total stays 362). **(2) `ignored_test_row_table_holds_exactly_362_rows` (`:1155`) reconciliation** — it asserts BOTH `EXPECTED_IGNORE_MANIFEST.len() == 362` (raw total — STAYS 362 because a `Lifted` row remains in the table) AND the status-filtered live-ignore count, now `EXPECTED_TOTAL_IGNORED_COUNT == 362 - lifted_count` (= 358 after the 4 lifts). **(3) THREE all-row-sensitive guards status-filtered** — `manifest_length_matches_documented_total` (`:989`, raw `.len()` vs status-filtered count), `every_manifest_row_corresponds_to_a_live_ignored_test` (the orphan-on-no-`#[ignore]` check, `:828`), `per_file_ignored_test_counts_match_manifest` (the per-file partition, `:1018`) all over `status == Ignored` rows only (a `Lifted` row carries NO live `#[ignore]` by design). The status-filtered COUNT guard `EXPECTED_TOTAL_IGNORED_COUNT = count_ignored_rows(…)` (`:595`/`:561`/`:566-575`) needed NO edit. This landed with the first lift; the "only THREE guards" framing was inaccurate. |
+| `lifted_row_overrides_retain_full_record` | The retained-lift metadata map (`LIFTED_ROW_OVERRIDES`) stores the FULL `IgnoredTestRow` payload per lifted row — the 12 data columns (`file`, `function`, `block_id`, `semantic_queries`, `proof`, `substrate`, `capability`, `organ`, `owning_u_block`, `mechanism_id`, `consumed_mechanisms`, `unblocker`) plus `status` (the 13th field) — so the regenerated table reproduces the lifted row VERBATIM with only `status: Lifted { block_id }` substituted, since live `#[ignore]` discovery can no longer supply ANY column once the `#[ignore]` is removed. Asserts every retained-lift record has a NON-EMPTY `unblocker` (so `every_manifest_row_has_non_empty_unblocker` at `:852` STILL holds on lifted rows, unchanged + un-status-filtered — the retained-lift metadata is its source) and a `proof` of `Ts7Oracle(_)` / `OracleAndGuard{..}` (a divergence row is an `OracleAndGuard` whose `guard` is the `DivergenceCorrection` prover). An independent non-`TypeExpr` obligation is expressed by the `OracleAndGuard` proof shape + its registered live prover — there is NO stored `non_typeexpr_obligations` ledger set (the round-2 full-record obligation ledger was retired). Discriminating: a retained-lift record that drops `unblocker` (or any column the all-rows manifest guards read), or demotes a footprint/audit/divergence row to bare `Ts7Oracle`, FAILS; a regenerated lifted row whose columns differ from the retained-lift record FAILS. (When the deferred §Q4 `oracle_query_ordinals` per-row-count field lands it will ride on this same retained-lift metadata, as will the deferred `migration_fingerprint` / `original_body_tokens` body-hash fidelity layer when wired — §Q4. Neither is a currently-stored column.) |
+| `lifted_row_block_id_matches_status` | The retained-lift record's `block_id` field (the row's own `block_id` manifest column, one of the 13 `IgnoredTestRow` columns) and the `IgnoreStatus::Lifted { block_id }` status-payload `block_id` the regenerated row carries are INTENTIONALLY the SAME value — the lifting block IS the row's block, recorded once. The regenerator emits `status: IgnoreStatus::Lifted { block_id: rec.block_id }`, so they cannot drift in a single regeneration; this guard asserts the equality on every lifted row in the table (the emitted row's `status` payload `block_id` EQUALS the row's `block_id` column). Discriminating: a regenerated `Lifted` row whose `status` payload `block_id` differs from its `block_id` manifest column FAILS — proving the two are one value, not two independently-maintained fields that could disagree. |
 | Per-row lift tests (added per block) | Each lifted oracle query runs the single-spec resolver ONCE and asserts against recorded data (`ts-compat-two-mode-model.md` §7), NOT a per-mode re-run or a family-key comparison; corrections bind at `(row, query_ordinal)` granularity, so a row may MIX the two cases below: **(a) ordinary query (no correction)** — `resolver(query) == normalized oracle_value` (the recorded `TsCompat`/tsgo value, which here equals the correct value); **(b) corrected query** (a correction overlay exists for that `query_ordinal`) — `resolver(query) == correction.correct_value` (the `Correct` value), while that query's `snapshot.oracle_value` is the recorded `TsCompat` value and must differ. Both keep the explicit negative assertions (no `Unknown`, no `any`/`never` where a concrete type is expected). |
 
 Generator-side (feature-gated, NOT in the default gate):
@@ -4435,11 +4310,15 @@ Confirm three things:
    visited-set, reduction step 0). Pinned by `oracle_normalization_is_confluent`,
    `oracle_normalizer_terminates_on_cyclic_input`, and
    `oracle_literal_spelling_canonicalized`.
-2. **`Expanded`-mode probe form (BLOCKING).** `Expanded`-mode rows are NOT admissible
-   until the spike validates a concrete, demonstrably lossless `Expanded`-probe form
-   for their construct class (preserving methods / call-signatures / optional /
-   readonly — a `{ [K in keyof T]: T[K] }` wrapper does NOT, and is rejected). Until
-   then those rows stay `Ignored`. Pinned by `expanded_probe_form_validated`.
+2. **`Expanded`-mode probe form (per construct class).** An `Expanded`-mode row is admissible
+   once a concrete, demonstrably lossless `Expanded`-probe form is validated for its construct
+   class (preserving methods / call-signatures / optional / readonly — a `{ [K in keyof T]: T[K] }`
+   wrapper does NOT, and is rejected); a class without a validated probe form stays `Ignored`.
+   Pinned by `expanded_probe_form_validated`. VALIDATED classes: index-signature publication
+   (`NumericIndexed` / `SymbolIndexed`) and built-in modifier-utility composition
+   (`Required<T>` / `Readonly<Required<T>>`) — the four lifted rows are captured + compared in
+   `Expanded` (the alias body is already a terminal structural surface, so the append-probe
+   hover is lossless).
 2-skeleton. **`Skeleton`-mode probe form (BLOCKING).** `Skeleton`-mode rows are NOT
    admissible until the spike validates a concrete, demonstrably lossless
    `Skeleton`-probe form for their construct class — one that elicits tsgo's
@@ -4704,28 +4583,26 @@ block; it is generator-side work (feature-gated), never part of the default gate
    tree grows linearly with lifted queries, and the `no_orphan_snapshot` set-equality
    guard must enumerate it recursively on every run.
 
-7. **The first lift's prerequisite set is the regenerator source-model + the 362-table
-   guard + THREE all-row-sensitive guards — NOT "only three guards."** The lift
-   mechanism removes a row's `#[ignore]` and flips `status` to `Lifted`. Because
-   `scripts/gen-typeinfo-ignore-manifest.py` builds the table ONLY from live `#[ignore]`
-   discovery, hardcodes `status: IgnoreStatus::Ignored`, and asserts exactly 362 built,
-   a `Lifted` row would VANISH on the next regeneration (lost `Lifted` record, failed
-   `!= 362` build assertion). The regenerator MUST be redesigned to UNION live discovery
-   with a retained `Lifted`-row ledger, source `status` from the ledger, and keep the
-   TOTAL union at 362. The `ignored_test_row_table_holds_exactly_362_rows` guard
-   (`:1155`) must be reconciled — its raw `.len() == 362` STAYS true (a `Lifted` row
-   stays in the table) but its `EXPECTED_TOTAL_IGNORED_COUNT == 362` (`:1171`) breaks on
-   the first lift, so it becomes `EXPECTED_TOTAL_IGNORED_COUNT == 362 - lifted_count`. Of
-   the four guards in `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs`,
+7. **The first lift's prerequisite set was the regenerator source-model + the 362-table
+   guard + THREE all-row-sensitive guards — NOT "only three guards" (REALIZED).** The lift
+   mechanism removes a row's `#[ignore]` and flips `status` to `Lifted`. Under the original
+   all-`Ignored` model, `scripts/gen-typeinfo-ignore-manifest.py` built the table ONLY from
+   live `#[ignore]` discovery, hardcoded `status: IgnoreStatus::Ignored`, and asserted
+   exactly 362 built — so a `Lifted` row would VANISH on the next regeneration. The
+   regenerator now UNIONS live discovery with a retained `Lifted`-row ledger
+   (`LIFTED_ROW_OVERRIDES`), sources `status` from the ledger, and keeps the TOTAL union at
+   362. The `ignored_test_row_table_holds_exactly_362_rows` guard (`:1155`) was reconciled —
+   its raw `.len() == 362` STAYS true (a `Lifted` row stays in the table) while its
+   live-ignore assertion is now `EXPECTED_TOTAL_IGNORED_COUNT == 362 - lifted_count` (= 358).
+   Of the four guards in `crates/verter_session/tests/typeinfo_ignored_test_manifest.rs`,
    the COUNT guard `EXPECTED_TOTAL_IGNORED_COUNT = count_ignored_rows(…)` (`:595`,
-   `:561`/`:566-575`) is ALREADY status-filtered and needs NO edit; the other THREE
-   all-row-sensitive guards (`manifest_length_matches_documented_total` `:989`,
+   `:561`/`:566-575`) was ALREADY status-filtered; the other THREE all-row-sensitive guards
+   (`manifest_length_matches_documented_total` `:989`,
    `every_manifest_row_corresponds_to_a_live_ignored_test` `:828`,
-   `per_file_ignored_test_counts_match_manifest` `:1018`) must be status-filtered over
+   `per_file_ignored_test_counts_match_manifest` `:1018`) are status-filtered over
    `status == Ignored` rows. All of this — regenerator redesign + 362-table-guard
-   reconciliation + the three guard edits — is the COMPLETE implementation PREREQUISITE,
-   landing in the SAME block as the first lift; it is called out in full in §Q5 and the
-   Verification table. The earlier "only THREE guards" framing was inaccurate.
+   reconciliation + the three guard edits — landed with the first lift; it is recorded in
+   full in §Q5 and the Verification table. The earlier "only THREE guards" framing was inaccurate.
 
 8. **Vendored-corpus byte size + regeneration cost.** Vendoring the closed oracle-env
    corpus checks in the BYTES of the consulted lib / ambient / package `.d.ts` set

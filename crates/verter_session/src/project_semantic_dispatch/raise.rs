@@ -9,7 +9,7 @@
 //! **Authority contract:** this is the *only* `SemanticNodeId →
 //! TypeExpr` lowering path in the workspace. Pair with
 //! [`shallow_lower_type_expr`](super::lower::shallow_lower_type_expr)
-//! (forward direction). The Step 6.1 invariant test
+//! (forward direction). The invariant test
 //! `semantic_node_to_type_expr_has_exactly_one_path` asserts exactly one
 //! `fn raise_node_to_type_expr` exists in `crates/`.
 
@@ -243,7 +243,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// need a [`TypeExpr`] for downstream payload construction. Operator-
     /// shape reduction (`IndexedAccess`, `Conditional`, `Mapped`,
     /// `KeyOf`, `TypeOf`) is the responsibility of the caller — typically
-    /// [`Self::raise_and_reduce`] (Step 6.1.A). This function alone is
+    /// [`Self::raise_and_reduce`]. This function alone is
     /// shell-only.
     pub(crate) fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {
         let mut active = FxHashSet::default();
@@ -556,7 +556,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                 )))
             }
-            // D26 lazy carriers. DeclRef raises to a
+            // Lazy carriers. DeclRef raises to a
             // bare `Ref { name }` with empty type arguments. Identity
             // (`canonical_id + whole_hash`) is encoded in the interning
             // scope, not in the projected TypeExpr — that's the lossy
@@ -600,14 +600,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         })
     }
 
-    /// `execute` variant that returns the full [`CacheRead`] (D38).
+    /// `execute` variant that returns the full [`CacheRead`].
     ///
     /// `ProjectSemanticDispatch::execute` (the [`SemanticQueryApi`] trait
     /// method) discards the dep-signature half of the cache read; this
     /// variant keeps it so callers like [`Self::raise_and_reduce`] can
     /// accumulate dep facts across nested dispatches and merge them into
-    /// the session-layer `fact_versions` (Step 6.6.A).
-    #[allow(dead_code)] // wired by Step 6.3 caller migration.
+    /// the session-layer `fact_versions`. This is the dispatch entry the
+    /// cold-build subtree reducer and the operator sub-reductions
+    /// (`ProjectPath` / `NormalizeIntersection` / macro-payload
+    /// intersection normalisation) ride so their dependency facts are not
+    /// dropped — the dep-signature-preserving peer of the `SemanticQueryApi`
+    /// trait's `execute`.
     pub(crate) fn execute_read(
         &self,
         key: SemanticQueryKey,
@@ -650,13 +654,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// Returns a [`MaterializedTypeExpr`] carrying the producing
     /// `SemanticNodeId`, the raised `TypeExpr`, and the accumulated
-    /// `DepSignature` (D31).
+    /// `DepSignature`.
     ///
     /// Backwards-compatible entry — defaults to a
     /// `Published(mode)` reduction context. Callers that need the
     /// reduction-demand axis (`Published` vs `StructuralTransit`) go
     /// through [`Self::raise_and_reduce_with_context`].
-    #[allow(dead_code)] // wired by Step 6.3 caller migration.
+    // Published(mode)-default convenience wrapper over
+    // `raise_and_reduce_with_context`; exercised by the dispatch reducer tests.
+    #[allow(dead_code)]
     pub(crate) fn raise_and_reduce(
         &self,
         node: SemanticNodeId,
@@ -1053,7 +1059,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   carrier-stop) accepts the form.
     /// - `DeclRef` / `InstantiationRef`: in `Published(Navigate)` /
     ///   `StructuralTransit`, terminal (DeclRef still follows aliases
-    ///   via D41). In `Published(Expanded)`, dispatch `ResolveDecl` /
+    ///   because aliases are semantically transparent). In
+    ///   `Published(Expanded)`, dispatch `ResolveDecl` /
     ///   `Instantiate`.
     /// - Composite shapes (`Object` / `Union` / `Intersection` /
     ///   `Array` / `Tuple` / `Function`) rebuild via
@@ -1281,10 +1288,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
 
-            // --- lazy carriers (D26+D41) ---
+            // --- lazy carriers ---
             SemanticNodeData::DeclRef { identity } => {
                 if matches!(mode, ProjectionMode::Navigate) {
-                    // D41: Navigate follows alias chains because aliases
+                    // Navigate follows alias chains because aliases
                     // are semantically transparent. Dispatch and recurse
                     // — same as Expanded for DeclRef.
                 }
@@ -1841,22 +1848,19 @@ fn rebuild_function(
 }
 
 /// Materialization-grade result returned by [`raise_and_reduce`] and the
-/// session-layer `materialize_*` wrapper (D31).
+/// session-layer `materialize_*` wrapper.
 ///
-/// Step 6.1.A introduces the type; Step 6.3 wires the
-/// session-layer caller `materialize_component_meta_type_expr_until_stable`
-/// to return this struct.
+/// The session-layer caller `materialize_component_meta_type_expr_until_stable`
+/// returns this struct.
 ///
 /// - `node_id`: `Some(id)` for dispatch-produced entries; `None` for
 ///   synthetic / inline-annotation entries that bypass the dispatch
 ///   path. Captured at materialization time for `SurfaceNodeIdentities`
-///   population (D32).
+///   population.
 /// - `type_expr`: the raised final form.
 /// - `dep_signature`: accumulated fence signatures from all dispatch
 ///   calls inside reduction. Session merges into
-///   `ResolvedComponentMetaState.fact_versions` before publish (Step
-///   6.6.A).
-#[allow(dead_code)] // wired by Step 6.3 caller migration.
+///   `ResolvedComponentMetaState.fact_versions` before publish.
 #[derive(Debug, Clone)]
 pub struct MaterializedTypeExpr {
     pub node_id: Option<SemanticNodeId>,
@@ -2028,10 +2032,11 @@ mod tests {
         );
     }
 
-    /// FAIL-FIRST (Step 6.1.A): preserves deferred operator over a free
-    /// `TypeParameter`. Pre-fix: `raise_and_reduce` doesn't exist.
-    /// Post-fix: `KeyOf(TypeParameter)` survives because dispatch returns
-    /// the same shape (deferred-form policy).
+    /// FAIL-FIRST: preserves a deferred operator over a free
+    /// `TypeParameter`. `KeyOf(TypeParameter)` survives `raise_and_reduce`
+    /// because dispatch returns the deferred operator over the free
+    /// parameter unchanged (deferred-form policy); a reducer that eagerly
+    /// collapsed it would drop the operator and FAIL this test.
     #[test]
     fn raise_and_reduce_preserves_open_keyof_over_type_parameter() {
         use crate::semantic_query::{DeclIdentity, HashValue, ProjectionMode};
@@ -2062,10 +2067,10 @@ mod tests {
         );
     }
 
-    /// FAIL-FIRST (Step 6.1.A + D33): the iterative reducer terminates
-    /// even when the visited set is the only termination signal. Pre-fix:
-    /// the reducer doesn't exist. Post-fix: visited set short-circuits
-    /// the cycle and returns the alias body.
+    /// FAIL-FIRST: the iterative reducer terminates
+    /// even when the visited set is the only termination signal. The visited
+    /// set short-circuits the cycle and returns the alias body; a reducer
+    /// without that guard would loop on the cycle and FAIL to terminate.
     #[test]
     fn raise_and_reduce_terminates_on_alias_cycle_via_visited_set() {
         use crate::semantic_query::ProjectionMode;
@@ -2086,7 +2091,7 @@ mod tests {
         );
     }
 
-    /// FAIL-FIRST (Step 6.1.A): hard-stop for `TemplateLiteral` —
+    /// FAIL-FIRST: hard-stop for `TemplateLiteral` —
     /// no dispatch variant exists, so the reducer must convert to
     /// `Unknown { raw: "<unresolved template literal type>" }`.
     #[test]
@@ -2116,10 +2121,11 @@ mod tests {
         }
     }
 
-    /// FAIL-FIRST (Step 6.1.A + D26): Navigate-mode keeps DeclRef
-    /// terminal. Pre-fix: lazy carriers don't exist. Post-fix: a
-    /// freshly-interned `DeclRef` raises to a bare `Ref { name }` with
-    /// empty type arguments.
+    /// FAIL-FIRST: Navigate-mode keeps a `DeclRef`
+    /// terminal — a freshly-interned `DeclRef` raises to a bare
+    /// `Ref { name }` with empty type arguments; a Navigate-mode reducer
+    /// that eagerly expanded the carrier would lose the terminal `Ref` and
+    /// FAIL this test.
     #[test]
     fn raise_and_reduce_navigate_mode_decl_ref_raises_to_bare_ref() {
         use crate::semantic_query::{DeclIdentity, HashValue, ProjectionMode};

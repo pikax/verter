@@ -3,7 +3,9 @@
 // row->block partition in `docs/arch/native-typeinfo-parity.md`
 // is the authoritative source ONLY for each IgnoredTestRow's
 // `block_id` (READ by the generator, joined with the live
-// `#[ignore]` discovery + the Capability Map). The AdditionalProofRow
+// `#[ignore]` discovery + the Capability Map). This includes LIFTED
+// rows: their `block_id` comes from §10.4.1 too — there is NO
+// generator-side block override. The AdditionalProofRow
 // table and the TYPEINFO_PARITY_BLOCKS DAG (each block's
 // required_guards/verification_labels/prereqs/mechanisms) are
 // authored in the generator's own Python maps, NOT in §10.4.1.

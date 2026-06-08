@@ -3671,6 +3671,43 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::ContextualTypeAt => "ContextualTypeAt",
         }
     }
+
+    /// This tag's stable bit position in [`Self::ALL`] (declaration order),
+    /// `0..ALL.len()`. The per-request dispatch trace
+    /// ([`crate::request_context::RequestContext::record_dispatched_query_tag`],
+    /// called from the shared
+    /// `ProjectSemanticDispatch::execute_via_cold_build_helper` choke point so
+    /// nested `execute_read` sub-dispatches are recorded too) ORs
+    /// `1 << bit_index()` into a `u32` mask surfaced on
+    /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`];
+    /// `ALL.len()` is 22 (≤ 32) so the mask never overflows `u32`.
+    #[must_use]
+    pub fn bit_index(self) -> u32 {
+        Self::ALL
+            .iter()
+            .position(|t| *t == self)
+            .expect("every tag is a member of SemanticQueryKeyTag::ALL") as u32
+    }
+
+    /// The tag at bit position `index` in [`Self::ALL`], or `None` when the
+    /// index is out of range. The inverse of [`Self::bit_index`] — used by the
+    /// dispatch-mask decoder to recover the dispatched tag set.
+    #[must_use]
+    pub fn from_bit_index(index: u32) -> Option<SemanticQueryKeyTag> {
+        Self::ALL.get(index as usize).copied()
+    }
+
+    /// Decode a dispatch mask (`u32`, bit `i` set iff the tag with
+    /// [`bit_index`](Self::bit_index) `i` was dispatched at least once) into the
+    /// dispatched tag set, in [`Self::ALL`] order.
+    #[must_use]
+    pub fn decode_dispatch_mask(mask: u32) -> Vec<SemanticQueryKeyTag> {
+        Self::ALL
+            .iter()
+            .copied()
+            .filter(|t| mask & (1 << t.bit_index()) != 0)
+            .collect()
+    }
 }
 
 impl SemanticQueryKey {
@@ -3739,6 +3776,77 @@ mod query_key_tag_tests {
             names.len(),
             "SemanticQueryKeyTag::name() produced a duplicate name; ALL and \
              name() have drifted out of sync"
+        );
+    }
+
+    /// DISCRIMINATING round-trip over the dispatch-mask bit encoding
+    /// (`bit_index` / `from_bit_index` / `decode_dispatch_mask`). Proves the
+    /// bijection between every tag and its bit position, that distinct tags
+    /// occupy distinct bits, that a single-bit mask decodes to exactly its
+    /// one tag, and that a multi-bit mask decodes to exactly the set of bits
+    /// set — in `ALL` order. A wrong bit mapping (collision, off-by-one,
+    /// non-inverse `from_bit_index`, or a `decode_dispatch_mask` that drops
+    /// or duplicates a bit) FAILS here.
+    #[test]
+    fn semantic_query_key_tag_bit_encoding_roundtrips_every_variant() {
+        use super::SemanticQueryKeyTag as Tag;
+
+        // (1) Every tag's bit_index round-trips through from_bit_index, and
+        //     all bit_index values are distinct.
+        let mut seen_bits: BTreeSet<u32> = BTreeSet::new();
+        for &t in Tag::ALL {
+            let i = t.bit_index();
+            assert_eq!(
+                Tag::from_bit_index(i),
+                Some(t),
+                "from_bit_index(bit_index({t:?})) must round-trip to the same tag",
+            );
+            assert!(
+                seen_bits.insert(i),
+                "bit_index collision: tag {t:?} reuses bit {i} already taken by \
+                 another tag",
+            );
+            // (2) The single-bit mask for this tag decodes to exactly [t].
+            assert_eq!(
+                Tag::decode_dispatch_mask(1u32 << i),
+                vec![t],
+                "decode_dispatch_mask(1 << bit_index({t:?})) must be exactly [{t:?}]",
+            );
+        }
+
+        // (3) The distinct-bit count equals the variant count (no gaps that
+        //     would let two tags alias, no bit ≥ 32 that would overflow u32).
+        assert_eq!(
+            seen_bits.len(),
+            Tag::ALL.len(),
+            "every tag must occupy a distinct bit",
+        );
+        assert!(
+            seen_bits.iter().all(|&i| i < 32),
+            "every bit_index must fit in a u32 mask; got {seen_bits:?}",
+        );
+
+        // (4) A multi-bit mask decodes to exactly the expected set, in ALL
+        //     order. Pick three well-separated tags and OR their bits.
+        let chosen = [Tag::ResolveDecl, Tag::MappedType, Tag::ResolveMacroPayload];
+        let mask = chosen.iter().fold(0u32, |m, t| m | (1u32 << t.bit_index()));
+        let decoded = Tag::decode_dispatch_mask(mask);
+        let expected: Vec<Tag> = Tag::ALL
+            .iter()
+            .copied()
+            .filter(|t| chosen.contains(t))
+            .collect();
+        assert_eq!(
+            decoded, expected,
+            "decode_dispatch_mask of a multi-bit mask must return exactly the \
+             set bits, in ALL order",
+        );
+
+        // (5) Out-of-range bit indices have no tag (the inverse is partial).
+        assert_eq!(
+            Tag::from_bit_index(Tag::ALL.len() as u32),
+            None,
+            "from_bit_index past the last tag must be None",
         );
     }
 }
@@ -4479,8 +4587,13 @@ pub trait SemanticGraphRead {
 
 /// Authoritative dispatch for every reusable semantic operation.
 ///
-/// [`execute`](Self::execute) is the single entry point; the convenience
-/// methods are thin wrappers, not a second API surface.
+/// [`execute`](Self::execute) is the single trait entry point; the convenience
+/// methods are thin wrappers, not a second API surface. The concrete
+/// `ProjectSemanticDispatch` additionally exposes a `pub(crate)` `execute_read`
+/// peer that returns the full `CacheRead` (so nested reducers can accumulate
+/// dep facts); both `execute` and `execute_read` funnel through the one shared
+/// `execute_via_cold_build_helper` cold-build choke point, which is where the
+/// per-request dispatch-mask trace is recorded.
 pub trait SemanticQueryApi {
     /// Canonical entry point. Returns the domain-agnostic
     /// [`SemanticQueryValue`] wrapped with the provenance of the producing

@@ -150,3 +150,76 @@ fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
         status = output.status,
     );
 }
+
+/// Discriminating per-block-count pin for the lifted rows (the 2 index-signature
+/// publication rows at `U2.QUERY_VALUE_DOMAIN` + the 2 built-in modifier-utility
+/// rows at `U2.MAPPED_TEMPLATE`). Before any lift `U2.QUERY_VALUE_DOMAIN` owned
+/// 0 rows, `U2.INDEXED_ACCESS` 16, `U2.UTILITIES` 42, `U2.MAPPED_TEMPLATE` 16,
+/// with 0 lifted; after the lifts + honest re-partition the generated counts are
+/// 2 / 14 / 40 / 18 with 4 lifted (2 at QUERY_VALUE_DOMAIN, 2 at MAPPED_TEMPLATE)
+/// and 358 ignored. Each assertion FAILS against the pre-lift generated file and
+/// PASSES against the committed post-lift file — so reverting (or mis-counting)
+/// any lift's manifest re-partition breaks this test.
+#[test]
+fn manifest_block_counts_reflect_index_and_utility_lifts() {
+    let rows = workspace_root()
+        .join("crates/verter_session/tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs");
+    let src =
+        std::fs::read_to_string(&rows).unwrap_or_else(|e| panic!("read {}: {e}", rows.display()));
+    let count = |needle: &str| src.matches(needle).count();
+
+    // Per-block generated row counts (the honest override distribution).
+    assert_eq!(
+        count("block_id: TypeInfoParityBlockId::U2QueryValueDomain,"),
+        2,
+        "U2.QUERY_VALUE_DOMAIN must own exactly the 2 lifted index-signature \
+         publication rows (it was a 0-row substrate block before the lift)",
+    );
+    assert_eq!(
+        count("block_id: TypeInfoParityBlockId::U2IndexedAccess,"),
+        14,
+        "U2.INDEXED_ACCESS must own 14 rows after the 2 publication rows moved to \
+         U2.QUERY_VALUE_DOMAIN (it owned 16 before the re-partition)",
+    );
+    assert_eq!(
+        count("block_id: TypeInfoParityBlockId::U2Utilities,"),
+        40,
+        "U2.UTILITIES must own 40 rows after the 2 built-in modifier-utility rows \
+         moved to U2.MAPPED_TEMPLATE (it owned 42 before the re-partition)",
+    );
+    assert_eq!(
+        count("block_id: TypeInfoParityBlockId::U2MappedTemplate,"),
+        18,
+        "U2.MAPPED_TEMPLATE must own 18 rows after the 2 built-in modifier-utility \
+         rows arrived lifted (it owned 16 before the re-partition)",
+    );
+
+    // Lifted-status counts.
+    assert_eq!(
+        count("status: IgnoreStatus::Lifted {"),
+        4,
+        "exactly 4 IgnoredTestRows must carry `status: Lifted` (2 index-signature \
+         publication + 2 built-in modifier-utility)",
+    );
+    assert_eq!(
+        count(
+            "status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2QueryValueDomain }"
+        ),
+        2,
+        "both index-signature lifts must record their lifting block as \
+         U2.QUERY_VALUE_DOMAIN",
+    );
+    assert_eq!(
+        count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2MappedTemplate }"),
+        2,
+        "both built-in modifier-utility lifts must record their lifting block as \
+         U2.MAPPED_TEMPLATE",
+    );
+
+    // Total ignored (status: Ignored) rows after 4 lifts.
+    assert_eq!(
+        count("status: IgnoreStatus::Ignored"),
+        358,
+        "exactly 358 IgnoredTestRows must remain `Ignored` (362 total − 4 lifted)",
+    );
+}

@@ -2,10 +2,12 @@
 //!
 //! Two tables live in this one module:
 //!
-//! - `IgnoredTestRow` — EXACTLY the 362 ignored test-site rows, one
-//!   per `#[ignore = "..."]` annotation inside
-//!   `crates/verter_session/src/typeinfo/typeinfo_tests/**/*.rs`,
-//!   bijective with the source `#[ignore]`s and count-guarded at 362.
+//! - `IgnoredTestRow` — EXACTLY 362 test-site rows total. 358 carry
+//!   `status: Ignored` (one per live `#[ignore = "..."]` annotation inside
+//!   `crates/verter_session/src/typeinfo/typeinfo_tests/**/*.rs`, bijective
+//!   with the source `#[ignore]`s) and 4 carry `status: Lifted` (no live
+//!   `#[ignore]`, each backed by an oracle row). The table length is
+//!   count-guarded at 362; the live-ignore count is count-guarded at 358.
 //!   Each row carries the full 13-column schema: `file`, `function`,
 //!   `substrate`, `capability`, `organ`, `owning_u_block`, `block_id`,
 //!   `semantic_queries`, `proof`, `status`, `mechanism_id`,
@@ -34,7 +36,7 @@
 //! `count(IgnoredTestRow where status == Ignored)`, not a
 //! frozen literal; it tracks the live ignore set as blocks lift rows
 //! (and as same-file overload retention adds new ones) and currently
-//! resolves to 362.
+//! resolves to 358 (362 rows total − 4 lifted).
 //!
 //! Guards:
 //!
@@ -48,8 +50,8 @@
 //! `total_ignored_typeinfo_test_count_matches_expected`,
 //! `manifest_length_matches_documented_total`,
 //! `every_ignored_typeinfo_test_carries_a_reason_string`,
-//! `every_ignore_reason_meets_minimum_quality_bar`) plus the new
-//! two-table ledger guards:
+//! `every_ignore_reason_meets_minimum_quality_bar`) plus the
+//! two-table manifest guards:
 //!
 //! - `ignored_test_row_table_holds_exactly_362_rows` (binding total +
 //!   disjointness vs `AdditionalProofRow`),
@@ -161,8 +163,8 @@ enum TargetSubstrate {
 // ──────────────────────────────────────────────────────────────────
 // The two-table manifest ledger schema.
 //
-// `IgnoredTestRow` carries the EXACT 362 ignored test-site rows
-// (count-guarded, bijective with the source `#[ignore]`s).
+// `IgnoredTestRow` carries EXACTLY 362 test-site rows total (count-guarded):
+// 358 `Ignored` (bijective with the source `#[ignore]`s) + 4 `Lifted`.
 // `AdditionalProofRow` carries the CLOSED set of 7 coverage-only rows
 // (6 JSX no-new-key submatrix + 1 mapped companion) — excluded from the
 // ignored count + bijection. Both tables and the `TYPEINFO_PARITY_BLOCKS`
@@ -268,13 +270,16 @@ enum UBlock {
 }
 
 /// The child `block_id` that OWNS lifting a row (per the partition).
-/// Closed set: the 29 row-owning blocks PLUS the 5 zero-row substrate
-/// blocks (`U0.MANIFEST_SUBSTRATE`, `U2.QUERY_VALUE_DOMAIN`,
-/// `U8.WIRE_SURFACE_CLOSURE`, `U12.EXPORTER`, `U13.PROJECTION`).
+/// Closed set: the 30 row-owning blocks PLUS the 4 zero-row substrate
+/// blocks (`U0.MANIFEST_SUBSTRATE`, `U8.WIRE_SURFACE_CLOSURE`,
+/// `U12.EXPORTER`, `U13.PROJECTION`). `U2.QUERY_VALUE_DOMAIN` was formerly
+/// a zero-row substrate block but now owns the 2 index-signature
+/// publication lifts, so it is row-owning.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
 #[allow(dead_code)]
 enum TypeInfoParityBlockId {
-    // Zero-row substrate blocks (own no `IgnoredTestRow`s).
+    // Substrate + foundation blocks. U0/U8/U12/U13 own no `IgnoredTestRow`s;
+    // U2.QUERY_VALUE_DOMAIN owns the 2 index-signature publication lifts.
     U0ManifestSubstrate,
     U2QueryValueDomain,
     U8WireSurfaceClosure,
@@ -416,6 +421,11 @@ enum OracleId {
     UtilityComposition,
     MappedTemplate,
     IndexedAccess,
+    /// Structural publication of a declared object type's index signature
+    /// (`{ [key: K]: V }`) — the foundational decl-resolution surface, distinct
+    /// from `IndexedAccess` (the `T[K]` lookup REDUCTION). The first lifted rows
+    /// (`index_signatures_{numeric,symbol}_index_publishes_signature`) carry this.
+    IndexSignature,
     EnumProjection,
     ClassSurface,
     ApparentType,
@@ -520,8 +530,8 @@ enum ProofRequirement {
     },
 }
 
-/// One manifest row per ignored typeinfo test — EXACTLY the 362
-/// ignored test-site rows. 13 fields.
+/// One manifest row per typeinfo test-site — EXACTLY 362 rows total
+/// (358 `Ignored` + 4 `Lifted`). 13 fields.
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
 struct IgnoredTestRow {
@@ -612,9 +622,11 @@ struct BlockContractRow {
 /// line number — line numbers drift as the docs are edited, the block heading
 /// does not:
 /// - foundational decl/value keys (`ResolveDecl`, `TypeOf`, `NormalizeUnion`,
-///   `NormalizeIntersection`, `ResolvedNamedType`) at `U2.QUERY_VALUE_DOMAIN`
-///   (its `Context` adds/upgrades the U2 key surface + value-domain arms);
-/// - relation / instantiation / conditional at `U2.RELATION_INFER`;
+///   `NormalizeIntersection`, `ResolvedNamedType`) PLUS `Instantiate` at
+///   `U2.QUERY_VALUE_DOMAIN` (its `Context` adds/upgrades the U2 key surface +
+///   value-domain arms; generic substitution is a value-domain instantiation,
+///   not a relation inference);
+/// - relation / conditional at `U2.RELATION_INFER`;
 /// - indexed-access / keyof / member / path at `U2.INDEXED_ACCESS`;
 /// - mapped + template-literal reduction at `U2.MAPPED_TEMPLATE`;
 /// - class-surface projection PLUS `ApparentType` (lib-wrapper member lookup)
@@ -637,10 +649,13 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
     use SemanticQueryName::*;
     use TypeInfoParityBlockId::*;
     match key {
-        ResolveDecl | TypeOf | NormalizeUnion | NormalizeIntersection | ResolvedNamedType => {
-            U2QueryValueDomain
-        }
-        Relate | Instantiate | Conditional => U2RelationInfer,
+        ResolveDecl
+        | TypeOf
+        | NormalizeUnion
+        | NormalizeIntersection
+        | ResolvedNamedType
+        | Instantiate => U2QueryValueDomain,
+        Relate | Conditional => U2RelationInfer,
         IndexedAccess | KeyOf | ProjectMember | ProjectPath => U2IndexedAccess,
         MappedType | TemplateLiteralReduce => U2MappedTemplate,
         ResolveClassSurface | ApparentType | ResolveOverloadSet => U2ClassSurfaces,
@@ -719,21 +734,22 @@ const fn count_ignored_rows(rows: &[IgnoredTestRow]) -> usize {
 
 /// Total ignored typeinfo test sites — DERIVED as
 /// `count(IgnoredTestRow where status == Ignored)`, NOT a frozen
-/// literal. It tracks the live ignore set — currently 362,
-/// recomputed as blocks lift rows and as same-file overload retention
-/// adds new ones; every current `IgnoredTestRow` carries
-/// `status: Ignored`.
+/// literal. It tracks the live ignore set — currently 358 (the 362-row
+/// table minus the 4 `Lifted` rows), recomputed as blocks lift more
+/// rows and as same-file overload retention adds new ones. The 4 lifted
+/// rows carry `status: Lifted { .. }` and no live `#[ignore]`; every
+/// other `IgnoredTestRow` carries `status: Ignored`.
 ///
-/// Why 362 not 384: the substrate's macro-driven test families emit
-/// expanded `#[ignore = "..."]` annotations at their call sites;
-/// those expansion sites ARE counted (they are real ignore
+/// Why the 362 TABLE total (not 384): the substrate's macro-driven test
+/// families emit expanded `#[ignore = "..."]` annotations at their call
+/// sites; those expansion sites ARE counted (they are real ignore
 /// annotations). What the manifest does NOT count are the
 /// `#[ignore = $reason]` patterns INSIDE `macro_rules!` bodies —
 /// those describe how the macro expands, not the test sites
 /// themselves. The macro-defined raw count includes 22 such
 /// in-macro-body lines that are not test sites; the live tree has
-/// 362 expanded test-site ignores, which is the number every guard
-/// below operates against.
+/// 358 expanded test-site ignores + 4 lifted rows = the 362-row table
+/// every guard below operates against.
 const EXPECTED_TOTAL_IGNORED_COUNT: usize = count_ignored_rows(EXPECTED_IGNORE_MANIFEST);
 
 /// Reason-strings shorter than this are rejected — every
@@ -970,8 +986,12 @@ fn every_ignored_typeinfo_test_has_a_manifest_row() {
 #[test]
 fn every_manifest_row_corresponds_to_a_live_ignored_test() {
     let live = collect_live_ignored_sites();
+    // Only `Ignored` rows must correspond to a live `#[ignore]` site. A
+    // `Lifted` row's body is `oracle::run_row` (no `#[ignore]`), so it stays in
+    // the table but is correctly absent from the live ignore set.
     let mut orphans: Vec<(String, String)> = EXPECTED_IGNORE_MANIFEST
         .iter()
+        .filter(|row| matches!(row.status, IgnoreStatus::Ignored))
         .map(|row| (row.file.to_string(), row.function.to_string()))
         .filter(|pair| !live.contains(pair))
         .collect();
@@ -1129,11 +1149,15 @@ fn total_ignored_typeinfo_test_count_matches_expected() {
 
 #[test]
 fn manifest_length_matches_documented_total() {
+    // The table length is the documented total 362 (lifted rows STAY in the
+    // table, so the length decoupled from the now-360 live-ignore count once the
+    // first rows lifted). A row added to or removed from the generated table
+    // breaks this — discriminating against the generated manifest data.
     assert_eq!(
         EXPECTED_IGNORE_MANIFEST.len(),
-        EXPECTED_TOTAL_IGNORED_COUNT,
-        "`EXPECTED_IGNORE_MANIFEST` row count must equal the documented \
-         total {EXPECTED_TOTAL_IGNORED_COUNT}",
+        362,
+        "the documented IgnoredTestRow table total is 362 (lifted rows stay in \
+         the table)",
     );
 }
 
@@ -1158,7 +1182,12 @@ fn per_file_ignored_test_counts_match_manifest() {
 
     let mut expected: BTreeMap<String, usize> = BTreeMap::new();
     for row in EXPECTED_IGNORE_MANIFEST {
-        *expected.entry(row.file.to_string()).or_default() += 1;
+        // Count only `Ignored` rows: a `Lifted` row stays in the table but no
+        // longer carries a live `#[ignore]`, so the per-file LIVE count excludes
+        // it. (index_signatures.rs: 6 manifest rows, 2 lifted -> 4 live ignores.)
+        if matches!(row.status, IgnoreStatus::Ignored) {
+            *expected.entry(row.file.to_string()).or_default() += 1;
+        }
     }
 
     if observed != expected {
@@ -1186,7 +1215,7 @@ fn per_file_ignored_test_counts_match_manifest() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// Two-table ledger guards.
+// Two-table manifest guards.
 // ──────────────────────────────────────────────────────────────────
 
 fn row_identity(file: &'static str, function: &'static str) -> (String, String) {
@@ -1298,18 +1327,35 @@ fn ignored_test_row_table_holds_exactly_362_rows() {
         EXPECTED_IGNORE_MANIFEST.len(),
         362,
         "the `IgnoredTestRow` table must hold EXACTLY 362 binding rows \
-         (got {}). The total is the source-`#[ignore]` bijective count — \
-         it decreases as cross-file `declare module` stitches (relative \
-         and external string-literal) land and lift their rows.",
+         (got {}). The 362 total is INVARIANT under lifts — a lifted row stays \
+         in the table with `status: Lifted`; only the derived live-ignore count \
+         (`EXPECTED_TOTAL_IGNORED_COUNT`) decreases as rows lift.",
         EXPECTED_IGNORE_MANIFEST.len(),
     );
 
-    // The derived count equals 362 (every current row is `Ignored`).
+    // The derived live-ignore count is 358: the table holds 362 rows, of which
+    // 4 are `Lifted` (the 2 index-signature publication rows at
+    // U2.QUERY_VALUE_DOMAIN + the 2 built-in modifier-utility rows at
+    // U2.MAPPED_TEMPLATE) and 358 remain `Ignored`.
+    // `EXPECTED_TOTAL_IGNORED_COUNT` is DERIVED as count(status == Ignored), so
+    // it tracks lifts automatically.
     assert_eq!(
-        EXPECTED_TOTAL_IGNORED_COUNT, 362,
+        EXPECTED_TOTAL_IGNORED_COUNT, 358,
         "EXPECTED_TOTAL_IGNORED_COUNT is DERIVED as count(status == \
-         Ignored); it must equal 362. Got {}.",
+         Ignored); with 4 rows lifted it must equal 358. Got {}.",
         EXPECTED_TOTAL_IGNORED_COUNT,
+    );
+    // Exactly 4 rows are `Lifted` (2 index-signature publication + 2 built-in
+    // modifier-utility).
+    let lifted = EXPECTED_IGNORE_MANIFEST
+        .iter()
+        .filter(|r| matches!(r.status, IgnoreStatus::Lifted { .. }))
+        .count();
+    assert_eq!(
+        lifted, 4,
+        "exactly 4 IgnoredTestRows are Lifted (2 index-signature publication at \
+         U2.QUERY_VALUE_DOMAIN + 2 built-in modifier-utility at \
+         U2.MAPPED_TEMPLATE); got {lifted}",
     );
 
     // Disjointness: no `(file, function)` in both tables. A
@@ -1752,9 +1798,12 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
         (NormalizeUnion, U2QueryValueDomain),
         (NormalizeIntersection, U2QueryValueDomain),
         (ResolvedNamedType, U2QueryValueDomain),
-        // Relation / instantiation / conditional at U2.RELATION_INFER.
+        // Generic substitution (`Instantiate`) is a value-domain instantiation
+        // produced by U2.QUERY_VALUE_DOMAIN's foundation, NOT a relation
+        // inference — it joins the foundational decl/value keys here.
+        (Instantiate, U2QueryValueDomain),
+        // Relation / conditional at U2.RELATION_INFER.
         (Relate, U2RelationInfer),
-        (Instantiate, U2RelationInfer),
         (Conditional, U2RelationInfer),
         // Indexed-access / keyof / member / path at U2.INDEXED_ACCESS.
         (IndexedAccess, U2IndexedAccess),
@@ -2024,5 +2073,916 @@ fn dag_guard_check4_fails_when_block_prereqs_do_not_cover_mechanism_keys() {
     assert!(
         ok.is_empty(),
         "U2.INDEXED_ACCESS consuming IndexedAccess must PASS check 4; got {ok:?}",
+    );
+}
+
+// ===========================================================================
+// Keystone guard: a lifted row's manifest classification must MATCH its REAL
+// `SemanticQueryKey` dispatch trace.
+//
+// Every other guard in this file checks the manifest against the STATIC DAG
+// (key→block→mechanism maps + prereq reachability). This guard closes the loop
+// to EXECUTION TRUTH: it runs each lifted row's actual registry query through
+// the SAME public host entry-point the row's `oracle::run_row` body rides
+// (`resolve_named_symbol_with_audit`), reads the per-request
+// `TypeResolutionPayload::semantic_query_dispatch_mask` recorded at the shared
+// `ProjectSemanticDispatch::execute_via_cold_build_helper` cold-build choke
+// point (every `SemanticQueryKey` variant dispatched during the request,
+// including nested reducer sub-dispatches via `execute_read`), decodes it
+// (`SemanticQueryKeyTag::decode_dispatch_mask`), and asserts the manifest's
+// `semantic_queries` / `mechanism_id` / `consumed_mechanisms` / status block are
+// EXACTLY what the trace produced. A mis-classified lift (wrong producer,
+// phantom consumed mechanism, missing/extra query tag, wrong status block) FAILS
+// here even when the static-DAG guards pass.
+// ===========================================================================
+
+/// The oracle-query-spec registry, reached as ONE table (the SAME `include!`
+/// the `oracle_query_specs_shared` guard uses), so the trace is sourced from the
+/// real executable query payloads — not a hand-copied list.
+mod oracle_registry {
+    include!("../src/typeinfo/typeinfo_tests/oracle_query_specs.rs");
+}
+
+/// The block that owns (produces) each block's dominant mechanism — read off
+/// `TYPEINFO_PARITY_BLOCKS` so the block→mechanism direction stays single-source
+/// with `mechanism_owning_block` (its inverse).
+fn block_dominant_mechanism(block: TypeInfoParityBlockId) -> Option<MechanismId> {
+    TYPEINFO_PARITY_BLOCKS
+        .iter()
+        .find(|b| b.block_id == block)
+        .map(|b| b.mechanism_id)
+}
+
+/// Recover the `SemanticQueryName` mirror variant for a live tag name
+/// (`SemanticQueryKeyTag::name`), via the macro-generated witness array — so the
+/// trace's tag names join the manifest's owner map without a second hand-list.
+fn semantic_query_name_from_str(s: &str) -> Option<SemanticQueryName> {
+    SEMANTIC_QUERY_NAME_ALL
+        .iter()
+        .copied()
+        .find(|n| semantic_query_name_str(*n) == s)
+}
+
+/// Map a registry projection-mode spec onto the resolver's `ProjectionMode`.
+fn registry_mode_to_resolver(
+    mode: oracle_registry::ProjectionModeSpec,
+) -> verter_session::ProjectionMode {
+    use oracle_registry::ProjectionModeSpec as S;
+    use verter_session::ProjectionMode as P;
+    match mode {
+        S::Shallow => P::Shallow,
+        S::Navigate => P::Navigate,
+        S::Expanded => P::Expanded,
+        S::Skeleton => P::Skeleton,
+    }
+}
+
+/// Run ONE lifted-row registry query through the public host entry-point its
+/// `oracle::run_row` body rides and return the recorded
+/// `semantic_query_dispatch_mask`. The host construction mirrors
+/// `support::make_host_with_footprint` (standalone + audit/footprint) so the
+/// dispatch trace is identical to the row's own execution.
+fn run_lifted_query_mask(spec: &oracle_registry::QuerySpec) -> u32 {
+    run_lifted_query_payload(spec).semantic_query_dispatch_mask
+}
+
+/// Run ONE lifted-row registry query through the public host entry-point and
+/// return its full `TypeResolutionPayload` audit record (the execution-truth the
+/// dispatch-mask trace AND the recorded `query_mode` are both read off). Shared
+/// by the keystone dispatch-trace guard and the audit query-mode identity guard
+/// (`lifted_row_audit_query_mode_matches_spec`).
+fn run_lifted_query_payload(
+    spec: &oracle_registry::QuerySpec,
+) -> verter_audit::TypeResolutionPayload {
+    use verter_audit::RequestKindPayload;
+    use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+
+    let host = VerterHost::new_standalone(HostConfig {
+        audit_enabled: true,
+        footprint_capture: true,
+        ..HostConfig::default()
+    });
+    for f in spec.workspace_files {
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(f.path.to_string()),
+            input_id: f.path.to_string(),
+            source: std::sync::Arc::from(f.source),
+            file_kind: FileKind::from_path(f.path),
+            aliases: Vec::new(),
+        });
+    }
+
+    let (symbol, mode) = match &spec.query_helper {
+        oracle_registry::QueryHelperSpec::ResolveExpr {
+            symbol,
+            type_args,
+            projection_mode,
+        } => {
+            assert!(
+                type_args.is_empty(),
+                "keystone guard handles only non-generic ResolveExpr lifted rows; \
+                 {}::{} carries type arguments",
+                spec.row_file,
+                spec.row_function,
+            );
+            (*symbol, registry_mode_to_resolver(*projection_mode))
+        }
+        other => panic!(
+            "keystone guard: lifted row {}::{} uses an unsupported query helper \
+             {other:?} — extend `run_lifted_query_mask` to source its trace",
+            spec.row_file, spec.row_function,
+        ),
+    };
+
+    let (_outcome, record) = host
+        .resolve_named_symbol_with_audit(spec.primary_canonical, symbol, &[], Some(mode))
+        .into_parts();
+    match record.kind_payload {
+        RequestKindPayload::TypeResolution(payload) => payload,
+        other => panic!(
+            "lifted-row query driver: expected a TypeResolution audit payload for \
+             {}::{}, got {other:?}",
+            spec.row_file, spec.row_function,
+        ),
+    }
+}
+
+/// PURE engine: the divergences between a lifted row's CLAIMED manifest columns
+/// and the EXECUTION TRUTH `dispatched_names` set decoded from its real dispatch
+/// mask. Split out so the discrimination-proof can exercise it with a fixed real
+/// trace + deliberately mis-tagged claims (no resolver run, no planted manifest
+/// edit). "Producer" is defined precisely AND INDEPENDENTLY of the row's claimed
+/// block: the dominant mechanism of the UNIQUE DAG-TERMINAL dispatched block —
+/// the most-downstream block in the prereq DAG, the one that is NOT a transitive
+/// prerequisite of any OTHER dispatched block. Deriving the producer from the
+/// trace's dispatch structure (NOT by filtering to the claimed block) is what
+/// makes this guard NON-circular: a row mis-claiming its block cannot make its
+/// own wrong mechanism masquerade as the producer.
+fn lifted_row_trace_failures(
+    label: &str,
+    claimed_block: TypeInfoParityBlockId,
+    claimed_mechanism: MechanismId,
+    claimed_status_block: TypeInfoParityBlockId,
+    claimed_consumed: &[MechanismId],
+    claimed_queries: &[SemanticQueryName],
+    dispatched_names: &BTreeSet<SemanticQueryName>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+
+    // (1) Normalise the dispatched tag set into mechanism evidence: each
+    //     dispatched key → its owning block → that block's dominant mechanism.
+    let mut dispatched_mechs: BTreeSet<MechanismId> = BTreeSet::new();
+    for n in dispatched_names {
+        let owner = key_owning_block(*n);
+        match block_dominant_mechanism(owner) {
+            Some(m) => {
+                dispatched_mechs.insert(m);
+            }
+            None => out.push(format!(
+                "{label}: dispatched key {n:?} owned by {owner:?} has no dominant \
+                 mechanism in TYPEINFO_PARITY_BLOCKS"
+            )),
+        }
+    }
+
+    // (2) Producer = the DAG-TERMINAL dispatched mechanism, derived
+    //     INDEPENDENTLY of `claimed_block`. Map each dispatched mechanism to its
+    //     owning block, then take the UNIQUE block that is NOT a transitive
+    //     prerequisite of any OTHER dispatched block — the most-downstream block
+    //     in the block prereq DAG. Its dominant mechanism is the terminal
+    //     result-producing mechanism. Because this never consults
+    //     `claimed_block`, a row mis-claiming its block (e.g. claiming
+    //     `U2.INDEXED_ACCESS` for the utility trace) cannot make its own wrong
+    //     mechanism look like the producer — the terminal block is fixed by the
+    //     trace's dispatch structure alone.
+    let prereqs = build_prereq_map();
+    let dispatched_blocks: BTreeSet<TypeInfoParityBlockId> = dispatched_mechs
+        .iter()
+        .map(|m| mechanism_owning_block(*m))
+        .collect();
+    let terminals: Vec<TypeInfoParityBlockId> = dispatched_blocks
+        .iter()
+        .copied()
+        .filter(|b| {
+            !dispatched_blocks
+                .iter()
+                .any(|other| other != b && reaches(*other, *b, &prereqs))
+        })
+        .collect();
+    let producer = match terminals.as_slice() {
+        [t] => match block_dominant_mechanism(*t) {
+            Some(m) => Some(m),
+            None => {
+                out.push(format!(
+                    "{label}: DAG-terminal dispatched block {t:?} has no dominant \
+                     mechanism in TYPEINFO_PARITY_BLOCKS"
+                ));
+                None
+            }
+        },
+        [] => {
+            out.push(format!(
+                "{label}: the dispatched blocks {dispatched_blocks:?} have NO \
+                 DAG-terminal block (every one is a transitive prerequisite of \
+                 another) — the producer is unresolvable"
+            ));
+            None
+        }
+        many => {
+            out.push(format!(
+                "{label}: {} dispatched blocks are DAG-terminal ({many:?}) — they \
+                 are mutually incomparable in the prereq DAG, so the producer \
+                 mechanism is ambiguous",
+                many.len()
+            ));
+            None
+        }
+    };
+
+    // (3) The trace-derived (independent) producer must equal the row's
+    //     mechanism_id, and the row's mechanism must be owned by its block.
+    //     Together these two checks PROVE `claimed_block` == the independent
+    //     terminal block — without ever having assumed it.
+    if let Some(p) = producer {
+        if p != claimed_mechanism {
+            out.push(format!(
+                "{label}: trace-derived producer mechanism {p:?} != row mechanism_id \
+                 {claimed_mechanism:?}"
+            ));
+        }
+    }
+    if mechanism_owning_block(claimed_mechanism) != claimed_block {
+        out.push(format!(
+            "{label}: mechanism_owning_block({claimed_mechanism:?}) = {:?} != row \
+             block {claimed_block:?}",
+            mechanism_owning_block(claimed_mechanism)
+        ));
+    }
+
+    // (4) The status lifting block must equal the row's block.
+    if claimed_status_block != claimed_block {
+        out.push(format!(
+            "{label}: status lifting block {claimed_status_block:?} != row block \
+             {claimed_block:?}"
+        ));
+    }
+
+    // (5) consumed_mechanisms SET-EQUALS the NON-owning dispatched mechanisms.
+    if let Some(p) = producer {
+        let actual_consumed: BTreeSet<MechanismId> = dispatched_mechs
+            .iter()
+            .copied()
+            .filter(|m| *m != p)
+            .collect();
+        let claimed_consumed_set: BTreeSet<MechanismId> =
+            claimed_consumed.iter().copied().collect();
+        if actual_consumed != claimed_consumed_set {
+            out.push(format!(
+                "{label}: trace NON-owning mechanisms {actual_consumed:?} != row \
+                 consumed_mechanisms {claimed_consumed_set:?}"
+            ));
+        }
+    }
+
+    // (6) semantic_queries SET-EQUALS the dispatched tag set EXACTLY.
+    let claimed_queries_set: BTreeSet<SemanticQueryName> =
+        claimed_queries.iter().copied().collect();
+    if *dispatched_names != claimed_queries_set {
+        out.push(format!(
+            "{label}: dispatched query tags {dispatched_names:?} != row \
+             semantic_queries {claimed_queries_set:?}"
+        ));
+    }
+
+    out
+}
+
+#[test]
+fn lifted_row_mechanism_trace_matches_manifest() {
+    let lifted: Vec<&IgnoredTestRow> = EXPECTED_IGNORE_MANIFEST
+        .iter()
+        .filter(|r| matches!(r.status, IgnoreStatus::Lifted { .. }))
+        .collect();
+    assert!(
+        !lifted.is_empty(),
+        "expected at least one Lifted row to trace-check (the index + utility lifts)",
+    );
+
+    let mut all_failures: Vec<String> = Vec::new();
+    for row in lifted {
+        // Source the REAL execution trace: every registry query the row owns.
+        let specs: Vec<&oracle_registry::QuerySpec> = oracle_registry::ORACLE_QUERY_SPECS
+            .iter()
+            .filter(|s| s.row_file == row.file && s.row_function == row.function)
+            .collect();
+        assert!(
+            !specs.is_empty(),
+            "lifted row {}::{} has NO ORACLE_QUERY_SPECS entry — its trace cannot \
+             be sourced (a stray lift)",
+            row.file,
+            row.function,
+        );
+        let mut mask = 0u32;
+        for s in &specs {
+            mask |= run_lifted_query_mask(s);
+        }
+        let dispatched_names: BTreeSet<SemanticQueryName> =
+            SemanticQueryKeyTag::decode_dispatch_mask(mask)
+                .iter()
+                .map(|t| {
+                    semantic_query_name_from_str(t.name()).unwrap_or_else(|| {
+                        panic!(
+                            "dispatched tag {} has no SemanticQueryName mirror variant",
+                            t.name()
+                        )
+                    })
+                })
+                .collect();
+        let status_block = match row.status {
+            IgnoreStatus::Lifted { block_id } => block_id,
+            IgnoreStatus::Ignored => unreachable!("filtered to Lifted above"),
+        };
+        let label = format!("{}::{}", row.file, row.function);
+        all_failures.extend(lifted_row_trace_failures(
+            &label,
+            row.block_id,
+            row.mechanism_id,
+            status_block,
+            row.consumed_mechanisms,
+            row.semantic_queries,
+            &dispatched_names,
+        ));
+    }
+
+    assert!(
+        all_failures.is_empty(),
+        "lifted_row_mechanism_trace_matches_manifest: one or more lifted rows' \
+         manifest classification diverges from its REAL dispatch trace. The \
+         manifest must record the EXECUTION TRUTH (the dispatched-tag set, its \
+         terminal producer mechanism, and the non-owning consumed mechanisms), \
+         not a derivation. Divergences:\n  {}",
+        all_failures.join("\n  "),
+    );
+}
+
+#[test]
+fn lifted_row_trace_engine_is_discriminating() {
+    use MechanismId::*;
+    use SemanticQueryName::*;
+    use TypeInfoParityBlockId::*;
+
+    // The REAL utility-row dispatch trace (the measured tag set). `ProjectPath`
+    // is the mapped-member source-projection sub-dispatch that enters via
+    // `execute_read` and is captured at the shared
+    // `execute_via_cold_build_helper` choke point — its owner (`U2IndexedAccess`)
+    // is the SAME block `KeyOf` already maps to, so the DAG-terminal producer
+    // stays `U2MappedTemplate`/`MappedTemplateRemap` and the non-owning consumed
+    // set stays `{QueryValueDomainFoundation, IndexedAccessUnionDistribution}`.
+    let trace: BTreeSet<SemanticQueryName> =
+        [ResolveDecl, Instantiate, KeyOf, MappedType, ProjectPath]
+            .into_iter()
+            .collect();
+    let honest_consumed = [QueryValueDomainFoundation, IndexedAccessUnionDistribution];
+    let honest_queries = [ResolveDecl, Instantiate, KeyOf, MappedType, ProjectPath];
+
+    // (0) The honest classification PASSES.
+    let ok = lifted_row_trace_failures(
+        "honest",
+        U2MappedTemplate,
+        MappedTemplateRemap,
+        U2MappedTemplate,
+        &honest_consumed,
+        &honest_queries,
+        &trace,
+    );
+    assert!(
+        ok.is_empty(),
+        "the honest utility classification must PASS against its real trace; got {ok:?}",
+    );
+
+    // (1) WRONG producer mechanism (a mechanism not owned by the row's block).
+    let wrong_mech = lifted_row_trace_failures(
+        "wrong-mech",
+        U2MappedTemplate,
+        UtilityGraphReduction,
+        U2MappedTemplate,
+        &honest_consumed,
+        &honest_queries,
+        &trace,
+    );
+    assert!(
+        !wrong_mech.is_empty(),
+        "a wrong producer mechanism (UtilityGraphReduction, owned by U2.UTILITIES) \
+         must FAIL; got a pass",
+    );
+
+    // (2) PHANTOM consumed mechanism (RelateCoinductiveScc is NOT dispatched —
+    //     it would be, were `Instantiate` still relation-owned).
+    let phantom = lifted_row_trace_failures(
+        "phantom-consumed",
+        U2MappedTemplate,
+        MappedTemplateRemap,
+        U2MappedTemplate,
+        &[
+            QueryValueDomainFoundation,
+            IndexedAccessUnionDistribution,
+            RelateCoinductiveScc,
+        ],
+        &honest_queries,
+        &trace,
+    );
+    assert!(
+        phantom.iter().any(|m| m.contains("consumed_mechanisms")),
+        "a phantom consumed mechanism (RelateCoinductiveScc) must FAIL the \
+         consumed-set check; got {phantom:?}",
+    );
+
+    // (3) MISSING query tag (drop the terminal MappedType from the claim,
+    //     keeping every other dispatched tag including ProjectPath).
+    let missing = lifted_row_trace_failures(
+        "missing-query",
+        U2MappedTemplate,
+        MappedTemplateRemap,
+        U2MappedTemplate,
+        &honest_consumed,
+        &[ResolveDecl, Instantiate, KeyOf, ProjectPath],
+        &trace,
+    );
+    assert!(
+        missing.iter().any(|m| m.contains("semantic_queries")),
+        "a missing query tag must FAIL the query-set check; got {missing:?}",
+    );
+
+    // (4) EXTRA query tag (claim an IndexedAccess the trace did not dispatch,
+    //     on top of the full honest set).
+    let extra = lifted_row_trace_failures(
+        "extra-query",
+        U2MappedTemplate,
+        MappedTemplateRemap,
+        U2MappedTemplate,
+        &honest_consumed,
+        &[
+            ResolveDecl,
+            Instantiate,
+            KeyOf,
+            MappedType,
+            ProjectPath,
+            IndexedAccess,
+        ],
+        &trace,
+    );
+    assert!(
+        extra.iter().any(|m| m.contains("semantic_queries")),
+        "an extra (un-dispatched) query tag must FAIL the query-set check; got {extra:?}",
+    );
+
+    // (5) WRONG status block.
+    let wrong_status = lifted_row_trace_failures(
+        "wrong-status",
+        U2MappedTemplate,
+        MappedTemplateRemap,
+        U2QueryValueDomain,
+        &honest_consumed,
+        &honest_queries,
+        &trace,
+    );
+    assert!(
+        wrong_status
+            .iter()
+            .any(|m| m.contains("status lifting block")),
+        "a status lifting block that disagrees with the row block must FAIL; got {wrong_status:?}",
+    );
+
+    // (6) NON-CIRCULARITY proof: WRONG producer via WRONG block. Claim the
+    //     utility trace belongs to `U2.INDEXED_ACCESS` with mechanism
+    //     `IndexedAccessUnionDistribution`, status block `U2.INDEXED_ACCESS`,
+    //     and the consumed set the OLD circular engine would have computed
+    //     (dispatched minus the claimed-block-owned mechanism =
+    //     {QueryValueDomainFoundation, MappedTemplateRemap}). The OLD engine
+    //     derived the producer by FILTERING dispatched mechanisms to the CLAIMED
+    //     block, so it would have ACCEPTED this self-consistent mis-claim. The
+    //     NEW engine derives the producer INDEPENDENTLY — the DAG-terminal block
+    //     of {U2QueryValueDomain, U2IndexedAccess, U2MappedTemplate} is
+    //     U2MappedTemplate ⇒ producer = MappedTemplateRemap ≠ the claimed
+    //     IndexedAccessUnionDistribution — so it MUST FAIL. This is the proof
+    //     the engine is non-circular.
+    let circular = lifted_row_trace_failures(
+        "circular-wrong-block",
+        U2IndexedAccess,
+        IndexedAccessUnionDistribution,
+        U2IndexedAccess,
+        &[QueryValueDomainFoundation, MappedTemplateRemap],
+        &honest_queries,
+        &trace,
+    );
+    assert!(
+        circular.iter().any(|m| m.contains("producer")),
+        "claiming block=U2.INDEXED_ACCESS + mechanism=IndexedAccessUnionDistribution \
+         (a mis-claim the OLD block-derived engine ACCEPTED) must FAIL the NEW \
+         independent producer derivation (the DAG-terminal producer is \
+         MappedTemplateRemap, not IndexedAccessUnionDistribution); got {circular:?}",
+    );
+}
+
+// ===========================================================================
+// Registry payload-fidelity: bind each lifted row → its ORACLE_QUERY_SPECS
+// entry → its checked-in oracle snapshot. The runtime `oracle::run_row` driver
+// validates a snapshot against its spec via the `snapshot_id` it derives FROM
+// the spec; this standalone guard additionally binds the registry to the
+// MANIFEST's `Lifted` set and asserts the snapshot's stored
+// `identity.symbol_or_expression` equals the symbol the registry entry queries —
+// so a registry whose spec queries a symbol its snapshot did NOT record (or that
+// covers a row the manifest never lifted, or leaves a snapshot orphaned) FAILS.
+// ===========================================================================
+
+/// The identity-binding fields shared by a registry `QuerySpec` and the oracle
+/// snapshot it must agree with: the row it belongs to, the query ordinal, and
+/// the symbol/expression it queries. Sourced from `ORACLE_QUERY_SPECS` (registry
+/// side) and decoded from each `oracle_snapshots/<family>/*.json` (snapshot
+/// side); the engine cross-checks the two against the manifest's `Lifted` set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OracleIdentityBinding {
+    row_file: String,
+    row_function: String,
+    query_ordinal: u16,
+    symbol_or_expression: String,
+}
+
+/// The symbol/expression a registry query helper targets — mirrors the driver's
+/// `symbol_or_expression` identity axis (symbol for `ResolveExpr` /
+/// `ShallowSurfaceExpr`, expression for `EvaluateExpr`).
+fn spec_symbol_or_expression(helper: &oracle_registry::QueryHelperSpec) -> String {
+    use oracle_registry::QueryHelperSpec as H;
+    match helper {
+        H::ResolveExpr { symbol, .. } => (*symbol).to_string(),
+        H::ShallowSurfaceExpr { symbol } => (*symbol).to_string(),
+        H::EvaluateExpr { expression, .. } => (*expression).to_string(),
+    }
+}
+
+/// Decode the identity binding of every checked-in oracle snapshot under
+/// `oracle_snapshots/<family>/*.json` — reading the snapshot's OWN stored
+/// `row_ref` + `identity.symbol_or_expression` (NOT re-deriving them from the
+/// registry), so the comparison is a genuine independent cross-check of the
+/// snapshot's recorded payload.
+fn decode_all_snapshot_bindings() -> Vec<OracleIdentityBinding> {
+    let root = typeinfo_tests_dir().join("oracle_snapshots");
+    let mut out = Vec::new();
+    let families =
+        fs::read_dir(&root).unwrap_or_else(|e| panic!("read oracle_snapshots dir {root:?}: {e}"));
+    for fam in families.flatten() {
+        let fam_path = fam.path();
+        if !fam_path.is_dir() {
+            continue;
+        }
+        let snaps = fs::read_dir(&fam_path)
+            .unwrap_or_else(|e| panic!("read snapshot family dir {fam_path:?}: {e}"));
+        for snap in snaps.flatten() {
+            let p = snap.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = fs::read(&p).unwrap_or_else(|e| panic!("read snapshot {p:?}: {e}"));
+            let json: serde_json::Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|e| panic!("parse snapshot {p:?}: {e}"));
+            let rr = &json["row_ref"];
+            let idt = &json["identity"];
+            let s = |v: &serde_json::Value, field: &str| -> String {
+                v[field]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("snapshot {p:?} missing string {field}"))
+                    .to_string()
+            };
+            out.push(OracleIdentityBinding {
+                row_file: s(rr, "row_file"),
+                row_function: s(rr, "row_function"),
+                query_ordinal: rr["query_ordinal"]
+                    .as_u64()
+                    .unwrap_or_else(|| panic!("snapshot {p:?} missing row_ref.query_ordinal"))
+                    as u16,
+                symbol_or_expression: s(idt, "symbol_or_expression"),
+            });
+        }
+    }
+    out
+}
+
+/// PURE engine: the divergences between the manifest's `Lifted` row set, the
+/// registry entries, and the on-disk snapshots. Split out so the discrimination
+/// proof can drive it with synthetic mismatches (no disk read). Asserts:
+///   (1) the registry's row set EQUALS the manifest's `Lifted` set — no registry
+///       entry for an un-lifted row, no lifted row without a registry entry;
+///   (2) every registry entry binds to EXACTLY ONE snapshot by
+///       `(row_file, row_function, query_ordinal)`, and that snapshot's recorded
+///       `symbol_or_expression` EQUALS the symbol the registry entry queries;
+///   (3) no snapshot is orphaned (every snapshot is claimed by some entry).
+fn registry_snapshot_fidelity_failures(
+    lifted_rows: &BTreeSet<(String, String)>,
+    registry: &[OracleIdentityBinding],
+    snapshots: &[OracleIdentityBinding],
+) -> Vec<String> {
+    let mut out = Vec::new();
+
+    // (1) registry row set == lifted row set (exactly).
+    let registry_rows: BTreeSet<(String, String)> = registry
+        .iter()
+        .map(|r| (r.row_file.clone(), r.row_function.clone()))
+        .collect();
+    for (f, fnc) in lifted_rows.difference(&registry_rows) {
+        out.push(format!(
+            "lifted manifest row {f}::{fnc} has NO registry entry"
+        ));
+    }
+    for (f, fnc) in registry_rows.difference(lifted_rows) {
+        out.push(format!(
+            "registry entry {f}::{fnc} is not a Lifted manifest row"
+        ));
+    }
+
+    // (2) each registry entry binds to exactly one snapshot, symbol-matched.
+    let mut claimed = vec![false; snapshots.len()];
+    for r in registry {
+        let matches: Vec<usize> = snapshots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                s.row_file == r.row_file
+                    && s.row_function == r.row_function
+                    && s.query_ordinal == r.query_ordinal
+            })
+            .map(|(i, _)| i)
+            .collect();
+        match matches.as_slice() {
+            [i] => {
+                claimed[*i] = true;
+                let s = &snapshots[*i];
+                if s.symbol_or_expression != r.symbol_or_expression {
+                    out.push(format!(
+                        "registry entry {}::{}#{} queries symbol `{}` but its snapshot \
+                         records `{}` — spec/snapshot disagree on the queried symbol",
+                        r.row_file,
+                        r.row_function,
+                        r.query_ordinal,
+                        r.symbol_or_expression,
+                        s.symbol_or_expression,
+                    ));
+                }
+            }
+            [] => out.push(format!(
+                "registry entry {}::{}#{} has NO matching snapshot",
+                r.row_file, r.row_function, r.query_ordinal,
+            )),
+            many => out.push(format!(
+                "registry entry {}::{}#{} matches {} snapshots — ambiguous binding",
+                r.row_file,
+                r.row_function,
+                r.query_ordinal,
+                many.len(),
+            )),
+        }
+    }
+
+    // (3) no orphan snapshot.
+    for (i, s) in snapshots.iter().enumerate() {
+        if !claimed[i] {
+            out.push(format!(
+                "snapshot {}::{}#{} (symbol `{}`) has NO registry entry — orphan",
+                s.row_file, s.row_function, s.query_ordinal, s.symbol_or_expression,
+            ));
+        }
+    }
+
+    out
+}
+
+#[test]
+fn registry_entries_bind_to_their_snapshots_and_lifted_rows() {
+    // Lifted rows from the manifest.
+    let lifted_rows: BTreeSet<(String, String)> = EXPECTED_IGNORE_MANIFEST
+        .iter()
+        .filter(|r| matches!(r.status, IgnoreStatus::Lifted { .. }))
+        .map(|r| (r.file.to_string(), r.function.to_string()))
+        .collect();
+    assert!(
+        !lifted_rows.is_empty(),
+        "expected at least one Lifted manifest row to bind (the index + utility lifts)",
+    );
+
+    // Registry bindings from ORACLE_QUERY_SPECS.
+    let registry: Vec<OracleIdentityBinding> = oracle_registry::ORACLE_QUERY_SPECS
+        .iter()
+        .map(|s| OracleIdentityBinding {
+            row_file: s.row_file.to_string(),
+            row_function: s.row_function.to_string(),
+            query_ordinal: s.query_ordinal,
+            symbol_or_expression: spec_symbol_or_expression(&s.query_helper),
+        })
+        .collect();
+
+    // Snapshot bindings decoded from disk.
+    let snapshots = decode_all_snapshot_bindings();
+    assert!(
+        !snapshots.is_empty(),
+        "expected at least one checked-in oracle snapshot under oracle_snapshots/",
+    );
+
+    let failures = registry_snapshot_fidelity_failures(&lifted_rows, &registry, &snapshots);
+    assert!(
+        failures.is_empty(),
+        "registry_entries_bind_to_their_snapshots_and_lifted_rows: the registry, its \
+         snapshots, and the manifest's Lifted set must agree row-for-row and \
+         symbol-for-symbol. NOTE: this binds the registry's DECLARED symbol to the \
+         snapshot's RECORDED symbol; binding the registry payload to the ORIGINAL \
+         pre-lift test BODY (the full migration-fidelity authority) is the deferred \
+         `registry_payload_matches_migration_fingerprint` guard \
+         (u0-oracle-harness-design.md §Q4 — needs the not-yet-added \
+         `migration_fingerprint` / `original_body_tokens` fidelity fields on the \
+         retained-lift metadata `LIFTED_ROW_OVERRIDES`). Divergences:\n  {}",
+        failures.join("\n  "),
+    );
+
+    // TODO(follow-up): the deeper original-body fidelity guard
+    // (`registry_payload_matches_migration_fingerprint`, u0-oracle-harness-design.md §Q4)
+    // binds each registry entry's full fidelity tuple to the canonical-JSON
+    // `migration_fingerprint` captured over the ORIGINAL hand-authored test body
+    // BEFORE the `#[oracle_row]` replacement — catching a fully self-consistent
+    // wrong (spec ∧ snapshot) pair this symbol-binding guard cannot. The row's
+    // query mode is already proven live (`lifted_row_audit_query_mode_matches_spec`);
+    // the missing capability is the cryptographic `migration_fingerprint` +
+    // `original_body_tokens` body-hash artifact (a `syn`-AST lift-time extractor
+    // that auto-derives the fidelity tuple from the original body).
+}
+
+/// Oracle query IDENTITY: every lifted row's live audit `query_mode` equals the
+/// mode its registry spec declares (`u0-oracle-harness-design.md` §Q4).
+///
+/// A row's `assert_query_mode(M)` that MATCHES the oracle query's own
+/// `projection_mode` is oracle query IDENTITY, not a side obligation: the driver
+/// resolves Verter's projection in mode `M` and this guard asserts the live audit
+/// record reports mode `M`. That IS the proof — stronger than duplicating the
+/// mode into a hand-recorded ledger, because it reads the REAL execution record.
+/// It replaces the retired obligation ledger.
+///
+/// General precedent (encoded here + in `QuerySpec`'s doc): a same-mode
+/// `assert_query_mode` carries NO obligation. Any INDEPENDENT non-`TypeExpr`
+/// assertion a row needs (dependency footprint, audit-record specifics,
+/// warm-cache / dependency facts, a divergence correction) is what promotes a row
+/// to `ProofRequirement::OracleAndGuard { oracle, guard }` with a registered live
+/// prover — none of the four seated rows carry one, so they stay bare
+/// `Ts7Oracle`.
+#[test]
+fn lifted_row_audit_query_mode_matches_spec() {
+    use oracle_registry::{ProjectionModeSpec, QueryHelperSpec, ORACLE_QUERY_SPECS};
+
+    fn spec_mode(helper: &QueryHelperSpec) -> ProjectionModeSpec {
+        match helper {
+            QueryHelperSpec::ResolveExpr {
+                projection_mode, ..
+            }
+            | QueryHelperSpec::EvaluateExpr {
+                projection_mode, ..
+            } => *projection_mode,
+            QueryHelperSpec::ShallowSurfaceExpr { .. } => ProjectionModeSpec::Shallow,
+        }
+    }
+
+    assert!(
+        !ORACLE_QUERY_SPECS.is_empty(),
+        "expected at least one registry query to mode-check (the index + utility lifts)",
+    );
+
+    for spec in ORACLE_QUERY_SPECS {
+        let declared = spec_mode(&spec.query_helper);
+        let payload = run_lifted_query_payload(spec);
+
+        // The live audit record reports the spec's declared mode (query identity).
+        assert_eq!(
+            payload.query_mode,
+            spec_mode_to_tag(declared),
+            "{}::{}#{}: the live audit query_mode must equal the spec's declared \
+             projection_mode ({declared:?}) — a same-mode assert_query_mode IS the \
+             oracle query identity, proven against the REAL audit record",
+            spec.row_file,
+            spec.row_function,
+            spec.query_ordinal,
+        );
+
+        // Discrimination: the equality above is not vacuous — the live mode does
+        // NOT match a DIFFERENT mode tag. (A resolver silently running Navigate
+        // while the spec declared Expanded would FAIL the assertion above and PASS
+        // this one only if the tags collided — so this rejects a degenerate tag
+        // map too.)
+        let other = if matches!(declared, ProjectionModeSpec::Expanded) {
+            ProjectionModeSpec::Navigate
+        } else {
+            ProjectionModeSpec::Expanded
+        };
+        assert_ne!(
+            payload.query_mode,
+            spec_mode_to_tag(other),
+            "{}::{}#{}: the live audit query_mode must DISCRIMINATE between modes — \
+             it cannot equal both the declared mode and a different one (a degenerate \
+             ProjectionModeTag map)",
+            spec.row_file,
+            spec.row_function,
+            spec.query_ordinal,
+        );
+    }
+
+    // Independent expected fact: all four seated rows are Expanded-mode oracle
+    // identities (the two index-signature publications + the two modifier
+    // utilities, each verified in the original `Expanded` projection mode).
+    let expanded = ORACLE_QUERY_SPECS
+        .iter()
+        .filter(|s| matches!(spec_mode(&s.query_helper), ProjectionModeSpec::Expanded))
+        .count();
+    assert_eq!(
+        expanded, 4,
+        "all four seated lifted rows must be Expanded-mode oracle identities",
+    );
+}
+
+/// Map a registry `ProjectionModeSpec` onto the audit `ProjectionModeTag` the
+/// resolver records — so a row's declared spec mode can be compared against its
+/// REAL audit `query_mode`.
+fn spec_mode_to_tag(mode: oracle_registry::ProjectionModeSpec) -> verter_audit::ProjectionModeTag {
+    verter_audit::ProjectionModeTag::from(registry_mode_to_resolver(mode))
+}
+
+#[test]
+fn registry_snapshot_fidelity_engine_is_discriminating() {
+    let bind = |file: &str, func: &str, ord: u16, sym: &str| OracleIdentityBinding {
+        row_file: file.to_string(),
+        row_function: func.to_string(),
+        query_ordinal: ord,
+        symbol_or_expression: sym.to_string(),
+    };
+    let lifted: BTreeSet<(String, String)> = [
+        ("index_signatures.rs", "f_num"),
+        ("utility_edge.rs", "f_req"),
+    ]
+    .into_iter()
+    .map(|(a, b)| (a.to_string(), b.to_string()))
+    .collect();
+    let registry = vec![
+        bind("index_signatures.rs", "f_num", 0, "NumericIndexed"),
+        bind("utility_edge.rs", "f_req", 0, "RequiredOptional"),
+    ];
+    let snapshots = vec![
+        bind("index_signatures.rs", "f_num", 0, "NumericIndexed"),
+        bind("utility_edge.rs", "f_req", 0, "RequiredOptional"),
+    ];
+
+    // (0) The honest binding PASSES.
+    assert!(
+        registry_snapshot_fidelity_failures(&lifted, &registry, &snapshots).is_empty(),
+        "the honest registry/snapshot/lifted binding must PASS",
+    );
+
+    // (1) snapshot symbol DISAGREES with the spec's queried symbol.
+    let mut s = snapshots.clone();
+    s[0].symbol_or_expression = "WrongSymbol".to_string();
+    let f = registry_snapshot_fidelity_failures(&lifted, &registry, &s);
+    assert!(
+        f.iter()
+            .any(|m| m.contains("disagree on the queried symbol")),
+        "a snapshot whose recorded symbol differs from the spec's queried symbol must \
+         FAIL; got {f:?}",
+    );
+
+    // (2) registry covers a row the manifest never lifted.
+    let mut r = registry.clone();
+    r.push(bind("stray.rs", "stray_fn", 0, "Stray"));
+    let mut s2 = snapshots.clone();
+    s2.push(bind("stray.rs", "stray_fn", 0, "Stray"));
+    let f = registry_snapshot_fidelity_failures(&lifted, &r, &s2);
+    assert!(
+        f.iter().any(|m| m.contains("is not a Lifted manifest row")),
+        "a registry entry for a non-lifted row must FAIL; got {f:?}",
+    );
+
+    // (3) a lifted row with NO registry entry.
+    let mut l = lifted.clone();
+    l.insert(("missing.rs".to_string(), "missing_fn".to_string()));
+    let f = registry_snapshot_fidelity_failures(&l, &registry, &snapshots);
+    assert!(
+        f.iter().any(|m| m.contains("has NO registry entry")),
+        "a lifted row missing from the registry must FAIL; got {f:?}",
+    );
+
+    // (4) a registry entry with NO snapshot.
+    let f = registry_snapshot_fidelity_failures(&lifted, &registry, &snapshots[..1].to_vec());
+    assert!(
+        f.iter().any(|m| m.contains("has NO matching snapshot")),
+        "a registry entry without a snapshot must FAIL; got {f:?}",
+    );
+
+    // (5) an ORPHAN snapshot (no registry entry claims it).
+    let mut s = snapshots.clone();
+    s.push(bind("orphan.rs", "orphan_fn", 0, "Orphan"));
+    let f = registry_snapshot_fidelity_failures(&lifted, &registry, &s);
+    assert!(
+        f.iter().any(|m| m.contains("orphan")),
+        "an orphan snapshot must FAIL; got {f:?}",
     );
 }

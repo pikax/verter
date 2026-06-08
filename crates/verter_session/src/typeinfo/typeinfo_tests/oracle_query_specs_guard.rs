@@ -2,14 +2,41 @@
 //! src-side half. The `tests/` integration binary additionally proves the
 //! registry `include!`-compiles WITHOUT the unit-test `support` module
 //! (`oracle_query_specs_is_pure_data`); this src-side half proves the structural
-//! well-formedness validation is genuinely discriminating, with SYNTHETIC specs
-//! (the real table is empty until the first row lifts).
+//! well-formedness validation is genuinely discriminating, with SYNTHETIC specs.
+//! The real table seats the 4 lifted rows (two index-signature publication
+//! queries + two built-in modifier-utility queries).
 
 use super::oracle::query_specs::{
     registry_well_formed, HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec,
     ProjectionModeSpec, QueryHelperSpec, QuerySpec, RegistryError, SourceLocatorSpec, SymbolSpace,
-    ORACLE_QUERY_SPECS,
+    INDEX_SIGNATURES_SOURCE, ORACLE_QUERY_SPECS, UTILITY_EDGE_SOURCE,
 };
+
+/// The registry inlines each fixture's source bytes (`INDEX_SIGNATURES_SOURCE` /
+/// `UTILITY_EDGE_SOURCE`) as `&'static str` rather than `include_str!`-ing the
+/// `fixtures/*.ts` copy, because the registry file is ALSO `include!`'d into the
+/// `tests/` integration binary where a relative `include_str!` path would not
+/// resolve. The sibling `#[ignore]`d typeinfo tests, by contrast, `include_str!`
+/// the on-disk fixture. This guard PINS the two representations byte-for-byte, so
+/// an edit to one without the other (a silent drift between what the oracle row
+/// upserts and what the ignored sibling test reads) FAILS. The `include_str!`
+/// here resolves correctly because THIS guard is a normal module beside
+/// `fixtures/`, not the `include!`'d registry file.
+#[test]
+fn inlined_registry_source_is_byte_identical_to_fixture_files() {
+    assert_eq!(
+        INDEX_SIGNATURES_SOURCE,
+        include_str!("fixtures/index_signatures.ts"),
+        "INDEX_SIGNATURES_SOURCE (inlined in the registry) drifted from \
+         fixtures/index_signatures.ts (read by the sibling #[ignore]d tests)",
+    );
+    assert_eq!(
+        UTILITY_EDGE_SOURCE,
+        include_str!("fixtures/utility_edge.ts"),
+        "UTILITY_EDGE_SOURCE (inlined in the registry) drifted from \
+         fixtures/utility_edge.ts (read by the sibling #[ignore]d tests)",
+    );
+}
 
 /// A synthetic well-formed spec with a tweakable `oracle_family` + `query_ordinal`.
 fn spec(row_function: &'static str, query_ordinal: u16, oracle_family: &'static str) -> QuerySpec {
@@ -41,10 +68,44 @@ fn spec(row_function: &'static str, query_ordinal: u16, oracle_family: &'static 
 }
 
 #[test]
-fn oracle_query_specs_registry_is_empty_and_well_formed() {
-    // The harness foundation lifts ZERO rows.
-    assert!(ORACLE_QUERY_SPECS.is_empty());
+fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
+    // The lifts seat the two index-signature publication queries plus the two
+    // built-in modifier-utility queries; the table is well-formed (non-empty
+    // `oracle_family`, contiguous ordinals).
     assert_eq!(registry_well_formed(ORACLE_QUERY_SPECS), Ok(()));
+
+    // The seated set is EXACTLY the two index-signature publication rows + the
+    // two built-in modifier-utility rows, one query each. A stray addition /
+    // removal FAILS here (discriminating).
+    let seated: Vec<(&str, &str, u16)> = ORACLE_QUERY_SPECS
+        .iter()
+        .map(|s| (s.row_file, s.row_function, s.query_ordinal))
+        .collect();
+    assert_eq!(
+        seated,
+        vec![
+            (
+                "index_signatures.rs",
+                "index_signatures_numeric_index_publishes_signature",
+                0
+            ),
+            (
+                "index_signatures.rs",
+                "index_signatures_symbol_index_publishes_signature",
+                0
+            ),
+            (
+                "utility_edge.rs",
+                "utility_edge_required_strips_optional_markers",
+                0
+            ),
+            (
+                "utility_edge.rs",
+                "utility_edge_readonly_required_composes_modifiers",
+                0
+            ),
+        ],
+    );
 }
 
 #[test]

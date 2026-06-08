@@ -9,10 +9,10 @@
 //! (`oracle_tsgo_forbidden::tsgo_not_reachable_from_resolver`).
 //!
 //! It drives the pinned tsgo, applies the two-sided positive-allowlist admission,
-//! and writes the checked-in snapshots — NEVER from a `#[test]`. The oracle-query
-//! registry is EMPTY (no rows are lifted), so a run writes ZERO snapshots (a real
-//! vacuous loop); the per-spec body is the same one the
-//! `oracle_gen_is_idempotent` gated test exercises against real tsgo.
+//! and writes the checked-in snapshots — NEVER from a `#[test]`. It walks the
+//! oracle-query registry (the 4 lifted rows) and writes one snapshot per spec;
+//! the per-spec body is the same one the `oracle_gen_is_idempotent` gated test
+//! exercises against real tsgo.
 
 fn main() {
     match verter_session::run_oracle_gen() {
@@ -20,7 +20,7 @@ fn main() {
             eprintln!("oracle_gen: wrote {written} snapshot(s)");
         }
         Err(verter_session::GenError::TsgoUnavailable(msg)) => {
-            // A tsgo-less environment is a SKIP, not a failure (mirrors the spike).
+            // A tsgo-less environment is a SKIP, not a failure (no tsgo to drive).
             eprintln!("oracle_gen: SKIP — tsgo not available: {msg}");
         }
         Err(e) => {

@@ -72,8 +72,9 @@ mod typeinfo_tests;
 // unit-test rows consume it) AND under the `oracle-gen` feature (the
 // `src/bin/oracle_gen` generator reaches its `run_oracle_gen` entry — a
 // `src/bin/*` is a separate crate that sees only `pub`/`pub(crate)` lib items,
-// not the `#[cfg(test)]` `typeinfo_tests` tree). It lifts ZERO rows: it is the
-// shared foundation the `TypeExpr`-projection oracle rows consume. The tsgo driver lives behind
+// not the `#[cfg(test)]` `typeinfo_tests` tree). It declares no oracle rows
+// itself: it is the shared foundation the `TypeExpr`-projection oracle rows
+// consume. The tsgo driver lives behind
 // `oracle-gen` only, so the default resolver build + default test gate stay
 // tsgo-free (the `tsgo`-forbidden-at-runtime invariant, design §3 inv 1).
 #[cfg(any(test, feature = "oracle-gen"))]

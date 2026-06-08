@@ -188,6 +188,7 @@ impl VerterHost {
                 .load(Ordering::Relaxed),
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
+            semantic_query_dispatch_mask: ctx.type_resolution_dispatched_query_tags_mask(),
         };
 
         let timings = RequestTimingAudit {

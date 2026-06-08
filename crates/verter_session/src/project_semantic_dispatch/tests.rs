@@ -6143,6 +6143,79 @@ fn resolve_macro_payload_define_props_multi_arg_normalize_intersection() {
     }
 }
 
+/// The per-request `SemanticQueryKey` dispatch mask must record tags
+/// dispatched through the shared `execute_via_cold_build_helper` choke point
+/// — INCLUDING nested reducer sub-dispatches that enter ONLY via
+/// `execute_read`, never via the top-level `execute` path.
+///
+/// A `ResolveMacroPayload` with ≥2 args enters via the top-level `execute`
+/// path (`execute_type_node` → `execute`) and dispatches a nested
+/// `execute_read(NormalizeIntersection)` (`build.rs`). In production
+/// `NormalizeIntersection` is dispatched ONLY through `execute_read` — there
+/// is no top-level `execute(NormalizeIntersection)` call site — so it is a
+/// genuine `execute_read`-only child tag.
+///
+/// Pre-fix (recording lived inside `execute`) the mask carried
+/// `ResolveMacroPayload` but NOT `NormalizeIntersection`. Post-fix (recording
+/// at the shared helper) the mask carries BOTH. This discriminates: the
+/// assertion on `NormalizeIntersection` FAILS against the pre-fix code and
+/// PASSES against the post-fix code.
+#[test]
+fn dispatch_mask_records_execute_read_only_nested_normalize_intersection() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::semantic_query::SemanticQueryKeyTag;
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+    // Install a per-request context so the dispatch-mask recorder has a sink.
+    let ctx = RequestContext::new(1, Arc::from("/c.vue"), false, None);
+    let _guard = RequestContextGuard::install(Arc::clone(&ctx));
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let owner = synthetic_macro_owner(&host, "/c.vue");
+    let result = dispatch.execute_type_node(SemanticQueryKey::ResolveMacroPayload {
+        owner,
+        macro_index: 0,
+        macro_kind: AnalyzedMacroKind::DefineProps,
+        type_args: Arc::from(vec![a, b].into_boxed_slice()),
+        context: crate::semantic_query::MacroPayloadContext::new(
+            Default::default(),
+            ProjectionMode::Expanded,
+        ),
+    });
+    assert!(
+        matches!(result, QueryResult::Value(_)),
+        "≥2-arg DefineProps must resolve to a Value; got {result:?}"
+    );
+
+    let tags =
+        SemanticQueryKeyTag::decode_dispatch_mask(ctx.type_resolution_dispatched_query_tags_mask());
+
+    // The top-level `execute`-entered dispatch is recorded (this held pre-fix
+    // too — it is the non-discriminating control assertion).
+    assert!(
+        tags.contains(&SemanticQueryKeyTag::ResolveMacroPayload),
+        "the top-level ResolveMacroPayload dispatch must be recorded; tags = {tags:?}"
+    );
+
+    // The DISCRIMINATING assertion: the nested
+    // `execute_read(NormalizeIntersection)` sub-dispatch must appear in the
+    // mask. Its absence means dispatch-mask recording is bound to `execute`
+    // instead of the shared `execute_via_cold_build_helper` choke point — the
+    // correctness hole this test pins shut.
+    assert!(
+        tags.contains(&SemanticQueryKeyTag::NormalizeIntersection),
+        "the nested execute_read(NormalizeIntersection) sub-dispatch MUST be \
+         recorded in the per-request dispatch mask — it enters ONLY via \
+         execute_read, never the top-level execute path. Its absence proves \
+         recording is bound to `execute` rather than the shared \
+         `execute_via_cold_build_helper` choke point. tags = {tags:?}"
+    );
+}
+
 /// `DefineExpose` / `DefineOptions` with 0 args → Opaque(Miss); else
 /// arg passed through unchanged. (Same shape as DefineProps but no
 /// intersection branch on the multi-arg case — the §3.2 sketch keeps

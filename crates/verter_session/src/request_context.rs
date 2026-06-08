@@ -20,7 +20,7 @@
 //!   `replace`, both of which are non-panicking.
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -461,6 +461,22 @@ pub struct RequestContext {
     /// (`verter_audit::WALKER_DEPTH_CAP`) was exceeded during the
     /// request.
     pub type_resolution_recursion_limit_reached: AtomicBool,
+    /// Per-request `SemanticQueryKey` dispatch trace: bit `i` is set once a key
+    /// with [`SemanticQueryKeyTag::bit_index`](crate::semantic_query::SemanticQueryKeyTag::bit_index)
+    /// `i` dispatches through the shared
+    /// `ProjectSemanticDispatch::execute_via_cold_build_helper` cold-build choke
+    /// point. Both the `SemanticQueryApi::execute` trait method and the
+    /// dep-signature-preserving `execute_read` subquery entry funnel through that
+    /// helper, so the mask records EVERY `SemanticQueryKey` variant dispatched
+    /// anywhere during the audited request — including nested reducer
+    /// sub-dispatches that enter only via `execute_read` (e.g.
+    /// `NormalizeIntersection`, `ProjectPath`), not just the top-level
+    /// `execute`-entered subset. (This is distinct from the focused cold/warm
+    /// `semantic_query_*` counters, which attribute cost for only the hot-path
+    /// subset.) Surfaced verbatim on
+    /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`] so a
+    /// consumer can recover which query families a resolution actually touched.
+    pub type_resolution_dispatched_query_tags: AtomicU32,
     /// Per-context accumulator for compile-phase wall-clock — parse
     /// phase. Stored as fixed-point microseconds (`f64` ms × 1_000`)
     /// so the atomic counter can `fetch_add` cheaply; finalisation
@@ -946,6 +962,7 @@ impl RequestContext {
             type_resolution_projection_ops: AtomicU64::new(0),
             type_resolution_depth_high_water: AtomicU16::new(0),
             type_resolution_recursion_limit_reached: AtomicBool::new(false),
+            type_resolution_dispatched_query_tags: AtomicU32::new(0),
             compile_parse_us: AtomicU64::new(0),
             compile_transform_us: AtomicU64::new(0),
             compile_codegen_us: AtomicU64::new(0),
@@ -1093,6 +1110,27 @@ impl RequestContext {
     pub fn bump_type_resolution_projection_op(&self) {
         self.type_resolution_projection_ops
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record that a `SemanticQueryKey` with `tag` dispatched through the shared
+    /// `ProjectSemanticDispatch::execute_via_cold_build_helper` cold-build choke
+    /// point. Called from the top of that helper (before key canonicalisation),
+    /// which both `execute` and `execute_read` route through — so nested
+    /// `execute_read`-only sub-dispatches are recorded too. Idempotent per tag —
+    /// sets the tag's [`bit_index`](crate::semantic_query::SemanticQueryKeyTag::bit_index)
+    /// bit in the per-request dispatch mask.
+    pub fn record_dispatched_query_tag(&self, tag: crate::semantic_query::SemanticQueryKeyTag) {
+        self.type_resolution_dispatched_query_tags
+            .fetch_or(1 << tag.bit_index(), Ordering::Relaxed);
+    }
+
+    /// The accumulated `SemanticQueryKey` dispatch mask for this request — bit
+    /// `i` set iff a tag with `bit_index() == i` dispatched at least once. Decode
+    /// with [`SemanticQueryKeyTag::decode_dispatch_mask`](crate::semantic_query::SemanticQueryKeyTag::decode_dispatch_mask).
+    #[must_use]
+    pub fn type_resolution_dispatched_query_tags_mask(&self) -> u32 {
+        self.type_resolution_dispatched_query_tags
+            .load(Ordering::Relaxed)
     }
 
     /// Mark that the cross-file external-type frontier closure

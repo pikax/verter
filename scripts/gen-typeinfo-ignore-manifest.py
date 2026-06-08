@@ -1148,6 +1148,113 @@ def proof_for_capability(cap: str) -> str:
     raise SystemExit(f"no ProofRequirement mapping for capability {cap!r}")
 
 
+# ── LIFTED rows: the closed set of rows whose `#[ignore]` has been REMOVED
+#    (an oracle snapshot + `ORACLE_QUERY_SPECS` registry entry now back their
+#    `oracle::run_row` body), flipping `status` Ignored -> Lifted{block_id}. A
+#    lifted row is no longer a live `#[ignore]` site, so it is NOT in the
+#    discovered set; it is enumerated here and is expected to remain in the
+#    §10.4.1 partition.
+#
+#    The row's `block_id` is NOT overridden here — it comes from §10.4.1, the
+#    SINGLE source of truth for every row's block (lifted rows now sit under
+#    their PRODUCTION block in the partition: the 2 index-signature publication
+#    rows under `U2.QUERY_VALUE_DOMAIN`, the 2 modifier-utility rows under
+#    `U2.MAPPED_TEMPLATE`). This override map carries ONLY the lift metadata that
+#    is NOT expressible in §10.4.1: the mechanism / proof / unblocker prose + the
+#    execution-true `semantic_queries` / `consumed_mechanisms`. The
+#    generation-time self-consistency assertion then VALIDATES the §10.4.1 block
+#    against `MECHANISM_OWNING_BLOCK[mech]` — so a partition that misplaced a
+#    lifted row would FAIL generation, not be silently corrected.
+#
+#    For a LIFTED row, `semantic_queries` + `consumed_mechanisms` are the
+#    EXECUTION TRUTH recorded on the override — the ACTUAL dispatched
+#    `SemanticQueryKey` tag set the row's resolution issues (sourced from the
+#    real per-request dispatch mask the keystone guard
+#    `lifted_row_mechanism_trace_matches_manifest` decodes), and the NON-OWNING
+#    subset of their owning mechanisms. They are NOT the mechanism-superset
+#    `keys_for_row(mech)` nor the block-prereq-derived
+#    `consumed_mechs_for_block(block)` an unlifted row carries: a lift is proven
+#    against a real trace, so its key/mechanism columns are the trace, not a
+#    derivation. The owning (terminal result-producing) mechanism among the
+#    dispatched set IS `mech` and is excluded from `consumed_mechanisms`.
+#
+#    The two index-signature PUBLICATION rows resolve a declared object-type alias
+#    and publish its terminal index signature — the FOUNDATIONAL decl-resolution
+#    publication owned by `U2.QUERY_VALUE_DOMAIN` (mechanism
+#    `QueryValueDomainFoundation`), NOT the indexed-access REDUCTION
+#    (`U2.INDEXED_ACCESS`) the rest of `index_signatures.rs` exercises. The proof
+#    is `OracleId::IndexSignature` (index-signature publication), not the false
+#    `OracleId::IndexedAccess` (lookup reduction). Their trace dispatches only
+#    `ResolveDecl` + `Instantiate` (both owned by `U2.QUERY_VALUE_DOMAIN`, so the
+#    owning mechanism is `QueryValueDomainFoundation` and nothing is consumed).
+#
+#    The two built-in MODIFIER-utility rows (`Required<T>` /
+#    `Readonly<Required<T>>`) terminate in the mapped-type `-?`/`readonly` remap
+#    owned by `U2.MAPPED_TEMPLATE` (mechanism `MappedTemplateRemap`): the trace
+#    dispatches `ResolveDecl` + `Instantiate` (→ `QueryValueDomainFoundation`,
+#    non-owning), `KeyOf` + `ProjectPath` (both → `IndexedAccessUnionDistribution`,
+#    non-owning; `ProjectPath` is the mapped-member source-projection
+#    sub-dispatch that enters via `execute_read` and is captured at the shared
+#    `execute_via_cold_build_helper` choke point), and the terminal `MappedType`
+#    (→ `MappedTemplateRemap`, the OWNING producer). `RelateCoinductiveScc` is NOT
+#    consumed (no `Relate`/`Conditional` dispatch), which holds precisely because
+#    `Instantiate` is owned by `U2.QUERY_VALUE_DOMAIN`, not `U2.RELATION_INFER`.
+LIFTED_ROW_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
+    ("index_signatures.rs", "index_signatures_numeric_index_publishes_signature"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::IndexSignature)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.QUERY_VALUE_DOMAIN: a declared object-type alias "
+            "resolves and publishes its terminal numeric-key index signature, "
+            "proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("index_signatures.rs", "index_signatures_symbol_index_publishes_signature"): {
+        "mech": "QueryValueDomainFoundation",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::IndexSignature)",
+        "semantic_queries": ["ResolveDecl", "Instantiate"],
+        "consumed_mechanisms": [],
+        "unblocker": (
+            "lifted by U2.QUERY_VALUE_DOMAIN: a declared object-type alias "
+            "resolves and publishes its terminal symbol-key index signature, "
+            "proven against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("utility_edge.rs", "utility_edge_required_strips_optional_markers"): {
+        "mech": "MappedTemplateRemap",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "KeyOf", "MappedType", "ProjectPath"],
+        "consumed_mechanisms": [
+            "QueryValueDomainFoundation",
+            "IndexedAccessUnionDistribution",
+        ],
+        "unblocker": (
+            "lifted by U2.MAPPED_TEMPLATE: `Required<T>` is the library mapped "
+            "type `{ [K in keyof T]-?: T[K] }`; the `-?` optional-stripping remap "
+            "is the terminal MappedTemplateRemap producer, proven against the "
+            "checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+    ("utility_edge.rs", "utility_edge_readonly_required_composes_modifiers"): {
+        "mech": "MappedTemplateRemap",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "KeyOf", "MappedType", "ProjectPath"],
+        "consumed_mechanisms": [
+            "QueryValueDomainFoundation",
+            "IndexedAccessUnionDistribution",
+        ],
+        "unblocker": (
+            "lifted by U2.MAPPED_TEMPLATE: `Readonly<Required<T>>` composes two "
+            "library mapped types; both modifier remaps (`-?` then `+readonly`) "
+            "are MappedTemplateRemap producers, proven against the checked-in "
+            "tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
+}
+
+
 def consumed_mechs_for_block(block_var: str) -> list[str]:
     """A row/block's consumed mechanisms = the dominant mechanisms of
     its block's DIRECT prerequisites (each a transitive prereq, so the
@@ -1164,8 +1271,10 @@ KEY_OWNING_BLOCK: dict[str, str] = {
     "NormalizeUnion": "U2QueryValueDomain",
     "NormalizeIntersection": "U2QueryValueDomain",
     "ResolvedNamedType": "U2QueryValueDomain",
+    # Generic substitution is a value-domain instantiation produced by
+    # U2.QUERY_VALUE_DOMAIN's foundation, NOT a relation inference.
+    "Instantiate": "U2QueryValueDomain",
     "Relate": "U2RelationInfer",
-    "Instantiate": "U2RelationInfer",
     "Conditional": "U2RelationInfer",
     "IndexedAccess": "U2IndexedAccess",
     "KeyOf": "U2IndexedAccess",
@@ -1276,7 +1385,9 @@ GENERATED_HEADER = (
     "// row->block partition in `docs/arch/native-typeinfo-parity.md`\n"
     "// is the authoritative source ONLY for each IgnoredTestRow's\n"
     "// `block_id` (READ by the generator, joined with the live\n"
-    "// `#[ignore]` discovery + the Capability Map). The AdditionalProofRow\n"
+    "// `#[ignore]` discovery + the Capability Map). This includes LIFTED\n"
+    "// rows: their `block_id` comes from §10.4.1 too — there is NO\n"
+    "// generator-side block override. The AdditionalProofRow\n"
     "// table and the TYPEINFO_PARITY_BLOCKS DAG (each block's\n"
     "// required_guards/verification_labels/prereqs/mechanisms) are\n"
     "// authored in the generator's own Python maps, NOT in §10.4.1.\n"
@@ -1300,7 +1411,7 @@ def emit_ignored_rows(rows: list[dict]) -> str:
             f"block_id: TypeInfoParityBlockId::{r['block']}, "
             f"semantic_queries: &[{keys}], "
             f"proof: {r['proof']}, "
-            "status: IgnoreStatus::Ignored, "
+            f"status: {r['status']}, "
             f"mechanism_id: MechanismId::{r['mech']}, "
             f"consumed_mechanisms: &[{mechs}], "
             f'unblocker: "{r["unblocker"]}" }},'
@@ -1468,27 +1579,71 @@ def main(check_only: bool = False) -> int:
             print(f"  - {fn}", file=sys.stderr)
         return 3
 
-    # Cross-check discovery vs §10.4.1 partition (must agree row-for-row).
+    # Cross-check discovery vs §10.4.1 partition. A LIFTED row is no longer a
+    # live `#[ignore]` site (its body is `oracle::run_row`), so it is expected
+    # to be in the partition but NOT in the discovered set; every OTHER row must
+    # agree row-for-row.
     disc_keys = set(discovered)
     part_keys = set(partition)
+    lifted_keys = set(LIFTED_ROW_OVERRIDES)
+    lifted_not_in_partition = sorted(lifted_keys - part_keys)
+    lifted_still_ignored = sorted(lifted_keys & disc_keys)
+    if lifted_not_in_partition or lifted_still_ignored:
+        print("error: lifted-row override set is inconsistent:", file=sys.stderr)
+        for k in lifted_not_in_partition:
+            print(f"  lifted row absent from §10.4.1 partition: {k[0]} :: {k[1]}", file=sys.stderr)
+        for k in lifted_still_ignored:
+            print(f"  lifted row still carries a live `#[ignore]`: {k[0]} :: {k[1]}", file=sys.stderr)
+        return 4
     only_disc = sorted(disc_keys - part_keys)
-    only_part = sorted(part_keys - disc_keys)
+    only_part = sorted(part_keys - disc_keys - lifted_keys)
     if only_disc or only_part:
         print("error: §10.4.1 partition does not match the live ignore set:", file=sys.stderr)
         for k in only_disc:
             print(f"  live-only (no partition row): {k[0]} :: {k[1]}", file=sys.stderr)
         for k in only_part:
-            print(f"  partition-only (no live ignore): {k[0]} :: {k[1]}", file=sys.stderr)
+            print(f"  partition-only (no live ignore, not lifted): {k[0]} :: {k[1]}", file=sys.stderr)
         return 4
 
-    # Build the IgnoredTestRows in (file, function) sorted order.
+    # Build the IgnoredTestRows in (file, function) sorted order. The row set is
+    # the live discovered ignores UNION the lifted rows (which are no longer
+    # discovered but stay in the table with `status: Lifted`).
     rows: list[dict] = []
-    for (file_, fn_name) in sorted(discovered):
+    for (file_, fn_name) in sorted(disc_keys | lifted_keys):
         block_text, cap = partition[(file_, fn_name)]
         block_var = BLOCK_TEXT_TO_VARIANT[block_text]
-        # mechanism_id is ROW-LEVEL, derived from capability/override —
-        # INDEPENDENT of block_var (the partition's block column).
-        mech = mechanism_for_row(cap, file_, fn_name)
+        override = LIFTED_ROW_OVERRIDES.get((file_, fn_name))
+        if override:
+            # Lifted: `block_var` comes from §10.4.1 (parsed above) — the SINGLE
+            # source of truth for every row's block_id, including lifted rows
+            # (they now sit under their PRODUCTION block in the partition, so
+            # there is NO generator-side block override). The override supplies
+            # ONLY the lift metadata that is NOT in §10.4.1: mechanism / proof /
+            # unblocker + the execution-true semantic_queries / consumed set. The
+            # `Lifted { block_id }` status block is block_var by construction, so
+            # the keystone guard's status_block == row.block_id check holds.
+            mech = override["mech"]
+            proof = override["proof"]
+            status = (
+                "IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::"
+                f"{block_var} }}"
+            )
+            unblocker = escape_rust_string_literal(override["unblocker"])
+            # EXECUTION TRUTH: a lifted row's keys + consumed mechanisms are the
+            # ACTUAL dispatched-tag set recorded on the override (decoded from
+            # the real per-request dispatch mask by the keystone guard), NOT the
+            # mechanism-superset / block-prereq-derivation an unlifted row uses.
+            row_keys = list(override["semantic_queries"])
+            row_consumed = list(override["consumed_mechanisms"])
+        else:
+            # mechanism_id is ROW-LEVEL, derived from capability/override —
+            # INDEPENDENT of block_var (the partition's block column).
+            mech = mechanism_for_row(cap, file_, fn_name)
+            proof = proof_for_capability(cap)
+            status = "IgnoreStatus::Ignored"
+            unblocker = escape_rust_string_literal(discovered[(file_, fn_name)])
+            row_keys = keys_for_row(mech)
+            row_consumed = consumed_mechs_for_block(block_var)
         rows.append(
             {
                 "file": file_,
@@ -1498,11 +1653,12 @@ def main(check_only: bool = False) -> int:
                 "organ": BLOCK_TO_ORGAN[block_var],
                 "ublock": BLOCK_TO_UBLOCK[block_var],
                 "block": block_var,
-                "keys": keys_for_row(mech),
-                "proof": proof_for_capability(cap),
+                "keys": row_keys,
+                "proof": proof,
                 "mech": mech,
-                "consumed": consumed_mechs_for_block(block_var),
-                "unblocker": escape_rust_string_literal(discovered[(file_, fn_name)]),
+                "consumed": row_consumed,
+                "status": status,
+                "unblocker": unblocker,
             }
         )
 

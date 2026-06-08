@@ -59,4 +59,27 @@ pub struct TypeResolutionPayload {
     /// `walker_diagnostics`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cache_suppress: bool,
+    /// Bitmask of the `SemanticQueryKey` variants this resolution dispatched —
+    /// bit `i` set iff a key whose tag has `bit_index() == i` dispatched at least
+    /// once through the shared
+    /// `ProjectSemanticDispatch::execute_via_cold_build_helper` cold-build choke
+    /// point. Because both the `execute` trait method and the
+    /// dep-signature-preserving `execute_read` subquery entry funnel through that
+    /// helper, this is the COMPLETE dispatched-tag trace for the request — every
+    /// variant dispatched anywhere, including nested reducer sub-dispatches that
+    /// enter only via `execute_read` — distinct from the focused cold/warm
+    /// hot-path counters that cover only a subset.
+    /// `verter_session::SemanticQueryKeyTag::{bit_index, decode_dispatch_mask}`
+    /// own the bit assignment + decode.
+    ///
+    /// Marked `#[serde(default)]` so pre-existing audit corpus records without
+    /// this field deserialize cleanly to `0` (no trace recorded).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub semantic_query_dispatch_mask: u32,
+}
+
+/// `skip_serializing_if` helper — the default (no trace) mask is `0`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }

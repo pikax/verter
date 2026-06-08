@@ -23,11 +23,11 @@
 //!    snapshot's stored (already-normalized) `oracle_value` under the same
 //!    normalization. NO tsgo at consumption time.
 //!
-//! The registry is EMPTY (it lifts ZERO rows), so `run_row` is never INVOKED at
-//! runtime here. The driver is nonetheless
-//! built complete + correct (never stubbed): its pure sub-functions are
-//! exercised directly by discriminating unit tests, and the orchestrator is the
-//! real path the first lifted row will ride.
+//! The registry seats the 4 lifted rows (the two index-signature
+//! publication queries + the two built-in modifier-utility queries), so `run_row`
+//! IS invoked at runtime by those rows' `oracle::run_row` bodies. Its pure
+//! sub-functions are additionally exercised directly by discriminating unit
+//! tests; the orchestrator is the real path every lifted row rides.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

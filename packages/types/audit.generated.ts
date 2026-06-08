@@ -3104,7 +3104,25 @@ walker_diagnostics?: Array<AuditDiagnosticEntry>,
  * Marked `#[serde(default)]` for the same compatibility reason as
  * `walker_diagnostics`.
  */
-cache_suppress?: boolean, };
+cache_suppress?: boolean,
+/**
+ * Bitmask of the `SemanticQueryKey` variants this resolution dispatched —
+ * bit `i` set iff a key whose tag has `bit_index() == i` dispatched at least
+ * once through the shared
+ * `ProjectSemanticDispatch::execute_via_cold_build_helper` cold-build choke
+ * point. Because both the `execute` trait method and the
+ * dep-signature-preserving `execute_read` subquery entry funnel through that
+ * helper, this is the COMPLETE dispatched-tag trace for the request — every
+ * variant dispatched anywhere, including nested reducer sub-dispatches that
+ * enter only via `execute_read` — distinct from the focused cold/warm
+ * hot-path counters that cover only a subset.
+ * `verter_session::SemanticQueryKeyTag::{bit_index, decode_dispatch_mask}`
+ * own the bit assignment + decode.
+ *
+ * Marked `#[serde(default)]` so pre-existing audit corpus records without
+ * this field deserialize cleanly to `0` (no trace recorded).
+ */
+semantic_query_dispatch_mask?: number, };
 
 /**
  * Which VFS layer served the read — mirrored from the workspace's

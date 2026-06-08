@@ -27,12 +27,11 @@
 //!    (`snapshot::assemble_snapshot_document`) and write it.
 //!
 //! [`run_oracle_gen`] is the single `pub` entry the `src/bin/oracle_gen` binary
-//! invokes. The oracle-query-spec registry is EMPTY (it lifts ZERO rows), so
-//! `run_oracle_gen` writes ZERO snapshots — a REAL vacuous loop, not a stub. The
-//! per-spec pipeline ([`generate_snapshot`]) is
-//! REAL and is exercised end-to-end against the pinned tsgo over a SYNTHETIC spec
-//! by `gen_tests::oracle_gen_is_idempotent`, which is what makes the generator
-//! non-hollow.
+//! invokes. It walks the oracle-query-spec registry (the 4 lifted rows — two
+//! index-signature publications + two built-in modifier utilities) and writes one
+//! snapshot per spec. The per-spec pipeline ([`generate_snapshot`]) is also
+//! exercised end-to-end against the pinned tsgo over a SYNTHETIC spec by
+//! `gen_tests::oracle_gen_is_idempotent`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -161,9 +160,9 @@ impl GenConfig {
     }
 }
 
-/// Generate + write every registry snapshot, returning the count written. The
-/// registry is EMPTY, so this is a REAL vacuous loop (zero snapshots) — the
-/// per-spec body ([`generate_snapshot`]) is exercised against real tsgo by the
+/// Generate + write every registry snapshot, returning the count written (one
+/// per `ORACLE_QUERY_SPECS` entry — the 4 lifted rows). The per-spec body
+/// ([`generate_snapshot`]) is additionally exercised against real tsgo by the
 /// idempotence test.
 pub fn run_oracle_gen() -> Result<usize, GenError> {
     let config = GenConfig::checked_in();

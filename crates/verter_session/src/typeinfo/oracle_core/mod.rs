@@ -3,8 +3,8 @@
 //! This module is the in-repo, tsgo-free half of the oracle harness defined in
 //! `docs/arch/u0-oracle-harness-design.md`: the normalization + canonical
 //! comparison engine that `TypeExpr`-projection oracle rows use to assert
-//! parity against checked-in TS7 snapshots. It lifts ZERO rows on its own — it
-//! is the shared foundation those rows build on.
+//! parity against checked-in TS7 snapshots. It declares no oracle rows itself —
+//! it is the shared foundation the lifted `TypeExpr`-projection rows build on.
 //!
 //! The two-sided positive-allowlist admission gate's PREDICATE (`admission`) is
 //! pure, tsgo-free logic — it walks parsed OXC type ASTs and synthetic

@@ -228,7 +228,7 @@ fn typescript_rules_keyof_materializes_literal_key_union() {
 }
 
 #[test]
-#[ignore = "typeinfo currently preserves multi-hop indexed-access aliases instead of reducing KeySource['nested']['value']; keep as the future indexed-access contract"]
+#[ignore = "multi-hop indexed-access reduction (KeySource['nested']['value']) is deferred to the separate U2 IndexedAccess Reduction resolver block"]
 fn typescript_rules_indexed_access_reduces_terminal_property() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);

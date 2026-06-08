@@ -2595,7 +2595,8 @@ is created. Both tables live in this one module.
 
 ### 10.1 Two SEPARATE tables: the binding 362 vs additional coverage
 
-The binding manifest total is EXACTLY 362 ignored rows. Full-parity coverage adds a
+The binding manifest total is EXACTLY 362 test-site rows (post-lift: 358 `Ignored` +
+4 `Lifted`). Full-parity coverage adds a
 CLOSED set of exactly 7 coverage-only `AdditionalProofRow`s = the 6 JSX no-new-key
 submatrix rows (owned by `U2.JSX_FOUNDATIONS`) + the 1 mapped companion
 `mapped_modifier_minus_optional_preserves_explicit_undefined_on_required_property`
@@ -2603,8 +2604,9 @@ submatrix rows (owned by `U2.JSX_FOUNDATIONS`) + the 1 mapped companion
 incoherent if the binding 362 and the additional fixtures share ONE table and ONE
 `EXPECTED_TOTAL_IGNORED_COUNT` — additional rows would either break the exact 362
 count/bijection or be untracked. The ledger therefore SPLITS into two tables:
-`IgnoredTestRow` holds EXACTLY the 362 ignored test-site rows (count-guarded at 362,
-bijective with the source `#[ignore]`s), and a SEPARATE coverage-only `AdditionalProofRow`
+`IgnoredTestRow` holds EXACTLY 362 test-site rows total (count-guarded at 362) — post-lift
+358 carry `status: Ignored` (bijective with the live source `#[ignore]`s) and 4 carry
+`status: Lifted` (no live `#[ignore]`, oracle-backed) — and a SEPARATE coverage-only `AdditionalProofRow`
 table holds EXACTLY the 7 closed coverage rows above. `AdditionalProofRow`s are EXCLUDED
 from the ignored-count + bijection guards (they are not source-`#[ignore]` test sites, so
 they neither add to `EXPECTED_TOTAL_IGNORED_COUNT` nor participate in the bijection) BUT
@@ -2615,7 +2617,7 @@ existing ignored row stays in that `IgnoredTestRow` (it is not duplicated); only
 genuinely NEW fixtures above are `AdditionalProofRow`s.
 
 ```rust
-struct IgnoredTestRow {              // EXACTLY the 362 ignored test-site rows (count-guarded, bijective with source #[ignore]s); 13 fields
+struct IgnoredTestRow {              // EXACTLY 362 test-site rows total (count-guarded): 358 Ignored (bijective with source #[ignore]s) + 4 Lifted; 13 fields
     file: &'static str,
     function: &'static str,
     substrate: TargetSubstrate,
@@ -2892,16 +2894,17 @@ fixes the single owning block. The per-block counts (summing to 362) are:
 | Owning `block_id` | Rows | Owning `block_id` | Rows |
 |---|---:|---|---:|
 | `U2.RELATION_INFER` | 20 | `U6.NARROW_*` (8 sub-blocks, below) | 104 |
-| `U2.UTILITIES` | 42 | `U6.PREDICATE_ASSERTION` | 3 |
-| `U2.INDEXED_ACCESS` | 16 | `U6.CALL_RESOLVE` | 21 |
-| `U2.MAPPED_TEMPLATE` | 16 | `U6.CONTEXTUAL_CALLBACK` | 15 |
-| `U2.CLASS_SURFACES` | 52 | `U6.VALUE_INFERENCE` | 1 |
-| `U2.ENUMS` | 7 | `U6.ASYNC_GENERATOR` | 1 |
-| `U2.MODULE_AUGMENTATION` | 8 | `U6.CROSS_FILE` | 6 |
-| `U2.JSX_FOUNDATIONS` | 9 | `U6.LOOP_CLOSURE` | 3 |
-| `U6.FLOW_RETURN_SUBSTRATE` | 7 | `U3.CACHE_FACT_MODEL` | 3 |
-| `U10.RESULT_DB` | 13 | `U11.PUBLIC_RELATION_SESSION` | 9 |
-| `U14.MACRO_ADAPTER` | 1 | `U15.FINAL_LIFT` | 5 |
+| `U2.UTILITIES` | 40 | `U6.PREDICATE_ASSERTION` | 3 |
+| `U2.INDEXED_ACCESS` | 14 | `U6.CALL_RESOLVE` | 21 |
+| `U2.MAPPED_TEMPLATE` | 18 | `U6.CONTEXTUAL_CALLBACK` | 15 |
+| `U2.QUERY_VALUE_DOMAIN` | 2 | `U6.VALUE_INFERENCE` | 1 |
+| `U2.CLASS_SURFACES` | 52 | `U6.ASYNC_GENERATOR` | 1 |
+| `U2.ENUMS` | 7 | `U6.CROSS_FILE` | 6 |
+| `U2.MODULE_AUGMENTATION` | 8 | `U6.LOOP_CLOSURE` | 3 |
+| `U2.JSX_FOUNDATIONS` | 9 | `U3.CACHE_FACT_MODEL` | 3 |
+| `U6.FLOW_RETURN_SUBSTRATE` | 7 | `U11.PUBLIC_RELATION_SESSION` | 9 |
+| `U10.RESULT_DB` | 13 | `U15.FINAL_LIFT` | 5 |
+| `U14.MACRO_ADAPTER` | 1 | | |
 
 Sum = 362 (the `U6.NARROW_*` bucket contributes its 104 rows as the sum of the eight
 sub-blocks below). The narrowing bucket is split per-mechanism (mechanism-first
@@ -2924,10 +2927,16 @@ narrowing mechanism (the `file::function` mechanism), so the sub-blocks partitio
 Sub-block sum = 104. These eight sub-blocks REPLACE the former single `U6.NARROWING`
 block (which no longer exists as a `block_id`); `U6.PREDICATE_ASSERTION` (`fi08`,
 `sb09`/`sb10`) and `U6.LOOP_CLOSURE` (`fi03`/`fi06`/`fi07`) remain SEPARATE blocks and
-are unchanged by the split. Blocks not in this table (`U0.MANIFEST_SUBSTRATE`, `U2.QUERY_VALUE_DOMAIN`,
+are unchanged by the split. The remaining zero-row blocks (`U0.MANIFEST_SUBSTRATE`,
 `U8.WIRE_SURFACE_CLOSURE`, `U12.EXPORTER`, `U13.PROJECTION`) own **zero** `IgnoredTestRow`s —
-they build substrate (ledger / keys / wire / exporter / projection) the owning blocks lift
+they build substrate (ledger / wire / exporter / projection) the owning blocks lift
 their rows through; their `Exact test rows lifted` is explicitly `none`.
+`U2.QUERY_VALUE_DOMAIN` is NO LONGER zero-row: it owns the 2 index-signature
+PUBLICATION lifts (`index_signatures.rs::index_signatures_numeric_index_publishes_signature`,
+`…_symbol_index_publishes_signature`), the foundational decl-resolution publication
+(mechanism `QueryValueDomainFoundation`). Its "designed 0-row" status was a
+current partition fact, not an invariant; the first oracle-backed lifts re-homed
+to their true producer block.
 
 The complete partition (each entry `file::function — substrate`):
 <!-- BEGIN U0 row→block coverage table (362 rows). [Marker name is a fixed parse contract
@@ -2941,6 +2950,11 @@ The complete partition (each entry `file::function — substrate`):
      AdditionalProofRow table (typeinfo_additional_proof_rows.rs) and the TYPEINFO_PARITY_BLOCKS
      DAG (typeinfo_parity_blocks.rs) come from the generator's own Python maps, NOT from this
      partition. Edit block_id assignments HERE, then regenerate. -->
+
+**`U2.QUERY_VALUE_DOMAIN`** (2 rows):
+
+- `index_signatures.rs::index_signatures_numeric_index_publishes_signature` — `IndexSignatures`
+- `index_signatures.rs::index_signatures_symbol_index_publishes_signature` — `IndexSignatures`
 
 **`U2.RELATION_INFER`** (20 rows):
 
@@ -2965,7 +2979,7 @@ The complete partition (each entry `file::function — substrate`):
 - `relation_semantics.rs::relation_readonly_property_assignable_to_mutable` — `RelationSemantics`
 - `typescript_rules.rs::typescript_rules_distributive_conditional_expands_each_union_arm` — `TypeScriptRules`
 
-**`U2.UTILITIES`** (42 rows):
+**`U2.UTILITIES`** (40 rows):
 
 - `indexed_utilities.rs::direct_parameters_payload_extracts_function_argument` — `UtilityComposition`
 - `indexed_utilities.rs::direct_parameters_second_extracts_number_argument` — `UtilityComposition`
@@ -2983,8 +2997,6 @@ The complete partition (each entry `file::function — substrate`):
 - `utility_edge.rs::utility_edge_omit_all_keys_yields_empty_object` — `UtilityComposition`
 - `utility_edge.rs::utility_edge_pick_all_keys_yields_input_shape` — `UtilityComposition`
 - `utility_edge.rs::utility_edge_pick_never_yields_empty_object` — `UtilityComposition`
-- `utility_edge.rs::utility_edge_readonly_required_composes_modifiers` — `UtilityComposition`
-- `utility_edge.rs::utility_edge_required_strips_optional_markers` — `UtilityComposition`
 - `utility_top_bottom.rs::utility_top_bottom_utb01_return_type_of_any_is_any` — `UtilityComposition`
 - `utility_top_bottom.rs::utility_top_bottom_utb02_return_type_of_never_is_never` — `UtilityComposition`
 - `utility_top_bottom.rs::utility_top_bottom_utb07_parameters_of_any_is_unknown_array` — `UtilityComposition`
@@ -3010,14 +3022,12 @@ The complete partition (each entry `file::function — substrate`):
 - `variadic_tuples.rs::variadic_tuple_tail_of_sample_resolves_to_remaining_tuple` — `TupleFeatures`
 - `variadic_tuples.rs::variadic_tuple_variadic_function_with_explicit_type_args_concatenates_tuples` — `TupleFeatures`
 
-**`U2.INDEXED_ACCESS`** (16 rows):
+**`U2.INDEXED_ACCESS`** (14 rows):
 
 - `deep_path.rs::deep_path_projection_resolves_terminal_without_losing_shape` — `PathProjection`
 - `index_signatures.rs::index_signatures_dual_numeric_key_returns_numeric_signature_value` — `IndexSignatures`
 - `index_signatures.rs::index_signatures_dual_string_key_returns_string_signature_value` — `IndexSignatures`
-- `index_signatures.rs::index_signatures_numeric_index_publishes_signature` — `IndexSignatures`
 - `index_signatures.rs::index_signatures_numeric_lookup_returns_signature_value` — `IndexSignatures`
-- `index_signatures.rs::index_signatures_symbol_index_publishes_signature` — `IndexSignatures`
 - `index_signatures.rs::index_signatures_symbol_lookup_returns_signature_value` — `IndexSignatures`
 - `typescript_rules.rs::typescript_rules_indexed_access_reduces_terminal_property` — `TypeScriptRules`
 - `typescript_rules.rs::typescript_rules_keyof_materializes_literal_key_union` — `TypeScriptRules`
@@ -3029,7 +3039,7 @@ The complete partition (each entry `file::function — substrate`):
 - `wide_deep.rs::wide_deep_projected_token_resolves_literal_union` — `PathProjection`
 - `wide_deep.rs::wide_deep_row_flags_resolve_partial_record_surface` — `PathProjection`
 
-**`U2.MAPPED_TEMPLATE`** (16 rows):
+**`U2.MAPPED_TEMPLATE`** (18 rows):
 
 - `mapped_modifiers.rs::mapped_modifier_as_never_filter_drops_matching_keys` — `MappedTypes`
 - `mapped_modifiers.rs::mapped_modifier_as_rename_capitalize_rewrites_keys` — `MappedTypes`
@@ -3047,6 +3057,8 @@ The complete partition (each entry `file::function — substrate`):
 - `template_literal_inference.rs::template_literal_strip_returns_input_unchanged_when_prefix_missing` — `TemplateLiteralInference`
 - `typescript_rules.rs::typescript_rules_key_remap_exclude_filters_and_renames_keys` — `TypeScriptRules`
 - `typescript_rules.rs::typescript_rules_template_intrinsic_evaluates_union` — `TypeScriptRules`
+- `utility_edge.rs::utility_edge_readonly_required_composes_modifiers` — `UtilityComposition`
+- `utility_edge.rs::utility_edge_required_strips_optional_markers` — `UtilityComposition`
 
 **`U2.CLASS_SURFACES`** (52 rows):
 
@@ -3395,7 +3407,8 @@ The complete partition (each entry `file::function — substrate`):
 ### 10.5 The exact-362 count and bijection
 
 `EXPECTED_TOTAL_IGNORED_COUNT` is ALWAYS exactly `count(IgnoredTestRow where status ==
-Ignored)`; it is 362 at U0. It is NOT a frozen constant that lags the row states — it is the
+Ignored)`; it is 358 after the first 4 lifts (362 rows total − 4 `Lifted`). It is NOT a frozen
+constant that lags the row states — it is the
 live count of `Ignored` `IgnoredTestRow`s, and the block branch that changes how many are
 `Ignored` updates it IN THE SAME BRANCH (and so in the same squash-merge) so the count guard
 never observes a disagreement in any committed state. The count and bijection are over the
@@ -3404,16 +3417,15 @@ never observes a disagreement in any committed state. The count and bijection ar
 exactly equal `IgnoredTestRow`s with `status == Ignored`, and that set must also exactly equal
 `EXPECTED_TOTAL_IGNORED_COUNT`.
 
-> **Lifted-lifecycle deferral (U0-FINISH-A is intentionally all-`Ignored`):** the ledger this
-> block lands lifts ZERO rows — the generator always emits `status: IgnoreStatus::Ignored`, the
-> guards validate every row against a live source `#[ignore]` site, and the count is pinned at
-> exactly 362 `Ignored` rows. The `IgnoreStatus::Lifted { block_id }` variant exists in the
-> schema as the FORWARD-DECLARATION for the per-block lift lifecycle described below; the
-> lifted-row GENERATION + validation path (a lifted row drops its `#[ignore]` and its status
-> becomes `Lifted { block_id }`, gated by the row-exact coverage gate) is exercised when an
-> actual parity block lands and lifts its rows. That path is OWNED by the lifting block / the
-> U0-FINISH-B coverage gate — it is NOT built in U0-FINISH-A. The accounting below is the
-> contract that lifecycle will honour, not machinery that runs here yet.
+> **Realized lifted-lifecycle state (4 rows lifted):** the `IgnoredTestRow` table holds 362 rows
+> total, of which 4 carry `status: IgnoreStatus::Lifted { block_id }` (the two index-signature
+> publication rows at `U2.QUERY_VALUE_DOMAIN` + the two built-in modifier-utility rows at
+> `U2.MAPPED_TEMPLATE`) and 358 carry `status: IgnoreStatus::Ignored`. The generator emits each
+> row's status (it unions live `#[ignore]` discovery with the lifted-row overrides); the count
+> guard pins the live-ignore count at 358. The lifted-row GENERATION + validation path — a lifted
+> row drops its `#[ignore]`, its status becomes `Lifted { block_id }`, and its body becomes the
+> registry-keyed `oracle::run_row` driver call proven against a checked-in tsgo snapshot — is
+> exercised by those four lifts. The accounting below is the contract every further lift honours.
 
 The accounting is a single coupled edit on the block's branch:
 
@@ -3705,9 +3717,11 @@ Pinned by **`no_vacuous_parent_u_block_landing`**.
 ### 11.10 Zero-row block lifecycle
 
 Some real child blocks own ZERO manifest rows: `U0.MANIFEST_SUBSTRATE`,
-`U2.QUERY_VALUE_DOMAIN`, `U8.WIRE_SURFACE_CLOSURE`, `U12.EXPORTER`, and
-`U13.PROJECTION` (the §10.4.1 partition lists them as zero-row). They build
-substrate / wire / projection surfaces, not row lifts. A purely row-status
+`U8.WIRE_SURFACE_CLOSURE`, `U12.EXPORTER`, and `U13.PROJECTION` (the §10.4.1
+partition lists them as zero-row). (`U2.QUERY_VALUE_DOMAIN` was formerly in this
+set but now owns the 2 index-signature publication lifts, so it is row-owning and
+its lifecycle is row-status driven like any other row-owning block.) These four
+build substrate / wire / projection surfaces, not row lifts. A purely row-status
 eligibility predicate is ill-defined for them — "all its rows are `Lifted`" is
 VACUOUSLY true, so a cold agent could neither unambiguously SELECT them nor avoid
 RE-selecting an already-done one. Their lifecycle is therefore MERGED-TRAILER /
@@ -3888,7 +3902,7 @@ manifest alone — no tracked cursor, no lease adoption, no staleness predicate,
    §11.10 defines:
    - for a **row-owning block** — its own rows still have `status == Ignored` (its
      `Typeinfo-Block:` trailer not yet merged); OR
-   - for a **zero-row block (§11.10)** (`U0.MANIFEST_SUBSTRATE`, `U2.QUERY_VALUE_DOMAIN`,
+   - for a **zero-row block (§11.10)** (`U0.MANIFEST_SUBSTRATE`,
      `U8.WIRE_SURFACE_CLOSURE`, `U12.EXPORTER`, `U13.PROJECTION`) — its `Typeinfo-Block:` trailer is
      NOT yet merged (a zero-row block owns no rows, so its eligibility is merged-trailer driven, not
      row-status driven).
