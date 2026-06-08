@@ -2295,12 +2295,48 @@ divergence budget**:
   budget is per family (so one family cannot hide behind another's agreement), against
   the pinned `tsgo`.
 
+> **Amendment — single-spec / correction-overlay reformulation (see [`ts-compat-two-mode-model.md`](ts-compat-two-mode-model.md) §9.4).**
+> The single-spec / correction-overlay model reframes this per-family budget. The budget M
+> as defined above measures Verter-vs-pinned-`tsgo` divergence, conflating *unintended*
+> divergence (defects) with *intended, registered* divergence (`ts-compat-two-mode-model.md`
+> §5). The resolver is single-spec — it always produces the `Correct` value, with no compat
+> mode and no spec dimension on any cache key — so there is ONE budget run, not two modes:
+> - **The budget compares `resolver(Correct)` against `tsgo`, excluding registered
+>   divergences.** A row where the resolver disagrees with `tsgo` is a candidate defect
+>   UNLESS it carries a registered correction, in which case the disagreement is intended
+>   (the resolver's `Correct` value equals `correction.correct_value`, which differs from
+>   `tsgo` by construction) and is **EXCLUDED from M**. M therefore counts only UNREGISTERED
+>   `resolver(Correct)`-vs-`tsgo` disagreements, and the per-family target SHARPENS to
+>   **M → 0**. An UNREGISTERED divergence still surfaces — it has no correction, so it shows
+>   up as a `resolver`-vs-`tsgo` miss (M > 0). **Precondition + scope:** `M → 0` presupposes
+>   that EVERY intended divergence — across the families IN the budget — is registered with a
+>   correction. Verdict-family cases are simply OUTSIDE the budget M until their structured
+>   oracle rows exist (`ts-compat-two-mode-model.md` §1.2 — the verdict oracle is deferred);
+>   they are NOT "`tsgo`-matching" (the single-spec resolver never reproduces a `tsgo` bug) —
+>   they are not yet IN the budget at all. Once a family or row IS in the §6.3 budget, EVERY
+>   `resolver(Correct)`-vs-`tsgo` disagreement counts against M UNLESS that exact `(row,
+>   query)` carries a registered correction.
+> - **The corrections are confirmed by the data comparison, not budgeted.** At each
+>   registered `(row, query)` the harness asserts `resolver(query) == correction.correct_value`
+>   (the review-gated correct value); that query's `snapshot.oracle_value` holds the recorded
+>   `tsgo` value. Registry-gated, not budgeted.
+>
+> This is a strengthening, not a loosening: intended and unintended divergences are no
+> longer mixed in one count. Pinned by `registered_divergence_excluded_from_budget`
+> (owned by the mechanism block in `ts-compat-two-mode-model.md` §8/§12). The N / M
+> shapes, the structured-diff machinery, and the rescope-gate sequencing below are
+> otherwise unchanged.
+
 **Why it replaces the 362 proxy as the semantic gate.** A green 362 ledger proves
 **coverage** (every row owned + executably proven + wired — "detects un-wired"). The
-oracle proves **semantic completeness** (the engine computes what `tsc`/`tsgo`
-computes — "detects **wrong**"). Stating `362-green` as tsc-parity is the proxy error
-the oracle closes: the two are distinct claims. The behavioral guards stay (they detect
-un-wired); the oracle is the net-new semantic gate on top.
+oracle proves **semantic completeness** — that the single-spec engine computes the
+**`Correct`** value (per the reformulation above): the engine computes
+`correction.correct_value` at registered divergence sites and `== tsgo` everywhere else, so
+the unqualified "computes what `tsc`/`tsgo` computes" was stale (`Correct == tsgo` does NOT
+hold at registered divergence sites, where the engine is intentionally correct) — "detects
+**wrong**". Stating `362-green` as tsc-parity is the proxy error the oracle closes: the two
+are distinct claims. The behavioral guards stay (they detect un-wired); the oracle is the
+net-new semantic gate on top.
 
 **Produced at each hard phase's rescope gate.** The oracle baseline for a family is a
 **rescope-gate deliverable** (sequencing authority §3.2(b)): when a
