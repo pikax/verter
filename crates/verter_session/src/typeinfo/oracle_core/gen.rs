@@ -27,9 +27,10 @@
 //!    (`snapshot::assemble_snapshot_document`) and write it.
 //!
 //! [`run_oracle_gen`] is the single `pub` entry the `src/bin/oracle_gen` binary
-//! invokes. It walks the oracle-query-spec registry (the 7 lifted rows — two
+//! invokes. It walks the oracle-query-spec registry (the 8 lifted rows — two
 //! index-signature publications + two built-in modifier utilities + three U2
-//! IndexedAccess-reduction carve-outs) and writes one
+//! IndexedAccess-reduction carve-outs + the mapped-modifier `-?` carve-out at
+//! U2.MAPPED_TEMPLATE) and writes one
 //! snapshot per spec. The per-spec pipeline ([`generate_snapshot`]) is also
 //! exercised end-to-end against the pinned tsgo over a SYNTHETIC spec by
 //! `gen_tests::oracle_gen_is_idempotent`.
@@ -168,7 +169,7 @@ impl GenConfig {
 }
 
 /// Generate + write every registry snapshot, returning the count written (one
-/// per `ORACLE_QUERY_SPECS` entry — the 7 lifted rows). The per-spec body
+/// per `ORACLE_QUERY_SPECS` entry — the 8 lifted rows). The per-spec body
 /// ([`generate_snapshot`]) is additionally exercised against real tsgo by the
 /// idempotence test.
 pub fn run_oracle_gen() -> Result<usize, GenError> {

@@ -669,6 +669,41 @@ pub(crate) fn materialize_through_aliases(
                     MaterializationStep::Stop(node) => return Ok(node),
                 }
             }
+            // Template-literal operator-bodied alias reduction. A top-level
+            // alias whose body is a `TemplateLiteral` (`type X = `on${…}``) is
+            // reduced through the shared `TemplateLiteralReduce` producer under
+            // the publication modes — same one-engine gate as IndexedAccess /
+            // KeyOf above. `Skeleton` / `Identity` fall through to the
+            // carrier-preserving terminal arm so BFS / structural-transit
+            // traversal keeps the template shell.
+            Some(SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            }) if matches!(
+                mode,
+                ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
+            ) =>
+            {
+                let key = SemanticQueryKey::TemplateLiteralReduce {
+                    pattern: Arc::clone(quasis),
+                    args: Arc::clone(expressions),
+                    context: dispatch.template_literal_reduce_context(),
+                };
+                let step_result = match dispatch.execute_type_node(key) {
+                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                        QueryResult::Value(node)
+                    }
+                    QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                    QueryResult::Error(err) => QueryResult::Error(err),
+                };
+                match classify_operator_reduction_step(store, step_result, current)? {
+                    MaterializationStep::Continue(next) => {
+                        current = next;
+                        continue;
+                    }
+                    MaterializationStep::Stop(node) => return Ok(node),
+                }
+            }
             _ => return Ok(current),
         }
     }

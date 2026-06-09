@@ -403,7 +403,7 @@ fn typescript_rules_awaited_recursively_unwraps_promises() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not evaluate template-literal intrinsic string utilities like Capitalize over unions; keep as the future string-intrinsic contract"]
+#[ignore = "reducer resolves this correctly (covered by the non-ignored `template_intrinsic_reducer_evaluates_union` regression); NOT oracle-liftable — the SOURCE body is a template-literal construct that the oracle §Q2 positive-allowlist rejects (Reject(DeferredConstruct(\"template-literal\"))). Lift pending an oracle admission + hover-grammar extension for template-literal source roots"]
 fn typescript_rules_template_intrinsic_evaluates_union() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);
@@ -420,8 +420,39 @@ fn typescript_rules_template_intrinsic_evaluates_union() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+/// Non-ignored reducer regression for the template-literal string-intrinsic row
+/// `typescript_rules_template_intrinsic_evaluates_union` (which stays
+/// `#[ignore]`d as an oracle-lift contract — its template-literal SOURCE body is
+/// rejected by the oracle §Q2 admission). The SHARED resolver folds
+/// `` `on${Capitalize<"submit" | "cancel">}` `` through the literal-preserving
+/// `Capitalize` intrinsic and distributes the template over the union, yielding
+/// `"onCancel" | "onSubmit"` — guarded here in the normal suite.
 #[test]
-#[ignore = "typeinfo currently does not apply key remapping with never-filtered keys and template-literal output names; keep as the future key-remap filter contract"]
+fn template_intrinsic_reducer_evaluates_union() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);
+
+    let (expr, _record) = resolve_expr(
+        &host,
+        "/fixtures/typescript-rules.ts",
+        "TemplateIntrinsicRules",
+        &[],
+        ProjectionMode::Expanded,
+    );
+
+    assert_literal_union(&expr, &["onCancel", "onSubmit"]);
+    let TypeExpr::Union(arms) = &expr else {
+        panic!("expected a literal union, got {expr:?}");
+    };
+    assert_eq!(
+        arms.len(),
+        2,
+        "the template must distribute over the 2 arms"
+    );
+}
+
+#[test]
+#[ignore = "blocked on TWO deferred shared-resolver gaps: (1) per-key CONDITIONAL branch selection / `as never` key drop (the `K extends \"internal\" ? never : …` arm is Relate-carrying — deferred to the relation-oracle block); (2) the `K & string` literal-subsumption normalization (`\"id\" & string` → `\"id\"`) — deferred to a future shared-normalization block. Both must land before the `public:${K & string}` remapped surface materializes; keep as the future key-remap filter contract"]
 fn typescript_rules_key_remap_exclude_filters_and_renames_keys() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/fixtures/typescript-rules.ts", TYPESCRIPT_RULES);

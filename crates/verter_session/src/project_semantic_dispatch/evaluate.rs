@@ -334,49 +334,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     quasis,
                     expressions,
                 } => {
-                    // When every expression resolves to a
-                    // single string literal, fold the template into a
-                    // `Literal::String` by concatenating
-                    // `quasis[0] expr[0] quasis[1] expr[1] … quasis[n]`.
-                    // This closes the `template_literal_as_key` mapped-
-                    // type case where a mapper's `name_remap` carries
-                    // a template-literal expression — the post-
-                    // substitution `${K}` resolves to a string literal,
-                    // and the surrounding template can be folded into
-                    // a single name. When any expression resolves to a
-                    // non-string-literal shape (Primitive, Union, an
-                    // unresolved deferred shell), the template stays
-                    // deferred — caller falls back to the iteration key.
-                    let quasis = Arc::clone(quasis);
-                    let expressions = Arc::clone(expressions);
+                    // Route the carrier through the ONE shared
+                    // `TemplateLiteralReduce` query producer (no inline fold).
+                    // The producer computes the cartesian product over the
+                    // finite literal-union choices of every interpolated
+                    // expression (`` `cell:${"name"|"count"}` `` ⇒
+                    // `"cell:name" | "cell:count"`), folds an all-single-literal
+                    // template to one `Literal`, returns `never` for an empty
+                    // product, and carrier-stops to this same hash-consed shell
+                    // (so `next == node` and the loop terminates) when any
+                    // expression is non-finite. Dispatching here is what makes
+                    // `TemplateLiteralReduce` appear in the request trace.
+                    let pattern = Arc::clone(quasis);
+                    let args = Arc::clone(expressions);
                     drop(data);
-                    let mut literals: Vec<Arc<str>> = Vec::with_capacity(expressions.len());
-                    let mut all_literal = true;
-                    for expr in expressions.iter() {
-                        let resolved = self
-                            .evaluate_deferred_semantic_node_with_context(*expr, reduction_context);
-                        match self.graph().node_data(resolved).as_deref() {
-                            Some(SemanticNodeData::Literal(LiteralValue::String(s))) => {
-                                literals.push(Arc::from(s.as_str()));
-                            }
-                            _ => {
-                                all_literal = false;
-                                break;
-                            }
-                        }
+                    let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
+                        pattern,
+                        args,
+                        context: self.template_literal_reduce_context(),
+                    });
+                    crate::request_context::observe_component_meta_read_suppress(&read);
+                    match read.value {
+                        QueryResult::Value(id) => id,
+                        _ => break node,
                     }
-                    if !all_literal {
-                        break node;
-                    }
-                    let mut buf = String::new();
-                    for (idx, quasi) in quasis.iter().enumerate() {
-                        buf.push_str(quasi);
-                        if let Some(lit) = literals.get(idx) {
-                            buf.push_str(lit);
-                        }
-                    }
-                    self.graph()
-                        .intern_node(SemanticNodeData::Literal(LiteralValue::String(buf)))
                 }
                 SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                     canonical_id,

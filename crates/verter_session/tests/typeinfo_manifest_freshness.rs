@@ -159,10 +159,9 @@ fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
 /// 42, `U2.MAPPED_TEMPLATE` 16, with 0 lifted; after the publication/utility lifts
 /// plus the U2 IndexedAccess-reduction lifts (which also move
 /// `wide_deep_projected_token` from `U2.INDEXED_ACCESS` to `U2.MAPPED_TEMPLATE`)
-/// the generated counts are 2 / 13 / 40 / 19 with 7 lifted (2 at
-/// QUERY_VALUE_DOMAIN, 2 at INDEXED_ACCESS, 3 at MAPPED_TEMPLATE) and 355 ignored.
-/// Each assertion FAILS against the pre-lift
-/// generated file and PASSES against the committed post-lift file — so reverting
+/// the generated counts are 2 / 13 / 40 / 19 with 8 lifted (2 at
+/// QUERY_VALUE_DOMAIN, 2 at INDEXED_ACCESS, 4 at MAPPED_TEMPLATE) and 354 ignored.
+/// Each assertion is pinned to the exact committed lift partition — so reverting
 /// (or mis-counting) any lift's manifest re-partition breaks this test.
 #[test]
 fn manifest_block_counts_reflect_lifts() {
@@ -203,10 +202,11 @@ fn manifest_block_counts_reflect_lifts() {
     // Lifted-status counts.
     assert_eq!(
         count("status: IgnoreStatus::Lifted {"),
-        7,
-        "exactly 7 IgnoredTestRows must carry `status: Lifted` (2 index-signature \
+        8,
+        "exactly 8 IgnoredTestRows must carry `status: Lifted` (2 index-signature \
          publication + 2 built-in modifier-utility + 2 terminal indexed-access \
-         projections + 1 wide/deep literal-union projection)",
+         projections + 1 wide/deep literal-union projection + 1 U2.MAPPED_TEMPLATE \
+         `-?` optional-remover lift)",
     );
     assert_eq!(
         count(
@@ -224,15 +224,16 @@ fn manifest_block_counts_reflect_lifts() {
     );
     assert_eq!(
         count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2MappedTemplate }"),
-        3,
+        4,
         "the 2 built-in modifier-utility lifts + the wide/deep literal-union \
-         projection lift must record their lifting block as U2.MAPPED_TEMPLATE",
+         projection lift + the `-?` optional-remover (`mapped_modifier_minus_optional`) \
+         lift must record their lifting block as U2.MAPPED_TEMPLATE",
     );
 
-    // Total ignored (status: Ignored) rows after 7 lifts.
+    // Total ignored (status: Ignored) rows after 8 lifts.
     assert_eq!(
         count("status: IgnoreStatus::Ignored"),
-        355,
-        "exactly 355 IgnoredTestRows must remain `Ignored` (362 total − 7 lifted)",
+        354,
+        "exactly 354 IgnoredTestRows must remain `Ignored` (362 total − 8 lifted)",
     );
 }

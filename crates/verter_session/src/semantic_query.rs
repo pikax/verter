@@ -3515,17 +3515,23 @@ pub enum SemanticQueryKey {
     /// (NO `P`; substitution rides on `args` — see
     /// [`TemplateLiteralReduceContext`]).
     ///
-    /// **LIVE producer** ([`AdmissionSpec::Singleflight`]). The build does
-    /// NOT re-implement concatenation: it interns the
-    /// [`SemanticNodeData::TemplateLiteral`] carrier and asks the ONE shared
-    /// deferred evaluator to fold it. All-literal expressions fold to a
-    /// single [`SemanticNodeData::Literal`] string; any non-literal
-    /// expression carrier-stops to the `TemplateLiteral` shell. Value
-    /// domain: [`SemanticQueryValueTag::TypeNode`].
+    /// **LIVE producer** ([`AdmissionSpec::Singleflight`]). The build is the
+    /// ONE shared template-literal reducer: it resolves each interpolated
+    /// expression to its finite set of string-literal choices through the
+    /// shared deferred evaluator, then forms the CARTESIAN PRODUCT of those
+    /// choices. An all-single-literal template folds to one
+    /// [`SemanticNodeData::Literal`] string; a finite union of choices
+    /// renormalises through `NormalizeUnion`; any non-finite expression — or a
+    /// finite product whose width exceeds the keyspace budget — carrier-stops
+    /// to the `TemplateLiteral` shell (an over-budget product is additionally
+    /// non-cacheable / budget-tainted). Value domain:
+    /// [`SemanticQueryValueTag::TypeNode`].
     ///
     /// Literal-precise intrinsic transforms (`Uppercase<"a">` → `"A"`) are
-    /// NOT part of this key — those ride the `Instantiate` path and widen
-    /// to `Primitive(String)`.
+    /// NOT part of this key — those ride the `Instantiate` path, which
+    /// PRESERVES literal/union results (folding `Uppercase<"a">` → `"A"` and
+    /// distributing over unions); it widens to `Primitive(String)` only for a
+    /// broad `string` / non-literal carrier.
     ///
     /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
     TemplateLiteralReduce {

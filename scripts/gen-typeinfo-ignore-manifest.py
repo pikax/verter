@@ -1200,6 +1200,21 @@ def proof_for_capability(cap: str) -> str:
 #    consumed (no `Relate`/`Conditional` dispatch), which holds precisely because
 #    `Instantiate` is owned by `U2.QUERY_VALUE_DOMAIN`, not `U2.RELATION_INFER`.
 LIFTED_ROW_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
+    ("mapped_modifiers.rs", "mapped_modifier_minus_optional_strips_optional_and_undefined"): {
+        "mech": "MappedTemplateRemap",
+        "proof": "ProofRequirement::Ts7Oracle(OracleId::MappedTemplate)",
+        "semantic_queries": ["ResolveDecl", "Instantiate", "KeyOf", "MappedType", "ProjectPath"],
+        "consumed_mechanisms": [
+            "QueryValueDomainFoundation",
+            "IndexedAccessUnionDistribution",
+        ],
+        "unblocker": (
+            "lifted by U2.MAPPED_TEMPLATE: `AllRequired<{ a?: string; b?: number }>` "
+            "is the userland mapped type `{ [K in keyof T]-?: T[K] }`; the presence-only "
+            "`-?` optional-remover is the terminal MappedTemplateRemap producer, proven "
+            "against the checked-in tsgo oracle snapshot via oracle::run_row"
+        ),
+    },
     ("index_signatures.rs", "index_signatures_numeric_index_publishes_signature"): {
         "mech": "QueryValueDomainFoundation",
         "proof": "ProofRequirement::Ts7Oracle(OracleId::IndexSignature)",

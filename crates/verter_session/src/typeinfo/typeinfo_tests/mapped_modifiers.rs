@@ -18,7 +18,9 @@
 //!     members in the projected surface (it does NOT prune them).
 //!     (Verter does NOT reduce yet; `#[ignore]`d as a future contract.)
 
+use super::oracle;
 use super::support::*;
+use verter_session_oracle_macro::oracle_row;
 
 const MAPPED_MODIFIERS: &str = include_str!("fixtures/mapped_modifiers.ts");
 
@@ -109,23 +111,26 @@ fn mapped_modifier_plus_optional_marks_every_member_optional() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `AllRequired<{ a?: string; b?: number }>` = `{ a: string; b: number }`.
+// The `-?` presence-only optional remover clears the optional flag; the
+// optional-origin `undefined` lives on the flag, so the bare value type surfaces.
+// The lifted body is the registry-keyed tsgo oracle comparison (`Expanded`).
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not strip `undefined` from the slot type when applying the `-?` mapped modifier; it only toggles the optional marker. Verter publishes `string | undefined` for what should be bare `string`. Keep as the future `-?` undefined-stripping contract"]
-fn mapped_modifier_minus_optional_strips_optional_and_undefined() {
-    // TS7 contract: `AllRequired<{ a: string | undefined; b: number | undefined }>`
-    // = `{ a: string; b: number }`. The `-?` mapped form strips the optional
-    // marker AND removes `undefined` from the slot type.
-    //
-    // The fixture uses explicit `| undefined` slot types (instead of the `?`
-    // shorthand) on purpose: with `a?: string` an implementer can pass by
-    // only flipping `optional → false`. With `a: string | undefined`, the
-    // resolver MUST ALSO rewrite the slot type to bare `string` — that's
-    // the actual TS7 contract for `-?` and it's what this assertion locks
-    // in (asserting `Primitive::String`, not `String | Undefined`).
+fn mapped_modifier_minus_optional_strips_optional_and_undefined() {}
+
+#[test]
+fn mapped_minus_optional_strips_only_optional_origin_undefined() {
+    // Block guard (U2.MAPPED_TEMPLATE): `-?` over an OPTIONAL-origin property
+    // (`a?: string`) clears the flag and yields the BARE value type. The
+    // optional-origin `undefined` is represented by the flag, never injected
+    // into the value slot, so the published value is `string`, NOT
+    // `string | undefined`. Negative assertion: the slot must be a bare
+    // primitive, never a `String | Undefined` union.
     let host = make_host_with_footprint();
     upsert(&host);
 
-    let (expr, record) = resolve_expr(
+    let (expr, _record) = resolve_expr(
         &host,
         "/fixtures/mapped_modifiers.ts",
         "RemoveOptionalResult",
@@ -134,14 +139,53 @@ fn mapped_modifier_minus_optional_strips_optional_and_undefined() {
     );
 
     let props = object_props(&expr);
-    assert_eq!(prop_names(&props), vec!["a", "b"]);
-    assert!(!props["a"].optional);
-    assert!(!props["b"].optional);
-    // Asserting bare primitives (no `| undefined`) characterises the
-    // undefined-stripping behaviour of `-?`.
+    assert!(!props["a"].optional, "-? must clear the optional flag");
     assert_primitive(&props["a"].ty, PrimitiveName::String);
-    assert_primitive(&props["b"].ty, PrimitiveName::Number);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
+    assert!(
+        !matches!(&props["a"].ty, TypeExpr::Union(_)),
+        "-? over an optional-origin property must NOT leave a `| undefined` \
+         union in the value slot, got {:?}",
+        props["a"].ty
+    );
+}
+
+#[test]
+fn mapped_minus_optional_preserves_explicit_undefined_on_required_property() {
+    // Block guard (U2.MAPPED_TEMPLATE): `-?` over a REQUIRED property whose
+    // `| undefined` is EXPLICIT in the declared type preserves it. Real TS:
+    // `Required<{ a: string | undefined }>` = `{ a: string | undefined }` —
+    // the `undefined` is part of the type, not an optional-origin marker, so
+    // `-?` (a presence-only modifier) leaves it intact. Discriminates against
+    // an over-eager implementation that subtracts `undefined` from every `-?`
+    // value slot. Positive assertion: the `| undefined` MUST still be present.
+    let host = make_host_with_footprint();
+    upsert(&host);
+
+    let (expr, _record) = resolve_expr(
+        &host,
+        "/fixtures/mapped_modifiers.ts",
+        "RequiredExplicitUndefined",
+        &[],
+        ProjectionMode::Expanded,
+    );
+
+    let props = object_props(&expr);
+    assert!(!props["a"].optional, "the required property stays required");
+    let TypeExpr::Union(arms) = &props["a"].ty else {
+        panic!(
+            "-? must PRESERVE the explicit `string | undefined` on a required \
+             property, got {:?}",
+            props["a"].ty
+        );
+    };
+    assert!(
+        arms.contains(&TypeExpr::Primitive(PrimitiveName::String)),
+        "the `string` arm must survive, got {arms:?}"
+    );
+    assert!(
+        arms.contains(&TypeExpr::Primitive(PrimitiveName::Undefined)),
+        "the explicit `undefined` arm MUST be preserved, got {arms:?}"
+    );
 }
 
 #[test]

@@ -2,12 +2,12 @@
 //!
 //! Two tables live in this one module:
 //!
-//! - `IgnoredTestRow` — EXACTLY 362 test-site rows total. 355 carry
+//! - `IgnoredTestRow` — EXACTLY 362 test-site rows total. 354 carry
 //!   `status: Ignored` (one per live `#[ignore = "..."]` annotation inside
 //!   `crates/verter_session/src/typeinfo/typeinfo_tests/**/*.rs`, bijective
-//!   with the source `#[ignore]`s) and 7 carry `status: Lifted` (no live
+//!   with the source `#[ignore]`s) and 8 carry `status: Lifted` (no live
 //!   `#[ignore]`, each backed by an oracle row). The table length is
-//!   count-guarded at 362; the live-ignore count is count-guarded at 355.
+//!   count-guarded at 362; the live-ignore count is count-guarded at 354.
 //!   Each row carries the full 13-column schema: `file`, `function`,
 //!   `substrate`, `capability`, `organ`, `owning_u_block`, `block_id`,
 //!   `semantic_queries`, `proof`, `status`, `mechanism_id`,
@@ -36,7 +36,7 @@
 //! `count(IgnoredTestRow where status == Ignored)`, not a
 //! frozen literal; it tracks the live ignore set as blocks lift rows
 //! (and as same-file overload retention adds new ones) and currently
-//! resolves to 355 (362 rows total − 7 lifted).
+//! resolves to 354 (362 rows total − 8 lifted).
 //!
 //! Guards:
 //!
@@ -164,7 +164,7 @@ enum TargetSubstrate {
 // The two-table manifest ledger schema.
 //
 // `IgnoredTestRow` carries EXACTLY 362 test-site rows total (count-guarded):
-// 355 `Ignored` (bijective with the source `#[ignore]`s) + 7 `Lifted`.
+// 354 `Ignored` (bijective with the source `#[ignore]`s) + 8 `Lifted`.
 // `AdditionalProofRow` carries the CLOSED set of 7 coverage-only rows
 // (6 JSX no-new-key submatrix + 1 mapped companion) — excluded from the
 // ignored count + bijection. Both tables and the `TYPEINFO_PARITY_BLOCKS`
@@ -531,7 +531,7 @@ enum ProofRequirement {
 }
 
 /// One manifest row per typeinfo test-site — EXACTLY 362 rows total
-/// (355 `Ignored` + 7 `Lifted`). 13 fields.
+/// (354 `Ignored` + 8 `Lifted`). 13 fields.
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
 struct IgnoredTestRow {
@@ -734,9 +734,9 @@ const fn count_ignored_rows(rows: &[IgnoredTestRow]) -> usize {
 
 /// Total ignored typeinfo test sites — DERIVED as
 /// `count(IgnoredTestRow where status == Ignored)`, NOT a frozen
-/// literal. It tracks the live ignore set — currently 355 (the 362-row
-/// table minus the 7 `Lifted` rows), recomputed as blocks lift more
-/// rows and as same-file overload retention adds new ones. The 7 lifted
+/// literal. It tracks the live ignore set — currently 354 (the 362-row
+/// table minus the 8 `Lifted` rows), recomputed as blocks lift more
+/// rows and as same-file overload retention adds new ones. The 8 lifted
 /// rows carry `status: Lifted { .. }` and no live `#[ignore]`; every
 /// other `IgnoredTestRow` carries `status: Ignored`.
 ///
@@ -748,7 +748,7 @@ const fn count_ignored_rows(rows: &[IgnoredTestRow]) -> usize {
 /// those describe how the macro expands, not the test sites
 /// themselves. The macro-defined raw count includes 22 such
 /// in-macro-body lines that are not test sites; the live tree has
-/// 355 expanded test-site ignores + 7 lifted rows = the 362-row table
+/// 354 expanded test-site ignores + 8 lifted rows = the 362-row table
 /// every guard below operates against.
 const EXPECTED_TOTAL_IGNORED_COUNT: usize = count_ignored_rows(EXPECTED_IGNORE_MANIFEST);
 
@@ -1333,33 +1333,35 @@ fn ignored_test_row_table_holds_exactly_362_rows() {
         EXPECTED_IGNORE_MANIFEST.len(),
     );
 
-    // The derived live-ignore count is 355: the table holds 362 rows, of which
-    // 7 are `Lifted` (the 2 index-signature publication rows at
+    // The derived live-ignore count is 354: the table holds 362 rows, of which
+    // 8 are `Lifted` (the 2 index-signature publication rows at
     // U2.QUERY_VALUE_DOMAIN + the 2 built-in modifier-utility rows at
     // U2.MAPPED_TEMPLATE + the 2 terminal indexed-access projection rows at
     // U2.INDEXED_ACCESS + the 1 wide/deep literal-union projection row at
-    // U2.MAPPED_TEMPLATE) and 355 remain `Ignored`.
-    // `EXPECTED_TOTAL_IGNORED_COUNT` is DERIVED as count(status == Ignored), so
-    // it tracks lifts automatically.
+    // U2.MAPPED_TEMPLATE + the 1 `-?` optional-remover row
+    // (`mapped_modifier_minus_optional`) at U2.MAPPED_TEMPLATE) and 354 remain
+    // `Ignored`. `EXPECTED_TOTAL_IGNORED_COUNT` is DERIVED as
+    // count(status == Ignored), so it tracks lifts automatically.
     assert_eq!(
-        EXPECTED_TOTAL_IGNORED_COUNT, 355,
+        EXPECTED_TOTAL_IGNORED_COUNT, 354,
         "EXPECTED_TOTAL_IGNORED_COUNT is DERIVED as count(status == \
-         Ignored); with 7 rows lifted it must equal 355. Got {}.",
+         Ignored); with 8 rows lifted it must equal 354. Got {}.",
         EXPECTED_TOTAL_IGNORED_COUNT,
     );
-    // Exactly 7 rows are `Lifted` (2 index-signature publication + 2 built-in
+    // Exactly 8 rows are `Lifted` (2 index-signature publication + 2 built-in
     // modifier-utility + 2 terminal indexed-access projections + 1 wide/deep
-    // literal-union projection).
+    // literal-union projection + 1 `-?` optional-remover at U2.MAPPED_TEMPLATE).
     let lifted = EXPECTED_IGNORE_MANIFEST
         .iter()
         .filter(|r| matches!(r.status, IgnoreStatus::Lifted { .. }))
         .count();
     assert_eq!(
-        lifted, 7,
-        "exactly 7 IgnoredTestRows are Lifted (2 index-signature publication at \
+        lifted, 8,
+        "exactly 8 IgnoredTestRows are Lifted (2 index-signature publication at \
          U2.QUERY_VALUE_DOMAIN + 2 built-in modifier-utility at U2.MAPPED_TEMPLATE \
          + 2 terminal indexed-access projections at U2.INDEXED_ACCESS + 1 wide/deep \
-         literal-union projection at U2.MAPPED_TEMPLATE); got {lifted}",
+         literal-union projection at U2.MAPPED_TEMPLATE + 1 `-?` optional-remover \
+         (`mapped_modifier_minus_optional`) at U2.MAPPED_TEMPLATE); got {lifted}",
     );
 
     // Disjointness: no `(file, function)` in both tables. A
@@ -2560,16 +2562,16 @@ fn lifted_row_trace_engine_is_discriminating() {
     // (6) NON-CIRCULARITY proof: WRONG producer via WRONG block. Claim the
     //     utility trace belongs to `U2.INDEXED_ACCESS` with mechanism
     //     `IndexedAccessUnionDistribution`, status block `U2.INDEXED_ACCESS`,
-    //     and the consumed set the OLD circular engine would have computed
+    //     and the consumed set a CIRCULAR derivation would compute
     //     (dispatched minus the claimed-block-owned mechanism =
-    //     {QueryValueDomainFoundation, MappedTemplateRemap}). The OLD engine
-    //     derived the producer by FILTERING dispatched mechanisms to the CLAIMED
-    //     block, so it would have ACCEPTED this self-consistent mis-claim. The
-    //     NEW engine derives the producer INDEPENDENTLY — the DAG-terminal block
-    //     of {U2QueryValueDomain, U2IndexedAccess, U2MappedTemplate} is
-    //     U2MappedTemplate ⇒ producer = MappedTemplateRemap ≠ the claimed
-    //     IndexedAccessUnionDistribution — so it MUST FAIL. This is the proof
-    //     the engine is non-circular.
+    //     {QueryValueDomainFoundation, MappedTemplateRemap}). A circular
+    //     derivation that FILTERED dispatched mechanisms to the CLAIMED
+    //     block would ACCEPT this self-consistent mis-claim. The lifted-row
+    //     trace mechanism instead derives the producer INDEPENDENTLY — the
+    //     DAG-terminal block of {U2QueryValueDomain, U2IndexedAccess,
+    //     U2MappedTemplate} is U2MappedTemplate ⇒ producer =
+    //     MappedTemplateRemap ≠ the claimed IndexedAccessUnionDistribution —
+    //     so it MUST FAIL. This is the proof the derivation is non-circular.
     let circular = lifted_row_trace_failures(
         "circular-wrong-block",
         U2IndexedAccess,
@@ -2893,17 +2895,18 @@ fn lifted_row_audit_query_mode_matches_spec() {
         );
     }
 
-    // Independent expected fact: all seven seated rows are Expanded-mode oracle
+    // Independent expected fact: all eight seated rows are Expanded-mode oracle
     // identities (the two index-signature publications + the two modifier
-    // utilities + the three U2 IndexedAccess-reduction carve-outs, each verified
-    // in the original `Expanded` projection mode).
+    // utilities + the three U2 IndexedAccess-reduction carve-outs + the
+    // U2.MAPPED_TEMPLATE `-?` optional-remover, each verified in the original
+    // `Expanded` projection mode).
     let expanded = ORACLE_QUERY_SPECS
         .iter()
         .filter(|s| matches!(spec_mode(&s.query_helper), ProjectionModeSpec::Expanded))
         .count();
     assert_eq!(
-        expanded, 7,
-        "all seven seated lifted rows must be Expanded-mode oracle identities",
+        expanded, 8,
+        "all eight seated lifted rows must be Expanded-mode oracle identities",
     );
 }
 

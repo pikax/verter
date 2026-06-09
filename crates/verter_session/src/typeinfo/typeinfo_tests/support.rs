@@ -491,6 +491,16 @@ pub(super) fn assert_string_literal(expr: &TypeExpr, expected: &str) {
     }
 }
 
+/// Return the value of a string-literal type, panicking on any other shape.
+/// Lets a caller BRANCH on the literal (e.g. match a union arm by its
+/// discriminant) where [`assert_string_literal`] would only assert one value.
+pub(super) fn string_literal_value(expr: &TypeExpr) -> &str {
+    match expr {
+        TypeExpr::Literal(LiteralValue::String(value)) => value.as_str(),
+        other => panic!("expected string literal, got {other:?}"),
+    }
+}
+
 pub(super) fn assert_number_literal(expr: &TypeExpr, expected: f64) {
     match expr {
         TypeExpr::Literal(LiteralValue::Number(value)) => {
@@ -512,6 +522,69 @@ pub(super) fn function_type(expr: &TypeExpr) -> &FunctionExpr {
         TypeExpr::Function(function) => function,
         other => panic!("expected function type, got {other:?}"),
     }
+}
+
+/// Drive the shared [`SemanticQueryKey::TemplateLiteralReduce`] producer
+/// directly over interned literal-union args and return the full `CacheRead`
+/// (so callers can inspect `cache_suppress` / `result_is_partial`) plus the
+/// shared graph (so callers can inspect the produced node's shape).
+///
+/// `quasis` is the alternating literal text (length `arg_unions.len() + 1`);
+/// each entry of `arg_unions` is the finite set of string-literal choices for
+/// one interpolated expression (a single-element set interns a bare literal, a
+/// multi-element set a `Union`). Used by the keyspace-budget guard.
+#[allow(clippy::type_complexity)]
+pub(crate) fn template_literal_reduce_read(
+    host: &VerterHost,
+    quasis: &[&str],
+    arg_unions: &[Vec<String>],
+) -> (
+    crate::semantic_query::CacheRead<
+        crate::semantic_query::QueryResult<crate::semantic_query::SemanticNodeId>,
+    >,
+    Arc<crate::semantic_query_memo::SemanticGraphStore>,
+) {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{LiteralValue, SemanticNodeData, SemanticNodeId, SemanticQueryKey};
+
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let args: Vec<SemanticNodeId> = arg_unions
+        .iter()
+        .map(|choices| {
+            let members: Vec<SemanticNodeId> = choices
+                .iter()
+                .map(|choice| {
+                    graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                        choice.clone(),
+                    )))
+                })
+                .collect();
+            if members.len() == 1 {
+                members[0]
+            } else {
+                graph.intern_node(SemanticNodeData::Union(Arc::from(
+                    members.into_boxed_slice(),
+                )))
+            }
+        })
+        .collect();
+
+    let store_view = host.resolver_store_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let read = dispatch.execute_read(SemanticQueryKey::TemplateLiteralReduce {
+        pattern: Arc::from(
+            quasis
+                .iter()
+                .map(|quasi| Arc::from(*quasi))
+                .collect::<Vec<Arc<str>>>()
+                .into_boxed_slice(),
+        ),
+        args: Arc::from(args.into_boxed_slice()),
+        context: dispatch.template_literal_reduce_context(),
+    });
+    (read, graph)
 }
 
 pub(super) fn loaded_file_names(host: &VerterHost) -> Vec<String> {

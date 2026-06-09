@@ -43,6 +43,76 @@ type AugmentationContributions = (
     Vec<(Arc<str>, crate::semantic_query::HashValue)>,
 );
 
+/// Upper bound on the template-literal keyspace product width
+/// `∏ |choice_set_i|` enumerated by
+/// [`ProjectSemanticDispatch::reduce_template_literal_nodes`]. A finite
+/// template whose enumerated product would exceed this cap carrier-stops to
+/// the deferred [`SemanticNodeData::TemplateLiteral`] shell instead of
+/// materialising (and possibly warm-publishing) an explosive union. The cap
+/// sits well above any realistic component template keyspace (event / slot /
+/// prop-name enumerations are far below it) while bounding allocation on the
+/// pathological tail. This is a PRODUCT-WIDTH bound, distinct from the
+/// deferred evaluator's per-arg recursion depth ceiling — that ceiling bounds
+/// how deep one argument resolves, not how wide the cartesian product grows.
+pub(super) const TEMPLATE_LITERAL_KEYSPACE_CAP: usize = 1024;
+
+/// Outcome of [`ProjectSemanticDispatch::reduce_template_literal_nodes`]: the
+/// folded surface node plus whether the keyspace product-width budget was
+/// exceeded. A `keyspace_budget_exceeded == true` outcome carries the deferred
+/// `TemplateLiteral` carrier-stop shell as `node`, and the live producer marks
+/// the build non-cacheable / budget-tainted so it is never warm-admitted.
+pub(super) struct TemplateReduceOutcome {
+    pub(super) node: SemanticNodeId,
+    pub(super) keyspace_budget_exceeded: bool,
+}
+
+/// Canonical TypeScript stringification of a literal interpolated into a
+/// template-literal type (`` `${...}` ``). Typed-IR only — it reads the
+/// interned [`LiteralValue`], never source text. Mirrors TS lexing: a string
+/// literal contributes its text; a numeric literal its JS `Number`→string
+/// form; a boolean `"true"` / `"false"`; a bigint its base-10 digits (the
+/// `n` suffix is literal syntax, not part of the interpolated string).
+fn literal_value_template_text(value: &LiteralValue) -> String {
+    match value {
+        LiteralValue::String(text) => text.clone(),
+        LiteralValue::Number(number) => js_number_to_string(*number),
+        LiteralValue::Boolean(flag) => if *flag { "true" } else { "false" }.to_string(),
+        // `LiteralValue::BigInt` stores the signed base-10 magnitude with no
+        // `n` suffix (see `verter_type_expr_oxc::lower_literal`), which is
+        // exactly TS's interpolated form of a bigint literal.
+        LiteralValue::BigInt(digits) => digits.clone(),
+    }
+}
+
+/// JS `Number`→string for a finite-or-special `f64` literal, matching the
+/// string TS produces when interpolating a numeric literal into a
+/// template-literal type. Rust's `f64` `Display` matches JS only across the
+/// common integer / decimal range component-template literals actually hit
+/// (`1.0`→`"1"`, `1.5`→`"1.5"`); the special cases below align `-0`→`"0"`, the
+/// infinities and `NaN` to their JS spellings. Two exponent-notation regimes
+/// are NOT modelled — JS switches to exponent form for large magnitudes
+/// (`|x| ≥ 1e21`) and for small magnitudes (`|x| < 1e-6`, e.g. `1e-7`→`"1e-7"`
+/// where `f64` `Display` yields `"0.0000001"`); such literals do not appear in
+/// component template types.
+fn js_number_to_string(number: f64) -> String {
+    if number.is_nan() {
+        return "NaN".to_string();
+    }
+    if number.is_infinite() {
+        return if number > 0.0 {
+            "Infinity"
+        } else {
+            "-Infinity"
+        }
+        .to_string();
+    }
+    // `-0.0 == 0.0` is true, so this collapses negative zero to `"0"` like JS.
+    if number == 0.0 {
+        return "0".to_string();
+    }
+    format!("{number}")
+}
+
 /// Encode a [`ProjectionReductionContext`] as a compact u32 bit
 /// pattern used in the mapped-member-materialization
 /// identity tuple. Layout: bits 0–1 (demand tag) and 2+ (mode tag).
@@ -2330,13 +2400,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   non-literal arms still fall through to the deferred shell.
     /// - **Opaque** (`NonNullable`, `Awaited`, function-signature
     ///   utilities when the argument shape does not match, string
-    ///   intrinsics with non-literal inputs): return a shell anchored
+    ///   intrinsics with a broad/open carrier): return a shell anchored
     ///   to the utility + arg identity with `Instantiate` +
     ///   `SubstituteTypeParam` edges. The shell's body is lazy —
     ///   callers projecting into it follow the normal `ProjectPath`
     ///   route which terminates with `Miss` until a later track
-    ///   implements the full shape. String intrinsics return the
-    ///   `String` primitive directly.
+    ///   implements the full shape. String intrinsics reduce
+    ///   literal/union inputs to the transformed literal/union
+    ///   (`Uppercase<"a">`→`"A"`, distributing over unions); only a
+    ///   broad/open carrier (`string`/non-literal) widens to `String`,
+    ///   and a bare `TypeParam` is preserved as an `InstantiationRef`
+    ///   carrier.
     ///
     /// Every utility path emits the `Instantiate` edge with sources
     /// `[base, args...]` and per-arg `SubstituteTypeParam` edges so the
@@ -2622,12 +2696,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
 
             // ---- String intrinsics ----
-            // These always produce a string primitive. The actual
-            // transformation (uppercase, lowercase, etc.) applies at the
-            // literal-string level; with no literal-type support in the
-            // semantic graph today the result is the `String` primitive.
+            // `Uppercase` / `Lowercase` / `Capitalize` / `Uncapitalize` are
+            // literal-preserving: a string literal maps to its case-transformed
+            // literal, a union distributes per-arm then renormalises, `never`
+            // stays `never`, and a broad `string` (or any unresolved/non-string
+            // shape) fails closed to the `string` primitive. The template-literal
+            // reducer consumes this result so `` `on${Capitalize<"submit"|"cancel">}` ``
+            // distributes correctly. Typed-IR only — the case transform applies
+            // to the interned literal value, never to source/display text.
             "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize" if args.len() == 1 => {
-                let result = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                let resolved_arg =
+                    self.evaluate_deferred_semantic_node_with_context(args[0], context);
+                let result = if matches!(
+                    graph.node_data(resolved_arg).as_deref(),
+                    Some(SemanticNodeData::TypeParam { .. })
+                ) {
+                    // Binder-preservation catches ONLY a BARE, unsubstituted
+                    // `TypeParam` (e.g. the mapper binder `K` in
+                    // `as `on${Capitalize<K>}``): preserve the intrinsic as a
+                    // deferred `InstantiationRef` carrier so a later per-key
+                    // substitution can bind the param and reduce. Reducing now
+                    // would erase the binder (collapse to the broad `string`)
+                    // before the key is known. A COMPOUND / nested open arg
+                    // (an open conditional, a `TypeParam` buried inside a union
+                    // or object) is NOT caught here — it falls through to
+                    // `apply_string_intrinsic`, which fails closed to the
+                    // `string` primitive for any non-finite-literal shape.
+                    graph.intern_node(SemanticNodeData::InstantiationRef {
+                        base: crate::semantic_query::DeclIdentity {
+                            canonical_id: Arc::from("__builtin__"),
+                            whole_hash: crate::semantic_query::HashValue::default(),
+                            decl_name: Arc::from(name),
+                        },
+                        args: Arc::from(vec![args[0]].into_boxed_slice()),
+                    })
+                } else {
+                    // Reuse the node we already resolved above — do NOT re-evaluate
+                    // `args[0]` from scratch inside `apply_string_intrinsic`.
+                    self.apply_string_intrinsic(name, resolved_arg, context)
+                };
                 record_utility_edges(result);
                 (QueryResult::Value(result), fence, false)
             }
@@ -3042,6 +3149,72 @@ impl<'a> ProjectSemanticDispatch<'a> {
     // `SemanticQueryKey::Instantiate.base` (the env-bearing content-free
     // `ResolvedDeclSlotIdentity` slot), so there is no arena node to unwrap.
 
+    /// Single-hop union-index distribution — the `IndexedAccessUnionDistribution`
+    /// reduction for `Obj[A | B]`. Resolves the index node; when it is a FINITE
+    /// union whose every arm normalises to a literal key (`string` / `number`),
+    /// projects `Obj[arm]` per arm through the shared `IndexedAccess` query and
+    /// renormalises the results through `NormalizeUnion`. Returns `None` (fall
+    /// through to the path walker) for a non-`TypeNode` index, a non-union
+    /// resolved index, an open/generic union arm, or any per-arm projection
+    /// miss — so symbolic / partial cases keep their carrier.
+    fn distribute_union_index(
+        &self,
+        base: SemanticNodeId,
+        index: &crate::semantic_query::IndexKey,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<crate::project_semantic_dispatch::walk::QueryBuildOutput> {
+        use crate::semantic_query::IndexKey;
+        let IndexKey::TypeNode(index_node) = index else {
+            return None;
+        };
+        let resolved = self.evaluate_deferred_semantic_node_with_context(*index_node, context);
+        let members = match self.graph().node_data(resolved).as_deref() {
+            Some(SemanticNodeData::Union(members)) => Arc::clone(members),
+            _ => return None,
+        };
+        if members.is_empty() {
+            return None;
+        }
+        let mut projected: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
+        let mut any_partial = false;
+        for &member in members.iter() {
+            // Each arm MUST be a concrete literal key; a non-literal arm
+            // aborts the distribution (the union is not a finite key set).
+            let member_index = match self.normalized_index_key_node(member) {
+                key @ (IndexKey::String(_) | IndexKey::Number(_)) => key,
+                IndexKey::TypeNode(_) => return None,
+            };
+            let read = self.execute_read(SemanticQueryKey::IndexedAccess {
+                base,
+                index: member_index,
+                mode: context.mode,
+            });
+            if read.result_is_partial {
+                any_partial = true;
+            }
+            match read.value {
+                QueryResult::Value(id) => projected.push(id),
+                _ => return None,
+            }
+        }
+        let norm = self.execute_read(SemanticQueryKey::NormalizeUnion {
+            members: Arc::from(projected.into_boxed_slice()),
+        });
+        match norm.value {
+            QueryResult::Value(id) => {
+                let observed_self_roots = self.observed_self_roots_from_nodes([base]);
+                let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                    QueryResult::Value(id),
+                    self.project_generation_signature(),
+                ))
+                .with_observed_self_roots(observed_self_roots);
+                out.result_is_partial = any_partial || norm.result_is_partial;
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+
     /// Path-precise projection. Walks each [`PathSegment`]
     /// from `base` via a fresh [`PathWalker`] that dispatches per-hop on
     /// every shell variant (`Object`, `Union`, `Intersection`,
@@ -3073,6 +3246,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if Self::project_path_is_indexed_access(path) {
             if let Some(absorbed) = self.absorb_indexed_access(base) {
                 return absorbed;
+            }
+        }
+        // Union-index distribution (`Obj[A | B]` = `Obj[A] | Obj[B]`). A
+        // single-hop indexed access whose index resolves to a FINITE union of
+        // literal keys distributes per-arm through the shared `IndexedAccess`
+        // query and renormalises. Multi-segment paths, non-union indices, and
+        // open/generic union arms fall through to the path walker unchanged
+        // (one engine — this re-dispatches the shared key, never hand-reduces).
+        if let [PathSegment::Index(index)] = path.as_ref() {
+            if let Some(distributed) = self.distribute_union_index(base, index, context) {
+                return distributed;
             }
         }
         let fence = self.project_generation_signature();
@@ -3689,6 +3873,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let mut produced: Vec<SurfaceMember> = Vec::with_capacity(key_names.len());
         let mut project_member_edges: Vec<(SemanticNodeId, Arc<str>)> = Vec::new();
+        // A key whose `as` remap fails closed (`DeferCarrier`) taints the whole
+        // mapped type: it returns the deferred `Mapped` carrier rather than a
+        // torn surface (set inside the loop, checked after).
+        let mut remap_defers = false;
         for name in &key_names {
             let source_member = source_members.iter().find(|m| &m.name == name);
             let optional = match mapper.optionality {
@@ -3735,46 +3923,82 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } else {
                 self.materialize_mapped_member_value_for_key(mapper, name.as_ref(), context)
             };
-            // Apply `name_remap` (the `as <expr>` clause) via the
-            // shared [`Self::materialize_mapped_member_name_for_key`]
-            // helper — same substitution + context-aware evaluation
-            // the Shallow walker uses, so the two paths produce
-            // identical post-remap names.
-            let produced_name = self.materialize_mapped_member_name_for_key(mapper, name, context);
-            // SAFETY: mapped-type member synthesis (e.g.,
-            // `Partial<T>` / `Required<T>` / `{ [K in S]: V }`).
-            // Members reach the surface via the mapped construction,
-            // NOT via own-body declaration in any consuming macro's
-            // T body. The construction layer is structurally
-            // heritage-equivalent — `false` is the truth.
-            produced.push(SurfaceMember {
-                name: Arc::clone(&produced_name),
-                value,
-                optional,
-                readonly,
-                is_method: false,
-                // Mapped-type produced member. The key domain is already
-                // public-only (non-public class members are filtered out of the
-                // keyspace at `source_members_for_published_projection` /
-                // `key_names_step`), so every produced member is public. For the
-                // homomorphic case (`{ [K in keyof T]: T[K] }` / Partial /
-                // Required / Readonly) thread the matched source member's
-                // (public) visibility verbatim so the invariant is preserved even
-                // if the keyspace gate is ever bypassed; otherwise the synthesized
-                // member is `Public`.
-                visibility: source_member
-                    .map_or(verter_type_expr::MemberVisibility::Public, |m| m.visibility),
-                declared_in_macro_type_arg: false,
-                // Mapped-type produced members are synthesized by the mapped
-                // construction, never an interface/class heritage overlay —
-                // `Authored` (they do not participate in own-body shadowing).
-                merge_role: crate::semantic_query::MemberMergeRole::Authored,
-                // Mapped-produced member: synthesized from a key domain, no
-                // single source declaration site — no spans, no declaration file.
-                spans: verter_type_expr::MemberSpans::default(),
-                declaration_origin: None,
+            // Apply `name_remap` (the `as <expr>` clause) via the shared
+            // [`Self::mapped_member_name_remap_outcome`] classifier — same
+            // substitution + context-aware evaluation the Shallow walker uses.
+            // `Drop` filters the key, `Keys` emits one member per produced
+            // name, `DeferCarrier` fails the whole mapped type closed.
+            let produced_names = match self.mapped_member_name_remap_outcome(mapper, name, context)
+            {
+                MappedKeyRemapOutcome::Keep(n) => vec![n],
+                MappedKeyRemapOutcome::Keys(ns) => ns,
+                MappedKeyRemapOutcome::Drop => continue,
+                MappedKeyRemapOutcome::DeferCarrier => {
+                    remap_defers = true;
+                    break;
+                }
+            };
+            for produced_name in produced_names {
+                // SAFETY: mapped-type member synthesis (e.g.,
+                // `Partial<T>` / `Required<T>` / `{ [K in S]: V }`).
+                // Members reach the surface via the mapped construction,
+                // NOT via own-body declaration in any consuming macro's
+                // T body. The construction layer is structurally
+                // heritage-equivalent — `false` is the truth.
+                produced.push(SurfaceMember {
+                    name: Arc::clone(&produced_name),
+                    value,
+                    optional,
+                    readonly,
+                    is_method: false,
+                    // Mapped-type produced member. The key domain is already
+                    // public-only (non-public class members are filtered out of
+                    // the keyspace at `source_members_for_published_projection` /
+                    // `key_names_step`), so every produced member is public. For
+                    // the homomorphic case (`{ [K in keyof T]: T[K] }` / Partial /
+                    // Required / Readonly) thread the matched source member's
+                    // (public) visibility verbatim so the invariant is preserved
+                    // even if the keyspace gate is ever bypassed; otherwise the
+                    // synthesized member is `Public`.
+                    visibility: source_member
+                        .map_or(verter_type_expr::MemberVisibility::Public, |m| m.visibility),
+                    declared_in_macro_type_arg: false,
+                    // Mapped-type produced members are synthesized by the mapped
+                    // construction, never an interface/class heritage overlay —
+                    // `Authored` (they do not participate in own-body shadowing).
+                    merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                    // Mapped-produced member: synthesized from a key domain, no
+                    // single source declaration site — no spans, no declaration file.
+                    spans: verter_type_expr::MemberSpans::default(),
+                    declaration_origin: None,
+                });
+                project_member_edges.push((value, produced_name));
+            }
+        }
+
+        // Fail closed: a key whose remap could not resolve to a finite key set
+        // returns the deferred `Mapped` carrier (callers re-dispatch once the
+        // remap becomes decidable) — never a torn partial surface.
+        if remap_defers {
+            let node = graph.intern_node(SemanticNodeData::Mapped {
+                source,
+                mapper: mapper.clone(),
             });
-            project_member_edges.push((value, produced_name));
+            graph.record_origin_edge(
+                node,
+                OriginEdgeKind::Normalize,
+                Arc::from(vec![source, mapper.key_space, mapper.value_expr].into_boxed_slice()),
+                OriginMeta::None,
+                Arc::clone(&fence),
+            );
+            let mut deferred_output =
+                crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                    QueryResult::Value(node),
+                    fence,
+                ))
+                .with_observed_self_roots(observed_self_roots);
+            deferred_output.result_is_partial = mapped_is_partial;
+            return deferred_output;
         }
 
         let view = SurfaceView {
@@ -4219,24 +4443,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.source_members_for_published_projection(source)
     }
 
-    /// Per-key Mapped member name materialiser — shared by
+    /// Per-key Mapped key-remap OUTCOME — shared by
     /// [`Self::build_mapped_type`] and the Shallow walker's
     /// `synthesise_mapped_surface`.
     ///
     /// Applies the mapper's `name_remap` (the `as <expr>` clause) by
-    /// substituting the binder with the key literal, evaluating the
-    /// remap under the caller's `context`, and folding the result to a
-    /// string-literal name (the template-literal evaluator handles
-    /// `` `prefix-${K}` `` shapes). Falls back to the iteration key on
-    /// remap resolution failure so the surface remains addressable.
-    pub(super) fn materialize_mapped_member_name_for_key(
+    /// substituting the binder with the key literal and evaluating the remap
+    /// under the caller's `context`, then classifies the result per the TS
+    /// key-remap contract:
+    ///
+    /// - no remap clause ⇒ [`MappedKeyRemapOutcome::Keep`] (the iteration key);
+    /// - `never` ⇒ [`MappedKeyRemapOutcome::Drop`] (the key is filtered out);
+    /// - a finite string `Literal` ⇒ [`MappedKeyRemapOutcome::Keys`] with that
+    ///   one key; a finite union of string literals ⇒ those keys;
+    /// - an unresolved / non-finite / non-string remap ⇒
+    ///   [`MappedKeyRemapOutcome::DeferCarrier`] — the mapped type FAILS CLOSED
+    ///   to its deferred carrier (it NEVER falls back to the original key,
+    ///   which would publish a wrong surface).
+    ///
+    /// The template-literal evaluator folds `` `prefix-${K}` `` shapes through
+    /// the shared `TemplateLiteralReduce` producer before this classification.
+    pub(super) fn mapped_member_name_remap_outcome(
         &self,
         mapper: &crate::semantic_query::MapperKey,
         key_name: &Arc<str>,
         context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Arc<str> {
+    ) -> MappedKeyRemapOutcome {
         let Some(remap_node) = mapper.name_remap else {
-            return Arc::clone(key_name);
+            return MappedKeyRemapOutcome::Keep(Arc::clone(key_name));
         };
         let key_literal =
             self.graph()
@@ -4247,9 +4481,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.substitute_semantic_type_param(remap_node, mapper.parameter_node, key_literal);
         let evaluated_remap =
             self.evaluate_deferred_semantic_node_with_context(substituted_remap, context);
-        match self.graph().node_data(evaluated_remap).as_deref() {
-            Some(SemanticNodeData::Literal(LiteralValue::String(text))) => Arc::from(text.as_str()),
-            _ => Arc::clone(key_name),
+        self.classify_remap_outcome(evaluated_remap)
+    }
+
+    /// Classify an evaluated key-remap node into a [`MappedKeyRemapOutcome`].
+    /// `never` ⇒ Drop, a string literal / finite union of string literals ⇒
+    /// Keys, anything else (broad `string`, an unresolved shell, a non-string
+    /// shape) ⇒ DeferCarrier (fail closed). Recurses through union arms.
+    fn classify_remap_outcome(&self, node: SemanticNodeId) -> MappedKeyRemapOutcome {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
+                MappedKeyRemapOutcome::Keys(vec![Arc::from(text.as_str())])
+            }
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => MappedKeyRemapOutcome::Drop,
+            Some(SemanticNodeData::Union(members)) => {
+                let members = Arc::clone(members);
+                let mut keys: Vec<Arc<str>> = Vec::new();
+                for member in members.iter() {
+                    match self.classify_remap_outcome(*member) {
+                        MappedKeyRemapOutcome::Keys(ks) => keys.extend(ks),
+                        // A `never` arm contributes no key (filtered);
+                        // anything non-finite taints the whole remap.
+                        MappedKeyRemapOutcome::Drop => {}
+                        MappedKeyRemapOutcome::Keep(_) | MappedKeyRemapOutcome::DeferCarrier => {
+                            return MappedKeyRemapOutcome::DeferCarrier;
+                        }
+                    }
+                }
+                if keys.is_empty() {
+                    MappedKeyRemapOutcome::Drop
+                } else {
+                    MappedKeyRemapOutcome::Keys(keys)
+                }
+            }
+            _ => MappedKeyRemapOutcome::DeferCarrier,
         }
     }
 
@@ -4725,20 +4990,85 @@ impl<'a> ProjectSemanticDispatch<'a> {
         .with_observed_self_roots(observed_self_roots)
     }
 
+    /// Literal-preserving string-intrinsic transform shared by the
+    /// `Uppercase` / `Lowercase` / `Capitalize` / `Uncapitalize` arms of
+    /// [`Self::build_instantiate`]. Takes an ALREADY-RESOLVED argument node
+    /// (the caller evaluates it ONCE through the shared deferred evaluator), then:
+    ///
+    /// - a string literal ⇒ the case-transformed literal;
+    /// - a union ⇒ per-arm transform + `NormalizeUnion` (each arm is resolved
+    ///   before transforming);
+    /// - `never` ⇒ `never` (empty domain);
+    /// - a broad `string` / unresolved / non-string shape ⇒ fail closed to the
+    ///   `string` primitive.
+    ///
+    /// Typed-IR only: the transform applies to the interned `LiteralValue`,
+    /// never to source/display text.
+    pub(super) fn apply_string_intrinsic(
+        &self,
+        intrinsic: &str,
+        resolved: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        match graph.node_data(resolved).as_deref() {
+            Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
+                let transformed = transform_string_intrinsic(intrinsic, text);
+                graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(transformed)))
+            }
+            Some(SemanticNodeData::Union(members)) => {
+                let members = Arc::clone(members);
+                let mapped: Vec<SemanticNodeId> = members
+                    .iter()
+                    .map(|m| {
+                        // Union arms are raw member nodes — resolve each once
+                        // before transforming (the entry node was resolved by
+                        // the caller, but its members were not).
+                        let resolved_member =
+                            self.evaluate_deferred_semantic_node_with_context(*m, context);
+                        self.apply_string_intrinsic(intrinsic, resolved_member, context)
+                    })
+                    .collect();
+                let read = self.execute_read(SemanticQueryKey::NormalizeUnion {
+                    members: Arc::from(mapped.into_boxed_slice()),
+                });
+                match read.value {
+                    QueryResult::Value(id) => id,
+                    _ => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
+                }
+            }
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => {
+                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
+            }
+            // Broad `string`, an unresolved deferred shell, or any non-string
+            // shape: fail closed to the `string` primitive (the intrinsic's
+            // declared result domain).
+            _ => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
+        }
+    }
+
     /// Template-literal reduction — the LIVE producer for
     /// [`SemanticQueryKey::TemplateLiteralReduce`].
     ///
-    /// ONE-ENGINE shape: this build does NOT re-implement concatenation. It
-    /// interns the existing [`SemanticNodeData::TemplateLiteral`] carrier
-    /// from the key's `pattern` (quasis) + `args` (expressions), then asks
-    /// the existing deferred evaluator
-    /// ([`Self::evaluate_deferred_semantic_node_with_context`]) to resolve
-    /// that carrier. The evaluator's `TemplateLiteral` arm folds an
-    /// all-literal template into a single
-    /// [`SemanticNodeData::Literal`] string (`quasis[0] expr[0] quasis[1]
-    /// …`) and carrier-stops to the `TemplateLiteral` shell when any
-    /// expression is non-literal — so the produced node is either the
-    /// folded literal or the shell, never a hand-rolled result.
+    /// ONE-ENGINE shape: this build is the SINGLE shared template-literal
+    /// reducer. It resolves every interpolated expression of the key's
+    /// `pattern` (quasis) + `args` (expressions) to its finite set of
+    /// string-literal choices through the shared deferred evaluator, then
+    /// forms the CARTESIAN PRODUCT of those choices into the folded surface
+    /// ([`Self::reduce_template_literal_nodes`]). An all-single-literal
+    /// template folds to one [`SemanticNodeData::Literal`] string; a finite
+    /// union of choices renormalises through
+    /// [`SemanticQueryKey::NormalizeUnion`]; any non-finite expression
+    /// carrier-stops to the `TemplateLiteral` shell. There is no second
+    /// walker — the deferred evaluator's `TemplateLiteral` arm and the
+    /// mapped key-remap path both reach this reducer THROUGH this query.
+    ///
+    /// Keyspace budget: a finite product whose running width exceeds
+    /// [`TEMPLATE_LITERAL_KEYSPACE_CAP`] carrier-stops to the deferred shell
+    /// and the result is marked NON-CACHEABLE / budget-tainted
+    /// (`cache_suppress` + `result_is_partial`) — a truncated / over-budget
+    /// product is never warm-admitted (mirrors the evaluator's
+    /// budget-exhaustion `ReturnOnly` discipline).
     ///
     /// Self-version rooting: the reduction depends on every interpolated
     /// arg node, so the memo entry roots on the file content version each
@@ -4751,22 +5081,211 @@ impl<'a> ProjectSemanticDispatch<'a> {
         args: &Arc<[SemanticNodeId]>,
         _context: crate::semantic_query::TemplateLiteralReduceContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        // Construct/intern the existing carrier, then defer to the shared
-        // evaluator under the key's context (Expanded publication).
-        let node = self.graph().intern_node(SemanticNodeData::TemplateLiteral {
-            quasis: Arc::clone(pattern),
-            expressions: Arc::clone(args),
-        });
-        let reduced = self.evaluate_deferred_semantic_node_with_context(
-            node,
+        let outcome = self.reduce_template_literal_nodes(
+            pattern,
+            args,
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
         );
         let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
-        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-            QueryResult::Value(reduced),
+        let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+            QueryResult::Value(outcome.node),
             self.project_generation_signature(),
         ))
-        .with_observed_self_roots(observed_self_roots)
+        .with_observed_self_roots(observed_self_roots);
+        if outcome.keyspace_budget_exceeded {
+            // The product width tripped the keyspace cap: the value is a
+            // deferred carrier-stop shell, not the fully-enumerated surface.
+            // Mark it a non-cacheable budget-tainted partial so it is never
+            // warm-admitted and the taint folds into the enclosing request.
+            output.cache_suppress = true;
+            output.result_is_partial = true;
+        }
+        output
+    }
+
+    /// Production constructor for the env-bearing
+    /// [`TemplateLiteralReduceContext`](crate::semantic_query::TemplateLiteralReduceContext).
+    /// The key has no decl slot; the already-lowered arg nodes carry the
+    /// content roots, so the context carries ONLY the R/T/L/J environment
+    /// (R21). No content/version hash enters the query-identity key (R6).
+    pub(crate) fn template_literal_reduce_context(
+        &self,
+    ) -> crate::semantic_query::TemplateLiteralReduceContext {
+        let host = self.ctx.host_for_fact_tracer_install();
+        let env = host.host_view_env_hashes();
+        crate::semantic_query::TemplateLiteralReduceContext {
+            resolve_env_hash: env.resolve_env_hash,
+            type_env_hash: env.type_env_hash,
+            lib_env_hash: env.lib_env_hash,
+            project_identity: host.host_view_project_identity().fold_u32(),
+        }
+    }
+
+    /// The ONE shared template-literal reduction helper (typed-IR only).
+    /// Produces the CARTESIAN PRODUCT over the finite string-literal choices
+    /// of every interpolated expression:
+    ///
+    /// - `` `cell:${"name" | "count"}` `` ⇒ `"cell:name" | "cell:count"`;
+    /// - an all-single-literal template ⇒ a single `Literal` string;
+    /// - an empty product (some expression resolved to `never`) ⇒ `never`;
+    /// - any non-finite / non-string expression ⇒ carrier-stop to the
+    ///   `TemplateLiteral` shell (the caller re-dispatches once it resolves).
+    ///
+    /// Keyspace budget: the running product width `∏ |choice_set_i|` is
+    /// bounded by [`TEMPLATE_LITERAL_KEYSPACE_CAP`]. A product whose width
+    /// exceeds the cap carrier-stops to the `TemplateLiteral` shell and the
+    /// returned [`TemplateReduceOutcome::keyspace_budget_exceeded`] flag is
+    /// set so the live producer refuses to warm-admit the over-budget result
+    /// (the per-arg recursion ceiling on the deferred evaluator bounds depth,
+    /// NOT product width — this cap is the width bound). The check runs on the
+    /// per-arg choice-set cardinalities BEFORE any string is allocated.
+    ///
+    /// The multi-result case renormalises through
+    /// [`SemanticQueryKey::NormalizeUnion`] so the union is canonical. Used by
+    /// [`Self::build_template_literal_reduce`] (the live query producer); the
+    /// deferred evaluator's `TemplateLiteral` arm and the mapped key-remap path
+    /// both reach this helper THROUGH that query, never a second walker.
+    pub(super) fn reduce_template_literal_nodes(
+        &self,
+        quasis: &[Arc<str>],
+        args: &[SemanticNodeId],
+        eval_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> TemplateReduceOutcome {
+        let graph = self.graph();
+        let carrier_stop = || TemplateReduceOutcome {
+            node: graph.intern_node(SemanticNodeData::TemplateLiteral {
+                quasis: Arc::from(quasis.to_vec().into_boxed_slice()),
+                expressions: Arc::from(args.to_vec().into_boxed_slice()),
+            }),
+            keyspace_budget_exceeded: false,
+        };
+        // Resolve every interpolated expression to its finite set of
+        // string-literal choices. A `None` carrier-stops the whole template.
+        let mut choice_sets: Vec<Vec<Arc<str>>> = Vec::with_capacity(args.len());
+        for &arg in args {
+            match self.template_arg_literal_choices(arg, eval_context) {
+                Some(choices) => choice_sets.push(choices),
+                None => return carrier_stop(),
+            }
+        }
+        // Keyspace budget gate: bound the cartesian product width BEFORE
+        // allocating any string. A finite-but-huge keyspace (e.g. a template
+        // over several wide finite unions) would otherwise explode allocation
+        // and could warm-publish a truncated surface. An over-cap product
+        // carrier-stops to the deferred shell, tainted budget-exceeded so the
+        // producer never warm-admits it.
+        let mut product_width: usize = 1;
+        for choices in &choice_sets {
+            product_width = product_width.saturating_mul(choices.len());
+        }
+        if product_width > TEMPLATE_LITERAL_KEYSPACE_CAP {
+            return TemplateReduceOutcome {
+                keyspace_budget_exceeded: true,
+                ..carrier_stop()
+            };
+        }
+        // Cartesian product: result = quasis[0] expr[0] quasis[1] … quasis[n].
+        // An empty choice set (a `never` expression) collapses the product to
+        // the empty set, which becomes `never` below.
+        let mut results: Vec<String> = vec![String::new()];
+        for (idx, choices) in choice_sets.iter().enumerate() {
+            let quasi = quasis.get(idx).map(|q| q.as_ref()).unwrap_or("");
+            let mut next: Vec<String> = Vec::with_capacity(results.len() * choices.len());
+            for prefix in &results {
+                for choice in choices {
+                    let mut combined =
+                        String::with_capacity(prefix.len() + quasi.len() + choice.len());
+                    combined.push_str(prefix);
+                    combined.push_str(quasi);
+                    combined.push_str(choice);
+                    next.push(combined);
+                }
+            }
+            results = next;
+        }
+        let tail = quasis.get(args.len()).map(|q| q.as_ref()).unwrap_or("");
+        for combined in &mut results {
+            combined.push_str(tail);
+        }
+
+        let node = match results.len() {
+            0 => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+            1 => graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                results.into_iter().next().expect("len == 1"),
+            ))),
+            _ => {
+                let members: Vec<SemanticNodeId> = results
+                    .into_iter()
+                    .map(|s| graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(s))))
+                    .collect();
+                let read = self.execute_read(SemanticQueryKey::NormalizeUnion {
+                    members: Arc::from(members.into_boxed_slice()),
+                });
+                match read.value {
+                    QueryResult::Value(id) => id,
+                    _ => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+                }
+            }
+        };
+        TemplateReduceOutcome {
+            node,
+            keyspace_budget_exceeded: false,
+        }
+    }
+
+    /// Resolve ONE template-literal interpolated expression to its finite set
+    /// of string-literal choices, or `None` when the expression is non-finite /
+    /// non-string (broad `string`, an unresolved deferred shell, an open
+    /// generic). `never` ⇒ `Some(empty)` (an empty product factor). The arg is
+    /// resolved through the shared deferred evaluator; a residual
+    /// `InstantiationRef` (e.g. `Capitalize<…>`) is dispatched through
+    /// `Instantiate` so string intrinsics fold before enumeration.
+    fn template_arg_literal_choices(
+        &self,
+        arg: SemanticNodeId,
+        eval_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<Vec<Arc<str>>> {
+        let graph = self.graph();
+        let mut resolved = self.evaluate_deferred_semantic_node_with_context(arg, eval_context);
+        if let Some(SemanticNodeData::InstantiationRef { base, args }) =
+            graph.node_data(resolved).as_deref()
+        {
+            let slot =
+                self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+            let inst_ctx = self.instantiate_context_for(&base.canonical_id, eval_context);
+            let args = Arc::clone(args);
+            let read = self.execute_read(SemanticQueryKey::Instantiate {
+                base: slot,
+                args,
+                context: inst_ctx,
+            });
+            if let QueryResult::Value(id) = read.value {
+                resolved = id;
+            }
+        }
+        match graph.node_data(resolved).as_deref() {
+            // A finite literal interpolant — string OR numeric / boolean /
+            // bigint — contributes ONE TS-stringified choice. TS interpolates
+            // `` `${1 | 2}` `` ⇒ `"1" | "2"`, `` `${true}` `` ⇒ `"true"`, and a
+            // bigint literal as its base-10 digits. Stringification is
+            // canonical-TS and typed-IR only (it reads the interned
+            // `LiteralValue`, never source text). See
+            // [`literal_value_template_text`].
+            Some(SemanticNodeData::Literal(value)) => {
+                Some(vec![Arc::from(literal_value_template_text(value).as_str())])
+            }
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => Some(Vec::new()),
+            Some(SemanticNodeData::Union(members)) => {
+                let members = Arc::clone(members);
+                let mut out: Vec<Arc<str>> = Vec::new();
+                for member in members.iter() {
+                    let choices = self.template_arg_literal_choices(*member, eval_context)?;
+                    out.extend(choices);
+                }
+                Some(out)
+            }
+            _ => None,
+        }
     }
 
     /// Vue macro resolution lookup.
@@ -5282,4 +5801,50 @@ fn fence_to_dep_signature(
     fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
 ) -> DepSignature {
     Arc::from(fence.into_boxed_slice())
+}
+
+/// Apply a TS string-intrinsic case transform to a single string literal value.
+/// `Capitalize` / `Uncapitalize` toggle the case of the FIRST character only;
+/// `Uppercase` / `Lowercase` transform the whole string.
+fn transform_string_intrinsic(intrinsic: &str, text: &str) -> String {
+    match intrinsic {
+        "Uppercase" => text.to_uppercase(),
+        "Lowercase" => text.to_lowercase(),
+        "Capitalize" => {
+            let mut chars = text.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        }
+        "Uncapitalize" => {
+            let mut chars = text.chars();
+            match chars.next() {
+                Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        }
+        // Unreachable in practice (the caller matches the four names), but a
+        // total function is safer than a panic on a future caller.
+        _ => text.to_string(),
+    }
+}
+
+/// The outcome of applying a mapped-type key remap (`[K in … as <expr>]`) to a
+/// single iteration key. The shared classifier
+/// [`ProjectSemanticDispatch::mapped_member_name_remap_outcome`] produces this;
+/// both the Expanded build ([`ProjectSemanticDispatch::build_mapped_type`]) and
+/// the Shallow walker's `synthesise_mapped_surface` consume it identically.
+#[derive(Debug, Clone)]
+pub(super) enum MappedKeyRemapOutcome {
+    /// No `as` clause — keep the iteration key verbatim.
+    Keep(std::sync::Arc<str>),
+    /// The remap resolved to `never` — DROP this key from the surface.
+    Drop,
+    /// The remap resolved to a finite string literal / union of literals —
+    /// these are the produced key(s) (usually one).
+    Keys(Vec<std::sync::Arc<str>>),
+    /// The remap is unresolved / non-finite / non-string — the mapped type
+    /// FAILS CLOSED to its deferred carrier (never the original key).
+    DeferCarrier,
 }

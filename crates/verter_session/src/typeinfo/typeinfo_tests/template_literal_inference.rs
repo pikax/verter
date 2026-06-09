@@ -1,8 +1,13 @@
 //! @ai-generated - Template-literal-type pattern-matching contracts.
 //!
-//! TDD-red tests describing TS7 expected behaviour when `infer` is used inside
-//! a template-literal pattern, including recursive split, prefix stripping,
-//! key remap with `Capitalize`, and `infer X extends number` casts.
+//! TS7 expected behaviour when `infer` is used inside a template-literal
+//! pattern, including recursive split, prefix stripping, key remap with
+//! `Capitalize`, and `infer X extends number` casts. The `Capitalize` key-remap
+//! contract is resolver-complete FOR THE RELATE-FREE SCOPE (closed literal-union
+//! keys remapped through `Capitalize`; see
+//! `event_handler_key_remap_reducer_capitalises_keys`) — per-key conditional
+//! `as never` key drop and `K & string` literal-subsumption stay owned by
+//! deferred blocks; the `infer`-pattern contracts stay future work.
 
 use super::support::*;
 
@@ -86,7 +91,7 @@ fn template_literal_strip_returns_input_unchanged_when_prefix_missing() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not apply template-literal `as` key remap with Capitalize over a union of input keys; keep as the future event-handler key-remap contract"]
+#[ignore = "reducer resolves this correctly (covered by the non-ignored `event_handler_key_remap_reducer_capitalises_keys` regression); NOT oracle-liftable — the reduced surface carries function/callable handler members that the oracle §Q2 positive-allowlist rejects (Reject(Callable)). Lift pending an oracle admission + hover-grammar extension for clean function values"]
 fn template_literal_key_remap_capitalises_each_event_key() {
     // TS7 contract: `EventHandlers<"inc" | "dec">` produces an object where
     // each key is remapped through `\`on${Capitalize<K>}\``, yielding
@@ -115,6 +120,43 @@ fn template_literal_key_remap_capitalises_each_event_key() {
     assert_eq!(on_dec.parameters.len(), 1);
     assert_string_literal(&on_dec.parameters[0].ty, "dec");
     assert_query_mode(&record, ProjectionModeTag::Expanded);
+}
+
+/// Non-ignored reducer regression for the callable-result key-remap row
+/// `template_literal_key_remap_capitalises_each_event_key` (which stays
+/// `#[ignore]`d as an oracle-lift contract because its handler members are
+/// function surfaces the oracle §Q2 admission rejects). The SHARED resolver
+/// remaps each key through `` `on${Capitalize<K>}` `` correctly — the open-`K`
+/// string intrinsic stays a carrier until per-key substitution binds the key —
+/// so this runs the same assertions in the normal suite to keep the reducer
+/// path guarded.
+#[test]
+fn event_handler_key_remap_reducer_capitalises_keys() {
+    let host = make_host_with_footprint();
+    upsert(&host);
+
+    let (expr, _record) = resolve_expr(
+        &host,
+        "/fixtures/template_literal_inference.ts",
+        "CounterHandlers",
+        &[],
+        ProjectionMode::Expanded,
+    );
+
+    let props = object_props(&expr);
+    assert_eq!(
+        prop_names(&props),
+        vec!["onDec", "onInc"],
+        "`on${{Capitalize<K>}}` must remap each event key per-key"
+    );
+    assert!(
+        !props.contains_key("inc") && !props.contains_key("dec"),
+        "the original lowercase keys must be dropped by the `as` remap"
+    );
+    let on_inc = function_type(&props["onInc"].ty);
+    assert_string_literal(&on_inc.parameters[0].ty, "inc");
+    let on_dec = function_type(&props["onDec"].ty);
+    assert_string_literal(&on_dec.parameters[0].ty, "dec");
 }
 
 #[test]

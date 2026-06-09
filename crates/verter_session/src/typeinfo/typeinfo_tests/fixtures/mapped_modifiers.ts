@@ -27,21 +27,30 @@ export type AllOptional<T> = { [K in keyof T]+?: T[K] };
 export type AddOptionalResult = AllOptional<RequiredSource>;
 
 // ---------------------------------------------------------------------------
-// (4) -? optional remover (strips `undefined` from slot type)
+// (4) -? optional remover — PRESENCE-ONLY
 //
-// `OptionalSource` carries an EXPLICIT `| undefined` in each slot (rather
-// than only the `?` syntactic marker) so the assertion proves that `-?`
-// stripped the `undefined` from the published value type, NOT just toggled
-// the optional flag. With `a?: string`, an implementer could pass by only
-// flipping `optional → false`; with `a: string | undefined`, the resolver
-// MUST also rewrite the slot type to `string` to match the TS7 contract.
+// `-?` is a presence modifier: it clears the optional flag. The
+// optional-origin `undefined` is carried by the flag (not in the value
+// slot), so clearing the flag on an OPTIONAL-origin property naturally
+// yields the bare value type. `OptionalSource` uses the `?` marker so
+// `AllRequired<OptionalSource>` = `{ a: string; b: number }` (bare).
+//
+// The companion `ExplicitUndefinedSource` proves the dual: a property whose
+// `| undefined` is EXPLICIT on a REQUIRED slot is preserved by `-?` (real TS:
+// `Required<{ a: string | undefined }>` = `{ a: string | undefined }`), because
+// the `undefined` is part of the declared type, not an optional-origin marker.
 // ---------------------------------------------------------------------------
 export type OptionalSource = {
-  a: string | undefined;
-  b: number | undefined;
+  a?: string;
+  b?: number;
 };
 export type AllRequired<T> = { [K in keyof T]-?: T[K] };
 export type RemoveOptionalResult = AllRequired<OptionalSource>;
+
+export type ExplicitUndefinedSource = {
+  a: string | undefined;
+};
+export type RequiredExplicitUndefined = AllRequired<ExplicitUndefinedSource>;
 
 // ---------------------------------------------------------------------------
 // (5) Combined `-readonly -?`

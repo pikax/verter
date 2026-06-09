@@ -3,15 +3,16 @@
 //! registry `include!`-compiles WITHOUT the unit-test `support` module
 //! (`oracle_query_specs_is_pure_data`); this src-side half proves the structural
 //! well-formedness validation is genuinely discriminating, with SYNTHETIC specs.
-//! The real table seats the 7 lifted rows (two index-signature publication
+//! The real table seats the 8 lifted rows (two index-signature publication
 //! queries + two built-in modifier-utility queries + three U2
-//! IndexedAccess-reduction carve-out queries).
+//! IndexedAccess-reduction carve-out queries + the mapped-modifier `-?`
+//! carve-out query at U2.MAPPED_TEMPLATE).
 
 use super::oracle::query_specs::{
     registry_well_formed, HostProjectSpec, HostSetupKindSpec, OracleValueKindSpec,
     ProjectionModeSpec, QueryHelperSpec, QuerySpec, RegistryError, SourceLocatorSpec, SymbolSpace,
-    DEEP_PATH_SOURCE, INDEX_SIGNATURES_SOURCE, ORACLE_QUERY_SPECS, TYPESCRIPT_RULES_SOURCE,
-    UTILITY_EDGE_SOURCE, WIDE_DEEP_SOURCE,
+    DEEP_PATH_SOURCE, INDEX_SIGNATURES_SOURCE, MAPPED_MODIFIERS_SOURCE, ORACLE_QUERY_SPECS,
+    TYPESCRIPT_RULES_SOURCE, UTILITY_EDGE_SOURCE, WIDE_DEEP_SOURCE,
 };
 
 /// The registry inlines each fixture's source bytes (`INDEX_SIGNATURES_SOURCE` /
@@ -56,6 +57,12 @@ fn inlined_registry_source_is_byte_identical_to_fixture_files() {
         "WIDE_DEEP_SOURCE (inlined in the registry) drifted from \
          fixtures/wide_deep.ts (read by the sibling #[ignore]d tests)",
     );
+    assert_eq!(
+        MAPPED_MODIFIERS_SOURCE,
+        include_str!("fixtures/mapped_modifiers.ts"),
+        "MAPPED_MODIFIERS_SOURCE (inlined in the registry) drifted from \
+         fixtures/mapped_modifiers.ts (read by the sibling #[ignore]d tests)",
+    );
 }
 
 /// A synthetic well-formed spec with a tweakable `oracle_family` + `query_ordinal`.
@@ -90,15 +97,15 @@ fn spec(row_function: &'static str, query_ordinal: u16, oracle_family: &'static 
 #[test]
 fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
     // The lifts seat the two index-signature publication queries, the two
-    // built-in modifier-utility queries, and the three U2 IndexedAccess-reduction
-    // carve-out queries; the table is well-formed (non-empty `oracle_family`,
-    // contiguous ordinals).
+    // built-in modifier-utility queries, the three U2 IndexedAccess-reduction
+    // carve-out queries, and the U2.MAPPED_TEMPLATE `-?` optional-remover query;
+    // the table is well-formed (non-empty `oracle_family`, contiguous ordinals).
     assert_eq!(registry_well_formed(ORACLE_QUERY_SPECS), Ok(()));
 
     // The seated set is EXACTLY the two index-signature publication rows + the
     // two built-in modifier-utility rows + the three IndexedAccess-reduction
-    // carve-out rows, one query each. A stray addition / removal FAILS here
-    // (discriminating).
+    // carve-out rows + the `-?` optional-remover row, one query each. A stray
+    // addition / removal FAILS here (discriminating).
     let seated: Vec<(&str, &str, u16)> = ORACLE_QUERY_SPECS
         .iter()
         .map(|s| (s.row_file, s.row_function, s.query_ordinal))
@@ -139,6 +146,11 @@ fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
             (
                 "wide_deep.rs",
                 "wide_deep_projected_token_resolves_literal_union",
+                0
+            ),
+            (
+                "mapped_modifiers.rs",
+                "mapped_modifier_minus_optional_strips_optional_and_undefined",
                 0
             ),
         ],

@@ -3399,9 +3399,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         } else {
             None
         };
-        let members = keys
-            .into_iter()
-            .map(|name| {
+        let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(keys.len());
+        for name in keys.into_iter() {
+            let member = {
                 let source_member = source_members
                     .as_ref()
                     .and_then(|m| m.iter().find(|sm| sm.name == name));
@@ -3451,15 +3451,32 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         materialise_context,
                     )
                 };
-                // Per-key produced name: apply `name_remap` through
-                // the same shared helper so `as <expr>` clauses fold
-                // identically to the Expanded path.
-                let produced_name = self.dispatch.materialize_mapped_member_name_for_key(
-                    mapper,
-                    &name,
-                    materialise_context,
-                );
-                ShallowSurfaceMember {
+                let visibility = source_member
+                    .map_or(verter_type_expr::MemberVisibility::Public, |sm| {
+                        sm.visibility
+                    });
+                (value, optional, readonly, visibility)
+            };
+            let (value, optional, readonly, visibility) = member;
+            // Per-key produced name(s): apply `name_remap` through the same
+            // shared outcome classifier so `as <expr>` clauses fold identically
+            // to the Expanded path. `Drop` filters the key; `Keys` emits one
+            // member per produced name; `DeferCarrier` fails the surface closed
+            // (the Shallow walker carrier-stops so the caller keeps the carrier).
+            let produced_names = match self.dispatch.mapped_member_name_remap_outcome(
+                mapper,
+                &name,
+                materialise_context,
+            ) {
+                crate::project_semantic_dispatch::build::MappedKeyRemapOutcome::Keep(n) => vec![n],
+                crate::project_semantic_dispatch::build::MappedKeyRemapOutcome::Keys(ns) => ns,
+                crate::project_semantic_dispatch::build::MappedKeyRemapOutcome::Drop => continue,
+                crate::project_semantic_dispatch::build::MappedKeyRemapOutcome::DeferCarrier => {
+                    return None;
+                }
+            };
+            for produced_name in produced_names {
+                members.push(ShallowSurfaceMember {
                     name: produced_name,
                     value,
                     optional,
@@ -3473,10 +3490,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // (public) visibility verbatim so the invariant holds even if
                     // the keyspace gate is bypassed; otherwise `Public` (mirrors
                     // the Expanded path in `build.rs`).
-                    visibility: source_member
-                        .map_or(verter_type_expr::MemberVisibility::Public, |sm| {
-                            sm.visibility
-                        }),
+                    visibility,
                     // Mapped-type synthesis produces a member from a key
                     // domain via `[K in keyof T]: ...`. The produced
                     // member is not literally written in the consuming
@@ -3491,9 +3505,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // no single source declaration site — no spans, no file.
                     spans: verter_type_expr::MemberSpans::default(),
                     declaration_origin: None,
-                }
-            })
-            .collect();
+                });
+            }
+        }
         Some(ShallowSurface {
             members,
             call_signatures: Vec::new(),

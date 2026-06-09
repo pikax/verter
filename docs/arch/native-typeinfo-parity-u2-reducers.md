@@ -533,7 +533,7 @@ Legacy deletions:
 
 SemanticQueryKey/facts touched: `MappedType`, `TemplateLiteralReduce` (value domain `TypeNode`); consumes `Relate` bindings (`infer` splitting). Facts read: `Member` / `MemberPresence` (the two-component split), `LibIntrinsic` (the four casing intrinsics), `TypeEnvOptions`. Admission: `Singleflight` (keyspace-explosion guarded by the planned `KeyspaceBudget` reducer; `ReturnOnly` on overflow) — matches the generated `SemanticQueryKeySpec` row for both keys.
 
-Exact test rows lifted (capability `MappedTypes`, `mapped_modifiers.rs` / `mapped_template.rs`; capability `TemplateLiteralInference`, `template_literal_inference.rs`):
+Block-planned test rows (capability `MappedTypes`, `mapped_modifiers.rs` / `mapped_template.rs`; capability `TemplateLiteralInference`, `template_literal_inference.rs`) — LANDED PARTITION: exactly 1 row lifted (`mapped_modifier_minus_optional_strips_optional_and_undefined`, after correcting its fixture to optional-origin) plus the `..preserves_explicit_undefined_on_required_property` `AdditionalProofRow`; the other 15 rows stay DEFERRED — `#[ignore]`d with honest reasons (the oracle §Q2 admission rejects Callable / template-literal-SOURCE-root surfaces; per-key conditional `as never` key drop is Relate-carrying → relation-oracle block; `K & string` literal-subsumption → shared-normalization block; the `infer`-split rows carry relation bindings). The full design list below is the block's PLANNED reducer-coverage target; the reducer is proven against all of it, but only the Relate-free, §Q2-admissible row landed as a lifted (un-ignored) row:
 - mapped_modifiers.rs::mapped_modifier_minus_optional_strips_optional_and_undefined
 - mapped_modifiers.rs::mapped_modifier_as_never_filter_drops_matching_keys
 - mapped_modifiers.rs::mapped_modifier_conditional_value_keeps_never_typed_members
@@ -551,7 +551,7 @@ Exact test rows lifted (capability `MappedTypes`, `mapped_modifiers.rs` / `mappe
 - typescript_rules.rs::typescript_rules_template_intrinsic_evaluates_union
 - typescript_rules.rs::typescript_rules_key_remap_exclude_filters_and_renames_keys
 
-(16 rows. The two added `typescript_rules.rs` rows are oracle-pinned TS quirk rows whose mechanism is template / mapped reduction: `template_intrinsic_evaluates_union` evaluates a template-literal casing intrinsic over a union (`TemplateLiteralReduce`), and `key_remap_exclude_filters_and_renames_keys` is mapped key-remap with `as never` filtering plus rename (`MappedType` + `TemplateLiteralReduce`), so both lift here — §10.4.1.)
+(16 rows. The two added `typescript_rules.rs` rows are oracle-pinned TS quirk rows whose mechanism is template / mapped reduction: `template_intrinsic_evaluates_union` evaluates a template-literal casing intrinsic over a union (`TemplateLiteralReduce`), and `key_remap_exclude_filters_and_renames_keys` is mapped key-remap with `as never` filtering plus rename (`MappedType` + `TemplateLiteralReduce`) — §10.4.1. LANDED OUTCOME: neither row lifted in U2.MAPPED_TEMPLATE. `template_intrinsic_evaluates_union` is reducer-proven but oracle §Q2 rejects its template-literal source root (Reject(DeferredConstruct)); `key_remap_exclude_filters_and_renames_keys` is blocked on TWO deferred shared-resolver gaps — per-key CONDITIONAL `as never` key drop (Relate-carrying → relation-oracle block) AND `K & string` literal-subsumption normalization (→ future shared-normalization block). Both stay `#[ignore]`d with honest reasons.)
 
 Required new guards (parent §§4.2, 4.3):
 - `mapped_minus_optional_strips_only_optional_origin_undefined`
@@ -564,7 +564,7 @@ Critical-rule guards: implements the parent's `(CRITICAL)` mapped-`-?` two-compo
 
 Proof requirement: per-row — all mapped / template rows are TS7-oracle-pinned (`Ts7Oracle`); the `-?` row (`mapped_modifier_minus_optional_strips_optional_and_undefined`) is `OracleAndGuard` pairing the oracle with `mapped_minus_optional_strips_only_optional_origin_undefined`. The companion required-`| undefined`-preservation contract is a NEW `AdditionalProofRow` — none of the 362 `IgnoredTestRow`s covers it — registered as `mapped_modifiers.rs::mapped_modifier_minus_optional_preserves_explicit_undefined_on_required_property` (block_id `U2.MAPPED_TEMPLATE`, `ProofRequirement::StructuralGuard(mapped_minus_optional_preserves_explicit_undefined_on_required_property)`), coverage-only and excluded from the 362 count + bijection (PART 2 §10.1). It uses a REQUIRED `{ a: string | undefined }` property so it exercises explicit-`| undefined` preservation (distinct from the optional-origin stripping the ignored `-?` row exercises). Each row's / additional-row's declared proof is consumed by its generated wrapper. (See the JSX submatrix in `U2.JSX_FOUNDATIONS` for the other six `AdditionalProofRow`s; these seven are the complete `AdditionalProofRow` set.) NOTE — the `Ts7Oracle` / `StructuralGuard` / `OracleAndGuard` kinds named above are the EVENTUAL per-row proof requirements; on the current tree ALL seven `AdditionalProofRow`s are emitted as `ProofRequirement::RowTestGuard { file, function }` forward-declaration placeholders (built and enforced by the manifest test in `typeinfo_ignored_test_manifest.rs`). U0-FINISH-B's proof registry / row-test wrapper assigns the executable kinds — U0-FINISH-A does not.
 
-Exit acceptance: all 16 rows above lift and pass plus the one `mapped_modifier_minus_optional_preserves_explicit_undefined_on_required_property` `AdditionalProofRow`; `{ a?: string }` under `-?` becomes `{ a: string }` while `{ a: string | undefined }` is preserved (both guards green); the template-intrinsic and key-remap-exclude TS rules match the oracle; key remap runs through `TemplateLiteralReduce`; the casing intrinsics match the oracle; `infer` splitting uses relation bindings; `KeyspaceBudget` reverse-matches and `ReturnOnly`s on overflow.
+Exit acceptance (LANDED): the 1 `-?` row (`mapped_modifier_minus_optional_strips_optional_and_undefined`) lifts and passes plus the one `mapped_modifier_minus_optional_preserves_explicit_undefined_on_required_property` `AdditionalProofRow` plus the three non-ignored reducer regression tests; `{ a?: string }` under `-?` becomes `{ a: string }` while `{ a: string | undefined }` is preserved (both guards green); key remap runs through `TemplateLiteralReduce`; the casing intrinsics match the oracle; `KeyspaceBudget` reverse-matches and `ReturnOnly`s on overflow. Rows 2-16 stay `#[ignore]`d with honest reasons (deferred to the named §Q2-admission-extension / relation-oracle / shared-normalization follow-up blocks); their template-intrinsic / key-remap-exclude / `infer`-split behaviour is reducer-proven but not lifted here.
 
 Verification commands:
 - `cargo test --package verter_session` mapped / template tests.
@@ -921,7 +921,10 @@ stated explicitly so no row is double-counted:
   template-intrinsic / key-remap rows
   (`distributive_conditional_expands_each_union_arm`,
   `template_intrinsic_evaluates_union`, `key_remap_exclude_filters_and_renames_keys`)
-  lift in **U2.RELATION_INFER** / **U2.MAPPED_TEMPLATE**; the
+  are assigned to **U2.RELATION_INFER** / **U2.MAPPED_TEMPLATE** by mechanism
+  (`key_remap_exclude_filters_and_renames_keys` did NOT lift in U2.MAPPED_TEMPLATE —
+  it additionally awaits the relation-oracle and a future shared-normalization
+  block for its `as never` key drop + `K & string` subsumption); the
   constructor-utility / instance-type / class-instance / `typeof const` /
   `Awaited` rows lift in **U2.CLASS_SURFACES** / **U2.UTILITIES** by mechanism.
   Every `typescript_rules_*` row maps to exactly one U2 block in the coverage

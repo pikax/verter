@@ -1529,6 +1529,13 @@ fn finalise_traced_build_output(
 /// them makes any storm fail closed to a structurally-valid typed PARTIAL
 /// within seconds — with cache suppression — regardless of which upstream
 /// layer missed.
+///
+/// `TemplateLiteralReduce` counts too: a template over wide finite unions
+/// enumerates a cartesian product, so an unbounded re-dispatch storm over
+/// template reductions is the same expansion-storm shape. (The reducer also
+/// applies its own per-call product-width cap — `TEMPLATE_LITERAL_KEYSPACE_CAP`
+/// — which bounds a SINGLE reduction; this gate bounds the aggregate dispatch
+/// count across the request.)
 fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> bool {
     matches!(
         key,
@@ -1539,6 +1546,7 @@ fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> boo
             | SemanticQueryKey::MappedType { .. }
             | SemanticQueryKey::Instantiate { .. }
             | SemanticQueryKey::Conditional { .. }
+            | SemanticQueryKey::TemplateLiteralReduce { .. }
     )
 }
 
