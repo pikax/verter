@@ -449,7 +449,17 @@ impl CanonicalCompletionOverlay {
             }
 
             let indexed = &file_artifacts.indexed;
-            let route_hash = if indexed.shallow_state.has_resolvable_surface() {
+            // Edge-currency gate. A wildcard-bearing artifact bakes its
+            // `export *` edge `canonical_id`s from the dependency file set;
+            // once `content_generation` advances past its edge generation BOTH
+            // its route-surface hash and its baked import-route hash are stale.
+            // Suppress both derived hashes so an entry rooted on them fails
+            // warm validation and recomputes through the edge-gated readers
+            // (which re-materialise the surface) rather than validating against
+            // a stale hash recorded in the completion overlay.
+            let edge_current =
+                host.route_surface_is_edge_current(&indexed.shallow_state, indexed.edge_generation);
+            let route_hash = if indexed.shallow_state.has_resolvable_surface() && edge_current {
                 Some(crate::resolver_store::hash_route_surface(
                     &indexed.shallow_state,
                 ))
@@ -462,10 +472,16 @@ impl CanonicalCompletionOverlay {
             // also reads). For the base-only path we read it from the
             // host's generation-current map. Both produce the same
             // value for non-overlaid canonicals; for overlaid
-            // canonicals the indexed authority is the overlay one.
-            let import_route_hash = indexed
-                .import_route_hash
-                .or_else(|| host.generation_current_import_route_hash(canonical));
+            // canonicals the indexed authority is the overlay one. An
+            // edge-stale wildcard surface suppresses it (same rail as the
+            // route hash above) so the baked stale edge is never recorded.
+            let import_route_hash = if edge_current {
+                indexed
+                    .import_route_hash
+                    .or_else(|| host.generation_current_import_route_hash(canonical))
+            } else {
+                None
+            };
             if route_hash.is_some() || import_route_hash.is_some() {
                 // Single write-lock acquisition for both derived-hash
                 // variants per canonical. Flag-set is performed under

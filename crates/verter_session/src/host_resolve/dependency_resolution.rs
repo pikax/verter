@@ -49,14 +49,27 @@ impl VerterHost {
     /// the projection ([`RouteOwnedShallowStateSnapshot`]) carries the
     /// minimal `(canonical_id, whole_hash, optional route_hash)` shape
     /// consumed by `resolver_store.rs:137`.
+    ///
+    /// Only EDGE-CURRENT entries are snapshotted: `HostStoreView::build`
+    /// snapshots route hashes from this set, so a stale wildcard-bearing
+    /// route-owned entry (its resolved edges baked at an earlier workspace
+    /// generation, before a dependency appeared or retargeted) would
+    /// otherwise publish a `Route` hash that validates a warm `RouteDb`
+    /// entry after the change. The SAME `route_owned_entry_is_edge_current`
+    /// gate that governs `current_route_surface_hash` filters the snapshot —
+    /// one gate, two route-fact producers.
     pub(crate) fn snapshot_route_owned_shallow_cache_entries(
         &self,
     ) -> Vec<RouteOwnedShallowStateSnapshot> {
         self.project_type_store
             .route_owned_shallow()
             .for_each_entry(|canonical_id, entry| {
-                RouteOwnedShallowStateSnapshot::from_entry(canonical_id, entry)
+                self.route_owned_entry_is_edge_current(canonical_id, entry)
+                    .then(|| RouteOwnedShallowStateSnapshot::from_entry(canonical_id, entry))
             })
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     /// Expand a relative import specifier into all candidate canonical IDs.
@@ -575,6 +588,57 @@ impl VerterHost {
         Some(preferred)
     }
 
+    /// The single shared route-edge resolution policy: given an owner and an
+    /// import/reexport specifier, return the canonical id the type-route layer
+    /// resolves it to.
+    ///
+    /// This is the SOLE specifier→canonical policy for type-route edges. It is
+    /// shared by route traversal ([`Self::resolve_route_type_edge`], which
+    /// layers on a `.vue` store-view gate + `ensure_loaded` side effects),
+    /// shallow-state wildcard/reexport canonicalization (so a route-owned
+    /// surface resolves the SAME edges as the indexed surface), and
+    /// known-miss revalidation
+    /// ([`Self::generation_current_known_miss_resolution`]). Keeping the policy
+    /// in one place is what guarantees the recorder and the validator agree on
+    /// every route-edge canonical, including the ESM-fallback normalization:
+    /// a `TypeImport` resolution normalized
+    /// through declaration-companion preference, then the relative runtime
+    /// companion, then the `EsmImport` fallback — itself normalized identically
+    /// (NOT the raw `source_id`, which is what diverged).
+    ///
+    /// Side-effect-free beyond the workspace engine's own resolution memo: it
+    /// does not load files, materialize artifacts, or write route caches.
+    pub(crate) fn resolve_route_edge_canonical(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+    ) -> Option<String> {
+        let normalize_workspace_resolution = |kind: verter_workspace::ResolveRequestKind| {
+            self.ws()
+                .resolve_import(
+                    owner_canonical,
+                    import_source,
+                    verter_workspace::ResolutionContext {
+                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                        kind,
+                    },
+                )
+                .map(|resolution| {
+                    self.normalize_live_type_dependency_target(
+                        owner_canonical,
+                        import_source,
+                        resolution.source_id.as_str(),
+                    )
+                })
+        };
+
+        normalize_workspace_resolution(verter_workspace::ResolveRequestKind::TypeImport)
+            .or_else(|| self.fallback_relative_type_companion(owner_canonical, import_source))
+            .or_else(|| {
+                normalize_workspace_resolution(verter_workspace::ResolveRequestKind::EsmImport)
+            })
+    }
+
     /// Side-effect-free type-dependency re-resolve for a known-miss
     /// specifier.
     ///
@@ -588,47 +652,19 @@ impl VerterHost {
     /// `cache_positive_import_route_result` (which would rewrite the
     /// `DerivedRawState.import_routes` known-miss entry to a positive and
     /// register a new dependency). Resolution flows straight through the
-    /// workspace VFS (`WorkspaceAccess::resolve_import`) and the
-    /// read-only target normalizers, so the only state it touches is the
-    /// workspace engine's own resolution memo.
+    /// shared [`Self::resolve_route_edge_canonical`] policy, so the only
+    /// state it touches is the workspace engine's own resolution memo.
     ///
-    /// The returned canonical id matches what
-    /// `resolve_type_dependency_canonical` would return for a
-    /// now-resolvable specifier: the workspace `TypeImport` resolution is
-    /// normalized through declaration-companion preference, then the
-    /// relative runtime companion and the `EsmImport` fallback are tried
-    /// in the same order. This keeps the absence-sensitive
-    /// `ImportRoute` hash correct without the side effects.
+    /// Routing through the shared policy keeps the absence-sensitive
+    /// `ImportRoute` hash on the SAME canonical the route traversal would
+    /// record — including the ESM-fallback normalization — so a re-resolved
+    /// known-miss never diverges from the live
+    /// route resolution.
     pub(crate) fn generation_current_known_miss_resolution(
         &self,
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        let workspace_resolve = |kind: verter_workspace::ResolveRequestKind| {
-            self.ws()
-                .resolve_import(
-                    owner_canonical,
-                    import_source,
-                    verter_workspace::ResolutionContext {
-                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                        kind,
-                    },
-                )
-                .map(|resolution| resolution.source_id)
-        };
-
-        let type_resolved = workspace_resolve(verter_workspace::ResolveRequestKind::TypeImport)
-            .map(|resolved| {
-                self.normalize_live_type_dependency_target(
-                    owner_canonical,
-                    import_source,
-                    resolved.as_str(),
-                )
-            })
-            .or_else(|| self.fallback_relative_type_companion(owner_canonical, import_source));
-        if type_resolved.is_some() {
-            return type_resolved;
-        }
-        workspace_resolve(verter_workspace::ResolveRequestKind::EsmImport)
+        self.resolve_route_edge_canonical(owner_canonical, import_source)
     }
 }

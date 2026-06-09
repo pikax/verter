@@ -3580,11 +3580,22 @@ impl VerterHost {
                 // `current_content_pinned_indexed` returns `None` for
                 // a stale candidate, so the recompute path below
                 // produces the truly-current route surface hash.
-                if let Some(cached) = self
-                    .current_content_pinned_indexed(canonical_id)
-                    .and_then(|facts| facts.route_hash)
-                {
-                    return Some(cached);
+                if let Some(indexed) = self.current_content_pinned_indexed(canonical_id) {
+                    if self.route_surface_is_edge_current(
+                        &indexed.shallow_state,
+                        indexed.edge_generation,
+                    ) {
+                        if let Some(cached) = indexed.route_hash {
+                            return Some(cached);
+                        }
+                    } else {
+                        // Edge-stale indexed surface: its cached `route_hash`
+                        // encodes stale wildcard `export *` edges. Do NOT
+                        // reproduce it — return `None` so a dependent cache
+                        // entry rooted on the stale `Route` fact fails warm
+                        // validation and recomputes against the live file set.
+                        return None;
+                    }
                 }
                 let state = self.shallow_file_state(canonical_id)?;
                 state
@@ -3640,25 +3651,73 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> Option<Hash16> {
-        // Content-pinned IndexedReady read. A permissive `get_any`
-        // would let a stale `IndexedReady` surface its old route
-        // table; `current_content_pinned_indexed` returns `None` for
-        // a stale candidate so the `DerivedRawState` fallback answers
-        // with the live-tracked route table.
-        //
-        // The IndexedReady route table is the import-target surface
-        // captured when the file was indexed. It can be empty even
-        // when the file does have resolved imports: routes recorded
-        // *after* indexing — e.g. a compile-prefetch or external
-        // `src=` resolution that lands in `DerivedRawState` via
-        // `cache_positive_import_route_result` — do not back-fill the
-        // already-materialised `IndexedReady`. An empty IndexedReady
-        // route table must therefore fall through to the
-        // `DerivedRawState` table rather than shadow it, otherwise a
-        // file whose routes were populated post-indexing yields no
-        // `ImportRoute` fact and dependent caches miss route changes.
-        // The `.filter(non-empty)` makes an empty content-pinned table
-        // behave the same as a missing one and defer to the fallback.
+        let routes = self.current_import_route_table(canonical_id)?;
+        Some(self.hash_generation_current_route_table(canonical_id, &routes))
+    }
+
+    /// Coverage-checked variant of [`Self::generation_current_import_route_hash`]
+    /// (coverage-checked `ImportRoute` admission).
+    ///
+    /// Identical route-source selection and known-miss rehash logic, but
+    /// returns `None` unless EVERY `required_source` is present as a key in the
+    /// owner's route table. The hole-2 rooting loop records the unresolved
+    /// wildcard edges it actually hit as `(owner, source)` pairs; an owner can
+    /// have a fully-resolved route surface (so the plain
+    /// `generation_current_import_route_hash` returns `Some`) that nonetheless
+    /// does NOT track the wildcard source — e.g. a PARTIAL
+    /// `set_import_dependencies` snapshot that resolves a sibling but omits the
+    /// wildcard. Hashing that partial table produces a fact that is reproduced
+    /// verbatim after the wildcard target appears, stale-serving the cached
+    /// `Miss`. Requiring full coverage forces the rooting loop to fall back to
+    /// the empty-facts negative-cache path (served, never persisted) when the
+    /// hash cannot root every unresolved wildcard the traversal hit.
+    pub(crate) fn generation_current_import_route_hash_covering_sources(
+        &self,
+        canonical_id: &str,
+        required_sources: &[String],
+    ) -> Option<Hash16> {
+        let routes = self.current_import_route_table(canonical_id)?;
+        // The produced hash can only root a known-miss the rooting loop must
+        // observe if the source is actually present in the table re-resolved
+        // by `hash_generation_current_route_table`. A required source absent
+        // from the table is silently dropped from the hash — refuse to admit.
+        for source in required_sources {
+            if !routes.contains_key(source) {
+                return None;
+            }
+        }
+        Some(self.hash_generation_current_route_table(canonical_id, &routes))
+    }
+
+    /// Select the owner's effective import-route table for fact production —
+    /// the single source order shared by
+    /// [`Self::generation_current_import_route_hash`] and its coverage-checked
+    /// sibling.
+    ///
+    /// Content-pinned IndexedReady read. A permissive `get_any`
+    /// would let a stale `IndexedReady` surface its old route
+    /// table; `current_content_pinned_indexed` returns `None` for
+    /// a stale candidate so the `DerivedRawState` fallback answers
+    /// with the live-tracked route table.
+    ///
+    /// The IndexedReady route table is the import-target surface
+    /// captured when the file was indexed. It can be empty even
+    /// when the file does have resolved imports: routes recorded
+    /// *after* indexing — e.g. a compile-prefetch or external
+    /// `src=` resolution that lands in `DerivedRawState` via
+    /// `cache_positive_import_route_result` — do not back-fill the
+    /// already-materialised `IndexedReady`. An empty IndexedReady
+    /// route table must therefore fall through to the
+    /// `DerivedRawState` table rather than shadow it, otherwise a
+    /// file whose routes were populated post-indexing yields no
+    /// `ImportRoute` fact and dependent caches miss route changes.
+    /// The `.filter(non-empty)` makes an empty content-pinned table
+    /// behave the same as a missing one and defer to the fallback.
+    fn current_import_route_table(
+        &self,
+        canonical_id: &str,
+    ) -> Option<std::sync::Arc<rustc_hash::FxHashMap<String, crate::types::DependencyResolution>>>
+    {
         let routes = self
             .current_content_pinned_indexed(canonical_id)
             .map(|facts| std::sync::Arc::clone(&facts.import_routes))
@@ -3674,12 +3733,23 @@ impl VerterHost {
         if routes.is_empty() {
             return None;
         }
+        Some(routes)
+    }
 
+    /// Hash the owner's import-route table after re-resolving any known-miss
+    /// specifier against the current workspace generation — the shared body of
+    /// [`Self::generation_current_import_route_hash`] and its coverage-checked
+    /// sibling.
+    fn hash_generation_current_route_table(
+        &self,
+        canonical_id: &str,
+        routes: &rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
+    ) -> Hash16 {
         let has_known_miss = routes.values().any(Self::import_route_is_known_miss);
         if !has_known_miss {
             // Every specifier resolved — the route table is stable
             // until the importer's own content changes.
-            return Some(crate::resolver_store::hash_import_route_targets(&routes));
+            return crate::resolver_store::hash_import_route_targets(routes);
         }
 
         // Re-resolve the known-miss specifiers against the current
@@ -3712,9 +3782,7 @@ impl VerterHost {
                 generation_current.insert(specifier.clone(), resolution.clone());
             }
         }
-        Some(crate::resolver_store::hash_import_route_targets(
-            &generation_current,
-        ))
+        crate::resolver_store::hash_import_route_targets(&generation_current)
     }
 }
 

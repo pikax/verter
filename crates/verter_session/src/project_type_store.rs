@@ -131,6 +131,19 @@ pub struct IndexedReady {
     /// lifecycle: when the canonical's whole_hash changes, a fresh
     /// `IndexedReady` is built and `route_hash` is recomputed.
     pub route_hash: Option<Hash16>,
+    /// Workspace `content_generation` captured at edge-canonicalization
+    /// time — the generation at which this artifact's wildcard `export *`
+    /// edge `canonical_id`s (baked into `shallow_state.wildcard_reexports`
+    /// and `import_routes`) were resolved. Those edges depend on the
+    /// dependency file set, NOT this file's own content, so a content-pinned
+    /// `IndexedReady` whose owner content is unchanged can still hold stale
+    /// wildcard edges after a dependency appears or retargets (e.g. a `.js`
+    /// edge whose `.d.ts` companion later appears). Route-surface consumers
+    /// validate it through the shared edge-currency oracle
+    /// (`route_surface_is_edge_current`): a wildcard-bearing surface is
+    /// edge-current only while `edge_generation == ws().content_generation()`.
+    /// A VALUE field (read-side validation) — never a cache key (R6).
+    pub edge_generation: u64,
     /// Raw file source as-read. Shared immutable handle across consumers.
     pub raw_source: Arc<str>,
     /// Script source used as the body of the eval environment. For a `.vue`
@@ -193,6 +206,7 @@ impl IndexedReady {
             import_routes: Arc::new(FxHashMap::default()),
             import_route_hash: None,
             route_hash: None,
+            edge_generation: 0,
             raw_source: Arc::from(""),
             eval_source: Arc::from(""),
             cached_parse: None,
@@ -473,8 +487,15 @@ impl crate::invalidation_domain::InvalidationByCanonical for AnalysisReadyDb {
 /// Generation fields drive the materialiser's tiered staleness gate
 /// (sub-):
 /// - `whole_hash` — content authority (tier 1).
-/// - `workspace_generation` — `ws().content_generation()` at publish time
-///   (tier 2 fallback for files the scheduler hasn't seen).
+/// - `workspace_generation` — `ws().content_generation()` captured at
+///   materialisation time, immediately before the wildcard reexport edges
+///   are canonicalized and fenced after (so it IS the workspace generation
+///   at which this entry's wildcard `canonical_id`s were resolved). Drives
+///   the tier-2 owner-surface fallback for files the scheduler hasn't seen,
+///   AND is the edge-resolution generation route-surface consumers check
+///   (`route_owned_entry_is_edge_current`): a wildcard-bearing entry whose
+///   owner content is unchanged but whose dependency file set has shifted is
+///   edge-stale and must not produce a route surface or be reused.
 /// - `project_generation` —
 ///   [`ProjectTypeStore::current_project_generation`] at publish time
 ///   (tier 3 — covers `configure_projects` / `set_exact_resolutions`
@@ -491,7 +512,11 @@ impl crate::invalidation_domain::InvalidationByCanonical for AnalysisReadyDb {
 pub struct RouteOwnedShallowEntry {
     /// Tier-1 content hash.
     pub whole_hash: Hash16,
-    /// Tier-2 workspace content generation captured at publish time.
+    /// Workspace content generation captured immediately before this entry's
+    /// wildcard reexport edges were canonicalized (fenced after) — i.e. the
+    /// generation at which the baked wildcard `canonical_id`s were resolved.
+    /// Tier-2 owner-surface fallback AND the edge-resolution generation
+    /// route-surface consumers validate (`route_owned_entry_is_edge_current`).
     pub workspace_generation: u64,
     /// Tier-3 project generation captured at publish time.
     pub project_generation: u64,
@@ -2814,6 +2839,7 @@ mod tests {
                 import_routes: Arc::new(FxHashMap::default()),
                 import_route_hash: None,
                 route_hash: None,
+                edge_generation: 0,
                 raw_source: Arc::from(""),
                 eval_source: Arc::from(""),
                 cached_parse: None,
@@ -2872,6 +2898,7 @@ mod tests {
                 import_routes: Arc::new(FxHashMap::default()),
                 import_route_hash: None,
                 route_hash: None,
+                edge_generation: 0,
                 raw_source: Arc::from(""),
                 eval_source: Arc::from(""),
                 cached_parse: None,

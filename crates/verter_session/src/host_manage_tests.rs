@@ -5100,6 +5100,1276 @@ fn resolve_eval_dependency_canonical_prefers_declaration_companion_shallowly() {
     );
 }
 
+/// DISCRIMINATING regression (RouteDb stale-serve hole 1, wildcard-hash-
+/// stability behavior): the route-owned shallow surface for a barrel must
+/// resolve its `export *` wildcard edges to the SAME canonical ids the indexed
+/// surface resolves them to, so the two hash to the SAME
+/// `DerivedFactKind::Route` shape. The route-owned materialiser built its
+/// surface with `NullResolver` (every wildcard `canonical_id` empty), so the
+/// wildcard target never entered the route-surface hash — a route depending on
+/// the wildcard target stale-served when that target's resolution changed, and
+/// the route-owned / indexed surfaces could disagree. Both surfaces now resolve
+/// `export *` sources through the shared `resolve_route_edge_canonical` policy
+/// (the indexed materialiser via its wildcard pass, the route-owned via its
+/// `dep_edges`), so the wildcard canonicals — and the route-surface hashes —
+/// agree.
+///
+/// FAILS pre-fix: the wildcard `canonical_id` is `""` (empty) on both surfaces
+/// and the route hash is target-blind. PASSES post-fix: both resolve `./impl`
+/// to `/workspace/impl.ts` through the shared route-edge policy and the two
+/// route-surface hashes are byte-equal.
+#[test]
+fn route_owned_wildcard_surface_matches_indexed_surface() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/workspace/index.ts", "export * from './impl';\n");
+    ws.inject_file("/workspace/impl.ts", "export type Impl = { id: number };\n");
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    // A configured project makes the workspace resolver resolve relative
+    // specifiers (mirrors a real workspace; a bare unconfigured workspace
+    // cannot resolve `./impl`).
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+
+    // Materialise the ROUTE-OWNED surface FIRST (the route-owned producer
+    // declines to publish once a content-matching IndexedReady exists).
+    let route_owned = host
+        .ensure_route_owned_shallow_entry("/workspace/index.ts")
+        .expect("route-owned materialiser must produce an entry for the barrel");
+    let route_wildcards = &route_owned.shallow_state.wildcard_reexports;
+    assert_eq!(
+        route_wildcards.len(),
+        1,
+        "the barrel has exactly one `export *` wildcard reexport"
+    );
+    assert_eq!(
+        route_wildcards[0].canonical_id, "/workspace/impl.ts",
+        "the route-owned surface MUST resolve the wildcard edge to the impl \
+         canonical (NOT an empty NullResolver id)"
+    );
+
+    // Materialise the INDEXED surface and compare wildcard resolution + hash.
+    let indexed = host
+        .ensure_indexed_ready("/workspace/index.ts")
+        .expect("indexed materialiser must produce an artifact for the barrel");
+    assert_eq!(
+        indexed.shallow_state.wildcard_reexports[0].canonical_id, "/workspace/impl.ts",
+        "the indexed surface resolves the wildcard edge identically"
+    );
+
+    let route_hash = crate::resolver_store::hash_route_surface(route_owned.shallow_state.as_ref());
+    let indexed_hash = crate::resolver_store::hash_route_surface(&indexed.shallow_state);
+    assert_eq!(
+        route_hash, indexed_hash,
+        "route-owned and indexed route-surface hashes MUST agree — a divergent \
+         wildcard canonical id records a Route fact one surface cannot \
+         reproduce, stale-serving on every warm validation"
+    );
+}
+
+/// DISCRIMINATING regression: an INDEXED barrel's PLAIN (non-type) `export *`
+/// wildcard edge must resolve through the shared TS-first route-edge policy
+/// (`resolve_route_edge_canonical`), matching the route-owned and overlay
+/// surfaces. A bare `export *` source IS captured in `export_signatures`, so
+/// the indexed materialiser's `resolve_missing` loop resolves it — but for a
+/// PLAIN `export *` it classifies the source as `EsmImport` and bakes the
+/// runtime `.js` `source_id` without TS-first normalization. The shared policy
+/// (used by route-owned + overlay) maps a `.js`-with-`.d.ts`-companion source
+/// to the `.d.ts` declaration, so the indexed surface diverged — a producer
+/// disagreement that `hash_route_surface` (which hashes `wildcard.canonical_id`)
+/// turns into a stale serve.
+///
+/// FAILS pre-fix: the indexed wildcard edge bakes `/workspace/runtime.js`.
+/// PASSES post-fix: the wildcard pass overwrites it with the shared-policy
+/// `/workspace/runtime.d.ts`, matching the route-edge oracle.
+#[test]
+fn indexed_plain_export_star_resolves_wildcard_edge_through_ts_first_policy() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let barrel = "/workspace/index.ts";
+    // PLAIN `export *` (not `export type *`) — the EsmImport-classified shape.
+    ws.inject_file(barrel, "export * from './runtime';\n");
+    // `./runtime` has a runtime `.js` WITH a `.d.ts` declaration companion: the
+    // shared policy picks the `.d.ts`, a raw EsmImport resolve picks the `.js`.
+    ws.inject_file("/workspace/runtime.js", "export const Runtime = true\n");
+    ws.inject_file("/workspace/runtime.d.ts", "export type Runtime = boolean\n");
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    let oracle = host.resolve_route_edge_canonical(barrel, "./runtime");
+    assert_eq!(
+        oracle.as_deref(),
+        Some("/workspace/runtime.d.ts"),
+        "precondition: the shared route-edge policy is TS-first (.d.ts companion)"
+    );
+
+    let indexed = host
+        .ensure_indexed_ready(barrel)
+        .expect("indexed materialiser must produce an artifact for the barrel");
+    let baked = indexed
+        .import_routes
+        .get("./runtime")
+        .and_then(|r| r.resolved_canonical_id.clone());
+    assert_eq!(
+        baked.as_deref(),
+        Some("/workspace/runtime.d.ts"),
+        "the indexed plain `export *` wildcard edge MUST resolve through the shared \
+         TS-first route-edge policy (.d.ts companion), not bake the EsmImport `.js`"
+    );
+    let wildcard = indexed
+        .shallow_state
+        .wildcard_reexports
+        .iter()
+        .find(|w| w.source_specifier == "./runtime")
+        .map(|w| w.canonical_id.clone());
+    assert_eq!(
+        wildcard.as_deref(),
+        Some("/workspace/runtime.d.ts"),
+        "the baked wildcard `canonical_id` (digested by `hash_route_surface`) MUST \
+         equal the shared route-edge oracle so the indexed surface agrees with \
+         route-owned / overlay"
+    );
+}
+
+/// DISCRIMINATING regression (RouteDb stale-serve hole 2): a cached
+/// `RouteResult::Miss` produced because an `export *` wildcard edge could not
+/// be resolved must NOT be served stale after the wildcard's target file
+/// appears. The Miss was rooted only on the provider's `FileWholeHash` +
+/// `Route` derived hash — neither of which re-resolves a known-miss specifier
+/// — so when the target appeared (the provider's own content unchanged) the
+/// recorded facts still revalidated and the stale Miss was served forever.
+///
+/// The fix roots such a Miss in the `DerivedFactKind::ImportRoute` rail:
+/// `generation_current_import_route_hash` re-resolves the provider's known-miss
+/// specifiers against the live workspace, so the recorded fact changes the
+/// moment `./missing` resolves — invalidating the cached Miss. (If that fact
+/// cannot be produced, the route entry is not admitted, so a cold re-resolve
+/// runs instead of serving an unrooted Miss.)
+///
+/// FAILS pre-fix: the second resolve returns `None` (the stale cached Miss).
+/// PASSES post-fix: the second resolve returns the now-existing target.
+#[test]
+fn unresolvable_wildcard_route_miss_reresolves_after_target_appears() {
+    let host = make_host();
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+
+    // A barrel that re-exports from a target which does NOT yet exist.
+    upsert_non_sfc(&host, "/workspace/index.ts", "export * from './missing';\n");
+
+    // Cold resolve: `Foo` cannot resolve because `./missing` is unresolvable.
+    let first = host.resolve_named_type_export_target("/workspace/index.ts", "Foo");
+    assert_eq!(
+        first, None,
+        "precondition: Foo must miss while ./missing does not resolve"
+    );
+
+    // The wildcard target appears (file-set change advances the epoch).
+    upsert_non_sfc(
+        &host,
+        "/workspace/missing.ts",
+        "export type Foo = string;\n",
+    );
+
+    // The cached Miss MUST NOT be served stale — Foo now resolves through the
+    // wildcard to the freshly-appeared target.
+    let second = host.resolve_named_type_export_target("/workspace/index.ts", "Foo");
+    assert_eq!(
+        second,
+        Some(("/workspace/missing.ts".to_string(), "Foo".to_string())),
+        "after ./missing appears, the cached wildcard Miss MUST invalidate and \
+         re-resolve Foo to the now-existing target (RouteDb stale-serve hole 2)"
+    );
+}
+
+/// CHARACTERIZATION (RouteDb stale-serve hole 2, review finding 1 facet a —
+/// already correct on the INDEXED path; documents WHY no producer change was
+/// needed). Review finding 1 facet a hypothesised that a barrel mixing an
+/// UNRESOLVABLE `export * from './missing'` with a RESOLVABLE sibling
+/// stale-serves because the bare `export *` edge is "not in
+/// `required_import_sources` (a bare `export *` has no exported name)". That
+/// premise is FALSE for the indexed materialiser: a bare `export *` is captured
+/// in `export_signatures` as `ExportSignature { name: "*", reexport_source:
+/// Some("./missing"), .. }` (see `verter_semantic::analysis::exports` —
+/// `Statement::ExportAllDeclaration`), so it enters `required_import_sources`
+/// and `prepared_decl`'s `resolve_missing` records it in `import_routes` as a
+/// known-miss `DependencyResolution { resolved_canonical_id: None,
+/// possible_canonical_ids: [] }` — WITHOUT any sibling, resolvable or not.
+/// `generation_current_import_route_hash` therefore already detects the
+/// known-miss and re-resolves `./missing` against the live workspace, so the
+/// recorded `ImportRoute` fact MOVES the moment `./missing` appears and the
+/// cached `Miss` invalidates.
+///
+/// This test PASSES both pre- and post-fix (no producer change lands for the
+/// indexed path); it is retained as a regression guard against a future change
+/// that drops `export *` sources from `export_signatures` / the import-route
+/// known-miss rail. The genuine facet-b drop bug is fixed + pinned by
+/// `route_resolved_via_later_wildcard_not_dropped_by_unresolvable_earlier_wildcard`.
+#[test]
+fn mixed_barrel_indexed_wildcard_known_miss_already_rooted_via_export_signatures() {
+    let host = make_host();
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+
+    // A resolvable sibling exists; the wildcard target does NOT yet exist.
+    upsert_non_sfc(
+        &host,
+        "/workspace/present.ts",
+        "export type Present = number;\n",
+    );
+    // Barrel mixes an UNRESOLVABLE `export *` with a RESOLVABLE named reexport.
+    upsert_non_sfc(
+        &host,
+        "/workspace/index.ts",
+        "export * from './missing';\nexport { Present } from './present';\n",
+    );
+
+    // Force the indexed surface: the resolvable sibling populates
+    // `import_routes`, so the route entry is ADMITTED (the bug's precondition —
+    // an admitted entry whose recorded fact does NOT track the wildcard
+    // known-miss).
+    let _ = host.ensure_indexed_ready("/workspace/index.ts");
+
+    // Cold resolve a name ONLY the unresolvable wildcard can provide → MISS.
+    let first = host.resolve_named_type_export_target("/workspace/index.ts", "Missing");
+    assert_eq!(
+        first, None,
+        "precondition: Missing must miss while ./missing is unresolvable"
+    );
+
+    // The wildcard target appears (provider content unchanged).
+    upsert_non_sfc(
+        &host,
+        "/workspace/missing.ts",
+        "export type Missing = string;\n",
+    );
+
+    let second = host.resolve_named_type_export_target("/workspace/index.ts", "Missing");
+    assert_eq!(
+        second,
+        Some(("/workspace/missing.ts".to_string(), "Missing".to_string())),
+        "the mixed-barrel cached Miss MUST invalidate when ./missing appears — the \
+         resolvable sibling's ImportRoute hash does NOT re-resolve the wildcard \
+         known-miss, so without rooting the unresolvable wildcard in import_routes \
+         the stale Miss is served forever (RouteDb stale-serve hole 2, facet a)"
+    );
+}
+
+/// DISCRIMINATING regression (RouteDb stale-serve hole 2, review finding 1
+/// facet b — wrongly-drops-valid / over-aggressive None). A barrel whose only
+/// edges are `export *` wildcards (`export * from './missing'; export * from
+/// './present';`) is a route-owned provider: its wildcards resolve into a local
+/// `dep_edges` map and are NOT published into `import_routes`, so
+/// `generation_current_import_route_hash(owner)` returns `None`. The hole-2
+/// rooting loop fed that `None` through `?`, dropping the WHOLE route entry —
+/// so a valid result resolved via the LATER wildcard (`./present`) was returned
+/// as `None` (no value served at all). "Do not admit to cache" was wrongly
+/// implemented as "return no result".
+///
+/// The fix splits the two cleanly: when an owner's import-route hash cannot be
+/// produced, the resolved route surface is still RETURNED to the caller (with
+/// empty facts → route_db's negative-cache path serves it without persisting),
+/// never dropped. The next query re-resolves cold against the live workspace.
+///
+/// FAILS pre-fix: the first resolve returns `None` (the valid `./present`
+/// result is wrongly dropped). PASSES post-fix: the valid result is returned
+/// and still resolves after `./missing` appears.
+#[test]
+fn route_resolved_via_later_wildcard_not_dropped_by_unresolvable_earlier_wildcard() {
+    let host = make_host();
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+
+    upsert_non_sfc(
+        &host,
+        "/workspace/present.ts",
+        "export type Shared = number;\n",
+    );
+    // Barrel: an UNRESOLVABLE earlier `export *` then a RESOLVABLE later one.
+    // (`Shared` is not a prefix of either wildcard's source stem, so the
+    // wildcards are tried in declaration order — the unresolvable `./missing`
+    // first, recording the owner as having an unresolved edge.)
+    upsert_non_sfc(
+        &host,
+        "/workspace/index.ts",
+        "export * from './missing';\nexport * from './present';\n",
+    );
+
+    // The earlier unresolvable wildcard must NOT cause the valid later-wildcard
+    // result to be dropped.
+    let first = host.resolve_named_type_export_target("/workspace/index.ts", "Shared");
+    assert_eq!(
+        first,
+        Some(("/workspace/present.ts".to_string(), "Shared".to_string())),
+        "a valid result resolved via a LATER `export *` wildcard MUST NOT be dropped \
+         because an EARLIER `export *` wildcard is unresolvable — refusing to cache an \
+         unrootable known-miss must never be implemented as returning no result \
+         (RouteDb stale-serve hole 2, facet b)"
+    );
+
+    // The earlier wildcard target appears; the later-wildcard result still
+    // resolves freshly (the served-without-caching surface re-resolves cold).
+    upsert_non_sfc(
+        &host,
+        "/workspace/missing.ts",
+        "export type Other = string;\n",
+    );
+    let second = host.resolve_named_type_export_target("/workspace/index.ts", "Shared");
+    assert_eq!(
+        second,
+        Some(("/workspace/present.ts".to_string(), "Shared".to_string())),
+        "after ./missing appears the later-wildcard result still resolves freshly"
+    );
+}
+
+/// End-to-end regression: a mixed wildcard barrel re-resolves once its
+/// unresolvable `export *` target appears. The barrel mixes an unresolvable
+/// `export * from './missing'` with a RESOLVABLE named reexport
+/// (`export { Present } from './present'`), supplied a PARTIAL `import_routes`
+/// snapshot (`set_import_dependencies` recording only `./present`, omitting the
+/// wildcard source). A first query for `Missing` misses; after `missing.ts`
+/// appears the query MUST resolve it rather than stale-serve the cached `Miss`.
+///
+/// Two independent rails enforce this, and the test guards the end-to-end
+/// behaviour rather than isolating either:
+/// - The coverage-checked `ImportRoute` admission
+///   (`generation_current_import_route_hash_covering_sources`): the rooting
+///   loop admits an `ImportRoute` fact ONLY when the produced hash covers
+///   EVERY unresolved wildcard source the traversal hit; a partial table that
+///   omits `./missing` yields no fact, so the `Miss` is returned with EMPTY
+///   facts (RouteDb negative-cache: served, never persisted) and re-resolves.
+/// - The shared edge-currency oracle (`route_surface_is_edge_current`): the
+///   barrel's surface is wildcard-bearing, so its `Route` participant fact is
+///   edge-stale once `content_generation` advances (a file appeared), which
+///   independently invalidates the cached `Miss`.
+///
+/// Because the edge-currency oracle backstops the wildcard rail, this test is
+/// NOT a discriminator for the coverage check in isolation (reverting the
+/// coverage check alone keeps it green — the edge oracle still invalidates).
+/// The coverage check is retained as sound cache hygiene: it refuses to record
+/// an `ImportRoute` fact that does not represent every dependency the entry
+/// actually rests on.
+///
+/// FAILS against a tree with neither rail (the original stale-serve bug);
+/// PASSES with either present.
+#[test]
+fn import_route_fact_admitted_only_when_it_covers_unresolved_wildcard_source() {
+    let host = make_host();
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+
+    // A resolvable sibling exists; the wildcard target does NOT yet exist.
+    upsert_non_sfc(
+        &host,
+        "/workspace/present.ts",
+        "export type Present = number;\n",
+    );
+    // Barrel mixes a RESOLVABLE named reexport with an UNRESOLVABLE `export *`.
+    // The file is left route-owned-only (no `ensure_indexed_ready`), so the
+    // import-route surface comes solely from the PARTIAL snapshot below.
+    upsert_non_sfc(
+        &host,
+        "/workspace/index.ts",
+        "export { Present } from './present';\nexport * from './missing';\n",
+    );
+
+    // PARTIAL snapshot: records ONLY `./present`. The `./missing` wildcard
+    // source is deliberately omitted, so `DerivedRawState.import_routes` has a
+    // fully-resolved table (no known-miss) that does NOT cover the wildcard the
+    // route traversal hits. This is the bug's precondition: an owner WITH a
+    // route surface whose `ImportRoute` hash silently fails to track the
+    // unresolved wildcard.
+    host.set_import_dependencies(
+        "/workspace/index.ts",
+        vec![exact_dependency("./present", "/workspace/present.ts")],
+    );
+
+    // Cold resolve a name ONLY the unresolvable wildcard can provide → MISS.
+    let first = host.resolve_named_type_export_target("/workspace/index.ts", "Missing");
+    assert_eq!(
+        first, None,
+        "precondition: Missing must miss while ./missing is unresolvable"
+    );
+
+    // The wildcard target appears (provider content unchanged; `./present`
+    // still resolves identically).
+    upsert_non_sfc(
+        &host,
+        "/workspace/missing.ts",
+        "export type Missing = string;\n",
+    );
+
+    let second = host.resolve_named_type_export_target("/workspace/index.ts", "Missing");
+    assert_eq!(
+        second,
+        Some(("/workspace/missing.ts".to_string(), "Missing".to_string())),
+        "the cached Miss MUST invalidate when ./missing appears — a partial \
+         import-route snapshot that resolves ./present but omits the wildcard \
+         source produces an ImportRoute hash that does NOT cover ./missing, so \
+         admitting it as the rooting fact stale-serves the Miss forever. The \
+         fact must be admitted only when it covers every unresolved wildcard \
+         source the traversal hit (RouteDb stale-serve hole 2 — coverage-checked \
+         ImportRoute admission)"
+    );
+}
+
+/// DISCRIMINATING regression (RouteDb stale-serve — generation-current
+/// wildcard-edge route-surface production). A route-owned barrel
+/// (`export * from './runtime'; export * from './present';`) first resolves
+/// `Runtime` through `./runtime` when only `runtime.js` exists, caching a
+/// `Route` fact whose route-owned-shallow surface bakes the wildcard edge
+/// `./runtime → runtime.js`. When the `.d.ts` companion `runtime.d.ts` later
+/// appears, TS-first priority retargets the effective edge to `runtime.d.ts`.
+///
+/// A route-owned barrel becomes scheduler-tracked once resolved, so the
+/// owner-surface freshness gate's tier-1 (owner content hash) judges the
+/// entry fresh after the retarget — the owner's content is unchanged. The
+/// baked wildcard edge is nonetheless stale: it depends on the dependency
+/// file set, which changed (a new file advanced `content_generation`). Before
+/// the fix the warm host reproduces the stale `Route` hash (encoding
+/// `runtime.js`) and validates the warm `RouteDb` entry, stale-serving
+/// `runtime.js`.
+///
+/// The fix gates route-surface fact production AND route-owned materializer
+/// reuse on `route_owned_entry_is_edge_current`: a wildcard-bearing entry is
+/// edge-stale once `content_generation` advances past its baked-edge
+/// generation, so no stale `Route` fact is produced and the materializer
+/// rebuilds the edges. The warm host then resolves the SAME target as a fresh
+/// host.
+///
+/// FAILS pre-fix: the warm host keeps returning `runtime.js` after
+/// `runtime.d.ts` appears. PASSES post-fix: the warm host returns
+/// `runtime.d.ts`, identical to a fresh host built on the same workspace.
+#[test]
+fn route_owned_route_fact_retargets_js_to_dts_on_warm_host() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let index = "/workspace/index.ts";
+    // Route-owned barrel + a resolvable sibling, injected straight into the
+    // workspace.
+    ws.inject_file(
+        index,
+        "export * from './runtime';\nexport * from './present';\n",
+    );
+    ws.inject_file("/workspace/present.ts", "export type Present = number;\n");
+    let warm = VerterHost::new(HostConfig::default(), ws.clone());
+
+    // `./runtime` absent → `Runtime` misses.
+    let r0 = warm.resolve_named_type_export_target(index, "Runtime");
+    assert_eq!(
+        r0, None,
+        "precondition: Runtime misses while ./runtime is absent"
+    );
+
+    // `runtime.js` appears: `./runtime` resolves to the runtime script (no
+    // `.d.ts` companion yet), so `Runtime` resolves to runtime.js and the warm
+    // host caches a Route fact encoding the `./runtime → runtime.js` edge.
+    ws.inject_file("/workspace/runtime.js", "export const Runtime = true\n");
+    let r1 = warm.resolve_named_type_export_target(index, "Runtime");
+    assert_eq!(
+        r1,
+        Some(("/workspace/runtime.js".to_string(), "Runtime".to_string())),
+        "precondition: Runtime resolves to runtime.js while only the .js exists"
+    );
+
+    // The `.d.ts` companion appears. TS-first priority retargets `./runtime`
+    // to runtime.d.ts.
+    ws.inject_file("/workspace/runtime.d.ts", "export type Runtime = boolean\n");
+
+    // A FRESH host on the same workspace is the oracle for the retargeted edge.
+    let fresh = VerterHost::new(HostConfig::default(), ws.clone());
+    let fresh_result = fresh.resolve_named_type_export_target(index, "Runtime");
+    assert_eq!(
+        fresh_result,
+        Some(("/workspace/runtime.d.ts".to_string(), "Runtime".to_string())),
+        "precondition: a fresh host resolves Runtime to the .d.ts companion after retarget"
+    );
+
+    let warm_result = warm.resolve_named_type_export_target(index, "Runtime");
+    assert_eq!(
+        warm_result, fresh_result,
+        "the WARM host MUST return the SAME retargeted target as a FRESH host once \
+         runtime.d.ts appears — a stale wildcard-bearing route-owned entry (its \
+         baked ./runtime edge unchanged at owner-content level but edge-stale after \
+         the dependency file set shifted) must NOT reproduce its Route fact. \
+         Route-surface production + materializer reuse must be gated on the \
+         wildcard-edge resolution generation"
+    );
+}
+
+/// DISCRIMINATING unit test for `route_owned_entry_is_edge_current`: the
+/// edge gate must judge a scheduler-tracked WILDCARD-bearing entry STALE once
+/// `content_generation` advances past its baked-edge generation, even though
+/// its owner content hash is unchanged — while a NON-wildcard entry with the
+/// same unchanged owner hash stays FRESH (the owner-surface tier-1 fast path
+/// is untouched).
+///
+/// FAILS against a gate that only checks owner-surface freshness (tier-1
+/// content hash): that gate would judge the wildcard entry fresh after the
+/// dependency-set change. PASSES once the edge gate also requires
+/// `workspace_generation == content_generation()` for wildcard-bearing
+/// entries.
+#[test]
+fn route_owned_edge_gate_stales_wildcard_entry_after_dependency_set_change() {
+    use crate::resolver_core::shallow_file_state::{ShallowFileState, WildcardReexport};
+    use rustc_hash::{FxHashMap, FxHashSet};
+
+    let ws = Arc::new(CountingWorkspace::new());
+    let owner = "/workspace/barrel.ts";
+    ws.inject_file(owner, "export * from './dep';\n");
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    // Upsert the owner so it is scheduler-tracked with a stable content hash:
+    // the owner-surface gate's tier-1 (`get_whole_hash`) then governs and
+    // stays FRESH across an unrelated dependency-set change.
+    upsert_non_sfc(&host, owner, "export * from './dep';\n");
+    let owner_hash = host
+        .get_whole_hash(owner)
+        .expect("owner must be scheduler-tracked with an authoritative content hash");
+    let project_generation = host.project_type_store().current_project_generation();
+    let baked_generation = host.ws().content_generation();
+
+    // Build a route-owned entry whose generations match `host`'s live state
+    // and whose self `whole_hash` is the owner's authoritative hash, varying
+    // ONLY whether the shallow surface carries a wildcard reexport.
+    let build_entry = |wildcard: bool| {
+        let analysis = Arc::new(
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+        );
+        let wildcard_reexports = if wildcard {
+            vec![WildcardReexport {
+                source_specifier: "./dep".to_string(),
+                canonical_id: String::new(),
+            }]
+        } else {
+            Vec::new()
+        };
+        Arc::new(crate::project_type_store::RouteOwnedShallowEntry {
+            whole_hash: owner_hash,
+            workspace_generation: baked_generation,
+            project_generation,
+            raw_source: Arc::from(""),
+            eval_source: Arc::from(""),
+            cached_parse: None,
+            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+            external_type_analysis: Arc::clone(&analysis),
+            shallow_state: Arc::new(ShallowFileState {
+                whole_hash: owner_hash,
+                exports: FxHashMap::default(),
+                wildcard_reexports,
+                symbols: FxHashMap::default(),
+                value_symbols: FxHashMap::default(),
+                augmentation_scopes: FxHashMap::default(),
+                augmentation_value_scopes: FxHashMap::default(),
+                import_locals: FxHashSet::default(),
+                import_targets: FxHashMap::default(),
+                analysis,
+            }),
+        })
+    };
+
+    let wildcard_entry = build_entry(true);
+    let plain_entry = build_entry(false);
+    assert!(wildcard_entry.shallow_state.has_wildcard_reexports());
+    assert!(!plain_entry.shallow_state.has_wildcard_reexports());
+
+    // Before any change: both are owner-fresh AND edge-current.
+    assert!(
+        host.route_owned_entry_is_fresh_for_test(owner, &wildcard_entry),
+        "precondition: owner-surface gate is fresh for the wildcard entry"
+    );
+    assert!(
+        host.route_owned_entry_is_edge_current_for_test(owner, &wildcard_entry),
+        "precondition: edge gate is current before any dependency-set change"
+    );
+
+    // A dependency-set change: a NEW file appears (the owner's content is
+    // unchanged). `content_generation` advances past the entries'
+    // `baked_generation`.
+    ws.inject_file("/workspace/dep.ts", "export type Dep = string;\n");
+    assert_ne!(
+        host.ws().content_generation(),
+        baked_generation,
+        "precondition: injecting a new file advances content_generation"
+    );
+
+    // Owner-surface gate stays FRESH for the wildcard entry (tier-1 owner
+    // hash unchanged) — proving the edge gate's staling is NOT just the
+    // owner-surface gate firing.
+    assert!(
+        host.route_owned_entry_is_fresh_for_test(owner, &wildcard_entry),
+        "owner-surface gate must stay fresh — the owner's content is unchanged"
+    );
+
+    // Edge gate: the WILDCARD entry is now STALE (its baked edge depends on
+    // the dependency file set), the NON-wildcard entry stays FRESH.
+    assert!(
+        !host.route_owned_entry_is_edge_current_for_test(owner, &wildcard_entry),
+        "edge gate MUST stale a wildcard-bearing entry once content_generation \
+         advances past its baked-edge generation, even with unchanged owner content"
+    );
+    assert!(
+        host.route_owned_entry_is_edge_current_for_test(owner, &plain_entry),
+        "edge gate MUST leave a non-wildcard entry fresh — it carries no \
+         dependency-set-derived surface, so the owner-surface fast path stands"
+    );
+}
+
+/// DISCRIMINATING regression (generation-current wildcard-edge surface on the
+/// INDEXED producer). The route-owned producer gates its wildcard-edge surface
+/// on `content_generation`, but `ensure_indexed_ready` bakes wildcard sources
+/// into the content-pinned `IndexedReady` surface, and the indexed surface is
+/// the route authority `current_route_surface_hash` / `HostStoreView::build`
+/// serve BEFORE the route-owned fallback. A barrel `export * from './runtime'`
+/// indexed while only `runtime.js` exists bakes the `./runtime → runtime.js`
+/// edge; when the `.d.ts` companion appears TS-first priority retargets the
+/// edge, but the content-pinned indexed surface (owner content unchanged) keeps
+/// serving runtime.js.
+///
+/// The root fix roots the indexed surface in `IndexedReady.edge_generation` and
+/// routes every route-fact producer + the indexed materializer-reuse through
+/// the shared edge-currency oracle: an edge-stale wildcard-bearing indexed
+/// surface produces no `Route` fact and is rebuilt on reuse, so the warm host
+/// re-resolves and matches a fresh host.
+///
+/// FAILS pre-root-fix: the warm host returns `runtime.js` after `runtime.d.ts`
+/// appears. PASSES post: warm == fresh == `runtime.d.ts`.
+#[test]
+fn indexed_route_fact_retargets_on_warm_host_after_dependency_set_change() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let index = "/workspace/index.ts";
+    ws.inject_file(
+        index,
+        "export type * from './runtime';\nexport type * from './present';\n",
+    );
+    ws.inject_file("/workspace/present.ts", "export type Present = number;\n");
+    // `./runtime` initially resolves to the directory-index file.
+    ws.inject_file(
+        "/workspace/runtime/index.ts",
+        "export type Runtime = number;\n",
+    );
+    let warm = VerterHost::new(HostConfig::default(), ws.clone());
+
+    // FORCE the indexed surface — the producer the route-owned edge gate does
+    // NOT cover. `ensure_indexed_ready` bakes `./runtime → runtime/index.ts`
+    // into the content-pinned `IndexedReady` at the current generation.
+    let _ = warm.ensure_indexed_ready(index);
+    let r1 = warm.resolve_named_type_export_target(index, "Runtime");
+    assert_eq!(
+        r1,
+        Some((
+            "/workspace/runtime/index.ts".to_string(),
+            "Runtime".to_string()
+        )),
+        "precondition: Runtime resolves to the directory-index file while it is \
+         the only ./runtime target"
+    );
+
+    // A more-specific `./runtime.ts` appears. The SAME resolution policy (a
+    // file preferred over a directory-index) retargets `./runtime` to
+    // `runtime.ts` — a genuine baked-edge change the indexed materialiser
+    // itself produces on rebuild (no resolution-policy divergence between
+    // producers).
+    ws.inject_file("/workspace/runtime.ts", "export type Runtime = boolean;\n");
+
+    let fresh = VerterHost::new(HostConfig::default(), ws.clone());
+    let _ = fresh.ensure_indexed_ready(index);
+    let fresh_result = fresh.resolve_named_type_export_target(index, "Runtime");
+    assert_eq!(
+        fresh_result,
+        Some(("/workspace/runtime.ts".to_string(), "Runtime".to_string())),
+        "precondition: a fresh host retargets Runtime to the more-specific \
+         ./runtime.ts after it appears"
+    );
+
+    let warm_result = warm.resolve_named_type_export_target(index, "Runtime");
+    assert_eq!(
+        warm_result, fresh_result,
+        "the WARM host MUST return the SAME retargeted target as a FRESH host once \
+         ./runtime.ts appears — a content-pinned INDEXED wildcard surface (owner \
+         content unchanged, but the dependency file set shifted) must be rooted in \
+         its edge-resolution generation so every route-fact producer and the \
+         indexed materializer reuse re-resolve instead of serving the stale \
+         runtime/index.ts edge"
+    );
+}
+
+/// DISCRIMINATING unit test for the shared edge-currency oracle
+/// `route_surface_is_edge_current`. A WILDCARD-bearing surface stamped at a
+/// baked generation is edge-stale once `content_generation` advances past it;
+/// a NON-wildcard surface (no dependency-set-derived edges) stays edge-current
+/// regardless. This is the single predicate every route-fact producer and the
+/// materializer reuse share, for both route-owned (`workspace_generation`) and
+/// indexed (`IndexedReady.edge_generation`) edge generations.
+#[test]
+fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
+    use crate::resolver_core::shallow_file_state::{ShallowFileState, WildcardReexport};
+    use rustc_hash::{FxHashMap, FxHashSet};
+
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/workspace/x.ts", "export const a = 1;\n");
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    let baked = host.ws().content_generation();
+
+    let make_surface = |wildcard: bool| {
+        let analysis = Arc::new(
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+        );
+        ShallowFileState {
+            whole_hash: [7u8; 16],
+            exports: FxHashMap::default(),
+            wildcard_reexports: if wildcard {
+                vec![WildcardReexport {
+                    source_specifier: "./dep".to_string(),
+                    canonical_id: String::new(),
+                }]
+            } else {
+                Vec::new()
+            },
+            symbols: FxHashMap::default(),
+            value_symbols: FxHashMap::default(),
+            augmentation_scopes: FxHashMap::default(),
+            augmentation_value_scopes: FxHashMap::default(),
+            import_locals: FxHashSet::default(),
+            import_targets: FxHashMap::default(),
+            analysis,
+        }
+    };
+    let wildcard = make_surface(true);
+    let plain = make_surface(false);
+
+    // Before any change: both surfaces are edge-current at their baked gen.
+    assert!(host.route_surface_is_edge_current(&wildcard, baked));
+    assert!(host.route_surface_is_edge_current(&plain, baked));
+
+    // A dependency-set change advances content_generation past `baked`.
+    ws.inject_file("/workspace/y.ts", "export const b = 2;\n");
+    assert_ne!(host.ws().content_generation(), baked);
+
+    // The wildcard surface is now edge-stale (its baked edges depend on the
+    // file set); the non-wildcard surface stays edge-current.
+    assert!(
+        !host.route_surface_is_edge_current(&wildcard, baked),
+        "a wildcard-bearing surface MUST be edge-stale once content_generation \
+         advances past its baked-edge generation"
+    );
+    assert!(
+        host.route_surface_is_edge_current(&plain, baked),
+        "a non-wildcard surface carries no dependency-set-derived edges and stays \
+         edge-current regardless of content_generation"
+    );
+}
+
+/// DISCRIMINATING regression (RouteDb stale-serve hole 3): the ESM-fallback
+/// effective-target normalization MUST be identical between route traversal
+/// (`resolve_route_type_edge`) and known-miss revalidation
+/// (`generation_current_known_miss_resolution`). Route traversal normalized
+/// the ESM fallback (mapping a runtime `.js` to its `.d.ts` declaration
+/// companion) while the known-miss path kept the raw `source_id`, so the two
+/// recorded divergent `ImportRoute` facts — a known-miss re-resolved against
+/// the current file set produced one canonical, the actual route resolution
+/// produced another, and the dependent cache entry stale-served.
+///
+/// The scenario forces the ESM fallback: the specifier resolves ONLY under the
+/// `EsmImport` kind (no `TypeImport` resolution exists), and the resolved
+/// runtime target carries a `.d.ts` companion — so a NORMALIZED fallback
+/// returns the declaration and a RAW fallback returns the runtime script.
+///
+/// FAILS pre-fix: `generation_current_known_miss_resolution` returned the raw
+/// `/workspace/runtime.js` while `resolve_route_type_edge` returned the
+/// normalized `/workspace/runtime.d.ts`. PASSES post-fix: both return the
+/// declaration companion through the single shared route-edge policy.
+#[test]
+fn esm_fallback_normalization_parity_between_route_edge_and_known_miss() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let owner = "/workspace/owner.ts";
+    ws.inject_file(owner, "export {}\n");
+    // Runtime target plus its declaration companion: normalization maps the
+    // `.js` to the `.d.ts` via `resolve_eval_dependency_canonical`.
+    ws.inject_file("/workspace/runtime.js", "export const runtime = true\n");
+    ws.inject_file("/workspace/runtime.d.ts", "export type Runtime = boolean\n");
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    // Resolvable ONLY via `EsmImport` — `TypeImport` resolution of this bare
+    // specifier returns `None`, so both code paths fall through to the ESM
+    // fallback (the exact site where the policies diverged).
+    ws.set_exact_resolutions(
+        owner,
+        vec![verter_workspace::ExactResolution {
+            specifier: "runtimedep".to_string(),
+            phase: verter_workspace::ResolvePhase::CodegenBlocker,
+            kind: verter_workspace::ResolveRequestKind::EsmImport,
+            resolved_canonical_id: Some("/workspace/runtime.js".to_string()),
+            possible_canonical_ids: vec!["/workspace/runtime.js".to_string()],
+        }],
+    );
+
+    let route_edge = host.resolve_route_type_edge(owner, "runtimedep");
+    let known_miss = host.generation_current_known_miss_resolution(owner, "runtimedep");
+
+    assert_eq!(
+        route_edge.as_deref(),
+        Some("/workspace/runtime.d.ts"),
+        "route traversal normalizes the ESM fallback to the declaration companion"
+    );
+    assert_eq!(
+        known_miss, route_edge,
+        "known-miss revalidation MUST apply the SAME ESM-fallback normalization \
+         as route traversal — divergent policies record divergent ImportRoute \
+         facts and stale-serve a known-miss after the file set changes"
+    );
+}
+
+/// DISCRIMINATING regression (RouteDb stale-serve hole 3, review finding 2 —
+/// the OVERLAY materialiser is a third sibling route-fact producer). The
+/// overlay `IndexedReady` materialiser resolved its TypeImport edges' ESM
+/// fallback to the RAW `source_id` (the runtime `.js`), while route traversal +
+/// known-miss revalidation normalize the ESM fallback to the `.d.ts`
+/// declaration companion through the single shared `resolve_route_edge_canonical`
+/// policy. Session store views consume the overlay's route facts, so an overlay
+/// barrel with an ESM-fallback edge recorded a route canonical the base /
+/// route-owned surfaces cannot reproduce — the SAME stale-serve class as hole 3,
+/// persisting on the overlay path.
+///
+/// The fix routes the overlay's TypeImport edge resolution through the SAME
+/// shared `resolve_route_edge_canonical` policy (no third copy). Because the
+/// overlay's `export *` wildcard sources flow through the SAME
+/// `required_import_sources` chain (a bare `export *` is captured in
+/// `export_signatures`), normalizing the chain also normalizes wildcard edges —
+/// no separate wildcard pass is needed.
+///
+/// FAILS pre-fix: the overlay records `/workspace/runtime.js` (raw). PASSES
+/// post-fix: the overlay records `/workspace/runtime.d.ts`, identical to the
+/// shared `resolve_route_edge_canonical` oracle.
+#[test]
+fn overlay_materializer_esm_fallback_normalizes_like_shared_route_edge_policy() {
+    use crate::session_view::OverlaidView;
+    let ws = Arc::new(CountingWorkspace::new());
+    let barrel = "/workspace/index.ts";
+    // Runtime target + its declaration companion (the `.js` → `.d.ts`
+    // normalization the shared policy applies).
+    ws.inject_file("/workspace/runtime.js", "export const runtime = true\n");
+    ws.inject_file("/workspace/runtime.d.ts", "export type Runtime = boolean\n");
+    // Resolvable ONLY via `EsmImport` — forces the ESM fallback (the exact site
+    // where the overlay kept the raw `source_id`).
+    ws.set_exact_resolutions(
+        barrel,
+        vec![verter_workspace::ExactResolution {
+            specifier: "runtimedep".to_string(),
+            phase: verter_workspace::ResolvePhase::CodegenBlocker,
+            kind: verter_workspace::ResolveRequestKind::EsmImport,
+            resolved_canonical_id: Some("/workspace/runtime.js".to_string()),
+            possible_canonical_ids: vec!["/workspace/runtime.js".to_string()],
+        }],
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), ws.clone()));
+
+    // The shared oracle — route traversal + known-miss both delegate here.
+    let oracle = host.resolve_route_edge_canonical(barrel, "runtimedep");
+    assert_eq!(
+        oracle.as_deref(),
+        Some("/workspace/runtime.d.ts"),
+        "precondition: the shared route-edge policy normalizes the ESM fallback to \
+         the .d.ts companion"
+    );
+
+    // Overlay-only barrel re-exporting from the ESM-fallback target. No base
+    // `IndexedReady` is seeded, so the overlay resolves the edge itself — this
+    // exercises the overlay materialiser's OWN edge-resolution policy (not a
+    // value copied from the base `DerivedRawState`).
+    let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> = rustc_hash::FxHashMap::default();
+    overlays.insert(
+        barrel.to_string(),
+        Arc::from("export type * from 'runtimedep';\n"),
+    );
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+
+    let overlay = host
+        .materialize_overlay_indexed_ready_with_view(barrel, &view)
+        .expect("overlay materialiser produces an IndexedReady for the overlaid barrel");
+
+    let recorded = overlay
+        .import_routes
+        .get("runtimedep")
+        .and_then(|r| r.resolved_canonical_id.clone());
+    assert_eq!(
+        recorded.as_deref(),
+        Some("/workspace/runtime.d.ts"),
+        "the overlay materialiser MUST normalize its ESM-fallback edge through the \
+         SAME shared route-edge policy (resolve_route_edge_canonical) as route \
+         traversal + known-miss revalidation — recording the raw runtime .js \
+         diverges the overlay route facts from the base / route-owned surfaces and \
+         stale-serves across the overlay boundary (RouteDb stale-serve hole 3, \
+         overlay materialiser, review finding 2)"
+    );
+    assert_eq!(
+        recorded, oracle,
+        "the overlay's recorded edge canonical MUST equal the shared route-edge oracle"
+    );
+}
+
+/// DISCRIMINATING regression: the OVERLAY materialiser's cache-hit reuse must
+/// be edge-current, the overlay analog of the indexed materialiser reuse gate.
+/// A session-overlay barrel `export type * from './runtime'` is materialised
+/// while `./runtime` resolves to the directory-index file, baking that edge
+/// into the overlay `IndexedReady` at the current generation. The overlay
+/// artifact is keyed by overlay content hash + discriminator, so a BASE
+/// file-set change (a more-specific `./runtime.ts` appears, advancing
+/// `content_generation` without touching the overlay source) does NOT
+/// re-materialise it — the cache-hit returns the stale baked edge.
+///
+/// The fix gates the overlay cache-hit on the shared edge-currency oracle: an
+/// edge-stale wildcard-bearing overlay `IndexedReady` is NOT reused; control
+/// falls through to RE-MATERIALISE the overlay artifact (re-resolving the
+/// wildcard edges against the live file set from the overlay source) — it must
+/// NOT fall back to the base surface (overlay-blindness).
+///
+/// FAILS pre-fix: the warm session host keeps the baked `runtime/index.ts`
+/// edge. PASSES post-fix: the warm session host retargets to `runtime.ts`,
+/// matching a fresh session host.
+#[test]
+fn overlay_materializer_wildcard_reuse_retargets_after_base_file_set_change() {
+    use crate::session_view::OverlaidView;
+    let ws = Arc::new(CountingWorkspace::new());
+    let barrel = "/workspace/index.ts";
+    // `./runtime` initially resolves to the directory-index file.
+    ws.inject_file(
+        "/workspace/runtime/index.ts",
+        "export type Runtime = number;\n",
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), ws.clone()));
+
+    let make_view = |host: &Arc<VerterHost>| {
+        let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> =
+            rustc_hash::FxHashMap::default();
+        overlays.insert(
+            barrel.to_string(),
+            Arc::from("export type * from './runtime';\n"),
+        );
+        OverlaidView::new(Arc::clone(host), overlays)
+    };
+
+    let view = make_view(&host);
+    // Materialise + cache the overlay artifact (bakes `./runtime → runtime/index.ts`).
+    let first = host
+        .materialize_overlay_indexed_ready_with_view(barrel, &view)
+        .expect("overlay materialiser produces an IndexedReady");
+    assert_eq!(
+        first
+            .import_routes
+            .get("./runtime")
+            .and_then(|r| r.resolved_canonical_id.clone())
+            .as_deref(),
+        Some("/workspace/runtime/index.ts"),
+        "precondition: the overlay bakes the directory-index edge while it is the \
+         only ./runtime target"
+    );
+
+    // A more-specific `./runtime.ts` appears — a BASE file-set change that
+    // advances `content_generation` but leaves the overlay source untouched.
+    ws.inject_file("/workspace/runtime.ts", "export type Runtime = boolean;\n");
+
+    // A fresh session host on the same workspace is the oracle for the retarget.
+    let fresh_host = Arc::new(VerterHost::new(HostConfig::default(), ws.clone()));
+    let fresh_view = make_view(&fresh_host);
+    let fresh = fresh_host
+        .materialize_overlay_indexed_ready_with_view(barrel, &fresh_view)
+        .expect("fresh overlay materialiser produces an IndexedReady");
+    let fresh_target = fresh
+        .import_routes
+        .get("./runtime")
+        .and_then(|r| r.resolved_canonical_id.clone());
+    assert_eq!(
+        fresh_target.as_deref(),
+        Some("/workspace/runtime.ts"),
+        "precondition: a fresh session host retargets ./runtime to the more-specific \
+         ./runtime.ts"
+    );
+
+    // Warm session host: re-materialise through the SAME view. The overlay
+    // cache-hit must re-resolve the wildcard edge (re-materialise), not serve
+    // the stale baked directory-index edge — and must NOT fall back to base.
+    let warm = host
+        .materialize_overlay_indexed_ready_with_view(barrel, &view)
+        .expect("warm overlay materialiser produces an IndexedReady");
+    let warm_target = warm
+        .import_routes
+        .get("./runtime")
+        .and_then(|r| r.resolved_canonical_id.clone());
+    assert_eq!(
+        warm_target, fresh_target,
+        "the WARM session host MUST retarget ./runtime to the SAME target as a FRESH \
+         session host after ./runtime.ts appears — a wildcard-bearing overlay \
+         IndexedReady reused from an earlier generation holds a stale baked edge; \
+         the overlay cache-hit must be gated on the edge-currency oracle and \
+         re-materialise (not serve the base surface)"
+    );
+    // Overlay-blindness guard: the retargeted edge is a genuine overlay
+    // re-materialisation, not a base-surface read — the overlay barrel exists
+    // ONLY in the overlay, so a base read would resolve nothing.
+    assert_eq!(
+        warm_target.as_deref(),
+        Some("/workspace/runtime.ts"),
+        "the warm overlay surface must carry the re-resolved overlay edge"
+    );
+}
+
+/// DISCRIMINATING regression: direct overlay artifact READERS (not just the
+/// materialiser's own cache-hit) must serve an edge-current wildcard surface.
+/// The session resolver context's `indexed_for_current_content` (and the
+/// frontier-adapter / route-owned-with-view readers) clone the cached overlay
+/// `IndexedReady` directly via `lookup_overlay_artifacts`, bypassing the
+/// edge-currency gate — so a wildcard-bearing overlay surface materialised
+/// before a BASE file-set change is read stale.
+///
+/// The fix routes every overlay reader through the gated overlay materialiser
+/// accessor (`materialize_overlay_indexed_ready_with_view`), which re-resolves
+/// the wildcard edges against the live file set when the cached surface is
+/// edge-stale and re-publishes — NEVER falling back to the base surface
+/// (overlay-blindness). The overlay barrel exists only in the overlay, so a
+/// base read would resolve nothing; the assertion that the reader returns the
+/// retargeted overlay edge proves the re-materialisation is overlay-rooted.
+///
+/// FAILS pre-fix: the reader serves the stale baked `runtime/index.ts` edge.
+/// PASSES post-fix: it retargets to `runtime.ts`, matching a fresh materialise.
+#[test]
+fn overlay_reader_retargets_wildcard_after_base_file_set_change() {
+    use crate::resolver_core::ResolverContext;
+    use crate::session_view::OverlaidView;
+    let ws = Arc::new(CountingWorkspace::new());
+    let barrel = "/workspace/index.ts";
+    ws.inject_file(
+        "/workspace/runtime/index.ts",
+        "export type Runtime = number;\n",
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), ws.clone()));
+    let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> = rustc_hash::FxHashMap::default();
+    overlays.insert(
+        barrel.to_string(),
+        Arc::from("export type * from './runtime';\n"),
+    );
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+    let first = host
+        .materialize_overlay_indexed_ready_with_view(barrel, &view)
+        .expect("overlay materializes");
+    assert_eq!(
+        first
+            .import_routes
+            .get("./runtime")
+            .and_then(|r| r.resolved_canonical_id.clone())
+            .as_deref(),
+        Some("/workspace/runtime/index.ts"),
+        "precondition: the overlay bakes the directory-index edge"
+    );
+    // BASE file-set change: a more-specific `./runtime.ts` appears.
+    ws.inject_file("/workspace/runtime.ts", "export type Runtime = boolean;\n");
+
+    let base = host
+        .resolver_store_view()
+        .with_session_overlay(&host, &view);
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::SessionResolverContext::new(&host, &view, &base, overlay);
+    let warm = ResolverContext::indexed_for_current_content(&ctx, barrel)
+        .expect("session context returns overlay indexed");
+    let target = warm
+        .import_routes
+        .get("./runtime")
+        .and_then(|r| r.resolved_canonical_id.clone());
+    assert_eq!(
+        target.as_deref(),
+        Some("/workspace/runtime.ts"),
+        "the overlay READER must retarget the wildcard edge after a base file-set \
+         change — re-materialising the overlay surface (not serving the stale baked \
+         edge, and not falling back to base)"
+    );
+}
+
+/// DISCRIMINATING regression: the BASE shallow reader (`shallow_file_state` →
+/// `indexed_for_current_content` → `current_content_pinned_indexed`) must serve
+/// an edge-current wildcard surface. The base pin is keyed only by the OWNER's
+/// content hash, so a wildcard-bearing `IndexedReady` materialised before a
+/// dependency file-set change is served with a stale baked `export *` edge —
+/// the owner content is unchanged, so the content pin still matches.
+///
+/// The fix gates the base content-pinned reader on the shared edge-currency
+/// oracle: an edge-stale wildcard surface is re-indexed from BASE content via
+/// `ensure_indexed_ready` (whose reuse is itself edge-gated, so it re-resolves
+/// the edges against the live file set) rather than served stale.
+///
+/// FAILS pre-fix: the base reader returns the stale `runtime/index.ts` edge.
+/// PASSES post-fix: it retargets to `runtime.ts`.
+#[test]
+fn base_shallow_reader_retargets_wildcard_after_dependency_set_change() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let barrel = "/workspace/index.ts";
+    ws.inject_file(barrel, "export type * from './runtime';\n");
+    ws.inject_file(
+        "/workspace/runtime/index.ts",
+        "export type Runtime = number;\n",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    let first = host
+        .ensure_indexed_ready(barrel)
+        .expect("indexed materialiser produces the barrel");
+    assert_eq!(
+        first
+            .import_routes
+            .get("./runtime")
+            .and_then(|r| r.resolved_canonical_id.clone())
+            .as_deref(),
+        Some("/workspace/runtime/index.ts"),
+        "precondition: the barrel bakes the directory-index edge"
+    );
+    ws.inject_file("/workspace/runtime.ts", "export type Runtime = boolean;\n");
+    let state = host
+        .shallow_file_state(barrel)
+        .expect("base shallow reader returns a surface");
+    let target = state
+        .wildcard_reexports
+        .iter()
+        .find(|w| w.source_specifier == "./runtime")
+        .map(|w| w.canonical_id.clone());
+    assert_eq!(
+        target.as_deref(),
+        Some("/workspace/runtime.ts"),
+        "the base shallow reader MUST retarget the wildcard edge after a dependency \
+         file-set change — re-indexing from base content rather than serving the \
+         stale baked directory-index edge"
+    );
+}
+
+/// DISCRIMINATING regression for the session-UNMASKED frontier reader
+/// (`route_owned_shallow_state_with_view`): a session-bearing query (the view
+/// is `Some`) for a NON-overlaid wildcard barrel reads the published base
+/// artifact via the legacy-key `lookup_overlay_artifacts` — which must be
+/// served only while edge-current. After a dependency file-set change the
+/// unmasked reader must fall through to the gated base route path and retarget
+/// rather than serve the stale baked edge.
+///
+/// FAILS pre-fix (unmasked branch returns the stale `runtime/index.ts` clone);
+/// PASSES post-fix (edge-stale → fall through to the gated `route_shallow_state`,
+/// which re-indexes to `runtime.ts`).
+#[test]
+fn session_unmasked_reader_retargets_wildcard_after_dependency_set_change() {
+    use crate::session_view::OverlaidView;
+    let ws = Arc::new(CountingWorkspace::new());
+    let barrel = "/workspace/index.ts";
+    ws.inject_file(barrel, "export type * from './runtime';\n");
+    ws.inject_file(
+        "/workspace/runtime/index.ts",
+        "export type Runtime = number;\n",
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), ws.clone()));
+    let _ = host
+        .ensure_indexed_ready(barrel)
+        .expect("indexed materialiser produces the barrel");
+    ws.inject_file("/workspace/runtime.ts", "export type Runtime = boolean;\n");
+
+    // A session view with NO overlay for the barrel (an empty overlay set) — a
+    // base-passthrough view, so the reader takes the session-UNMASKED branch.
+    let view = OverlaidView::new(Arc::clone(&host), rustc_hash::FxHashMap::default());
+    let state = host
+        .route_owned_shallow_state_with_view(barrel, Some(&view))
+        .expect("session-unmasked reader returns a surface");
+    let target = state
+        .wildcard_reexports
+        .iter()
+        .find(|w| w.source_specifier == "./runtime")
+        .map(|w| w.canonical_id.clone());
+    assert_eq!(
+        target.as_deref(),
+        Some("/workspace/runtime.ts"),
+        "the session-unmasked frontier reader MUST retarget the wildcard edge after \
+         a dependency file-set change — falling through to the gated base route path \
+         rather than serving the stale baked directory-index clone"
+    );
+}
+
+/// CRASH regression: an ARTIFACT-ONLY (no scheduler `DerivedRawState`)
+/// wildcard barrel whose `edge_generation` is stale must NOT cause a mutual
+/// recursion between `artifact_current_indexed` and `ensure_indexed_ready`.
+/// The artifact-current reader re-indexes an edge-stale wildcard surface via
+/// `ensure_indexed_ready`, whose own artifact fast-path must NOT call back into
+/// the re-indexing `artifact_current_indexed` (it peeks the artifact raw and
+/// non-recursively, then falls through to the single `materialize` re-index) —
+/// otherwise the two bounce forever and overflow the stack.
+///
+/// Pre-fix: `artifact_current_indexed` → `ensure_indexed_ready` →
+/// `artifact_current_indexed` → … → stack overflow (process abort).
+/// Post-fix: terminates and re-indexes from the backing source to the FRESH
+/// target (`runtime.ts`), never the stale planted `runtime/index.ts` edge.
+#[test]
+fn artifact_only_wildcard_barrel_edge_stale_does_not_recurse() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let barrel = "/workspace/index.ts";
+    ws.inject_file(barrel, "export type * from './runtime';\n");
+    ws.inject_file(
+        "/workspace/runtime/index.ts",
+        "export type Runtime = number;\n",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    let real = host
+        .ensure_indexed_ready(barrel)
+        .expect("the barrel materialises");
+    assert!(real.shallow_state.has_wildcard_reexports());
+
+    // A genuinely artifact-only canonical: a real backing source in the
+    // workspace (so a re-index CAN re-resolve it) but NO scheduler
+    // `DerivedRawState` — the artifact is planted directly into the store as a
+    // clone of the wildcard barrel's `IndexedReady` (its `edge_generation`
+    // captured at the current generation).
+    let foreign = "/workspace/foreign_barrel.ts";
+    ws.inject_file(foreign, "export type * from './runtime';\n");
+    host.project_type_store()
+        .indexed()
+        .insert(Arc::from(foreign), Arc::clone(&real));
+
+    // A more-specific `./runtime.ts` appears: `content_generation` advances
+    // past the planted clone's `edge_generation`, so the planted wildcard
+    // surface is now edge-stale.
+    ws.inject_file("/workspace/runtime.ts", "export type Runtime = boolean;\n");
+
+    // MUST terminate (no stack overflow) and re-index to the FRESH target.
+    let result = host
+        .artifact_current_indexed(foreign)
+        .expect("artifact-only reader re-indexes the edge-stale wildcard barrel");
+    let target = result
+        .import_routes
+        .get("./runtime")
+        .and_then(|r| r.resolved_canonical_id.clone());
+    assert_eq!(
+        target.as_deref(),
+        Some("/workspace/runtime.ts"),
+        "the artifact-only reader MUST terminate and re-index to the fresh \
+         ./runtime.ts target — never recurse, never serve the stale baked \
+         runtime/index.ts edge"
+    );
+    // The sibling readers over the same canonical also terminate + retarget.
+    assert!(host.shallow_file_state(foreign).is_some());
+    assert!(host.ensure_indexed_ready(foreign).is_some());
+}
+
 #[test]
 fn resolve_eval_dependency_canonical_ignores_empty_candidate_without_reads() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -6972,12 +8242,30 @@ fn store_view_import_routes_do_not_depend_on_live_owner_state() {
     assert_eq!(
         resolved.as_deref(),
         Some("/src/types/target.ts"),
-        "route resolution should continue to use cached module facts while the store view provides the validating import-route hash",
+        "route resolution should continue to resolve the barrel's `export *` target through cached module facts",
     );
+    // The barrel's surface is wildcard-bearing, so its baked `export *` edge is
+    // rooted in the indexed `edge_generation`. Removing the owner advances the
+    // workspace `content_generation`, which the shared edge-currency oracle
+    // treats as a potential dependency-set change: the wildcard edge is
+    // re-validated against the live workspace rather than served from the
+    // now-edge-stale baked surface. The resolution stays correct (`./target`
+    // still resolves to `target.ts`); the re-validation is the correctness
+    // conservatism the wildcard-edge rooting introduces. A non-wildcard
+    // import-route surface carries no dependency-set-derived edge and would
+    // still serve from cache without a live resolve.
+    //
+    // The rebuild resolves `./target` twice: once in the `resolve_missing`
+    // loop (the plain `export *` source is classified `EsmImport`) and once in
+    // the wildcard pass that re-resolves it through the shared TS-first
+    // `resolve_route_edge_canonical` policy and overwrites — so the indexed
+    // wildcard canonical agrees with the route-owned / overlay surfaces.
     assert_eq!(
         ws.resolve_count("/src/types/index.ts", "./target"),
-        0,
-        "captured store-view barrel routes should not fall back to a live workspace resolve",
+        2,
+        "a wildcard-bearing barrel re-validates its baked `export *` edge once \
+         content_generation advances (edge-currency): one EsmImport resolve plus \
+         one shared-policy TS-first resolve, still resolving correctly",
     );
 }
 

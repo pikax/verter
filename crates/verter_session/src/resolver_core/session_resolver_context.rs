@@ -390,10 +390,17 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
             // companion). `lookup_overlay_artifacts` handles both the
             // `overlay_scoped` (discriminator present) and `legacy`
             // (base-passthrough) key shapes.
-            let identity = self.inner.overlay_artifact_identity(canonical);
-            return identity
-                .lookup_overlay_artifacts(self.inner, self.view)
-                .map(|facts| Arc::clone(&facts.indexed));
+            // Route through the gated overlay materialiser accessor rather
+            // than reading the published artifact directly: it re-resolves the
+            // wildcard `export *` edges against the live file set when the
+            // cached overlay surface is edge-stale (a base dependency appeared
+            // / retargeted while the overlay source stayed put), and reuses the
+            // cached surface once it is edge-current. It materialises from the
+            // overlay source — NEVER the base surface — so the overlay edits
+            // are preserved (no overlay-blindness).
+            return self
+                .inner
+                .materialize_overlay_indexed_ready_with_view(canonical, self.view);
         }
         if self.view.is_tombstoned(canonical) {
             return None;

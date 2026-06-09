@@ -719,9 +719,26 @@ impl VerterHost {
         let analysis_canonical = self.normalized_analysis_canonical(canonical);
         let analysis_canonical = analysis_canonical.as_ref();
         let current_hash = self.authoritative_current_content_hash(analysis_canonical)?;
-        self.project_type_store
+        let indexed = self
+            .project_type_store
             .indexed()
-            .get_for_current_content(analysis_canonical, current_hash)
+            .get_for_current_content(analysis_canonical, current_hash)?;
+        // Edge-currency gate. The content pin keys only on the OWNER's content
+        // hash, but a wildcard `export *` surface bakes its edge `canonical_id`s
+        // from the dependency file set; a dependency appearing or retargeting
+        // (the file set changes, the owner's content does not) leaves those
+        // edges stale while the content pin still matches. Re-index from BASE
+        // content through `ensure_indexed_ready` — whose reuse is itself
+        // edge-gated, so it re-resolves the edges against the live file set and
+        // republishes — and return the fresh artifact. A non-wildcard surface
+        // is always edge-current and returns directly. This base accessor is
+        // the choke point every base reader (`shallow_file_state`,
+        // `observe_materialize_scope`, `current_import_route_table`, the
+        // `HostStoreView` ImportRoute snapshot, …) funnels through.
+        if self.route_surface_is_edge_current(&indexed.shallow_state, indexed.edge_generation) {
+            return Some(indexed);
+        }
+        self.ensure_indexed_ready(analysis_canonical)
     }
 
     /// Artifact-current [`crate::project_type_store::IndexedReady`]
@@ -775,6 +792,44 @@ impl VerterHost {
     /// rewrite is idempotent for an already-normalised id.
     #[must_use]
     pub(crate) fn artifact_current_indexed(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        let indexed = self.artifact_current_indexed_raw(canonical)?;
+        // Edge-currency gate (same rationale as
+        // `current_content_pinned_indexed`). A genuinely artifact-only
+        // canonical has no scheduler `DerivedRawState`, so re-indexing it
+        // through `ensure_indexed_ready` re-reads the artifact source and
+        // re-resolves its wildcard `export *` edges against the live file set.
+        // When the artifact source is no longer resolvable, `ensure_indexed_ready`
+        // returns `None` — a stale wildcard surface is never served.
+        //
+        // `ensure_indexed_ready` MUST NOT route its own artifact fast-path back
+        // through this method (it uses the non-recursing
+        // [`Self::artifact_current_indexed_raw`] instead): this method calls
+        // `ensure_indexed_ready` on edge-stale, so a back-edge would mutually
+        // recurse and overflow the stack for an artifact-only edge-stale
+        // wildcard barrel.
+        if self.route_surface_is_edge_current(&indexed.shallow_state, indexed.edge_generation) {
+            return Some(indexed);
+        }
+        let analysis_canonical = self.normalized_analysis_canonical(canonical);
+        self.ensure_indexed_ready(analysis_canonical.as_ref())
+    }
+
+    /// Non-recursing raw peek of the artifact-current `IndexedReady` — the
+    /// store read [`Self::artifact_current_indexed`] performs WITHOUT its
+    /// edge-currency re-index. It honours the same artifact-only contract (a
+    /// `DerivedRawState` entry — live or evicted — means the scheduler is the
+    /// content authority, so this declines), but never calls
+    /// `ensure_indexed_ready`.
+    ///
+    /// `ensure_indexed_ready`'s own artifact fast-path uses THIS helper (then
+    /// edge-filters and falls through to its single `materialize` re-index on
+    /// stale) so it has no back-edge into the re-indexing
+    /// [`Self::artifact_current_indexed`].
+    #[must_use]
+    pub(crate) fn artifact_current_indexed_raw(
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {

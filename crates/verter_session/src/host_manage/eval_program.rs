@@ -536,17 +536,29 @@ impl VerterHost {
         // `FileArtifactKey.canonical` — so it reaches the candidate even
         // when `normalize(raw) != raw`.
         if let Some(view) = view {
-            if let Some(facts) = identity.lookup_overlay_artifacts(self, view) {
-                let inputs = ExternalTypeResolutionInputs {
-                    raw_source: Arc::clone(&facts.indexed.raw_source),
-                    cached_parse: facts.indexed.cached_parse.clone(),
-                    whole_hash: facts.indexed.whole_hash,
-                    eval_source: Arc::clone(&facts.indexed.eval_source),
-                    analysis: Arc::clone(&facts.indexed.external_type_analysis),
-                    analysis_cache_hit: true,
-                };
-                return Some(inputs);
+            if view
+                .overlay_content_hash_for(identity.raw_overlay_owner())
+                .is_some()
+            {
+                // GENUINELY OVERLAID canonical: route through the gated overlay
+                // materialiser so an edge-stale wildcard `export *` surface
+                // re-resolves from the OVERLAY source (never the base surface).
+                if let Some(indexed) = self
+                    .materialize_overlay_indexed_ready_with_view(identity.raw_overlay_owner(), view)
+                {
+                    return Some(ExternalTypeResolutionInputs {
+                        raw_source: Arc::clone(&indexed.raw_source),
+                        cached_parse: indexed.cached_parse.clone(),
+                        whole_hash: indexed.whole_hash,
+                        eval_source: Arc::clone(&indexed.eval_source),
+                        analysis: Arc::clone(&indexed.external_type_analysis),
+                        analysis_cache_hit: true,
+                    });
+                }
             }
+            // Unmasked (non-overlaid) canonical: fall through to the base
+            // accessor below (`current_content_pinned_indexed`), which is
+            // edge-gated and re-indexes a stale wildcard surface.
         }
 
         // Project-global `FileArtifactStore` fast path. The read is

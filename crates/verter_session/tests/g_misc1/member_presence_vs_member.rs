@@ -95,6 +95,7 @@ fn build_foo(members: Vec<(&str, TypeExpr)>) -> Arc<IndexedReady> {
         import_routes: Arc::new(FxHashMap::default()),
         import_route_hash: None,
         route_hash: None,
+        edge_generation: 0,
         raw_source: Arc::from(""),
         eval_source: Arc::from(""),
         cached_parse: None,

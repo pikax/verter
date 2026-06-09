@@ -82,8 +82,43 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
         // under, so it reaches the candidate even when
         // `normalize(raw) != raw`.
         if let Some(view) = self.view {
-            if let Some(facts) = identity.lookup_overlay_artifacts(self.host, view) {
-                if facts.indexed.shallow_state.has_resolvable_surface() || !self.materialize_symbols
+            if view.overlay_content_hash_for(canonical_id).is_some() {
+                // GENUINELY OVERLAID canonical: route through the gated overlay
+                // materialiser accessor (not a direct artifact read). It
+                // re-resolves wildcard `export *` edges against the live file
+                // set when the cached overlay surface is edge-stale, and
+                // materialises from the overlay source — never the base surface
+                // (no overlay-blindness).
+                if let Some(indexed) = self
+                    .host
+                    .materialize_overlay_indexed_ready_with_view(canonical_id, view)
+                {
+                    if indexed.shallow_state.has_resolvable_surface() || !self.materialize_symbols {
+                        if indexed.shallow_state.has_wildcard_reexports() {
+                            self.host
+                                .provenance
+                                .resolver_barrel_fact_reuse
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        return Some(indexed.shallow_state.clone());
+                    }
+                }
+            } else if let Some(facts) = identity.lookup_overlay_artifacts(self.host, view) {
+                // Base-passthrough view (the canonical is not overlaid): the
+                // legacy-key read returns the published BASE artifact. Serve it
+                // only while edge-current; an edge-stale wildcard `export *`
+                // surface falls through to the gated base reads below
+                // (`route_shallow_state` / `current_content_pinned_indexed` /
+                // `ensure_indexed_ready`), which re-resolve the edges against
+                // the live file set. Routing it through the overlay materialiser
+                // would instead build a redundant overlay candidate from base
+                // content.
+                if (facts.indexed.shallow_state.has_resolvable_surface()
+                    || !self.materialize_symbols)
+                    && self.host.route_surface_is_edge_current(
+                        &facts.indexed.shallow_state,
+                        facts.indexed.edge_generation,
+                    )
                 {
                     if facts.indexed.shallow_state.has_wildcard_reexports() {
                         self.host

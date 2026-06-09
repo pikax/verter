@@ -558,7 +558,21 @@ impl HostStoreView {
                         std::sync::Arc::clone(&overlay_artifacts.facts),
                     );
                     let overlay_indexed = &overlay_artifacts.indexed;
-                    if overlay_indexed.shallow_state.has_resolvable_surface() {
+                    // Edge-currency gate. A wildcard-bearing overlay surface
+                    // bakes its `export *` edge `canonical_id`s from the
+                    // dependency file set; once `content_generation` advances
+                    // past its edge generation BOTH the route-surface hash and
+                    // the import-route hash are stale. Suppress both derived
+                    // hashes (the same outcome as an unmaterialised overlay
+                    // artifact below) so a warm entry rooted on them fails
+                    // validation and recomputes through the edge-gated readers,
+                    // which re-materialise the overlay surface — rather than
+                    // copying a stale hash into the view.
+                    let edge_current = host.route_surface_is_edge_current(
+                        &overlay_indexed.shallow_state,
+                        overlay_indexed.edge_generation,
+                    );
+                    if overlay_indexed.shallow_state.has_resolvable_surface() && edge_current {
                         self.derived_hashes.insert(
                             (
                                 canonical.clone(),
@@ -573,7 +587,7 @@ impl HostStoreView {
                         ));
                     }
                     match overlay_indexed.import_route_hash {
-                        Some(hash) => {
+                        Some(hash) if edge_current => {
                             self.derived_hashes.insert(
                                 (
                                     canonical.clone(),
@@ -582,7 +596,7 @@ impl HostStoreView {
                                 hash,
                             );
                         }
-                        None => {
+                        _ => {
                             self.derived_hashes.remove(&(
                                 canonical.clone(),
                                 crate::resolver_core::DerivedFactKind::ImportRoute,
@@ -721,7 +735,17 @@ impl HostStoreView {
             // still gets its route hash from the fallback loop. The
             // `Route` derived fact itself is contributed only when the
             // current indexed surface is route-resolvable.
-            if indexed.whole_hash == tracked_whole_hash {
+            // The current-content indexed artifact is the route-surface
+            // authority — and suppresses the route-owned fallback — ONLY
+            // while edge-current. A wildcard-bearing artifact whose baked
+            // `export *` edges are stale (a dependency appeared / retargeted
+            // while this file's content stayed put) must neither contribute
+            // its stale `Route` hash NOR suppress the (edge-gated) fallback,
+            // so a warm entry rooted on the stale hash recomputes.
+            if indexed.whole_hash == tracked_whole_hash
+                && host
+                    .route_surface_is_edge_current(&indexed.shallow_state, indexed.edge_generation)
+            {
                 indexed_route_canonicals.insert(canonical_str.clone());
                 if indexed.shallow_state.has_resolvable_surface() {
                     view.derived_hashes.insert(

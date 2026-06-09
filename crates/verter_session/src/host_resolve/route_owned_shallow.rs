@@ -96,16 +96,27 @@ impl VerterHost {
                 .indexed()
                 .get(canonical, current_hash)
             {
-                if indexed.shallow_state.has_resolvable_surface() {
-                    return Some(crate::resolver_store::hash_route_surface(
-                        &indexed.shallow_state,
-                    ));
+                // The indexed artifact is the route-surface authority ONLY
+                // while edge-current. A wildcard-bearing artifact whose baked
+                // edges are stale (a dependency appeared / retargeted while
+                // the owner content stayed put) is NOT the authority: fall
+                // through to Source 2 so the route-owned fallback (itself
+                // edge-gated) answers or the absence forces a cold re-resolve.
+                if self
+                    .route_surface_is_edge_current(&indexed.shallow_state, indexed.edge_generation)
+                {
+                    if indexed.shallow_state.has_resolvable_surface() {
+                        return Some(crate::resolver_store::hash_route_surface(
+                            &indexed.shallow_state,
+                        ));
+                    }
+                    // A current edge-current indexed artifact exists but its
+                    // surface is not route-resolvable — there is no route
+                    // fact, and the route-owned-shallow fallback must NOT
+                    // answer (it would publish a hash the indexed authority
+                    // overrode).
+                    return None;
                 }
-                // A current indexed artifact exists but its surface is
-                // not route-resolvable — there is no route fact, and
-                // the route-owned-shallow fallback must NOT answer (it
-                // would publish a hash the indexed authority overrode).
-                return None;
             }
         }
         // Source 2 — the route-only shallow cache, ONLY when no current
@@ -113,12 +124,23 @@ impl VerterHost {
         // current hash when the scheduler tracks one; fall back to the
         // route-owned cache's single current entry when the canonical
         // is scheduler-invisible (a pure route-only file).
+        //
+        // The entry must be EDGE-CURRENT before it produces a `Route` fact.
+        // A route-owned entry's resolved wildcard edges are baked at the
+        // workspace generation when they were resolved; a dependency
+        // appearing or retargeting (the file set changes, the owner's
+        // content does not) leaves those edges stale while the owner-content
+        // gate would still judge the entry fresh, so a stale `Route` hash
+        // would otherwise validate a warm `RouteDb` entry. A stale
+        // wildcard-bearing entry produces NO `Route` fact, so the warm
+        // entry's recorded fact cannot be reproduced and it recomputes.
         let route_owned = self.project_type_store.route_owned_shallow();
         let entry = match current_hash {
             Some(current_hash) => route_owned.get(canonical, current_hash),
             None => route_owned.get_any(canonical),
         };
         entry
+            .filter(|entry| self.route_owned_entry_is_edge_current(canonical, entry))
             .filter(|entry| entry.shallow_state.has_resolvable_surface())
             .map(|entry| crate::resolver_store::hash_route_surface(entry.shallow_state.as_ref()))
     }
@@ -186,7 +208,7 @@ impl VerterHost {
             .route_owned_shallow()
             .get_any(canonical_id)
         {
-            if self.route_owned_entry_is_fresh(canonical_id, entry.as_ref()) {
+            if self.route_owned_entry_is_edge_current(canonical_id, entry.as_ref()) {
                 return Some(entry);
             }
             self.project_type_store
@@ -214,7 +236,7 @@ impl VerterHost {
                     .route_owned_shallow()
                     .get_any(canonical_id)
                 {
-                    if self.route_owned_entry_is_fresh(canonical_id, entry.as_ref()) {
+                    if self.route_owned_entry_is_edge_current(canonical_id, entry.as_ref()) {
                         return Ok(entry);
                     }
                     self.project_type_store
@@ -239,7 +261,7 @@ impl VerterHost {
                     .route_owned_shallow()
                     .get(canonical_id, whole_hash)
                 {
-                    if self.route_owned_entry_is_fresh(canonical_id, entry.as_ref()) {
+                    if self.route_owned_entry_is_edge_current(canonical_id, entry.as_ref()) {
                         return Ok(entry);
                     }
                     self.project_type_store
@@ -295,12 +317,44 @@ impl VerterHost {
                         cached_parse.as_deref(),
                         &eval_source,
                     );
-                let shallow_state =
-                    Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
+                // Canonicalize the `export *` wildcard edges through the SAME
+                // shared route-edge policy (`resolve_route_edge_canonical`) the
+                // indexed surface uses, so the route-owned route surface hashes
+                // the SAME resolved wildcard canonical ids as the indexed
+                // surface. Building with `NullResolver` (empty canonical ids)
+                // recorded a `DerivedFactKind::Route` shape that the indexed-
+                // surface validator could not reproduce — a false stale miss /
+                // re-resolution on every warm hit.
+                //
+                // ONLY the wildcard sources are resolved here: `hash_route_surface`
+                // hashes export names + wildcard reexports + whole_hash, so plain
+                // imports and direct reexports never enter the route surface.
+                // Resolving the file's imports would break the route-owned
+                // laziness invariant (a route-only lookup must not eagerly
+                // resolve unrelated import edges) — that is the route-owned
+                // surface's whole reason for existing as a lightweight fallback.
+                let mut dep_edges = rustc_hash::FxHashMap::default();
+                for source in external_type_analysis.wildcard_reexport_sources() {
+                    if dep_edges.contains_key(source) {
+                        continue;
+                    }
+                    if let Some(resolved) = self.resolve_route_edge_canonical(canonical_id, source)
+                    {
+                        dep_edges.insert(source.clone(), resolved);
+                    }
+                }
+                let resolver = crate::host_manage::HostShallowImportResolver {
+                    dep_edges: &dep_edges,
+                };
+                let shallow_state = Arc::new(
+                    crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
                         whole_hash,
                         Arc::clone(&external_type_analysis),
+                        None,
                         Some(eval_env.as_ref()),
-                    ));
+                        &resolver,
+                    ),
+                );
 
                 // STEP 7 — PRE-PUBLISH FENCE.
                 // Re-read both generations. If either has bumped since STEP 4,
@@ -372,6 +426,51 @@ impl VerterHost {
             && self.ws().file_exists(canonical_id)
     }
 
+    /// The single edge-currency oracle for ANY route surface derived from a
+    /// shallow state — route-owned entries, indexed `IndexedReady`
+    /// artifacts, and session-overlay artifacts alike.
+    ///
+    /// A wildcard `export *` edge bakes its target `canonical_id` at the
+    /// workspace generation when the edge was resolved (`edge_generation`).
+    /// That baked canonical depends on the DEPENDENCY file set, not the
+    /// owner's own content, so a content-pinned surface whose owner content
+    /// is unchanged can still hold a STALE wildcard edge after a dependency
+    /// appears or retargets (e.g. a `.js` edge whose `.d.ts` companion later
+    /// appears): the file set changed and `content_generation` advanced.
+    ///
+    /// A surface is edge-current iff it carries no wildcard reexports (no
+    /// dependency-set-derived edges to go stale) OR its `edge_generation`
+    /// still matches the live workspace `content_generation`. For route-owned
+    /// entries the `edge_generation` is
+    /// [`RouteOwnedShallowEntry::workspace_generation`](crate::project_type_store::RouteOwnedShallowEntry::workspace_generation);
+    /// for indexed/overlay artifacts it is
+    /// [`IndexedReady::edge_generation`](crate::project_type_store::IndexedReady::edge_generation).
+    /// Every `Route`-fact producer/validator and the materializer-reuse
+    /// gates route a surface through THIS predicate so a non-edge-current
+    /// wildcard surface is never produced, served, or reused — forcing a
+    /// cold re-resolve against the live file set.
+    pub(crate) fn route_surface_is_edge_current(
+        &self,
+        shallow_state: &crate::resolver_core::ShallowFileState,
+        edge_generation: u64,
+    ) -> bool {
+        !shallow_state.has_wildcard_reexports() || edge_generation == self.ws().content_generation()
+    }
+
+    /// Freshness gate for route-owned materializer reuse and the route-owned
+    /// route-surface fallback: owner-surface fresh
+    /// ([`Self::route_owned_entry_is_fresh`]) AND edge-current
+    /// ([`Self::route_surface_is_edge_current`], keyed on the entry's
+    /// `workspace_generation` as its edge-resolution generation).
+    pub(super) fn route_owned_entry_is_edge_current(
+        &self,
+        canonical_id: &str,
+        entry: &crate::project_type_store::RouteOwnedShallowEntry,
+    ) -> bool {
+        self.route_owned_entry_is_fresh(canonical_id, entry)
+            && self.route_surface_is_edge_current(&entry.shallow_state, entry.workspace_generation)
+    }
+
     /// test-only accessor for the route-only freshness gate.
     /// Used by `cache_identity_invariants_tests` to discriminate tier-2
     /// behaviour without depending on the public materialiser path (which
@@ -384,6 +483,20 @@ impl VerterHost {
         entry: &crate::project_type_store::RouteOwnedShallowEntry,
     ) -> bool {
         self.route_owned_entry_is_fresh(canonical_id, entry)
+    }
+
+    /// test-only accessor for the route-edge freshness gate
+    /// ([`Self::route_owned_entry_is_edge_current`]). Lets a test
+    /// discriminate the wildcard-edge-currency layer from the owner-surface
+    /// gate ([`Self::route_owned_entry_is_fresh_for_test`]) without driving
+    /// the materialiser.
+    #[cfg(test)]
+    pub(crate) fn route_owned_entry_is_edge_current_for_test(
+        &self,
+        canonical_id: &str,
+        entry: &crate::project_type_store::RouteOwnedShallowEntry,
+    ) -> bool {
+        self.route_owned_entry_is_edge_current(canonical_id, entry)
     }
     /// host-level prepared-decl barrel routing
     /// helper.

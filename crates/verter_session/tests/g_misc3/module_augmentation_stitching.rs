@@ -78,6 +78,7 @@ fn build_indexed_with_source(raw: &str, whole_hash: [u8; 16]) -> Arc<IndexedRead
         import_routes: Arc::new(FxHashMap::default()),
         import_route_hash: None,
         route_hash: None,
+        edge_generation: 0,
         raw_source: Arc::from(raw),
         eval_source: Arc::from(""),
         cached_parse: None,

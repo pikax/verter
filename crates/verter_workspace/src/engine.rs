@@ -159,9 +159,35 @@ impl Engine {
     /// Replace the workspace's reverse-dep extension list (additive: merges
     /// with `probe_extensions()` and sorts longest-first at set-time per F4).
     /// Lock-free swap; does not stall reverse queries.
+    ///
+    /// An extension-priority change is a resolve-config mutation: the merged
+    /// extension set feeds every project's `resolve_env_hash` (R21), and
+    /// resolution outcomes (effective targets, resolved wildcard canonicals)
+    /// depend on it. When the merged list actually changes, recompose +
+    /// republish the env-hash tables (so RouteDb effective-export-set entries
+    /// keyed on the OLD `resolve_env_hash` become unreachable) and advance
+    /// `content_generation` (so route-owned shallow freshness + known-miss
+    /// staleness checks invalidate). This mirrors the
+    /// [`Self::set_default_resolve_extensions`] sibling resolver-config
+    /// mutation [`crate::traits::WorkspaceAccess::configure_resolver`], which
+    /// also republishes through `rebuild_and_publish`.
+    ///
+    /// TODO(perf-wave-2): the BROADER runtime resolver-config-mutation API —
+    /// a host-level `VerterHost` setter that drives the full
+    /// `configure_projects`-style cascade on the session side (clear RouteDb
+    /// caches, route-owned shallow, bump project/store-view generation) for
+    /// resolve-config changes that are NOT extension-list changes — is
+    /// unpushed-perf-dependent and not yet wired. Closing it is a prerequisite
+    /// for WAVE-2 perf-enable; until then only the extension-list dimension
+    /// invalidates the host route memo through this path.
     pub(crate) fn set_default_resolve_extensions(&self, host_resolve_extensions: Vec<String>) {
         let sorted = Self::merge_extensions(&host_resolve_extensions);
+        let changed = **self.default_resolve_extensions.load() != sorted;
         self.default_resolve_extensions.store(Arc::new(sorted));
+        if changed {
+            self.rebuild_and_publish();
+            self.bump_content_generation();
+        }
     }
 
     /// Publish a workspace snapshot atomically.
@@ -362,6 +388,14 @@ impl Engine {
                     self.package_index.write().invalidate_under(&prefix);
                     self.dir_index.write().mark_dirty_under(&prefix);
                     self.clear_lazy_resolution_cache();
+                    // A directory-tree dirty (watcher recovery) is a file-set
+                    // mutation: members under `prefix` may have appeared or
+                    // disappeared. Route-owned freshness and known-miss
+                    // staleness checks key on `content_generation`, so the
+                    // batch must advance the epoch — clearing the lazy
+                    // resolution cache alone leaves those downstream gates
+                    // serving the pre-recovery route surface.
+                    content_changed = true;
                 }
                 WorkspaceChange::ConfigChanged { canonical_id: _ } => {
                     self.clear_lazy_resolution_cache();

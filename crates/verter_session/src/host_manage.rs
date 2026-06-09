@@ -1224,8 +1224,8 @@ pub(crate) struct ComputedEvaluatedTypes {
 /// Resolves import specifiers to canonical file IDs from already-cached
 /// import routes. Used during shallow state materialization to
 /// pre-canonicalize cross-file edges without live workspace reads.
-pub(in crate::host_manage) struct HostShallowImportResolver<'a> {
-    pub(in crate::host_manage) dep_edges: &'a rustc_hash::FxHashMap<String, String>,
+pub(crate) struct HostShallowImportResolver<'a> {
+    pub(crate) dep_edges: &'a rustc_hash::FxHashMap<String, String>,
 }
 
 impl crate::resolver_core::ShallowImportResolver for HostShallowImportResolver<'_> {

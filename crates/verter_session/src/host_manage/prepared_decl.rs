@@ -1336,9 +1336,14 @@ impl VerterHost {
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        // Step 1 — current-content-pinned `IndexedReady` fast path. This is
-        // a cache read only; it never materialises (no `ensure_indexed_ready`
-        // — that would re-enter the recursion this function guards against).
+        // Step 1 — current-content-pinned `IndexedReady` fast path. A warm
+        // edge-current artifact is a pure cache read; an edge-stale
+        // wildcard-bearing artifact is re-indexed inside the accessor
+        // (`ensure_indexed_ready`) so its `export *` edges re-resolve against
+        // the live file set. That re-index does not re-enter this function:
+        // `ensure_indexed_ready`'s materialise path never calls
+        // `shallow_file_state` / the content-pinned accessor, and its own reuse
+        // is edge-gated, so the re-index terminates at a fresh artifact.
         if let Some(indexed) = ctx.indexed_for_current_content(canonical_id) {
             if indexed.shallow_state.has_resolvable_surface() {
                 return Some(indexed.shallow_state.clone());
@@ -1393,13 +1398,34 @@ impl VerterHost {
                 .indexed()
                 .get(canonical_id, current_hash)
             {
-                component_meta_trace_custom!(
-                    "ensure_indexed_ready_fast_hit",
-                    format!("owner={} whole_hash={:?}", canonical_id, indexed.whole_hash),
-                );
-                return Some(indexed);
+                // A content-current artifact is reusable ONLY while
+                // edge-current. A wildcard-bearing artifact whose baked
+                // `export *` edges are stale (a dependency appeared /
+                // retargeted while this file's content stayed put) must be
+                // rebuilt so its edges re-resolve against the live file set —
+                // the materialiser below re-inserts under the same content
+                // key, replacing the stale candidate with a fresh
+                // `edge_generation`. Falling through (not returning) routes
+                // an edge-stale hit into the rebuild.
+                if self
+                    .route_surface_is_edge_current(&indexed.shallow_state, indexed.edge_generation)
+                {
+                    component_meta_trace_custom!(
+                        "ensure_indexed_ready_fast_hit",
+                        format!("owner={} whole_hash={:?}", canonical_id, indexed.whole_hash),
+                    );
+                    return Some(indexed);
+                }
             }
-        } else if let Some(indexed) = self.artifact_current_indexed(canonical_id) {
+        } else if let Some(indexed) =
+            self.artifact_current_indexed_raw(canonical_id)
+                .filter(|indexed| {
+                    self.route_surface_is_edge_current(
+                        &indexed.shallow_state,
+                        indexed.edge_generation,
+                    )
+                })
+        {
             // Scheduler doesn't have a current snapshot. The
             // artifact-current authority answers ONLY for a genuinely
             // artifact-only canonical (no scheduler `DerivedRawState` —
@@ -1407,9 +1433,16 @@ impl VerterHost {
             // canonical staleness is not driven by content upserts, so
             // the single retained artifact is the current one. A
             // canonical the scheduler DOES track (a `DerivedRawState`
-            // entry exists) gets `None` from `artifact_current_indexed`,
-            // so this branch declines and the materialiser below
-            // rebuilds rather than serving a possibly-stale artifact.
+            // entry exists) gets `None`, so this branch declines and the
+            // materialiser below rebuilds rather than serving a
+            // possibly-stale artifact.
+            //
+            // This peeks the artifact via the NON-recursing
+            // `artifact_current_indexed_raw` (not the re-indexing
+            // `artifact_current_indexed`): the edge-currency filter here +
+            // the `materialize` re-index below are the single re-index entry,
+            // so there is no mutual recursion with `artifact_current_indexed`
+            // (which itself calls `ensure_indexed_ready` on edge-stale).
             component_meta_trace_custom!(
                 "ensure_indexed_ready_fast_hit",
                 format!("owner={} whole_hash={:?}", canonical_id, indexed.whole_hash),
@@ -1588,6 +1621,14 @@ impl VerterHost {
                                 if !prefer_live_fallback {
                                     return None;
                                 }
+                                // ESM fallback for a type-route edge: normalize
+                                // the effective target through declaration-
+                                // companion preference, identically to the
+                                // shared route-edge policy
+                                // (`resolve_route_edge_canonical`). Recording the
+                                // raw `source_id` here diverged the indexed
+                                // shallow surface from route traversal and known-
+                                // miss revalidation (so the indexed surface and route traversal never record divergent edge canonicals).
                                 self.ws()
                                     .resolve_import(
                                         canonical_id,
@@ -1597,7 +1638,13 @@ impl VerterHost {
                                             kind: verter_workspace::ResolveRequestKind::EsmImport,
                                         },
                                     )
-                                    .map(|resolution| resolution.source_id)
+                                    .map(|resolution| {
+                                        self.normalize_live_type_dependency_target(
+                                            canonical_id,
+                                            specifier,
+                                            resolution.source_id.as_str(),
+                                        )
+                                    })
                             })
                     } else {
                         primary
@@ -1614,6 +1661,16 @@ impl VerterHost {
                     import_routes.insert(specifier.to_string(), resolution);
                 };
 
+            // Capture the workspace generation BEFORE any edge is
+            // canonicalized. The import/wildcard edges resolved below bake
+            // target `canonical_id`s that depend on the dependency file set;
+            // recording the generation here (and never re-stamping it after)
+            // means a file-set change during or after this build leaves
+            // `edge_generation < content_generation()`, so the shared
+            // edge-currency oracle judges the surface stale and forces a
+            // re-resolve — never a torn entry served as fresh.
+            let edge_generation = self.ws().content_generation();
+
             for (source, kind) in &required_import_sources {
                 resolve_missing(source, *kind, true);
             }
@@ -1625,6 +1682,37 @@ impl VerterHost {
                 cached_parse.as_deref(),
                 &eval_source,
             );
+
+            // Re-resolve every `export *` wildcard reexport source through the
+            // shared route-edge policy (`resolve_route_edge_canonical`) — the
+            // SAME TS-first policy the route-owned fallback and the overlay
+            // materialiser use — so the indexed wildcard `canonical_id`s agree
+            // with those producers and `hash_route_surface` hashes identically.
+            //
+            // A bare `export *` source IS captured in `snapshot.export_signatures`
+            // (an `ExportSignature` with `reexport_source = Some(..)`), so the
+            // `resolve_missing` loop above already resolved it. But for a PLAIN
+            // (non-type) `export *` that loop classifies the source as
+            // `EsmImport` and bakes the runtime `.js` `source_id` WITHOUT
+            // TS-first normalization — diverging from the route-owned / overlay
+            // surfaces, which resolve the `.d.ts` companion. This pass therefore
+            // OVERWRITES (does not skip) any `resolve_missing`-baked entry with
+            // the policy result, so a `.js`-with-`.d.ts`-companion wildcard
+            // source resolves to its declaration companion on every producer.
+            // `resolve_route_edge_canonical` returning `None` (an unresolvable
+            // source) leaves the `resolve_missing` known-miss in place.
+            for source in external_type_analysis.wildcard_reexport_sources() {
+                if let Some(resolved) = self.resolve_route_edge_canonical(canonical_id, source) {
+                    import_routes.insert(
+                        source.clone(),
+                        DependencyResolution {
+                            specifier: source.clone(),
+                            resolved_canonical_id: Some(resolved.clone()),
+                            possible_canonical_ids: vec![resolved],
+                        },
+                    );
+                }
+            }
 
             let import_route_hash = (!import_routes.is_empty())
                 .then(|| crate::resolver_store::hash_import_route_targets(&import_routes));
@@ -1711,6 +1799,7 @@ impl VerterHost {
                 import_routes: Arc::clone(&import_routes),
                 import_route_hash,
                 route_hash,
+                edge_generation,
                 raw_source: Arc::clone(&raw_source),
                 eval_source: Arc::clone(&eval_source),
                 cached_parse,
@@ -1751,13 +1840,31 @@ impl VerterHost {
                     .indexed()
                     .get(canonical_id, current_hash)
                 {
-                    return Ok(indexed);
+                    // Same edge-currency gate as the outer fast path: an
+                    // edge-stale wildcard surface must rebuild, not be served.
+                    if self.route_surface_is_edge_current(
+                        &indexed.shallow_state,
+                        indexed.edge_generation,
+                    ) {
+                        return Ok(indexed);
+                    }
                 }
-            } else if let Some(indexed) = self.artifact_current_indexed(canonical_id) {
+            } else if let Some(indexed) =
+                self.artifact_current_indexed_raw(canonical_id)
+                    .filter(|indexed| {
+                        self.route_surface_is_edge_current(
+                            &indexed.shallow_state,
+                            indexed.edge_generation,
+                        )
+                    })
+            {
                 // Scheduler has no current snapshot — the artifact-current
                 // authority answers only for a genuinely artifact-only
                 // canonical (no `DerivedRawState`), mirroring the outer
-                // fast path.
+                // fast path. Uses the NON-recursing
+                // `artifact_current_indexed_raw` (edge-filtered here; the
+                // `materialize` below is the single re-index) so there is no
+                // back-edge into the re-indexing `artifact_current_indexed`.
                 return Ok(indexed);
             }
             materialize().ok_or(())
@@ -2001,6 +2108,12 @@ impl VerterHost {
         // request view no longer exists.
         let route_hash = known_shallow
             .filter(|state| state.has_resolvable_surface())
+            // A bare caller-supplied surface carries no edge-resolution
+            // generation, so a wildcard-bearing one cannot be proven
+            // edge-current — re-derive it through the edge-gated
+            // `route_owned_shallow_state` (which rebuilds a stale baked
+            // surface) rather than hashing a possibly-stale `export *` edge.
+            .filter(|state| !state.has_wildcard_reexports())
             .map(crate::resolver_store::hash_route_surface)
             .or_else(|| {
                 self.route_owned_shallow_state(canonical_id)

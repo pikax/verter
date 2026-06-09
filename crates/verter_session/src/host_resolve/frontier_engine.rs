@@ -554,42 +554,13 @@ impl VerterHost {
         owner_canonical: &str,
         source_specifier: &str,
     ) -> Option<String> {
-        let resolved = self
-            .ws()
-            .resolve_import(
-                owner_canonical,
-                source_specifier,
-                verter_workspace::ResolutionContext {
-                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                    kind: verter_workspace::ResolveRequestKind::TypeImport,
-                },
-            )
-            .map(|resolution| {
-                self.normalize_live_type_dependency_target(
-                    owner_canonical,
-                    source_specifier,
-                    resolution.source_id.as_str(),
-                )
-            })
-            .or_else(|| self.fallback_relative_type_companion(owner_canonical, source_specifier))
-            .or_else(|| {
-                self.ws()
-                    .resolve_import(
-                        owner_canonical,
-                        source_specifier,
-                        verter_workspace::ResolutionContext {
-                            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                            kind: verter_workspace::ResolveRequestKind::EsmImport,
-                        },
-                    )
-                    .map(|resolution| {
-                        self.normalize_live_type_dependency_target(
-                            owner_canonical,
-                            source_specifier,
-                            resolution.source_id.as_str(),
-                        )
-                    })
-            })?;
+        // Resolve the edge through the single shared route-edge policy
+        // (`resolve_route_edge_canonical`), then layer the route-traversal-only
+        // side effects (`.vue` store-view gate, `ensure_loaded`) on top. The
+        // pure resolution — including the normalized ESM fallback — lives in
+        // the shared helper so this path, shallow-state canonicalization, and
+        // known-miss revalidation agree on every edge.
+        let resolved = self.resolve_route_edge_canonical(owner_canonical, source_specifier)?;
 
         if resolved.ends_with(".vue") {
             let known_hash = self
@@ -619,6 +590,7 @@ impl VerterHost {
         target: &crate::resolver_core::ExportTarget,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
         participants: &mut rustc_hash::FxHashSet<String>,
+        unresolved_edge_owners: &mut rustc_hash::FxHashSet<(String, String)>,
         route_shallow_cache: &mut RouteShallowStateCache,
     ) -> Option<crate::resolver_core::RouteResult> {
         match target {
@@ -639,6 +611,7 @@ impl VerterHost {
                         import_target.imported_name.as_str(),
                         active,
                         participants,
+                        unresolved_edge_owners,
                         route_shallow_cache,
                     );
                 }
@@ -664,6 +637,7 @@ impl VerterHost {
                     original_name.as_str(),
                     active,
                     participants,
+                    unresolved_edge_owners,
                     route_shallow_cache,
                 )
             }
@@ -706,7 +680,19 @@ impl VerterHost {
             .current_content_pinned_indexed(normalized_canonical.as_str())
             .or_else(|| self.artifact_current_indexed(normalized_canonical.as_str()))
         {
-            return Some(Arc::clone(&indexed.shallow_state));
+            // Reuse a baked indexed surface for route traversal ONLY while it
+            // is edge-current. A wildcard-bearing artifact whose `export *`
+            // edges were baked at an earlier generation (a dependency since
+            // appeared / retargeted) would otherwise feed traversal a stale
+            // `canonical_id`. Rebuild it through `ensure_indexed_ready` (which
+            // re-resolves the edges against the live file set and replaces the
+            // stale candidate) and traverse the fresh surface.
+            if self.route_surface_is_edge_current(&indexed.shallow_state, indexed.edge_generation) {
+                return Some(Arc::clone(&indexed.shallow_state));
+            }
+            if let Some(fresh) = self.ensure_indexed_ready(normalized_canonical.as_str()) {
+                return Some(Arc::clone(&fresh.shallow_state));
+            }
         }
 
         // Request-scoped memo (frontier engine de-dupe). NOT a host-side
@@ -763,15 +749,34 @@ impl VerterHost {
         view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
         if let Some(view) = view {
-            // `canonical_id` is the RAW requested canonical. The overlay
-            // artifact read goes through `OverlayArtifactIdentity` so it
-            // reconstructs the exact key the overlay materialiser
-            // published under — raw-owner overlay hash + discriminator,
-            // normalised `FileArtifactKey.canonical` — and reaches the
-            // overlay candidate even when `normalize(raw) != raw`.
-            let identity = self.overlay_artifact_identity(canonical_id);
-            if let Some(facts) = identity.lookup_overlay_artifacts(self, view) {
-                return Some(Arc::clone(&facts.indexed.shallow_state));
+            // `canonical_id` is the RAW requested canonical.
+            if view.overlay_content_hash_for(canonical_id).is_some() {
+                // GENUINELY OVERLAID canonical: route through the gated overlay
+                // materialiser accessor so an edge-stale wildcard `export *`
+                // surface re-resolves against the live file set (re-materialised
+                // from the overlay source, never the base surface — no
+                // overlay-blindness) before it is served.
+                if let Some(indexed) =
+                    self.materialize_overlay_indexed_ready_with_view(canonical_id, view)
+                {
+                    return Some(Arc::clone(&indexed.shallow_state));
+                }
+            } else {
+                // Base-passthrough view: the legacy-key read returns the
+                // published base artifact for a non-overlaid canonical. Serve
+                // it only while edge-current; an edge-stale wildcard `export *`
+                // surface falls through to the gated base path below
+                // (`route_shallow_state`, whose indexed fast path re-indexes on
+                // edge-stale) so the edges re-resolve against the live file set.
+                let identity = self.overlay_artifact_identity(canonical_id);
+                if let Some(facts) = identity.lookup_overlay_artifacts(self, view) {
+                    if self.route_surface_is_edge_current(
+                        &facts.indexed.shallow_state,
+                        facts.indexed.edge_generation,
+                    ) {
+                        return Some(Arc::clone(&facts.indexed.shallow_state));
+                    }
+                }
             }
         }
         self.route_owned_shallow_state(canonical_id)
@@ -783,6 +788,7 @@ impl VerterHost {
         exported_name: &str,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
         participants: &mut rustc_hash::FxHashSet<String>,
+        unresolved_edge_owners: &mut rustc_hash::FxHashSet<(String, String)>,
         route_shallow_cache: &mut RouteShallowStateCache,
     ) -> Option<crate::resolver_core::RouteResult> {
         let key = (provider_canonical.to_string(), exported_name.to_string());
@@ -800,6 +806,7 @@ impl VerterHost {
                     target,
                     active,
                     participants,
+                    unresolved_edge_owners,
                     route_shallow_cache,
                 );
             }
@@ -819,6 +826,24 @@ impl VerterHost {
                     Some(wildcard.canonical_id.clone())
                 };
                 let Some(target_canonical) = target_canonical else {
+                    // The wildcard's source specifier does not resolve under
+                    // the current workspace. The Miss this may produce depends
+                    // on that unresolved edge re-resolving when the file set
+                    // changes — record the owner AND the unresolved source
+                    // specifier so the route entry roots it in the
+                    // `ImportRoute` fact rail.
+                    // Neither the owner's `FileWholeHash` nor its `Route` hash
+                    // re-resolves a known-miss specifier, so without this the
+                    // cached Miss is served stale after the target appears. The
+                    // SOURCE identity is threaded (not just the owner) so the
+                    // rooting loop can verify the produced `ImportRoute` hash
+                    // actually covers this exact wildcard source; an owner with
+                    // a route surface that does not track this source must NOT
+                    // admit a hash that silently drops it.
+                    unresolved_edge_owners.insert((
+                        provider_canonical.to_string(),
+                        wildcard.source_specifier.clone(),
+                    ));
                     continue;
                 };
                 let child = self.resolve_named_type_export_route_uncached(
@@ -826,6 +851,7 @@ impl VerterHost {
                     exported_name,
                     active,
                     participants,
+                    unresolved_edge_owners,
                     route_shallow_cache,
                 )?;
                 if !child.is_miss() {
@@ -850,12 +876,14 @@ impl VerterHost {
     )> {
         let mut active = rustc_hash::FxHashSet::default();
         let mut touched_canonical_ids = rustc_hash::FxHashSet::default();
+        let mut unresolved_edge_owners = rustc_hash::FxHashSet::default();
         let mut route_shallow_cache = RouteShallowStateCache::default();
         let route_result = self.resolve_named_type_export_route_uncached(
             dep_canonical,
             requested_name,
             &mut active,
             &mut touched_canonical_ids,
+            &mut unresolved_edge_owners,
             &mut route_shallow_cache,
         )?;
 
@@ -866,6 +894,59 @@ impl VerterHost {
         participants.dedup();
         for canonical in participants {
             self.append_route_participant_fact_versions(canonical.as_str(), &mut facts, &mut seen);
+        }
+
+        // Root any unresolved `export *` wildcard edge the traversal hit in the
+        // `ImportRoute` fact rail. The owner's
+        // `FileWholeHash` + `Route` facts do NOT re-resolve a known-miss
+        // specifier, so a Miss caused by an unresolvable wildcard would be
+        // served stale after the target appears. `generation_current_import_route_hash`
+        // re-resolves the owner's known-miss specifiers against the live
+        // workspace, so the recorded fact changes the moment the edge resolves.
+        //
+        // When an owner has no import-route surface to root the unresolved edge
+        // on (e.g. a route-owned-only barrel whose wildcards resolve into a
+        // local `dep_edges` map and never publish `import_routes`), the hash is
+        // unproduce-able. We must NOT admit a fact-validated entry — a cached
+        // value could stale-serve once the target appears. But we must equally
+        // NOT DROP a valid result: returning `None` here makes `RouteDb` serve
+        // no value at all, which silently discards a route that resolved through
+        // a LATER wildcard (never conflate "refuse to
+        // cache" with "no result"). Instead, return the resolved route surface
+        // with EMPTY facts: `RouteDb`'s strict admission treats an empty fact
+        // signature as the negative-cache pattern — the value is returned to the
+        // caller but never persisted — so the next query re-resolves cold
+        // against the live workspace.
+        //
+        // The hash must also COVER every unresolved wildcard source the
+        // traversal hit on that owner. An owner can
+        // have a fully-resolved route surface (so a bare
+        // `generation_current_import_route_hash` returns `Some`) whose table
+        // does NOT track the wildcard source — e.g. a PARTIAL import-route
+        // snapshot resolving a sibling but omitting the wildcard. That hash is
+        // reproduced verbatim after the target appears, so it cannot root the
+        // known-miss. `generation_current_import_route_hash_covering_sources`
+        // returns `None` for that incomplete case, routing it through the SAME
+        // empty-facts negative-cache path as the no-surface case.
+        let mut owner_sources: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (owner, source) in unresolved_edge_owners {
+            owner_sources.entry(owner).or_default().push(source);
+        }
+        for (owner, sources) in owner_sources {
+            let Some(import_route_hash) = self
+                .generation_current_import_route_hash_covering_sources(owner.as_str(), &sources)
+            else {
+                return Some((route_result, Vec::new()));
+            };
+            let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id: owner,
+                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+                hash: import_route_hash,
+            };
+            if seen.insert(fact.clone()) {
+                facts.push(fact);
+            }
         }
 
         Some((route_result, facts))

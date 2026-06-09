@@ -48,6 +48,7 @@ fn indexed_from_source(source: &str) -> Arc<IndexedReady> {
         import_routes: Arc::new(rustc_hash::FxHashMap::default()),
         import_route_hash: None,
         route_hash: None,
+        edge_generation: 0,
         raw_source: Arc::from(source),
         eval_source: Arc::from(source),
         cached_parse: None,

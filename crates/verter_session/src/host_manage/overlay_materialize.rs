@@ -322,7 +322,22 @@ impl VerterHost {
         // are RAW-owner-derived — so it reconstructs exactly the key
         // the publish below writes under.
         if let Some(facts) = identity.lookup_overlay_artifacts(self, view) {
-            return Some(Arc::clone(&facts.indexed));
+            // Reuse the cached overlay artifact ONLY while it is edge-current.
+            // A wildcard-bearing overlay `IndexedReady` bakes its `export *`
+            // edge `canonical_id`s at the workspace generation when they were
+            // resolved; the artifact is keyed by overlay content hash, so a
+            // BASE file-set change (a dependency appears / retargets) advances
+            // `content_generation` without touching the overlay source and
+            // would otherwise serve the stale baked edge. Falling through here
+            // RE-MATERIALISES the overlay artifact from the overlay source
+            // (re-resolving the edges against the live file set) — it must NOT
+            // fall back to the base surface (that would be overlay-blindness).
+            if self.route_surface_is_edge_current(
+                &facts.indexed.shallow_state,
+                facts.indexed.edge_generation,
+            ) {
+                return Some(Arc::clone(&facts.indexed));
+            }
         }
 
         if analysis_canonical_id.is_empty() || is_raw_import_specifier_id(analysis_canonical_id) {
@@ -405,64 +420,57 @@ impl VerterHost {
             (String, verter_workspace::ResolveRequestKind),
             Option<String>,
         > = rustc_hash::FxHashMap::default();
+
+        // Generation at which this overlay artifact's wildcard/import edges are
+        // canonicalized — captured before the resolve loop so a later file-set
+        // change leaves the surface edge-stale for the shared oracle (the same
+        // contract as the base materializer).
+        let edge_generation = self.ws().content_generation();
+
         for (specifier, kind) in &required_import_sources {
             if import_routes.contains_key(specifier) {
                 continue;
             }
             let kind = *kind;
-            let primary = resolve_memo
-                .entry((specifier.clone(), kind))
-                .or_insert_with(|| {
-                    self.ws()
-                        .resolve_import(
-                            analysis_canonical_id,
-                            specifier,
-                            verter_workspace::ResolutionContext {
-                                phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                                kind,
-                            },
-                        )
-                        .map(|resolution| {
-                            if kind == verter_workspace::ResolveRequestKind::TypeImport {
-                                self.normalize_live_type_dependency_target(
-                                    analysis_canonical_id,
-                                    specifier,
-                                    resolution.source_id.as_str(),
-                                )
-                            } else {
-                                resolution.source_id
-                            }
-                        })
-                })
-                .clone();
             // `resolve_relative_overlay_candidate` probes the view's
             // overlay maps (`view.source` / `view.content_hash_for`)
             // for an overlay-only relative helper, so it takes the RAW
             // `canonical_id` — the owner the overlay is keyed under.
-            // Workspace resolution above uses the normalised
+            // Workspace resolution uses the normalised
             // `analysis_canonical_id` (directory-equivalent for the
             // `.js`→`.d.ts` rewrite, and the base path's identity).
             let resolved: Option<String> = if kind
                 == verter_workspace::ResolveRequestKind::TypeImport
             {
-                primary
-                    .or_else(|| {
-                        self.fallback_relative_type_companion(analysis_canonical_id, specifier)
-                    })
-                    .or_else(|| {
+                // Type-route edges resolve through the SINGLE shared route-edge
+                // policy (`resolve_route_edge_canonical`): TypeImport →
+                // relative companion → ESM fallback, ALL normalized identically
+                // to route traversal + known-miss revalidation. Recording the
+                // RAW `EsmImport` `source_id` here (the runtime `.js`) diverged
+                // the overlay's route facts from the base / route-owned surfaces
+                // (which record the `.d.ts` companion) — a stale serve across
+                // the overlay boundary. Then the
+                // overlay-only relative candidate (overlay maps are keyed by the
+                // RAW owner). `export *` wildcard sources flow through this same
+                // chain, so normalizing it normalizes wildcard edges too.
+                self.resolve_route_edge_canonical(analysis_canonical_id, specifier)
+                    .or_else(|| resolve_relative_overlay_candidate(view, canonical_id, specifier))
+            } else {
+                let primary = resolve_memo
+                    .entry((specifier.clone(), kind))
+                    .or_insert_with(|| {
                         self.ws()
                             .resolve_import(
                                 analysis_canonical_id,
                                 specifier,
                                 verter_workspace::ResolutionContext {
                                     phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                                    kind: verter_workspace::ResolveRequestKind::EsmImport,
+                                    kind,
                                 },
                             )
                             .map(|resolution| resolution.source_id)
                     })
-                    .or_else(|| resolve_relative_overlay_candidate(view, canonical_id, specifier))
-            } else {
+                    .clone();
                 primary
                     .or_else(|| resolve_relative_overlay_candidate(view, canonical_id, specifier))
             };
@@ -485,6 +493,29 @@ impl VerterHost {
             cached_parse.as_deref(),
             &eval_source,
         );
+
+        // Re-resolve every `export *` wildcard reexport source through the
+        // shared route-edge policy and OVERWRITE the loop-baked entry, mirroring
+        // the base indexed materialiser. The loop above classifies a PLAIN
+        // (non-type) `export *` as `EsmImport` and bakes the runtime `.js`
+        // `source_id` without TS-first normalization; this pass routes the
+        // wildcard edge through `resolve_route_edge_canonical` (the `.d.ts`
+        // companion), so the overlay wildcard `canonical_id`s agree with the
+        // base / route-owned surfaces. An unresolvable source leaves the
+        // loop-baked known-miss in place.
+        for source in external_type_analysis.wildcard_reexport_sources() {
+            if let Some(resolved) = self.resolve_route_edge_canonical(analysis_canonical_id, source)
+            {
+                import_routes.insert(
+                    source.clone(),
+                    DependencyResolution {
+                        specifier: source.clone(),
+                        resolved_canonical_id: Some(resolved.clone()),
+                        possible_canonical_ids: vec![resolved],
+                    },
+                );
+            }
+        }
 
         let import_route_hash = (!import_routes.is_empty())
             .then(|| crate::resolver_store::hash_import_route_targets(&import_routes));
@@ -536,6 +567,7 @@ impl VerterHost {
             import_routes: Arc::clone(&import_routes),
             import_route_hash,
             route_hash,
+            edge_generation,
             raw_source: Arc::clone(&raw_source),
             eval_source: Arc::clone(&eval_source),
             cached_parse,

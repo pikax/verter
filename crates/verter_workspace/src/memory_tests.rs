@@ -1127,6 +1127,67 @@ fn trait_configure_resolver_empty_clears_resolver() {
     );
 }
 
+/// DISCRIMINATING regression (RouteDb stale-serve hole 5): changing the
+/// default resolve-extension list is a resolve-config mutation. RouteDb
+/// effective-export-set entries are keyed on `resolve_env_hash`, and
+/// route-owned shallow freshness keys on `content_generation`. The
+/// extension setter must therefore (a) recompose + republish the per-
+/// project env-hash tables so the new `resolve_env_hash` takes effect
+/// (old-keyed entries become unreachable), and (b) advance
+/// `content_generation` so route-owned shallow freshness invalidates.
+///
+/// FAILS pre-fix: `set_default_resolve_extensions` only swapped the
+/// stored list and never republished env hashes or bumped the epoch, so
+/// `resolve_env_hash` stayed identical (stale serve) and the generation
+/// did not move. PASSES post-fix: the setter republishes and bumps once.
+#[test]
+fn changing_default_resolve_extensions_republishes_resolve_env_hash() {
+    use crate::resolver::IdeProjectConfig;
+    use crate::workspace_snapshot::ProjectId;
+
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    let project = IdeProjectConfig::new(
+        "/proj".to_string(),
+        "/proj".to_string(),
+        Some("/proj/tsconfig.json".to_string()),
+    );
+    WorkspaceAccess::configure_resolver(&ws, vec![project]);
+
+    // index 1 of the per-project env-hash array is `resolve_env_hash`.
+    let read_resolve_env_hash = || {
+        ws.engine
+            .load_published()
+            .expect("published state after configure_resolver")
+            .env_hashes_by_project
+            .get(&ProjectId(0))
+            .copied()
+            .expect("project 0 env-hash array")[1]
+    };
+
+    let hash_before = read_resolve_env_hash();
+    let gen_before = ws.content_generation();
+
+    // `.custom` is NOT in `probe_extensions()`, so the merged extension
+    // set genuinely changes — `resolve_env_hash` MUST change iff the
+    // setter republishes the env-hash tables.
+    WorkspaceAccess::set_default_resolve_extensions(&ws, vec![".custom".to_string()]);
+
+    let hash_after = read_resolve_env_hash();
+    let gen_after = ws.content_generation();
+
+    assert_ne!(
+        hash_before, hash_after,
+        "changing default resolve extensions MUST republish the project's \
+         resolve_env_hash so RouteDb effective-export-set entries keyed on the \
+         old hash are no longer reachable"
+    );
+    assert!(
+        gen_after > gen_before,
+        "an extension-list change is a resolve-config mutation: it must advance \
+         content_generation so route-owned shallow freshness invalidates"
+    );
+}
+
 // ── Context-keyed exact resolution tests ──
 
 /// Exact overrides keyed by (specifier, phase, kind): different contexts

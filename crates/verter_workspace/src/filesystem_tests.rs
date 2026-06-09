@@ -527,6 +527,39 @@ fn directory_tree_dirty_forces_dir_index_rescan_on_next_access() {
     );
 }
 
+/// DISCRIMINATING regression (RouteDb stale-serve hole 4): a
+/// `DirectoryTreeDirty` change is a file-set mutation produced by
+/// watcher recovery. Route-owned freshness (`route_owned_entry_is_fresh`
+/// tier-2) and known-miss staleness checks in `verter_session` read the
+/// workspace `content_generation` epoch to decide whether a cached route
+/// is still fresh. If `DirectoryTreeDirty` clears the resolver lazy cache
+/// but leaves the epoch un-advanced, those downstream freshness checks
+/// serve the pre-recovery (stale) route surface.
+///
+/// FAILS pre-fix: the `DirectoryTreeDirty` arm did not set
+/// `content_changed`, so the batch never bumped `content_generation`
+/// (`after == before`). PASSES post-fix: the arm marks the batch as a
+/// content mutation and the epoch advances exactly once.
+#[test]
+fn directory_tree_dirty_advances_content_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = dir.path().to_string_lossy().replace('\\', "/");
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    let before = ws.content_generation();
+    ws.apply_changes(vec![WorkspaceChange::DirectoryTreeDirty { prefix }]);
+    let after = ws.content_generation();
+
+    assert_eq!(
+        after,
+        before + 1,
+        "DirectoryTreeDirty (watcher recovery) is a file-set generation \
+         mutation: it must advance content_generation exactly once for the \
+         batch so route-owned freshness and known-miss staleness checks do \
+         not serve stale results after recovery"
+    );
+}
+
 #[test]
 fn vfs_provenance_tracks_dir_index_hits_refreshes_and_dirty_rescans() {
     let dir = tempfile::tempdir().unwrap();
