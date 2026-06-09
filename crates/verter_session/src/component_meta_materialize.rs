@@ -471,28 +471,31 @@ fn finish_materialize_admission(
                 // admission for the intrinsic non-cacheable reason), so
                 // `cache_suppress` is unconditionally `true` — independent
                 // of whether the value is complete. `result_is_partial`
-                // carries ONLY the request's GENUINE partiality (budget /
-                // fatal / recursion folded onto the sticky flag); a
-                // complete-but-non-cacheable ReturnOnly stays
-                // `result_is_partial=false` so it does NOT suppress the
+                // carries ONLY THIS cold compute's GENUINE partiality
+                // (budget / fatal / recursion folded into the per-cold-compute
+                // completeness scope); a complete-but-non-cacheable ReturnOnly
+                // stays `result_is_partial=false` so it does NOT suppress the
                 // component-meta final warm.
                 cache_suppress: true,
-                result_is_partial: crate::request_context::current_materialization_cache_suppress(),
+                result_is_partial: crate::request_context::current_cold_compute_completeness()
+                    .is_partial(),
             },
         );
     }
-    // Shared result-cache partial gate (M1). A GENUINE partial — a
+    // Shared result-cache partial gate. A GENUINE partial — a
     // budget exhaustion / fatal `QueryError` / same-path materialiser
-    // re-entry folded onto the request's materialization-cache-suppress
-    // sticky — must NOT warm-replay as a complete `MaterializeStructureDb`
-    // entry. The outcome is a valid `Value`/`Miss` whose structure is
-    // structurally incomplete; route it through `ReturnOnly` so the
-    // winning flight receives it and the shared cache stays empty for the
-    // next cold-miss to recompute against a fresh budget. Keyed on the
-    // sticky alone here — a `MaterializeOutcome` carries no per-value
-    // partial flag; the materialiser child rails (M2) propagate child
-    // partiality onto the sticky before this admission boundary runs.
-    if crate::cache_runtime::refuse_result_cache_admission_if_partial(false) {
+    // re-entry folded into THIS cold compute's completeness scope — must
+    // NOT warm-replay as a complete `MaterializeStructureDb` entry. The
+    // outcome is a valid `Value`/`Miss` whose structure is structurally
+    // incomplete; route it through `ReturnOnly` so the winning flight
+    // receives it and the shared cache stays empty for the next cold-miss
+    // to recompute against a fresh budget. Keyed on the per-cold-compute
+    // completeness scope here — a `MaterializeOutcome` carries no per-value
+    // partial flag; the materialiser child rails fold child partiality
+    // into the scope before this admission boundary runs.
+    if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+        crate::request_context::current_cold_compute_completeness().is_partial(),
+    ) {
         let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
             crate::cache_runtime::NonAdmissionReason::PartialResult,
         );
@@ -540,12 +543,12 @@ fn finish_materialize_admission(
                     // A2 signal-split (see the IntrinsicNonCacheable arm): a
                     // self-root-refusal ReturnOnly is COMPLETE but
                     // non-shareable — `cache_suppress=true` unconditionally,
-                    // `result_is_partial` carries ONLY the request's genuine
-                    // partiality so a complete materialised outcome still
-                    // warms the component-meta final cache.
+                    // `result_is_partial` carries ONLY THIS cold compute's
+                    // genuine partiality so a complete materialised outcome
+                    // still warms the component-meta final cache.
                     cache_suppress: true,
-                    result_is_partial:
-                        crate::request_context::current_materialization_cache_suppress(),
+                    result_is_partial: crate::request_context::current_cold_compute_completeness()
+                        .is_partial(),
                 },
             )
         }
@@ -949,6 +952,23 @@ pub(crate) fn materialize_component_meta_structure(
             }
         }
 
+        // Test-only GENUINE-in-scope-partial injection hook. When the
+        // host's `materialize_force_in_scope_partial` knob is armed, fold
+        // a partial into the active `ColdComputeCompletenessScope` via the
+        // EXACT production rail a budget-tripped child read uses
+        // (`mark_request_materialization_cache_suppress`). This is not a
+        // side channel: it drives the same fold a real budget trip drives,
+        // so the per-cold-compute completeness goes `Partial` and the
+        // wrapper's `refuse_result_cache_admission_if_partial` gate must
+        // refuse the entry. Mirrors the `force_n` overflow hook above.
+        if ctx
+            .host_for_fact_tracer_install()
+            .materialize_force_in_scope_partial
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            crate::request_context::mark_request_materialization_cache_suppress();
+        }
+
         // Registry-route branch.
         //
         // `extract_route_root_identity_node` returns `Some` ONLY for
@@ -1179,7 +1199,7 @@ pub(crate) fn materialize_component_meta_structure(
                             mode: key_for_compute.mode,
                         };
                         let body_read = materialize_component_meta_structure(ctx, body_key);
-                        // M2 child rail: propagate a GENUINE-partial child
+                        // Child rail: propagate a GENUINE-partial child
                         // (same-key `Recursive`, budget-tripped `Tainted`,
                         // fatal `Error`) onto the request partial sticky
                         // BEFORE the symbolic-`Value` mapping below erases the
@@ -1309,6 +1329,18 @@ pub(crate) fn materialize_component_meta_structure(
             crate::semantic_query::CacheRead<MaterializeOutcome>,
             MaterializeStructureEntry,
         > {
+            // Per-cold-compute completeness scope: this cold
+            // compute admits into the SHARED `MaterializeStructureDb`
+            // (reused across consumers via R7 cross-owner reuse), so the
+            // entry must carry its OWN completeness — the partiality of
+            // THIS compute's contributing reads, NOT a request-global
+            // proxy that would let one consumer's partial poison a sibling
+            // consumer's complete entry. The scope covers both the inner
+            // compute (its child `observe_*` folds in) and the wrapper's
+            // re-publish gates below; single-threaded by construction
+            // (the singleflight winner's thread).
+            let _completeness_scope =
+                crate::request_context::ColdComputeCompletenessScope::enter();
             let (admission, finalise) =
                 crate::fact_signature_helpers::install_fact_tracer(host, compute);
             provenance
@@ -1319,13 +1351,15 @@ pub(crate) fn materialize_component_meta_structure(
                     match admission {
                         crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry)
                             if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-                                false,
+                                crate::request_context::current_cold_compute_completeness()
+                                    .is_partial(),
                             ) =>
                         {
-                            // Defensive M1 wrapper gate. A genuine partial
-                            // sticky raised DURING the fact-tracer install
-                            // window (after `finish_materialize_admission`
-                            // returned `Cacheable`) must still refuse the
+                            // Defensive wrapper gate. A genuine partial
+                            // folded into this cold compute's completeness
+                            // scope DURING the fact-tracer install window
+                            // (after `finish_materialize_admission` returned
+                            // `Cacheable`) must still refuse the
                             // wrapper-level re-publish. Route the valid
                             // outcome through `ReturnOnly` with
                             // `result_is_partial = true` so it never warms.
@@ -1414,14 +1448,16 @@ pub(crate) fn materialize_component_meta_structure(
                     // non-cacheable) passes through unchanged.
                     match admission {
                         crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
-                            // Defensive M1 wrapper gate (overflow arm). A
-                            // genuine partial sticky takes precedence over the
+                            // Defensive wrapper gate (overflow arm). A
+                            // genuine partial in this cold compute's
+                            // completeness scope takes precedence over the
                             // benign signature-overflow reason: preserve
-                            // `result_is_partial = sticky` so a partial that
-                            // also overflowed never warms.
+                            // `result_is_partial = scope partiality` so a
+                            // partial that also overflowed never warms.
                             let result_is_partial =
                                 crate::cache_runtime::refuse_result_cache_admission_if_partial(
-                                    false,
+                                    crate::request_context::current_cold_compute_completeness()
+                                        .is_partial(),
                                 );
                             let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
                                 if result_is_partial {
@@ -1632,7 +1668,7 @@ fn materialize_child_at_nested(
         mode: parent_key.mode,
     };
     let sub_read = materialize_component_meta_structure(ctx, sub_key);
-    // M2 child rail: a GENUINE-partial child (same-key `Recursive`,
+    // Child rail: a GENUINE-partial child (same-key `Recursive`,
     // depth-fuse `Tainted`, fatal `Error`) must raise the request partial
     // sticky BEFORE the `child`-symbolic mapping below erases the
     // non-cacheable outcome kind — otherwise the parent object surface
@@ -3259,24 +3295,40 @@ export type C<T> = A<T>
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // FIX-7 M1 / M2 — MaterializeStructureDb partial-admission gate +
-    // materializer child rails. The partial sticky
-    // (`materialization_cache_suppress`) is a GENUINE-partial signal;
-    // `finish_materialize_admission` must refuse `Cacheable` admission
-    // when it is set, routing the valid outcome through `ReturnOnly` so
-    // the next cold-miss recomputes against a fresh budget.
+    // MaterializeStructureDb partial-admission gate + materializer child
+    // rails. The partial sticky (`materialization_cache_suppress`) is a
+    // GENUINE-partial signal; `finish_materialize_admission` must refuse
+    // `Cacheable` admission when it is set, routing the valid outcome
+    // through `ReturnOnly` so the next cold-miss recomputes against a
+    // fresh budget.
     // ─────────────────────────────────────────────────────────────────
 
-    /// FIX-7 M1 (direct). A request whose partial sticky is set MUST NOT
-    /// admit a `MaterializeStructureDb` entry, and a fresh request (sticky
-    /// clear) MUST cold-rebuild — proving the partial never warm-replayed.
+    /// Per-cold-compute completeness gate (NOT the request sticky). The
+    /// `MaterializeStructureDb` admission gate
+    /// (`finish_materialize_admission` + the fact-tracer wrapper arms) keys
+    /// on the PER-COLD-COMPUTE completeness scope
+    /// (`current_cold_compute_completeness`), entered fresh per cold compute
+    /// inside `materialize_component_meta_structure`. It is decoupled from
+    /// the request-global suppress sticky: a
+    /// request sticky raised OUTSIDE this compute (a sibling consumer's
+    /// partial) must NOT block this consumer's value-complete entry, because
+    /// the cold compute enters its OWN `Complete`-seeded scope that the
+    /// outer sticky does not fold into.
     ///
-    /// MUTATION CHECK: reverting the `finish_materialize_admission` partial
-    /// gate (the `refuse_result_cache_admission_if_partial(false)` early
-    /// return before `Cacheable`) makes the first call admit an entry,
-    /// failing the "no entry after partial" assertion.
+    /// This pins the NEW decoupling: a complete materialise under a SET
+    /// request sticky still ADMITS into the shared cache. The genuine
+    /// in-compute partial-refusal path (a budget fuse tripping a child read
+    /// inside the compute → fold into the live scope → ReturnOnly) is
+    /// covered end-to-end by
+    /// `component_meta_pick_omit_tests::genuine_runaway_budget_trip_still_refused_warm_admission`.
+    ///
+    /// MUTATION CHECK: re-introducing the retired
+    /// `current_materialization_cache_suppress()` OR-in inside
+    /// `refuse_result_cache_admission_if_partial` would make this complete
+    /// materialise refuse admission while the sticky is set — the "entry
+    /// admitted / peekable" assertions then fail.
     #[test]
-    fn partial_sticky_refuses_materialize_structure_admission_and_fresh_rebuilds() {
+    fn complete_materialize_admits_despite_outer_request_sticky() {
         use crate::request_context::{RequestContext, RequestContextGuard};
         use crate::semantic_query::ProjectionMode;
 
@@ -3309,54 +3361,153 @@ export type C<T> = A<T>
         let db = host.project_type_store().materialize_structure_db();
         let entries_before = db.live_count();
 
-        // Request 1 — install a context and raise the partial sticky to
-        // simulate a budget-tripped / recursive contributing read folded
-        // onto the request. The materialise outcome is valid but MUST NOT
-        // be admitted.
+        // A request sticky is set OUTSIDE the cold compute (modelling a
+        // sibling consumer's partial). The cold compute enters its own
+        // `Complete`-seeded scope; the outer sticky does NOT fold into it.
+        // The materialise of `{x,y}` is genuinely complete, so it MUST
+        // admit a `MaterializeStructureDb` entry.
         {
             let ctx = RequestContext::new(1, StdArc::from("/m1_types.ts"), false, None);
             let _guard = RequestContextGuard::install(ctx);
             crate::request_context::mark_request_materialization_cache_suppress();
             assert!(
                 crate::request_context::current_materialization_cache_suppress(),
-                "fixture invariant: partial sticky armed for request 1",
+                "fixture invariant: outer request sticky armed",
             );
             let read = materialize_component_meta_structure(host, key.clone());
             assert!(
-                read.result_is_partial,
-                "the partial-sticky request's materialise read MUST surface \
-                 result_is_partial=true (the gate folds the sticky onto the ReturnOnly)",
+                !read.result_is_partial,
+                "a genuinely COMPLETE materialise MUST surface \
+                 result_is_partial=false even with the outer request sticky set — \
+                 the per-cold-compute scope, not the sticky, is the authority",
             );
         }
 
-        assert_eq!(
-            db.live_count(),
-            entries_before,
-            "M1: a partial-sticky request MUST NOT admit a MaterializeStructureDb \
-             entry (reverting the finish_materialize_admission gate makes this fail)",
-        );
         assert!(
-            db.peek(&key, host).is_none(),
-            "M1: MaterializeStructureDb MUST hold no candidate for the partial request's key",
-        );
-
-        // Request 2 — NO sticky. The materialise MUST cold-rebuild (the
-        // cache was never warmed by the partial) and now admit a complete
-        // entry.
-        let read2 = materialize_component_meta_structure(host, key.clone());
-        assert!(
-            !read2.result_is_partial,
-            "the fresh request's complete materialise read MUST be result_is_partial=false",
+            db.live_count() > entries_before,
+            "a value-complete materialise MUST admit MaterializeStructureDb \
+             entries even with the outer request sticky set (re-adding the retired sticky \
+             OR-in refuses ALL admission, leaving live_count unchanged at {entries_before})",
         );
         assert!(
             db.peek(&key, host).is_some(),
-            "M1: a fresh (sticky-clear) request MUST cold-rebuild and admit a \
-             complete MaterializeStructureDb entry — proving the partial never \
-             warm-replayed and the slot was genuinely empty",
+            "MaterializeStructureDb MUST hold the complete candidate for the key \
+             despite the outer sticky",
         );
     }
 
-    /// FIX-7 M2 (child rail). A same-key re-entry surfaces a `Recursive`
+    /// DIRECT genuine-partial refusal at the `MaterializeStructureDb`
+    /// layer — the mutation-soundness witness.
+    ///
+    /// `complete_materialize_admits_despite_outer_request_sticky` only
+    /// pins that a COMPLETE compute admits; it delegates genuine-partial
+    /// coverage to the final-result warm-hit test
+    /// (`genuine_runaway_budget_trip_still_refused_warm_admission`). But
+    /// that final-result test keys on `ComponentMetaResultDb` warm hits,
+    /// which a request-wide partial sticky ALSO suppresses — so it would
+    /// STILL PASS if THIS materialize gate regressed to
+    /// `refuse_result_cache_admission_if_partial(false)`, masking a
+    /// poisoned inner `MaterializeStructureDb` entry that gets admitted +
+    /// replayed as complete. This test closes that gap directly.
+    ///
+    /// It drives a GENUINE in-scope partial through the SAME fold path a
+    /// budget-tripped child read uses: the cold compute folds
+    /// `mark_request_materialization_cache_suppress()` into its OWN active
+    /// `ColdComputeCompletenessScope` (armed by the per-host
+    /// `materialize_force_in_scope_partial` knob — the structural analogue
+    /// of the budget-trip fold, NOT a side channel). The per-cold-compute
+    /// completeness therefore goes `Partial`, and the wrapper's
+    /// `refuse_result_cache_admission_if_partial` gate MUST refuse the
+    /// entry: `MaterializeStructureDb.live_count` stays unchanged and a
+    /// subsequent `peek` MISSES (the partial did not warm).
+    ///
+    /// MUTATION CHECK: the no-poison materialize path is guarded by TWO
+    /// redundant gates that share ONE predicate —
+    /// `finish_materialize_admission` (`refuse_result_cache_admission_if_partial`
+    /// over `current_cold_compute_completeness().is_partial()`) AND the
+    /// defensive wrapper gate in `materialize_component_meta_structure`
+    /// (the same predicate over the same completeness). Because they are
+    /// defense-in-depth, EACH is independently sufficient, so this test
+    /// discriminates the SHARED admission predicate: making
+    /// `refuse_result_cache_admission_if_partial` itself return `false`
+    /// (or flipping BOTH gates' arguments to a literal `false`) makes this
+    /// test FAIL — the partial entry then admits, `live_count` increases,
+    /// and the `peek` hits. Flipping only one gate is masked by the other
+    /// (the redundancy is the point). Reverted after the check.
+    #[test]
+    fn genuine_in_scope_partial_refused_materialize_structure_admission() {
+        use crate::request_context::{RequestContext, RequestContextGuard};
+        use crate::semantic_query::ProjectionMode;
+
+        let project = a0_make_project();
+        project
+            .upsert_base(
+                "/m1_partial_types.ts",
+                "export type Foo = { x: number; y: string };",
+            )
+            .unwrap();
+        let host = project.host();
+
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let decl_ref_node = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/m1_partial_types.ts",
+                &verter_type_expr::TypeExpr::Ref {
+                    name: StdArc::from("Foo"),
+                    type_arguments: StdArc::from(Vec::new()),
+                },
+                ProjectionMode::Navigate,
+            )
+            .expect("lowering Foo via Navigate must succeed");
+        let key = MaterializeStructureCacheKey {
+            scope_canonical_id: StdArc::from("/m1_partial_types.ts"),
+            base: decl_ref_node,
+            scope_axis: MaterializationScope::TopLevel,
+            mode: ProjectionMode::Expanded,
+        };
+        let db = host.project_type_store().materialize_structure_db();
+        let entries_before = db.live_count();
+
+        // A request context is installed so the in-compute fold has the
+        // request-scoped sticky to set (the scope fold is the load-bearing
+        // signal here; the request sticky is incidental). The
+        // `materialize_force_in_scope_partial` knob folds a GENUINE partial
+        // into the cold compute's OWN completeness scope — the same fold a
+        // budget-tripped child read drives.
+        {
+            let ctx = RequestContext::new(1, StdArc::from("/m1_partial_types.ts"), false, None);
+            let _guard = RequestContextGuard::install(ctx);
+            let _partial = crate::for_tests::materialize_force_in_scope_partial_for_tests(host);
+
+            let read = materialize_component_meta_structure(host, key.clone());
+            assert!(
+                read.result_is_partial,
+                "a GENUINE in-scope partial folded into the cold compute's \
+                 completeness scope MUST surface result_is_partial=true on the materialize \
+                 read — the per-cold-compute scope is the authority and the wrapper gate \
+                 routes it through ReturnOnly",
+            );
+        }
+
+        // The genuine partial MUST be REFUSED admission: no
+        // `MaterializeStructureDb` entry warmed.
+        assert_eq!(
+            db.live_count(),
+            entries_before,
+            "a GENUINE in-scope partial MUST be REFUSED MaterializeStructureDb \
+             admission — live_count must stay unchanged (flipping \
+             refuse_result_cache_admission_if_partial to `false` admits the poisoned partial \
+             and live_count increases)",
+        );
+        assert!(
+            db.peek(&key, host).is_none(),
+            "MaterializeStructureDb MUST NOT hold a candidate for a genuine partial \
+             — a subsequent peek must MISS (flipping the gate to `false` makes this peek HIT \
+             a poisoned partial replayed as complete)",
+        );
+    }
+
+    /// Child rail. A same-key re-entry surfaces a `Recursive`
     /// `result_is_partial=true` child; `observe_component_meta_read_suppress`
     /// on the `sub_read` rail of `materialize_child_at_nested` MUST raise
     /// the request partial sticky BEFORE the symbolic-`child` remap erases
@@ -3423,7 +3574,7 @@ export type C<T> = A<T>
         );
         assert!(
             crate::request_context::current_materialization_cache_suppress(),
-            "M2: a same-key recursive child MUST raise the request partial sticky via the \
+            "a same-key recursive child MUST raise the request partial sticky via the \
              materialize_child_at_nested rail (removing observe_component_meta_read_suppress \
              leaves it clear)",
         );

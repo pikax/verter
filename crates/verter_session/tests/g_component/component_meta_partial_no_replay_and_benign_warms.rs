@@ -318,22 +318,22 @@ fn benign_complete_result_warms_and_replays_from_final_cache() {
     );
 }
 
-/// FIX-7 (test 7 — e2e replay across the result-cache set). After a
+/// E2e replay across the result-cache set. After a
 /// budget-exhausted request-1 partial:
 /// - `ComponentMetaResultDb` stays EMPTY (the final partial never warms);
-/// - `MaterializeStructureDb` stays EMPTY (M1: no partial structural
+/// - `MaterializeStructureDb` stays EMPTY (no partial structural
 ///   entry is admitted);
 /// - `ShapeCacheDb` holds ONLY benign-COMPLETE prefixes (the members that
 ///   resolved completely BEFORE the budget tripped legitimately warm —
-///   the §1-correct "benign-complete still warms" behaviour) and does NOT
+///   the "benign-complete still warms" behaviour) and does NOT
 ///   GROW on request 2 (no laundered complete replay);
 /// - request 2 reproduces request 1's EXACT partial shape (not served as
 ///   a laundered complete result).
 ///
-/// MUTATION CHECK: reverting the M1 `finish_materialize_admission` gate
+/// MUTATION CHECK: reverting the `finish_materialize_admission` gate
 /// lets the budget-tripped partial admit a `MaterializeStructureDb` entry
 /// — the `materialize_structure_cache_len == 0` assertion fails. Reverting
-/// the M3 `ShapeCacheDb` gate lets the budget-tripped PARTIAL member
+/// the `ShapeCacheDb` gate lets the budget-tripped PARTIAL member
 /// shapes admit too — the shape cache grows past its benign-complete
 /// prefix count AND request 2 can launder a larger result, failing the
 /// stable-shape / no-growth assertions.
@@ -357,7 +357,7 @@ fn partial_leaves_result_caches_uncorrupted_and_request2_not_complete() {
     let request1_props = meta1.props.len();
     let shape_after1 = shape_cache_len(&host);
 
-    // The final partial never warms; M1 admits no partial structural entry.
+    // The final partial never warms; no partial structural entry is admitted.
     assert_eq!(
         component_meta_cache_len(&host),
         0,
@@ -366,7 +366,7 @@ fn partial_leaves_result_caches_uncorrupted_and_request2_not_complete() {
     assert_eq!(
         materialize_structure_cache_len(&host),
         0,
-        "M1: MaterializeStructureDb MUST be empty after a budget-exhausted partial — a \
+        "MaterializeStructureDb MUST be empty after a budget-exhausted partial — a \
          non-zero count means the partial admitted a structural entry (revert the \
          finish_materialize_admission gate to see this fail)",
     );
@@ -398,7 +398,7 @@ fn partial_leaves_result_caches_uncorrupted_and_request2_not_complete() {
     assert_eq!(
         shape_cache_len(&host),
         shape_after1,
-        "M3: ShapeCacheDb MUST NOT grow on request 2 — its entries are benign-complete \
+        "ShapeCacheDb MUST NOT grow on request 2 — its entries are benign-complete \
          prefixes only; growth means a budget-tripped PARTIAL member shape was admitted \
          (revert the ShapeCacheDb gate to see this fail)",
     );

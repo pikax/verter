@@ -38,10 +38,96 @@ pub fn current_request_budget() -> Option<Arc<RequestBudget>> {
     current_request_context().map(|ctx| Arc::clone(&ctx.projection_budget))
 }
 
-/// Snapshot the request-scoped materialization-cache-suppress sticky
-/// flag. Set by reducer / materializer paths on `cache_suppress=true`
-/// dispatch reads; OR-folded into `synthesis_should_suppress` by
-/// `compute_component_meta_state_inner`. Returns `false` when no
+use crate::semantic_query::{PartialReasonSet, ResultCompleteness};
+
+thread_local! {
+    /// Per-thread stack of per-COLD-COMPUTE completeness accumulators.
+    ///
+    /// A cold compute that admits a result into a SHARED semantic cache
+    /// (`MaterializeStructureDb`, reused across consumers via R7
+    /// cross-owner reuse) pushes a scope ([`ColdComputeCompletenessScope`])
+    /// for the duration of its single-threaded compute. The compute's
+    /// contributing child reads fold their partiality into the top scope
+    /// via [`observe_component_meta_read_suppress`] /
+    /// [`mark_request_materialization_cache_suppress`]; the admission gate
+    /// reads the scope's completeness so the ENTRY carries its OWN
+    /// completeness — NOT a request-global proxy that would let one
+    /// consumer's partial poison a sibling consumer's complete entry.
+    ///
+    /// Single-threaded by construction: each singleflight cold compute
+    /// runs start-to-finish on the winning flight's thread (the same
+    /// model as the materialiser's `MATERIALIZE_IN_FLIGHT` / depth TLS),
+    /// so the per-thread stack matches the compute's call tree. A nested
+    /// compute bubbles its completeness into its parent on scope drop.
+    static COLD_COMPUTE_COMPLETENESS: RefCell<Vec<ResultCompleteness>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// RAII scope tracking the completeness of ONE cold compute that admits
+/// into a shared semantic cache. While held, partiality observed via
+/// [`observe_component_meta_read_suppress`] /
+/// [`mark_request_materialization_cache_suppress`] folds into THIS scope;
+/// the admission gate reads [`current_cold_compute_completeness`]. On
+/// drop the scope's completeness bubbles into the enclosing scope (if
+/// any) so a nested compute taints its parent. A no-op-safe stack: with
+/// no scope active the fold/read helpers degrade to request-level only.
+#[must_use]
+pub struct ColdComputeCompletenessScope {
+    _private: (),
+}
+
+impl ColdComputeCompletenessScope {
+    /// Enter a per-cold-compute completeness scope, seeded `Complete`.
+    pub fn enter() -> Self {
+        COLD_COMPUTE_COMPLETENESS.with(|s| s.borrow_mut().push(ResultCompleteness::Complete));
+        Self { _private: () }
+    }
+}
+
+impl Drop for ColdComputeCompletenessScope {
+    fn drop(&mut self) {
+        COLD_COMPUTE_COMPLETENESS.with(|s| {
+            let mut stack = s.borrow_mut();
+            if let Some(child) = stack.pop() {
+                if let Some(parent) = stack.last_mut() {
+                    *parent = parent.merge(child);
+                }
+            }
+        });
+    }
+}
+
+/// Fold a partial completeness into the active per-cold-compute scope (if
+/// any). No-op when no scope is active.
+fn fold_cold_compute_completeness(completeness: ResultCompleteness) {
+    COLD_COMPUTE_COMPLETENESS.with(|s| {
+        if let Some(top) = s.borrow_mut().last_mut() {
+            *top = top.merge(completeness);
+        }
+    });
+}
+
+/// The completeness accumulated by the active per-cold-compute scope.
+/// `Complete` when no scope is active. The shared-semantic-cache
+/// admission gate keys on `is_partial()` of this value so each entry
+/// carries its OWN completeness (per-result/scoped, not a
+/// request-global proxy).
+#[must_use]
+pub fn current_cold_compute_completeness() -> ResultCompleteness {
+    COLD_COMPUTE_COMPLETENESS
+        .with(|s| s.borrow().last().copied())
+        .unwrap_or(ResultCompleteness::Complete)
+}
+
+/// Snapshot the request-result completeness signal as a boolean.
+///
+/// This is the REQUEST-level (cross-thread) partiality accumulator. For
+/// the component-meta entry point request-scope IS result-scope (one
+/// request resolves one component's meta), so this is the per-result
+/// completeness for `synthesis_should_suppress`. The cross-consumer
+/// poisoning hazard for SHARED semantic caches is handled separately and
+/// precisely by the per-cold-compute scope above
+/// ([`current_cold_compute_completeness`]). Returns `false` when no
 /// `RequestContext` is installed.
 #[must_use]
 pub fn current_materialization_cache_suppress() -> bool {
@@ -50,14 +136,16 @@ pub fn current_materialization_cache_suppress() -> bool {
         .unwrap_or(false)
 }
 
-/// Set the request-scoped materialization-cache-suppress sticky flag.
-/// Sticky for the request's lifetime. No-op when no `RequestContext`
-/// is installed.
+/// Mark the request-result completeness signal partial, and fold the
+/// partiality into the active per-cold-compute scope (if any). Sticky for
+/// the request's lifetime. No-op when no `RequestContext` is installed
+/// (the scope fold is still attempted — it is `RequestContext`-independent).
 pub fn mark_request_materialization_cache_suppress() {
     if let Some(ctx) = current_request_context() {
         ctx.materialization_cache_suppress
             .store(true, Ordering::Relaxed);
     }
+    fold_cold_compute_completeness(ResultCompleteness::partial(PartialReasonSet::PROPAGATED));
 }
 
 /// Class-fix helper for the component-meta read/materialize path: observe a

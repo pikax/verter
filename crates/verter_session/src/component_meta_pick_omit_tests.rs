@@ -1446,3 +1446,220 @@ fn consumer_indexed_access_through_symbolic_omit_works() {
          enumeration is a regression. got {calls}",
     );
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Runaway-fuse termination backstop: the fuse is ARMED by default
+// (`projection_op_budget == 0` ⇒ effective cap 2000); `Instantiate` /
+// `Conditional` / the
+// projection keys count toward the request-wide cap unconditionally. The
+// fuse is the genuine termination backstop for the open-generic
+// expansion-storm class.
+//
+// An open-generic surface whose enumeration costs > 2000 ops therefore
+// TRIPS the fuse → returns a structurally-valid `Partial(BUDGET_EXCEEDED)`
+// → is correctly REFUSED warm admission (the no-poison invariant). A
+// surface that genuinely needs more than 2000 ops to publish complete
+// metadata (the deep open `extends` chain over a wide generic interface
+// plus many `defineModel`s — nuxt-ui's `Table.vue` class) is NOT
+// finite-large-terminating-under-the-fuse: it stays degraded-but-
+// terminating until the route/mode-independent L1 open-domain carrier-
+// stop lands (a tracked follow-up). Until then the
+// honest contract for that class is: terminates, partial, NOT warmed.
+//
+// The companion invariant pinned here is the partial-taint SCOPING:
+// a budget-tripped partial in one consumer must not poison a
+// genuinely-COMPLETE sibling's warm entry through a request-wide sticky
+// suppress. That decoupling is pinned by the unit-level per-cold-compute
+// completeness tests in `component_meta_materialize.rs`
+// (`complete_materialize_admits_despite_outer_request_sticky`,
+// `genuine_in_scope_partial_refused_materialize_structure_admission`) and
+// `component_meta_caches_tests.rs`
+// (`shape_cache_db_admits_value_complete_shape_regardless_of_request_sticky`).
+//
+// The fixtures below are FULLY HERMETIC (no external corpus) and model
+// the open-generic-over-`T` shape: a deep linear `extends` chain of
+// generic interfaces whose members are generic-conditional
+// instantiations, an open SFC `generic="T"`, a
+// `withDefaults(defineProps<BigProps<T>>())`, and many `defineModel<…>()`.
+// Enumerating that open surface costs > 2000 `Instantiate`/`Conditional`
+// ops, so under the ARMED fuse it trips — exactly the runaway-trip the
+// no-poison invariant (test (c) below) exercises.
+// ════════════════════════════════════════════════════════════════════
+
+/// Generate the deep+wide open-generic interface hierarchy. `LEVELS`
+/// linear `extends` hops, `WIDTH` generic-conditional members per level.
+/// Enumerating `BigProps<T>` over the open `T` instantiates each level
+/// and evaluates each member's conditional generic — a cost that exceeds
+/// the 2000-op armed-fuse cap, so the surface trips the fuse.
+fn finite_large_generic_dts() -> String {
+    use std::fmt::Write as _;
+
+    // Sized so that enumerating the open generic surface costs well over
+    // the 2000-op default cap while remaining finite and well under the
+    // walker depth cap. LEVELS drives `Instantiate` (one per `extends`
+    // hop); WIDTH * LEVELS drives the per-member `Instantiate` +
+    // `Conditional` work.
+    const LEVELS: usize = 60;
+    const WIDTH: usize = 60;
+
+    let mut src = String::from(
+        "export interface Row { id: string }\n\
+         export type Cell<T, K extends string> =\n  \
+           K extends `c${string}` ? { row: T; key: K; tag: 0 }\n  \
+           : K extends `s${string}` ? { row: T; key: K; tag: 1 }\n  \
+           : { row: T; key: K; tag: 2 }\n\n",
+    );
+
+    // Level 0 has no `extends` parent.
+    src.push_str("export interface L0<T extends Row> {\n");
+    for w in 0..WIDTH {
+        let _ = writeln!(src, "  f0_{w}?: Cell<T, 'c0_{w}'>");
+    }
+    src.push_str("}\n\n");
+
+    for level in 1..LEVELS {
+        let prev = level - 1;
+        let _ = writeln!(
+            src,
+            "export interface L{level}<T extends Row> extends L{prev}<T> {{"
+        );
+        for w in 0..WIDTH {
+            let _ = writeln!(src, "  f{level}_{w}?: Cell<T, 'c{level}_{w}'>");
+        }
+        src.push_str("}\n\n");
+    }
+
+    let top = LEVELS - 1;
+    let _ = writeln!(
+        src,
+        "export interface BigProps<T extends Row> extends L{top}<T> {{\n  extra?: string\n}}\n"
+    );
+    src
+}
+
+/// SFC consuming the finite-large generic surface: open `generic="T"`,
+/// `withDefaults(defineProps<BigProps<T>>())`, and several generic
+/// `defineModel<…>()` (mirroring Table.vue's 13 models).
+const FINITE_LARGE_GENERIC_VUE: &str = r#"<script setup lang="ts" generic="T extends Row">
+import type { Row, Cell, BigProps } from './big'
+
+withDefaults(defineProps<BigProps<T>>(), {})
+
+const m0 = defineModel<Cell<T, 'm0'>>('m0')
+const m1 = defineModel<Cell<T, 'm1'>>('m1')
+const m2 = defineModel<Cell<T, 'm2'>>('m2')
+const m3 = defineModel<Cell<T, 'm3'>>('m3')
+const m4 = defineModel<Cell<T, 'm4'>>('m4')
+const m5 = defineModel<Cell<T, 'm5'>>('m5')
+const m6 = defineModel<Cell<T, 'm6'>>('m6')
+const m7 = defineModel<Cell<T, 'm7'>>('m7')
+const m8 = defineModel<Cell<T, 'm8'>>('m8')
+const m9 = defineModel<Cell<T, 'm9'>>('m9')
+const m10 = defineModel<Cell<T, 'm10'>>('m10')
+const m11 = defineModel<Cell<T, 'm11'>>('m11')
+const m12 = defineModel<Cell<T, 'm12'>>('m12')
+</script>
+<template><div /></template>
+"#;
+
+/// Pins the budget-exceeded detector to the REAL production spelling so
+/// the hollow-detector class (the case-sensitive `"BudgetExceeded"`
+/// mismatch against the production `budgetExceeded(...)` sentinel) can
+/// never re-open. The shared recognizer
+/// `type_expr_is_budget_exceeded_sentinel` MUST fire on the exact raw
+/// `semantic_query_error_raw` emits, and MUST NOT fire on clean text or a
+/// plain object surface.
+#[test]
+fn budget_exceeded_detector_matches_production_spelling_not_capital_b() {
+    use crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel;
+    use verter_type_expr::TypeExpr;
+
+    // The exact production spelling (lowercase `b`, parameterised domain).
+    let real_sentinel = TypeExpr::Unknown {
+        raw: "budgetExceeded(ProjectionOperation)".into(),
+    };
+    assert!(
+        type_expr_is_budget_exceeded_sentinel(&real_sentinel),
+        "detector MUST fire on the real production sentinel `budgetExceeded(...)`"
+    );
+
+    // The historically-wrong capital-B spelling occurs NOWHERE in
+    // production; the detector must NOT key on it (and crucially the real
+    // sentinel above must not depend on it either).
+    let capital_b = TypeExpr::Unknown {
+        raw: "BudgetExceeded".into(),
+    };
+    assert!(
+        !type_expr_is_budget_exceeded_sentinel(&capital_b),
+        "detector keys on the production prefix, not the stale capital-B literal"
+    );
+
+    // Clean unrelated `Unknown` raw text must not fire.
+    let clean = TypeExpr::Unknown {
+        raw: "string".into(),
+    };
+    assert!(
+        !type_expr_is_budget_exceeded_sentinel(&clean),
+        "detector MUST NOT fire on clean `Unknown` text"
+    );
+
+    // A plain object surface (non-`Unknown`) must not fire.
+    let plain_object = TypeExpr::Object(std::sync::Arc::new(verter_type_expr::ObjectExpr {
+        properties: Vec::new(),
+    }));
+    assert!(
+        !type_expr_is_budget_exceeded_sentinel(&plain_object),
+        "detector MUST NOT fire on a plain object surface"
+    );
+}
+
+/// A GENUINE runaway/budget trip (explicit tiny fuse cap)
+/// still produces a partial that is REFUSED warm admission — the
+/// no-poison invariant is preserved. This pins the invariant: it would
+/// FAIL if partials were wrongly allowed to warm.
+#[test]
+fn genuine_runaway_budget_trip_still_refused_warm_admission() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    // An explicit tiny runaway-fuse cap of 1 ARMS the budget. The
+    // finite-large surface trips it almost immediately, producing a
+    // GENUINE partial.
+    let files: &[(&str, &str)] = &[
+        ("/workspace/src/big.ts", finite_large_generic_dts().leak()),
+        ("/workspace/src/BigTable.vue", FINITE_LARGE_GENERIC_VUE),
+    ];
+    let project = build_hermetic_project_with_budget(files, 1);
+    let host = project.host();
+    let canonical = "/workspace/src/BigTable.vue";
+
+    let (_meta, resolution) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("a budget-tripped resolve must still return partial metadata");
+
+    // The genuine runaway trip MUST mark the result partial/suppressed.
+    assert!(
+        resolution.synthesis_should_suppress,
+        "an explicit tiny runaway-fuse cap (1) MUST trip on this surface and mark the result \
+         partial/suppressed (synthesis_should_suppress=true)"
+    );
+
+    // The partial MUST NOT warm the final-result cache: a 2nd resolve
+    // re-runs cold rather than serving the poisoned partial.
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("second resolve must still succeed");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "a GENUINE budget-tripped partial MUST NOT warm `ComponentMetaResultDb` — the 2nd resolve \
+         must NOT be a warm hit (hits_before={hits_before}, hits_after={hits_after}); flipping the \
+         admission gate to admit partials would make this a hit"
+    );
+}

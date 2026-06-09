@@ -754,7 +754,7 @@ defineProps<{ x: Lib }>()
 }
 
 // ─────────────────────────────────────────────────────────────────
-// FIX-7 M3 — ShapeCacheDb central partial-admission gate.
+// ShapeCacheDb central partial-admission gate.
 // `ShapeCacheDb::get_or_compute` / `admit_computed` refuse to admit a
 // GENUINE partial (value.result_is_partial OR the request partial
 // sticky), so a partial member shape never warm-replays as a complete
@@ -807,7 +807,7 @@ fn shape_value_and_fact_sig_for_scope(
     (value, fact_sig)
 }
 
-/// FIX-7 M3 (direct unit). `ShapeCacheDb::admit_computed` with a COMPLETE
+/// Direct unit. `ShapeCacheDb::admit_computed` with a COMPLETE
 /// value admits (baseline: peek hits, live count +1); with a PARTIAL
 /// value (`result_is_partial=true`) it refuses (peek misses, live count
 /// unchanged) yet still returns the value verbatim.
@@ -850,12 +850,12 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
     assert_eq!(
         db.live_count(),
         live_before_complete + 1,
-        "M3 baseline: a COMPLETE shape MUST admit (the gate keys on partiality, not on \
+        "baseline: a COMPLETE shape MUST admit (the gate keys on partiality, not on \
          non-cacheability) — over-suppression would break benign warming",
     );
     assert!(
         db.peek(&complete_key, ctx).is_some(),
-        "M3 baseline: a COMPLETE shape MUST be peekable after admission",
+        "baseline: a COMPLETE shape MUST be peekable after admission",
     );
 
     // The fix: a PARTIAL value is refused.
@@ -876,26 +876,36 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
     assert_eq!(
         db.live_count(),
         live_before_partial,
-        "M3: a PARTIAL shape (result_is_partial=true) MUST NOT admit — live count unchanged \
+        "a PARTIAL shape (result_is_partial=true) MUST NOT admit — live count unchanged \
          (reverting the get_or_compute gate makes this fail)",
     );
     assert!(
         db.peek(&partial_key, ctx).is_none(),
-        "M3: a PARTIAL shape MUST NOT be peekable — it was refused admission",
+        "a PARTIAL shape MUST NOT be peekable — it was refused admission",
     );
 }
 
-/// FIX-7 M3 (integration via the request partial sticky). A per-member
-/// shape whose partiality comes ONLY from the request-scoped sticky (the
-/// materializer-native rail raises it) MUST NOT admit into ShapeCacheDb;
-/// a fresh request (sticky clear) cold-rebuilds and admits.
+/// Per-result completeness gate (NOT the request sticky). The
+/// `ShapeCacheDb` admission gate keys on the value's OWN completeness
+/// (`MaterializedTypeExpr::result_is_partial`, set from the contributing
+/// dispatch read in `field_types`), NEVER on the request-global suppress
+/// sticky. The shared semantic caches carry their
+/// OWN completeness so one consumer's request-scoped partial can NOT
+/// poison a sibling consumer's value-complete entry.
 ///
-/// MUTATION CHECK: reverting the
-/// `current_materialization_cache_suppress()` half of
-/// `refuse_result_cache_admission_if_partial` makes the sticky-bearing
-/// admit succeed — the "no admission while sticky" assertion fails.
+/// This pins the architecture: a VALUE-COMPLETE shape admits even
+/// when the request partial sticky is set (the sticky governs only the
+/// request-result `ComponentMetaResultDb` gate, not the shared shape
+/// cache). A value-PARTIAL shape is refused — covered by the sibling
+/// `shape_cache_db_refuses_partial_admit_but_admits_complete`.
+///
+/// MUTATION CHECK: re-introducing the
+/// `current_materialization_cache_suppress()` OR-in inside
+/// `refuse_result_cache_admission_if_partial` (the retired sticky bridge)
+/// would refuse this value-complete admission while the sticky is set —
+/// the "MUST admit / MUST be peekable" assertions then fail.
 #[test]
-fn shape_cache_db_refuses_admit_when_request_partial_sticky_set() {
+fn shape_cache_db_admits_value_complete_shape_regardless_of_request_sticky() {
     use crate::component_meta_caches::ShapeCacheKey;
     use crate::request_context::{RequestContext, RequestContextGuard};
     use crate::types::ProjectionMode;
@@ -914,9 +924,10 @@ fn shape_cache_db_refuses_admit_when_request_partial_sticky_set() {
         ProjectionMode::Expanded,
     );
 
-    // The value itself is COMPLETE (result_is_partial=false) — the
-    // partiality enters ONLY via the request sticky, exactly as the
-    // materializer-native rail propagates it.
+    // The value itself is COMPLETE (result_is_partial=false). A request
+    // sticky is set — but for the SHARED shape cache that sticky is NOT
+    // an admission authority (it is the request-result-level signal). The
+    // value-complete shape MUST admit.
     let live_before = db.live_count();
     {
         let rctx = RequestContext::new(7, Arc::from("/m3_int.ts"), false, None);
@@ -927,22 +938,13 @@ fn shape_cache_db_refuses_admit_when_request_partial_sticky_set() {
     }
     assert_eq!(
         db.live_count(),
-        live_before,
-        "M3 integration: with the request partial sticky set, even a value-complete shape \
-         MUST be refused (the rail's partiality reaches the gate via the sticky)",
+        live_before + 1,
+        "a VALUE-COMPLETE shape MUST admit into the shared `ShapeCacheDb` even with \
+         the request sticky set — the sticky is the request-result gate, not the shared-cache \
+         authority (re-adding the retired sticky OR-in makes this refuse)",
     );
-    assert!(
-        db.peek(&key, ctx).is_none(),
-        "M3 integration: the sticky-suppressed shape MUST NOT be peekable",
-    );
-
-    // Fresh request, sticky clear — the shape now admits (proving the
-    // slot was genuinely empty, not warm-poisoned).
-    let (value2, sig2) = shape_value_and_fact_sig_for_scope(ctx, "/m3_int.ts", false);
-    let _ = db.admit_computed(&key, ctx, value2, sig2);
     assert!(
         db.peek(&key, ctx).is_some(),
-        "M3 integration: a fresh (sticky-clear) request MUST cold-admit the complete shape — \
-         proving the partial replay never warmed the slot",
+        "the value-complete shape MUST be peekable after admission despite the sticky",
     );
 }

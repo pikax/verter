@@ -106,7 +106,8 @@ mod surface;
 pub(crate) use surface::{
     projected_surface_from_semantic_node, projected_surface_to_expanded_shape,
     projected_surface_to_type_expr, semantic_query_error_raw, surface_view_to_projected_surface,
-    type_expr_contains_semantic_miss, type_expr_is_expanded_surface,
+    type_expr_contains_semantic_miss, type_expr_is_budget_exceeded_sentinel,
+    type_expr_is_expanded_surface,
 };
 
 // Predicate/utility helpers (route-expr surface keys,
@@ -120,6 +121,14 @@ use helpers::type_expr_references_type_params;
 pub(crate) const SEMANTIC_MISS: &str = "semanticMiss";
 pub(crate) const SEMANTIC_OBJECT_SURFACE: &str = "semanticObjectSurface";
 pub(crate) const SEMANTIC_SURFACE_MEMBER: &str = "semanticSurfaceMember";
+
+/// The exact `TypeExpr::Unknown { raw }` prefix `semantic_query_error_raw`
+/// emits for a `QueryError::BudgetExceeded` sentinel (`format!("budgetExceeded({:?})", …)`).
+/// This is the SINGLE source of truth for the budget-exceeded spelling:
+/// the production recognizer (`dispatch_route_expr_is_materialized`) and
+/// every test that scans a published surface for a leaked budget sentinel
+/// reference this constant, so the spelling can never silently drift.
+pub(crate) const BUDGET_EXCEEDED_SENTINEL_PREFIX: &str = "budgetExceeded(";
 
 /// Build an R28 signature for a cache whose validity depends on the
 /// IDENTITY of a top-level type at `(canonical, type_name)`. Observes

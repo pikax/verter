@@ -192,6 +192,50 @@ impl Drop for MaterializeForceOverflowGuard<'_> {
     }
 }
 
+/// Arm the per-host materialiser GENUINE-in-scope-partial injection knob
+/// and return an RAII guard that clears it on drop.
+///
+/// When armed, the materialiser's cold-compute closure folds a partial
+/// into its active [`crate::request_context::ColdComputeCompletenessScope`]
+/// via the EXACT production rail a budget-tripped child read uses
+/// ([`crate::request_context::mark_request_materialization_cache_suppress`]).
+/// The per-cold-compute completeness therefore goes `Partial` and the
+/// `MaterializeStructureDb` admission gate
+/// (`refuse_result_cache_admission_if_partial`) must refuse the entry —
+/// the SAME outcome a real budget trip produces, with a deterministic
+/// trigger. Per-host so the forced state never leaks into a concurrent
+/// materialise on a different host.
+pub fn materialize_force_in_scope_partial_for_tests(
+    host: &crate::VerterHost,
+) -> MaterializeForceInScopePartialGuard<'_> {
+    MaterializeForceInScopePartialGuard::arm(host)
+}
+
+/// Host-scoped RAII guard for the per-host materialiser in-scope-partial
+/// injection knob
+/// [`crate::VerterHost::materialize_force_in_scope_partial`]. Mirrors
+/// [`MaterializeForceOverflowGuard`] for the genuine-partial fold path.
+pub struct MaterializeForceInScopePartialGuard<'h> {
+    host: &'h crate::VerterHost,
+}
+
+impl<'h> MaterializeForceInScopePartialGuard<'h> {
+    /// Arm `host`'s in-scope-partial knob and return the guard.
+    fn arm(host: &'h crate::VerterHost) -> Self {
+        host.materialize_force_in_scope_partial
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Self { host }
+    }
+}
+
+impl Drop for MaterializeForceInScopePartialGuard<'_> {
+    fn drop(&mut self) {
+        self.host
+            .materialize_force_in_scope_partial
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Arm the per-host relation-memo fact-injection knob and return an RAII
 /// guard that zeroes it on drop. Mirrors
 /// [`materialize_force_overflow_observations_for_tests`] for the relation

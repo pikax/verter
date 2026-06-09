@@ -255,7 +255,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 ) {
                     ImportedRegistrySymbolResolution::Resolved(opt) => opt,
                     ImportedRegistrySymbolResolution::FuseTripped => {
-                        // M4: the wildcard route was needed but the
+                        // The wildcard route was needed but the
                         // per-request fuse was exhausted, so the symbol
                         // was NEVER looked up. This `None` is a GENUINE
                         // PARTIAL — admitting it as a warm negative would
@@ -567,14 +567,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 self.resolve_imported_registry_symbol(source_key, exported_name)
                     .is_some()
             };
-            // M5: if the imported-registry resolution above tripped the
-            // wildcard-route fuse (M4 set the request partial sticky), the
-            // derived `false` is NOT an authoritative "unresolvable"
-            // verdict — the symbol was never looked up. Refuse to admit it
-            // into `ResolvabilityDb`; the caller still recomputes the bool
-            // below so it never sees a spurious cached `false`. Routed
-            // through the shared result-cache partial gate.
-            if crate::cache_runtime::refuse_result_cache_admission_if_partial(false) {
+            // If the imported-registry resolution above tripped the
+            // wildcard-route fuse (which marked the request-result
+            // completeness partial), the derived `false` is NOT an authoritative
+            // "unresolvable" verdict — the symbol was never looked up.
+            // Refuse to admit it into `ResolvabilityDb`; the caller still
+            // recomputes the bool below so it never sees a spurious cached
+            // `false`. The `ResolvabilityDb` rail has no per-value partial
+            // flag, so it supplies the request-result completeness (one
+            // request resolves one component's meta) to the pure gate.
+            if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+                crate::request_context::current_materialization_cache_suppress(),
+            ) {
                 return None;
             }
             let observed = observed_keyed_hash?;

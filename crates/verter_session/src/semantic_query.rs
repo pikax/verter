@@ -1431,6 +1431,139 @@ pub enum DepVersion {
 /// Dependency signature returned alongside every reusable cache read.
 pub type DepSignature = Arc<[(Arc<str>, DepVersion)]>;
 
+/// The set of reasons a result is PARTIAL (structurally incomplete).
+///
+/// A bitset so a result that hit more than one early-exit class records
+/// all of them. The reasons are the GENUINE-incompleteness classes — an
+/// early-exit / failure to compute the full surface. Crucially, **"budget
+/// pressure but the work completed" is NOT a partial reason**: a
+/// finite-large terminating resolution is COMPLETE regardless of op count.
+/// Only a real budget *exhaustion early-exit* (`BUDGET_EXCEEDED`) — which
+/// arises only on a genuine armed-fuse runaway trip — counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct PartialReasonSet(u8);
+
+impl PartialReasonSet {
+    /// An armed runaway fuse tripped mid-compute (`QueryError::BudgetExceeded`).
+    pub const BUDGET_EXCEEDED: Self = Self(1 << 0);
+    /// The request was cancelled mid-compute.
+    pub const CANCELLED: Self = Self(1 << 1);
+    /// The world generation advanced and superseded the compute.
+    pub const SUPERSEDED_GENERATION: Self = Self(1 << 2);
+    /// An unstable / torn intermediate state (`QueryError::UnstableState`).
+    pub const UNSTABLE_STATE: Self = Self(1 << 3);
+    /// Same-path recursion produced a non-terminating self-reference.
+    pub const SAME_PATH_RECURSION: Self = Self(1 << 4);
+    /// The shallow-mode terminal-surface walker hit a fatal / pathological
+    /// diagnostic and contributed no surface.
+    pub const WALKER_FATAL: Self = Self(1 << 5);
+    /// Partiality inherited from a contributing child read whose specific
+    /// reason class was not captured at the propagation site (the
+    /// boolean-bridge fold). The producer that originated the partial
+    /// records the precise reason; this marks a downstream propagation.
+    pub const PROPAGATED: Self = Self(1 << 6);
+
+    /// The empty reason set (no partial reasons recorded).
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Whether no reasons are recorded.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Union of two reason sets.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether `self` contains every reason in `other`.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+}
+
+/// Per-result completeness — whether a computed result is the FULL surface
+/// (`Complete`) or structurally incomplete (`Partial`, carrying the
+/// reason set).
+///
+/// This is the typed carrier for the partial-result signal. The
+/// component-meta final-result warm gate and the shape / materialize
+/// result caches admit ONLY a `Complete` result; a `Partial` is refused
+/// warm admission so a subsequent identical request re-runs the cold
+/// compute (the no-poison invariant). It is DISTINCT from `cache_suppress`
+/// (benign non-cacheability — a torn self-root, a tracer-signature
+/// overflow, a `ReturnOnly` cross-owner-reuse admission): a
+/// `cache_suppress` COMPLETE result still warms the component-meta result;
+/// only a `Partial` is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum ResultCompleteness {
+    /// The result is the full surface.
+    #[default]
+    Complete,
+    /// The result is structurally incomplete, with the recorded reasons.
+    Partial(PartialReasonSet),
+}
+
+impl ResultCompleteness {
+    /// A complete result.
+    #[must_use]
+    pub const fn complete() -> Self {
+        Self::Complete
+    }
+
+    /// A partial result carrying a single reason.
+    #[must_use]
+    pub const fn partial(reason: PartialReasonSet) -> Self {
+        Self::Partial(reason)
+    }
+
+    /// Whether this result is partial (structurally incomplete).
+    #[must_use]
+    pub const fn is_partial(self) -> bool {
+        matches!(self, Self::Partial(_))
+    }
+
+    /// The recorded partial reasons (empty when complete).
+    #[must_use]
+    pub const fn reasons(self) -> PartialReasonSet {
+        match self {
+            Self::Complete => PartialReasonSet::empty(),
+            Self::Partial(reasons) => reasons,
+        }
+    }
+
+    /// OR-merge two completenesses: `Partial` dominates `Complete`, and
+    /// two `Partial`s union their reason sets. The fold used to aggregate
+    /// a child read's completeness into a parent compute's.
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Complete, Self::Complete) => Self::Complete,
+            (Self::Partial(a), Self::Partial(b)) => Self::Partial(a.union(b)),
+            (Self::Partial(a), Self::Complete) => Self::Partial(a),
+            (Self::Complete, Self::Partial(b)) => Self::Partial(b),
+        }
+    }
+
+    /// Fold a partial `reason` into `self` iff `is_partial` holds. A
+    /// bridge for the legacy boolean partial signal at producer sites that
+    /// know the reason class.
+    #[must_use]
+    pub fn or_partial_if(self, is_partial: bool, reason: PartialReasonSet) -> Self {
+        if is_partial {
+            self.merge(Self::Partial(reason))
+        } else {
+            self
+        }
+    }
+}
+
 /// Returned by cache reads so callers can fold transitive dep facts into
 /// their dependency-fact set for the publish-side completion-fence
 /// revalidation.
@@ -1469,6 +1602,15 @@ pub struct CacheRead<T> {
     /// shape/materialization result caches key ONLY on this flag — a
     /// complete-but-non-cacheable result MUST still be allowed to warm the
     /// component-meta result, while a partial MUST be refused.
+    ///
+    /// This boolean is the per-read projection of
+    /// [`ResultCompleteness`]: `false` ⇒ `Complete`, `true` ⇒ `Partial`.
+    /// The typed [`ResultCompleteness`] carrier (with the reason set) is
+    /// used at the RESULT / scope / admission level — where the
+    /// completeness drives a decision — via the per-cold-compute
+    /// completeness scope and the request-result completeness accumulator
+    /// (see [`crate::request_context`] and
+    /// [`crate::cache_runtime::refuse_result_cache_admission_if_partial`]).
     pub result_is_partial: bool,
 }
 

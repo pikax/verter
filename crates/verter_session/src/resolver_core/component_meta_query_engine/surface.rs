@@ -15,7 +15,10 @@ use rustc_hash::FxHashSet;
 use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
 use verter_type_expr::TypeExpr;
 
-use super::{SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE, SEMANTIC_SURFACE_MEMBER};
+use super::{
+    BUDGET_EXCEEDED_SENTINEL_PREFIX, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
+    SEMANTIC_SURFACE_MEMBER,
+};
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{QueryError, SemanticNodeData, SemanticNodeId, SurfaceView};
 
@@ -189,7 +192,7 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
             );
             let is_prefix_sentinel = raw.starts_with("materialize:")
                 || raw.starts_with("unsupportedIntrinsic(")
-                || raw.starts_with("budgetExceeded(")
+                || raw.starts_with(BUDGET_EXCEEDED_SENTINEL_PREFIX)
                 || raw.starts_with("unstableState(")
                 || raw.starts_with("aliasCycle(");
             !is_exact_sentinel && !is_prefix_sentinel
@@ -295,6 +298,17 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
 /// until §5.8 retires the owner_engine bridge.
 pub(crate) fn type_expr_contains_semantic_miss(expr: &TypeExpr) -> bool {
     !dispatch_route_expr_is_materialized(expr)
+}
+
+/// Returns `true` when `expr` is the budget-exceeded sentinel
+/// (`TypeExpr::Unknown { raw }` whose `raw` starts with
+/// [`BUDGET_EXCEEDED_SENTINEL_PREFIX`]). This is the single shared
+/// recognizer for the spelling `semantic_query_error_raw` emits for
+/// `QueryError::BudgetExceeded` — production routing and every test that
+/// scans a published surface for a leaked budget sentinel call this so
+/// the spelling can never drift between producer and detector.
+pub(crate) fn type_expr_is_budget_exceeded_sentinel(expr: &TypeExpr) -> bool {
+    matches!(expr, TypeExpr::Unknown { raw } if raw.starts_with(BUDGET_EXCEEDED_SENTINEL_PREFIX))
 }
 
 /// Returns `true` when `expr` still carries open deferred shell shapes

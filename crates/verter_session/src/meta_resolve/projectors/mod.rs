@@ -1025,12 +1025,15 @@ fn member_shape_peek_or_compute(
     // declaration scope) that should invalidate.
     let materialized_with_gate_fence =
         merge_gate_fence_into_materialized(materialized.clone(), &gate_fence, scope_canonical_id);
-    // M3 local early return: a GENUINE-partial member shape (the value's
-    // own `result_is_partial`, or the request partial sticky raised by a
-    // budget-tripped contributing read) must NOT enter the shared shape
-    // cache. The central `get_or_compute` gate also refuses, but returning
-    // here keeps the per-member producer from depending on the cache layer
-    // remembering the rule and skips the futile admission plumbing.
+    // Local early return: a GENUINE-partial member shape (keyed on the
+    // value's OWN `result_is_partial` — a budget-tripped contributing read
+    // folds its partiality onto this value via the per-cold-compute
+    // completeness scope) must NOT enter the shared shape cache. The gate
+    // is PURE over `result_is_partial`; it does NOT OR-in a request-global
+    // partial sticky. The central `get_or_compute` gate also refuses, but
+    // returning here keeps the per-member producer from depending on the
+    // cache layer remembering the rule and skips the futile admission
+    // plumbing.
     if crate::cache_runtime::refuse_result_cache_admission_if_partial(
         materialized_with_gate_fence.result_is_partial,
     ) {
@@ -1176,7 +1179,7 @@ fn admit_member_shape_if_possible(
     key: &crate::component_meta_caches::ShapeCacheKey,
     value: crate::project_semantic_dispatch::raise::MaterializedTypeExpr,
 ) -> crate::project_semantic_dispatch::raise::MaterializedTypeExpr {
-    // M3 local early return: refuse a GENUINE-partial shape before any
+    // Local early return: refuse a GENUINE-partial shape before any
     // admission plumbing. The central `admit_computed` → `get_or_compute`
     // gate also refuses, but the early return keeps this single
     // centralised admission point from depending on the cache layer

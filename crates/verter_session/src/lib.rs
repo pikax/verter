@@ -311,6 +311,28 @@ pub mod test_only {
             }
         }
     }
+
+    /// Test-only probe for the budget-exceeded published-surface
+    /// recognizer. Integration tests (`tests/defect_b_corpus_prevention_gate.rs`)
+    /// scan a published surface for a leaked budget sentinel; this
+    /// re-exports the SAME `pub(crate)` recognizer production routing
+    /// uses (`type_expr_is_budget_exceeded_sentinel`, which keys on the
+    /// `BUDGET_EXCEEDED_SENTINEL_PREFIX` constant `semantic_query_error_raw`
+    /// emits) so the test's spelling can NEVER drift from the producer's.
+    pub mod budget_sentinel {
+        use verter_type_expr::TypeExpr;
+
+        /// Returns `true` iff `expr` is the budget-exceeded sentinel
+        /// (`TypeExpr::Unknown { raw }` starting with the production
+        /// `budgetExceeded(` prefix). Delegates verbatim to the shared
+        /// `pub(crate)` production recognizer.
+        #[inline]
+        pub fn is_budget_exceeded_sentinel(expr: &TypeExpr) -> bool {
+            crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel(
+                expr,
+            )
+        }
+    }
 }
 pub mod meta_resolve;
 #[cfg(test)]
@@ -716,6 +738,19 @@ pub struct VerterHost {
     /// Armed/cleared by
     /// [`crate::for_tests::MaterializeForceOverflowGuard`].
     pub(crate) materialize_force_overflow_observations: std::sync::atomic::AtomicUsize,
+    /// Per-host test-injection knob that forces a GENUINE in-scope
+    /// PARTIAL inside the materialiser's cold compute. When non-zero,
+    /// the cold-compute closure folds a partial into the active
+    /// [`crate::request_context::ColdComputeCompletenessScope`] via the
+    /// EXACT production rail a budget-tripped child read uses
+    /// ([`crate::request_context::mark_request_materialization_cache_suppress`]),
+    /// so the per-cold-compute completeness goes `Partial` and the
+    /// `MaterializeStructureDb` admission gate
+    /// (`refuse_result_cache_admission_if_partial`) must refuse the
+    /// entry. This is NOT a side channel: it drives the same fold a
+    /// real budget trip drives, mirroring production. Armed/cleared by
+    /// [`crate::for_tests::MaterializeForceInScopePartialGuard`].
+    pub(crate) materialize_force_in_scope_partial: std::sync::atomic::AtomicBool,
     /// Per-host test-injection knob for the relation engine's cold
     /// judgement path — the relation-memo analogue of
     /// [`Self::materialize_force_overflow_observations`]. When set to `N >

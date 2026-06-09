@@ -1300,12 +1300,12 @@ impl ShapeCacheDb {
         // strict warm-read validation rejects a same-scope content edit.
         let self_roots: Arc<[Arc<str>]> =
             Arc::from(vec![Arc::clone(key.subject.scope_canonical())]);
-        // M3 central partial gate. A computed shape that is itself a
-        // GENUINE partial (the value's own `result_is_partial`, or any
-        // contributing read having raised the request partial sticky) must
-        // NOT be admitted into `ShapeCacheDb` — a warm replay would serve
-        // the partial as a complete shape. The cold value is still returned
-        // to the caller; only the cache write is skipped. The
+        // Central partial gate. The gate is PURE over the value's OWN
+        // `result_is_partial` — a computed shape that is itself a GENUINE
+        // partial must NOT be admitted into `ShapeCacheDb` (a warm replay
+        // would serve the partial as a complete shape). It does NOT OR-in
+        // any request-global partial sticky. The cold value is still
+        // returned to the caller; only the cache write is skipped. The
         // `refused_partial` cell captures the value when the gate refuses
         // so `lookup` (which would surface `None` for a `None`-returning
         // compute) does not erase it.
@@ -1344,11 +1344,12 @@ impl ShapeCacheDb {
     /// rejects the entry — the caller still receives the same value
     /// it computed).
     ///
-    /// M3 central partial gate: this delegates to [`Self::get_or_compute`],
-    /// whose `refuse_result_cache_admission_if_partial` gate refuses to
-    /// admit a GENUINE partial (the value's own `result_is_partial`, or
-    /// the request partial sticky). On refusal the value is returned
-    /// verbatim and `peek` continues to miss.
+    /// Central partial gate: this delegates to [`Self::get_or_compute`],
+    /// whose `refuse_result_cache_admission_if_partial` gate is PURE over
+    /// the value's OWN `result_is_partial` and refuses to admit a GENUINE
+    /// partial. The gate does NOT OR-in any request-global partial sticky.
+    /// On refusal the value is returned verbatim and `peek` continues to
+    /// miss.
     pub(crate) fn admit_computed(
         &self,
         key: &ShapeCacheKey,
@@ -1777,21 +1778,23 @@ impl MaterializeStructureDb {
             move || -> CacheAdmission<crate::semantic_query::CacheRead<MaterializeOutcome>> {
                 match compute() {
                     crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
-                        // Defensive M1 invariant: only complete/cacheable
-                        // entries lower into `MaterializeStructureDb`. A
-                        // genuine partial is converted to `ReturnOnly` by
+                        // Defensive completeness invariant: only
+                        // complete/cacheable entries lower into
+                        // `MaterializeStructureDb`. A genuine partial is
+                        // converted to `ReturnOnly` by
                         // `finish_materialize_admission` + the fact-tracer
-                        // wrapper arms BEFORE this lowering runs, so the
-                        // request-scoped materialization-cache-suppress sticky
-                        // must be clear here. If this fires, a partial leaked
-                        // past the upstream gates — the warm entry it would
-                        // publish could replay a partial as complete.
-                        debug_assert!(
-                            !crate::request_context::current_materialization_cache_suppress(),
-                            "MaterializeStructureDb lowered a Cacheable entry while the \
-                             request partial sticky was set — a partial leaked past the \
-                             finish_materialize_admission / fact-tracer ReturnOnly gates"
-                        );
+                        // wrapper arms — both keyed on the PER-COLD-COMPUTE
+                        // completeness scope (`current_cold_compute_completeness`)
+                        // and run WHILE that scope is live (inside `compute`),
+                        // BEFORE this lowering runs. So a `Cacheable` arrival
+                        // here means THIS compute's scope was complete by
+                        // construction. The invariant is NOT keyed on the
+                        // request-global suppress sticky: a sibling consumer's
+                        // request-scoped partial must NOT block this
+                        // consumer's value-complete entry, and the scope has
+                        // already dropped by the time `compute()` returns —
+                        // its in-scope gates are the authority, not a
+                        // post-scope re-read.
                         CacheAdmission::Cacheable {
                             value: crate::semantic_query::CacheRead {
                                 value: entry.outcome,

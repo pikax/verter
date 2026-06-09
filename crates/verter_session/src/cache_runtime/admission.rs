@@ -55,32 +55,36 @@ use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
 /// the runtime and structured refusal events name one type.
 pub(crate) use verter_audit::NonAdmissionReason;
 
-/// THE shared result-cache partial-admission gate.
+/// THE shared result-cache partial-admission gate — **PURE** over the
+/// supplied completeness.
 ///
 /// A GENUINE partial (a budget exhaustion / fatal `QueryError` /
-/// same-path recursion / walker fatal folded onto the request-scoped
-/// materialization-cache-suppress sticky) must NOT warm-replay as a
-/// complete result. Every result-cache admission path
-/// (`MaterializeStructureDb`, `ShapeCacheDb`, `ImportedRegistryDb`,
-/// `ResolvabilityDb`) routes its `Cacheable` decision through this one
-/// predicate so a future result-cache cannot silently forget the rule.
+/// same-path recursion / walker fatal) must NOT warm-replay as a complete
+/// result. Every result-cache admission path (`MaterializeStructureDb`,
+/// `ShapeCacheDb`, `ImportedRegistryDb`, `ResolvabilityDb`) routes its
+/// `Cacheable` decision through this one predicate so a future
+/// result-cache cannot silently forget the rule.
 ///
-/// Returns `true` when admission MUST be refused (route the value
-/// through `ComputeAdmission::ReturnOnly` under
+/// Returns `true` when admission MUST be refused (route the value through
+/// `ComputeAdmission::ReturnOnly` under
 /// [`NonAdmissionReason::PartialResult`] instead of admitting it).
 ///
-/// The gate keys on `value_is_partial OR the request sticky`:
+/// **The gate is PURE**: it returns its `value_is_partial` argument and
+/// does NOT OR-in any request-global / thread-local state. Each caller
+/// supplies the completeness scoped to the value/entry it is admitting:
 ///
-/// - `value_is_partial` — the cold-built value's own
-///   [`crate::semantic_query::CacheRead::result_is_partial`] flag, when
-///   the producer carries a `CacheRead`. Pass `false` for producers
-///   whose value type has no per-value partial flag (the registry /
-///   resolvability rails track partiality only through the sticky).
-/// - the request sticky —
-///   [`crate::request_context::current_materialization_cache_suppress`],
-///   set by `mark_request_materialization_cache_suppress` /
-///   `observe_component_meta_read_suppress` when ANY contributing read
-///   was a genuine partial.
+/// - The SHARED semantic-cache producers (`MaterializeStructureDb`) pass
+///   their PER-COLD-COMPUTE completeness
+///   ([`crate::request_context::current_cold_compute_completeness`]`.is_partial()`)
+///   so each entry carries its OWN completeness — one consumer's partial
+///   never poisons a sibling consumer's complete entry.
+/// - Per-value producers pass the value's own
+///   [`crate::semantic_query::CacheRead::result_is_partial`].
+/// - The registry / resolvability rails (no per-value flag) pass the
+///   request-result completeness
+///   ([`crate::request_context::current_materialization_cache_suppress`]),
+///   which for the component-meta entry point IS result-scoped (one
+///   request resolves one component's meta).
 ///
 /// CRITICAL — this gate keys on PARTIALITY, never on bare
 /// `cache_suppress`. A benign non-cacheable result (a `ReturnOnly`
@@ -92,7 +96,7 @@ pub(crate) use verter_audit::NonAdmissionReason;
 #[inline]
 #[must_use]
 pub(crate) fn refuse_result_cache_admission_if_partial(value_is_partial: bool) -> bool {
-    value_is_partial || crate::request_context::current_materialization_cache_suppress()
+    value_is_partial
 }
 
 /// Outcome of finalising a fact-read tracer, before the cached value is

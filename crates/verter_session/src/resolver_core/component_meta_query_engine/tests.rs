@@ -4418,7 +4418,7 @@ export class C {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// FIX-7 M4 / M5 — wildcard-route fuse-trip is a PARTIAL, not an absent.
+// Wildcard-route fuse-trip is a PARTIAL, not an absent.
 // A route-only symbol whose wildcard-route fuse is exhausted was NEVER
 // looked up: its `None` MUST NOT admit an ImportedRegistryDb warm
 // negative, and the derived ResolvabilityDb `false` MUST NOT be cached.
@@ -4460,13 +4460,14 @@ fn build_route_only_reexport_host() -> Arc<VerterHost> {
     host
 }
 
-/// FIX-7 M4. A route-only symbol whose wildcard-route fuse is primed to
+/// A route-only symbol whose wildcard-route fuse is primed to
 /// ZERO trips on the slow lane — the symbol is NEVER looked up. The
 /// fuse-trip `None` MUST NOT admit an ImportedRegistryDb warm negative,
 /// and a FRESH engine WITH budget MUST resolve the symbol.
 ///
-/// MUTATION CHECK: reverting M4 (collapsing FuseTripped back to a plain
-/// `None` resolved value that falls through to `Cacheable`) admits a
+/// MUTATION CHECK: reverting the fuse-trip gate (collapsing FuseTripped
+/// back to a plain `None` resolved value that falls through to
+/// `Cacheable`) admits a
 /// warm negative — the `imported_registry_db().live_count()` assertion
 /// fails (a non-zero negative is cached).
 #[test]
@@ -4499,7 +4500,7 @@ fn fuse_tripped_route_only_symbol_admits_no_warm_negative_and_fresh_resolves() {
     assert_eq!(
         imported_db.live_count(),
         neg_before,
-        "M4: a wildcard-route fuse-trip MUST NOT admit an ImportedRegistryDb warm \
+        "a wildcard-route fuse-trip MUST NOT admit an ImportedRegistryDb warm \
          negative (the symbol was never looked up; admitting `value:None` would poison \
          a later budgeted request) — live count must be unchanged",
     );
@@ -4509,7 +4510,7 @@ fn fuse_tripped_route_only_symbol_admits_no_warm_negative_and_fresh_resolves() {
     let mut engine2 = ComponentMetaQueryEngine::new(host.as_ref());
     let resolved2 = engine2.resolve_imported_registry_symbol("/m4_src/index.ts", "ButtonProps");
     let resolved2 = resolved2.expect(
-        "M4: a fresh request WITH wildcard-route budget MUST resolve the route-only symbol — \
+        "a fresh request WITH wildcard-route budget MUST resolve the route-only symbol — \
          a cached fuse-trip negative would spuriously short-circuit it to None",
     );
     assert_eq!(
@@ -4522,12 +4523,12 @@ fn fuse_tripped_route_only_symbol_admits_no_warm_negative_and_fresh_resolves() {
     );
 }
 
-/// FIX-7 M5. `can_resolve_registry_symbol` for a route-only symbol whose
+/// `can_resolve_registry_symbol` for a route-only symbol whose
 /// wildcard-route fuse is exhausted MUST NOT cache the derived `false`
 /// into ResolvabilityDb (the imported-registry call set the partial
 /// sticky), and a fresh budgeted request MUST report it resolvable.
 ///
-/// MUTATION CHECK: reverting M5 (removing the partial-sticky gate before
+/// MUTATION CHECK: reverting the partial-sticky gate (removing it before
 /// the ResolvabilityDb `Cacheable` admission) caches the derived `false`
 /// — the `resolvable_db().live_count()` assertion fails.
 #[test]
@@ -4556,14 +4557,14 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
         );
         assert!(
             crate::request_context::current_materialization_cache_suppress(),
-            "M5 precondition: the fuse-trip MUST set the request partial sticky (M4)",
+            "precondition: the fuse-trip MUST set the request partial sticky",
         );
     }
 
     assert_eq!(
         resolvable_db.live_count(),
         false_before,
-        "M5: a wildcard-route fuse-trip MUST NOT cache the derived ResolvabilityDb `false` \
+        "a wildcard-route fuse-trip MUST NOT cache the derived ResolvabilityDb `false` \
          (the symbol was never looked up) — live count must be unchanged",
     );
 
@@ -4572,7 +4573,7 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
     let resolvable2 = engine2.can_resolve_registry_symbol("/m4_src/index.ts", "ButtonProps", None);
     assert!(
         resolvable2,
-        "M5: a fresh request WITH wildcard-route budget MUST report the route-only symbol \
+        "a fresh request WITH wildcard-route budget MUST report the route-only symbol \
          resolvable — a cached fuse-trip `false` would spuriously report it unresolvable",
     );
 }
