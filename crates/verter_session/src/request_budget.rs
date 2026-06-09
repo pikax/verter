@@ -11,11 +11,21 @@ use std::sync::Arc;
 
 /// Request-scoped projection-operation fuse.
 ///
-/// Tracks the per-request projection-op count that the legacy engine's
-/// `FuseBudgets::projection_op_count` rail used to terminate utility
-/// and projection recursion before the call stack exhausts. The cap is
-/// constructor-time on `HostConfig::projection_op_budget`; a value of
-/// `0` preserves the legacy default of 2000.
+/// Tracks the per-request aggregate work-op count used to terminate
+/// utility / projection / generic-expansion recursion before the call
+/// stack exhausts. The cap is constructor-time on
+/// `HostConfig::projection_op_budget`; a value of `0` preserves the
+/// legacy default of 2000.
+///
+/// The set of `SemanticQueryKey` kinds that count is the aggregate
+/// work-budget gate
+/// (`project_semantic_dispatch::semantic_query_counts_toward_projection_budget`):
+/// the projection operators (`ProjectMember` / `IndexedAccess` /
+/// `ProjectPath` / `KeyOf` / `MappedType`) PLUS `Instantiate` and
+/// `Conditional` — the kinds that dominate an open-generic expansion
+/// storm. Counting only projection operators left instantiation /
+/// conditional storms unbounded; the aggregate gate makes them fail
+/// closed too.
 ///
 /// # Default rationale
 ///

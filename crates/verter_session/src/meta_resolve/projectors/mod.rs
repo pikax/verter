@@ -573,6 +573,7 @@ pub(crate) fn resolve_macro_payload(
         type_args,
         context: dispatch.macro_payload_context_for(&owner.canonical_id, ProjectionMode::Navigate),
     });
+    crate::request_context::observe_component_meta_read_suppress(&payload_read);
     emit_dispatch_dep_signature_facts(dispatch.ctx, &payload_read.dep_signature);
     if !payload_read.walker_diagnostics.is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
@@ -701,6 +702,7 @@ pub(crate) fn resolve_payload_surface(
             provenance,
         ),
     });
+    crate::request_context::observe_component_meta_read_suppress(&surface_read);
     emit_dispatch_dep_signature_facts(dispatch.ctx, &surface_read.dep_signature);
     if !surface_read.walker_diagnostics.is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
@@ -753,8 +755,8 @@ pub(crate) fn resolve_payload_surface(
 ///  2. **Cold path raises once.** A cold miss raises
 ///     `member_value` to a `TypeExpr` shell via
 ///     [`crate::project_semantic_dispatch::ProjectSemanticDispatch::raise_node_to_type_expr`],
-///     then runs the same shallow gates `reduce_field_type_expr` runs
-///     today (`type_expr_has_package_backed_object_like_root` +
+///     then runs the same shallow gates `reduce_field_type_expr_with_mode`
+///     runs (`type_expr_has_package_backed_object_like_root` +
 ///     `lowered_root_reaches_transitive_cycle` +
 ///     `type_expr_contains_reducible_operator`). The gates stay
 ///     TypeExpr-keyed here per the noted caveat — migrating
@@ -815,7 +817,7 @@ fn member_shape_peek_or_compute(
     };
 
     // (3) Shallow gates on the raised TypeExpr — same predicates
-    // `reduce_field_type_expr` runs today. Gates run BEFORE the
+    // `reduce_field_type_expr_with_mode` runs. Gates run BEFORE the
     // operator-shape peek consultation: `MaterializeMemoDb` is shared
     // across the typed-IR materialiser callers (model resolution /
     // registry candidate materialisation) which do not apply these
@@ -862,14 +864,14 @@ fn member_shape_peek_or_compute(
                 node_id: Some(member_value),
                 type_expr: raised,
                 dep_signature: Arc::from(Vec::new()),
-                cache_suppress: false,
+                result_is_partial: false,
             };
         };
         let value = MaterializedTypeExpr {
             node_id: Some(member_value),
             type_expr: raised,
             dep_signature: package_backed_fence,
-            cache_suppress: false,
+            result_is_partial: false,
         };
         return admit_member_shape_if_possible(ctx, &key, value);
     }
@@ -887,7 +889,7 @@ fn member_shape_peek_or_compute(
             node_id: Some(member_value),
             type_expr: raised,
             dep_signature: Arc::from(Vec::new()),
-            cache_suppress: false,
+            result_is_partial: false,
         };
     };
     // F1: cycle-gate fence — computed lazily because the cycle gate
@@ -914,7 +916,7 @@ fn member_shape_peek_or_compute(
                 node_id: Some(member_value),
                 type_expr: raised,
                 dep_signature: combined_fence,
-                cache_suppress: false,
+                result_is_partial: false,
             };
             return admit_member_shape_if_possible(ctx, &key, value);
         }
@@ -948,7 +950,7 @@ fn member_shape_peek_or_compute(
             node_id: Some(member_value),
             type_expr: raised,
             dep_signature: gate_fence,
-            cache_suppress: false,
+            result_is_partial: false,
         };
         return admit_member_shape_if_possible(ctx, &key, value);
     }
@@ -971,7 +973,7 @@ fn member_shape_peek_or_compute(
                     node_id: Some(member_value),
                     type_expr: leaf,
                     dep_signature: gate_fence,
-                    cache_suppress: false,
+                    result_is_partial: false,
                 };
                 return admit_member_shape_if_possible(ctx, &key, value);
             }
@@ -980,7 +982,7 @@ fn member_shape_peek_or_compute(
                     node_id: Some(member_value),
                     type_expr: raised,
                     dep_signature: gate_fence,
-                    cache_suppress: false,
+                    result_is_partial: false,
                 };
                 return admit_member_shape_if_possible(ctx, &key, value);
             }
@@ -1023,6 +1025,17 @@ fn member_shape_peek_or_compute(
     // declaration scope) that should invalidate.
     let materialized_with_gate_fence =
         merge_gate_fence_into_materialized(materialized.clone(), &gate_fence, scope_canonical_id);
+    // M3 local early return: a GENUINE-partial member shape (the value's
+    // own `result_is_partial`, or the request partial sticky raised by a
+    // budget-tripped contributing read) must NOT enter the shared shape
+    // cache. The central `get_or_compute` gate also refuses, but returning
+    // here keeps the per-member producer from depending on the cache layer
+    // remembering the rule and skips the futile admission plumbing.
+    if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+        materialized_with_gate_fence.result_is_partial,
+    ) {
+        return materialized_with_gate_fence;
+    }
     let materialized_for_closure = materialized_with_gate_fence.clone();
     let admitted = cache.get_or_compute(&key, ctx, move || {
         let scope_obs = observed_scope?;
@@ -1103,7 +1116,7 @@ fn merge_gate_fence_into_materialized(
 /// the same value the cold compute produced.
 /// Admit a TypeExpr-subject shape into the universal
 /// [`crate::component_meta_caches::ShapeCacheDb`] when the scope has
-/// a tear-free observation. Used by the `reduce_field_type_expr`
+/// a tear-free observation. Used by the `reduce_field_type_expr_with_mode`
 /// peek primitive's `Leaf` / `BareCarrier` arms to enforce the
 /// universal-caching invariant: every successful shape compute
 /// admits, regardless of how cheap the compute was.
@@ -1114,8 +1127,8 @@ fn merge_gate_fence_into_materialized(
 /// admitted entry self-roots ONLY on the scope file's whole_hash, so
 /// edits to other files the gate/compute touched would not invalidate
 /// the cached verdict. For Leaf/BareCarrier admits in
-/// `reduce_field_type_expr`, the caller threads the gate fence (cycle
-/// + package-backed) collected upstream.
+/// `reduce_field_type_expr_with_mode`, the caller threads the gate fence
+/// (cycle + package-backed) collected upstream.
 fn admit_type_expr_shape_if_possible(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
@@ -1129,7 +1142,7 @@ fn admit_type_expr_shape_if_possible(
         node_id: None,
         type_expr: materialized_type_expr,
         dep_signature,
-        cache_suppress: false,
+        result_is_partial: false,
     };
     // gap1: admit into the SAME slot identity the whole-expression
     // materialiser + `peek_member_shape_known` use — keyed by the exact
@@ -1163,6 +1176,14 @@ fn admit_member_shape_if_possible(
     key: &crate::component_meta_caches::ShapeCacheKey,
     value: crate::project_semantic_dispatch::raise::MaterializedTypeExpr,
 ) -> crate::project_semantic_dispatch::raise::MaterializedTypeExpr {
+    // M3 local early return: refuse a GENUINE-partial shape before any
+    // admission plumbing. The central `admit_computed` → `get_or_compute`
+    // gate also refuses, but the early return keeps this single
+    // centralised admission point from depending on the cache layer
+    // remembering the rule. The value is returned verbatim.
+    if crate::cache_runtime::refuse_result_cache_admission_if_partial(value.result_is_partial) {
+        return value;
+    }
     let scope = key.subject.scope_canonical().clone();
     let Some(observed_scope) = ctx.observe_materialize_scope(scope.as_ref()) else {
         return value;
@@ -1291,9 +1312,9 @@ pub(crate) fn surface_member_to_expanded_field(
     }
 }
 
-/// Drive the shared field-type reduction used by every projector and
-/// by [`reduce_published_field_types`] on slot bindings, model bindings,
-/// and any leftover parser-side fields.
+/// Drive the shared field-type reduction used by every projector and by
+/// [`reduce_published_field_types`] on props, emits, slot bindings, model
+/// bindings, and any leftover parser-side fields.
 ///
 /// # Shallow-by-default invariant
 ///
@@ -1323,24 +1344,6 @@ pub(crate) fn surface_member_to_expanded_field(
 /// authoritative reduction primitive for the operator case; generic
 /// substitutions, dep-signature accumulation, and fence-validated
 /// publication all flow through it.
-pub(crate) fn reduce_field_type_expr(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    scope_canonical_id: &str,
-    expr: TypeExpr,
-) -> TypeExpr {
-    // Backward-compatible entry point — defaults to `Expanded`
-    // publication mode (no carrier narrowing). Callers that publish
-    // a macro surface shallow-by-default route through
-    // `reduce_field_type_expr_with_mode` with `Navigate`.
-    reduce_field_type_expr_with_mode(
-        query_engine,
-        scope_canonical_id,
-        expr,
-        ProjectionMode::Expanded,
-    )
-}
-
-/// Carrier-aware variant of [`reduce_field_type_expr`].
 ///
 /// When `publish_mode` is `Navigate` (the shallow-by-default macro
 /// publication boundary), arbitrary userland generic instantiations
@@ -1534,8 +1537,8 @@ pub(crate) fn reduce_field_type_expr_with_mode(
     //
     // TypeExpr-start callers that need `Expanded` (slot bindings,
     // model bindings, the `Pick`/`Omit`/`IndexedAccess`/`keyof`
-    // paths) enter through [`reduce_field_type_expr`] (the
-    // default-`Expanded` overload) and pass `Expanded` here. Callers
+    // paths) enter through [`reduce_field_type_expr_with_mode`] passing
+    // `Expanded` here. Callers
     // that explicitly name `Navigate` at
     // `reduce_field_type_expr_with_mode` get the shallower
     // materialisation depth instead.
@@ -1636,6 +1639,7 @@ fn resolve_member_value_for_classification(
             ProjectionMode::Shallow,
         ),
     });
+    crate::request_context::observe_component_meta_read_suppress(&read);
     emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
     match read.value {
         QueryResult::Value(id) => id,

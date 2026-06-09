@@ -609,6 +609,7 @@ fn all_non_admission_reasons() -> Vec<NonAdmissionReason> {
         NonAdmissionReason::Cancelled => (),
         NonAdmissionReason::UnresolvedProvenance => (),
         NonAdmissionReason::ComputeFailed => (),
+        NonAdmissionReason::PartialResult => (),
     };
     vec![
         NonAdmissionReason::IntrinsicNonCacheable,
@@ -623,6 +624,7 @@ fn all_non_admission_reasons() -> Vec<NonAdmissionReason> {
         NonAdmissionReason::Cancelled,
         NonAdmissionReason::UnresolvedProvenance,
         NonAdmissionReason::ComputeFailed,
+        NonAdmissionReason::PartialResult,
     ]
 }
 

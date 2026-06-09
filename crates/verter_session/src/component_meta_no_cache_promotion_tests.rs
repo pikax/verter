@@ -848,3 +848,816 @@ fn no_cache_promotion_for_budget_exceeded_engine_state_promotion() {
          got warm={warm_delta})"
     );
 }
+
+/// L3 fail-closed budget-TRIP guard for `Conditional`. Pre-fix
+/// `Conditional` was excluded from
+/// `semantic_query_counts_toward_projection_budget`, so a storm
+/// dominated by conditionals never tripped the fuse (the
+/// `ChatMessages.vue` hang). This test pins the FULL trip contract,
+/// not just the executed-counter increment:
+///
+/// With `projection_op_budget = 1`:
+/// 1. the first cold `Conditional` build lands within budget (1/1),
+///    returns a concrete `Value`, and counts (executed counter == 1);
+/// 2. a SECOND, DISTINCT cold `Conditional` build trips the fuse,
+///    returning `QueryError::BudgetExceeded`;
+/// 3. that `CacheRead.cache_suppress == true` (the build closure marks
+///    the budget-exceeded carrier non-cacheable); and
+/// 4. re-querying the SAME tripped key returns `BudgetExceeded` again
+///    with NO warm hit — the partial was NOT promoted to the warm cache
+///    (warm delta == 0; the post-trip fast-path peek bypasses
+///    cooperative admission entirely, so no warm-served `Value` can
+///    leak).
+///
+/// Pre-fix the test FAILS at step 2 (the second Conditional never
+/// trips, returning a `Value`), so the whole contract is
+/// discriminating against the pre-L3 tree.
+#[test]
+fn budget_trip_conditional_suppresses_and_does_not_warm() {
+    use crate::semantic_query::PrimitiveKind;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 1,
+        ..HostConfig::default()
+    }));
+    let graph = host.project_type_store().semantic_graph();
+    let true_branch = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let false_branch = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    // Two DISTINCT conditional keys (distinct check/extends shapes), so
+    // each is its own cold build.
+    let key_first = SemanticQueryKey::Conditional {
+        check: intern_single_member_object(&host, "cond_check_first"),
+        extends: intern_single_member_object(&host, "cond_extends_first"),
+        true_branch,
+        false_branch,
+        distributive: false,
+    };
+    let key_second = SemanticQueryKey::Conditional {
+        check: intern_single_member_object(&host, "cond_check_second"),
+        extends: intern_single_member_object(&host, "cond_extends_second"),
+        true_branch,
+        false_branch,
+        distributive: false,
+    };
+
+    let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/cond-budget-trip.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        host.config.projection_op_budget,
+    );
+    let request_budget = Arc::clone(&ctx.projection_budget);
+    let _ctx_guard = RequestContextGuard::install(ctx);
+    let dispatch = host.semantic_dispatch();
+
+    // (1) first cold build lands within budget and counts.
+    let first = dispatch.execute_read(key_first.clone());
+    assert!(
+        matches!(first.value, QueryResult::Value(_)),
+        "1st Conditional within budget must succeed (got {:?})",
+        first.value
+    );
+    assert_eq!(
+        request_budget.projection_ops_executed_count(),
+        1,
+        "a cold Conditional build must count toward the request work budget"
+    );
+
+    // (2)+(3) second distinct build trips + suppresses.
+    let second = dispatch.execute_read(key_second.clone());
+    assert!(
+        matches!(
+            second.value,
+            QueryResult::Error(QueryError::BudgetExceeded(_))
+        ),
+        "2nd distinct Conditional must trip the budget (pre-L3 it returned a Value); got {:?}",
+        second.value
+    );
+    assert!(
+        second.cache_suppress,
+        "a budget-exceeded Conditional read MUST carry cache_suppress=true so the partial is \
+         never warmed"
+    );
+    assert!(
+        second.result_is_partial,
+        "a budget-exceeded Conditional read MUST carry result_is_partial=true — this is the \
+         signal the component-meta + shape/materialize warm gates key on"
+    );
+
+    // (4) FRESH-request replay. The previous in-request replay was too
+    // weak: re-querying inside the already-exhausted request short-
+    // circuits at the dispatcher's `is_exhausted` peek BEFORE cooperative
+    // admission, so it neither warm-serves nor cold-rebuilds — a warm
+    // delta of 0 there proves nothing (a promoted partial would simply
+    // never be consulted). A FRESH request carries a FRESH budget, so the
+    // replay actually enters `execute_cooperative`: if the partial had
+    // been promoted it would WARM-hit; if it was correctly suppressed it
+    // COLD-rebuilds. Assert cold delta increases with NO warm hit.
+    drop(_ctx_guard);
+    let fresh_ctx = RequestContext::with_kind_timing_and_projection_budget(
+        2,
+        Arc::from("/cond-budget-trip-replay.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        host.config.projection_op_budget,
+    );
+    let _fresh_guard = RequestContextGuard::install(fresh_ctx);
+    let counter = DispatchCounter;
+    let baseline_cold = counter.family_cold(&key_second);
+    let baseline_warm = counter.family_warm(&key_second);
+    let _replay = dispatch.execute_read(key_second.clone());
+    // The discriminating invariant is the COLD/WARM split, not the
+    // replay's value kind: under the fresh, roomier budget the
+    // cold-rebuild legitimately completes to a `Value`. What proves the
+    // partial was NOT promoted is that the replay COLD-fires (it had to
+    // recompute) and does NOT WARM-hit. A promoted partial would instead
+    // warm-serve (warm delta 1, cold delta 0) and return the suppressed
+    // `Error`. Pre-signal-split (or pre-fresh-request replay) the in-
+    // request replay short-circuited at the budget peek and recorded
+    // NEITHER counter, so the old `warm delta == 0` proved nothing.
+    assert!(
+        counter.family_cold(&key_second) - baseline_cold >= 1,
+        "fresh-request replay MUST cold-rebuild (proving the suppressed partial was NOT promoted \
+         to the warm cache)"
+    );
+    assert_eq!(
+        counter.family_warm(&key_second) - baseline_warm,
+        0,
+        "fresh-request replay of a budget-exceeded Conditional MUST NOT warm-hit a promoted partial"
+    );
+}
+
+/// L3 fail-closed budget-TRIP guard for `Instantiate` — the sibling of
+/// `budget_trip_conditional_suppresses_and_does_not_warm`. Pre-fix
+/// `Instantiate` was excluded from the projection budget gate, so a
+/// generic-expansion storm never tripped. With
+/// `projection_op_budget = 1` the second distinct cold `Instantiate`
+/// build must trip, suppress, and refuse warm promotion on replay.
+///
+/// Pre-fix the test FAILS at the trip assertion (the second Instantiate
+/// returns a `Value` instead of `BudgetExceeded`).
+#[test]
+fn budget_trip_instantiate_suppresses_and_does_not_warm() {
+    // `projection_op_budget = 1`: the FIRST decidable `Partial<{ … }>`
+    // cold build lands within the budget (it counts exactly one
+    // budget-gated Instantiate op at the dispatch entry) and the SECOND
+    // distinct build trips the fuse, returning a real `BudgetExceeded`.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 1,
+        ..HostConfig::default()
+    }));
+    let dispatch = host.semantic_dispatch();
+    // Two DISTINCT builtin instantiations (distinct argument shapes) so
+    // each is its own cold build.
+    let arg_first = intern_single_member_object(&host, "inst_arg_first");
+    let arg_second = intern_single_member_object(&host, "inst_arg_second");
+    let partial_slot = dispatch.builtin_type_slot("Partial");
+    let context = dispatch.instantiate_context_for(
+        "__builtin__",
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
+    let key_first = SemanticQueryKey::Instantiate {
+        base: partial_slot.clone(),
+        args: Arc::from(vec![arg_first].into_boxed_slice()),
+        context,
+    };
+    let key_second = SemanticQueryKey::Instantiate {
+        base: partial_slot,
+        args: Arc::from(vec![arg_second].into_boxed_slice()),
+        context,
+    };
+
+    let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/inst-budget-trip.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        host.config.projection_op_budget,
+    );
+    let request_budget = Arc::clone(&ctx.projection_budget);
+    let _ctx_guard = RequestContextGuard::install(ctx);
+
+    let first = dispatch.execute_read(key_first);
+    assert!(
+        matches!(first.value, QueryResult::Value(_)),
+        "1st Instantiate within budget must succeed (got {:?})",
+        first.value
+    );
+    assert!(
+        request_budget.projection_ops_executed_count() >= 1,
+        "a cold Instantiate build must count toward the request work budget (Instantiate must be \
+         in the budget gate); executed counter still 0"
+    );
+
+    let second = dispatch.execute_read(key_second.clone());
+    assert!(
+        matches!(
+            second.value,
+            QueryResult::Error(QueryError::BudgetExceeded(_))
+        ),
+        "2nd distinct Instantiate must trip the budget (pre-L3 it returned a Value); got {:?}",
+        second.value
+    );
+    assert!(
+        second.cache_suppress,
+        "a budget-exceeded Instantiate read MUST carry cache_suppress=true"
+    );
+    assert!(
+        second.result_is_partial,
+        "a budget-exceeded Instantiate read MUST carry result_is_partial=true — the warm gate \
+         keys on this signal"
+    );
+
+    // FRESH-request replay (see the Conditional sibling for the rationale).
+    // The fresh budget lets the replay enter cooperative admission so a
+    // promoted partial would warm-hit; a correctly-suppressed partial
+    // cold-rebuilds. Assert cold delta increases with NO warm hit.
+    drop(_ctx_guard);
+    let fresh_ctx = RequestContext::with_kind_timing_and_projection_budget(
+        2,
+        Arc::from("/inst-budget-trip-replay.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        host.config.projection_op_budget,
+    );
+    let _fresh_guard = RequestContextGuard::install(fresh_ctx);
+    let counter = DispatchCounter;
+    let baseline_cold = counter.family_cold(&key_second);
+    let baseline_warm = counter.family_warm(&key_second);
+    let _replay = dispatch.execute_read(key_second.clone());
+    // Discriminating invariant: the COLD/WARM split (see the Conditional
+    // sibling). Under the fresh roomier budget the cold-rebuild completes;
+    // what proves non-promotion is cold-fire + no warm-hit. A promoted
+    // partial would warm-serve the suppressed `Error` (warm 1, cold 0).
+    assert!(
+        counter.family_cold(&key_second) - baseline_cold >= 1,
+        "fresh-request replay MUST cold-rebuild (proving the suppressed partial was NOT promoted)"
+    );
+    assert_eq!(
+        counter.family_warm(&key_second) - baseline_warm,
+        0,
+        "fresh-request replay of a budget-exceeded Instantiate MUST NOT warm-hit a promoted partial"
+    );
+}
+
+/// §5 MANDATORY discrimination proof for the A2 signal split, at the WARM
+/// GATE — the single point the reachability argument converges on.
+///
+/// A budget/walker partial can surface as a COMPLETE
+/// `QueryResult::Value` (a `ProjectPath` shallow-walking an
+/// `InstantiationRef` whose nested `Instantiate` trips the budget — the
+/// walker catches the error, contributes no surface, and `build_project_path`
+/// returns `Value` with `result_is_partial = true`). A value-kind gate
+/// (`matches!(value, Error | Recursive)`) is INSUFFICIENT — it MISSES this
+/// Value-partial by construction and would warm `ComponentMetaResultDb`.
+///
+/// This test pins the warm gate's behaviour directly on the two read shapes
+/// the split must distinguish — independently of which producer site
+/// manufactures them, so it stays discriminating even where the
+/// request-wide budget backstop would otherwise mask the producer:
+///
+/// 1. A `Value` carrying `result_is_partial = true` (the Value-partial)
+///    MUST raise the suppression flag. A value-kind gate
+///    (`matches!(value, Error | Recursive)`) is `false` for this `Value`, so
+///    keying on value-kind alone would NOT suppress → the partial would warm.
+///    The `result_is_partial` authority is what closes the hole.
+/// 2. A complete `Value` carrying `cache_suppress = true` but
+///    `result_is_partial = false` (a benign non-cacheable result — ReturnOnly
+///    / overflow / unrootable self-root) MUST NOT raise the flag: a
+///    complete-but-non-cacheable result still warms the component-meta result.
+///    Keying the gate on `cache_suppress` (the other failed candidate) would
+///    wrongly suppress here.
+#[test]
+fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
+    use crate::request_context::{current_materialization_cache_suppress, RequestContext};
+    use crate::semantic_query::CacheRead;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    }));
+    let graph = host.project_type_store().semantic_graph();
+    let value_node = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+        members: Arc::from(Vec::new().into_boxed_slice()),
+        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }));
+
+    let empty_sig: crate::semantic_query::DepSignature = Arc::from(Vec::new().into_boxed_slice());
+
+    // (1) The Value-partial: a COMPLETE `Value` with
+    // `result_is_partial = true`. A value-kind gate
+    // (`matches!(value, Error | Recursive)`) is FALSE for this `Value`.
+    let value_partial: CacheRead<QueryResult<SemanticNodeId>> = CacheRead {
+        value: QueryResult::Value(value_node),
+        dep_signature: empty_sig.clone(),
+        walker_diagnostics: Arc::from([]),
+        cache_suppress: true,
+        result_is_partial: true,
+    };
+    assert!(
+        !matches!(
+            value_partial.value,
+            QueryResult::Error(_) | QueryResult::Recursive(_)
+        ),
+        "the Value-partial is a COMPLETE Value — a value-kind gate's blind spot"
+    );
+
+    // (2) A benign complete-but-non-cacheable result: a `Value` with
+    // `cache_suppress = true` but `result_is_partial = false` (ReturnOnly /
+    // overflow / unrootable self-root).
+    let complete_non_cacheable: CacheRead<QueryResult<SemanticNodeId>> = CacheRead {
+        value: QueryResult::Value(value_node),
+        dep_signature: empty_sig,
+        walker_diagnostics: Arc::from([]),
+        cache_suppress: true,
+        result_is_partial: false,
+    };
+
+    // Gate behaviour for (2) — under its OWN request — must NOT suppress:
+    // keying on `cache_suppress` (a failed candidate) would wrongly fire.
+    {
+        let ctx = RequestContext::with_kind_timing_and_projection_budget(
+            1,
+            Arc::from("/non-cacheable.vue"),
+            verter_audit::RequestKind::ComponentMeta,
+            false,
+            false,
+            None,
+            host.config.projection_op_budget,
+        );
+        let _g = RequestContextGuard::install(ctx);
+        assert!(!current_materialization_cache_suppress());
+        crate::request_context::observe_component_meta_read_suppress(&complete_non_cacheable);
+        assert!(
+            !current_materialization_cache_suppress(),
+            "a complete-but-non-cacheable result (cache_suppress=true, result_is_partial=false) \
+             MUST NOT raise the warm-gate suppress flag — it must still be allowed to warm a \
+             complete component-meta result"
+        );
+    }
+
+    // Gate behaviour for (1) — under a fresh request — MUST suppress: the
+    // Value-partial raises the flag the final-result + shape caches consult.
+    {
+        let ctx = RequestContext::with_kind_timing_and_projection_budget(
+            1,
+            Arc::from("/value-partial.vue"),
+            verter_audit::RequestKind::ComponentMeta,
+            false,
+            false,
+            None,
+            host.config.projection_op_budget,
+        );
+        let _g = RequestContextGuard::install(ctx);
+        assert!(!current_materialization_cache_suppress());
+        crate::request_context::observe_component_meta_read_suppress(&value_partial);
+        assert!(
+            current_materialization_cache_suppress(),
+            "a Value-partial (result_is_partial=true) MUST raise the warm-gate suppress flag — a \
+             value-kind gate misses this complete Value and would have warmed the partial"
+        );
+    }
+}
+
+/// FIX 2 discrimination proof: a COMPLETE result that hits a BENIGN
+/// non-cacheable inner memo (signature-overflow / unrootable self-root /
+/// ReturnOnly) MUST STILL warm the component-meta final cache.
+///
+/// The benign-non-cacheable shapes carry `cache_suppress = true` but
+/// `result_is_partial = false`. The warm gate keys on `result_is_partial`,
+/// so `observe_component_meta_read_suppress` MUST NOT raise the request's
+/// suppression flag for ANY of these complete results. Were a memo site to
+/// wrongly tag a benign non-cacheable winner with `result_is_partial = true`
+/// (the bug the memo fixtures encoded pre-FIX-2), this test would FAIL: the
+/// flag would fire and the complete component-meta result would be wrongly
+/// refused warm promotion.
+#[test]
+fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
+    use crate::request_context::{current_materialization_cache_suppress, RequestContext};
+    use crate::semantic_query::CacheRead;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    }));
+    let graph = host.project_type_store().semantic_graph();
+    let value_node = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::String,
+    ));
+    let empty_sig: crate::semantic_query::DepSignature = Arc::from(Vec::new().into_boxed_slice());
+
+    // Each benign non-cacheable production shape: a COMPLETE `Value`
+    // (`Primitive(String)`), `cache_suppress = true`, `result_is_partial =
+    // false`. These mirror exactly what `finalise_traced_build_output`
+    // emits for the Overflow / unrootable-`None` / ReturnOnly arms and what
+    // the two `component_meta_materialize.rs` ReturnOnly arms emit.
+    let benign_shapes: [(&str, CacheRead<QueryResult<SemanticNodeId>>); 3] = [
+        (
+            "signature-overflow",
+            CacheRead {
+                value: QueryResult::Value(value_node),
+                dep_signature: empty_sig.clone(),
+                walker_diagnostics: Arc::from([]),
+                cache_suppress: true,
+                result_is_partial: false,
+            },
+        ),
+        (
+            "unrootable-self-root",
+            CacheRead {
+                value: QueryResult::Value(value_node),
+                dep_signature: empty_sig.clone(),
+                walker_diagnostics: Arc::from([]),
+                cache_suppress: true,
+                result_is_partial: false,
+            },
+        ),
+        (
+            "return-only",
+            CacheRead {
+                value: QueryResult::Value(value_node),
+                dep_signature: empty_sig,
+                walker_diagnostics: Arc::from([]),
+                cache_suppress: true,
+                result_is_partial: false,
+            },
+        ),
+    ];
+
+    for (label, read) in benign_shapes {
+        let ctx = RequestContext::with_kind_timing_and_projection_budget(
+            1,
+            Arc::from("/benign-non-cacheable.vue"),
+            verter_audit::RequestKind::ComponentMeta,
+            false,
+            false,
+            None,
+            host.config.projection_op_budget,
+        );
+        let _g = RequestContextGuard::install(ctx);
+        assert!(!current_materialization_cache_suppress());
+        // Sanity: the shape is a COMPLETE Value, non-cacheable only.
+        assert!(
+            matches!(read.value, QueryResult::Value(_))
+                && read.cache_suppress
+                && !read.result_is_partial,
+            "{label}: benign shape must be a complete Value with cache_suppress=true, \
+             result_is_partial=false"
+        );
+        crate::request_context::observe_component_meta_read_suppress(&read);
+        assert!(
+            !current_materialization_cache_suppress(),
+            "{label}: a COMPLETE but non-cacheable result (cache_suppress=true, \
+             result_is_partial=false) MUST NOT raise the warm-gate suppress flag — it must still \
+             warm the component-meta final cache. A memo site wrongly setting result_is_partial=true \
+             on this benign winner would fail here."
+        );
+    }
+}
+
+/// Direct PRODUCER-LEVEL discrimination proof for the A2 signal split —
+/// the producer fold, not just the gate.
+///
+/// The concrete reachability path: a `ProjectPath` shallow-walking an
+/// `InstantiationRef` whose nested `Instantiate` trips the projection-op
+/// budget. The walker catches the budget error, contributes no surface,
+/// and `build_project_path` returns `QueryResult::Value` carrying the
+/// folded `result_is_partial = true`. This test observes the DISPATCH READ
+/// directly (proving the producer fold, independent of any request-wide
+/// budget backstop) and asserts it raises the component-meta warm-gate
+/// suppression flag — i.e. it does NOT warm `ComponentMetaResultDb`.
+///
+/// It FAILS if the walker fatal-path fold (`walk.rs` InstantiationRef /
+/// DeclPlaceholder arms → `self.result_is_partial`, drained by
+/// `build_project_path`) is reverted: the read would then be a COMPLETE
+/// `Value` with `result_is_partial = false` and the flag would NOT fire.
+///
+/// Asserts BOTH the request-level warm-gate suppression AND the SEMANTIC
+/// non-admission directly: `graph.get_unvalidated(&projectpath_key)` is
+/// `None` (the partial `ProjectPath` build was refused family-memo
+/// admission), so a later identical request cannot warm-replay it as
+/// complete.
+#[test]
+fn projectpath_over_instantiationref_budget_trip_surfaces_value_partial_and_does_not_warm() {
+    use crate::request_context::current_materialization_cache_suppress;
+
+    // `projection_op_budget = 2`: the outer `ProjectPath` (op 1) and the
+    // nested `Instantiate(Partial<…>)` (op 2) both pass the entry/raw-build
+    // budget gates, so the walk reaches the builtin-utility mapper path;
+    // `Partial`'s nested `KeyOf` / `MappedType` (op 3+) then trips the fuse
+    // INSIDE the instantiation, exercising the FIX-1 mapper-utility fold AND
+    // the walker fold — NOT the dispatch-entry post-trip early-exit.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 2,
+        ..HostConfig::default()
+    }));
+    let dispatch = host.semantic_dispatch();
+    let graph = host.project_type_store().semantic_graph();
+
+    // A real decidable object arg so the nested `Instantiate(Partial<…>)`
+    // is a genuine cold build (not an immediate miss).
+    let arg = intern_single_member_object(&host, "instref_budget_arg");
+    // `InstantiationRef` over the builtin `Partial` — a builtin base ALWAYS
+    // unwraps in the walker (even at the terminal hop), so the ProjectPath
+    // walk dispatches the nested `Instantiate`.
+    let partial_builtin = crate::semantic_query::DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: crate::semantic_query::HashValue::default(),
+        decl_name: Arc::from("Partial"),
+    };
+    let instref = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: partial_builtin,
+        args: Arc::from(vec![arg].into_boxed_slice()),
+    });
+
+    let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/projectpath-instref-budget.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        host.config.projection_op_budget,
+    );
+    let _ctx_guard = RequestContextGuard::install(ctx);
+
+    // ProjectPath over the InstantiationRef. The walker unwraps the builtin
+    // InstantiationRef → dispatches the nested `Instantiate` → the builtin
+    // `Partial` mapper's nested KeyOf/MappedType trips the budget → the
+    // FIX-1 fold raises `result_is_partial`, threaded out through the
+    // builtin-utility tuple and the walker, and drained onto the build
+    // output by `build_project_path`.
+    let projectpath_key = SemanticQueryKey::ProjectPath {
+        base: instref,
+        path: Arc::from(vec![PathSegment::Member(Arc::from("x"))].into_boxed_slice()),
+        context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+    };
+    let read = dispatch.execute_read(projectpath_key.clone());
+
+    // The dispatch read is a COMPLETE `Value` (the walker contributed an
+    // opaque shell, NOT an Error/Recursive) carrying the FOLDED partiality.
+    assert!(
+        matches!(read.value, QueryResult::Value(_)),
+        "the budget-tripped ProjectPath-over-InstantiationRef surfaces as a COMPLETE Value (the \
+         walker catches the nested budget error and contributes an opaque shell), got {:?}",
+        read.value
+    );
+    assert!(
+        read.result_is_partial,
+        "the nested Instantiate budget trip MUST fold result_is_partial=true onto the surfaced \
+         Value — reverting the walker fatal-path fold makes this a complete Value with \
+         result_is_partial=false (the A2 reachability hole)"
+    );
+
+    // The Value-partial MUST raise the warm-gate suppression flag — i.e. it
+    // does NOT warm `ComponentMetaResultDb`. The shared read boundary marks
+    // the request sticky directly on `result_is_partial`, so the flag is
+    // already set after the partial read; `observe_component_meta_read_suppress`
+    // confirms it (and is idempotent).
+    crate::request_context::observe_component_meta_read_suppress(&read);
+    assert!(
+        current_materialization_cache_suppress(),
+        "the Value-partial from the budget-tripped ProjectPath-over-InstantiationRef MUST raise the \
+         warm-gate suppress flag so the partial is NOT promoted into ComponentMetaResultDb"
+    );
+
+    // SEMANTIC NON-ADMISSION (direct): the partial `ProjectPath` build was
+    // refused family-memo admission, so no warm `MemoEntry` exists for the
+    // key. A later identical request therefore cold-rebuilds and cannot
+    // warm-replay the partial as a complete surface. This pins the producer
+    // fold at the memo boundary, not just the request-level warm gate.
+    assert!(
+        graph.get_unvalidated(&projectpath_key).is_none(),
+        "the partial ProjectPath-over-InstantiationRef MUST NOT be admitted to the family memo \
+         (reverting the walker fold makes this a complete result_is_partial=false Value that warms \
+         the memo)"
+    );
+}
+
+/// the partial-metadata invariant (§4) Finding-A producer path — `lower.rs` operator-over-budget,
+/// through the `execute_type_node` CHOKEPOINT (NO per-site fold).
+///
+/// Every `lower.rs` operator arm (`Instantiate`/`KeyOf`/`MappedType`/
+/// `IndexedAccess`/`Conditional`) handles a budget-tripped sub-dispatch
+/// with a bare `_ => self.opaque(QueryError::Miss)` — there is NO per-site
+/// `result_is_partial` fold at any of these sites. Partiality propagates
+/// SOLELY through the chokepoint `execute_type_node` override. This drives a
+/// userland alias `Deep = keyof Partial<Required<Box>>` whose lowering
+/// dispatches the `KeyOf` operator (`lower.rs:1320`) over a nested
+/// builtin-utility instantiation; the nested `Partial`/`Required` mapper's
+/// `KeyOf`/`MappedType` operators trip the projection-op budget, `lower.rs`
+/// returns the opaque shell with no fold, and the chokepoint is the ONLY
+/// thing that carries the partial onto the `Instantiate(Deep)` build output.
+///
+/// Asserts the `Instantiate` read carries `result_is_partial = true` (does
+/// NOT warm component-meta) AND was refused family-memo admission.
+///
+/// DISCRIMINATION: reverting the chokepoint fold drops the lower.rs nested
+/// partiality entirely (no per-site fold backstops it) — the read becomes a
+/// complete `result_is_partial = false` Value and warms the memo.
+#[test]
+fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_refuses_memo() {
+    use crate::request_context::current_materialization_cache_suppress;
+    use crate::{FileKind, UpsertRequest};
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 2,
+        ..HostConfig::default()
+    }));
+    // A nested object alias plus a deep indexed-access alias. Lowering
+    // `Deep`'s body dispatches one `IndexedAccess` per hop through
+    // `lower.rs:1476`; the third hop trips `projection_op_budget = 2`.
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/w/lower_chain.ts".to_string(),
+            source: Arc::from(
+                "export type Box = { a: number; b: string; c: boolean }\n\
+                 export type Deep = keyof Partial<Required<Box>>\n",
+            ),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        })
+        .expect("upsert lower_chain.ts");
+
+    let dispatch = host.semantic_dispatch();
+    let deep_slot = dispatch.type_slot_for(Arc::from("/w/lower_chain.ts"), Arc::from("Deep"));
+    let resolve_env = dispatch.resolve_env_hash_for("/w/lower_chain.ts");
+    let instantiate_key = SemanticQueryKey::Instantiate {
+        base: deep_slot,
+        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        context: crate::semantic_query::InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            resolve_env,
+        ),
+    };
+
+    let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/lower-indexed-budget.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        host.config.projection_op_budget,
+    );
+    let _ctx_guard = RequestContextGuard::install(ctx);
+
+    let read = dispatch.execute_read(instantiate_key.clone());
+    assert!(
+        read.result_is_partial,
+        "the deep indexed-access chain's nested IndexedAccess budget trip MUST fold \
+         result_is_partial=true onto the Instantiate(Deep) build output THROUGH the chokepoint — \
+         lower.rs has NO per-site fold, so reverting the chokepoint makes this result_is_partial=false"
+    );
+
+    // Warm-gate: the partial raises the suppression flag (no component-meta warm).
+    crate::request_context::observe_component_meta_read_suppress(&read);
+    assert!(
+        current_materialization_cache_suppress(),
+        "the lower.rs operator partial MUST raise the component-meta warm-gate suppress flag"
+    );
+
+    // Semantic-memo NON-ADMISSION: a partial result leaves NO warm family
+    // entry. Probing memo presence directly is robust against the per-request
+    // budget already being exhausted.
+    let graph = host.project_type_store().semantic_graph();
+    assert!(
+        graph.get_unvalidated(&instantiate_key).is_none(),
+        "the partial Instantiate(Deep) MUST NOT be admitted to the family memo (Finding B closure)"
+    );
+}
+
+/// the partial-metadata invariant (§4) Finding-A producer path — relation → `build_conditional`.
+///
+/// A `Conditional` whose `check` / `extends` are identity carriers
+/// (`InstantiationRef` over the builtin `Partial`) forces
+/// `build_conditional` to fall through to the full `relate_nodes`
+/// authority. The relation's identity-carrier `Instantiate` unwrap
+/// (`relation.rs:342`/`:433`) trips the projection-op budget; the
+/// chokepoint `execute_type_node` folds the partiality into the relation's
+/// cold-build-local frame, so the relation `Unknown` is refused admission
+/// to the relation memo AND the partiality bubbles into the conditional's
+/// build output.
+///
+/// Asserts: the `Conditional` dispatch read carries `result_is_partial =
+/// true` (does NOT warm component-meta) AND the relation judgement is
+/// refused relation-memo admission (a fresh `relate_nodes` cold-recomputes).
+///
+/// DISCRIMINATION: reverting the chokepoint fold (or the relation-memo
+/// partial-skip) makes the conditional a complete non-partial Value and/or
+/// admits the partial-derived `Unknown` to the relation memo.
+#[test]
+fn conditional_relation_budget_trip_folds_partial_and_refuses_relation_memo() {
+    use crate::request_context::current_materialization_cache_suppress;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 2,
+        ..HostConfig::default()
+    }));
+    let dispatch = host.semantic_dispatch();
+    let graph = host.project_type_store().semantic_graph();
+
+    let mk_partial_instref = |member: &'static str| -> SemanticNodeId {
+        let arg = intern_single_member_object(&host, member);
+        let partial_builtin = crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::from("__builtin__"),
+            whole_hash: crate::semantic_query::HashValue::default(),
+            decl_name: Arc::from("Partial"),
+        };
+        graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: partial_builtin,
+            args: Arc::from(vec![arg].into_boxed_slice()),
+        })
+    };
+    let check = mk_partial_instref("cond_check_arg");
+    let extends = mk_partial_instref("cond_extends_arg");
+    let true_branch = {
+        let g = host.project_type_store().semantic_graph();
+        g.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ))
+    };
+    let false_branch = {
+        let g = host.project_type_store().semantic_graph();
+        g.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Number,
+        ))
+    };
+
+    let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/conditional-relation-budget.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        host.config.projection_op_budget,
+    );
+    let _ctx_guard = RequestContextGuard::install(ctx);
+
+    let conditional_key = SemanticQueryKey::Conditional {
+        check,
+        extends,
+        true_branch,
+        false_branch,
+        distributive: false,
+    };
+    let read = dispatch.execute_read(conditional_key.clone());
+    assert!(
+        read.result_is_partial,
+        "the conditional's relation authority tripped the budget instantiating its identity-carrier \
+         operands; the chokepoint MUST fold result_is_partial=true onto the Conditional build output \
+         (reverting the chokepoint fold makes this a complete non-partial Value)"
+    );
+
+    // Semantic family-memo NON-ADMISSION (the DIRECT Finding-A assertion,
+    // matching the lower test at the Instantiate key and the ProjectPath test):
+    // the partial-derived `Conditional` result leaves NO warm family entry.
+    // Probing the `Conditional` family-memo key directly discriminates the
+    // chokepoint fold — reverting it makes the build admit a complete Value and
+    // this `get_unvalidated` would return `Some`.
+    assert!(
+        graph.get_unvalidated(&conditional_key).is_none(),
+        "the partial-derived Conditional MUST NOT be admitted to the family memo \
+         (reverting the chokepoint early-exit/normal fold admits it here)"
+    );
+    // The chokepoint marks the request sticky directly on result_is_partial,
+    // so the flag is already set after the partial read; observe-suppress
+    // confirms it (and is idempotent).
+    crate::request_context::observe_component_meta_read_suppress(&read);
+    assert!(
+        current_materialization_cache_suppress(),
+        "the relation-derived conditional partial MUST raise the component-meta warm-gate suppress flag"
+    );
+
+    // Relation-memo non-admission: a fresh `relate_nodes(check, extends)`
+    // must cold-recompute (no warm relation hit on the partial-derived
+    // judgement). `get_relation` returning `None` proves the partial-derived
+    // judgement was never admitted.
+    assert!(
+        graph
+            .get_relation(host.as_ref(), &dispatch.relate_memo_key(check, extends))
+            .is_none(),
+        "a relation Unknown that arose from a PARTIAL nested read MUST NOT be admitted to the \
+         relation memo (reverting the relation-memo partial-skip admits it here)"
+    );
+}

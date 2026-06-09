@@ -2691,6 +2691,7 @@ fn prefix_backfill_loop_skips_all_backfills_when_winner_aborted_mid_loop() {
                     dep_signature: empty_signature(),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
+                    result_is_partial: false,
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: None,
@@ -5711,6 +5712,7 @@ fn prefix_backfill_carries_traced_facts() {
             dep_signature: Arc::clone(&parent_dep_signature),
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
+            result_is_partial: false,
             taint: crate::semantic_query::ResultTaint::Clean,
             observed_self_roots: Vec::new(),
             graph_carrier: Some(Box::new(parent_carrier.clone())),
@@ -6021,6 +6023,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
+                    result_is_partial: false,
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -6217,6 +6220,12 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
+                    // A2 taxonomy: this is a BENIGN non-cacheable winner — a
+                    // COMPLETE `Primitive(String)` value suppressed for a
+                    // non-self-root admission reason, NOT a partial. Benign
+                    // inner-memo non-cacheability is `cache_suppress` only;
+                    // `result_is_partial` stays false.
+                    result_is_partial: false,
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -6453,6 +6462,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
+                    result_is_partial: false,
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -6659,6 +6669,7 @@ fn same_view_joiner_still_coalesces_onto_winner() {
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
+                    result_is_partial: false,
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -6835,11 +6846,19 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
                 // emits exactly this on `FactReadSetFinalise::Overflow`;
                 // the cold-winner path then broadcasts the SYNTHETIC
                 // empty-fact carrier with no self-root.
+                //
+                // A2 taxonomy: a tracer signature-overflow is BENIGN
+                // non-cacheability — the `Primitive(String)` VALUE is
+                // COMPLETE, only the fact list overflowed. So
+                // `cache_suppress=true` (inner memo refuses admission) but
+                // `result_is_partial=false` (a complete result that still
+                // warms a component-meta final cache).
                 crate::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(winner_node),
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
+                    result_is_partial: false,
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: None,
@@ -7094,6 +7113,13 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
                 // carrier carrying only cross-file *dependency* facts,
                 // with an EMPTY `self_root_canonicals` — the build could
                 // not be soundly self-rooted.
+                //
+                // A2 taxonomy: an unrootable build is BENIGN
+                // non-cacheability — the `Primitive(String)` VALUE is
+                // COMPLETE, only its self-root could not be soundly
+                // established for admission. So `cache_suppress=true`,
+                // `result_is_partial=false` (a complete result that still
+                // warms a component-meta final cache).
                 let carrier =
                     ReadSetSignature::new(Arc::from(vec![winner_dep_fact_for_build.clone()]));
                 crate::project_semantic_dispatch::walk::QueryBuildOutput {
@@ -7101,6 +7127,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
+                    result_is_partial: false,
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -7383,6 +7410,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
+                    result_is_partial: false,
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -7669,6 +7697,278 @@ fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
         "`invalidate_canonical` must drop the cross-canonical shard it \
          empties — an empty `Mutex<map>` for `/w/b.ts` must not linger \
          after its last registration is stripped",
+    );
+}
+
+/// the partial-metadata invariant (§2) — MEMO-LAUNDERING discrimination (Finding B).
+///
+/// A producer that returns a `Value` carrying `result_is_partial = true`
+/// must NOT be admitted to the family memo. Pre-FIX the admission gate
+/// keyed ONLY on `cache_suppress`; a build that surfaced a partial value
+/// without also setting `cache_suppress` (the exact pre-FIX-1 producer bug)
+/// was published as a complete `MemoEntry`, then reconstructed as a
+/// COMPLETE `CacheRead` (`result_is_partial = false`) on a later warm read
+/// and republished as a complete component-meta result.
+///
+/// This drives `execute_cooperative` DIRECTLY with a `QueryBuildOutput`
+/// carrying `result_is_partial = true, cache_suppress = false` (bypassing
+/// `finalise_traced_build_output`, which would otherwise enforce the
+/// invariant). Post-FIX the admission boundary's debug-asserted
+/// `result_is_partial ⟹ cache_suppress` invariant catches the laundering
+/// attempt and aborts rather than poisoning the shared memo.
+///
+/// DISCRIMINATION: reverting the FIX-2 admission `debug_assert!` + OR gate
+/// makes this build publish a warm `MemoEntry` (no panic), so the
+/// `#[should_panic]` expectation fails.
+#[test]
+#[should_panic(expected = "invariant violated at memo admission")]
+fn memo_admission_debug_asserts_against_partial_without_suppress() {
+    use crate::project_semantic_dispatch::walk::QueryBuildOutput;
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/launder.ts"),
+        name: Arc::from("Laundered"),
+    });
+    let _ = store.execute_cooperative(
+        &host,
+        key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+            let mut out: QueryBuildOutput = (QueryResult::Value(id), empty_signature()).into();
+            // The laundering shape: a COMPLETE Value that surfaced a
+            // partial WITHOUT setting cache_suppress (the pre-FIX-1
+            // producer bug). The FIX-2 admission invariant must catch this.
+            out.result_is_partial = true;
+            out.cache_suppress = false;
+            out
+        },
+    );
+}
+
+/// the partial-metadata invariant (§2) — MEMO-LAUNDERING behavioral proof (Finding B).
+///
+/// A genuine partial (invariant-holding: `result_is_partial = true` AND
+/// `cache_suppress = true`, exactly what `finalise_traced_build_output`
+/// produces after FIX-1) must leave NO `MemoEntry`. A fresh request on the
+/// SAME store for the SAME key must COLD-REBUILD — never warm-hit the
+/// (refused) partial as complete.
+///
+/// DISCRIMINATION: reverting the FIX-2 admission gate (back to keying only
+/// on `cache_suppress`) keeps THIS case refused (cache_suppress=true), so
+/// the discriminating force here is the no-launder behavior of the whole
+/// partial class — paired with the `#[should_panic]` test above which
+/// isolates the OR/assert. Reverting FIX-1's finalise enforcement would let
+/// a partial reach admission with `cache_suppress=false` and warm — caught
+/// by the should_panic peer.
+#[test]
+fn partial_value_leaves_no_memo_entry_and_fresh_request_cold_rebuilds() {
+    use crate::project_semantic_dispatch::walk::QueryBuildOutput;
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/partial.ts"),
+        name: Arc::from("GenuinePartial"),
+    });
+
+    let mut first_ran = false;
+    let first = store.execute_cooperative(
+        &host,
+        key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            first_ran = true;
+            let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+            let mut out: QueryBuildOutput = (QueryResult::Value(id), empty_signature()).into();
+            // A genuine, invariant-holding partial.
+            out.result_is_partial = true;
+            out.cache_suppress = true;
+            out
+        },
+    );
+    assert!(first_ran, "first request must cold-build");
+    assert!(
+        matches!(first.value, QueryResult::Value(_)),
+        "the partial value still flows back to the caller"
+    );
+    assert!(
+        first.result_is_partial,
+        "the CacheRead carries result_is_partial=true back to the caller"
+    );
+    assert_eq!(
+        store.memo_entry_count(),
+        0,
+        "a partial result must NOT be admitted to the family memo (Finding B)"
+    );
+    assert!(
+        store.get_unvalidated(&key).is_none(),
+        "no MemoEntry exists for the partial key — a fresh request cannot warm-hit it"
+    );
+
+    // A fresh request on the SAME store for the SAME key must COLD-REBUILD.
+    let mut second_ran = false;
+    let second = store.execute_cooperative(
+        &host,
+        key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            second_ran = true;
+            let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+            (QueryResult::Value(id), empty_signature())
+        },
+    );
+    assert!(
+        second_ran,
+        "fresh request MUST cold-rebuild — the partial was not laundered into a warm-complete entry"
+    );
+    match second.value {
+        QueryResult::Value(id) => {
+            let data = store.node_data(id).unwrap();
+            assert!(
+                matches!(*data, SemanticNodeData::Primitive(PrimitiveKind::Number)),
+                "the fresh cold build's result is served, not the refused partial"
+            );
+        }
+        other => panic!("expected fresh cold value, got {other:?}"),
+    }
+}
+
+/// the partial-metadata invariant — RELEASE-BEHAVIORAL OR-gate proof (P3).
+///
+/// The `should_panic` peer
+/// (`memo_admission_debug_asserts_against_partial_without_suppress`) only
+/// fires in DEBUG builds: the `debug_assert!` at the memo-admission
+/// boundary is compiled OUT in release, so it proves nothing about release
+/// behavior. The actual admission GATE — `publish_carrier = if
+/// cache_suppress || result_is_partial { None } else { Some(...) }` — is a
+/// RUNTIME OR that refuses a `result_is_partial=true, cache_suppress=false`
+/// shape regardless of build profile.
+///
+/// This test asserts that runtime refusal BEHAVIORALLY: it drives
+/// `execute_cooperative` with the laundering shape (`result_is_partial =
+/// true, cache_suppress = false`, bypassing `finalise_traced_build_output`)
+/// and proves NO `MemoEntry` is admitted + a fresh request COLD-REBUILDS.
+/// It is `#[cfg(not(debug_assertions))]`-gated so it runs ONLY where the
+/// `debug_assert` is absent — i.e. exactly where the should_panic peer
+/// cannot run — proving the OR-gate (not the assert) is the release
+/// authority.
+///
+/// DISCRIMINATION: reverting the admission gate's `|| result_is_partial`
+/// arm (back to keying only on `cache_suppress`) admits this shape as a
+/// warm complete `MemoEntry`, so `get_unvalidated(&key)` returns `Some` and
+/// the fresh request warm-hits — failing this test in release.
+#[cfg(not(debug_assertions))]
+#[test]
+fn memo_admission_or_gate_refuses_partial_without_suppress_in_release() {
+    use crate::project_semantic_dispatch::walk::QueryBuildOutput;
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/release_launder.ts"),
+        name: Arc::from("ReleaseLaundered"),
+    });
+
+    let first = store.execute_cooperative(
+        &host,
+        key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+            let mut out: QueryBuildOutput = (QueryResult::Value(id), empty_signature()).into();
+            // The laundering shape — a partial WITHOUT cache_suppress. In
+            // debug this trips the debug_assert (covered by the should_panic
+            // peer); in release the runtime OR-gate must still refuse it.
+            out.result_is_partial = true;
+            out.cache_suppress = false;
+            out
+        },
+    );
+    assert!(
+        matches!(first.value, QueryResult::Value(_)),
+        "the value still flows back to the caller"
+    );
+    assert_eq!(
+        store.memo_entry_count(),
+        0,
+        "release OR-gate must refuse a partial-without-suppress admission"
+    );
+    assert!(
+        store.get_unvalidated(&key).is_none(),
+        "no MemoEntry exists — the release OR-gate refused the laundering shape"
+    );
+
+    // A fresh request must COLD-REBUILD, never warm-hit a laundered entry.
+    let mut second_ran = false;
+    let _ = store.execute_cooperative(
+        &host,
+        key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            second_ran = true;
+            let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+            (QueryResult::Value(id), empty_signature())
+        },
+    );
+    assert!(
+        second_ran,
+        "fresh request MUST cold-rebuild — the partial was not laundered into a warm-complete entry"
+    );
+}
+
+/// the partial-metadata invariant — benign-suppress OR-gate proof
+/// (holds in BOTH debug and release).
+///
+/// Complements the release-gated peer above: it drives the OTHER arm of the
+/// admission OR — a benign, invariant-holding `cache_suppress = true,
+/// result_is_partial = false` build (a complete-but-non-cacheable result,
+/// e.g. an unrootable self-root / overflow). This shape never trips the
+/// `debug_assert` (the invariant `result_is_partial ⟹ cache_suppress`
+/// holds), so it runs in every build profile and proves the
+/// `cache_suppress` arm of the runtime gate refuses admission.
+///
+/// DISCRIMINATION: dropping `cache_suppress` from the admission gate admits
+/// this build as a warm `MemoEntry`, so `get_unvalidated(&key)` returns
+/// `Some` — failing this test.
+#[test]
+fn memo_admission_or_gate_refuses_benign_cache_suppress() {
+    use crate::project_semantic_dispatch::walk::QueryBuildOutput;
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/benign_suppress.ts"),
+        name: Arc::from("BenignSuppress"),
+    });
+
+    let first = store.execute_cooperative(
+        &host,
+        key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+            let mut out: QueryBuildOutput = (QueryResult::Value(id), empty_signature()).into();
+            // Benign non-cacheable COMPLETE result — invariant holds.
+            out.cache_suppress = true;
+            out.result_is_partial = false;
+            out
+        },
+    );
+    assert!(
+        matches!(first.value, QueryResult::Value(_)),
+        "the complete value still flows back to the caller"
+    );
+    assert!(
+        !first.result_is_partial,
+        "a benign non-cacheable result is NOT partial — component-meta may still warm"
+    );
+    assert_eq!(
+        store.memo_entry_count(),
+        0,
+        "the cache_suppress arm of the admission OR-gate must refuse admission"
+    );
+    assert!(
+        store.get_unvalidated(&key).is_none(),
+        "no MemoEntry exists — the cache_suppress arm refused admission"
     );
 }
 

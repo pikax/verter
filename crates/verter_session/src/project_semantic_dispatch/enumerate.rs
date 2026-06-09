@@ -13,8 +13,7 @@ use rustc_hash::FxHashSet;
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    HashValue, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
-    SemanticQueryOutput,
+    HashValue, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId,
 };
 use verter_semantic::facts::registry::{FactKey, InternedName, SymbolSpace};
 
@@ -208,29 +207,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let base = self.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
                 let owner_canonical = Arc::clone(canonical_id);
                 drop(data);
-                match self.execute_type_node(crate::semantic_query::SemanticQueryKey::Instantiate {
-                    base,
-                    args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    // Key-name enumeration consumes the body's structural
-                    // shape (Object members, Union arms, etc.) — Expanded
-                    // is required so the next Expand frame can read keys
-                    // off the unwrapped surface, not a lazy Ref shell.
-                    // Demand-driven reducer spec: key
-                    // enumeration is a legitimate publication-grade
-                    // demand (the keyspace is the explicit consumer
-                    // surface), so the context stays `Published +
-                    // Expanded`.
-                    context: self.instantiate_context_for(
-                        &owner_canonical,
-                        crate::semantic_query::ProjectionReductionContext::published(
-                            crate::semantic_query::ProjectionMode::Expanded,
+                let read =
+                    self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate {
+                        base,
+                        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        // Key-name enumeration consumes the body's structural
+                        // shape (Object members, Union arms, etc.) — Expanded
+                        // is required so the next Expand frame can read keys
+                        // off the unwrapped surface, not a lazy Ref shell.
+                        // Demand-driven reducer spec: key
+                        // enumeration is a legitimate publication-grade
+                        // demand (the keyspace is the explicit consumer
+                        // surface), so the context stays `Published +
+                        // Expanded`.
+                        context: self.instantiate_context_for(
+                            &owner_canonical,
+                            crate::semantic_query::ProjectionReductionContext::published(
+                                crate::semantic_query::ProjectionMode::Expanded,
+                            ),
                         ),
-                    ),
-                }) {
-                    crate::semantic_query::QueryResult::Value(SemanticQueryOutput {
-                        value: instantiated,
-                        ..
-                    }) if instantiated != resolved => {
+                    });
+                // A2 signal-split: fold a genuinely-incomplete keyspace
+                // instantiation onto the request's sticky partial flag.
+                crate::request_context::observe_component_meta_read_suppress(&read);
+                match read.value {
+                    crate::semantic_query::QueryResult::Value(instantiated)
+                        if instantiated != resolved =>
+                    {
                         work.push(KeyNamesFrame::Expand(instantiated));
                     }
                     _ => {
@@ -282,21 +285,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::ProjectionMode::Shallow,
             "resolve_typeinfo_surface_view synthesises a one-level surface; mode must be Shallow"
         );
-        let terminal =
-            match self.execute_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
+        let terminal_read =
+            self.execute_read(crate::semantic_query::SemanticQueryKey::ProjectPath {
                 base,
                 path: Arc::from(
                     Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice(),
                 ),
                 context,
-            }) {
-                crate::semantic_query::QueryResult::Value(SemanticQueryOutput {
-                    value: node,
-                    ..
-                }) => node,
-                crate::semantic_query::QueryResult::Recursive(node) => node,
-                crate::semantic_query::QueryResult::Error(_) => return None,
-            };
+            });
+        // A2 signal-split: fold a genuinely-incomplete terminal projection.
+        crate::request_context::observe_component_meta_read_suppress(&terminal_read);
+        let terminal = match terminal_read.value {
+            crate::semantic_query::QueryResult::Value(node) => node,
+            crate::semantic_query::QueryResult::Recursive(node) => node,
+            crate::semantic_query::QueryResult::Error(_) => return None,
+        };
         match self.graph().node_data(terminal).as_deref() {
             Some(SemanticNodeData::Object(view)) => Some(view.clone()),
             _ => None,
@@ -338,8 +341,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // through the shared dispatch (`Instantiate`) and recurse. This is
             // path-precise (the demanded key set), not a breadth walk.
             SemanticNodeData::DeclRef { identity } => {
-                let instantiated = match self.execute_type_node(
-                    crate::semantic_query::SemanticQueryKey::Instantiate {
+                let read =
+                    self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate {
                         base: self.type_slot_for(
                             Arc::clone(&identity.canonical_id),
                             Arc::clone(&identity.decl_name),
@@ -351,12 +354,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 crate::semantic_query::ProjectionMode::Expanded,
                             ),
                         ),
-                    },
-                ) {
-                    crate::semantic_query::QueryResult::Value(SemanticQueryOutput {
-                        value: id,
-                        ..
-                    }) => id,
+                    });
+                // A2 signal-split: fold a genuinely-incomplete carrier resolve.
+                crate::request_context::observe_component_meta_read_suppress(&read);
+                let instantiated = match read.value {
+                    crate::semantic_query::QueryResult::Value(id) => id,
                     _ => return self.key_names_from_base_node(resolved),
                 };
                 if instantiated == resolved {
@@ -365,8 +367,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.key_names_from_keyspace_node(instantiated)
             }
             SemanticNodeData::InstantiationRef { base, args } => {
-                let instantiated = match self.execute_type_node(
-                    crate::semantic_query::SemanticQueryKey::Instantiate {
+                let read =
+                    self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate {
                         base: self.type_slot_for(
                             Arc::clone(&base.canonical_id),
                             Arc::clone(&base.decl_name),
@@ -378,12 +380,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 crate::semantic_query::ProjectionMode::Expanded,
                             ),
                         ),
-                    },
-                ) {
-                    crate::semantic_query::QueryResult::Value(SemanticQueryOutput {
-                        value: id,
-                        ..
-                    }) => id,
+                    });
+                // A2 signal-split: fold a genuinely-incomplete carrier resolve.
+                crate::request_context::observe_component_meta_read_suppress(&read);
+                let instantiated = match read.value {
+                    crate::semantic_query::QueryResult::Value(id) => id,
                     _ => return self.key_names_from_base_node(resolved),
                 };
                 if instantiated == resolved {

@@ -20,7 +20,7 @@ use verter_type_expr::TypeExpr;
 
 use crate::semantic_query::ProjectionMode;
 
-use super::{reduce_field_type_expr, reduce_field_type_expr_with_mode};
+use super::reduce_field_type_expr_with_mode;
 
 /// Run the shared field-type reducer over every published surface in
 /// `evaluated_types` so consumers see the same finalised shapes the
@@ -126,7 +126,17 @@ pub(crate) fn reduce_published_field_types(
             continue;
         }
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        field.r#type = reduce_field_type_expr(query_engine, scope_canonical_id, raised);
+        // Navigate (shallow-by-default), matching the props / emits /
+        // slot_bindings reducers above. Model bindings are a macro
+        // publication surface; an explicit selector still reduces
+        // path-precisely, but a plain alias / open generic carrier
+        // stays shallow rather than eagerly expanding.
+        field.r#type = reduce_field_type_expr_with_mode(
+            query_engine,
+            scope_canonical_id,
+            raised,
+            ProjectionMode::Navigate,
+        );
     }
 }
 
@@ -147,8 +157,8 @@ fn root_is_explicit_selector_operator(expr: &TypeExpr) -> bool {
 ///
 /// Returns `true` when the expression carries an `IndexedAccess`,
 /// `KeyOf`, `TypeOf`, `Conditional`, `Mapped`, or `Infer` anywhere
-/// in its tree. Used by `reduce_field_type_expr` to decide whether
-/// to skip the reducer entirely.
+/// in its tree. Used by `reduce_field_type_expr_with_mode` to decide
+/// whether to skip the reducer entirely.
 pub(crate) fn type_expr_contains_reducible_operator(expr: &TypeExpr) -> bool {
     use verter_type_expr::ObjectMember;
 

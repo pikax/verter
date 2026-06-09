@@ -694,12 +694,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .unwrap_or(TypeExpr::Unknown {
                 raw: "<raise miss after reduction>".to_string(),
             });
-        let cache_suppress = state.cache_suppress;
+        let result_is_partial = state.result_is_partial;
         MaterializedTypeExpr {
             node_id: Some(reduced),
             type_expr,
             dep_signature: state.into_dep_signature(),
-            cache_suppress,
+            result_is_partial,
         }
     }
 
@@ -1340,9 +1340,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // operator helpers.
                     //
                     // Builtin utility types (`Pick`/`Omit`/...,
-                    // `canonical_id == "__builtin__"`) ALWAYS
-                    // reduce regardless of body shape.
+                    // `canonical_id == "__builtin__"`) do not match this
+                    // closed-object carve-out — they are gated by the
+                    // open-enumeration-domain carrier-stop (L1) below.
                     return node;
+                }
+                if matches!(mode, ProjectionMode::Navigate) {
+                    // L1 (Shallow-By-Default): an object-filter utility
+                    // (`Pick`/`Omit`) whose enumeration domain
+                    // (source argument) is OPEN — an unbound generic, an
+                    // open conditional/mapped/indexed/keyof, an
+                    // instantiation over open args, or an unresolved
+                    // declaration — STAYS a shallow carrier under
+                    // `Published(Navigate)` instead of materialising its
+                    // source. Materialising an open source degenerates
+                    // into full cross-file generic expansion (the
+                    // `ChatMessages.vue` `Pick<PropsBase<T>, …>` storm).
+                    // A CLOSED source (finite object surface / concrete
+                    // instantiation) still materialises path-precisely.
+                    //
+                    // The domain args are substituted through `mapping`
+                    // first so a bound type argument (a closed
+                    // instantiation) is judged closed and still reduces.
+                    let resolved_args: Vec<SemanticNodeId> = args
+                        .iter()
+                        .map(|id| state.mapping.get(&(*id, context)).copied().unwrap_or(*id))
+                        .collect();
+                    if utility_enumeration_domain_is_open_or_unknown(self.ctx, base, &resolved_args)
+                    {
+                        return node;
+                    }
                 }
                 let base_key =
                     self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
@@ -1479,17 +1506,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         let read = self.execute_read(key);
         state.merge_dep_signature(&read.dep_signature);
-        // Cache-suppression propagation: a `cache_suppress=true` read
-        // means the semantic dispatch produced a partial outcome that
-        // must not warm any shared cache. Mark the per-reduce-state
-        // flag so the enclosing `raise_and_reduce_with_context` returns
-        // a `MaterializedTypeExpr` carrying `cache_suppress=true`, AND
-        // raise the request-scoped sticky bit so downstream callers
-        // (the projector second pass, the final ComponentMeta cache
-        // admission gate) observe it without needing a hand-threaded
-        // return value.
-        if read.cache_suppress {
-            state.cache_suppress = true;
+        // Partial-result propagation: a `result_is_partial=true` read
+        // means the semantic dispatch produced a PARTIAL outcome (budget
+        // exhaustion / cancellation / same-path recursion / walker
+        // fatal). Such a result must not warm any shared cache. Mark the
+        // per-reduce-state flag so the enclosing
+        // `raise_and_reduce_with_context` returns a `MaterializedTypeExpr`
+        // carrying `result_is_partial=true`, AND raise the request-scoped
+        // sticky bit so downstream callers (the projector second pass, the
+        // final ComponentMeta cache admission gate) observe it without
+        // needing a hand-threaded return value. A benign non-cacheable
+        // read (`cache_suppress` without partiality — ReturnOnly /
+        // overflow / unrootable self-root) is NOT folded here: it refuses
+        // only its own inner-memo admission and MUST NOT suppress a
+        // complete component-meta result.
+        if read.result_is_partial {
+            state.result_is_partial = true;
             crate::request_context::mark_request_materialization_cache_suppress();
         }
         let result = match read.value {
@@ -1867,13 +1899,18 @@ pub struct MaterializedTypeExpr {
     pub type_expr: TypeExpr,
     pub dep_signature: DepSignature,
     /// `true` when ANY semantic-dispatch read consumed by the reducer
-    /// returned with `cache_suppress=true` (projection-budget exhaustion
-    /// or another fatal `QueryError`). Callers that publish the
+    /// returned a PARTIAL value (`result_is_partial` — projection-budget
+    /// exhaustion, cancellation, same-path recursion, or a walker
+    /// fatal/pathological diagnostic). Callers that publish the
     /// materialized result into a downstream shared cache (e.g. the
     /// per-field cache in `field_types.rs`, the projector second pass)
     /// must propagate this bit so the final-result `ComponentMetaResultDb`
-    /// admission gate observes it and refuses to warm a partial.
-    pub cache_suppress: bool,
+    /// admission gate observes it and refuses to warm a partial. A benign
+    /// non-cacheable nested read (`cache_suppress` without `result_is_partial`
+    /// — ReturnOnly / overflow / unrootable self-root) does NOT set this:
+    /// a complete-but-non-cacheable result MUST still be allowed to warm
+    /// the component-meta result.
+    pub result_is_partial: bool,
 }
 
 #[allow(dead_code)] // wired by raise_and_reduce above.
@@ -1882,13 +1919,14 @@ struct ReduceState {
     visited: FxHashSet<(SemanticNodeId, ProjectionReductionContext)>,
     mapping: MappingMap,
     dep_facts: Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
-    /// OR-fold of every `read.cache_suppress` observed by `reduce_one`
+    /// OR-fold of every `read.result_is_partial` observed by `reduce_one`
     /// during this reduce pass. Propagated into the returned
-    /// `MaterializedTypeExpr.cache_suppress` so direct consumers
+    /// `MaterializedTypeExpr.result_is_partial` so direct consumers
     /// (e.g. `field_types::materialize_component_meta_type_expr_until_stable_full`)
-    /// can refuse to publish the result into shared caches without
-    /// needing to inspect the request-scoped TLS flag.
-    cache_suppress: bool,
+    /// can refuse to publish a PARTIAL result into shared caches without
+    /// needing to inspect the request-scoped TLS flag. NOT set by a
+    /// benign non-cacheable read (`cache_suppress` without partiality).
+    result_is_partial: bool,
 }
 
 #[allow(dead_code)] // wired by raise_and_reduce above.
@@ -1956,6 +1994,631 @@ fn is_closed_object_body(expr: &TypeExpr) -> bool {
         TypeExpr::Intersection(arms) => arms.iter().all(is_closed_object_body),
         TypeExpr::Parenthesized(inner) => is_closed_object_body(inner),
         _ => false,
+    }
+}
+
+/// Budget for the bounded alias-chain resolver
+/// ([`prepared_decl_body_is_closed`]). Each transparent alias hop
+/// (`type Foo = Bar`) decrements it; a legitimate alias chain terminates
+/// at a closed object surface in a handful of hops. Exhaustion ⇒
+/// conservatively OPEN.
+const ALIAS_CHAIN_HOP_BUDGET: u32 = 32;
+
+/// Whether the prepared declaration `(canonical, name)` resolves to a
+/// CLOSED finite object surface through a BOUNDED, transparent alias chain.
+///
+/// Replaces the previous single-hop `is_closed_object_body(&prepared.body)`
+/// shortcut, which mis-classified a perfectly legitimate closed alias chain
+/// (`type Foo = Bar; type Bar = { bar: string }`) as OPEN — the source of
+/// `Pick<Foo, 'bar'>` failing to materialise. The walk follows a body that
+/// is a bare `TypeExpr::Ref` (no type arguments — a transparent alias) to
+/// the referenced declaration via the prepared decl's `name_resolution`
+/// context (NO route discovery, NO reducer, NO `execute_read` — prepared
+/// declaration cache reads ONLY), bounded by a hop budget + a visited set.
+///
+/// CLOSED ⇒ the chain terminates at a finite object surface (or a finite
+/// intersection of object surfaces). OPEN ⇒ the chain reaches an
+/// operator/conditional/mapped body, a `Ref` with type arguments (a generic
+/// instantiation whose closedness depends on its args — not a transparent
+/// alias hop), an unresolved name, a missing prepared decl, a cycle, or
+/// exhausts the hop budget.
+fn prepared_decl_body_is_closed(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    canonical_id: &str,
+    decl_name: &str,
+    budget: &mut u32,
+    visited: &mut FxHashSet<(Arc<str>, Arc<str>)>,
+) -> bool {
+    let key = (Arc::<str>::from(canonical_id), Arc::<str>::from(decl_name));
+    if !visited.insert(key) {
+        // Cycle on the alias frontier — not a proven closed surface.
+        return false;
+    }
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+
+    let Some(prepared) = ctx.prepared_type_decl(canonical_id, decl_name) else {
+        return false;
+    };
+    body_type_expr_is_closed(ctx, &prepared, &prepared.body, budget, visited)
+}
+
+/// Inspect a prepared declaration BODY `TypeExpr` for closedness, following
+/// transparent alias hops (`type Foo = Bar`) through `prepared`'s
+/// `name_resolution` context. Bounded by the same budget + visited set as
+/// [`prepared_decl_body_is_closed`].
+fn body_type_expr_is_closed(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    body: &TypeExpr,
+    budget: &mut u32,
+    visited: &mut FxHashSet<(Arc<str>, Arc<str>)>,
+) -> bool {
+    match body {
+        TypeExpr::Object(_) => true,
+        TypeExpr::Intersection(arms) => arms
+            .iter()
+            .all(|arm| body_type_expr_is_closed(ctx, prepared, arm, budget, visited)),
+        TypeExpr::Parenthesized(inner) => {
+            body_type_expr_is_closed(ctx, prepared, inner, budget, visited)
+        }
+        // A bare `Ref` with NO type arguments is a transparent alias hop:
+        // follow it to the referenced declaration. A `Ref` WITH type
+        // arguments is a generic instantiation whose closedness depends on
+        // its arguments and substituted body — NOT a transparent alias —
+        // so it is not followed here (conservatively OPEN).
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() => {
+            let Some(target) = prepared.name_resolution.get(name.as_ref()) else {
+                return false;
+            };
+            prepared_decl_body_is_closed(
+                ctx,
+                &target.canonical_id,
+                &target.symbol_name,
+                budget,
+                visited,
+            )
+        }
+        _ => false,
+    }
+}
+
+/// Whether the instantiation `base<args…>` (with `arg_count` ALREADY
+/// verified-closed type arguments) can be PROVEN to close.
+///
+/// Replaces the unsound "non-empty, all-concrete args ⇒ CLOSED" shortcut.
+/// An instantiation closes only when:
+///   1. the target declaration exists (a prepared decl is available),
+///   2. its arity is satisfiable: `required_params <= arg_count <= total_params`
+///      (the trailing `total_params - arg_count` params fall back to defaults),
+///   3. every default supplied for an unfilled param is itself closed, and
+///   4. the prepared body is closed under those bindings — a type-parameter
+///      reference counts as BOUND (closed) because its arg/default was
+///      verified closed; any other open structure (operator/conditional/
+///      mapped body, unresolved `Ref`, instantiation over an open target)
+///      opens the instantiation.
+///
+/// Bounded by the same hop budget + a fresh visited set; prepared-decl cache
+/// reads ONLY — no reducer, no substitution, no `execute_read`.
+fn prepared_instantiation_is_closed(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    base: &crate::semantic_query::DeclIdentity,
+    arg_count: usize,
+    budget: &mut u32,
+) -> bool {
+    let Some(prepared) =
+        ctx.prepared_type_decl(base.canonical_id.as_ref(), base.decl_name.as_ref())
+    else {
+        // Unresolved target ⇒ undecidable ⇒ not closed.
+        return false;
+    };
+
+    let total_params = prepared.type_parameters.len();
+    let required_params = prepared
+        .type_parameters
+        .iter()
+        .filter(|p| p.default.is_none())
+        .count();
+    // Over- or under-application: arity not satisfiable ⇒ not closed.
+    if arg_count < required_params || arg_count > total_params {
+        return false;
+    }
+
+    // Bind set: every declared type-parameter name is bound (the first
+    // `arg_count` to verified-closed args, the rest to defaults). Defaults
+    // for unfilled params must themselves be closed.
+    let mut chain_visited: FxHashSet<(Arc<str>, Arc<str>)> = FxHashSet::default();
+    for param in prepared.type_parameters.iter().skip(arg_count) {
+        let Some(default) = param.default.as_deref() else {
+            // No default for an unfilled param — guarded by the arity check
+            // above, but stay conservative.
+            return false;
+        };
+        if !body_type_expr_is_closed(ctx, &prepared, default, budget, &mut chain_visited) {
+            return false;
+        }
+    }
+
+    let bound_params: FxHashSet<&str> = prepared
+        .type_parameters
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    instantiated_body_is_closed(ctx, &prepared, &prepared.body, &bound_params, budget)
+}
+
+/// Whether a prepared declaration body is closed under a set of BOUND
+/// type-parameter names. A reference to a bound parameter counts as closed
+/// (its binding arg/default was verified closed by the caller). Any other
+/// structure recurses; an unresolved free `Ref`, a generic instantiation
+/// over an open/unresolvable target, or an operator body over a free param
+/// opens the body. Bounded by `budget`.
+/// Collect every `infer X` binding NAME reachable in `expr` into `sink`
+/// (borrowing the names from the body tree). A conditional's `extends`
+/// clause introduces these bindings for its branches; treating them as
+/// bound leaves keeps an inferred-name reference (lowered as a bare `Ref`)
+/// from being wrongly opened by the bare-unresolved-`Ref` rule. Shallow,
+/// allocation-free typed-IR walk — no reduction.
+fn collect_infer_names<'e>(expr: &'e TypeExpr, sink: &mut FxHashSet<&'e str>) {
+    match expr {
+        TypeExpr::Infer { name } => {
+            sink.insert(name.as_str());
+        }
+        TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) | TypeExpr::KeyOf(inner) => {
+            collect_infer_names(inner, sink)
+        }
+        TypeExpr::Array { element, .. } => collect_infer_names(element, sink),
+        TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
+            arms.iter().for_each(|a| collect_infer_names(a, sink))
+        }
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .for_each(|e| collect_infer_names(&e.ty, sink)),
+        TypeExpr::Ref { type_arguments, .. } => type_arguments
+            .iter()
+            .for_each(|a| collect_infer_names(a, sink)),
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            collect_infer_names(check, sink);
+            collect_infer_names(extends, sink);
+            collect_infer_names(true_type, sink);
+            collect_infer_names(false_type, sink);
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            collect_infer_names(object, sink);
+            collect_infer_names(index, sink);
+        }
+        _ => {}
+    }
+}
+
+fn instantiated_body_is_closed(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    body: &TypeExpr,
+    bound_params: &FxHashSet<&str>,
+    budget: &mut u32,
+) -> bool {
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    match body {
+        TypeExpr::Object(_) | TypeExpr::Primitive(_) | TypeExpr::Literal(_) => true,
+        TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => {
+            instantiated_body_is_closed(ctx, prepared, inner, bound_params, budget)
+        }
+        TypeExpr::Array { element, .. } => {
+            instantiated_body_is_closed(ctx, prepared, element, bound_params, budget)
+        }
+        TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => arms
+            .iter()
+            .all(|arm| instantiated_body_is_closed(ctx, prepared, arm, bound_params, budget)),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .all(|e| instantiated_body_is_closed(ctx, prepared, &e.ty, bound_params, budget)),
+        // A bare type-parameter reference is a LEAF type variable: under a
+        // fully-concrete instantiation it is bound to a verified-closed
+        // type, and it carries no own enumerable key space that the OUTER
+        // object-filter would expand. Closed regardless of whether the
+        // name is one of THIS decl's params (it may also be a conditional
+        // `infer` binding introduced inside the body).
+        TypeExpr::TypeParameter(_) => true,
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            // A bare `Ref` (no type arguments) is a leaf reference. If it
+            // names a bound parameter / inference binding it is closed; if
+            // it resolves to a declaration, require that declaration's
+            // bounded alias chain to close; an unresolvable bare name is
+            // open.
+            if type_arguments.is_empty() {
+                if bound_params.contains(name.as_ref()) {
+                    return true;
+                }
+                return match prepared.name_resolution.get(name.as_ref()) {
+                    Some(target) => {
+                        let mut chain_visited: FxHashSet<(Arc<str>, Arc<str>)> =
+                            FxHashSet::default();
+                        prepared_decl_body_is_closed(
+                            ctx,
+                            &target.canonical_id,
+                            &target.symbol_name,
+                            budget,
+                            &mut chain_visited,
+                        )
+                    }
+                    // A bare unresolved `Ref` — a free name that is neither
+                    // a bound type parameter nor resolvable through this
+                    // decl's name-resolution — is OPEN (undecidable). It is
+                    // NOT an `infer`-introduced binding (those lower to the
+                    // dedicated `TypeExpr::Infer` arm, which returns closed);
+                    // treating an unresolved free ref as a closed leaf would
+                    // wrongly prove an open body closed and let the L1
+                    // carrier-stop materialise an undecidable surface.
+                    None => false,
+                };
+            }
+            // A `Ref` WITH type arguments is a generic instantiation. Every
+            // type argument must close first.
+            if !type_arguments
+                .iter()
+                .all(|a| instantiated_body_is_closed(ctx, prepared, a, bound_params, budget))
+            {
+                return false;
+            }
+            // A `contains_key` membership test is INSUFFICIENT — a resolvable
+            // name does NOT imply the instantiation closes. Resolve the
+            // target through this decl's name-resolution, then run the SAME
+            // bounded, prepared-decl-only verification used at the top level
+            // (`prepared_instantiation_is_closed`): the target decl must
+            // exist, its arity over `type_arguments.len()` must be
+            // satisfiable, every default for an unfilled param must close,
+            // and the substituted body must close. An unresolvable target is
+            // open. Bounded + cache-read-only (no reducer / no execute_read).
+            let Some(target) = prepared.name_resolution.get(name.as_ref()) else {
+                return false;
+            };
+            let target_identity = crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::from(target.canonical_id.as_str()),
+                whole_hash: crate::semantic_query::HashValue::default(),
+                decl_name: Arc::from(target.symbol_name.as_str()),
+            };
+            prepared_instantiation_is_closed(ctx, &target_identity, type_arguments.len(), budget)
+        }
+        // Operator bodies (conditional / indexed-access / keyof / mapped)
+        // are CLOSED *under these bindings* when every operand is closed.
+        // With a NON-EMPTY all-concrete arg list every free type parameter
+        // is bound to a verified-closed type, so a conditional with a
+        // bound-closed check/extends is decidable (it reduces to one
+        // branch during real materialisation) and the operator does not
+        // leave an open key space. We require BOTH branches / both operands
+        // closed (a sound over-approximation that avoids reducing here).
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            // `infer X` bindings in the `extends` clause bind `X` for the
+            // conditional's branches (TS semantics). Harvest them and treat
+            // them as bound leaves in the branch recursion so a branch
+            // referencing an inferred name (lowered as a bare `Ref`, e.g.
+            // `ChatMessageProps<M, D, U>` where `M`/`D`/`U` are inferred in
+            // `extends UIMessage<infer M, infer D, infer U>`) is NOT wrongly
+            // opened by the bare-unresolved-`Ref` rule.
+            let mut branch_bound: FxHashSet<&str> = bound_params.clone();
+            collect_infer_names(extends, &mut branch_bound);
+            collect_infer_names(check, &mut branch_bound);
+            instantiated_body_is_closed(ctx, prepared, check, bound_params, budget)
+                && instantiated_body_is_closed(ctx, prepared, extends, bound_params, budget)
+                && instantiated_body_is_closed(ctx, prepared, true_type, &branch_bound, budget)
+                && instantiated_body_is_closed(ctx, prepared, false_type, &branch_bound, budget)
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            instantiated_body_is_closed(ctx, prepared, object, bound_params, budget)
+                && instantiated_body_is_closed(ctx, prepared, index, bound_params, budget)
+        }
+        TypeExpr::KeyOf(inner) => {
+            instantiated_body_is_closed(ctx, prepared, inner, bound_params, budget)
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            instantiated_body_is_closed(ctx, prepared, source, bound_params, budget)
+                && instantiated_body_is_closed(ctx, prepared, value, bound_params, budget)
+                && name_type.as_deref().is_none_or(|n| {
+                    instantiated_body_is_closed(ctx, prepared, n, bound_params, budget)
+                })
+        }
+        // `infer T` is a conditional-inference binding placeholder, not an
+        // unbound generic — it does not leave an open key space.
+        TypeExpr::Infer { .. } => true,
+        // `typeof x`, recursive refs, template literals, and any shape not
+        // modelled above stay conservatively not-provably-closed.
+        _ => false,
+    }
+}
+
+/// Node budget for the enumeration-domain openness walk
+/// ([`enumeration_domain_node_is_open`]). The walk is a bounded, shallow
+/// typed-IR inspection — it never reduces, substitutes, or loads new
+/// files — so this cap only guards a pathological already-interned
+/// graph; legitimate utility sources resolve in a handful of hops.
+const ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET: u32 = 256;
+
+/// Enumeration-domain argument index for an OBJECT-FILTER builtin utility
+/// (`Pick` / `Omit`), if `base` names one.
+///
+/// The enumeration domain is the SOURCE type whose key space the filter
+/// walks: argument 0 (`Pick<X, K>` / `Omit<X, K>` walk `X`'s keys).
+///
+/// Returns `None` for any instantiation that is NOT a `Pick` / `Omit`
+/// object filter — including the mapped utilities (`Partial` / `Required`
+/// / `Readonly`, guarded by their `MappedType` deferred shell + L3 budget)
+/// and `Record` (an index-signature key domain, not finite enumeration).
+/// Those keep their existing reduce / terminal behaviour and are not
+/// subject to the open-domain carrier-stop.
+fn enumeration_domain_arg_index(base: &crate::semantic_query::DeclIdentity) -> Option<usize> {
+    use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+    if base.canonical_id.as_ref() != "__builtin__" {
+        return None;
+    }
+    // Utility identity is decided by the shared `BuiltinUtility` registry,
+    // NOT a local name string match — a single source of truth for which
+    // names are builtin utilities (the registry also owns arity / intrinsic
+    // metadata).
+    //
+    // The L1 carrier-stop is scoped to the OBJECT-FILTER utilities `Pick` /
+    // `Omit` ONLY. These two materialise their argument-0 source surface
+    // (`object_filter_source_surface`) and so degenerate into full
+    // cross-file generic expansion when that source is an open instantiation
+    // (the `ChatMessages.vue` `Pick<PropsBase<T>, …>` hang). Their
+    // enumeration domain is always argument 0 (`Pick<X, K>` / `Omit<X, K>`
+    // walk `X`'s keys).
+    //
+    // `Partial` / `Required` / `Readonly` are NOT in the L1 family: they
+    // lower to a `MappedType` (`build.rs`), which already fails closed —
+    // an unavailable source/keyspace yields a deferred `Mapped` shell and
+    // the L3 budget covers `MappedType` / `Instantiate` / `Conditional`. A
+    // second L1 carrier-stop on them would be redundant.
+    //
+    // `Record` is NOT in the L1 family either: its domain is argument 0
+    // (the KEYS), and `Record<string, V>` / `Record<number, V>` are
+    // infinite key domains (index signatures), not a finite enumeration —
+    // an open-domain carrier-stop on Record's key argument is a category
+    // error. Record correctly falls back to a deferred mapped carrier; if
+    // Record gains first-class support later, primitive key domains become
+    // `IndexSignature` surfaces, not CLOSED finite enumeration.
+    //
+    // The union/extraction/function/promise/string utilities (`Extract`,
+    // `Exclude`, `ReturnType`, `Awaited`, `Uppercase`, …) are likewise NOT
+    // key-enumerating object filters and keep their existing reduce /
+    // terminal behaviour.
+    match BuiltinUtility::from_name(base.decl_name.as_ref())? {
+        BuiltinUtility::Pick | BuiltinUtility::Omit => Some(0),
+        _ => None,
+    }
+}
+
+/// Shallow-By-Default carrier-stop predicate (L1).
+///
+/// Under `Published(Navigate)`, an object-filter utility (`Pick` / `Omit`)
+/// must NOT materialise an enumeration domain whose key space is OPEN or
+/// undecidable — doing so degenerates into full cross-file generic
+/// expansion of an unbound source (the `ChatMessages.vue`
+/// `Pick<PropsBase<T>, …>` hang). Returns `true` when the utility's
+/// enumeration domain (argument 0) is open or cannot be proven finite;
+/// the reducer then keeps the `InstantiationRef` as a shallow carrier
+/// (`Pick<…>` published verbatim). A CLOSED domain (a finite object
+/// surface, a finite union/intersection of object surfaces, or a
+/// concrete instantiation reached without crossing an open node) returns
+/// `false`, so a legitimate `Pick<Foo, 'bar'>` /
+/// `Pick<PropsBase<ConcreteMsg[]>, 'icon'>` still materialises only the
+/// requested keys.
+///
+/// Pure typed-IR inspection — no reduction, no substitution, no string
+/// matching. An unrecognised utility name returns `false` (not subject
+/// to this carrier-stop), preserving userland operator-helper and
+/// nominal-generic behaviour.
+fn utility_enumeration_domain_is_open_or_unknown(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    base: &crate::semantic_query::DeclIdentity,
+    args: &[SemanticNodeId],
+) -> bool {
+    let Some(idx) = enumeration_domain_arg_index(base) else {
+        return false;
+    };
+    let Some(&domain) = args.get(idx) else {
+        // A recognised utility whose domain argument is absent is
+        // structurally undecidable — treat the domain as open.
+        return true;
+    };
+    let mut budget = ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET;
+    let mut visited = FxHashSet::default();
+    enumeration_domain_node_is_open(ctx, domain, &mut budget, &mut visited)
+}
+
+/// Bounded typed-IR walk deciding whether `node` (a utility enumeration
+/// domain) is OPEN — i.e. its key space still depends on unsubstituted
+/// generic structure or cannot be proven a finite object surface.
+///
+/// OPEN ⇒ reaches an unsubstituted `TypeParam`, an `Opaque`
+/// (resolution miss / degraded), a conditional whose check/extends is
+/// open, an `IndexedAccess`/`KeyOf`/`Mapped` over an open operand, an
+/// instantiation with an open type argument, an under-applied /
+/// arity-unsatisfied / open-bodied `InstantiationRef`, an unresolved or
+/// open-bodied `DeclRef` alias chain, or exhausts the walk budget. CLOSED
+/// ⇒ a finite object/primitive/literal/function/array/tuple surface, a
+/// finite union/intersection of closed arms, or a `DeclRef` whose bounded
+/// alias chain terminates at a closed object surface. `Infer` is a
+/// conditional-inference binding placeholder, NOT an unbound generic — it
+/// does NOT open the domain on its own.
+fn enumeration_domain_node_is_open(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+    budget: &mut u32,
+    visited: &mut FxHashSet<SemanticNodeId>,
+) -> bool {
+    if !visited.insert(node) {
+        // Back-edge on the current walk frontier: contributes no new
+        // openness signal. Treat as closed for this revisit.
+        return false;
+    }
+    if *budget == 0 {
+        // Walk budget exhausted ⇒ conservatively undecidable ⇒ open.
+        return true;
+    }
+    *budget -= 1;
+
+    let Some(data) = super::node_data_for(ctx, node) else {
+        // Unresolved / un-interned node ⇒ open.
+        return true;
+    };
+    match data.as_ref() {
+        // --- definitively open leaves ---
+        // An unsubstituted `TypeParam` is an unbound generic — the
+        // keyspace depends on it. An `Opaque` is a resolution miss /
+        // degraded node. Both make the domain open.
+        SemanticNodeData::TypeParam { .. } | SemanticNodeData::Opaque(_) => true,
+
+        // `Infer` is a conditional-inference BINDING placeholder
+        // (`extends UIMessage<infer M, …>`), NOT an unbound generic. A
+        // conditional with a concrete `check` and `infer`-bearing
+        // `extends` is decidable, so `Infer` alone does NOT open the
+        // domain — only an unsubstituted `TypeParam` reached through the
+        // `check`/`extends`/source does.
+        SemanticNodeData::Infer { .. } => false,
+
+        // --- operator shapes: open iff an open operand is reached ---
+        SemanticNodeData::Conditional { check, extends, .. } => {
+            enumeration_domain_node_is_open(ctx, *check, budget, visited)
+                || enumeration_domain_node_is_open(ctx, *extends, budget, visited)
+        }
+        SemanticNodeData::KeyOf { base } => {
+            enumeration_domain_node_is_open(ctx, *base, budget, visited)
+        }
+        // An indexed access is open when EITHER the object OR the index key
+        // space is open. A `TypeParam`-keyed access (`T[K]` with open `K`)
+        // is just as undecidable as an open object — inspecting only the
+        // object would miss `Source[OpenKey]` source domains.
+        SemanticNodeData::IndexedAccess { object, index } => {
+            enumeration_domain_node_is_open(ctx, *object, budget, visited)
+                || index_key_is_open(ctx, index, budget, visited)
+        }
+        // A mapped type is open when its source OR its mapper key space (or
+        // an `as`-clause remap) is open. The produced key set of
+        // `{ [K in OpenKeySpace]: V }` is undecidable even if `source` is
+        // concrete, so inspecting only `source` would miss an open keyspace.
+        SemanticNodeData::Mapped { source, mapper } => {
+            enumeration_domain_node_is_open(ctx, *source, budget, visited)
+                || enumeration_domain_node_is_open(ctx, mapper.key_space, budget, visited)
+                || mapper
+                    .name_remap
+                    .is_some_and(|n| enumeration_domain_node_is_open(ctx, n, budget, visited))
+        }
+        SemanticNodeData::TemplateLiteral { expressions, .. } => expressions
+            .iter()
+            .any(|e| enumeration_domain_node_is_open(ctx, *e, budget, visited)),
+        // An instantiation is open when ANY type argument is open, OR the
+        // target declaration cannot be PROVEN to close under those args.
+        //
+        // The previous "non-empty, all-concrete args ⇒ CLOSED" shortcut was
+        // unsound: a target whose declaration is missing, arity-mismatched,
+        // or whose body stays operator-shaped under the supplied bindings is
+        // NOT closed even with concrete args. Closedness is now decided by
+        // [`prepared_instantiation_is_closed`]: the target decl must exist,
+        // its arity/defaults must be satisfiable by `args`, every supplied
+        // default must be closed, and the prepared body must be closed under
+        // those bindings (type-parameter references count as bound since
+        // their arg/default was verified closed). The bare-alias /
+        // under-applied case (`args.is_empty()`) is the `args.len() == 0`
+        // instance of the same check. Bounded, prepared-decl cache reads
+        // only — no reducer, no substitution, no `execute_read`.
+        SemanticNodeData::InstantiationRef { base, args } => {
+            if args
+                .iter()
+                .any(|a| enumeration_domain_node_is_open(ctx, *a, budget, visited))
+            {
+                return true;
+            }
+            !prepared_instantiation_is_closed(ctx, base, args.len(), budget)
+        }
+
+        // --- carriers we can follow one transparent hop ---
+        SemanticNodeData::Alias(target) => {
+            enumeration_domain_node_is_open(ctx, *target, budget, visited)
+        }
+        SemanticNodeData::DeclRef { identity } => {
+            // A resolved declaration whose BOUNDED transparent alias chain
+            // terminates at a finite closed-object surface is CLOSED;
+            // anything else (an alias to an operator/conditional body, an
+            // unresolved name, a cycle, or budget exhaustion) is open. The
+            // single-hop `is_closed_object_body` shortcut would mis-classify
+            // a legitimate closed alias chain
+            // (`type Foo = Bar; type Bar = { bar: string }`) as OPEN; the
+            // bounded chain resolver follows the transparent hops via the
+            // prepared decl's `name_resolution` (cache reads only, no
+            // reducer / `execute_read`).
+            let mut chain_visited: FxHashSet<(Arc<str>, Arc<str>)> = FxHashSet::default();
+            let mut hop_budget = ALIAS_CHAIN_HOP_BUDGET;
+            !prepared_decl_body_is_closed(
+                ctx,
+                identity.canonical_id.as_ref(),
+                identity.decl_name.as_ref(),
+                &mut hop_budget,
+                &mut chain_visited,
+            )
+        }
+
+        // --- finite surfaces: the key space is enumerable ---
+        SemanticNodeData::Object(_)
+        | SemanticNodeData::Primitive(_)
+        | SemanticNodeData::Literal(_)
+        | SemanticNodeData::Function { .. }
+        | SemanticNodeData::Array { .. }
+        | SemanticNodeData::Tuple { .. }
+        | SemanticNodeData::VueMacroElements(_) => false,
+
+        // --- composites: open iff any arm is open ---
+        SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => arms
+            .iter()
+            .any(|a| enumeration_domain_node_is_open(ctx, *a, budget, visited)),
+        SemanticNodeData::MergedDecl { contributors } => contributors
+            .iter()
+            .any(|a| enumeration_domain_node_is_open(ctx, *a, budget, visited)),
+
+        // --- unmodelled-for-this-walk shapes: conservatively open ---
+        SemanticNodeData::TypeOf { .. } => true,
+    }
+}
+
+/// Whether an [`IndexKey`] index operand is OPEN. Literal string / number
+/// keys are concrete (closed); a `TypeNode` key is open iff its referenced
+/// node is open under the same bounded walk.
+fn index_key_is_open(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    index: &crate::semantic_query::IndexKey,
+    budget: &mut u32,
+    visited: &mut FxHashSet<SemanticNodeId>,
+) -> bool {
+    use crate::semantic_query::IndexKey;
+    match index {
+        IndexKey::String(_) | IndexKey::Number(_) => false,
+        IndexKey::TypeNode(node) => enumeration_domain_node_is_open(ctx, *node, budget, visited),
     }
 }
 
@@ -2198,6 +2861,265 @@ mod tests {
             **index,
             TypeExpr::string_literal("key"),
             "string index keys should serialize as string literals",
+        );
+    }
+
+    /// L1 carrier-stop predicate (Shallow-By-Default). An
+    /// enumeration-domain utility (`Pick`/`Omit`/…) whose source
+    /// argument is an OPEN generic instantiation (`PropsBase<T>` with
+    /// `T` an unsubstituted type parameter) is open ⇒ the reducer keeps
+    /// it a shallow carrier. A CLOSED source (concrete instantiation, or
+    /// a finite object surface) is NOT open ⇒ it still materialises.
+    /// Discriminating: an over-broad "builtin utility == carrier" L1
+    /// would return `true` for the closed cases too and fail this test.
+    #[test]
+    fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
+        use crate::semantic_query::{
+            DeclIdentity, HashValue, SemanticNodeData, SurfaceView, TupleElement,
+        };
+
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let builtin_pick = DeclIdentity {
+            canonical_id: Arc::from("__builtin__"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Pick"),
+        };
+        // Keyspace argument — never inspected by the openness walk
+        // (only argument 0, the enumeration domain, matters).
+        let keys = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
+
+        // OPEN: PropsBase<T> with T an unsubstituted type parameter.
+        let tparam = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("T"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("T"),
+        });
+        let props_base_open = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                canonical_id: Arc::from("/types.ts"),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from("PropsBase"),
+            },
+            args: Arc::from(vec![tparam].into_boxed_slice()),
+        });
+        assert!(
+            super::utility_enumeration_domain_is_open_or_unknown(
+                &host,
+                &builtin_pick,
+                &[props_base_open, keys],
+            ),
+            "Pick<PropsBase<T>, …> over an unbound generic must be OPEN"
+        );
+
+        let concrete_elem =
+            graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::Unknown));
+        let concrete_array = graph.intern_node(SemanticNodeData::Array {
+            element: concrete_elem,
+            readonly: false,
+        });
+
+        // OPEN: PropsBase<UIMessage[]> — a NON-EMPTY all-concrete arg list
+        // is NOT sufficient on its own. An instantiation closes only when
+        // its target declaration EXISTS with satisfiable arity/defaults and
+        // a body that closes under the bindings. Here no `PropsBase` decl is
+        // seeded in this pure-unit host, so the target is UNRESOLVABLE ⇒
+        // undecidable ⇒ OPEN — even with concrete args. The
+        // resolvable-closed path (a real generic decl that materialises
+        // path-precisely) is exercised end-to-end by the integration
+        // fixtures in `component_meta_pick_omit_tests`.
+        let props_base_concrete_unresolved =
+            graph.intern_node(SemanticNodeData::InstantiationRef {
+                base: DeclIdentity {
+                    canonical_id: Arc::from("/types.ts"),
+                    whole_hash: HashValue::default(),
+                    decl_name: Arc::from("PropsBase"),
+                },
+                args: Arc::from(vec![concrete_array].into_boxed_slice()),
+            });
+        assert!(
+            super::utility_enumeration_domain_is_open_or_unknown(
+                &host,
+                &builtin_pick,
+                &[props_base_concrete_unresolved, keys],
+            ),
+            "Pick<PropsBase<UIMessage[]>, …> with concrete args but an UNRESOLVABLE target must \
+             be OPEN — an instantiation is closed only when its target decl is resolvable with \
+             a body that closes under the bindings"
+        );
+
+        // OPEN (tightening 4): a bare / under-applied generic alias —
+        // `InstantiationRef` with EMPTY args — over a target whose prepared
+        // body is unresolvable (no decl seeded) is undecidable ⇒ OPEN.
+        let bare_alias_unresolved = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                canonical_id: Arc::from("/types.ts"),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from("SlotProps"),
+            },
+            args: Arc::from(Vec::new().into_boxed_slice()),
+        });
+        assert!(
+            super::utility_enumeration_domain_is_open_or_unknown(
+                &host,
+                &builtin_pick,
+                &[bare_alias_unresolved, keys],
+            ),
+            "Pick<SlotProps, …> with EMPTY args over an unresolvable target must be OPEN \
+             (tightening 4: no arg binds the body's free params)"
+        );
+
+        // CLOSED: a finite object surface domain.
+        let closed_object = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }));
+        assert!(
+            !super::utility_enumeration_domain_is_open_or_unknown(
+                &host,
+                &builtin_pick,
+                &[closed_object, keys],
+            ),
+            "Pick<{{ … }}, …> over a finite object surface must be CLOSED"
+        );
+
+        // A NON-utility instantiation is never subject to this
+        // carrier-stop, even with an open source argument.
+        let not_a_utility = DeclIdentity {
+            canonical_id: Arc::from("/types.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Lookup"),
+        };
+        assert!(
+            !super::utility_enumeration_domain_is_open_or_unknown(
+                &host,
+                &not_a_utility,
+                &[props_base_open, keys],
+            ),
+            "a non-enumeration-utility instantiation is not subject to L1 carrier-stop"
+        );
+
+        // Tuple domains are finite surfaces (concrete numeric/length key
+        // space) — keep them closed.
+        let tuple = graph.intern_node(SemanticNodeData::Tuple {
+            elements: Arc::from(
+                vec![TupleElement {
+                    label: None,
+                    value: concrete_elem,
+                    optional: false,
+                    rest: false,
+                }]
+                .into_boxed_slice(),
+            ),
+            readonly: false,
+        });
+        assert!(
+            !super::utility_enumeration_domain_is_open_or_unknown(
+                &host,
+                &builtin_pick,
+                &[tuple, keys]
+            ),
+            "a concrete tuple domain must be CLOSED"
+        );
+    }
+
+    /// Tightening 2 + 3 discriminator: the openness walk must inspect the
+    /// KEYSPACE of an `IndexedAccess` / `Mapped` domain, not only the
+    /// object / source. A domain `Source[OpenKey]` or
+    /// `{ [K in OpenKeySpace]: V }` with a CONCRETE object but an OPEN key
+    /// space is OPEN — pre-tightening (object/source-only inspection) it
+    /// was wrongly judged CLOSED.
+    #[test]
+    fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
+        use crate::semantic_query::{
+            DeclIdentity, HashValue, IndexKey, MapperKey, MapperKind, OptionalityMod, ReadonlyMod,
+            SemanticNodeData, SurfaceView,
+        };
+
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let builtin_pick = DeclIdentity {
+            canonical_id: Arc::from("__builtin__"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Pick"),
+        };
+        let keys = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
+
+        // CONCRETE object, OPEN type-param key.
+        let concrete_object = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }));
+        let open_key = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("K"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("K"),
+        });
+
+        // IndexedAccess { object: concrete, index: TypeNode(open K) }.
+        let indexed_open_key = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: concrete_object,
+            index: IndexKey::TypeNode(open_key),
+        });
+        assert!(
+            super::utility_enumeration_domain_is_open_or_unknown(
+                &host,
+                &builtin_pick,
+                &[indexed_open_key, keys],
+            ),
+            "IndexedAccess with a concrete object but an OPEN type-param index key must be OPEN \
+             (keyspace must be inspected, not just the object)"
+        );
+
+        // A literal-string index key over the same concrete object is CLOSED.
+        let indexed_closed_key = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: concrete_object,
+            index: IndexKey::String(Arc::from("a")),
+        });
+        assert!(
+            !super::utility_enumeration_domain_is_open_or_unknown(
+                &host,
+                &builtin_pick,
+                &[indexed_closed_key, keys],
+            ),
+            "IndexedAccess with a concrete object and a literal-string index key must be CLOSED"
+        );
+
+        // Mapped { source: concrete, mapper.key_space: open K }.
+        let mapped_open_keyspace = graph.intern_node(SemanticNodeData::Mapped {
+            source: concrete_object,
+            mapper: MapperKey {
+                parameter_node: open_key,
+                key_space: open_key,
+                value_expr: concrete_object,
+                optionality: OptionalityMod::Keep,
+                readonly: ReadonlyMod::Keep,
+                name_remap: None,
+                kind: MapperKind::Computed,
+            },
+        });
+        assert!(
+            super::utility_enumeration_domain_is_open_or_unknown(
+                &host,
+                &builtin_pick,
+                &[mapped_open_keyspace, keys],
+            ),
+            "Mapped with a concrete source but an OPEN mapper key space must be OPEN \
+             (the produced key set is undecidable; key_space must be inspected, not just source)"
         );
     }
 }

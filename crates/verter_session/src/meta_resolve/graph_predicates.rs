@@ -596,6 +596,7 @@ pub(crate) fn bfs_compute_inner(
             ),
         };
         let read = dispatch.execute_read(key);
+        crate::request_context::observe_component_meta_read_suppress(&read);
         crate::component_meta_audit::merge_dep_signature_into_local_fence(
             local_fence,
             &read.dep_signature,

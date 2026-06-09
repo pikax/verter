@@ -137,7 +137,16 @@ pub struct QueryBuildOutput {
     pub result: QueryResult<SemanticNodeId>,
     pub dep_signature: DepSignature,
     pub walker_diagnostics: Vec<ShallowDiagnostic>,
+    /// **Inner-memo non-cacheability** — see
+    /// [`crate::semantic_query::CacheRead::cache_suppress`]. Gates memo
+    /// admission only; NOT the partial-result signal.
     pub cache_suppress: bool,
+    /// **Partial-result signal** — see
+    /// [`crate::semantic_query::CacheRead::result_is_partial`]. Set at the
+    /// budget exits and the walker fatal/pathological paths; folded
+    /// through nested reads. Gates the component-meta + shape/materialize
+    /// warm caches.
+    pub result_is_partial: bool,
     /// The §18 provenance taint of this build's value: how trustworthy the
     /// inputs that produced it were. Defaults to
     /// [`ResultTaint::Clean`](crate::semantic_query::ResultTaint::Clean).
@@ -221,6 +230,7 @@ impl From<(QueryResult<SemanticNodeId>, DepSignature)> for QueryBuildOutput {
             dep_signature,
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
+            result_is_partial: false,
             taint: crate::semantic_query::ResultTaint::Clean,
             observed_self_roots: Vec::new(),
             graph_carrier: None,
@@ -491,6 +501,14 @@ pub(super) struct PathWalker<'a, 'b> {
     /// nested Instantiate dispatch produced a fatal `QueryError`. The
     /// memo refuses insertion when this is true.
     pub(super) cache_suppress: bool,
+    /// `true` when the walker's result is a PARTIAL — the
+    /// pathological-input cap fired or a nested Instantiate dispatch
+    /// produced a fatal `QueryError`. Distinct from [`Self::cache_suppress`]
+    /// (which is also set by benign non-cacheability upstream): this is the
+    /// signal the component-meta + shape/materialize warm gates key on. Set
+    /// in lock-step with `cache_suppress` at the walker fatal/pathological
+    /// paths.
+    pub(super) result_is_partial: bool,
     /// `true` when this walk projects a NON-EMPTY path (the caller
     /// requested `base[seg..]`), as opposed to an EMPTY whole-surface
     /// projection (`ProjectPath(base, [])`). Set once in [`Self::walk`].
@@ -783,6 +801,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             intermediate_nodes: Vec::new(),
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
+            result_is_partial: false,
             original_path_non_empty: false,
         }
     }
@@ -829,6 +848,29 @@ impl<'a, 'b> PathWalker<'a, 'b> {
 
     fn opaque_miss(&self) -> SemanticNodeId {
         self.dispatch.opaque(QueryError::Miss)
+    }
+
+    /// Dispatch a nested subquery and FOLD its A2 partiality flag into the
+    /// walker's accumulated `result_is_partial` before returning the bare
+    /// [`QueryResult`].
+    ///
+    /// Every intermediate-hop re-dispatch in the path walker that swallows
+    /// a non-`Value` result into an `opaque_miss()` fallback must route
+    /// through here so a genuinely-incomplete nested subquery (budget /
+    /// recursion / walker-fatal) taints the walked surface — otherwise the
+    /// partial would surface as a complete-looking `Value` past the
+    /// component-meta / shape / materialize warm gates. A benign
+    /// non-cacheable nested read is COMPLETE; its `cache_suppress` does NOT
+    /// taint partiality and is intentionally NOT folded here.
+    fn execute_read_folding_partial(
+        &mut self,
+        key: SemanticQueryKey,
+    ) -> QueryResult<SemanticNodeId> {
+        let read = self.dispatch.execute_read(key);
+        if read.result_is_partial {
+            self.result_is_partial = true;
+        }
+        read.value
     }
 
     /// Extract the declaration identity `(canonical_id, name)` from a
@@ -1096,31 +1138,27 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let rest_path: Arc<[PathSegment]> =
                         Arc::from(path[index..].to_vec().into_boxed_slice());
                     let true_projection =
-                        self.dispatch
-                            .execute_type_node(SemanticQueryKey::ProjectPath {
-                                base: true_branch,
-                                path: Arc::clone(&rest_path),
-                                context:
-                                    crate::semantic_query::ProjectionReductionContext::published(
-                                        self.mode(),
-                                    ),
-                            });
+                        self.execute_read_folding_partial(SemanticQueryKey::ProjectPath {
+                            base: true_branch,
+                            path: Arc::clone(&rest_path),
+                            context: crate::semantic_query::ProjectionReductionContext::published(
+                                self.mode(),
+                            ),
+                        });
                     let false_projection =
-                        self.dispatch
-                            .execute_type_node(SemanticQueryKey::ProjectPath {
-                                base: false_branch,
-                                path: rest_path,
-                                context:
-                                    crate::semantic_query::ProjectionReductionContext::published(
-                                        self.mode(),
-                                    ),
-                            });
+                        self.execute_read_folding_partial(SemanticQueryKey::ProjectPath {
+                            base: false_branch,
+                            path: rest_path,
+                            context: crate::semantic_query::ProjectionReductionContext::published(
+                                self.mode(),
+                            ),
+                        });
                     let true_id = match true_projection {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                        QueryResult::Value(id) => id,
                         _ => self.opaque_miss(),
                     };
                     let false_id = match false_projection {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                        QueryResult::Value(id) => id,
                         _ => self.opaque_miss(),
                     };
                     let wrapper = self.graph().intern_node(SemanticNodeData::Conditional {
@@ -1148,18 +1186,21 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     return;
                 }
                 SemanticNodeData::KeyOf { base } => {
-                    let resolved = match self.dispatch.execute_type_node(SemanticQueryKey::KeyOf {
-                        base: *base,
-                        context: crate::semantic_query::ProjectionReductionContext::published(
-                            self.mode(),
-                        ),
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                        _ => {
-                            results.push(self.opaque_miss());
-                            return;
-                        }
-                    };
+                    let base = *base;
+                    let key_mode = self.mode();
+                    let resolved =
+                        match self.execute_read_folding_partial(SemanticQueryKey::KeyOf {
+                            base,
+                            context: crate::semantic_query::ProjectionReductionContext::published(
+                                key_mode,
+                            ),
+                        }) {
+                            QueryResult::Value(id) => id,
+                            _ => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        };
                     if resolved == current {
                         results.push(current);
                         return;
@@ -1179,15 +1220,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // TERMINAL segment runs in the caller's mode — that is
                     // handled after the loop by
                     // `resolve_expanded_terminal_carrier`.
+                    let object = *object;
+                    let ix = ix.clone();
                     let resolved =
-                        match self
-                            .dispatch
-                            .execute_type_node(SemanticQueryKey::IndexedAccess {
-                                base: *object,
-                                index: ix.clone(),
-                                mode: ProjectionMode::Navigate,
-                            }) {
-                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                        match self.execute_read_folding_partial(SemanticQueryKey::IndexedAccess {
+                            base: object,
+                            index: ix,
+                            mode: ProjectionMode::Navigate,
+                        }) {
+                            QueryResult::Value(id) => id,
                             _ => {
                                 results.push(self.opaque_miss());
                                 return;
@@ -1538,18 +1579,18 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     //   would forge a value type for a non-existent
                     //   member; the coarse path produces the correct
                     //   Object miss instead).
+                    let source = *source;
+                    let mapper = mapper.clone();
+                    let mapped_mode = self.mode();
                     let resolved =
-                        match self
-                            .dispatch
-                            .execute_type_node(SemanticQueryKey::MappedType {
-                                source: *source,
-                                mapper: mapper.clone(),
-                                context:
-                                    crate::semantic_query::ProjectionReductionContext::published(
-                                        self.mode(),
-                                    ),
-                            }) {
-                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                        match self.execute_read_folding_partial(SemanticQueryKey::MappedType {
+                            source,
+                            mapper,
+                            context: crate::semantic_query::ProjectionReductionContext::published(
+                                mapped_mode,
+                            ),
+                        }) {
+                            QueryResult::Value(id) => id,
                             _ => {
                                 results.push(self.opaque_miss());
                                 return;
@@ -1565,16 +1606,18 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     value_root,
                     path: typeof_path,
                 } => {
-                    let mut resolved =
-                        match self.dispatch.execute_type_node(SemanticQueryKey::TypeOf {
-                            value_root: value_root.clone(),
-                        }) {
-                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                            _ => {
-                                results.push(self.opaque_miss());
-                                return;
-                            }
-                        };
+                    let value_root = value_root.clone();
+                    let typeof_path = typeof_path.clone();
+                    let typeof_mode = self.mode();
+                    let mut resolved = match self
+                        .execute_read_folding_partial(SemanticQueryKey::TypeOf { value_root })
+                    {
+                        QueryResult::Value(id) => id,
+                        _ => {
+                            results.push(self.opaque_miss());
+                            return;
+                        }
+                    };
                     if !typeof_path.is_empty() {
                         let projection_path: Arc<[PathSegment]> = Arc::from(
                             typeof_path
@@ -1583,22 +1626,21 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 .collect::<Vec<_>>()
                                 .into_boxed_slice(),
                         );
-                        resolved = match self.dispatch.execute_type_node(
-                            SemanticQueryKey::ProjectPath {
+                        resolved =
+                            match self.execute_read_folding_partial(SemanticQueryKey::ProjectPath {
                                 base: resolved,
                                 path: projection_path,
                                 context:
                                     crate::semantic_query::ProjectionReductionContext::published(
-                                        self.mode(),
+                                        typeof_mode,
                                     ),
-                            },
-                        ) {
-                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                            _ => {
-                                results.push(self.opaque_miss());
-                                return;
-                            }
-                        };
+                            }) {
+                                QueryResult::Value(id) => id,
+                                _ => {
+                                    results.push(self.opaque_miss());
+                                    return;
+                                }
+                            };
                     }
                     if resolved == current {
                         results.push(current);
@@ -1679,14 +1721,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     );
                     drop(data);
                     let expanded =
-                        match self
-                            .dispatch
-                            .execute_type_node(SemanticQueryKey::Instantiate {
-                                base,
-                                args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                                context: inst_ctx,
-                            }) {
-                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                        match self.execute_read_folding_partial(SemanticQueryKey::Instantiate {
+                            base,
+                            args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                            context: inst_ctx,
+                        }) {
+                            QueryResult::Value(id) => id,
                             QueryResult::Recursive(id) => {
                                 results.push(id);
                                 return;
@@ -1713,23 +1753,19 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     };
                     let name = Arc::clone(&identity.decl_name);
                     drop(data);
-                    let resolved =
-                        match self
-                            .dispatch
-                            .execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                                scope,
-                                name,
-                            })) {
-                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                            QueryResult::Recursive(id) => {
-                                results.push(id);
-                                return;
-                            }
-                            QueryResult::Error(_) => {
-                                results.push(self.opaque_miss());
-                                return;
-                            }
-                        };
+                    let resolved = match self.execute_read_folding_partial(
+                        SemanticQueryKey::ResolveDecl(ResolveDeclKey { scope, name }),
+                    ) {
+                        QueryResult::Value(id) => id,
+                        QueryResult::Recursive(id) => {
+                            results.push(id);
+                            return;
+                        }
+                        QueryResult::Error(_) => {
+                            results.push(self.opaque_miss());
+                            return;
+                        }
+                    };
                     if resolved == current {
                         results.push(current);
                         return;
@@ -1798,18 +1834,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     } else {
                         crate::semantic_query::ProjectionReductionContext::published(self.mode())
                     };
+                    let inst_context = self
+                        .dispatch
+                        .instantiate_context_for(&identity.defining_canonical, unwrap_context);
                     let resolved =
-                        match self
-                            .dispatch
-                            .execute_type_node(SemanticQueryKey::Instantiate {
-                                context: self.dispatch.instantiate_context_for(
-                                    &identity.defining_canonical,
-                                    unwrap_context,
-                                ),
-                                base: identity,
-                                args: args_clone,
-                            }) {
-                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                        match self.execute_read_folding_partial(SemanticQueryKey::Instantiate {
+                            context: inst_context,
+                            base: identity,
+                            args: args_clone,
+                        }) {
+                            QueryResult::Value(id) => id,
                             QueryResult::Recursive(id) => {
                                 results.push(id);
                                 return;
@@ -1912,40 +1946,38 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 };
                 let name = Arc::clone(&identity.decl_name);
                 drop(data);
-                match self
-                    .dispatch
-                    .execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                        scope,
-                        name,
-                    })) {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                match self.execute_read_folding_partial(SemanticQueryKey::ResolveDecl(
+                    ResolveDeclKey { scope, name },
+                )) {
+                    QueryResult::Value(id) => id,
                     // A recursive / errored terminal carrier keeps the
                     // carrier (no expansion) — the published surface stays
                     // the bare `DeclRef` per the shallow-by-default rule
-                    // when resolution cannot complete.
+                    // when resolution cannot complete. `execute_read_folding_partial`
+                    // already folded the read's A2 partiality, so a budget /
+                    // recursion-fatal terminal taints the walked surface.
                     QueryResult::Recursive(_) | QueryResult::Error(_) => node,
                 }
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 let identity = base.clone();
                 let args_clone = Arc::clone(args);
+                let carrier_mode = self.mode();
                 drop(data);
-                match self
-                    .dispatch
-                    .execute_type_node(SemanticQueryKey::Instantiate {
-                        base: self.dispatch.type_slot_for(
-                            Arc::clone(&identity.canonical_id),
-                            Arc::clone(&identity.decl_name),
-                        ),
-                        args: args_clone,
-                        context: self.dispatch.instantiate_context_for(
-                            &identity.canonical_id,
-                            crate::semantic_query::ProjectionReductionContext::published(
-                                self.mode(),
-                            ),
-                        ),
-                    }) {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                let inst_base = self.dispatch.type_slot_for(
+                    Arc::clone(&identity.canonical_id),
+                    Arc::clone(&identity.decl_name),
+                );
+                let inst_context = self.dispatch.instantiate_context_for(
+                    &identity.canonical_id,
+                    crate::semantic_query::ProjectionReductionContext::published(carrier_mode),
+                );
+                match self.execute_read_folding_partial(SemanticQueryKey::Instantiate {
+                    base: inst_base,
+                    args: args_clone,
+                    context: inst_context,
+                }) {
+                    QueryResult::Value(id) => id,
                     QueryResult::Recursive(_) | QueryResult::Error(_) => node,
                 }
             }
@@ -2103,21 +2135,18 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // `published(self.mode())` here would drop the provenance
                 // and the macro-T-root own-body members would all report
                 // `false`.
+                let inst_context = self.dispatch.instantiate_context_for(
+                    &identity.defining_canonical,
+                    crate::semantic_query::ProjectionReductionContext::published(self.mode())
+                        .with_provenance(self.provenance()),
+                );
                 let expanded =
-                    match self
-                        .dispatch
-                        .execute_type_node(SemanticQueryKey::Instantiate {
-                            context: self.dispatch.instantiate_context_for(
-                                &identity.defining_canonical,
-                                crate::semantic_query::ProjectionReductionContext::published(
-                                    self.mode(),
-                                )
-                                .with_provenance(self.provenance()),
-                            ),
-                            base: identity,
-                            args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                        }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                    match self.execute_read_folding_partial(SemanticQueryKey::Instantiate {
+                        context: inst_context,
+                        base: identity,
+                        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    }) {
+                        QueryResult::Value(id) => id,
                         QueryResult::Recursive(id) => {
                             results.push(id);
                             return;
@@ -2150,18 +2179,17 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             {
                 let source = *source;
                 let mapper = mapper.clone();
+                let mapped_mode = self.mode();
                 drop(data);
                 let materialised =
-                    match self
-                        .dispatch
-                        .execute_type_node(SemanticQueryKey::MappedType {
-                            source,
-                            mapper,
-                            context: crate::semantic_query::ProjectionReductionContext::published(
-                                self.mode(),
-                            ),
-                        }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                    match self.execute_read_folding_partial(SemanticQueryKey::MappedType {
+                        source,
+                        mapper,
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            mapped_mode,
+                        ),
+                    }) {
+                        QueryResult::Value(id) => id,
                         QueryResult::Recursive(id) => {
                             results.push(id);
                             return;
@@ -2421,6 +2449,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 self.walker_diagnostics
                     .push(ShallowDiagnostic::PathologicalInput { root: node });
                 self.cache_suppress = true;
+                self.result_is_partial = true;
                 break;
             }
             match frame {
@@ -2795,6 +2824,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     QueryResult::Error(error) => {
                         if is_fatal_query_error(&error) {
                             self.cache_suppress = true;
+                            self.result_is_partial = true;
                         }
                         self.walker_diagnostics
                             .push(ShallowDiagnostic::InstantiationError {
@@ -2886,6 +2916,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     QueryResult::Error(error) => {
                         if is_fatal_query_error(&error) {
                             self.cache_suppress = true;
+                            self.result_is_partial = true;
                         }
                         self.walker_diagnostics
                             .push(ShallowDiagnostic::InstantiationError {
@@ -3066,15 +3097,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 };
                 let name = Arc::clone(&identity.decl_name);
                 drop(data);
-                match self
-                    .dispatch
-                    .execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                        scope,
-                        name,
-                    })) {
-                    QueryResult::Value(SemanticQueryOutput {
-                        value: resolved, ..
-                    }) => {
+                match self.execute_read_folding_partial(SemanticQueryKey::ResolveDecl(
+                    ResolveDeclKey { scope, name },
+                )) {
+                    QueryResult::Value(resolved) => {
                         if resolved == cur {
                             self.contribute_surface(
                                 target,
@@ -3290,7 +3316,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         .dispatch
                         .mapped_surface_source_members_for_projection(source, self.context)
                     {
-                        Some(members) => {
+                        Some((members, source_is_partial)) => {
+                            // A2 signal-split: a genuinely-incomplete source
+                            // projection (budget / recursion / walker-fatal)
+                            // taints this synthesised mapped surface.
+                            if source_is_partial {
+                                self.result_is_partial = true;
+                            }
                             keys = members.iter().map(|m| Arc::clone(&m.name)).collect();
                             source_members = Some(members);
                         }

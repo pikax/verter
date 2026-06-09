@@ -1448,13 +1448,28 @@ pub struct CacheRead<T> {
     /// Stored on the memo entry; warm reads replay transparently. Empty
     /// for queries that don't run the walker.
     pub walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
-    /// True if this query's computation (or any nested query) hit a
-    /// fatal `QueryError` (BudgetExceeded / UnstableState) or the
-    /// pathological-input cap. Aggregates via OR through nested queries'
-    /// `cache_suppress`. The memo refuses insertion when this is true
-    /// so the caller observes the suppressed result and subsequent
-    /// requests cold-recompute.
+    /// **Inner-memo non-cacheability.** `true` when THIS query's memo
+    /// entry must not be admitted/shared — either because the build hit a
+    /// fatal `QueryError` / pathological-input cap, OR because a perfectly
+    /// VALID complete result is merely not memo-publishable (a torn /
+    /// unrootable self-root, a tracer-signature overflow, a `ReturnOnly`
+    /// cross-owner-reuse admission). Aggregates via OR through nested
+    /// queries. The memo refuses insertion when this is true; the value
+    /// still flows back to the caller. This is NOT the partial-result
+    /// signal — see [`Self::result_is_partial`].
     pub cache_suppress: bool,
+    /// **Partial-result signal.** `true` when this query's value is
+    /// itself a PARTIAL — a budget exhaustion (`BudgetExceeded`),
+    /// cancellation / unstable state, same-path recursion, or a walker
+    /// pathological/fatal diagnostic produced a structurally-incomplete
+    /// result. Aggregates via OR through nested queries. Distinct from
+    /// [`Self::cache_suppress`]: a benign non-cacheable result (ReturnOnly
+    /// / overflow / unrootable self-root) sets `cache_suppress` but NOT
+    /// this. The component-meta final-result warm gate and the
+    /// shape/materialization result caches key ONLY on this flag — a
+    /// complete-but-non-cacheable result MUST still be allowed to warm the
+    /// component-meta result, while a partial MUST be refused.
+    pub result_is_partial: bool,
 }
 
 impl<T> CacheRead<T> {
@@ -1470,6 +1485,7 @@ impl<T> CacheRead<T> {
             dep_signature,
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
+            result_is_partial: false,
         }
     }
 }

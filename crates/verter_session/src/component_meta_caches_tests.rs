@@ -752,3 +752,197 @@ defineProps<{ x: Lib }>()
         "evict_canonical must not increase live cache count"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────
+// FIX-7 M3 — ShapeCacheDb central partial-admission gate.
+// `ShapeCacheDb::get_or_compute` / `admit_computed` refuse to admit a
+// GENUINE partial (value.result_is_partial OR the request partial
+// sticky), so a partial member shape never warm-replays as a complete
+// shape. A benign-COMPLETE shape MUST still admit (the gate keys on
+// partiality, not bare non-cacheability).
+// ─────────────────────────────────────────────────────────────────
+
+/// Build a valid `(MaterializedTypeExpr, fact_dep_signature)` for a real
+/// upserted scope so `admit_computed` can take its `Cacheable` arm. The
+/// helper observes the scope and runs the engine fact-signature builder
+/// exactly as the projector pipeline does.
+fn shape_value_and_fact_sig_for_scope(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    scope_canonical: &str,
+    result_is_partial: bool,
+) -> (
+    crate::project_semantic_dispatch::raise::MaterializedTypeExpr,
+    Arc<[crate::resolver_core::FactVersionRef]>,
+) {
+    use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
+    // Force the scope's `IndexedReady` artifact to materialise so the
+    // scheduler reports a live scope and `observe_materialize_scope`
+    // returns a tear-free observation (an upsert alone does not eagerly
+    // index).
+    ctx.ensure_indexed_ready(scope_canonical)
+        .expect("fixture invariant: scope IndexedReady materialises");
+    let observed = ctx
+        .observe_materialize_scope(scope_canonical)
+        .expect("fixture invariant: real scope yields a materialize observation");
+    let parse_fact = observed
+        .syntactic_export_set
+        .clone()
+        .expect("fixture invariant: scope carries a SyntacticExportSet parse fact");
+    let value = MaterializedTypeExpr {
+        node_id: None,
+        type_expr: verter_type_expr::TypeExpr::string_literal("ok".to_string()),
+        dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+        result_is_partial,
+    };
+    let fact_sig = match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
+        &observed,
+        parse_fact,
+        &value.dep_signature,
+    ) {
+        crate::cache_runtime::SignatureAdmission::Cacheable(sig) => sig.facts,
+        crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
+            panic!("fixture invariant: signature must build for a real scope, got {reason:?}")
+        }
+    };
+    (value, fact_sig)
+}
+
+/// FIX-7 M3 (direct unit). `ShapeCacheDb::admit_computed` with a COMPLETE
+/// value admits (baseline: peek hits, live count +1); with a PARTIAL
+/// value (`result_is_partial=true`) it refuses (peek misses, live count
+/// unchanged) yet still returns the value verbatim.
+///
+/// MUTATION CHECK: reverting the central
+/// `refuse_result_cache_admission_if_partial` gate in
+/// `ShapeCacheDb::get_or_compute` makes the partial value admit — the
+/// "live count unchanged" / "peek misses" assertions fail.
+#[test]
+fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
+    use crate::component_meta_caches::ShapeCacheKey;
+    use crate::types::ProjectionMode;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/m3_shape.ts",
+            "export type Complete = { x: string };\nexport type Partial = { y: number };",
+        )
+        .unwrap();
+    let host = project.host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let db = host.project_type_store().shape_cache_db();
+
+    // Baseline: a COMPLETE value admits.
+    let complete_key = ShapeCacheKey::type_expr_whole(
+        Arc::from("/m3_shape.ts"),
+        Arc::new(verter_type_expr::TypeExpr::named("Complete")),
+        ProjectionMode::Expanded,
+    );
+    let (complete_value, complete_sig) =
+        shape_value_and_fact_sig_for_scope(ctx, "/m3_shape.ts", false);
+    let live_before_complete = db.live_count();
+    let returned_complete = db.admit_computed(&complete_key, ctx, complete_value, complete_sig);
+    assert_eq!(
+        returned_complete.type_expr,
+        verter_type_expr::TypeExpr::string_literal("ok".to_string()),
+        "admit_computed returns the value verbatim",
+    );
+    assert_eq!(
+        db.live_count(),
+        live_before_complete + 1,
+        "M3 baseline: a COMPLETE shape MUST admit (the gate keys on partiality, not on \
+         non-cacheability) — over-suppression would break benign warming",
+    );
+    assert!(
+        db.peek(&complete_key, ctx).is_some(),
+        "M3 baseline: a COMPLETE shape MUST be peekable after admission",
+    );
+
+    // The fix: a PARTIAL value is refused.
+    let partial_key = ShapeCacheKey::type_expr_whole(
+        Arc::from("/m3_shape.ts"),
+        Arc::new(verter_type_expr::TypeExpr::named("Partial")),
+        ProjectionMode::Expanded,
+    );
+    let (partial_value, partial_sig) =
+        shape_value_and_fact_sig_for_scope(ctx, "/m3_shape.ts", true);
+    let live_before_partial = db.live_count();
+    let returned_partial = db.admit_computed(&partial_key, ctx, partial_value, partial_sig);
+    assert_eq!(
+        returned_partial.type_expr,
+        verter_type_expr::TypeExpr::string_literal("ok".to_string()),
+        "admit_computed still returns the partial value verbatim to the caller",
+    );
+    assert_eq!(
+        db.live_count(),
+        live_before_partial,
+        "M3: a PARTIAL shape (result_is_partial=true) MUST NOT admit — live count unchanged \
+         (reverting the get_or_compute gate makes this fail)",
+    );
+    assert!(
+        db.peek(&partial_key, ctx).is_none(),
+        "M3: a PARTIAL shape MUST NOT be peekable — it was refused admission",
+    );
+}
+
+/// FIX-7 M3 (integration via the request partial sticky). A per-member
+/// shape whose partiality comes ONLY from the request-scoped sticky (the
+/// materializer-native rail raises it) MUST NOT admit into ShapeCacheDb;
+/// a fresh request (sticky clear) cold-rebuilds and admits.
+///
+/// MUTATION CHECK: reverting the
+/// `current_materialization_cache_suppress()` half of
+/// `refuse_result_cache_admission_if_partial` makes the sticky-bearing
+/// admit succeed — the "no admission while sticky" assertion fails.
+#[test]
+fn shape_cache_db_refuses_admit_when_request_partial_sticky_set() {
+    use crate::component_meta_caches::ShapeCacheKey;
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::types::ProjectionMode;
+
+    let project = make_project();
+    project
+        .upsert_base("/m3_int.ts", "export type Member = { z: boolean };")
+        .unwrap();
+    let host = project.host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let db = host.project_type_store().shape_cache_db();
+
+    let key = ShapeCacheKey::type_expr_whole(
+        Arc::from("/m3_int.ts"),
+        Arc::new(verter_type_expr::TypeExpr::named("Member")),
+        ProjectionMode::Expanded,
+    );
+
+    // The value itself is COMPLETE (result_is_partial=false) — the
+    // partiality enters ONLY via the request sticky, exactly as the
+    // materializer-native rail propagates it.
+    let live_before = db.live_count();
+    {
+        let rctx = RequestContext::new(7, Arc::from("/m3_int.ts"), false, None);
+        let _guard = RequestContextGuard::install(rctx);
+        crate::request_context::mark_request_materialization_cache_suppress();
+        let (value, sig) = shape_value_and_fact_sig_for_scope(ctx, "/m3_int.ts", false);
+        let _ = db.admit_computed(&key, ctx, value, sig);
+    }
+    assert_eq!(
+        db.live_count(),
+        live_before,
+        "M3 integration: with the request partial sticky set, even a value-complete shape \
+         MUST be refused (the rail's partiality reaches the gate via the sticky)",
+    );
+    assert!(
+        db.peek(&key, ctx).is_none(),
+        "M3 integration: the sticky-suppressed shape MUST NOT be peekable",
+    );
+
+    // Fresh request, sticky clear — the shape now admits (proving the
+    // slot was genuinely empty, not warm-poisoned).
+    let (value2, sig2) = shape_value_and_fact_sig_for_scope(ctx, "/m3_int.ts", false);
+    let _ = db.admit_computed(&key, ctx, value2, sig2);
+    assert!(
+        db.peek(&key, ctx).is_some(),
+        "M3 integration: a fresh (sticky-clear) request MUST cold-admit the complete shape — \
+         proving the partial replay never warmed the slot",
+    );
+}

@@ -8500,6 +8500,51 @@ defineProps<{ value: A }>()
         );
     }
 
+    /// L2: the cycle/fence guard derives its root identity from the
+    /// utility's SOURCE type-argument, not just the outer `Ref` name.
+    /// `Pick<A, 'next'>` where `A` transitively cycles (A → B(keyof C) →
+    /// C → A) must be DETECTED — pre-fix `root_decl_identity` rooted the
+    /// BFS at `__builtin__::Pick` (structurally blind to the source
+    /// chain) and missed the cycle.
+    #[test]
+    fn cycle_guard_roots_at_utility_source_type_argument() {
+        use verter_type_expr::TypeExpr;
+
+        let project = make_project();
+        project
+            .upsert_base(
+                "/cycle.ts",
+                r#"
+export type A = { next: B }
+export type B = keyof C
+export type C = { back: A }
+"#,
+            )
+            .unwrap();
+        let session = project.open_session_batch().unwrap();
+        // Seed IndexedReady/analysis for /cycle.ts.
+        let _ = session.evaluate_types("/cycle.ts");
+
+        let host = session.host();
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+
+        // `Pick<A, 'next'>` — the source argument `A` is the cyclic root.
+        let pick_over_cycle = TypeExpr::named_with_args(
+            "Pick",
+            vec![TypeExpr::named("A"), TypeExpr::string_literal("next")],
+        );
+        let detected = crate::meta_resolve::lowered_root_reaches_transitive_cycle(
+            &mut engine,
+            "/cycle.ts",
+            &pick_over_cycle,
+        );
+        assert!(
+            detected,
+            "Pick<A,'next'> over a cyclic source `A` must be detected via the \
+             source type-argument root (L2) — rooting only at `Pick` misses it"
+        );
+    }
+
     /// Pick / Omit shapes through `evaluate_types`
     /// stay healthy after the alias-body rescue chain and the
     /// inline-registry-member-route candidate chain were deleted.

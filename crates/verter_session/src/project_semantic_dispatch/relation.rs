@@ -158,6 +158,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // actually read. The cycle guard is keyed on the full relation
         // identity `key`, never the bare node pair.
         let host = self.ctx.host_for_fact_tracer_install();
+        // Relation-memo non-admission: open a cold-build-local taint frame
+        // so the shared read boundary (`execute_via_cold_build_helper`)
+        // folds the metadata of the identity-carrier `Instantiate` unwraps
+        // into THIS frame for every nested read. A relation `Unknown` that
+        // arose from a partial OR a non-cacheable nested read must NOT be
+        // inserted into the relation memo (it would launder the partial as a
+        // cacheable judgement, or admit a judgement whose dependency fence
+        // cannot be soundly represented). We pop the frame after the cold
+        // compute and consult both `result_is_partial` and `cache_suppress`
+        // below. The RAII guard pops the frame on panic / early-return too
+        // (panic-safe pop), so an unwinding relation compute never leaks a
+        // stale frame onto the stack.
+        let taint_guard =
+            crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
         let (result, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
             // Test-only fact-injection hook. When the host's per-host
             // `relation_force_overflow_observations` knob is non-zero, emit
@@ -187,6 +201,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 RelationResult::Unknown
             }
         });
+        // Pop this relation's cold-build-local taint frame. If a nested
+        // identity-carrier `Instantiate` unwrap surfaced a PARTIAL or
+        // non-cacheable read, the shared read boundary folded it here.
+        // Bubble that taint into any enclosing build's frame (so the outer
+        // build also refuses memo admission), and use it below to refuse the
+        // relation-memo insert for a partial/non-cacheable-derived `Unknown`.
+        let relation_build_local = taint_guard.finish();
+        // After the pop, the new stack top (if any) is the ENCLOSING build's
+        // frame; folding here bubbles this relation's partiality/non-cacheability
+        // outward so the outer build also refuses memo admission.
+        if relation_build_local.result_is_partial || relation_build_local.cache_suppress {
+            self.fold_into_top_build_local_taint(
+                relation_build_local.result_is_partial,
+                relation_build_local.cache_suppress,
+            );
+        }
         // Overflowed read-set: the judgement is returned to the caller but
         // refused memo admission — the dependency fence cannot be
         // represented — matching the cooperative cold-build contract.
@@ -194,6 +224,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::resolver_core::FactReadSetFinalise::Ok(facts) => facts,
             crate::resolver_core::FactReadSetFinalise::Overflow => return (result, fence),
         };
+        // Relation-memo non-admission: a relation `Unknown` (or any
+        // judgement) that arose from a PARTIAL nested read — OR from a
+        // nested read that was merely non-cacheable (`cache_suppress`) —
+        // must NOT be admitted to the relation memo. A partial launders as
+        // a cacheable judgement that a later identical relation check
+        // warm-replays as complete; a non-cacheable nested read means the
+        // judgement's own dependency fence cannot be soundly represented in
+        // the relation memo, so the relation entry must likewise refuse
+        // admission (the defensive OR — same rule the semantic family memo
+        // applies: refuse `cache_suppress || result_is_partial`). The taint
+        // was folded into this relation's build-local frame by the shared
+        // read boundary (`execute_via_cold_build_helper`) for every nested
+        // identity-carrier `Instantiate` unwrap.
+        //
+        // TODO(follow-up): the relation collapses this partial-derived
+        // outcome to a bare `RelationResult::Unknown` (the identity-carrier
+        // unwrap returns `Unresolvable` on the budget-tripped `Instantiate`).
+        // §5 carries forward a richer public relation outcome — a
+        // `RelationResult::BudgetExceeded` payload carrying the partial /
+        // proof so callers can distinguish a genuine non-relation from a
+        // budget-collapsed one. NOT required for cache-poisoning closure
+        // (the partial is already correctly refused admission here); tracked
+        // separately.
+        if relation_build_local.result_is_partial || relation_build_local.cache_suppress {
+            return (result, fence);
+        }
         // Self-version rooting: the relation judgement depends on the
         // `source` and `target` node surfaces plus the transitive facts
         // traced above — root the memo entry on the file content version

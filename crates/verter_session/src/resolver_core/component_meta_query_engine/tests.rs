@@ -4416,3 +4416,163 @@ export class C {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// FIX-7 M4 / M5 — wildcard-route fuse-trip is a PARTIAL, not an absent.
+// A route-only symbol whose wildcard-route fuse is exhausted was NEVER
+// looked up: its `None` MUST NOT admit an ImportedRegistryDb warm
+// negative, and the derived ResolvabilityDb `false` MUST NOT be cached.
+// ─────────────────────────────────────────────────────────────────
+
+/// Build the route-only re-export fixture: `ButtonProps` is
+/// re-exported from `./types` with NO local prepared declaration in
+/// `index.ts`, so resolving it takes the slow wildcard-route lane and
+/// consumes one `allow_wildcard_route()` tick.
+fn build_route_only_reexport_host() -> Arc<VerterHost> {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/m4_src/types.ts".to_string(),
+        Arc::from("export interface Props { primary: string }"),
+    );
+    ws.inject_file(
+        "/m4_src/index.ts".to_string(),
+        Arc::from("export { Props as ButtonProps } from './types'"),
+    );
+    let host = Arc::new(VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    ));
+    assert!(host.ensure_loaded("/m4_src/index.ts"));
+    assert!(host.ensure_loaded("/m4_src/types.ts"));
+    host.set_import_dependencies(
+        "/m4_src/index.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/m4_src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host
+}
+
+/// FIX-7 M4. A route-only symbol whose wildcard-route fuse is primed to
+/// ZERO trips on the slow lane — the symbol is NEVER looked up. The
+/// fuse-trip `None` MUST NOT admit an ImportedRegistryDb warm negative,
+/// and a FRESH engine WITH budget MUST resolve the symbol.
+///
+/// MUTATION CHECK: reverting M4 (collapsing FuseTripped back to a plain
+/// `None` resolved value that falls through to `Cacheable`) admits a
+/// warm negative — the `imported_registry_db().live_count()` assertion
+/// fails (a non-zero negative is cached).
+#[test]
+fn fuse_tripped_route_only_symbol_admits_no_warm_negative_and_fresh_resolves() {
+    let host = build_route_only_reexport_host();
+    // Materialise the keyed canonical's artifact so admission would have
+    // a provenance-pure signature available — isolating the refusal to
+    // the fuse-trip path, not a missing-artifact path.
+    assert!(host.ensure_indexed_ready("/m4_src/index.ts").is_some());
+
+    let imported_db = host.project_type_store().imported_registry_db();
+    let neg_before = imported_db.live_count();
+
+    // Request 1 — fuse primed to 0: the slow-lane `allow_wildcard_route()`
+    // trips immediately, so the symbol is never looked up (PARTIAL).
+    {
+        let mut engine = ComponentMetaQueryEngine::new(host.as_ref());
+        engine.prime_wildcard_route_fuse_for_tests(0);
+        let resolved = engine.resolve_imported_registry_symbol("/m4_src/index.ts", "ButtonProps");
+        assert!(
+            resolved.is_none(),
+            "the fuse-tripped request returns no symbol (the route was never taken)",
+        );
+        assert!(
+            engine.has_fuse_tripped(),
+            "fixture invariant: the wildcard-route fuse tripped on the route-only symbol",
+        );
+    }
+
+    assert_eq!(
+        imported_db.live_count(),
+        neg_before,
+        "M4: a wildcard-route fuse-trip MUST NOT admit an ImportedRegistryDb warm \
+         negative (the symbol was never looked up; admitting `value:None` would poison \
+         a later budgeted request) — live count must be unchanged",
+    );
+
+    // Request 2 — FRESH engine WITH budget. The symbol resolves (proving
+    // no warm negative short-circuited it to None).
+    let mut engine2 = ComponentMetaQueryEngine::new(host.as_ref());
+    let resolved2 = engine2.resolve_imported_registry_symbol("/m4_src/index.ts", "ButtonProps");
+    let resolved2 = resolved2.expect(
+        "M4: a fresh request WITH wildcard-route budget MUST resolve the route-only symbol — \
+         a cached fuse-trip negative would spuriously short-circuit it to None",
+    );
+    assert_eq!(
+        (
+            resolved2.canonical_id.as_str(),
+            resolved2.exported_name.as_str(),
+        ),
+        ("/m4_src/types.ts", "Props"),
+        "the budgeted request must resolve to the defining export",
+    );
+}
+
+/// FIX-7 M5. `can_resolve_registry_symbol` for a route-only symbol whose
+/// wildcard-route fuse is exhausted MUST NOT cache the derived `false`
+/// into ResolvabilityDb (the imported-registry call set the partial
+/// sticky), and a fresh budgeted request MUST report it resolvable.
+///
+/// MUTATION CHECK: reverting M5 (removing the partial-sticky gate before
+/// the ResolvabilityDb `Cacheable` admission) caches the derived `false`
+/// — the `resolvable_db().live_count()` assertion fails.
+#[test]
+fn fuse_tripped_resolvability_does_not_cache_derived_false() {
+    let host = build_route_only_reexport_host();
+    assert!(host.ensure_indexed_ready("/m4_src/index.ts").is_some());
+
+    let resolvable_db = host.project_type_store().resolvable_db();
+    let false_before = resolvable_db.live_count();
+
+    // Request 1 — fuse primed to 0: the imported-registry resolution
+    // trips the fuse and sets the request partial sticky, so the derived
+    // `false` MUST NOT be admitted. A `RequestContext` is installed
+    // because the partial sticky is request-scoped (production
+    // component-meta requests always install one before resolving).
+    {
+        use crate::request_context::{RequestContext, RequestContextGuard};
+        let rctx = RequestContext::new(1, Arc::from("/m4_src/index.ts"), false, None);
+        let _guard = RequestContextGuard::install(rctx);
+        let mut engine = ComponentMetaQueryEngine::new(host.as_ref());
+        engine.prime_wildcard_route_fuse_for_tests(0);
+        let _ = engine.can_resolve_registry_symbol("/m4_src/index.ts", "ButtonProps", None);
+        assert!(
+            engine.has_fuse_tripped(),
+            "fixture invariant: the wildcard-route fuse tripped during resolvability",
+        );
+        assert!(
+            crate::request_context::current_materialization_cache_suppress(),
+            "M5 precondition: the fuse-trip MUST set the request partial sticky (M4)",
+        );
+    }
+
+    assert_eq!(
+        resolvable_db.live_count(),
+        false_before,
+        "M5: a wildcard-route fuse-trip MUST NOT cache the derived ResolvabilityDb `false` \
+         (the symbol was never looked up) — live count must be unchanged",
+    );
+
+    // Request 2 — FRESH engine WITH budget. The symbol IS resolvable.
+    let mut engine2 = ComponentMetaQueryEngine::new(host.as_ref());
+    let resolvable2 = engine2.can_resolve_registry_symbol("/m4_src/index.ts", "ButtonProps", None);
+    assert!(
+        resolvable2,
+        "M5: a fresh request WITH wildcard-route budget MUST report the route-only symbol \
+         resolvable — a cached fuse-trip `false` would spuriously report it unresolvable",
+    );
+}

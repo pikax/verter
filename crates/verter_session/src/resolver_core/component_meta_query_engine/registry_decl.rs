@@ -36,7 +36,9 @@
 use verter_semantic::analysis::type_solver::query_engine::ProjectedSurface;
 use verter_type_expr::TypeExpr;
 
-use super::helpers::{is_builtin_name, resolve_imported_registry_symbol_with_budget};
+use super::helpers::{
+    is_builtin_name, resolve_imported_registry_symbol_with_budget, ImportedRegistrySymbolResolution,
+};
 use super::surface::{
     dispatch_route_expr_is_materialized, projected_compound_root_surface_via_dispatch,
     projected_surface_from_semantic_node, projected_surface_to_type_expr,
@@ -245,12 +247,32 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // The single, side-effecting resolution: the wildcard-route
             // fuse is consumed here at most once per key.
             let resolved: Option<ResolvedImportedRegistrySymbol> =
-                resolve_imported_registry_symbol_with_budget(
+                match resolve_imported_registry_symbol_with_budget(
                     ctx,
                     canonical_id,
                     exported_name,
                     || self.allow_wildcard_route(),
-                );
+                ) {
+                    ImportedRegistrySymbolResolution::Resolved(opt) => opt,
+                    ImportedRegistrySymbolResolution::FuseTripped => {
+                        // M4: the wildcard route was needed but the
+                        // per-request fuse was exhausted, so the symbol
+                        // was NEVER looked up. This `None` is a GENUINE
+                        // PARTIAL — admitting it as a warm negative would
+                        // poison subsequent identical requests that DO
+                        // have budget. Mark the request partial sticky so
+                        // the whole component-meta result refuses to warm,
+                        // and route the absent value through
+                        // `ReturnOnly(None)` (NOT a cacheable negative).
+                        crate::request_context::mark_request_materialization_cache_suppress();
+                        let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+                            crate::cache_runtime::NonAdmissionReason::PartialResult,
+                        );
+                        return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
+                            None,
+                        );
+                    }
+                };
             let resolved_value = resolved.map(std::sync::Arc::new);
             #[cfg(test)]
             if super::FORCE_IMPORTED_REGISTRY_ADMISSION_REFUSAL.with(|f| f.get()) {
@@ -545,6 +567,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 self.resolve_imported_registry_symbol(source_key, exported_name)
                     .is_some()
             };
+            // M5: if the imported-registry resolution above tripped the
+            // wildcard-route fuse (M4 set the request partial sticky), the
+            // derived `false` is NOT an authoritative "unresolvable"
+            // verdict — the symbol was never looked up. Refuse to admit it
+            // into `ResolvabilityDb`; the caller still recomputes the bool
+            // below so it never sees a spurious cached `false`. Routed
+            // through the shared result-cache partial gate.
+            if crate::cache_runtime::refuse_result_cache_admission_if_partial(false) {
+                return None;
+            }
             let observed = observed_keyed_hash?;
             match engine_fact_signature_for_exported_type(
                 self.ctx,

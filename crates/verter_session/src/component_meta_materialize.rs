@@ -263,6 +263,7 @@ pub fn convert_dispatch_result(
     input_node_for_sentinel: SemanticNodeId,
     local_fence: &mut Vec<(Arc<str>, DepVersion)>,
 ) -> MaterializeOutcome {
+    crate::request_context::observe_component_meta_read_suppress(&read);
     crate::component_meta_audit::merge_dep_signature_into_local_fence(
         local_fence,
         &read.dep_signature,
@@ -465,7 +466,43 @@ fn finish_materialize_admission(
                 value: outcome,
                 dep_signature: empty_signature(),
                 walker_diagnostics: Arc::from([]),
-                cache_suppress: false,
+                // A2 signal-split: a ReturnOnly outcome is ALWAYS
+                // non-cacheable by construction (the inner memo refuses
+                // admission for the intrinsic non-cacheable reason), so
+                // `cache_suppress` is unconditionally `true` — independent
+                // of whether the value is complete. `result_is_partial`
+                // carries ONLY the request's GENUINE partiality (budget /
+                // fatal / recursion folded onto the sticky flag); a
+                // complete-but-non-cacheable ReturnOnly stays
+                // `result_is_partial=false` so it does NOT suppress the
+                // component-meta final warm.
+                cache_suppress: true,
+                result_is_partial: crate::request_context::current_materialization_cache_suppress(),
+            },
+        );
+    }
+    // Shared result-cache partial gate (M1). A GENUINE partial — a
+    // budget exhaustion / fatal `QueryError` / same-path materialiser
+    // re-entry folded onto the request's materialization-cache-suppress
+    // sticky — must NOT warm-replay as a complete `MaterializeStructureDb`
+    // entry. The outcome is a valid `Value`/`Miss` whose structure is
+    // structurally incomplete; route it through `ReturnOnly` so the
+    // winning flight receives it and the shared cache stays empty for the
+    // next cold-miss to recompute against a fresh budget. Keyed on the
+    // sticky alone here — a `MaterializeOutcome` carries no per-value
+    // partial flag; the materialiser child rails (M2) propagate child
+    // partiality onto the sticky before this admission boundary runs.
+    if crate::cache_runtime::refuse_result_cache_admission_if_partial(false) {
+        let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+            crate::cache_runtime::NonAdmissionReason::PartialResult,
+        );
+        return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
+            crate::semantic_query::CacheRead {
+                value: outcome,
+                dep_signature: empty_signature(),
+                walker_diagnostics: Arc::from([]),
+                cache_suppress: true,
+                result_is_partial: true,
             },
         );
     }
@@ -500,7 +537,15 @@ fn finish_materialize_admission(
                     value: outcome,
                     dep_signature: empty_signature(),
                     walker_diagnostics: Arc::from([]),
-                    cache_suppress: false,
+                    // A2 signal-split (see the IntrinsicNonCacheable arm): a
+                    // self-root-refusal ReturnOnly is COMPLETE but
+                    // non-shareable — `cache_suppress=true` unconditionally,
+                    // `result_is_partial` carries ONLY the request's genuine
+                    // partiality so a complete materialised outcome still
+                    // warms the component-meta final cache.
+                    cache_suppress: true,
+                    result_is_partial:
+                        crate::request_context::current_materialization_cache_suppress(),
                 },
             )
         }
@@ -769,6 +814,9 @@ pub(crate) fn materialize_component_meta_structure(
             dep_signature: empty_signature(),
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
+            // Same-key re-entry is a structurally-incomplete (recursive)
+            // partial — gate it out of the MaterializeStructure warm cache.
+            result_is_partial: true,
         };
     }
 
@@ -779,6 +827,8 @@ pub(crate) fn materialize_component_meta_structure(
             dep_signature: empty_signature(),
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
+            // Depth-fuse abort yields a degraded (tainted) partial.
+            result_is_partial: true,
         };
     }
 
@@ -802,6 +852,8 @@ pub(crate) fn materialize_component_meta_structure(
             dep_signature: empty_signature(),
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
+            // Valid complete passthrough (package-ref / function skip).
+            result_is_partial: false,
         };
     }
 
@@ -827,6 +879,8 @@ pub(crate) fn materialize_component_meta_structure(
                     dep_signature: empty_signature(),
                     walker_diagnostics: Arc::from([]),
                     cache_suppress: false,
+                    // Valid complete passthrough (function-shape skip).
+                    result_is_partial: false,
                 };
             }
         }
@@ -967,6 +1021,7 @@ pub(crate) fn materialize_component_meta_structure(
                             crate::semantic_query::ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate),
                         ),
                     });
+                    crate::request_context::observe_component_meta_read_suppress(&body_read);
                     crate::component_meta_audit::merge_dep_signature_into_local_fence(
                         &mut local_fence,
                         &body_read.dep_signature,
@@ -1002,6 +1057,7 @@ pub(crate) fn materialize_component_meta_structure(
                             crate::semantic_query::ProjectionReductionContext::published(key_for_compute.mode),
                         ),
                     });
+                    crate::request_context::observe_component_meta_read_suppress(&projected);
                     crate::component_meta_audit::merge_dep_signature_into_local_fence(
                         &mut local_fence,
                         &projected.dep_signature,
@@ -1101,6 +1157,7 @@ pub(crate) fn materialize_component_meta_structure(
                     ),
                     args,
                 });
+                crate::request_context::observe_component_meta_read_suppress(&read);
                 crate::component_meta_audit::merge_dep_signature_into_local_fence(
                     &mut local_fence,
                     &read.dep_signature,
@@ -1122,6 +1179,16 @@ pub(crate) fn materialize_component_meta_structure(
                             mode: key_for_compute.mode,
                         };
                         let body_read = materialize_component_meta_structure(ctx, body_key);
+                        // M2 child rail: propagate a GENUINE-partial child
+                        // (same-key `Recursive`, budget-tripped `Tainted`,
+                        // fatal `Error`) onto the request partial sticky
+                        // BEFORE the symbolic-`Value` mapping below erases the
+                        // non-cacheable outcome kind. Without this, the parent
+                        // ref-body materialisation rebuilds a symbolic
+                        // `Value(base)` and `finish_materialize_admission`
+                        // would admit it as a complete `MaterializeStructureDb`
+                        // entry, warm-replaying a partial as complete.
+                        crate::request_context::observe_component_meta_read_suppress(&body_read);
                         crate::component_meta_audit::merge_dep_signature_into_local_fence(
                             &mut local_fence,
                             &body_read.dep_signature,
@@ -1195,6 +1262,7 @@ pub(crate) fn materialize_component_meta_structure(
                     path,
                     context: crate::semantic_query::ProjectionReductionContext::published(key_for_compute.mode),
                 });
+                crate::request_context::observe_component_meta_read_suppress(&read);
                 crate::component_meta_audit::merge_dep_signature_into_local_fence(
                     &mut local_fence,
                     &read.dep_signature,
@@ -1249,6 +1317,31 @@ pub(crate) fn materialize_component_meta_structure(
             match finalise {
                 crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
                     match admission {
+                        crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry)
+                            if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+                                false,
+                            ) =>
+                        {
+                            // Defensive M1 wrapper gate. A genuine partial
+                            // sticky raised DURING the fact-tracer install
+                            // window (after `finish_materialize_admission`
+                            // returned `Cacheable`) must still refuse the
+                            // wrapper-level re-publish. Route the valid
+                            // outcome through `ReturnOnly` with
+                            // `result_is_partial = true` so it never warms.
+                            let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
+                                crate::cache_runtime::NonAdmissionReason::PartialResult,
+                            );
+                            crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
+                                crate::semantic_query::CacheRead {
+                                    value: entry.outcome,
+                                    dep_signature: empty_signature(),
+                                    walker_diagnostics: Arc::from([]),
+                                    cache_suppress: true,
+                                    result_is_partial: true,
+                                },
+                            )
+                        }
                         crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(mut entry) => {
                             // Merge the tracer's authoritative
                             // observation set ON TOP of the producer
@@ -1296,6 +1389,9 @@ pub(crate) fn materialize_component_meta_structure(
                                             dep_signature: empty_signature(),
                                             walker_diagnostics: Arc::from([]),
                                             cache_suppress: false,
+                                            // Complete result, non-cacheable
+                                            // (self-root conflict) — not a partial.
+                                            result_is_partial: false,
                                         },
                                     )
                                 }
@@ -1318,15 +1414,39 @@ pub(crate) fn materialize_component_meta_structure(
                     // non-cacheable) passes through unchanged.
                     match admission {
                         crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
+                            // Defensive M1 wrapper gate (overflow arm). A
+                            // genuine partial sticky takes precedence over the
+                            // benign signature-overflow reason: preserve
+                            // `result_is_partial = sticky` so a partial that
+                            // also overflowed never warms.
+                            let result_is_partial =
+                                crate::cache_runtime::refuse_result_cache_admission_if_partial(
+                                    false,
+                                );
                             let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                                crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
+                                if result_is_partial {
+                                    crate::cache_runtime::NonAdmissionReason::PartialResult
+                                } else {
+                                    crate::cache_runtime::NonAdmissionReason::SignatureOverflow
+                                },
                             );
                             crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
                                 crate::semantic_query::CacheRead {
                                     value: entry.outcome,
                                     dep_signature: empty_signature(),
                                     walker_diagnostics: Arc::from([]),
-                                    cache_suppress: false,
+                                    // Signature-overflow = benign non-cacheable
+                                    // COMPLETE per the two-signal model: ReturnOnly
+                                    // already gates inner-memo admission, but
+                                    // cache_suppress carries the non-cacheability
+                                    // signal consistently with the Tainted /
+                                    // self-root-refusal ReturnOnly arms above —
+                                    // result_is_partial defensively tracks the
+                                    // sticky: a complete-but-overflowed value
+                                    // stays false; a genuine partial that also
+                                    // overflowed stays true so it never warms.
+                                    cache_suppress: true,
+                                    result_is_partial,
                                 },
                             )
                         }
@@ -1357,6 +1477,9 @@ pub(crate) fn materialize_component_meta_structure(
                 dep_signature: empty_signature(),
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: false,
+                // Cooperative-admission failure surfaces a degraded
+                // (tainted) partial; the next call re-attempts cold.
+                result_is_partial: true,
             }
         }
     }
@@ -1509,6 +1632,13 @@ fn materialize_child_at_nested(
         mode: parent_key.mode,
     };
     let sub_read = materialize_component_meta_structure(ctx, sub_key);
+    // M2 child rail: a GENUINE-partial child (same-key `Recursive`,
+    // depth-fuse `Tainted`, fatal `Error`) must raise the request partial
+    // sticky BEFORE the `child`-symbolic mapping below erases the
+    // non-cacheable outcome kind — otherwise the parent object surface
+    // rebuilds with the child kept symbolic and `finish_materialize_admission`
+    // admits it as a complete `MaterializeStructureDb` entry.
+    crate::request_context::observe_component_meta_read_suppress(&sub_read);
     crate::component_meta_audit::merge_dep_signature_into_local_fence(
         local_fence,
         &sub_read.dep_signature,
@@ -1677,6 +1807,7 @@ mod tests {
             dep_signature: dummy_dep_signature(),
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
+            result_is_partial: false,
         };
         let outcome = convert_dispatch_result(read, dummy_node(7), &mut fence);
         match outcome {
@@ -1698,6 +1829,7 @@ mod tests {
             dep_signature: dummy_dep_signature(),
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
+            result_is_partial: false,
         };
         match convert_dispatch_result(read, dummy_node(7), &mut fence) {
             MaterializeOutcome::Value(id) => assert_eq!(id, dummy_node(42)),
@@ -1713,6 +1845,7 @@ mod tests {
             dep_signature: dummy_dep_signature(),
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
+            result_is_partial: false,
         };
         match convert_dispatch_result(read, dummy_node(7), &mut fence) {
             MaterializeOutcome::Error(QueryError::Miss) => {}
@@ -3089,9 +3222,211 @@ export type C<T> = A<T>
              before={refusals_before}, after={refusals_after}"
         );
 
+        // Discrimination #4 (benign, NOT partial): a tracer-signature
+        // overflow is BENIGN non-cacheability — the materialised outcome is
+        // COMPLETE, only its dependency fence cannot be represented. The
+        // ReturnOnly read MUST carry `result_is_partial = false` so the
+        // component-meta / shape / materialize warm gates (which key on
+        // `result_is_partial` ONLY) still admit the COMPLETE final result.
+        //
+        // MUTATION CHECK: mutating the Overflow ReturnOnly arm to set
+        // `result_is_partial = true` (the corrected-last-round bug class)
+        // makes this assertion FAIL — the benign overflow would then wrongly
+        // gate the final component-meta warm.
+        assert!(
+            !read.result_is_partial,
+            "a benign tracer-signature overflow MUST surface result_is_partial=false (complete, \
+             inner-memo non-cacheable only) — setting result_is_partial=true here would wrongly \
+             refuse the COMPLETE component-meta final warm"
+        );
+
+        // Discrimination #5 (two-signal reconciliation): a signature-overflow
+        // ReturnOnly carries `cache_suppress = true` — the non-cacheability
+        // signal, consistent with the Tainted / self-root-refusal ReturnOnly
+        // arms and the synthetic benign-overflow shape in
+        // component_meta_no_cache_promotion_tests.rs. ReturnOnly already gates
+        // inner-memo admission, but the bit must agree across code/test/prose.
+        assert!(
+            read.cache_suppress,
+            "a benign tracer-signature overflow ReturnOnly MUST carry cache_suppress=true \
+             (benign non-cacheable COMPLETE per the two-signal model); cache_suppress=false here \
+             diverges from the Tainted/self-root ReturnOnly arms and the synthetic shape"
+        );
+
         // Drop the force guard before any subsequent operations so a
         // panic in the test driver does not leak the forced state.
         drop(_force_guard);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // FIX-7 M1 / M2 — MaterializeStructureDb partial-admission gate +
+    // materializer child rails. The partial sticky
+    // (`materialization_cache_suppress`) is a GENUINE-partial signal;
+    // `finish_materialize_admission` must refuse `Cacheable` admission
+    // when it is set, routing the valid outcome through `ReturnOnly` so
+    // the next cold-miss recomputes against a fresh budget.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// FIX-7 M1 (direct). A request whose partial sticky is set MUST NOT
+    /// admit a `MaterializeStructureDb` entry, and a fresh request (sticky
+    /// clear) MUST cold-rebuild — proving the partial never warm-replayed.
+    ///
+    /// MUTATION CHECK: reverting the `finish_materialize_admission` partial
+    /// gate (the `refuse_result_cache_admission_if_partial(false)` early
+    /// return before `Cacheable`) makes the first call admit an entry,
+    /// failing the "no entry after partial" assertion.
+    #[test]
+    fn partial_sticky_refuses_materialize_structure_admission_and_fresh_rebuilds() {
+        use crate::request_context::{RequestContext, RequestContextGuard};
+        use crate::semantic_query::ProjectionMode;
+
+        let project = a0_make_project();
+        project
+            .upsert_base(
+                "/m1_types.ts",
+                "export type Foo = { x: number; y: string };",
+            )
+            .unwrap();
+        let host = project.host();
+
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let decl_ref_node = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/m1_types.ts",
+                &verter_type_expr::TypeExpr::Ref {
+                    name: StdArc::from("Foo"),
+                    type_arguments: StdArc::from(Vec::new()),
+                },
+                ProjectionMode::Navigate,
+            )
+            .expect("lowering Foo via Navigate must succeed");
+        let key = MaterializeStructureCacheKey {
+            scope_canonical_id: StdArc::from("/m1_types.ts"),
+            base: decl_ref_node,
+            scope_axis: MaterializationScope::TopLevel,
+            mode: ProjectionMode::Expanded,
+        };
+        let db = host.project_type_store().materialize_structure_db();
+        let entries_before = db.live_count();
+
+        // Request 1 — install a context and raise the partial sticky to
+        // simulate a budget-tripped / recursive contributing read folded
+        // onto the request. The materialise outcome is valid but MUST NOT
+        // be admitted.
+        {
+            let ctx = RequestContext::new(1, StdArc::from("/m1_types.ts"), false, None);
+            let _guard = RequestContextGuard::install(ctx);
+            crate::request_context::mark_request_materialization_cache_suppress();
+            assert!(
+                crate::request_context::current_materialization_cache_suppress(),
+                "fixture invariant: partial sticky armed for request 1",
+            );
+            let read = materialize_component_meta_structure(host, key.clone());
+            assert!(
+                read.result_is_partial,
+                "the partial-sticky request's materialise read MUST surface \
+                 result_is_partial=true (the gate folds the sticky onto the ReturnOnly)",
+            );
+        }
+
+        assert_eq!(
+            db.live_count(),
+            entries_before,
+            "M1: a partial-sticky request MUST NOT admit a MaterializeStructureDb \
+             entry (reverting the finish_materialize_admission gate makes this fail)",
+        );
+        assert!(
+            db.peek(&key, host).is_none(),
+            "M1: MaterializeStructureDb MUST hold no candidate for the partial request's key",
+        );
+
+        // Request 2 — NO sticky. The materialise MUST cold-rebuild (the
+        // cache was never warmed by the partial) and now admit a complete
+        // entry.
+        let read2 = materialize_component_meta_structure(host, key.clone());
+        assert!(
+            !read2.result_is_partial,
+            "the fresh request's complete materialise read MUST be result_is_partial=false",
+        );
+        assert!(
+            db.peek(&key, host).is_some(),
+            "M1: a fresh (sticky-clear) request MUST cold-rebuild and admit a \
+             complete MaterializeStructureDb entry — proving the partial never \
+             warm-replayed and the slot was genuinely empty",
+        );
+    }
+
+    /// FIX-7 M2 (child rail). A same-key re-entry surfaces a `Recursive`
+    /// `result_is_partial=true` child; `observe_component_meta_read_suppress`
+    /// on the `sub_read` rail of `materialize_child_at_nested` MUST raise
+    /// the request partial sticky BEFORE the symbolic-`child` remap erases
+    /// the non-cacheable outcome kind.
+    ///
+    /// The re-entry is forced deterministically by pushing the child's
+    /// Nested key into the in-flight guard before calling
+    /// `materialize_child_at_nested`, so the inner
+    /// `materialize_component_meta_structure` takes the same-key re-entry
+    /// branch (the `Recursive` partial). This is the exact production rail —
+    /// only the trigger is deterministic.
+    ///
+    /// MUTATION CHECK: removing the `observe_component_meta_read_suppress`
+    /// call on the `materialize_child_at_nested` rail leaves the sticky
+    /// clear — this assertion fails.
+    #[test]
+    fn child_rail_same_key_recursion_raises_partial_sticky() {
+        use crate::request_context::{RequestContext, RequestContextGuard};
+        use crate::semantic_query::{ProjectionMode, SemanticNodeId};
+
+        let project = a0_make_project();
+        project
+            .upsert_base("/m2_types.ts", "export type Foo = { x: number };")
+            .unwrap();
+        let host = project.host();
+        let ctx_host: &dyn ResolverContext = host;
+
+        // A concrete child node id; the parent key carries it as base.
+        let child = SemanticNodeId(1);
+        let parent_key = MaterializeStructureCacheKey {
+            scope_canonical_id: StdArc::from("/m2_types.ts"),
+            base: SemanticNodeId(0),
+            scope_axis: MaterializationScope::TopLevel,
+            mode: ProjectionMode::Expanded,
+        };
+        // The sub_key `materialize_child_at_nested` will construct for the
+        // child — push it into the in-flight guard so the inner materialise
+        // hits the same-key re-entry (`Recursive`, result_is_partial=true).
+        let sub_key = MaterializeStructureCacheKey {
+            scope_canonical_id: StdArc::clone(&parent_key.scope_canonical_id),
+            base: child,
+            scope_axis: MaterializationScope::Nested,
+            mode: parent_key.mode,
+        };
+
+        let rctx = RequestContext::new(1, StdArc::from("/m2_types.ts"), false, None);
+        let _guard = RequestContextGuard::install(rctx);
+        assert!(
+            !crate::request_context::current_materialization_cache_suppress(),
+            "fixture invariant: partial sticky clear before the recursive child rail",
+        );
+
+        let _inflight = MaterializeInFlightGuard::push(sub_key.clone());
+        let mut local_fence: Vec<(StdArc<str>, DepVersion)> = Vec::new();
+        let (returned, _changed) =
+            materialize_child_at_nested(ctx_host, &parent_key, child, &mut local_fence);
+
+        // The child rail kept the node symbolic (Recursive remapped to the
+        // input child id) — but the rail's observe call MUST have raised the
+        // partial sticky first.
+        assert_eq!(
+            returned, child,
+            "fixture invariant: a Recursive child is remapped to the input child id (symbolic)",
+        );
+        assert!(
+            crate::request_context::current_materialization_cache_suppress(),
+            "M2: a same-key recursive child MUST raise the request partial sticky via the \
+             materialize_child_at_nested rail (removing observe_component_meta_read_suppress \
+             leaves it clear)",
+        );
     }
 
     /// `MaterializeStructureDb::peek` rejects a candidate whose

@@ -87,6 +87,14 @@ pub(super) struct InflightState {
     /// `false` for the abort/retry path (the sentinel result there is
     /// not a real winner build).
     pub(super) cache_suppress: bool,
+    /// The winner build's `result_is_partial` flag — the partial-result
+    /// signal (budget / cancellation / recursion / walker fatal). Set by
+    /// the winner alongside `completed`; a joiner that observes
+    /// `aborted == false` returns this verbatim so a joiner inside an
+    /// outer component-meta synthesis inherits the partial taint and the
+    /// warm gate suppresses the outer result. `false` for the abort/retry
+    /// path. Distinct from [`Self::cache_suppress`] (memo admission only).
+    pub(super) result_is_partial: bool,
     /// `true` once some thread owns the build. Subsequent threads wait on
     /// `ready` rather than trying to own it themselves.
     pub(super) claimed: bool,

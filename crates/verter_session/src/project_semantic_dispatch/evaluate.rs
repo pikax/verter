@@ -15,8 +15,7 @@ use std::sync::Arc;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     IndexKey, LiteralValue, PathSegment, ProjectionMode, ProjectionReductionContext, QueryError,
-    QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
-    SemanticQueryOutput,
+    QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 
 /// Hard ceiling on recursive `evaluate_deferred_semantic_node_with_context`
@@ -221,11 +220,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticNodeData::KeyOf { base } => {
                     let base =
                         self.evaluate_deferred_semantic_node_with_context(*base, reduction_context);
-                    match self.execute_type_node(SemanticQueryKey::KeyOf {
+                    let read = self.execute_read(SemanticQueryKey::KeyOf {
                         base,
                         context: reduction_context,
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                    });
+                    // A2 signal-split: the deferred-shell evaluator returns a
+                    // bare node (hash-cons memoised), so it folds a genuinely
+                    // incomplete nested read onto the request's sticky partial
+                    // flag — the component-meta / materialize warm gates
+                    // consult that flag and refuse a partial-tainted result.
+                    crate::request_context::observe_component_meta_read_suppress(&read);
+                    match read.value {
+                        QueryResult::Value(id) => id,
                         _ => break self.opaque(QueryError::Miss),
                     }
                 }
@@ -249,30 +255,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         IndexKey::Number(number) => IndexKey::Number(*number),
                         IndexKey::TypeNode(node) => self.normalized_index_key_node(*node),
                     };
-                    match self.execute_type_node(SemanticQueryKey::IndexedAccess {
+                    let read = self.execute_read(SemanticQueryKey::IndexedAccess {
                         base: object,
                         index,
                         mode: reduction_context.mode,
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                    });
+                    crate::request_context::observe_component_meta_read_suppress(&read);
+                    match read.value {
+                        QueryResult::Value(id) => id,
                         _ => break self.opaque(QueryError::Miss),
                     }
                 }
                 SemanticNodeData::Mapped { source, mapper } => {
-                    match self.execute_type_node(SemanticQueryKey::MappedType {
+                    let read = self.execute_read(SemanticQueryKey::MappedType {
                         source: *source,
                         mapper: mapper.clone(),
                         context: reduction_context,
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                    });
+                    crate::request_context::observe_component_meta_read_suppress(&read);
+                    match read.value {
+                        QueryResult::Value(id) => id,
                         _ => break self.opaque(QueryError::Miss),
                     }
                 }
                 SemanticNodeData::TypeOf { value_root, path } => {
-                    let root = match self.execute_type_node(SemanticQueryKey::TypeOf {
+                    let read = self.execute_read(SemanticQueryKey::TypeOf {
                         value_root: value_root.clone(),
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                    });
+                    crate::request_context::observe_component_meta_read_suppress(&read);
+                    let root = match read.value {
+                        QueryResult::Value(id) => id,
                         _ => break self.opaque(QueryError::Miss),
                     };
                     if path.is_empty() {
@@ -284,14 +296,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 .collect::<Vec<_>>()
                                 .into_boxed_slice(),
                         );
-                        match self.execute_type_node(SemanticQueryKey::ProjectPath {
+                        let read = self.execute_read(SemanticQueryKey::ProjectPath {
                             base: root,
                             path: projection_path,
                             context: crate::semantic_query::ProjectionReductionContext::published(
                                 ProjectionMode::Navigate,
                             ),
-                        }) {
-                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                        });
+                        crate::request_context::observe_component_meta_read_suppress(&read);
+                        match read.value {
+                            QueryResult::Value(id) => id,
                             _ => break self.opaque(QueryError::Miss),
                         }
                     }
@@ -302,16 +316,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true_branch_ref,
                     false_branch_ref,
                     distributive,
-                } => match self.execute_type_node(SemanticQueryKey::Conditional {
-                    check: *check,
-                    extends: *extends,
-                    true_branch: *true_branch_ref,
-                    false_branch: *false_branch_ref,
-                    distributive: *distributive,
-                }) {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                    _ => break self.opaque(QueryError::Miss),
-                },
+                } => {
+                    let read = self.execute_read(SemanticQueryKey::Conditional {
+                        check: *check,
+                        extends: *extends,
+                        true_branch: *true_branch_ref,
+                        false_branch: *false_branch_ref,
+                        distributive: *distributive,
+                    });
+                    crate::request_context::observe_component_meta_read_suppress(&read);
+                    match read.value {
+                        QueryResult::Value(id) => id,
+                        _ => break self.opaque(QueryError::Miss),
+                    }
+                }
                 SemanticNodeData::TemplateLiteral {
                     quasis,
                     expressions,
@@ -375,12 +393,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // re-opened nested `keyof` / `Mapped` reification
                     // during relation-engine binding; the caller's
                     // `StructuralTransit` context now carries through.
-                    match self.execute_type_node(SemanticQueryKey::Instantiate {
+                    let read = self.execute_read(SemanticQueryKey::Instantiate {
                         base,
                         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         context: self.instantiate_context_for(&owner_canonical, reduction_context),
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                    });
+                    crate::request_context::observe_component_meta_read_suppress(&read);
+                    match read.value {
+                        QueryResult::Value(id) => id,
                         _ => break self.opaque(QueryError::Miss),
                     }
                 }

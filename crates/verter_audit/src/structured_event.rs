@@ -110,6 +110,15 @@ pub enum NonAdmissionReason {
     /// The cold compute itself failed (panic substitute, missing dep,
     /// parse error).
     ComputeFailed,
+    /// The result is a GENUINE partial: a request-scoped partiality
+    /// signal (budget exhaustion, fatal `QueryError`, same-path
+    /// recursion, walker fatal) was folded onto the request's
+    /// materialization-cache-suppress sticky during the cold compute.
+    /// A partial must NOT warm-replay as complete, so every result-cache
+    /// admission gate (`MaterializeStructureDb`, `ShapeCacheDb`,
+    /// `ImportedRegistryDb`, `ResolvabilityDb`) routes the value through
+    /// `ReturnOnly` under this reason rather than admitting it.
+    PartialResult,
 }
 
 impl std::fmt::Display for NonAdmissionReason {
@@ -127,6 +136,7 @@ impl std::fmt::Display for NonAdmissionReason {
             Self::Cancelled => "Cancelled",
             Self::UnresolvedProvenance => "UnresolvedProvenance",
             Self::ComputeFailed => "ComputeFailed",
+            Self::PartialResult => "PartialResult",
         };
         f.write_str(name)
     }

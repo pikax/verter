@@ -2028,6 +2028,7 @@ impl SemanticGraphStore {
                     dep_signature,
                     walker_diagnostics: entry.walker_diagnostics,
                     cache_suppress: false,
+                    result_is_partial: false,
                 }
             })
         });
@@ -2110,6 +2111,7 @@ impl SemanticGraphStore {
                 dep_signature,
                 walker_diagnostics: entry.walker_diagnostics,
                 cache_suppress: false,
+                result_is_partial: false,
             }
         });
         if let Some(rctx) = crate::request_context::current_request_context() {
@@ -2368,6 +2370,7 @@ impl SemanticGraphStore {
             dep_signature: Arc::clone(&entry.dispatch_dep_signature),
             walker_diagnostics: entry.walker_diagnostics,
             cache_suppress: false,
+            result_is_partial: false,
         };
 
         // Instrumentation — fast-path attribution.
@@ -2521,6 +2524,8 @@ impl SemanticGraphStore {
                     dep_signature: empty_signature(),
                     walker_diagnostics: std::sync::Arc::from([]),
                     cache_suppress: false,
+                    // Same-path recursion sentinel is a partial — gate out of warm caches.
+                    result_is_partial: true,
                 };
             }
 
@@ -2598,6 +2603,7 @@ impl SemanticGraphStore {
                 // neither the suppressed child's suppression nor (via
                 // the carrier bubble below) its dep facts.
                 let cache_suppress = state.cache_suppress;
+                let result_is_partial = state.result_is_partial;
                 let walker_diagnostics = state
                     .walker_diagnostics
                     .clone()
@@ -2730,6 +2736,7 @@ impl SemanticGraphStore {
                     dep_signature,
                     walker_diagnostics,
                     cache_suppress,
+                    result_is_partial,
                 };
             }
             state.claimed = true;
@@ -2761,6 +2768,7 @@ impl SemanticGraphStore {
             dep_signature,
             walker_diagnostics,
             cache_suppress,
+            result_is_partial,
             taint: _, // §18 taint already consumed upstream by `admit_decision`.
             observed_self_roots: _,
             graph_carrier,
@@ -2841,36 +2849,15 @@ impl SemanticGraphStore {
         // duplicating the publish primitives. Pure refactor — TOCTOU
         // semantics, ResolvedNamedType bypass, and reverse-index
         // semantics all live inside the helper.
-        // Memo no-poison contract: refuse insertion when the build's
-        // `cache_suppress` flag is set (pathological-input cap fired,
-        // or a transitive query produced a fatal `QueryError`). The
-        // result still flows back to the caller, but the next request
-        // re-runs cold so the suppression decision applies under the
-        // current state of the world rather than being fossilised.
-        // Resolve TWO carriers from the build output:
-        //
-        // - `broadcast_carrier` — ALWAYS resolved. It is bubbled into
-        //   this winner thread's outer tracer AND recorded on the
-        //   in-flight state so cross-thread joiners bubble the SAME
-        //   fact rail. The production cold-build path
-        //   (`ProjectSemanticDispatch::execute_via_cold_build_helper`)
-        //   sets `graph_carrier` via `finalise_traced_build_output` —
-        //   for a cacheable build the self-version-rooted carrier, and
-        //   for a non-cacheable `Ok(traced)→None` build a non-admitted
-        //   carrier still carrying the traced cross-file dep facts (so
-        //   joiners inherit the suppressed child's transitive deps). A
-        //   direct `execute_cooperative` caller that bypasses the
-        //   dispatch's `traced_build` wrapper (test / debug drivers)
-        //   leaves `graph_carrier` unset; such a build broadcasts an
-        //   empty carrier — its build observed no traced facts.
-        //
-        // - `publish_carrier` — `Some` only when the build is
-        //   cacheable (`!cache_suppress`). A `cache_suppress` build
-        //   (tracer overflow, pathological input, or an unrootable
-        //   `None` signature) is non-cacheable: it is NEVER admitted to
-        //   the memo. But its `broadcast_carrier` is still bubbled to
-        //   joiners — broadcasting the build's dependency state is
-        //   independent of memo admission.
+        // Memo no-poison contract: refuse insertion when the build is
+        // non-cacheable (`cache_suppress`) or partial — the result still
+        // flows back to the caller, but the next request re-runs cold.
+        // `broadcast_carrier` is ALWAYS resolved (bubbled into this winner's
+        // outer tracer AND recorded on the in-flight state so cross-thread
+        // joiners bubble the SAME fact rail; `finalise_traced_build_output`
+        // sets `graph_carrier`, else an empty carrier). `publish_carrier` is
+        // `Some` ONLY for an admissible build (see the §2 gate below);
+        // broadcasting is independent of admission.
         let broadcast_carrier: crate::fact_signature_helpers::ReadSetSignature = match graph_carrier
         {
             Some(boxed) => *boxed,
@@ -2878,8 +2865,19 @@ impl SemanticGraphStore {
                 crate::fact_signature_helpers::empty_fact_signature(),
             ),
         };
+        // §2 memo-admission invariant: refuse admission on
+        // `cache_suppress || result_is_partial` (defensive OR — a partial
+        // entry must NOT exist; a laundered `Value + result_is_partial=true`
+        // would be reconstructed as a COMPLETE `CacheRead` on a later warm
+        // read). `finalise_traced_build_output` already enforces
+        // `result_is_partial ⟹ cache_suppress`; the debug_assert pins it here.
+        debug_assert!(
+            !result_is_partial || cache_suppress,
+            "§1 invariant violated at memo admission: result_is_partial \
+             without cache_suppress would launder a partial into the family memo"
+        );
         let publish_carrier: Option<&crate::fact_signature_helpers::ReadSetSignature> =
-            if cache_suppress {
+            if cache_suppress || result_is_partial {
                 None
             } else {
                 Some(&broadcast_carrier)
@@ -3026,6 +3024,8 @@ impl SemanticGraphStore {
                 // publish an outer entry despite a non-cacheable
                 // transitive child.
                 state.cache_suppress = cache_suppress;
+                // Propagate the partial signal so a joiner inherits the taint.
+                state.result_is_partial = result_is_partial;
                 state.walker_diagnostics = Some(std::sync::Arc::clone(&walker_diagnostics));
             }
         }
@@ -3066,6 +3066,7 @@ impl SemanticGraphStore {
             dep_signature,
             walker_diagnostics,
             cache_suppress,
+            result_is_partial,
         }
     }
 

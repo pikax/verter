@@ -111,6 +111,7 @@ pub(crate) fn resolve_macro_payload_diagnostic_probe(
             ProjectionMode::Shallow,
         ),
     });
+    crate::request_context::observe_component_meta_read_suppress(&probe_read);
     emit_dispatch_dep_signature_facts(dispatch.ctx, &probe_read.dep_signature);
 
     if !probe_read.walker_diagnostics.is_empty() {
@@ -436,6 +437,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 ProjectionMode::Shallow,
             ),
         });
+        crate::request_context::observe_component_meta_read_suppress(&branch_read);
         emit_dispatch_dep_signature_facts(dispatch.ctx, &branch_read.dep_signature);
         if !branch_read.walker_diagnostics.is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(

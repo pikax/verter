@@ -1300,15 +1300,36 @@ impl ShapeCacheDb {
         // strict warm-read validation rejects a same-scope content edit.
         let self_roots: Arc<[Arc<str>]> =
             Arc::from(vec![Arc::clone(key.subject.scope_canonical())]);
+        // M3 central partial gate. A computed shape that is itself a
+        // GENUINE partial (the value's own `result_is_partial`, or any
+        // contributing read having raised the request partial sticky) must
+        // NOT be admitted into `ShapeCacheDb` — a warm replay would serve
+        // the partial as a complete shape. The cold value is still returned
+        // to the caller; only the cache write is skipped. The
+        // `refused_partial` cell captures the value when the gate refuses
+        // so `lookup` (which would surface `None` for a `None`-returning
+        // compute) does not erase it.
+        let refused_partial: std::cell::RefCell<Option<MaterializedTypeExpr>> =
+            std::cell::RefCell::new(None);
         let node = SingleEntryArtifactNode {
             entries: &self.entries,
             inflight: &self.inflight,
             live_counter: &self.live_counter,
-            compute: std::cell::RefCell::new(Some(move || {
-                compute().map(|(value, facts)| (value, facts, Arc::clone(&self_roots)))
+            compute: std::cell::RefCell::new(Some(|| {
+                compute().and_then(|(value, facts)| {
+                    if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+                        value.result_is_partial,
+                    ) {
+                        *refused_partial.borrow_mut() = Some(value);
+                        None
+                    } else {
+                        Some((value, facts, Arc::clone(&self_roots)))
+                    }
+                })
             })),
         };
-        lookup(&node, key.clone(), ctx)
+        let admitted = lookup(&node, key.clone(), ctx);
+        admitted.or_else(|| refused_partial.into_inner())
     }
 
     /// Universal-caching admission helper. Admits an already-computed
@@ -1322,6 +1343,12 @@ impl ShapeCacheDb {
     /// — e.g. when the cache's signature check on the live `StoreView`
     /// rejects the entry — the caller still receives the same value
     /// it computed).
+    ///
+    /// M3 central partial gate: this delegates to [`Self::get_or_compute`],
+    /// whose `refuse_result_cache_admission_if_partial` gate refuses to
+    /// admit a GENUINE partial (the value's own `result_is_partial`, or
+    /// the request partial sticky). On refusal the value is returned
+    /// verbatim and `peek` continues to miss.
     pub(crate) fn admit_computed(
         &self,
         key: &ShapeCacheKey,
@@ -1384,7 +1411,7 @@ impl ShapeCacheDb {
                 node_id: None,
                 type_expr: TypeExpr::Unknown { raw: String::new() },
                 dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
-                cache_suppress: false,
+                result_is_partial: false,
             },
             signature: ReadSetSignature::empty(),
             self_root_canonicals: Arc::from(vec![Arc::clone(key.subject.scope_canonical())]),
@@ -1452,7 +1479,7 @@ impl ShapeCacheDb {
                 node_id: node_for_provenance,
                 type_expr: deep_type,
                 dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
-                cache_suppress: false,
+                result_is_partial: false,
             },
             signature: ReadSetSignature::empty(),
             self_root_canonicals: Arc::from(vec![Arc::clone(key.subject.scope_canonical())]),
@@ -1750,12 +1777,28 @@ impl MaterializeStructureDb {
             move || -> CacheAdmission<crate::semantic_query::CacheRead<MaterializeOutcome>> {
                 match compute() {
                     crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
+                        // Defensive M1 invariant: only complete/cacheable
+                        // entries lower into `MaterializeStructureDb`. A
+                        // genuine partial is converted to `ReturnOnly` by
+                        // `finish_materialize_admission` + the fact-tracer
+                        // wrapper arms BEFORE this lowering runs, so the
+                        // request-scoped materialization-cache-suppress sticky
+                        // must be clear here. If this fires, a partial leaked
+                        // past the upstream gates — the warm entry it would
+                        // publish could replay a partial as complete.
+                        debug_assert!(
+                            !crate::request_context::current_materialization_cache_suppress(),
+                            "MaterializeStructureDb lowered a Cacheable entry while the \
+                             request partial sticky was set — a partial leaked past the \
+                             finish_materialize_admission / fact-tracer ReturnOnly gates"
+                        );
                         CacheAdmission::Cacheable {
                             value: crate::semantic_query::CacheRead {
                                 value: entry.outcome,
                                 dep_signature: Arc::clone(&entry.dispatch_dep_signature),
                                 walker_diagnostics: Arc::from([]),
                                 cache_suppress: false,
+                                result_is_partial: false,
                             },
                             signature: entry.read_set_signature,
                             self_root_canonicals: entry.self_root_canonicals,
@@ -1844,6 +1887,7 @@ impl MaterializeStructureDb {
             dep_signature: Arc::from(Vec::new()),
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
+            result_is_partial: false,
         };
         self.store.insert_for_test(
             key,
@@ -1871,6 +1915,7 @@ impl MaterializeStructureDb {
             dep_signature: Arc::from(Vec::new()),
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
+            result_is_partial: false,
         };
         self.store.insert_for_test(
             key,
@@ -2076,6 +2121,7 @@ impl RefCycleResultDb {
                         dep_signature: Arc::clone(&entry.dispatch_dep_signature),
                         walker_diagnostics: Arc::from([]),
                         cache_suppress: false,
+                        result_is_partial: false,
                     },
                     signature: entry.read_set_signature,
                     self_root_canonicals: entry.self_root_canonicals,
@@ -2191,6 +2237,7 @@ impl RefCycleResultDb {
             dep_signature: Arc::from(Vec::new()),
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
+            result_is_partial: false,
         };
         self.store.insert_for_test(
             id,
@@ -2513,6 +2560,7 @@ where
             dep_signature,
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
+            result_is_partial: false,
         };
         // Refuse shared admission when the BFS fence carries a
         // `RouteGeneration` dependency — route generation has no

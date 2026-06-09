@@ -60,6 +60,44 @@ pub fn mark_request_materialization_cache_suppress() {
     }
 }
 
+/// Class-fix helper for the component-meta read/materialize path: observe a
+/// completed dispatch read and propagate PARTIAL-result suppression onto
+/// the request-scoped sticky flag.
+///
+/// EVERY `dispatch.execute_read(...)` in the component-meta path
+/// (projectors, the macro-payload substrate, dispatch helpers, graph
+/// predicates, the slot-binding graph, and `component_meta_materialize`)
+/// must route its result through this helper. A budget exhaustion / fatal
+/// `QueryError` (`BudgetExceeded` / `UnstableState`) / same-path recursion
+/// / walker fatal produces a PARTIAL value: such a read MUST suppress the
+/// whole component-meta result's warm promotion (else a subsequent
+/// identical request replays the poisoned partial instead of
+/// cold-recomputing against the fresh budget).
+///
+/// CRITICAL distinction (the A2 signal split): the warm gate keys on
+/// [`crate::semantic_query::CacheRead::result_is_partial`], NOT on
+/// `cache_suppress`. `cache_suppress` is ALSO set when a perfectly VALID
+/// complete result is merely not memo-publishable (a torn / unrootable
+/// self-root, a tracer signature overflow, a `ReturnOnly`
+/// cross-owner-reuse admission; see `project_semantic_dispatch::mod`'s
+/// admission arms). Those are benign non-cacheability, NOT partial results
+/// — keying the warm gate on `cache_suppress` would wrongly refuse to warm
+/// a complete component-meta result (e.g. a carrier-stopped open `Pick`
+/// whose valid shell rode a non-cacheable sub-read). Equally, a value-kind
+/// gate (`matches!(value, Error | Recursive)`) is INSUFFICIENT: a
+/// budget-tripped partial can surface as a COMPLETE `QueryResult::Value`
+/// (a `ProjectPath` shallow-walking an `InstantiationRef` whose nested
+/// `Instantiate` trips the budget — the walker catches the error,
+/// contributes no surface, and `build_project_path` returns `Value` with
+/// `result_is_partial=true`). The explicit `result_is_partial` field is
+/// the sole correct authority.
+#[inline]
+pub fn observe_component_meta_read_suppress<T>(read: &crate::semantic_query::CacheRead<T>) {
+    if read.result_is_partial {
+        mark_request_materialization_cache_suppress();
+    }
+}
+
 /// RAII guard scoping the slot-binding synthesis phase on the active
 /// request context. While held, [`RequestContext::synthesis_active_depth`]
 /// is `> 0`, so [`crate::project_semantic_dispatch`]'s `build_instantiate`

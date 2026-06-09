@@ -74,6 +74,43 @@ fn build_hermetic_project_with_workspace_graph(files: &[(&str, &str)]) -> Arc<Me
     MetaProject::new(host)
 }
 
+/// Variant of [`build_hermetic_project_with_workspace_graph`] with an
+/// explicit `projection_op_budget` so a test can drive a component-meta
+/// resolution into a MID-WALK budget trip (a budget-tripped partial that
+/// surfaces as a complete `QueryResult::Value` via the
+/// `ProjectPath`-over-`InstantiationRef` walker path).
+fn build_hermetic_project_with_budget(
+    files: &[(&str, &str)],
+    projection_op_budget: usize,
+) -> Arc<MetaProject> {
+    let scheduler_config = verter_scheduler::scheduler::SchedulerConfig {
+        cpu_threads: 1,
+        ..verter_scheduler::scheduler::SchedulerConfig::default()
+    };
+    let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    let project_config = make_workspace_project_config("/workspace");
+    #[allow(deprecated)]
+    workspace.set_project_graph(verter_workspace::ProjectGraph::from_configs(vec![
+        project_config.clone(),
+    ]));
+    for (canonical, content) in files {
+        workspace.inject_file((*canonical).into(), Arc::from(*content));
+    }
+    let ide_project = project_config.to_ide_project_config();
+    let ws_access: Arc<dyn WorkspaceAccess> = workspace;
+    let host = VerterHost::new_with_scheduler_config(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            projection_op_budget,
+            ..HostConfig::default()
+        },
+        ws_access,
+        scheduler_config,
+    );
+    host.configure_projects(vec![ide_project]);
+    MetaProject::new(host)
+}
+
 #[allow(deprecated)]
 fn make_workspace_project_config(root: &str) -> verter_workspace::VfsProjectConfig {
     verter_workspace::VfsProjectConfig {
@@ -512,6 +549,610 @@ fn chatmessages_missing_types_barrel_returns_partial_native_component_meta() {
         assert!(
             meta.props.iter().any(|p| p.name == expected),
             "owner-local prop `{expected}` should publish when imported props are unresolved",
+        );
+    }
+}
+
+/// Resolvable sibling barrel for [`CHAT_MESSAGES_MISSING_BARREL_VUE`].
+///
+/// `ChatMessageProps<M, D, U> extends UIMessage<M, D, U>` re-introduces
+/// the AI-SDK generic surface — exactly the leaf that fans out when
+/// `Pick<PropsBase<T>, …>` materialises an open `T`. Vendoring this
+/// barrel makes the `../types` import RESOLVE, so the discriminating
+/// fixture actually exercises the cross-file expansion path that an
+/// earlier audit fixture masked by leaving its imports unresolved.
+const CHAT_MESSAGES_RESOLVABLE_TYPES_TS: &str = r#"import type { UIMessage, UITools, UIDataTypes } from 'ai'
+
+export interface ButtonProps {
+  variant?: string
+  size?: string
+  to?: string
+  href?: string
+  onClick?: (e: unknown) => void
+}
+
+export interface IconProps {
+  name?: string
+  size?: string
+}
+
+export type LinkPropsKeys = 'to' | 'href'
+
+export interface ChatMessageProps<
+  TMetadata = unknown,
+  TDataParts extends UIDataTypes = UIDataTypes,
+  TTools extends UITools = UITools
+> extends UIMessage<TMetadata, TDataParts, TTools> {
+  icon?: IconProps['name']
+  avatar?: { src?: string; alt?: string }
+  variant?: 'solid' | 'outline' | 'soft'
+  side?: 'left' | 'right'
+  actions?: (Omit<ButtonProps, 'onClick'> & {
+    onClick?: (e: unknown, message: UIMessage<TMetadata, TDataParts, TTools>) => void
+  })[]
+  ui?: Record<string, string>
+}
+
+export interface ChatMessageSlots {
+  leading?: (props: { message: unknown }) => unknown
+  content?: (props: { message: unknown }) => unknown
+}
+"#;
+
+/// L1 regression guard (Shallow-By-Default). With the `../types` barrel
+/// RESOLVABLE, `user?: Pick<PropsBase<T>, …>` over the SFC's open
+/// `generic="T extends UIMessage[]"` would — pre-fix — materialise the
+/// open-generic source through the chained conditionals and re-instantiate
+/// the cross-file AI-SDK generics (the `bench:meta:ui` hang). Post-fix the
+/// open enumeration domain carrier-stops and `user` publishes as a shallow
+/// `Pick<…>` carrier, NOT an expanded object surface, and the resolve
+/// completes quickly without tripping the projection budget.
+#[test]
+fn chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier() {
+    use std::sync::atomic::Ordering::Relaxed;
+    use verter_type_expr::TypeExpr;
+
+    let ai_index_dts = chat_messages_ai_index_dts();
+    let project = build_hermetic_project_with_workspace_graph(&[
+        (
+            "/workspace/node_modules/ai/package.json",
+            r#"{ "name": "ai", "types": "./index.d.ts" }"#,
+        ),
+        (
+            "/workspace/node_modules/@nuxt/schema/package.json",
+            r#"{ "name": "@nuxt/schema", "types": "./index.d.ts" }"#,
+        ),
+        (
+            "/workspace/node_modules/vue/package.json",
+            r#"{ "name": "vue", "types": "./index.d.ts" }"#,
+        ),
+        (
+            "/workspace/node_modules/ai/index.d.ts",
+            ai_index_dts.as_str(),
+        ),
+        (
+            "/workspace/node_modules/@nuxt/schema/index.d.ts",
+            CHAT_MESSAGES_NUXT_SCHEMA_DTS,
+        ),
+        (
+            "/workspace/node_modules/vue/index.d.ts",
+            CHAT_MESSAGES_VUE_INDEX_DTS,
+        ),
+        (
+            "/workspace/src/runtime/types.ts",
+            CHAT_MESSAGES_RESOLVABLE_TYPES_TS,
+        ),
+        (
+            "/workspace/src/runtime/components/ChatMessages.vue",
+            CHAT_MESSAGES_MISSING_BARREL_VUE,
+        ),
+    ]);
+
+    let host = project.host();
+    let canonical = "/workspace/src/runtime/components/ChatMessages.vue";
+
+    // Cold resolve through the host-backed resolution API so we can
+    // inspect the suppression flag + diagnostics on the resolved state.
+    let (meta, resolution) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("resolvable barrel must still produce metadata");
+
+    // The resolve must COMPLETE — not bail out via budget exhaustion /
+    // partial synthesis. A carrier-stop avoids the storm, so the run is
+    // clean and the final result is cacheable.
+    assert!(
+        !resolution.synthesis_should_suppress,
+        "a carrier-stopped open Pick must let synthesis COMPLETE (synthesis_should_suppress \
+         must be false); a budget-exceeded run would set it true"
+    );
+    for diag in &resolution.synthesis_diagnostics {
+        assert_eq!(
+            diag.execution_status,
+            verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+            "no macro expansion may report a non-Completed (budget/cancel/hard-stop) status; \
+             got {:?}",
+            diag.execution_status
+        );
+        assert_ne!(
+            diag.exactness,
+            verter_semantic::analysis::type_expand::ExpansionExactness::Incomplete,
+            "no macro expansion may report Incomplete exactness (a partial surface)"
+        );
+    }
+
+    let user = meta
+        .props
+        .iter()
+        .find(|p| p.name == "user")
+        .expect("`user` prop must publish");
+
+    // L1: the open `Pick<PropsBase<T>, …>` stays a shallow carrier whose
+    // TWO type arguments are (arg0) the OPEN `PropsBase<T>` source — a
+    // bare `Ref`, NOT an expanded object — and (arg1) the requested key
+    // union.
+    let pick_args = match &user.type_expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            assert_eq!(
+                name.as_ref(),
+                "Pick",
+                "open Pick<PropsBase<T>, …> must publish as a `Pick` carrier ref"
+            );
+            assert_eq!(
+                type_arguments.len(),
+                2,
+                "the `Pick` carrier must keep both type arguments (source + keyspace)"
+            );
+            type_arguments
+        }
+        other => panic!(
+            "open Pick<PropsBase<T>, …> must stay a shallow carrier, not expand — got {other:?}"
+        ),
+    };
+
+    // arg0: the source MUST be a bare `Ref` carrier (the open
+    // `PropsBase<T>`), NOT an expanded `Object` — materialising the open
+    // source is exactly the storm L1 prevents. It must ALSO preserve its
+    // own open `T` type argument: a no-args `PropsBase` carrier (the
+    // generic argument silently dropped) would pass a bare `Ref("PropsBase")`
+    // check while having lost the open generic that makes the source open
+    // in the first place.
+    match &pick_args[0] {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            assert_eq!(
+                name.as_ref(),
+                "PropsBase",
+                "arg0 must be the open `PropsBase<T>` source carrier (a Ref), got Ref({name})"
+            );
+            assert_eq!(
+                type_arguments.len(),
+                1,
+                "arg0 `PropsBase<T>` MUST preserve its single open type argument `T` — a no-args \
+                 `PropsBase` carrier means the open generic was dropped: {:?}",
+                pick_args[0]
+            );
+            // The preserved type argument is the OPEN `T` — a bare `Ref`
+            // (the unsubstituted SFC type parameter), NOT an expanded /
+            // substituted concrete type.
+            match &type_arguments[0] {
+                TypeExpr::Ref {
+                    name: t_name,
+                    type_arguments: t_args,
+                } => {
+                    assert_eq!(
+                        t_name.as_ref(),
+                        "T",
+                        "arg0's preserved type argument must be the open `T`, got Ref({t_name})"
+                    );
+                    assert!(
+                        t_args.is_empty(),
+                        "the open `T` argument must itself be a bare unsubstituted Ref, got {:?}",
+                        type_arguments[0]
+                    );
+                }
+                TypeExpr::TypeParameter(t_param) => assert_eq!(
+                    t_param.name, "T",
+                    "arg0's preserved type argument must be the open type parameter `T`, got {:?}",
+                    t_param.name
+                ),
+                TypeExpr::Object(_) => panic!(
+                    "arg0's `T` argument must NOT be an expanded Object — the open generic was \
+                     substituted/materialised: {:?}",
+                    type_arguments[0]
+                ),
+                other => {
+                    panic!("arg0's preserved type argument must be the open `T`, got {other:?}")
+                }
+            }
+        }
+        TypeExpr::Object(_) => panic!(
+            "arg0 (the Pick source) must NOT be an expanded Object — the open source was \
+             materialised, which is the storm L1 prevents: {:?}",
+            pick_args[0]
+        ),
+        other => panic!("arg0 must be the open `PropsBase<T>` Ref carrier, got {other:?}"),
+    }
+
+    // arg1: the keyspace MUST be the requested key union (string
+    // literals), NOT expanded structure.
+    let key_union_mentions = |needle: &str| key_union_contains_literal(&pick_args[1], needle);
+    for expected in ["icon", "avatar", "variant", "side", "actions", "ui"] {
+        assert!(
+            key_union_mentions(expected),
+            "arg1 must carry the requested key `{expected}` as a string-literal union member: {:?}",
+            pick_args[1]
+        );
+    }
+
+    // Negative (DEEP): the published `user` carrier must NOT have inlined
+    // the AI-SDK `UIMessage` internals (`id` / `role` / `parts` /
+    // `metadata`) anywhere reachable — INCLUDING inside `Ref`
+    // type-arguments, which the carrier preserves. A walk that stopped at
+    // the outer `Ref` would be tautological (the outer Ref is always
+    // `Pick`, never an internal name).
+    fn surface_mentions_uimessage_internals(expr: &TypeExpr) -> bool {
+        use verter_type_expr::ObjectMember;
+        match expr {
+            TypeExpr::Object(object) => object.properties.iter().any(|m| match m {
+                ObjectMember::Property(p) => {
+                    matches!(p.name.as_str(), "id" | "role" | "parts" | "metadata")
+                        || surface_mentions_uimessage_internals(&p.ty)
+                }
+                _ => false,
+            }),
+            TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => {
+                surface_mentions_uimessage_internals(inner)
+            }
+            TypeExpr::Array { element, .. } => surface_mentions_uimessage_internals(element),
+            TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
+                arms.iter().any(surface_mentions_uimessage_internals)
+            }
+            // CRITICAL: descend into Ref type-arguments — the carrier keeps
+            // `Pick<PropsBase<T>, …>`, so an inlined internal would hide
+            // inside the arguments, not at the top level.
+            TypeExpr::Ref { type_arguments, .. } => type_arguments
+                .iter()
+                .any(surface_mentions_uimessage_internals),
+            _ => false,
+        }
+    }
+    assert!(
+        !surface_mentions_uimessage_internals(&user.type_expr),
+        "the shallow `user` carrier must not inline UIMessage internals (deep walk, including \
+         Ref type-arguments): {:?}",
+        user.type_expr
+    );
+
+    // The completed, non-suppressed result must WARM the final-result
+    // cache: a second resolve is served from `ComponentMetaResultDb`.
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let (_meta2, _res2) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("second resolve must succeed");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert!(
+        hits_after > hits_before,
+        "a non-suppressed carrier-stopped result MUST warm the final-result cache; the second \
+         resolve should be a warm hit (hits_before={hits_before}, hits_after={hits_after})"
+    );
+}
+
+/// §5 MANDATORY discrimination proof for the A2 signal split — the
+/// COUNTERPART of `chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier`
+/// (which proves a COMPLETE result warms). Here a TIGHT `projection_op_budget`
+/// drives the SAME `Pick<PropsBase<T>, …>` resolution into a MID-WALK budget
+/// trip: the `ProjectPath` shallow-walking the `InstantiationRef` source
+/// dispatches a nested `Instantiate` that trips the budget, the walker
+/// catches the `BudgetExceeded` and contributes no surface, and the
+/// projection returns a COMPLETE `QueryResult::Value` carrying
+/// `result_is_partial = true`.
+///
+/// A value-kind gate (`matches!(value, Error | Recursive)`) is INSUFFICIENT:
+/// it MISSES this Value-partial and would WARM `ComponentMetaResultDb`. The
+/// signal split is the authority: `result_is_partial` propagates onto
+/// `synthesis_should_suppress`, and the final-result warm gate refuses to
+/// promote the partial.
+///
+/// Discrimination: the resolution MUST report `synthesis_should_suppress ==
+/// true` and the second resolve MUST NOT warm-hit `ComponentMetaResultDb`.
+/// Reverting the walker's `result_is_partial` fold leaves the Value-partial
+/// with `synthesis_should_suppress == false` and the second resolve
+/// warm-hits — i.e. this test FAILS without the fold and PASSES with it.
+#[test]
+fn chatmessages_budget_tripped_value_partial_does_not_warm_final_result_cache() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let ai_index_dts = chat_messages_ai_index_dts();
+    // A deliberately tight projection-op budget: the open
+    // `Pick<PropsBase<T>, …>` resolution's nested generic instantiation
+    // storm trips it MID-WALK, surfacing the partial as a complete Value.
+    let project = build_hermetic_project_with_budget(
+        &[
+            (
+                "/workspace/node_modules/ai/package.json",
+                r#"{ "name": "ai", "types": "./index.d.ts" }"#,
+            ),
+            (
+                "/workspace/node_modules/@nuxt/schema/package.json",
+                r#"{ "name": "@nuxt/schema", "types": "./index.d.ts" }"#,
+            ),
+            (
+                "/workspace/node_modules/vue/package.json",
+                r#"{ "name": "vue", "types": "./index.d.ts" }"#,
+            ),
+            (
+                "/workspace/node_modules/ai/index.d.ts",
+                ai_index_dts.as_str(),
+            ),
+            (
+                "/workspace/node_modules/@nuxt/schema/index.d.ts",
+                CHAT_MESSAGES_NUXT_SCHEMA_DTS,
+            ),
+            (
+                "/workspace/node_modules/vue/index.d.ts",
+                CHAT_MESSAGES_VUE_INDEX_DTS,
+            ),
+            (
+                "/workspace/src/runtime/types.ts",
+                CHAT_MESSAGES_RESOLVABLE_TYPES_TS,
+            ),
+            (
+                "/workspace/src/runtime/components/ChatMessages.vue",
+                CHAT_MESSAGES_MISSING_BARREL_VUE,
+            ),
+        ],
+        // Small enough that the cross-file generic-expansion storm trips
+        // mid-walk, large enough that the owner-local surface still
+        // assembles a partial result.
+        4,
+    );
+
+    let host = project.host();
+    let canonical = "/workspace/src/runtime/components/ChatMessages.vue";
+
+    let (_meta, resolution) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("a budget-tripped resolve must still return partial metadata");
+
+    // The budget-tripped Value-partial MUST set the suppression flag —
+    // this is exactly what the signal split enforces. The Value-partial is a
+    // complete `QueryResult::Value` (the walker swallows the nested
+    // `BudgetExceeded`), so a value-kind gate matching only `Error` /
+    // `Recursive` would leave this `false`; the `result_is_partial` authority
+    // is what raises it.
+    assert!(
+        resolution.synthesis_should_suppress,
+        "a budget-tripped Value-partial MUST set synthesis_should_suppress=true (the A2 signal \
+         split: result_is_partial folds onto the warm gate even though the value is a complete \
+         QueryResult::Value)"
+    );
+
+    // The partial MUST NOT have warmed the final-result cache: a second
+    // resolve does NOT hit `ComponentMetaResultDb`.
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let (_meta2, _res2) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("second resolve must still succeed");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "a budget-tripped Value-partial MUST NOT warm `ComponentMetaResultDb` — the second \
+         resolve must NOT be a warm hit (hits_before={hits_before}, hits_after={hits_after}); \
+         pre-signal-split the Value-partial warmed and this would be a hit"
+    );
+}
+
+/// Whether a keyspace `TypeExpr` (a string-literal union, a single
+/// literal, or a parenthesised form) contains the literal `needle`.
+fn key_union_contains_literal(expr: &verter_type_expr::TypeExpr, needle: &str) -> bool {
+    use verter_type_expr::{LiteralValue, TypeExpr};
+    match expr {
+        TypeExpr::Literal(LiteralValue::String(s)) => s.as_str() == needle,
+        TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
+            arms.iter().any(|a| key_union_contains_literal(a, needle))
+        }
+        TypeExpr::Parenthesized(inner) => key_union_contains_literal(inner, needle),
+        _ => false,
+    }
+}
+
+/// Component whose Pick sources are CLOSED — a finite object literal and
+/// a CONCRETE generic instantiation (`PropsBase<UIMessage[]>`). L1 must
+/// NOT carrier-stop these: an over-broad "builtin utility == carrier"
+/// form would wrongly keep `closedObj` / `closedInst` as `Pick` carriers
+/// instead of materialising the requested keys.
+const CHAT_MESSAGES_CLOSED_PICK_VUE: &str = r#"<script lang="ts">
+import type { UIMessage, UIDataTypes, UITools } from 'ai'
+import type { ChatMessageProps } from '../types'
+
+type MessageBase<T extends UIMessage[]>
+  = T[number] extends UIMessage<infer M, infer D, infer U>
+    ? UIMessage<M, D, U>
+    : UIMessage<unknown, UIDataTypes, UITools>
+
+type PropsBase<T extends UIMessage[]>
+  = MessageBase<T> extends UIMessage<infer M, infer D, infer U>
+    ? ChatMessageProps<M, D, U>
+    : never
+
+interface SimpleBox<T> {
+  icon: T
+  other: number
+}
+
+export interface ClosedPickProps {
+  closedObj?: Pick<{ bar: string; baz: number }, 'bar'>
+  closedInst?: Pick<PropsBase<UIMessage[]>, 'icon'>
+  closedSimpleInst?: Pick<SimpleBox<string>, 'icon'>
+}
+</script>
+
+<script setup lang="ts">
+defineProps<ClosedPickProps>()
+</script>
+
+<template><div /></template>
+"#;
+
+/// L1 over-broadness counter-guard. A CLOSED Pick source still
+/// materialises path-precisely. `closedObj` (finite object literal)
+/// materialises to `{ bar }` only; `closedInst`
+/// (`Pick<PropsBase<UIMessage[]>, 'icon'>`, a CONCRETE instantiation)
+/// is NOT carrier-stopped. If L1 were over-broad, either would publish
+/// as a `Pick` carrier ref and this test would fail.
+#[test]
+fn closed_pick_sources_still_materialize_path_precisely() {
+    use verter_type_expr::{ObjectMember, TypeExpr};
+
+    let ai_index_dts = chat_messages_ai_index_dts();
+    let project = build_hermetic_project_with_workspace_graph(&[
+        (
+            "/workspace/node_modules/ai/package.json",
+            r#"{ "name": "ai", "types": "./index.d.ts" }"#,
+        ),
+        (
+            "/workspace/node_modules/ai/index.d.ts",
+            ai_index_dts.as_str(),
+        ),
+        (
+            "/workspace/src/runtime/types.ts",
+            CHAT_MESSAGES_RESOLVABLE_TYPES_TS,
+        ),
+        (
+            "/workspace/src/runtime/components/ClosedPick.vue",
+            CHAT_MESSAGES_CLOSED_PICK_VUE,
+        ),
+    ]);
+
+    let session = project.open_session_batch().expect("session");
+    let meta = session
+        .get_component_meta("/workspace/src/runtime/components/ClosedPick.vue")
+        .expect("session result")
+        .expect("closed-pick component must resolve");
+
+    let closed_obj = meta
+        .props
+        .iter()
+        .find(|p| p.name == "closedObj")
+        .expect("`closedObj` prop must publish");
+    // CLOSED finite object literal: must materialise to `{ bar }` only,
+    // NOT stay a `Pick` carrier.
+    match &closed_obj.type_expr {
+        TypeExpr::Object(object) => {
+            let names: Vec<&str> = object
+                .properties
+                .iter()
+                .filter_map(|m| match m {
+                    ObjectMember::Property(p) => Some(p.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                names.contains(&"bar"),
+                "closed Pick<{{bar,baz}},'bar'> must materialise `bar`, got {names:?}"
+            );
+            assert!(
+                !names.contains(&"baz"),
+                "closed Pick<{{bar,baz}},'bar'> must NOT surface `baz`, got {names:?}"
+            );
+        }
+        other => panic!(
+            "closed Pick<{{bar,baz}},'bar'> must materialise to an object surface, not a carrier — got {other:?}"
+        ),
+    }
+
+    // CONCRETE generic instantiation source — the discriminating
+    // concrete-surface assertion. `Pick<SimpleBox<string>,'icon'>` over a
+    // closed (object-bodied) generic instantiated with a concrete arg must
+    // NOT be carrier-stopped by L1; it must materialise PATH-PRECISELY to
+    // an `Object` with EXACTLY the `icon` member — not a `Pick` carrier
+    // ref, not an `Unknown`/`Opaque` shell, not a bare alias carrier.
+    //
+    // This is the strong form the weak "if Ref then name != Pick" check
+    // could not express: a bail-to-`Unknown` regression would silently
+    // pass the weaker predicate, but fails this concrete-surface match.
+    let closed_simple_inst = meta
+        .props
+        .iter()
+        .find(|p| p.name == "closedSimpleInst")
+        .expect("`closedSimpleInst` prop must publish");
+    match &closed_simple_inst.type_expr {
+        TypeExpr::Object(object) => {
+            let names: Vec<&str> = object
+                .properties
+                .iter()
+                .filter_map(|m| match m {
+                    ObjectMember::Property(p) => Some(p.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                names,
+                vec!["icon"],
+                "Pick<SimpleBox<string>,'icon'> must materialise EXACTLY the `icon` member \
+                 (path-precise), got {names:?}"
+            );
+        }
+        TypeExpr::Ref { name, .. } => panic!(
+            "Pick<SimpleBox<string>,'icon'> has a CONCRETE closed source — L1 must NOT keep it a \
+             carrier ref `{name}` (over-broad); it must materialise the `icon` Object surface"
+        ),
+        other => panic!(
+            "Pick<SimpleBox<string>,'icon'> must materialise an Object surface with the `icon` \
+             member — not Unknown / Opaque / a bare alias carrier; got {other:?}"
+        ),
+    }
+
+    // Counter-guard for the chained-conditional-bodied concrete source
+    // `Pick<PropsBase<UIMessage[]>,'icon'>`: A3 correctly does NOT
+    // carrier-stop it (a non-empty all-concrete arg list over a resolvable
+    // target whose body's operands all close). It must therefore NOT
+    // publish as a `Pick` carrier ref.
+    //
+    // It currently materialises to `Unknown { raw: "semanticMiss" }`: the
+    // downstream resolver cannot reduce the chained conditional
+    // `MessageBase<T> extends UIMessage<infer …> ? ChatMessageProps<…> :
+    // never` to the object surface that `Pick` filters, even with the
+    // concrete `UIMessage[]` arg. That is a SEPARATE downstream
+    // reduction gap (NOT the L1 carrier-stop), tracked as a follow-up —
+    // the simple-generic assertion above is the in-lane path-precision
+    // guarantee. This assertion still discriminates: it FAILS if L1
+    // regresses to keeping the concrete source a `Pick` carrier.
+    //
+    // TODO(follow-up): reduce a chained-conditional-bodied concrete
+    // generic (`PropsBase<UIMessage[]>`) to its object surface so a
+    // `Pick<…,'icon'>` over it materialises `{ icon }` instead of
+    // `semanticMiss`. Owner: cross-file conditional reduction in the
+    // typed-IR dispatch.
+    let closed_inst = meta
+        .props
+        .iter()
+        .find(|p| p.name == "closedInst")
+        .expect("`closedInst` prop must publish");
+    if let TypeExpr::Ref { name, .. } = &closed_inst.type_expr {
+        assert_ne!(
+            name.as_ref(),
+            "Pick",
+            "Pick<PropsBase<UIMessage[]>,'icon'> has a CONCRETE source — L1 must NOT keep it a \
+             `Pick` carrier (over-broad); got {:?}",
+            closed_inst.type_expr
         );
     }
 }

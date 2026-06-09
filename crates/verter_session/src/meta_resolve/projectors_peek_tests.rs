@@ -289,7 +289,7 @@ fn peek_operator_shape_warm_memo_returns_cached() {
             node_id: None,
             type_expr: TypeExpr::Primitive(PrimitiveName::Number),
             dep_signature: Arc::from(Vec::<(Arc<str>, crate::semantic_query::DepVersion)>::new()),
-            cache_suppress: false,
+            result_is_partial: false,
         };
         let admitted = memo_db.get_or_compute(&key, ctx, || {
             Some((

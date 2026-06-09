@@ -4,6 +4,8 @@
 mod component_meta_family_producers_observe_cross_file_deps;
 #[path = "g_component/component_meta_no_cache_poisoning.rs"]
 mod component_meta_no_cache_poisoning;
+#[path = "g_component/component_meta_partial_no_replay_and_benign_warms.rs"]
+mod component_meta_partial_no_replay_and_benign_warms;
 #[path = "g_component/component_meta_result_eager_invalidation_defeating.rs"]
 mod component_meta_result_eager_invalidation_defeating;
 #[path = "g_component/component_meta_result_fact_validation.rs"]

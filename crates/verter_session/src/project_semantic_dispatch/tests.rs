@@ -6143,6 +6143,123 @@ fn resolve_macro_payload_define_props_multi_arg_normalize_intersection() {
     }
 }
 
+/// The POST-TRIP BUDGET EARLY-EXIT is a SECOND return point of
+/// `execute_via_cold_build_helper`, and it MUST apply the same read-boundary
+/// fold (request sticky + active build-local taint frame) the normal tail
+/// applies — via the shared `fold_cache_read_rails` funnel both return points
+/// call.
+///
+/// This isolates the early-exit fold deterministically: it PRE-EXHAUSTS the
+/// request budget (so the non-incrementing `is_exhausted()` peek is already
+/// true) and pushes a build-local taint frame to simulate an enclosing cold
+/// build, then issues ONE budget-kind `execute_read(KeyOf)`. With the budget
+/// exhausted that read short-circuits at the EARLY-EXIT return (never entering
+/// `execute_cooperative` / `raw_build` — so the in-build
+/// `check_projection_op_count` trip is NOT the carrier). The early-exit return
+/// MUST fold `result_is_partial=true` into:
+///   - the pushed build-local frame (so an enclosing cold build is tainted and
+///     refuses memo admission), AND
+///   - the per-request materialization-cache-suppress sticky (so the
+///     component-meta warm gate refuses for the whole request).
+///
+/// DISCRIMINATION (mutation): commenting out the
+/// `self.fold_cache_read_rails(true, true)` call at the early-exit return makes
+/// BOTH the popped frame's `result_is_partial` flip to `false` AND the request
+/// sticky stay unset — this test FAILS. The normal-tail fold cannot backstop it
+/// because the early-exit returns BEFORE `execute_cooperative` ever runs.
+#[test]
+fn budget_early_exit_folds_partial_into_enclosing_build_local_frame_and_request_sticky() {
+    use crate::request_context::{
+        current_materialization_cache_suppress, current_request_budget, RequestContext,
+        RequestContextGuard,
+    };
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let obj = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+        members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }));
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/early-exit-frame.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        2,
+    );
+    let _ctx_guard = RequestContextGuard::install(ctx);
+
+    // Pre-exhaust the budget (cap 2): 3 increments → executed=3 > 2, so the
+    // helper's non-incrementing `is_exhausted()` peek is already true and the
+    // KeyOf read below takes the EARLY-EXIT rather than building.
+    let budget = current_request_budget().expect("budget installed");
+    for _ in 0..3 {
+        let _ = budget.check_projection_op_count();
+    }
+    assert!(
+        budget.is_exhausted(),
+        "test setup: budget must be pre-exhausted so the KeyOf read hits the early-exit",
+    );
+    assert!(
+        !current_materialization_cache_suppress(),
+        "test setup: the request sticky must start UNSET so the early-exit fold is the only thing \
+         that can raise it",
+    );
+
+    // Simulate an enclosing cold build by pushing a build-local taint frame.
+    let guard =
+        crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+
+    // Budget-kind read → EARLY-EXIT (budget pre-exhausted). The early-exit
+    // return must fold its rails BEFORE returning.
+    let read = dispatch.execute_read(SemanticQueryKey::KeyOf {
+        base: obj,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    });
+    assert!(
+        read.result_is_partial,
+        "the early-exit return MUST carry result_is_partial=true",
+    );
+    assert!(
+        read.cache_suppress,
+        "the early-exit return MUST carry cache_suppress=true",
+    );
+
+    // The enclosing build-local frame MUST have been tainted by the early-exit
+    // fold — this is the carrier the discarded-rails value-only caller relies
+    // on. `finish()` pops + returns the frame for inspection.
+    let frame = guard.finish();
+    assert!(
+        frame.result_is_partial,
+        "the EARLY-EXIT MUST fold result_is_partial=true into the enclosing build-local frame — \
+         commenting out the early-exit fold leaves this false and launders the partial past the \
+         outer build",
+    );
+    assert!(
+        frame.cache_suppress,
+        "the EARLY-EXIT MUST fold cache_suppress=true into the enclosing build-local frame",
+    );
+
+    // The per-request sticky MUST have been raised by the early-exit fold (it
+    // started unset above).
+    assert!(
+        current_materialization_cache_suppress(),
+        "the EARLY-EXIT MUST raise the per-request materialization-cache-suppress sticky on \
+         result_is_partial — commenting out the early-exit fold leaves it unset",
+    );
+}
+
 /// The per-request `SemanticQueryKey` dispatch mask must record tags
 /// dispatched through the shared `execute_via_cold_build_helper` choke point
 /// — INCLUDING nested reducer sub-dispatches that enter ONLY via
@@ -9095,5 +9212,56 @@ fn path_walk_materialized_set_records_linear_navhops_and_stops_at_arm_split() {
     assert!(
         got_warm.points().contains(&navhop(2)),
         "the warm-prefix `start_index` contribution must extend the recorded navhop run",
+    );
+}
+
+/// L3 architecture guard: the request work budget must count
+/// `Instantiate` and `Conditional` alongside the projection-operator
+/// kinds. These two kinds dominate the open-generic expansion storm
+/// (`Pick<PropsBase<T>, …>` re-instantiating cross-file AI-SDK
+/// generics); excluding them lets the storm run unbounded past the fuse
+/// (the `ChatMessages.vue` hang). This guard fails if the exclusion
+/// silently returns.
+#[test]
+fn projection_budget_counts_instantiate_and_conditional() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, InstantiateContext, ProjectionReductionContext, SemanticNodeId,
+        SemanticQueryKey,
+    };
+    use std::sync::Arc;
+
+    let instantiate = SemanticQueryKey::Instantiate {
+        base: DeclIdentity::synthetic("X").to_type_slot_unscoped(),
+        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        context: InstantiateContext {
+            projection_reduction: ProjectionReductionContext::structural_transit(),
+            resolve_env_hash: HashValue::default(),
+        },
+    };
+    assert!(
+        super::semantic_query_counts_toward_projection_budget(&instantiate),
+        "Instantiate must count toward the request work budget (fail-closed backstop)"
+    );
+
+    let conditional = SemanticQueryKey::Conditional {
+        check: SemanticNodeId(0),
+        extends: SemanticNodeId(1),
+        true_branch: SemanticNodeId(2),
+        false_branch: SemanticNodeId(3),
+        distributive: false,
+    };
+    assert!(
+        super::semantic_query_counts_toward_projection_budget(&conditional),
+        "Conditional must count toward the request work budget (fail-closed backstop)"
+    );
+
+    // The original projection-operator kinds must still count.
+    let mapped = SemanticQueryKey::KeyOf {
+        base: SemanticNodeId(0),
+        context: ProjectionReductionContext::structural_transit(),
+    };
+    assert!(
+        super::semantic_query_counts_toward_projection_budget(&mapped),
+        "the original projection-operator kinds must still count"
     );
 }

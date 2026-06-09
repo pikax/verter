@@ -477,6 +477,7 @@ pub(crate) fn slot_param_root_is_symbolic_only(
                 ),
             });
             // Dual-emit: legacy accumulator + fact-tracer fan-out.
+            crate::request_context::observe_component_meta_read_suppress(&read);
             emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &read.dep_signature);
             match read.value {
                 // Decidable: reduced to a concrete terminal — classify it (a
@@ -529,6 +530,7 @@ pub(crate) fn slot_param_root_is_symbolic_only(
             };
             let read = dispatch.execute_read(key);
             // Dual-emit: legacy accumulator + fact-tracer fan-out.
+            crate::request_context::observe_component_meta_read_suppress(&read);
             emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &read.dep_signature);
             match read.value {
                 QueryResult::Value(body_id) if body_id != node => {
@@ -786,6 +788,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
                 .macro_payload_context_for(&owner.canonical_id, ProjectionMode::Navigate),
         });
         // Dual-emit: legacy accumulator + fact-tracer fan-out.
+        crate::request_context::observe_component_meta_read_suppress(&macro_payload_read);
         emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &macro_payload_read.dep_signature);
         if !macro_payload_read.walker_diagnostics.is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(
@@ -795,7 +798,10 @@ pub(crate) fn resolve_slot_bindings_graph_native(
                 macro_payload_read.cache_suppress,
             ));
         }
-        if macro_payload_read.cache_suppress {
+        // A2 signal split: the component-meta warm gate keys on the
+        // PARTIAL signal, not on inner-memo non-cacheability. A benign
+        // non-cacheable nested read must NOT suppress a complete result.
+        if macro_payload_read.result_is_partial {
             should_suppress = true;
         }
 
@@ -946,6 +952,7 @@ pub(crate) fn compute_bindings_via_graph(
         ),
     });
     // Dual-emit: legacy accumulator + fact-tracer fan-out.
+    crate::request_context::observe_component_meta_read_suppress(&slot_surface_read);
     emit_slot_binding_graph_dispatch_facts(ctx, &slot_surface_read.dep_signature);
     if !slot_surface_read.walker_diagnostics.is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
@@ -955,7 +962,8 @@ pub(crate) fn compute_bindings_via_graph(
             slot_surface_read.cache_suppress,
         ));
     }
-    if slot_surface_read.cache_suppress {
+    // A2 signal split: key the warm gate on the PARTIAL signal only.
+    if slot_surface_read.result_is_partial {
         *should_suppress = true;
     }
     let slot_surface = match slot_surface_read.value {
@@ -1058,6 +1066,7 @@ pub(crate) fn compute_bindings_via_graph(
             ),
         });
         // Dual-emit: legacy accumulator + fact-tracer fan-out.
+        crate::request_context::observe_component_meta_read_suppress(&param_surface_read);
         emit_slot_binding_graph_dispatch_facts(ctx, &param_surface_read.dep_signature);
         if !param_surface_read.walker_diagnostics.is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(
@@ -1067,7 +1076,8 @@ pub(crate) fn compute_bindings_via_graph(
                 param_surface_read.cache_suppress,
             ));
         }
-        if param_surface_read.cache_suppress {
+        // A2 signal split: key the warm gate on the PARTIAL signal only.
+        if param_surface_read.result_is_partial {
             *should_suppress = true;
         }
         let param_surface = match param_surface_read.value {

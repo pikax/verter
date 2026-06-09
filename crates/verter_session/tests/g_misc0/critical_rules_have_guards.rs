@@ -214,6 +214,18 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "pattern_a_non_slot_mapped_publication_does_not_leak_inherited_library_members",
             "pattern_b_generic_parameter_substitution_does_not_leak_inherited_library_members",
             "chatmessages_shape_audit_has_zero_outputschema_execute_project_member_edges",
+            // L1 open-enumeration-domain carrier-stop: an open utility
+            // source stays a shallow carrier; closed sources still
+            // materialise path-precisely.
+            "chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier",
+            "closed_pick_sources_still_materialize_path_precisely",
+            // L2/L3 fuse backstops for the open-generic expansion storm
+            // (the `ChatMessages.vue` hang): the aggregate request work
+            // budget counts `Instantiate` + `Conditional`, and the cycle
+            // guard roots at the utility SOURCE type-argument (not the
+            // outer `__builtin__::Pick` ref) so a cyclic source is detected.
+            "projection_budget_counts_instantiate_and_conditional",
+            "cycle_guard_roots_at_utility_source_type_argument",
         ],
     ),
     // SKILL.md uses the shortened title "Shallow-By-Default Rule" for
@@ -225,6 +237,10 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "pattern_a_non_slot_mapped_publication_does_not_leak_inherited_library_members",
             "pattern_b_generic_parameter_substitution_does_not_leak_inherited_library_members",
             "chatmessages_shape_audit_has_zero_outputschema_execute_project_member_edges",
+            "chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier",
+            "closed_pick_sources_still_materialize_path_precisely",
+            "projection_budget_counts_instantiate_and_conditional",
+            "cycle_guard_roots_at_utility_source_type_argument",
         ],
     ),
     (

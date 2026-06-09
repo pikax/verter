@@ -69,9 +69,10 @@ pub(crate) use world_snapshot::{
 // consumer.
 #[allow(unused_imports)]
 pub(crate) use admission::{
-    consume_return_only_reason_for_lowering, set_return_only_reason, take_return_only_reason,
-    CacheAdmission, CacheEntry, Candidate, DeferredVictims, FactCandidateDiscriminant,
-    NonAdmissionReason, PublishCoreOutcome, PublishOutcome, SetReasonGuard, SignatureAdmission,
+    consume_return_only_reason_for_lowering, refuse_result_cache_admission_if_partial,
+    set_return_only_reason, take_return_only_reason, CacheAdmission, CacheEntry, Candidate,
+    DeferredVictims, FactCandidateDiscriminant, NonAdmissionReason, PublishCoreOutcome,
+    PublishOutcome, SetReasonGuard, SignatureAdmission,
 };
 #[allow(unused_imports)]
 pub(crate) use node::{lookup, query, ArtifactNode, ComputeCtx, QueryFlightKey, QueryNode};

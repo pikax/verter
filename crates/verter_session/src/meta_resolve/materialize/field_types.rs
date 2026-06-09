@@ -12,8 +12,8 @@
 //!
 //! The projector path
 //! (`meta_resolve::projectors::reduce_published_field_types` +
-//! `reduce_field_type_expr`) is the sole post-projection authority
-//! for finalising published field types.
+//! `reduce_field_type_expr_with_mode`) is the sole post-projection
+//! authority for finalising published field types.
 
 use crate::instant::Instant;
 
@@ -249,7 +249,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             node_id: None,
             type_expr: expr.clone(),
             dep_signature: Arc::from(Vec::new()),
-            cache_suppress: false,
+            result_is_partial: false,
         };
     };
     let scope = NodeScopeId::File {
@@ -317,7 +317,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         node_id: dispatch_materialized.node_id,
         type_expr: dispatch_materialized.type_expr,
         dep_signature: dispatch_materialized.dep_signature,
-        cache_suppress: dispatch_materialized.cache_suppress,
+        result_is_partial: dispatch_materialized.result_is_partial,
     };
 
     // Step 3 closure: write-through to ctx-owned MaterializeMemoDb.
@@ -333,15 +333,18 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     // hash without the observation's pinned `SyntacticExportSet` parse
     // fact would be a mis-rooted write.
     //
-    // Additional gate: `cache_suppress=true` on the freshly materialized
+    // Additional gate: `result_is_partial=true` on the freshly materialized
     // value means a downstream `dispatch.execute_read(...)` exhausted the
-    // projection-op budget (or returned another fatal `QueryError`). The
-    // partial outcome must NOT warm the shared `ShapeCacheDb` slot —
-    // admitting it would poison subsequent identical-key lookups against
-    // the same scope+expr+mode triple. The freshly-computed value is
-    // still returned to the caller; only the shared-cache admission is
-    // refused.
-    if !materialized.cache_suppress {
+    // projection-op budget (or returned another fatal `QueryError` / a
+    // same-path recursion / a walker fatal). The PARTIAL outcome must NOT
+    // warm the shared `ShapeCacheDb` slot — admitting it would poison
+    // subsequent identical-key lookups against the same scope+expr+mode
+    // triple. A benign non-cacheable read (ReturnOnly / overflow /
+    // unrootable self-root) does NOT set `result_is_partial`, so a
+    // complete-but-non-cacheable materialisation still warms the shape
+    // cache here. The freshly-computed value is always returned to the
+    // caller; only the shared-cache admission is refused for a partial.
+    if !materialized.result_is_partial {
         if let Some(captured_scope_observation) = observed_scope {
             // Loop-5 instrumentation — count every publish attempt. The
             // get_or_compute path is a no-op on a concurrent winner but

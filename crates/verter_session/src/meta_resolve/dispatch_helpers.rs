@@ -153,6 +153,7 @@ fn realize_callable_member_inner(
                 false_branch,
                 distributive,
             });
+            crate::request_context::observe_component_meta_read_suppress(&read);
             emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
             let reduced = match read.value {
                 QueryResult::Value(id) if id != node => id,
@@ -181,6 +182,7 @@ fn realize_callable_member_inner(
                 args,
                 context: dispatch.instantiate_context_for(&owner_canonical, body_context),
             });
+            crate::request_context::observe_component_meta_read_suppress(&read);
             emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
             let body = match read.value {
                 QueryResult::Value(id) => id,
@@ -205,6 +207,7 @@ fn realize_callable_member_inner(
                 },
                 name: Arc::clone(&identity.decl_name),
             }));
+            crate::request_context::observe_component_meta_read_suppress(&read);
             emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
             let resolved = match read.value {
                 QueryResult::Value(id) => id,
@@ -242,6 +245,7 @@ fn realize_callable_member_inner(
                     ),
                 ),
             });
+            crate::request_context::observe_component_meta_read_suppress(&read);
             emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
             let body = match read.value {
                 QueryResult::Value(id) if id != node => id,

@@ -22,8 +22,7 @@ use crate::semantic_query::{
     BranchSelection, DepSignature, HostResolvedNamedTypeKey, IndexSignature, LiteralValue,
     NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
     QueryError, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeData, SemanticNodeId,
-    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceMember, SurfaceView,
-    ValueRootKey,
+    SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
 };
 
 /// Result of a cross-file declaration-augmentation stitch
@@ -728,7 +727,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // structural-transit keeps the instance members shallow (the consumer
         // drives any deeper projection), matching `resolve_vue_public_type`'s
         // own intermediate-hop demand.
-        let instance_return = match self.execute_type_node(SemanticQueryKey::Instantiate {
+        let instance_read = self.execute_read(SemanticQueryKey::Instantiate {
             base: self.type_slot_for(Arc::clone(resolved_default_canonical), Arc::from("default")),
             args: Arc::from(Vec::new().into_boxed_slice()),
             context: self.instantiate_context_for(
@@ -737,8 +736,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ProjectionMode::Navigate,
                 ),
             ),
-        }) {
-            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+        });
+        // A2 signal-split: the `.vue` instance synthesis helper returns a
+        // bare node, so a genuinely-incomplete nested `Instantiate` (budget /
+        // recursion / walker-fatal) folds onto the request's sticky partial
+        // flag — the component-meta / materialize warm gates consult it and
+        // refuse the partial-tainted result. (`.vue` import is the hardest
+        // macro-traversal case; this is exactly where a leaked partial
+        // would warm a poisoned result.)
+        crate::request_context::observe_component_meta_read_suppress(&instance_read);
+        let instance_return = match instance_read.value {
+            QueryResult::Value(node) => node,
             QueryResult::Recursive(node) => node,
             // A `.vue` whose synthesized instance shape could not be produced
             // (e.g. mid-flight recursion supersession) yields the opaque miss as
@@ -845,7 +853,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &decl_slot.defining_canonical,
                     ProjectionReductionContext::published(ProjectionMode::Shallow),
                 );
-                self.execute_type_node(SemanticQueryKey::Instantiate {
+                self.execute_read(SemanticQueryKey::Instantiate {
                     base,
                     args: Arc::clone(type_args),
                     context: inst_ctx,
@@ -855,19 +863,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // Static side = the VALUE-space half: TypeOf the value
                 // root (the constructor value).
                 let value_root = crate::semantic_query::value_root_of(decl_slot);
-                self.execute_type_node(SemanticQueryKey::TypeOf { value_root })
+                self.execute_read(SemanticQueryKey::TypeOf { value_root })
             }
         };
 
-        // Identity projection: return the composed sub-query node
-        // directly.
-        let result = match composed {
-            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => QueryResult::Value(node),
-            QueryResult::Recursive(node) => QueryResult::Recursive(node),
-            QueryResult::Error(err) => QueryResult::Error(err),
-        };
+        // A2 signal-split: fold the composed sub-query read's partiality so
+        // a budget/recursion/walker-fatal nested side surfaces as a partial
+        // (it would otherwise return through the identity projection with
+        // `result_is_partial=false`).
+        let composed_is_partial = composed.result_is_partial;
+        // Identity projection: return the composed sub-query node directly.
+        let result = composed.value;
         let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
             (result, self.project_generation_signature()).into();
+        output.result_is_partial = composed_is_partial;
         if observed.is_none() {
             // Could not self-root on the decl's live content version —
             // refuse warm admission; the value still flows to the caller.
@@ -1086,14 +1095,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // direct-decl case: CarrierProps's own body is stamped below
             // and only its `extends`-reached members go through this
             // utility path as structural.)
-            let output: crate::project_semantic_dispatch::walk::QueryBuildOutput = self
-                .build_builtin_utility(
-                    base,
-                    decl_name.as_ref(),
-                    args,
-                    context.into_structural_provenance(),
-                )
-                .into();
+            let (utility_result, utility_fence, utility_is_partial) = self.build_builtin_utility(
+                base,
+                decl_name.as_ref(),
+                args,
+                context.into_structural_provenance(),
+            );
+            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                (utility_result, utility_fence).into();
+            // FOLD (A2 signal-split): a mapper-utility surface whose
+            // nested KeyOf/MappedType subquery was genuinely incomplete
+            // (budget / recursion / walker-fatal) surfaces here as a
+            // complete-looking `Value` shell — carry its partiality
+            // through the published value so the component-meta + shape /
+            // materialize warm gates refuse it. Benign non-cacheability of
+            // the nested read does NOT taint this (it is `cache_suppress`
+            // on the inner memo only).
+            output.result_is_partial = utility_is_partial;
             return output.with_observed_self_roots(observed_self_roots);
         }
 
@@ -2329,12 +2347,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
         name: &str,
         args: &Arc<[SemanticNodeId]>,
         context: crate::semantic_query::ProjectionReductionContext,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+    ) -> (QueryResult<SemanticNodeId>, DepSignature, bool) {
         use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
 
         let graph = self.graph();
         let fence = self.project_generation_signature();
         self.graph().record_instantiate();
+
+        // Two-signal taxonomy fold (A2 signal-split). The mapper-based
+        // utilities (`Partial` / `Required` / `Readonly` / `Record` and
+        // the shared `keyof source` reification) surface their result
+        // through nested `KeyOf` / `MappedType` subqueries. When such a
+        // nested subquery is GENUINELY INCOMPLETE — budget exceeded,
+        // same-path recursion, walker fatal/pathological — the utility's
+        // produced surface is itself partial even though it surfaces as a
+        // complete-looking `QueryResult::Value` (an `Opaque(Miss)` shell).
+        // `result_is_partial` accumulates that partiality across every
+        // nested read so the cold-build helper can mark the published
+        // value partial and the component-meta / shape / materialize warm
+        // gates refuse it. A benign non-cacheable nested read (signature
+        // overflow, unrootable, ReturnOnly) is COMPLETE — it does NOT set
+        // this flag (it only blocks the inner memo via `cache_suppress`).
+        let result_is_partial = std::cell::Cell::new(false);
 
         // Look up the utility's real TS type-parameter names so
         // `SubstituteTypeParam` edges carry names identical to those
@@ -2387,11 +2421,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `Partial<Record<keyof T, undefined>>` reached through a
             // relation-engine `infer`-binding pass) does NOT reify
             // `keyof source` into a literal-anchor union.
-            let key_space = match self.execute_type_node(SemanticQueryKey::KeyOf {
+            let key_space_read = self.execute_read(SemanticQueryKey::KeyOf {
                 base: source,
                 context,
-            }) {
-                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            });
+            // FOLD: a genuinely-incomplete nested KeyOf (budget /
+            // recursion / walker-fatal) taints the utility surface.
+            if key_space_read.result_is_partial {
+                result_is_partial.set(true);
+            }
+            let key_space = match key_space_read.value {
+                QueryResult::Value(node) => node,
                 _ => self.opaque(QueryError::Miss),
             };
             // Value placeholder: the shell does not eagerly lower per-key
@@ -2457,44 +2497,56 @@ impl<'a> ProjectSemanticDispatch<'a> {
             "Partial" if args.len() == 1 => {
                 let source = args[0];
                 let mapper = mapper_for(OptionalityMod::Add, ReadonlyMod::Keep, source);
-                let result = match self.execute_type_node(SemanticQueryKey::MappedType {
+                let mapped_read = self.execute_read(SemanticQueryKey::MappedType {
                     source,
                     mapper,
                     context,
-                }) {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                });
+                if mapped_read.result_is_partial {
+                    result_is_partial.set(true);
+                }
+                let result = match mapped_read.value {
+                    QueryResult::Value(node) => node,
                     _ => self.opaque(QueryError::Miss),
                 };
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence)
+                (QueryResult::Value(result), fence, result_is_partial.get())
             }
             "Required" if args.len() == 1 => {
                 let source = args[0];
                 let mapper = mapper_for(OptionalityMod::Remove, ReadonlyMod::Keep, source);
-                let result = match self.execute_type_node(SemanticQueryKey::MappedType {
+                let mapped_read = self.execute_read(SemanticQueryKey::MappedType {
                     source,
                     mapper,
                     context,
-                }) {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                });
+                if mapped_read.result_is_partial {
+                    result_is_partial.set(true);
+                }
+                let result = match mapped_read.value {
+                    QueryResult::Value(node) => node,
                     _ => self.opaque(QueryError::Miss),
                 };
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence)
+                (QueryResult::Value(result), fence, result_is_partial.get())
             }
             "Readonly" if args.len() == 1 => {
                 let source = args[0];
                 let mapper = mapper_for(OptionalityMod::Keep, ReadonlyMod::Add, source);
-                let result = match self.execute_type_node(SemanticQueryKey::MappedType {
+                let mapped_read = self.execute_read(SemanticQueryKey::MappedType {
                     source,
                     mapper,
                     context,
-                }) {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                });
+                if mapped_read.result_is_partial {
+                    result_is_partial.set(true);
+                }
+                let result = match mapped_read.value {
+                    QueryResult::Value(node) => node,
                     _ => self.opaque(QueryError::Miss),
                 };
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence)
+                (QueryResult::Value(result), fence, result_is_partial.get())
             }
             "Record" if args.len() == 2 => {
                 // Record<K, V>: map K's key space to V.
@@ -2538,16 +2590,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
                 // Source is K; `build_mapped_type` reads names from K's
                 // keyspace branch when the source isn't an Object.
-                let result = match self.execute_type_node(SemanticQueryKey::MappedType {
+                let mapped_read = self.execute_read(SemanticQueryKey::MappedType {
                     source: key_arg,
                     mapper,
                     context,
-                }) {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                });
+                if mapped_read.result_is_partial {
+                    result_is_partial.set(true);
+                }
+                let result = match mapped_read.value {
+                    QueryResult::Value(node) => node,
                     _ => self.opaque(QueryError::Miss),
                 };
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence)
+                (QueryResult::Value(result), fence, result_is_partial.get())
             }
 
             // ---- Identity utility ----
@@ -2562,7 +2618,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     Arc::clone(&fence),
                 );
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence)
+                (QueryResult::Value(result), fence, false)
             }
 
             // ---- String intrinsics ----
@@ -2573,7 +2629,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize" if args.len() == 1 => {
                 let result = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence)
+                (QueryResult::Value(result), fence, false)
             }
 
             // ---- Function-signature utilities ----
@@ -2598,34 +2654,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     {
                         let id = *return_type;
                         record_utility_edges(id);
-                        return (QueryResult::Value(id), fence);
+                        return (QueryResult::Value(id), fence, false);
                     }
                 }
                 let result = self.opaque(QueryError::Miss);
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence)
+                (QueryResult::Value(result), fence, false)
             }
             "Parameters" if args.len() == 1 => {
                 if let Some(function_node) = self.resolve_call_signature_function(args[0]) {
                     if let Some(tuple_id) = self.intern_function_params_tuple(function_node) {
                         record_utility_edges(tuple_id);
-                        return (QueryResult::Value(tuple_id), fence);
+                        return (QueryResult::Value(tuple_id), fence, false);
                     }
                 }
                 let result = self.opaque(QueryError::Miss);
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence)
+                (QueryResult::Value(result), fence, false)
             }
             "ConstructorParameters" if args.len() == 1 => {
                 if let Some(function_node) = self.resolve_construct_signature_function(args[0]) {
                     if let Some(tuple_id) = self.intern_function_params_tuple(function_node) {
                         record_utility_edges(tuple_id);
-                        return (QueryResult::Value(tuple_id), fence);
+                        return (QueryResult::Value(tuple_id), fence, false);
                     }
                 }
                 let result = self.opaque(QueryError::Miss);
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence)
+                (QueryResult::Value(result), fence, false)
             }
             "InstanceType" if args.len() == 1 => {
                 if let Some(function_node) = self.resolve_construct_signature_function(args[0]) {
@@ -2634,12 +2690,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     {
                         let id = *return_type;
                         record_utility_edges(id);
-                        return (QueryResult::Value(id), fence);
+                        return (QueryResult::Value(id), fence, false);
                     }
                 }
                 let result = self.opaque(QueryError::Miss);
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence)
+                (QueryResult::Value(result), fence, false)
             }
 
             // ---- Object-filter utilities ----
@@ -2665,7 +2721,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     None => {
                         let result = self.opaque(QueryError::Miss);
                         record_utility_edges(result);
-                        return (QueryResult::Value(result), fence);
+                        return (QueryResult::Value(result), fence, false);
                     }
                 };
                 // Context-propagating deferred
@@ -2686,7 +2742,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     None => {
                         let result = self.opaque(QueryError::Miss);
                         record_utility_edges(result);
-                        return (QueryResult::Value(result), fence);
+                        return (QueryResult::Value(result), fence, false);
                     }
                 };
                 let pick_set: FxHashSet<&str> = pick_names.iter().map(|s| s.as_ref()).collect();
@@ -2719,7 +2775,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
                 let result = graph.intern_node(SemanticNodeData::Object(result_surface));
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence)
+                (QueryResult::Value(result), fence, false)
             }
             "Omit" if args.len() == 2 => {
                 let source = args[0];
@@ -2729,7 +2785,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     None => {
                         let result = self.opaque(QueryError::Miss);
                         record_utility_edges(result);
-                        return (QueryResult::Value(result), fence);
+                        return (QueryResult::Value(result), fence, false);
                     }
                 };
                 // Context-propagating deferred
@@ -2741,7 +2797,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     None => {
                         let result = self.opaque(QueryError::Miss);
                         record_utility_edges(result);
-                        return (QueryResult::Value(result), fence);
+                        return (QueryResult::Value(result), fence, false);
                     }
                 };
                 let omit_set: FxHashSet<&str> = omit_names.iter().map(|s| s.as_ref()).collect();
@@ -2781,7 +2837,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
                 let result = graph.intern_node(SemanticNodeData::Object(result_surface));
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence)
+                (QueryResult::Value(result), fence, false)
             }
 
             // ---- Union-filter utilities ----
@@ -2829,7 +2885,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         // fall through to the deferred shell.
                         let result = self.opaque(QueryError::Miss);
                         record_utility_edges(result);
-                        return (QueryResult::Value(result), fence);
+                        return (QueryResult::Value(result), fence, false);
                     }
                 };
                 drop(source_data);
@@ -2855,13 +2911,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // information.
                             let result = self.opaque(QueryError::Miss);
                             record_utility_edges(result);
-                            return (QueryResult::Value(result), fence);
+                            return (QueryResult::Value(result), fence, false);
                         }
                     }
                 }
                 let result = self.intern_normalized_union_or_intersection(&survivors, true);
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence)
+                (QueryResult::Value(result), fence, false)
             }
 
             // ---- Deferred utilities ----
@@ -2873,7 +2929,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             _ => {
                 let result = self.opaque(QueryError::Miss);
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence)
+                (QueryResult::Value(result), fence, false)
             }
         }
     }
@@ -3049,6 +3105,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let walker_diagnostics: Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic> =
             std::mem::take(&mut walker.walker_diagnostics);
         let cache_suppress = walker.cache_suppress;
+        let result_is_partial = walker.result_is_partial;
         // Supplement §5.D.0 r17 — surface a budget-exceeded
         // sentinel as `QueryResult::Recursive` so §5.D.4
         // `no_cache_promotion_for_budget_exceeded_*` callers can
@@ -3067,6 +3124,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 dep_signature: fence,
                 walker_diagnostics,
                 cache_suppress,
+                result_is_partial,
                 taint: crate::semantic_query::ResultTaint::Clean,
                 observed_self_roots: Vec::new(),
                 graph_carrier: None,
@@ -3133,6 +3191,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             dep_signature: fence,
             walker_diagnostics,
             cache_suppress,
+            result_is_partial,
             taint: crate::semantic_query::ResultTaint::Clean,
             observed_self_roots,
             graph_carrier: None,
@@ -3184,6 +3243,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ))
             .with_observed_self_roots(observed_self_roots);
         }
+        // A2 signal-split: a `keyof` over an Intersection/Union enumerates
+        // its keyspace through `member_names_for_published_projection`,
+        // whose underlying ProjectPath read can be genuinely incomplete
+        // (budget / recursion / walker-fatal). Carry that partiality onto
+        // the published keyof surface.
+        let mut keyof_is_partial = false;
         let node = match data.as_deref() {
             // `keyof ClassType` yields only public keys (TS semantics): a
             // private/protected member is not part of the keyspace. Filter
@@ -3199,6 +3264,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
             Some(SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_)) => self
                 .member_names_for_published_projection(base)
+                .map(|(names, is_partial)| {
+                    keyof_is_partial |= is_partial;
+                    names
+                })
                 .or_else(|| self.key_names_from_base_node(base))
                 .map(|names| self.intern_keyspace_names(base, names, &fence))
                 .unwrap_or_else(|| self.graph().intern_node(SemanticNodeData::KeyOf { base })),
@@ -3217,11 +3286,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // surface, which was lowered from the file `base` originates in.
         // Root the memo entry on that file's observed content version.
         let observed_self_roots = self.observed_self_roots_from_nodes([base]);
-        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+        let mut keyof_output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
             QueryResult::Value(node),
             fence,
         ))
-        .with_observed_self_roots(observed_self_roots)
+        .with_observed_self_roots(observed_self_roots);
+        keyof_output.result_is_partial = keyof_is_partial;
+        keyof_output
     }
 
     pub(super) fn intern_keyspace_names<I>(
@@ -3298,10 +3369,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// surface (`native_props`) reads the member surface DIRECTLY (it does
     /// not route through this published-projection helper), so it is
     /// unaffected by this filter.
+    /// Returns the source's public members for a published projection,
+    /// PLUS the `result_is_partial` flag of the underlying `ProjectPath`
+    /// read (A2 signal-split). A genuinely-incomplete projection (budget /
+    /// recursion / walker-fatal) surfaces a complete-looking member list
+    /// here; the bool carries that partiality so `build_mapped_type` can
+    /// taint its published surface. The fast path over an already-resolved
+    /// `Object` node is always complete (`false`).
     pub(super) fn source_members_for_published_projection(
         &self,
         source: SemanticNodeId,
-    ) -> Option<Vec<SurfaceMember>> {
+    ) -> Option<(Vec<SurfaceMember>, bool)> {
         fn public_members(members: &[SurfaceMember]) -> Vec<SurfaceMember> {
             members
                 .iter()
@@ -3311,7 +3389,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         if let Some(SemanticNodeData::Object(view)) = self.graph().node_data(source).as_deref() {
-            return Some(public_members(&view.members));
+            return Some((public_members(&view.members), false));
         }
 
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
@@ -3322,12 +3400,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
         });
         crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
+        let read_is_partial = read.result_is_partial;
         let node = match read.value {
             QueryResult::Value(id) => id,
             QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };
         match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Object(view)) => Some(public_members(&view.members)),
+            Some(SemanticNodeData::Object(view)) => {
+                Some((public_members(&view.members), read_is_partial))
+            }
             _ => None,
         }
     }
@@ -3335,9 +3416,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn member_names_for_published_projection(
         &self,
         source: SemanticNodeId,
-    ) -> Option<Vec<Arc<str>>> {
+    ) -> Option<(Vec<Arc<str>>, bool)> {
         self.source_members_for_published_projection(source)
-            .map(|members| members.into_iter().map(|member| member.name).collect())
+            .map(|(members, is_partial)| {
+                (
+                    members.into_iter().map(|member| member.name).collect(),
+                    is_partial,
+                )
+            })
     }
 
     /// Mapped-type rewrite.
@@ -3441,9 +3527,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // source directly). If `source` is not an Object we can read
         // member names from, fall back to the keyspace shape — but
         // opaque keyspaces terminate the mapped dispatch cleanly.
-        let source_members: Vec<SurfaceMember> = self
+        // A2 signal-split partiality accumulator. Folds the partiality of
+        // every nested subquery this mapped-type build surfaces (the
+        // source-member ProjectPath, the K-independent value hoist's
+        // nested Instantiate) into the published surface so a
+        // genuinely-incomplete (budget / recursion / walker-fatal) input
+        // taints the mapped result even though it surfaces as a complete
+        // `Value`.
+        let mut mapped_is_partial = false;
+        let (source_members, source_members_partial): (Vec<SurfaceMember>, bool) = self
             .source_members_for_published_projection(source)
             .unwrap_or_default();
+        mapped_is_partial |= source_members_partial;
         let key_names: Vec<Arc<str>> = if !source_members.is_empty() {
             if self.uses_synthetic_mapped_key_names(&source_members) {
                 match self.key_names_from_keyspace_node(mapper.key_space) {
@@ -3482,11 +3577,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 OriginMeta::None,
                 Arc::clone(&fence),
             );
-            return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                QueryResult::Value(node),
-                fence,
-            ))
-            .with_observed_self_roots(observed_self_roots.clone());
+            let mut deferred_output =
+                crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                    QueryResult::Value(node),
+                    fence,
+                ))
+                .with_observed_self_roots(observed_self_roots.clone());
+            deferred_output.result_is_partial = mapped_is_partial;
+            return deferred_output;
         };
 
         // 2. Build member slots.
@@ -3555,12 +3653,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
                     let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
                     let args = Arc::clone(args);
-                    match self.execute_type_node(SemanticQueryKey::Instantiate {
+                    let inst_read = self.execute_read(SemanticQueryKey::Instantiate {
                         base: slot,
                         args,
                         context: inst_ctx,
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                    });
+                    if inst_read.result_is_partial {
+                        mapped_is_partial = true;
+                    }
+                    match inst_read.value {
+                        QueryResult::Value(id) => id,
                         _ => evaluated,
                     }
                 }
@@ -3708,11 +3810,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
         }
 
-        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+        let mut mapped_output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
             QueryResult::Value(node),
             fence,
         ))
-        .with_observed_self_roots(observed_self_roots)
+        .with_observed_self_roots(observed_self_roots);
+        mapped_output.result_is_partial = mapped_is_partial;
+        mapped_output
     }
 
     /// Per-key Mapped member value materialiser — the SHARED
@@ -3788,12 +3892,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
                 let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
                 let args = Arc::clone(args);
-                match self.execute_type_node(SemanticQueryKey::Instantiate {
+                let read = self.execute_read(SemanticQueryKey::Instantiate {
                     base: slot,
                     args,
                     context: inst_ctx,
-                }) {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                });
+                // A2 signal-split: per-K materialiser returns a bare node, so
+                // fold a genuinely-incomplete nested Instantiate onto the
+                // request's sticky partial flag.
+                crate::request_context::observe_component_meta_read_suppress(&read);
+                match read.value {
+                    QueryResult::Value(id) => id,
                     _ => evaluated,
                 }
             }
@@ -3923,12 +4032,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
                 let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
                 let args = Arc::clone(args);
-                match self.execute_type_node(SemanticQueryKey::Instantiate {
+                let read = self.execute_read(SemanticQueryKey::Instantiate {
                     base: slot,
                     args,
                     context: inst_ctx,
-                }) {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                });
+                // A2 signal-split: fold a genuinely-incomplete nested
+                // Instantiate onto the request's sticky partial flag.
+                crate::request_context::observe_component_meta_read_suppress(&read);
+                match read.value {
+                    QueryResult::Value(id) => id,
                     _ => evaluated,
                 }
             }
@@ -3998,12 +4111,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
                 let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
                 let args = Arc::clone(args);
-                match self.execute_type_node(SemanticQueryKey::Instantiate {
+                let read = self.execute_read(SemanticQueryKey::Instantiate {
                     base: slot,
                     args,
                     context: inst_ctx,
-                }) {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                });
+                // A2 signal-split: fold a genuinely-incomplete nested
+                // Instantiate onto the request's sticky partial flag.
+                crate::request_context::observe_component_meta_read_suppress(&read);
+                match read.value {
+                    QueryResult::Value(id) => id,
                     _ => evaluated,
                 }
             }
@@ -4094,7 +4211,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         source: SemanticNodeId,
         _context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Option<Vec<SurfaceMember>> {
+    ) -> Option<(Vec<SurfaceMember>, bool)> {
+        // Returns the source surface PLUS the A2 partiality flag of the
+        // underlying ProjectPath read so the Shallow walker's
+        // `synthesise_mapped_surface` caller can taint its surface when
+        // the source projection was genuinely incomplete.
         self.source_members_for_published_projection(source)
     }
 
@@ -4224,17 +4345,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }) {
                 let mut per_member: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
                 let mut distribution_ok = true;
+                // A2 signal-split: accumulate the partiality of every
+                // per-member sub-conditional so an incomplete distribution
+                // (a member whose nested resolution tripped the budget /
+                // recurred / hit a walker fatal) taints the conditional
+                // result, whether it early-returns the normalised union or
+                // falls through to the deferred shell.
+                let mut distribution_is_partial = false;
                 for &member in members.iter() {
-                    match self.execute_type_node(SemanticQueryKey::Conditional {
+                    let member_read = self.execute_read(SemanticQueryKey::Conditional {
                         check: member,
                         extends,
                         true_branch,
                         false_branch,
                         distributive: false,
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => {
-                            per_member.push(id)
-                        }
+                    });
+                    distribution_is_partial |= member_read.result_is_partial;
+                    match member_read.value {
+                        QueryResult::Value(id) => per_member.push(id),
                         _ => {
                             distribution_ok = false;
                             break;
@@ -4242,17 +4370,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 if distribution_ok {
-                    if let QueryResult::Value(SemanticQueryOutput {
-                        value: normalised, ..
-                    }) = self.execute_type_node(SemanticQueryKey::NormalizeUnion {
+                    let normalize_read = self.execute_read(SemanticQueryKey::NormalizeUnion {
                         members: Arc::from(per_member.into_boxed_slice()),
-                    }) {
-                        return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                            QueryResult::Value(normalised),
-                            fence,
-                        ))
-                        .with_observed_self_roots(observed_self_roots.clone());
+                    });
+                    distribution_is_partial |= normalize_read.result_is_partial;
+                    if let QueryResult::Value(normalised) = normalize_read.value {
+                        let mut output =
+                            crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                                QueryResult::Value(normalised),
+                                fence,
+                            ))
+                            .with_observed_self_roots(observed_self_roots.clone());
+                        output.result_is_partial = distribution_is_partial;
+                        return output;
                     }
+                }
+                // Distribution failed or normalisation did not produce a
+                // value: a partial member taints the request so the
+                // fall-through deferred-shell result does not warm.
+                if distribution_is_partial {
+                    crate::request_context::mark_request_materialization_cache_suppress();
                 }
                 // Fall through to the deferred-shell path below.
             }
@@ -4312,6 +4449,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `check` is first materialised via `evaluate_deferred_semantic_node`
         // so `PricingPlanSlots["badge"]` / mapped-type references resolve
         // to their underlying Function before position-wise binding.
+        //
+        // This evaluator does not propagate the caller's publication
+        // (`Navigate`) demand — it uses the default expanded evaluator.
+        // That is sound for this narrowly-gated arm (a `Function`-typed
+        // `extends` with `infer` positions): the recursive resolution it
+        // triggers dispatches `Conditional` / `Instantiate`, both of
+        // which count toward the aggregate request work budget, so an
+        // open-generic storm reaching here still fails closed to a typed
+        // partial rather than running unbounded.
         if let Some(SemanticNodeData::Function {
             params: extends_params,
             return_type: extends_return,
@@ -4775,6 +4921,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::DepVersion::ProjectGeneration(project_gen),
         ));
 
+        // Fold BOTH metadata signals from the nested macro-payload reads:
+        // `cache_suppress` (inner-memo non-cacheability) and
+        // `result_is_partial` (budget/walker partial). A bare
+        // `read.value`-only extraction here would drop both via
+        // `QueryBuildOutput::from`'s default-false, letting a budget-tripped
+        // nested Instantiate's partial warm the component-meta result.
+        let mut nested_cache_suppress = false;
+        let mut nested_result_is_partial = false;
         let result = match macro_kind {
             AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
                 // §3.2 sketch: 0 args → Miss; 1 arg → arg directly;
@@ -4791,6 +4945,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         &mut local_fence,
                         &read.dep_signature,
                     );
+                    nested_cache_suppress |= read.cache_suppress;
+                    nested_result_is_partial |= read.result_is_partial;
                     read.value
                 }
             }
@@ -4853,6 +5009,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         context: crate::semantic_query::ProjectionReductionContext::published(mode),
                     });
                     local_fence.extend(read.dep_signature.iter().cloned());
+                    nested_cache_suppress |= read.cache_suppress;
+                    nested_result_is_partial |= read.result_is_partial;
                     read.value
                 }
             }
@@ -4908,6 +5066,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             fence_to_dep_signature(local_fence),
         ))
         .with_observed_self_roots(observed_self_roots);
+        // Fold the nested macro-payload reads' metadata onto the build
+        // output so a budget/walker partial in a nested
+        // `NormalizeIntersection` / `ProjectPath` read taints this macro
+        // payload result (and suppresses the component-meta warm gate),
+        // while a benign non-cacheable nested read still refuses inner-memo
+        // admission without falsely marking this result partial.
+        output.cache_suppress |= nested_cache_suppress;
+        output.result_is_partial |= nested_result_is_partial;
         // Stale real-file owner: the key names a file unknown to the
         // live view (`ensure_indexed_ready == None`). The value flows to
         // the caller, but the entry is non-cacheable — never publish a

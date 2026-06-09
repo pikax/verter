@@ -125,6 +125,104 @@ pub(super) type InstantiateIdentity = (Arc<str>, Arc<str>);
 pub struct ProjectSemanticDispatch<'a> {
     pub(super) ctx: &'a dyn ResolverContext,
     pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[InstantiateIdentity; 8]>>,
+    /// Cold-build-LOCAL taint accumulator stack (universal read-boundary
+    /// fold).
+    ///
+    /// One frame is pushed per cold build that actually runs its build
+    /// closure (the `execute_via_cold_build_helper` `traced_build` path),
+    /// and popped + OR-folded into the build's `QueryBuildOutput` before
+    /// memo admission. While a frame is on the stack, EVERY cold-build
+    /// subquery read folds its discarded `CacheRead` metadata into the TOP
+    /// frame at the shared read boundary
+    /// ([`Self::execute_via_cold_build_helper`], the single funnel for
+    /// `execute`, `execute_read`, and every direct `execute_read`
+    /// cold-build consumer in build / evaluate / enumerate / walk):
+    /// `read.result_is_partial` into `result_is_partial`, AND
+    /// `read.cache_suppress` into `cache_suppress`. This is the SINGLE
+    /// place the partial/non-cacheable read-leak class is closed — a
+    /// nested partial/non-cacheable read can no longer drop its metadata
+    /// before the outer build's warm-gate decision, regardless of which
+    /// helper issued it. A top-level read with no active build frame
+    /// naturally no-ops (the stack is empty).
+    ///
+    /// Distinct from the broad per-request sticky
+    /// ([`crate::request_context::current_materialization_cache_suppress`]):
+    /// the request sticky records ONLY genuine partials (§1) and
+    /// outlives the build; this stack is scoped to the active cold build so
+    /// a benign non-cacheable nested read taints only THIS build's
+    /// `cache_suppress` (memo non-admission), never the request partial
+    /// sticky (which would wrongly refuse component-meta warm).
+    pub(super) build_local_taint: std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+}
+
+/// One cold-build-local taint frame: the OR-accumulator a single cold
+/// build folds every nested read's `result_is_partial` / `cache_suppress`
+/// into before its memo-admission decision. See
+/// [`ProjectSemanticDispatch::build_local_taint`].
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct BuildLocalTaint {
+    /// OR of every nested read's `result_is_partial` observed while this
+    /// frame was the top of the build-local stack. A genuine partial.
+    pub(super) result_is_partial: bool,
+    /// OR of every nested read's `cache_suppress` observed while this
+    /// frame was the top of the build-local stack. Inner-memo
+    /// non-cacheability — benign or partial-derived.
+    pub(super) cache_suppress: bool,
+}
+
+/// Panic-safe RAII guard for a cold-build-local taint frame.
+///
+/// On construction it pushes a fresh [`BuildLocalTaint`] frame onto the
+/// dispatch's [`ProjectSemanticDispatch::build_local_taint`] stack; on
+/// drop it pops that frame UNLESS the frame was already consumed via
+/// [`Self::finish`]. This mirrors [`crate::semantic_query_memo::InflightPanicGuard`]:
+/// a manual `push` / `pop` pair
+/// is not unwind-safe — if the cold-build closure (or the relation cold
+/// compute) panics or returns early between the push and the pop, the
+/// frame leaks and every subsequent read on this dispatcher folds into a
+/// stale frame, corrupting later builds' memo-admission decisions.
+///
+/// Normal path: the owner calls [`Self::finish`], which pops the frame and
+/// returns it for the OR-fold into the build's `QueryBuildOutput` (or the
+/// relation's non-admission decision), marking the guard finished so
+/// `drop` is a no-op. Panic / early-return path: `drop` pops the frame so
+/// the stack stays balanced.
+pub(super) struct BuildLocalTaintGuard<'g> {
+    stack: &'g std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    finished: bool,
+}
+
+impl<'g> BuildLocalTaintGuard<'g> {
+    /// Push a fresh taint frame and return a guard that pops it on drop.
+    pub(super) fn push(
+        stack: &'g std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    ) -> Self {
+        stack.borrow_mut().push(BuildLocalTaint::default());
+        Self {
+            stack,
+            finished: false,
+        }
+    }
+
+    /// Normal-path completion: pop this frame and return it for the
+    /// OR-fold, marking the guard finished so `drop` becomes a no-op.
+    /// Returns a default (untainted) frame if the stack is somehow empty.
+    pub(super) fn finish(mut self) -> BuildLocalTaint {
+        self.finished = true;
+        self.stack.borrow_mut().pop().unwrap_or_default()
+    }
+}
+
+impl<'g> Drop for BuildLocalTaintGuard<'g> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        // Panic / early-return path: pop the frame this guard pushed so the
+        // stack stays balanced. The popped frame is discarded — the build
+        // that owned it is unwinding, so its memo admission never happens.
+        self.stack.borrow_mut().pop();
+    }
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -152,6 +250,95 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Self {
             ctx,
             instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
+        }
+    }
+
+    /// Fold a discarded nested-read's metadata into the TOP cold-build-local
+    /// taint frame (universal read-boundary fold). Called by the shared read
+    /// boundary [`Self::execute_via_cold_build_helper`] for EVERY cold-build
+    /// subquery read (so `execute`, `execute_read`, the `execute_type_node`
+    /// override, and every direct `execute_read` cold-build consumer fold
+    /// identically) before the `CacheRead` rails are discarded by a
+    /// value-only caller. No-op when no frame is on the stack (no active cold
+    /// build — e.g. a top-level read from the projector, which routes
+    /// partiality through the request sticky instead).
+    pub(super) fn fold_into_top_build_local_taint(
+        &self,
+        result_is_partial: bool,
+        cache_suppress: bool,
+    ) {
+        if let Some(top) = self.build_local_taint.borrow_mut().last_mut() {
+            top.result_is_partial |= result_is_partial;
+            top.cache_suppress |= cache_suppress;
+        }
+    }
+
+    /// Fold a returning `CacheRead`'s rails into BOTH propagation channels —
+    /// the per-request partial sticky AND the active build-local taint frame.
+    /// This is the SINGLE fold funnel `execute_via_cold_build_helper` invokes
+    /// at EVERY one of its return points (the post-cooperative normal tail AND
+    /// the post-trip budget early-exit), so no exit can launder a partial /
+    /// non-cacheable nested read past the enclosing build's warm-gate decision:
+    ///   - `result_is_partial` ⟹ mark the request sticky (a genuine partial
+    ///     must gate component-meta / shape / materialize warm for the whole
+    ///     request) AND fold into the build-local frame.
+    ///   - `cache_suppress` ⟹ fold into the build-local frame only (a benign
+    ///     non-cacheable but COMPLETE nested read taints the enclosing build's
+    ///     memo non-admission, never the request partial sticky).
+    ///
+    /// A top-level read with no active build frame naturally no-ops the
+    /// build-local fold (the stack is empty); the sticky mark still fires.
+    pub(super) fn fold_cache_read_rails(&self, result_is_partial: bool, cache_suppress: bool) {
+        if result_is_partial {
+            crate::request_context::mark_request_materialization_cache_suppress();
+        }
+        self.fold_into_top_build_local_taint(result_is_partial, cache_suppress);
+    }
+
+    /// Bump the per-request type-resolution audit counters (hop / mode /
+    /// projection-op / conditional-decision + walker-depth high-water) for a
+    /// CONSUMER dispatch `key`, BEFORE admission-time rewriting so the
+    /// attribution reflects the caller's intent (path-projection sugar still
+    /// counts as one hop).
+    ///
+    /// Shared by BOTH consumer entry points — [`SemanticQueryApi::execute`]
+    /// and the chokepoint [`SemanticQueryApi::execute_type_node`] override —
+    /// so a `execute_type_node` caller keeps counting after the override
+    /// switched it from the value-only `execute` to `execute_read` (which
+    /// does NOT bump these). The per-request dispatch-MASK trace
+    /// (`record_dispatched_query_tag`) stays at the `execute_via_cold_build_helper`
+    /// choke point (so nested `execute_read`-only sub-dispatches are captured
+    /// there); these intent counters stay on the consumer entry. No-op when
+    /// no `RequestContext` is installed on the calling thread.
+    fn record_dispatch_intent_counters(&self, key: &SemanticQueryKey) {
+        let Some(ctx) = crate::request_context::current_request_context() else {
+            return;
+        };
+        let depth = self.instantiate_active.borrow().len();
+        ctx.observe_type_resolution_depth(u16::try_from(depth).unwrap_or(u16::MAX));
+        match key {
+            SemanticQueryKey::ProjectPath { context, .. } => {
+                ctx.bump_type_resolution_hop(context.mode);
+                ctx.bump_type_resolution_projection_op();
+            }
+            SemanticQueryKey::ProjectMember { mode, .. }
+            | SemanticQueryKey::IndexedAccess { mode, .. } => {
+                ctx.bump_type_resolution_hop(*mode);
+                ctx.bump_type_resolution_projection_op();
+            }
+            SemanticQueryKey::Instantiate { context, .. } => {
+                ctx.bump_type_resolution_hop(context.projection_reduction.mode);
+            }
+            SemanticQueryKey::Conditional { .. } => {
+                ctx.bump_type_resolution_conditional_decision();
+                ctx.bump_type_resolution_hop(crate::semantic_query::ProjectionMode::Identity);
+            }
+            // Every other kind is a single dispatched hop with no
+            // consumer-visible projection mode — count as Identity.
+            _ => {
+                ctx.bump_type_resolution_hop(crate::semantic_query::ProjectionMode::Identity);
+            }
         }
     }
 
@@ -760,11 +947,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // count (the peek is non-incrementing — see
         // [`RequestBudget::is_exhausted`]).
         //
-        // The check is gated on `semantic_query_counts_toward_projection_budget`
-        // so non-projection queries (ResolveDecl, NormalizeUnion,
-        // Conditional, Instantiate, TypeOf, …) bypass the gate
-        // entirely — their cost is not what the projection-op fuse
-        // bounds.
+        // The check is gated on `semantic_query_counts_toward_projection_budget`,
+        // the aggregate work-budget gate: the projection operators PLUS
+        // `Instantiate` / `Conditional` (the generic-expansion-storm
+        // kinds). Kinds outside that set (ResolveDecl, NormalizeUnion,
+        // TypeOf, …) bypass the early-exit — their cost is not what the
+        // work budget bounds.
         if semantic_query_counts_toward_projection_budget(&key) {
             if let Some(budget) = crate::request_context::current_request_budget() {
                 if budget.is_exhausted() {
@@ -785,6 +973,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // the runaway signal.
                     if let Some(observer) = verter_audit::current_observer() {
                         use verter_audit::AuditEvent;
+                        // The early-exit attribution must mirror EVERY kind
+                        // the aggregate work-budget gate counts — including
+                        // `Instantiate` and `Conditional`. Once those two
+                        // count toward the budget they can reach this
+                        // post-trip early-exit; omitting their cold-event
+                        // arms here would silently under-count post-trip
+                        // instantiate/conditional dispatches and lose the
+                        // open-generic-storm signal in bench attribution.
                         let event = match &key {
                             SemanticQueryKey::MappedType { .. } => {
                                 Some(AuditEvent::SemanticQueryMappedTypeCold)
@@ -799,17 +995,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             SemanticQueryKey::IndexedAccess { .. } => {
                                 Some(AuditEvent::SemanticQueryIndexedAccessCold)
                             }
+                            SemanticQueryKey::Instantiate { .. } => {
+                                Some(AuditEvent::SemanticQueryInstantiateCold)
+                            }
+                            SemanticQueryKey::Conditional { .. } => {
+                                Some(AuditEvent::SemanticQueryConditionalCold)
+                            }
                             _ => None,
                         };
                         if let Some(event) = event {
                             observer.record_event(event);
                         }
                     }
+                    // CRITICAL: the post-trip budget early-exit is a SECOND
+                    // return point of this helper. It must fold its rails into
+                    // the request sticky + active build-local frame BEFORE
+                    // returning — identical to the post-cooperative normal tail
+                    // — or a budget-tripped sub-read (whose rails a value-only
+                    // caller like `execute_type_node` discards into
+                    // `Opaque(Miss)`) would never taint the enclosing cold
+                    // build, which would then admit a complete `Value`
+                    // (`result_is_partial=false`) and launder the partial.
+                    self.fold_cache_read_rails(true, true);
                     return CacheRead {
                         value: QueryResult::Error(QueryError::BudgetExceeded(failure)),
                         dep_signature: empty_signature(),
                         walker_diagnostics: Arc::from([]),
                         cache_suppress: true,
+                        result_is_partial: true,
                     };
                 }
             }
@@ -854,6 +1067,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             )
                                 .into();
                         output.cache_suppress = true;
+                        output.result_is_partial = true;
                         return output;
                     }
                 }
@@ -1007,7 +1221,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let provenance = Arc::clone(&host.provenance);
         let traced_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
             cold_build_ran_for_closure.store(true, std::sync::atomic::Ordering::Relaxed);
-            let (output, finalise) =
+            // Open a cold-build-local taint frame for the duration of THIS
+            // build. The shared read boundary folds every nested
+            // sub-dispatch's discarded `CacheRead` metadata into this frame;
+            // we pop + OR it into the output below, so a nested partial /
+            // non-cacheable read can no longer escape the enclosing build's
+            // memo-admission decision. The RAII guard pops the frame on
+            // panic / early-return too (panic-safe pop), so an unwinding
+            // cold build never leaks a stale frame onto the stack.
+            let taint_guard = BuildLocalTaintGuard::push(&self.build_local_taint);
+            let (mut output, finalise) =
                 crate::fact_signature_helpers::install_fact_tracer(host, || {
                     // Test-only fact-injection hook. When the
                     // `dispatch_test_inject_parse_fact` slot is non-None,
@@ -1016,6 +1239,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     dispatch_test_inject_parse_fact_if_set();
                     raw_build()
                 });
+            let build_local = taint_guard.finish();
+            output.result_is_partial |= build_local.result_is_partial;
+            output.cache_suppress |= build_local.cache_suppress;
             provenance
                 .memo_entry_fact_tracer_installs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1092,6 +1318,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 observer.record_event(event);
             }
         }
+        // UNIVERSAL READ-BOUNDARY FOLD (the single fold point). Every
+        // cold-build subquery read — issued through `execute`,
+        // `execute_read`, the `execute_type_node` override, OR any direct
+        // `execute_read` cold-build consumer in build / evaluate /
+        // enumerate / walk — funnels through THIS helper, so folding the
+        // returned `CacheRead`'s metadata into the active build-local taint
+        // frame HERE closes the read-leak class in ONE place:
+        //   - `cache_read.cache_suppress`  → the build-local frame (a
+        //     benign non-cacheable but COMPLETE nested read taints the
+        //     enclosing build's memo non-admission, but NOT the request
+        //     partial sticky — component-meta still warms).
+        //   - `cache_read.result_is_partial` → the build-local frame AND
+        //     the per-request sticky (a genuine partial must gate
+        //     component-meta / shape / materialize warm for the whole
+        //     request).
+        // At this point `traced_build` (if it ran a child build) has already
+        // popped its OWN child frame inside `execute_cooperative`, so the
+        // top of the stack is the PARENT build frame — folding the child's
+        // returned metadata here propagates it exactly one level up. A
+        // top-level read with no active build frame naturally no-ops
+        // (`fold_into_top_build_local_taint` finds an empty stack).
+        self.fold_cache_read_rails(cache_read.result_is_partial, cache_read.cache_suppress);
         tracing::debug!(
             target: "verter::dispatch::execute_via_helper",
             ?key,
@@ -1244,9 +1492,43 @@ fn finalise_traced_build_output(
             output.cache_suppress = true;
         }
     }
+    // §1 INVARIANT enforcement (the convergence point): a genuine
+    // computational partial MUST imply non-cacheability. The build-local
+    // taint fold (in `traced_build`) and every producer set
+    // `result_is_partial` for genuine partials; enforce `result_is_partial
+    // ⟹ cache_suppress` here at the single finalisation boundary so a
+    // partial value can never be admitted to the semantic family memo (a
+    // laundered `Value + result_is_partial=true, cache_suppress=false`
+    // entry — Finding B — cannot exist). Benign non-cacheable COMPLETE
+    // results (`cache_suppress=true, result_is_partial=false`) are left
+    // untouched: they stay out of the memo but still warm component-meta
+    // (which gates on `result_is_partial` ONLY).
+    if output.result_is_partial {
+        output.cache_suppress = true;
+    }
+    debug_assert!(
+        !output.result_is_partial || output.cache_suppress,
+        "§1 invariant violated at finalisation: result_is_partial \
+         without cache_suppress would launder a partial into the memo"
+    );
     output
 }
 
+/// Aggregate request work budget gate.
+///
+/// Returns `true` for every `SemanticQueryKey` kind that counts toward
+/// the per-request fail-closed work budget ([`crate::request_budget`]).
+/// This is an AGGREGATE semantic-expansion/work budget, NOT a per-kind
+/// fuse: alongside the projection operators (`ProjectMember` /
+/// `IndexedAccess` / `ProjectPath` / `KeyOf` / `MappedType`) it counts
+/// `Instantiate` and `Conditional` — the two kinds that dominate an
+/// open-generic expansion storm (`Pick<PropsBase<T>, …>` re-instantiating
+/// cross-file generics through chained conditionals). Counting only
+/// projection operators left those two unbounded, so a storm dominated
+/// by them never tripped the fuse and ran past the early-exit. Including
+/// them makes any storm fail closed to a structurally-valid typed PARTIAL
+/// within seconds — with cache suppression — regardless of which upstream
+/// layer missed.
 fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> bool {
     matches!(
         key,
@@ -1255,6 +1537,8 @@ fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> boo
             | SemanticQueryKey::ProjectPath { .. }
             | SemanticQueryKey::KeyOf { .. }
             | SemanticQueryKey::MappedType { .. }
+            | SemanticQueryKey::Instantiate { .. }
+            | SemanticQueryKey::Conditional { .. }
     )
 }
 
@@ -1263,58 +1547,12 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         &self,
         key: SemanticQueryKey,
     ) -> QueryResult<SemanticQueryOutput<SemanticQueryValue>> {
-        // Type-resolution audit: bump the per-request hop / mode /
-        // projection / conditional counters BEFORE admission-time
-        // rewriting so we attribute the dispatch to the caller's
-        // intent (path-projection sugar still counts as one hop). The
-        // counters are no-ops when no `RequestContext` is installed
-        // on the calling thread.
-        if let Some(ctx) = crate::request_context::current_request_context() {
-            // Walker depth high-water — observe per-dispatch nesting
-            // depth via the dispatcher's `instantiate_active` stack.
-            let depth = self.instantiate_active.borrow().len();
-            ctx.observe_type_resolution_depth(u16::try_from(depth).unwrap_or(u16::MAX));
-            // NOTE: the per-request dispatch-mask trace
-            // (`record_dispatched_query_tag`) is recorded at the shared
-            // `execute_via_cold_build_helper` choke point, NOT here — so
-            // nested reducer sub-dispatches that enter only via
-            // `execute_read` are captured too. The hop / mode / projection
-            // / conditional counters below stay on the `execute` path:
-            // they attribute the caller's top-level dispatch intent and
-            // several path-precision guards assert them here.
-            match &key {
-                SemanticQueryKey::ProjectPath { context, .. } => {
-                    ctx.bump_type_resolution_hop(context.mode);
-                    ctx.bump_type_resolution_projection_op();
-                }
-                SemanticQueryKey::ProjectMember { mode, .. }
-                | SemanticQueryKey::IndexedAccess { mode, .. } => {
-                    ctx.bump_type_resolution_hop(*mode);
-                    ctx.bump_type_resolution_projection_op();
-                }
-                SemanticQueryKey::Instantiate { context, .. } => {
-                    ctx.bump_type_resolution_hop(context.projection_reduction.mode);
-                }
-                SemanticQueryKey::Conditional { .. } => {
-                    ctx.bump_type_resolution_conditional_decision();
-                    // Conditional decisions still count as a single
-                    // dispatched hop in `Identity` mode — the
-                    // dispatcher allocates one node id for the
-                    // resolution.
-                    ctx.bump_type_resolution_hop(crate::semantic_query::ProjectionMode::Identity);
-                }
-                // ResolveDecl, KeyOf, MappedType, TypeOf,
-                // NormalizeUnion, NormalizeIntersection,
-                // ResolvedNamedType, Relate, ResolveMacroPayload —
-                // each is a single dispatched hop with no consumer-
-                // visible projection mode. Count them as Identity hops
-                // so the audit's `hops` field is the total dispatch
-                // count, not just the projection-bearing subset.
-                _ => {
-                    ctx.bump_type_resolution_hop(crate::semantic_query::ProjectionMode::Identity);
-                }
-            }
-        }
+        // Type-resolution audit hop / mode / projection / conditional
+        // counters — shared with the `execute_type_node` consumer entry
+        // (both are consumer entry points; the chokepoint override below
+        // also calls this so its callers keep counting after switching to
+        // `execute_read`).
+        self.record_dispatch_intent_counters(&key);
         // Delegate to the shared cold-build helper. Both `execute`
         // (this method) and `execute_read` route through the helper
         // so the fact-tracer wrapper, sentinel construction, and
@@ -1334,6 +1572,49 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         match self.execute_via_cold_build_helper(key).value {
             QueryResult::Value(node) => QueryResult::Value(SemanticQueryOutput {
                 value: SemanticQueryValue::TypeNode(node),
+                provenance: ResultProvenance::clean(),
+            }),
+            QueryResult::Recursive(n) => QueryResult::Recursive(n),
+            QueryResult::Error(e) => QueryResult::Error(e),
+        }
+    }
+
+    /// Consumer entry point that returns a bare [`SemanticNodeId`].
+    ///
+    /// The trait default narrows the value-only `execute`, dropping the
+    /// `CacheRead` partiality / non-cacheability metadata of the
+    /// sub-dispatch. The override drives `execute_read` instead so its read
+    /// funnels through the shared read boundary
+    /// ([`Self::execute_via_cold_build_helper`]) — which performs the
+    /// UNIVERSAL build-local taint fold (`result_is_partial` AND
+    /// `cache_suppress`) plus the per-request partial-sticky mark for every
+    /// cold-build subquery read in ONE place. The override therefore does
+    /// NOT re-fold here (the shared boundary already folded); it only counts
+    /// dispatch intent and narrows the value half.
+    ///
+    /// `finalise_traced_build_output` later ORs the popped frame into the
+    /// `QueryBuildOutput` and enforces `result_is_partial ⟹ cache_suppress`.
+    fn execute_type_node(
+        &self,
+        key: SemanticQueryKey,
+    ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+        // This is a CONSUMER entry point (the trait default routed through
+        // `execute`, which bumped these counters). Now that the override
+        // drives `execute_read` — which does NOT bump them — count here so
+        // `execute_type_node` callers (every convenience wrapper, the
+        // path-precision hop oracle) keep their attribution.
+        self.record_dispatch_intent_counters(&key);
+        // The shared read boundary inside `execute_read` →
+        // `execute_via_cold_build_helper` performs the universal taint fold
+        // (build-local `result_is_partial` + `cache_suppress`, and the
+        // request partial sticky). No bespoke re-fold here — re-folding
+        // would double-count the same read into the parent frame.
+        let read = self.execute_read(key);
+        // Narrow the value half exactly as the trait default would, wrapping
+        // the bare node into the domain value with clean boundary provenance.
+        match read.value {
+            QueryResult::Value(node) => QueryResult::Value(SemanticQueryOutput {
+                value: node,
                 provenance: ResultProvenance::clean(),
             }),
             QueryResult::Recursive(n) => QueryResult::Recursive(n),
@@ -1543,6 +1824,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             dep_signature: read.dep_signature,
             walker_diagnostics: read.walker_diagnostics,
             cache_suppress: read.cache_suppress,
+            result_is_partial: read.result_is_partial,
         }
     }
 
@@ -1570,6 +1852,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             dep_signature: read.dep_signature,
             walker_diagnostics: read.walker_diagnostics,
             cache_suppress: read.cache_suppress,
+            result_is_partial: read.result_is_partial,
         }
     }
 
@@ -1604,6 +1887,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     dep_signature: slot_read.dep_signature,
                     walker_diagnostics: slot_read.walker_diagnostics,
                     cache_suppress: slot_read.cache_suppress,
+                    result_is_partial: slot_read.result_is_partial,
                 };
             }
             QueryResult::Error(e) => {
@@ -1612,6 +1896,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     dep_signature: slot_read.dep_signature,
                     walker_diagnostics: slot_read.walker_diagnostics,
                     cache_suppress: slot_read.cache_suppress,
+                    result_is_partial: slot_read.result_is_partial,
                 };
             }
         };
@@ -1625,6 +1910,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         dep_signature: slot_read.dep_signature,
                         walker_diagnostics: slot_read.walker_diagnostics,
                         cache_suppress: slot_read.cache_suppress,
+                        result_is_partial: slot_read.result_is_partial,
                     };
                 }
             },
@@ -1634,6 +1920,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     dep_signature: slot_read.dep_signature,
                     walker_diagnostics: slot_read.walker_diagnostics,
                     cache_suppress: slot_read.cache_suppress,
+                    result_is_partial: slot_read.result_is_partial,
                 };
             }
         };
@@ -1666,6 +1953,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             dep_signature: Arc::from(merged.into_boxed_slice()),
             walker_diagnostics: binding_read.walker_diagnostics,
             cache_suppress: binding_read.cache_suppress,
+            // Fold the partial signal across BOTH hops: a budget/walker
+            // partial on the Navigate slot hop must taint the composed
+            // result even when the terminal binding hop completed.
+            result_is_partial: slot_read.result_is_partial || binding_read.result_is_partial,
         }
     }
 

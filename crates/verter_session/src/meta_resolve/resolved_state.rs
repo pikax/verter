@@ -184,19 +184,48 @@ pub(crate) fn lowered_root_reaches_transitive_cycle_with_fence(
     // the cached `resolve_type_declaration` to produce a
     // `DeclIdentity` directly — no eager lowering, no third-party
     // file loads triggered by constraint resolution.
-    fn root_decl_identity(
+    /// Bounded cap on the number of cycle-guard roots derived from one
+    /// expression — covers the outer name plus a utility's source
+    /// type-arguments without unbounded fan-out on pathological inputs.
+    const MAX_CYCLE_ROOTS: usize = 16;
+    /// Bounded recursion depth for root collection.
+    const MAX_ROOT_COLLECT_DEPTH: u32 = 8;
+
+    // L2: collect the cycle/fence guard's root identities from the
+    // expression's OPERANDS, not only the outer `Ref` name. For a
+    // builtin-utility carrier (`Pick<Source, K>` /
+    // `Omit<Source, K>` / …) the outer name resolves to
+    // `__builtin__::Pick` — a root with no declaration body, so the BFS
+    // rooted there is structurally blind to the real
+    // `Source → … → Source` chain. Collecting roots from the utility's
+    // type-arguments (the source chain) AND the outer name lets the
+    // guard see the actual cyclic source.
+    fn collect_root_decl_identities(
         expr: &TypeExpr,
         owner_canonical: &str,
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    ) -> Option<crate::semantic_query::DeclIdentity> {
+        depth: u32,
+        out: &mut Vec<crate::semantic_query::DeclIdentity>,
+    ) {
+        if out.len() >= MAX_CYCLE_ROOTS || depth >= MAX_ROOT_COLLECT_DEPTH {
+            return;
+        }
         match expr {
             TypeExpr::Parenthesized(inner) => {
-                root_decl_identity(inner, owner_canonical, query_engine)
+                collect_root_decl_identities(inner, owner_canonical, query_engine, depth + 1, out)
             }
             TypeExpr::IndexedAccess { object, .. } => {
-                root_decl_identity(object, owner_canonical, query_engine)
+                collect_root_decl_identities(object, owner_canonical, query_engine, depth + 1, out)
             }
-            TypeExpr::Ref { name, .. } | TypeExpr::RecursiveRef { name, .. } => {
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            }
+            | TypeExpr::RecursiveRef {
+                name,
+                type_arguments,
+                ..
+            } => {
                 let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
                 let resolved_canonical = if declaration.canonical_source.is_empty() {
                     Arc::<str>::from(owner_canonical)
@@ -213,39 +242,62 @@ pub(crate) fn lowered_root_reaches_transitive_cycle_with_fence(
                     .shallow_file_state(resolved_canonical.as_ref())
                     .map(|state| state.whole_hash)
                     .unwrap_or_default();
-                Some(crate::semantic_query::DeclIdentity {
+                let identity = crate::semantic_query::DeclIdentity {
                     canonical_id: resolved_canonical,
                     whole_hash,
                     decl_name: resolved_name,
-                })
+                };
+                if !out.contains(&identity) {
+                    out.push(identity);
+                }
+                // Also root at the type-arguments — the source chain of a
+                // utility carrier (`Pick<Source, K>`) lives there, never
+                // on the outer name.
+                for arg in type_arguments.iter() {
+                    collect_root_decl_identities(
+                        arg,
+                        owner_canonical,
+                        query_engine,
+                        depth + 1,
+                        out,
+                    );
+                }
             }
-            _ => None,
+            _ => {}
         }
     }
 
-    let Some(identity) = root_decl_identity(expr, scope_canonical_id, query_engine) else {
+    let mut roots: Vec<crate::semantic_query::DeclIdentity> = Vec::new();
+    collect_root_decl_identities(expr, scope_canonical_id, query_engine, 0, &mut roots);
+    if roots.is_empty() {
         return (false, Arc::from(Vec::new()));
-    };
+    }
     crate::loop5_instrumentation::LOWERED_ROOT_CYCLE_FAST_PATH_HITS
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-    // F1: record the root declaration identity itself in the fence —
-    // the BFS only records `roots` it visits inside `bfs_compute_inner`
-    // (and merges any cache-hit dep_signature); the root identity is
-    // not appended on the fast path, so we add it explicitly so the
-    // admit's `fact_dep_signature` invalidates on root-declaration-file
-    // edits.
-    if !identity.canonical_id.as_ref().is_empty()
-        && identity.canonical_id.as_ref() != "__builtin__"
-        && identity.canonical_id.as_ref() != scope_canonical_id
-    {
-        fence.push((
-            Arc::clone(&identity.canonical_id),
-            crate::semantic_query::DepVersion::WholeHash(identity.whole_hash),
-        ));
+    let mut result = false;
+    for identity in &roots {
+        // F1: record the root declaration identity itself in the fence —
+        // the BFS only records `roots` it visits inside
+        // `bfs_compute_inner` (and merges any cache-hit dep_signature);
+        // the root identity is not appended on the fast path, so we add
+        // it explicitly so the admit's `fact_dep_signature` invalidates
+        // on root-declaration-file edits.
+        if !identity.canonical_id.as_ref().is_empty()
+            && identity.canonical_id.as_ref() != "__builtin__"
+            && identity.canonical_id.as_ref() != scope_canonical_id
+        {
+            fence.push((
+                Arc::clone(&identity.canonical_id),
+                crate::semantic_query::DepVersion::WholeHash(identity.whole_hash),
+            ));
+        }
+        // OR the per-root verdicts: a cycle reachable from ANY operand
+        // root makes the whole expression cyclic. Every root's BFS still
+        // runs so the merged fence observes the full dep graph.
+        result |=
+            super::ref_root_reaches_transitive_cycle_node(identity, query_engine.ctx, &mut fence);
     }
-    let result =
-        super::ref_root_reaches_transitive_cycle_node(&identity, query_engine.ctx, &mut fence);
     // Dual-emit the BFS fence into both downstream channels so the
     // legacy `state.fact_versions` curated signature and the outer
     // `with_fact_tracer` scope both observe the cycle dep graph.
