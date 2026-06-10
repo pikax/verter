@@ -8413,8 +8413,8 @@ fn no_thread_local_oxc_caches() {
 /// is preserved.
 ///
 /// The borrowed-form lowering input is constructed inside
-/// `crate::ParsedEvalProgram::parse` (in `lib.rs`), which IS the
-/// scheduler-bound entry point. Test sources are exempt.
+/// `crate::ParsedEvalProgram::parse` (in `parsed_eval_program.rs`), which
+/// IS the scheduler-bound entry point. Test sources are exempt.
 #[test]
 fn no_direct_oxc_parser_calls_outside_scheduler_path() {
     // Allow-list: production files that legitimately invoke
@@ -8424,7 +8424,7 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
     let allow_list = [
         // The `ParsedEvalProgram::parse` constructor IS the
         // scheduler-bound parse entry; `host_executor.rs` calls it.
-        "crates/verter_session/src/lib.rs",
+        "crates/verter_session/src/parsed_eval_program.rs",
         // host_executor.rs itself calls `parse_vue_snapshot` /
         // `parse_non_sfc_snapshot`; the OXC parser is invoked inside
         // those helpers in `crate::parse`, but they go through the
@@ -15221,7 +15221,8 @@ mod single_resolution_engine_guards {
             "crates/verter_session/src/host_resolve/frontier_helpers.rs",
             4,
         ),
-        ("crates/verter_session/src/lib.rs", 2),
+        ("crates/verter_session/src/lib.rs", 1),
+        ("crates/verter_session/src/parsed_eval_program.rs", 1),
         ("crates/verter_session/src/project_type_store.rs", 5),
         (
             "crates/verter_session/src/resolver_core/component_meta/mod.rs",

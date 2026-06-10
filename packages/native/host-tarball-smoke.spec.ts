@@ -81,11 +81,14 @@ function extractTarball(tarball: string, destPkgDir: string): void {
   // npm tarballs put everything under `package/`; strip that one level.
   // GNU tar (msys2 on Windows): pass forward-slash paths so backslashes are
   // not read as escapes, and `--force-local` so the `C:` drive letter is a
-  // local path, not a remote `host:path` rsh spec.
+  // local path, not a remote `host:path` rsh spec. bsdtar (macOS) does not
+  // support `--force-local` and has no drive-letter ambiguity, so the flag
+  // is Windows-only.
   const fwd = (p: string) => p.replace(/\\/g, "/");
+  const forceLocal = process.platform === "win32" ? ["--force-local"] : [];
   execFileSync(
     "tar",
-    ["--force-local", "-xzf", fwd(tarball), "-C", fwd(destPkgDir), "--strip-components=1"],
+    [...forceLocal, "-xzf", fwd(tarball), "-C", fwd(destPkgDir), "--strip-components=1"],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
 }

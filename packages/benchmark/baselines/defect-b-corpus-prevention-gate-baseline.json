@@ -1,10 +1,18 @@
 {
   "kind": "defect-b-corpus-prevention-gate-baseline",
-  "note": "Real post-fix armed-budget corpus measurement. First-pass aggregate elapsed (ms) over NO_TIMEOUT_MANDATORY_COMPONENTS (Button, Badge, Avatar, Modal, Calendar, Table) resolved one-per-fresh-host through the hard-budget watchdog, captured on the live nuxt-ui corpus. The #3 perf-budget assertion fails when a run exceeds firstPassAggregateMs * 1.15. Two consecutive captures observed 17784.0ms and 17937.6ms; the committed baseline of 17800.0ms gives a 20470ms ceiling that clears the observed spread while still tripping on the UTILMETA +28%/2x regression. Recapture (set firstPassAggregateMs to the new measured aggregate) whenever an INTENTIONAL perf change lands or the mandatory set changes.",
-  "capturedAgainst": "mom/metaui-regfix-b post Defect B fix (per-cold-compute completeness + armed runaway-fuse budget)",
-  "components": ["Button.vue", "Badge.vue", "Avatar.vue", "Modal.vue", "Calendar.vue", "Table.vue"],
+  "note": "Real armed-budget corpus measurement on the carrier-preserving lowering + Navigate publication pipeline with the TypeOf demand axis (typeof value graphs lower at the requested demand \u2014 no Expanded build-time materialisation) and the admission-refusal-is-not-partial materialiser fallback (complete results admit and warm). First-pass aggregate elapsed (ms) over NO_TIMEOUT_MANDATORY_COMPONENTS (Button, Badge, Avatar, Modal, Calendar, Table, ChatMessages) resolved one-per-fresh-host through the hard-budget watchdog, captured on the live nuxt-ui corpus. The #3 perf-budget assertion fails when a run exceeds firstPassAggregateMs * 1.15. Two consecutive uncontended captures observed 17496.7ms and 16958.4ms; the committed baseline of 17250.0ms gives a 19838ms ceiling that clears the observed spread while still tripping on the UTILMETA +28%/2x regression class. Recapture (set firstPassAggregateMs to the new measured aggregate, printed by the gate under --nocapture) whenever an INTENTIONAL perf change lands or the mandatory set changes.",
+  "capturedAgainst": "mom/metaui-followup-ab post TypeOf demand axis + admission-refusal-is-not-partial (Table + ChatMessages COMPLETE)",
+  "components": [
+    "Button.vue",
+    "Badge.vue",
+    "Avatar.vue",
+    "Modal.vue",
+    "Calendar.vue",
+    "Table.vue",
+    "ChatMessages.vue"
+  ],
   "perComponentHardBudgetSecs": 60,
   "perfRegressionThreshold": 0.15,
-  "firstPassAggregateMs": 17800.0,
+  "firstPassAggregateMs": 17250.0,
   "firstPassAggregateMsProvisional": false
 }

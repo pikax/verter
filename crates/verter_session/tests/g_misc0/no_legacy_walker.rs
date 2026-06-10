@@ -411,6 +411,23 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // Re-introducing the enum-rank fan-out would resurrect the
     // lattice-unsound `Shallow → Navigate` clone the satisfaction gate rejects.
     "backfill_targets",
+    // Registry-local open-mapped pre-walk. DELETED: the registry
+    // structural materialiser runs `mode: ProjectionMode::Navigate`
+    // (shallow-by-default), so open carriers survive the materialised
+    // structure through the shared L1 carrier-stop predicates — the
+    // guard it provided (an Expanded fall-through over an open mapped
+    // shell) no longer has a route to guard. Re-introducing it would
+    // resurrect a second registry-local openness walker beside the
+    // shared `raise.rs` predicates.
+    "base_contains_open_mapped_or_unknown",
+    // Per-property materialisation-scope re-resolution. DELETED with
+    // the registry improvement re-solve loops: the imported-alias
+    // refinement materialises every property in the alias's OWN
+    // defining scope (`imported_generic_alias_scope`), so a per-value
+    // declaration-scope re-resolution has nothing left to select.
+    // Re-introducing it would resurrect a consumer-local
+    // second-resolution path beside the shared resolver.
+    "select_imported_materialization_scope",
 ];
 
 /// File names whose presence at the head of the path should make us
@@ -860,5 +877,42 @@ pub fn live_caller() {\n\
             .lines()
             .any(|l| line_contains_identifier(l, "parse_type_annotation")),
         "identifier-boundary matcher must not match `parse_type_annotation_v2`"
+    );
+}
+
+/// Targeted call-site guard: `compare_type_expr_improvement` survives
+/// as the shallow-vs-raised pick inside the projector
+/// (`meta_resolve/projectors/published_reducer.rs`), so the
+/// symbol-level `RETIRED_SYMBOLS` rail cannot pin it. The registry
+/// publication path (`host_manage/component_meta_methods.rs`) must
+/// carry ZERO call sites: a per-property / per-member improvement
+/// pick there is the consumer-local second resolution path the
+/// publication-demand contract forbids (one materialise + one
+/// Navigate-mode stabilisation per property, carriers re-resolved by
+/// the consumer through the shared resolver).
+#[test]
+fn component_meta_methods_has_no_improvement_pick_call_sites() {
+    let path = workspace_root()
+        .join("crates")
+        .join("verter_session")
+        .join("src")
+        .join("host_manage")
+        .join("component_meta_methods.rs");
+    let source =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let processed = preprocess(&source);
+    let hits: Vec<usize> = processed
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line_contains_identifier(line, "compare_type_expr_improvement"))
+        .map(|(idx, _)| idx + 1)
+        .collect();
+    assert!(
+        hits.is_empty(),
+        "`compare_type_expr_improvement` must have ZERO call sites in \
+         component_meta_methods.rs (the registry publication path publishes one \
+         Navigate-mode stabilisation per property, no improvement pick); found at \
+         lines {hits:?} of {}",
+        path.display()
     );
 }

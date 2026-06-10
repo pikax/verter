@@ -15,7 +15,7 @@ use crate::semantic_query::demand::{
 use crate::semantic_query::{
     DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, PathSegment, ProjectionMode,
     ProjectionReductionContext, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeId,
-    SemanticQueryKey, ValueRootKey,
+    SemanticQueryKey,
 };
 
 #[derive(Clone)]
@@ -202,8 +202,27 @@ pub(super) enum FamilyKey {
         false_branch: SemanticNodeId,
         distributive: bool,
     },
+    /// `value_root` is the env-bearing, content-free
+    /// [`crate::semantic_query::ValueRootSlotIdentity`] (R6 — carries the
+    /// value-root scope canonical's intrinsic `T` / `L` / `J` env, NEVER a
+    /// content/version hash); version-rooting lives on each candidate's
+    /// `ReadSetSignature.facts` + `self_root_canonicals` inside the
+    /// multi-candidate [`FamilySlots`]. `resolve_env_hash` (`R`) is folded
+    /// here from the key's [`crate::semantic_query::TypeOfContext`] so two
+    /// `typeof` resolutions differing only in `R` never warm-hit; the
+    /// embedded projection demand strips into the [`ModeSlot`].
     TypeOf {
-        value_root: ValueRootKey,
+        value_root: crate::semantic_query::ValueRootSlotIdentity,
+        resolve_env_hash: crate::semantic_query::HashValue,
+        /// Surface-provenance dimension. `build_typeof` lowers the value's
+        /// annotation / shape under the full projection-reduction context,
+        /// so provenance is value-affecting identity (parity with `KeyOf` /
+        /// `MappedType`).
+        provenance: crate::semantic_query::SurfaceProvenanceContext,
+        /// Member-merge role dimension. The lowered value surface and its
+        /// nested reductions depend on the merge-role regime and must not
+        /// warm-hit across it.
+        merge_role: crate::semantic_query::MemberMergeRole,
     },
     NormalizeUnion {
         members: Arc<[SemanticNodeId]>,
@@ -1001,7 +1020,7 @@ fn mode_of_slot(slot: ModeSlot) -> Option<ProjectionMode> {
         }
         ModeSlot::Expanded | ModeSlot::TransitExpanded => Some(ProjectionMode::Expanded),
         ModeSlot::Skeleton => Some(ProjectionMode::Skeleton),
-        // Modeless families (`ResolveDecl` / `TypeOf` / `Conditional` /
+        // Modeless families (`ResolveDecl` / `Conditional` /
         // `Normalize*` / …) carry no projection demand; their satisfaction
         // is decided purely by `validate_with_self_roots`. Represent their
         // point as the regime-`⊥` `Demand::identity()` at the empty path so
@@ -1139,11 +1158,17 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             ModeSlot::Single,
         ),
-        SemanticQueryKey::TypeOf { value_root } => (
+        SemanticQueryKey::TypeOf {
+            value_root,
+            context,
+        } => (
             FamilyKey::TypeOf {
                 value_root: value_root.clone(),
+                resolve_env_hash: context.resolve_env_hash,
+                provenance: context.projection_reduction.provenance,
+                merge_role: context.projection_reduction.merge_role,
             },
-            ModeSlot::Single,
+            context_to_slot(context.projection_reduction),
         ),
         SemanticQueryKey::NormalizeUnion { members } => (
             FamilyKey::NormalizeUnion {

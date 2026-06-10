@@ -51,10 +51,12 @@ fn evaluated_prop<'a>(
 ///
 /// `Comp.vue` has `defineProps<{ ui: typeof theme }>()` where
 /// `import theme from './theme'` initially resolves to nothing. The
-/// first evaluation publishes `ui = Unknown { raw: "semanticMiss" }`.
-/// When `./theme` is later ADDED, the consumer must recover: the
-/// stale negative result is invalidated and the recomputed `ui` type
-/// is the concrete object.
+/// first evaluation publishes a NEGATIVE result for `ui` — the
+/// unresolved `typeof theme` carrier (`TypeExpr::TypeOf`), which the
+/// no-poison publication rule keeps in place of a `semanticMiss`
+/// sentinel. When `./theme` is later ADDED, the consumer must
+/// recover: the stale negative result is invalidated and the
+/// recomputed `ui` type is the concrete object.
 ///
 /// Discrimination property: the negative resolution's `ImportRoute`
 /// derived fact records `./theme` as unresolved; the fact-validation
@@ -62,9 +64,8 @@ fn evaluated_prop<'a>(
 /// workspace generation at validate time
 /// (`generation_current_import_route_hash`). Reverting that — letting
 /// the warm negative resolution validate against its own stale
-/// `ImportRoute` snapshot — keeps the re-evaluation returning
-/// `Unknown { raw: "semanticMiss" }` and the `TypeExpr::Object`
-/// assertion fails.
+/// `ImportRoute` snapshot — keeps the re-evaluation returning the
+/// unresolved carrier and the `TypeExpr::Object` assertion fails.
 #[test]
 fn negative_result_recovers_when_missing_dependency_appears() {
     let host = standalone_host();
@@ -85,9 +86,13 @@ fn negative_result_recovers_when_missing_dependency_appears() {
         .evaluate_types("/src/Comp.vue")
         .expect("initial evaluate_types must resolve the owner");
     assert!(
-        matches!(evaluated_prop(&initial, "ui"), TypeExpr::Unknown { .. }),
-        "precondition: with `./theme` missing, `ui` must be an Unknown \
-         (semanticMiss) result — got {:?}",
+        matches!(
+            evaluated_prop(&initial, "ui"),
+            TypeExpr::Unknown { .. } | TypeExpr::TypeOf(_)
+        ),
+        "precondition: with `./theme` missing, `ui` must be a NEGATIVE result — the \
+         unresolved `typeof theme` carrier (or a miss sentinel), never a concrete \
+         object — got {:?}",
         evaluated_prop(&initial, "ui")
     );
 
@@ -125,8 +130,8 @@ fn negative_result_recovers_when_missing_dependency_appears() {
         }
         other => panic!(
             "`ui` MUST recover to a concrete object once `./theme` exists — \
-             a stale negative result would still be `Unknown {{ raw: \
-             \"semanticMiss\" }}`. Got {other:?}"
+             a stale negative result would still be the unresolved `typeof \
+             theme` carrier / miss sentinel. Got {other:?}"
         ),
     }
 }

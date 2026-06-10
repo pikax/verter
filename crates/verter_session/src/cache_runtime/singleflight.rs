@@ -11,8 +11,8 @@
 //!   - **Cooperative wait.** Joiners do NOT busy-spin; they wait on a
 //!     `parking_lot::Condvar` and wake on publish or fail.
 //!   - **Panic safety.** If `compute()` panics, the winner's RAII guard
-//!     marks the slot `failed = true` and notifies waiters; subsequent
-//!     callers retry the cold path.
+//!     marks the slot failed (`InflightFailureKind::WinnerPanicked`) and
+//!     notifies waiters; subsequent callers retry the cold path.
 //!   - **Post-compute revalidation.** After `compute()` returns, the caller-
 //!     supplied `revalidate_after_compute` runs against the freshly-built
 //!     `Entry` BEFORE the entry is inserted — and, when the cache passes a
@@ -178,6 +178,29 @@ pub(super) struct InflightSlot {
     pub(super) ready: Condvar,
 }
 
+/// Failure-kind discriminant for a completed in-flight slot that
+/// published no value. The three causes carry DIFFERENT completeness
+/// evidence, so joiners must not collapse them onto one policy:
+///
+/// - [`Self::ComputeFailed`] — the winner's `compute()` itself reported
+///   failure (`None` / [`ComputeAdmission::Failed`]). Deterministic
+///   failure semantics: joiners surface `None`.
+/// - [`Self::WinnerPanicked`] — the winner's RAII guard fired without
+///   `mark_finished` (a panic / early return inside the cold build). The
+///   winner produced NO completeness evidence whatsoever; a joiner must
+///   not consume the slot as a value-bearing outcome.
+/// - [`Self::AdmissionRejected`] — the winner COMPUTED a valid entry but
+///   post-compute revalidation refused to ADMIT it (a mutation landed in
+///   the cold window / the winner's view snapshot went stale). The value
+///   was valid for the winner's view; a joiner forks and cold-recomputes
+///   for its OWN view (the same policy as a cross-view stale reject).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum InflightFailureKind {
+    ComputeFailed,
+    WinnerPanicked,
+    AdmissionRejected,
+}
+
 #[derive(Default)]
 pub(super) struct InflightSlotState {
     /// `true` once a thread has claimed ownership of the cold build.
@@ -185,15 +208,15 @@ pub(super) struct InflightSlotState {
     pub(super) claimed: bool,
     /// `true` once the winner has finished — successfully or otherwise.
     pub(super) completed: bool,
-    /// `true` if the winner's `compute()` returned `None`, panicked, OR
-    /// `revalidate_after_compute` rejected the freshly-built entry.
-    /// Joiners observing `failed = true` return `None`; subsequent calls
-    /// retry the cold path.
-    pub(super) failed: bool,
+    /// `Some(kind)` when the winner finished without publishing a value:
+    /// `compute()` failure, winner panic, or post-compute admission
+    /// rejection — see [`InflightFailureKind`] for the per-cause joiner
+    /// policy. Subsequent calls always retry the cold path.
+    pub(super) failure: Option<InflightFailureKind>,
     /// `true` when the winner's compute returned a valid-but-non-cacheable
     /// outcome (`ComputeAdmission::ReturnOnly`). The map stays empty for
     /// such a winner. A joiner that wakes observing `non_cacheable_winner
-    /// == true` (with `failed == false`) has no published entry to
+    /// == true` (with `failure == None`) has no published entry to
     /// validate against its own view, so it forks and cold-recomputes.
     /// `false` for cacheable outcomes and for failures.
     pub(super) non_cacheable_winner: bool,
@@ -330,7 +353,7 @@ where
             let mut state = self.slot.state.lock();
             if !state.completed {
                 state.completed = true;
-                state.failed = true;
+                state.failure = Some(InflightFailureKind::WinnerPanicked);
             }
         }
         self.slot.ready.notify_all();
@@ -687,7 +710,11 @@ where
         if state.claimed {
             // Joiner — wait for the winner to publish or fail.
             slot.ready.wait_while(&mut state, |s| !s.completed);
-            if state.failed {
+            if state.failure.is_some() {
+                // Artifact-path joiner policy: every failure kind surfaces
+                // `None` (the caller's fallback owns retry policy). The
+                // query-identity lookup-publish adapter applies the
+                // per-kind policy instead — see `InflightFailureKind`.
                 return None;
             }
             // Winner succeeded. Drop the slot lock, then re-read the
@@ -759,7 +786,7 @@ where
                     {
                         let mut state = slot.state.lock();
                         state.completed = true;
-                        state.failed = true;
+                        state.failure = Some(InflightFailureKind::AdmissionRejected);
                     }
                     slot.ready.notify_all();
                     panic_guard.mark_finished();
@@ -802,7 +829,7 @@ where
                 {
                     let mut state = slot.state.lock();
                     state.completed = true;
-                    state.failed = true;
+                    state.failure = Some(InflightFailureKind::ComputeFailed);
                 }
                 slot.ready.notify_all();
                 None
@@ -840,7 +867,7 @@ where
 /// - `Failed` — mark the slot failed; joiners surface `None`.
 ///
 /// **Joiner contract.** Joiners wake on the slot's condvar. If
-/// `state.failed`, they return `None`. If `state.non_cacheable_winner`,
+/// `state.failure` set, they return `None`. If `state.non_cacheable_winner`,
 /// the winner emitted a carrier-less `ReturnOnly` outcome that cannot
 /// be view-validated — the joiner forks and cold-recomputes. Otherwise
 /// the winner inserted an entry into the map; the joiner re-reads the
@@ -1112,7 +1139,11 @@ where
         if state.claimed {
             // Joiner — wait for the winner to publish or fail.
             slot.ready.wait_while(&mut state, |s| !s.completed);
-            if state.failed {
+            if state.failure.is_some() {
+                // Artifact-path joiner policy: every failure kind surfaces
+                // `None` (the caller's fallback owns retry policy). The
+                // query-identity lookup-publish adapter applies the
+                // per-kind policy instead — see `InflightFailureKind`.
                 return None;
             }
             // A `ReturnOnly` winner left the map empty and published no
@@ -1194,7 +1225,7 @@ where
                     {
                         let mut state = slot.state.lock();
                         state.completed = true;
-                        state.failed = true;
+                        state.failure = Some(InflightFailureKind::AdmissionRejected);
                     }
                     slot.ready.notify_all();
                     panic_guard.mark_finished();
@@ -1281,7 +1312,7 @@ where
                 {
                     let mut state = slot.state.lock();
                     state.completed = true;
-                    state.failed = true;
+                    state.failure = Some(InflightFailureKind::ComputeFailed);
                 }
                 slot.ready.notify_all();
                 None

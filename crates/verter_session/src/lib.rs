@@ -102,6 +102,8 @@ mod component_meta_pathological_recursion_tests;
 #[cfg(test)]
 mod component_meta_pick_omit_tests;
 #[cfg(test)]
+mod component_meta_publication_demand_tests;
+#[cfg(test)]
 mod component_meta_read_once_tests;
 #[cfg(test)]
 mod component_meta_repo_first_pass_diagnosis_tests;
@@ -216,124 +218,6 @@ pub mod loop5_instrumentation;
 pub(crate) mod mapper_binder_registry;
 pub mod meta;
 
-/// Test-only re-exports for integration tests in `tests/`.
-///
-/// Items under this module are NOT a public API — they are
-/// hidden from documentation and exist purely so integration
-/// tests can probe internal invariants (e.g. the content-addressed
-/// `MapperFingerprint` substrate). Production code MUST NOT
-/// import from here. The architecture guard
-/// `test_only_module_is_only_consumed_by_test_files` (see
-/// `tests/architecture_guards.rs`) pins this contract.
-#[doc(hidden)]
-pub mod test_only {
-    /// Test-only probe for the content-addressed `MapperFingerprint`
-    /// primitive. The wrapper exposes the minimal surface needed by
-    /// `tests/mapper_fingerprint_content_addressed.rs` without
-    /// promoting the internal `MapperFingerprint` / `MapperBinderRegistry`
-    /// types to the crate's public API.
-    ///
-    /// The `private_interfaces` lint fires here because the wrapper
-    /// methods are `pub` while the wrapped `MapperFingerprint`
-    /// stays `pub(crate)`. The whole purpose of the wrapper is to
-    /// keep the inner type out of the public API while still
-    /// letting integration tests drive it — so the lint is
-    /// deliberately suppressed.
-    pub mod mapper_fingerprint {
-        use std::sync::Arc;
-
-        use verter_type_expr::{MappedModifier, TypeExpr};
-
-        use crate::mapper_binder_registry::{MapperBinderRegistry, MapperFingerprint};
-
-        /// Public newtype around the internal `MapperFingerprint`.
-        /// This is what `tests/mapper_fingerprint_content_addressed.rs`
-        /// asserts equality / inequality on. The newtype keeps the
-        /// inner type out of the public API surface while still
-        /// letting integration tests drive its observable
-        /// behaviour.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub struct Fingerprint(MapperFingerprint);
-
-        /// Owning wrapper around the internal `MapperBinderRegistry`
-        /// so the test can drive `ordinal_for` end-to-end without
-        /// reaching into the host. Constructing a fresh registry
-        /// keeps the test hermetic — no shared state across tests.
-        pub struct Registry(MapperBinderRegistry);
-
-        /// Probe substrate. Free functions on this zero-sized type
-        /// keep the test's call sites readable: every probe entry
-        /// is `MapperFingerprintProbe::*`.
-        pub struct MapperFingerprintProbe;
-
-        impl MapperFingerprintProbe {
-            /// Build a content-addressed fingerprint from the
-            /// same components the production lowering passes.
-            #[inline]
-            pub fn from_components(
-                source: &Arc<TypeExpr>,
-                value: &Arc<TypeExpr>,
-                optional: MappedModifier,
-                readonly: MappedModifier,
-                name_type: Option<&Arc<TypeExpr>>,
-            ) -> Fingerprint {
-                Fingerprint(MapperFingerprint::from_components(
-                    source, value, optional, readonly, name_type,
-                ))
-            }
-
-            /// Construct a fresh, empty `MapperBinderRegistry` so
-            /// each test has independent ordinal state.
-            #[inline]
-            pub fn fresh_registry() -> Registry {
-                Registry(MapperBinderRegistry::new())
-            }
-
-            /// Get / assign the stable ordinal for
-            /// `(canonical, display_name, fingerprint)` against the
-            /// test's owned registry.
-            #[inline]
-            pub fn ordinal_for(
-                registry: &Registry,
-                canonical: &Arc<str>,
-                display_name: &Arc<str>,
-                fp: Fingerprint,
-            ) -> u16 {
-                registry.0.ordinal_for(canonical, display_name, fp.0)
-            }
-
-            /// Test-only accessor for the raw `u64` content hash.
-            /// Used by the stack-safety test to assert the
-            /// returned fingerprint is non-default.
-            #[inline]
-            pub fn raw(fp: Fingerprint) -> u64 {
-                fp.0.raw()
-            }
-        }
-    }
-
-    /// Test-only probe for the budget-exceeded published-surface
-    /// recognizer. Integration tests (`tests/defect_b_corpus_prevention_gate.rs`)
-    /// scan a published surface for a leaked budget sentinel; this
-    /// re-exports the SAME `pub(crate)` recognizer production routing
-    /// uses (`type_expr_is_budget_exceeded_sentinel`, which keys on the
-    /// `BUDGET_EXCEEDED_SENTINEL_PREFIX` constant `semantic_query_error_raw`
-    /// emits) so the test's spelling can NEVER drift from the producer's.
-    pub mod budget_sentinel {
-        use verter_type_expr::TypeExpr;
-
-        /// Returns `true` iff `expr` is the budget-exceeded sentinel
-        /// (`TypeExpr::Unknown { raw }` starting with the production
-        /// `budgetExceeded(` prefix). Delegates verbatim to the shared
-        /// `pub(crate)` production recognizer.
-        #[inline]
-        pub fn is_budget_exceeded_sentinel(expr: &TypeExpr) -> bool {
-            crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel(
-                expr,
-            )
-        }
-    }
-}
 pub mod meta_resolve;
 #[cfg(test)]
 mod negative_import_route_tests;
@@ -342,6 +226,7 @@ pub mod owner_import_surface;
 #[cfg(test)]
 mod parity_tests;
 mod parse;
+mod parsed_eval_program;
 #[cfg(test)]
 mod project_global_cache_tests;
 pub(crate) mod project_semantic_dispatch;
@@ -365,6 +250,15 @@ mod store_view_manager_tests;
 #[cfg(test)]
 mod store_view_non_current_contract_tests;
 pub(crate) mod template_convert;
+/// Test-only re-exports for integration tests in `tests/`.
+///
+/// NOT a public API — hidden from documentation; production code MUST
+/// NOT import from here. The architecture guard
+/// `test_only_module_is_only_consumed_by_test_files` (see
+/// `tests/architecture_guards.rs`) pins this contract. Body lives in
+/// `test_only.rs`.
+#[doc(hidden)]
+pub mod test_only;
 pub mod typeinfo;
 mod types;
 mod upsert;
@@ -441,121 +335,14 @@ pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS;
 // without adding verter_compiler as a direct dependency.
 pub use verter_compiler::compile::CompileTarget;
 
-use std::rc::Rc;
 use std::sync::Arc;
 
 pub use id::resolve_external;
+pub(crate) use parsed_eval_program::{ParsedEvalProgram, ParsedTypeResolutionContext};
 use rustc_hash::FxHashMap;
 #[cfg(test)]
 use shared::default_shared;
 use shared::Shared;
-
-type CachedEvalProgramAst<'a> = oxc_ast::ast::Program<'a>;
-type CachedTypeResolutionContext<'a> =
-    verter_compiler::utils::oxc::vue::resolve_type::TypeResolutionContext<'a, 'a>;
-
-struct ParsedEvalProgramOwner {
-    allocator: oxc_allocator::Allocator,
-    source: Arc<str>,
-    source_type: oxc_span::SourceType,
-}
-
-self_cell::self_cell!(
-    pub(crate) struct ParsedEvalProgram {
-        owner: ParsedEvalProgramOwner,
-
-        #[covariant]
-        dependent: CachedEvalProgramAst,
-    }
-);
-
-self_cell::self_cell!(
-    pub(crate) struct ParsedTypeResolutionContext {
-        owner: Rc<ParsedEvalProgram>,
-
-        #[covariant]
-        dependent: CachedTypeResolutionContext,
-    }
-);
-
-impl ParsedEvalProgram {
-    pub(crate) fn parse(source: Arc<str>, source_type: oxc_span::SourceType) -> Option<Self> {
-        let mut panicked = false;
-        let parsed = Self::new(
-            ParsedEvalProgramOwner {
-                allocator: oxc_allocator::Allocator::new(),
-                source,
-                source_type,
-            },
-            |owner| {
-                let result = oxc_parser::Parser::new(
-                    &owner.allocator,
-                    owner.source.as_ref(),
-                    owner.source_type,
-                )
-                .with_options(oxc_parser::ParseOptions {
-                    parse_regular_expression: false,
-                    ..oxc_parser::ParseOptions::default()
-                })
-                .parse();
-                panicked = result.panicked;
-                result.program
-            },
-        );
-        (!panicked).then_some(parsed)
-    }
-
-    pub(crate) fn empty(source_type: oxc_span::SourceType) -> Self {
-        Self::parse(Arc::<str>::from(""), source_type)
-            .expect("empty eval program should always parse")
-    }
-
-    pub(crate) fn source_bytes(&self) -> &[u8] {
-        self.borrow_owner().source.as_bytes()
-    }
-}
-
-pub(crate) fn next_host_instance_id() -> u64 {
-    static NEXT_HOST_INSTANCE_ID: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(1);
-    NEXT_HOST_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Consolidated resolver state: bundles the unified sub-node resolver runtime
-/// with host-level top caches and singleflight groups.
-///
-/// Replaces the 4 individual cache/singleflight fields that were previously
-/// scattered across `VerterHost`.
-pub(crate) struct HostResolverState {
-    /// Unified sub-node resolver runtime (symbol + fallthrough subsystems).
-    pub runtime: crate::resolver_core::resolver_runtime::UnifiedResolverRuntime<
-        crate::meta_resolve::ResolvedComponentMetaState,
-        crate::types::FallthroughResolution,
-    >,
-}
-
-impl HostResolverState {
-    /// Construct a `HostResolverState` whose
-    /// inner [`UnifiedResolverRuntime`](crate::resolver_core::resolver_runtime::UnifiedResolverRuntime)
-    /// shares its `RouteDb` / `ImportedRootDb` authority with the host's
-    /// [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore)
-    /// via `Arc` clones supplied by the host at construction time.
-    fn new(
-        routes: Arc<crate::resolver_core::RouteDb>,
-        imported_roots: Arc<crate::resolver_core::ImportedRootDb>,
-    ) -> Self {
-        Self {
-            runtime: crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::new(
-                routes,
-                imported_roots,
-            ),
-        }
-    }
-
-    fn reset_all(&self) {
-        self.runtime.clear_caches();
-    }
-}
 
 /// Central file store and compile cache for Vue SFC compilation.
 ///
@@ -625,7 +412,7 @@ pub struct VerterHost {
     pub(crate) provenance: Arc<MetaProvenance>,
     /// Consolidated resolver state: sub-node caches (symbol + fallthrough),
     /// top-level host caches (meta + fallthrough), and singleflight groups.
-    pub(crate) resolver: HostResolverState,
+    pub(crate) resolver: host_construction::HostResolverState,
     /// Active per-host query profile — execution-policy decisions
     /// (prewarming, budgets, allowed query families). **Not a cache** — does
     /// not memoise query results. Different artifact type than anything in
@@ -782,6 +569,15 @@ pub struct VerterHost {
     /// real budget trip drives, mirroring production. Armed/cleared by
     /// [`crate::for_tests::MaterializeForceInScopePartialGuard`].
     pub(crate) materialize_force_in_scope_partial: std::sync::atomic::AtomicBool,
+    /// Per-host test-injection knob modelling a project-shape mutation
+    /// landing INSIDE the materialiser's cold window: when armed, the
+    /// next `materialize_component_meta_structure` cold compute bumps
+    /// the project generation once (a REAL bump through
+    /// `ProjectTypeStore::bump_project_generation`), so the runtime's
+    /// post-compute revalidation gate rejects the freshly-built entry —
+    /// the exact production admission-refusal path, with a
+    /// deterministic trigger. Self-disarms after one fire.
+    pub(crate) materialize_force_mid_compute_generation_bump: std::sync::atomic::AtomicBool,
     /// Per-host test-injection knob for the relation engine's cold
     /// judgement path — the relation-memo analogue of
     /// [`Self::materialize_force_overflow_observations`]. When set to `N >
@@ -817,36 +613,6 @@ impl std::fmt::Debug for VerterHost {
         f.debug_struct("VerterHost")
             .field("config", &self.config)
             .finish_non_exhaustive()
-    }
-}
-
-/// SourceLoader that delegates to the host's current workspace.
-///
-/// Holds a reference to the host's `RwLock<Arc<dyn WorkspaceAccess>>`
-/// so it always reads through the latest workspace, even after
-/// `set_workspace()` swaps it.
-pub(crate) struct WorkspaceSourceLoader(
-    pub(crate) Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
-);
-
-impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
-    fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.0.read().read_file(canonical_id)
-    }
-
-    fn exists(&self, canonical_id: &str) -> bool {
-        self.0.read().file_exists(canonical_id)
-    }
-
-    fn classify(&self, canonical_id: &str) -> verter_scheduler::source_loader::FileKind {
-        match self.0.read().classify_file(canonical_id) {
-            verter_workspace::FileKind::VueSfc => verter_scheduler::source_loader::FileKind::VueSfc,
-            verter_workspace::FileKind::NonSfc => verter_scheduler::source_loader::FileKind::NonSfc,
-        }
-    }
-
-    fn realpath(&self, canonical_id: &str) -> Option<String> {
-        self.0.read().realpath(canonical_id)
     }
 }
 

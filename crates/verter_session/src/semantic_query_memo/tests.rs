@@ -8420,6 +8420,209 @@ mod env_scoped_key_identity_guards {
         assert_value_node(second.value, heritage_result);
     }
 
+    fn typeof_key(
+        slot: crate::semantic_query::ValueRootSlotIdentity,
+        resolve_env: HashValue,
+        prc: ProjectionReductionContext,
+    ) -> SemanticQueryKey {
+        SemanticQueryKey::TypeOf {
+            value_root: slot,
+            context: crate::semantic_query::TypeOfContext::new(prc, resolve_env),
+        }
+    }
+
+    fn value_root_slot(
+        canonical: &Arc<str>,
+        name: &Arc<str>,
+        project_identity: u32,
+        type_env: HashValue,
+        lib_env: HashValue,
+    ) -> crate::semantic_query::ValueRootSlotIdentity {
+        crate::semantic_query::ValueRootSlotIdentity::new(
+            crate::semantic_query::ValueRootKey {
+                scope: crate::semantic_query::ScopeId::file(Arc::clone(canonical)),
+                name: Arc::clone(name),
+            },
+            project_identity,
+            type_env,
+            lib_env,
+        )
+    }
+
+    /// Two `TypeOf` queries over the SAME value root `(canonical, name)`
+    /// that differ ONLY in an env dim — slot `type_env_hash` /
+    /// `lib_env_hash` / `project_identity`, or the context
+    /// `resolve_env_hash` — map to DISTINCT `FamilyKey`s and so cannot
+    /// warm-hit each other. `build_typeof` does env-sensitive name/export
+    /// resolution, so the env dims ride on the `ValueRootSlotIdentity`
+    /// slot (`T`/`L`/`J`) and the dedicated `TypeOfContext` (`R`); an
+    /// env-free `ValueRootKey`-only key would collapse all four pairs
+    /// onto one family slot (cross-env cache poisoning) and this test
+    /// would fail.
+    #[test]
+    fn typeof_same_root_different_env_or_context_do_not_warm_hit() {
+        let canonical: Arc<str> = Arc::from("/u2b9/value.ts");
+        let name: Arc<str> = Arc::from("sample");
+        let prc = ProjectionReductionContext::published(ProjectionMode::Navigate);
+        let base = value_root_slot(&canonical, &name, 0, [1u8; 16], [0u8; 16]);
+        let baseline = fam(&typeof_key(base.clone(), [0u8; 16], prc));
+
+        // type_env differs on the slot.
+        let t2 = value_root_slot(&canonical, &name, 0, [2u8; 16], [0u8; 16]);
+        assert_ne!(
+            baseline,
+            fam(&typeof_key(t2, [0u8; 16], prc)),
+            "type_env change must distinguish the TypeOf FamilyKey"
+        );
+
+        // lib_env differs on the slot.
+        let l = value_root_slot(&canonical, &name, 0, [1u8; 16], [9u8; 16]);
+        assert_ne!(
+            baseline,
+            fam(&typeof_key(l, [0u8; 16], prc)),
+            "lib_env change must distinguish the TypeOf FamilyKey"
+        );
+
+        // project_identity differs on the slot.
+        let j = value_root_slot(&canonical, &name, 7, [1u8; 16], [0u8; 16]);
+        assert_ne!(
+            baseline,
+            fam(&typeof_key(j, [0u8; 16], prc)),
+            "project_identity change must distinguish the TypeOf FamilyKey"
+        );
+
+        // resolve_env differs in the context (same slot).
+        assert_ne!(
+            baseline,
+            fam(&typeof_key(base.clone(), [5u8; 16], prc)),
+            "resolve_env change in TypeOfContext must distinguish the FamilyKey"
+        );
+
+        // Identical env + context → SAME family slot (warm-hit IS allowed).
+        assert_eq!(baseline, fam(&typeof_key(base, [0u8; 16], prc)));
+    }
+
+    /// `TypeOf` follows the same provenance/merge_role family-identity
+    /// pattern as `KeyOf` / `MappedType`: a macro-own-body `typeof`
+    /// resolution and a structural one over the same value root must
+    /// cold-build separately, never warm-hit one another.
+    #[test]
+    fn typeof_queries_differing_only_by_provenance_do_not_warm_hit() {
+        let host = super::ctx_host();
+        let store = super::SemanticGraphStore::new();
+        let canonical: Arc<str> = Arc::from("/u2b9/value.ts");
+        let name: Arc<str> = Arc::from("sample");
+        let structural_result =
+            store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let macro_result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+
+        let slot = value_root_slot(&canonical, &name, 0, [1u8; 16], [0u8; 16]);
+        let structural = typeof_key(
+            slot.clone(),
+            [0u8; 16],
+            context_with_axes(
+                SurfaceProvenanceContext::Structural,
+                MemberMergeRole::Authored,
+            ),
+        );
+        let macro_own_body = typeof_key(
+            slot,
+            [0u8; 16],
+            context_with_axes(
+                SurfaceProvenanceContext::MacroTypeArgOwnBody,
+                MemberMergeRole::Authored,
+            ),
+        );
+
+        let first = store.execute_cooperative(
+            &host,
+            structural,
+            || store.intern_node(SemanticNodeData::Opaque(super::QueryError::Miss)),
+            || {
+                (
+                    QueryResult::Value(structural_result),
+                    super::empty_signature(),
+                )
+            },
+        );
+        assert_value_node(first.value, structural_result);
+
+        let mut second_build_ran = false;
+        let second = store.execute_cooperative(
+            &host,
+            macro_own_body,
+            || store.intern_node(SemanticNodeData::Opaque(super::QueryError::Miss)),
+            || {
+                second_build_ran = true;
+                (QueryResult::Value(macro_result), super::empty_signature())
+            },
+        );
+
+        assert!(
+            second_build_ran,
+            "a TypeOf query with different provenance must cold-build, not warm-hit a prior context"
+        );
+        assert_value_node(second.value, macro_result);
+    }
+
+    /// A `StructuralTransit` `typeof` lowering and a `Published` `typeof`
+    /// resolution of the SAME value root are distinct evaluations: the
+    /// transit lowering carrier-stops where the publication reduces, so a
+    /// transit result must never be served from (or into) the publication
+    /// slot.
+    #[test]
+    fn typeof_published_and_transit_contexts_do_not_warm_hit() {
+        let host = super::ctx_host();
+        let store = super::SemanticGraphStore::new();
+        let canonical: Arc<str> = Arc::from("/u2b9/value.ts");
+        let name: Arc<str> = Arc::from("sample");
+        let published_result =
+            store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let transit_result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+
+        let slot = value_root_slot(&canonical, &name, 0, [1u8; 16], [0u8; 16]);
+        let published = typeof_key(
+            slot.clone(),
+            [0u8; 16],
+            ProjectionReductionContext::published(ProjectionMode::Shallow),
+        );
+        let transit = typeof_key(
+            slot,
+            [0u8; 16],
+            ProjectionReductionContext::structural_transit(),
+        );
+
+        let first = store.execute_cooperative(
+            &host,
+            published,
+            || store.intern_node(SemanticNodeData::Opaque(super::QueryError::Miss)),
+            || {
+                (
+                    QueryResult::Value(published_result),
+                    super::empty_signature(),
+                )
+            },
+        );
+        assert_value_node(first.value, published_result);
+
+        let mut second_build_ran = false;
+        let second = store.execute_cooperative(
+            &host,
+            transit,
+            || store.intern_node(SemanticNodeData::Opaque(super::QueryError::Miss)),
+            || {
+                second_build_ran = true;
+                (QueryResult::Value(transit_result), super::empty_signature())
+            },
+        );
+
+        assert!(
+            second_build_ran,
+            "a StructuralTransit TypeOf query must cold-build, not warm-hit the Published slot"
+        );
+        assert_value_node(second.value, transit_result);
+    }
+
     /// The `HostResolvedNamedTypeKey` resolved-named-type artifact identity is
     /// env-scoped (R T L J): two resolutions of the SAME file content
     /// (`whole_hash`) under different envs are DISTINCT identities AND the

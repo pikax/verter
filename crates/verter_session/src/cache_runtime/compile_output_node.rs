@@ -25,10 +25,10 @@
 //! tables and (for `PureContent`) the entry map; the host hands the
 //! node a `&ProfileState` (or the compile-cache shard) at call time.
 //!
-//! `#![allow(dead_code)]` at module scope: substrate types and
-//! methods landed before the routing rehome in
-//! `virtual_file_pipeline.rs`. The inline `tests` module exercises
-//! every public surface independently of the routing.
+//! `#![allow(dead_code)]` at module scope: the routing in
+//! `virtual_file_pipeline.rs` consumes the substrate types and methods
+//! selectively. The inline `tests` module exercises every public
+//! surface independently of the routing.
 #![allow(dead_code)]
 
 use std::sync::Arc;
@@ -608,14 +608,40 @@ impl CompileOutputNodeFactValidatedSession {
 
     /// Read-only access to the last-good outputs, when present. Used
     /// by `DevServeLastKnownGood` fallback paths.
-    pub(crate) fn peek_last_good(
+    ///
+    /// The last-good rail rides on the same fact-validated slot as the
+    /// warm-hit candidate, so it is gated by the SAME read-side fact
+    /// validation as [`Self::lookup`]: a cross-file edit that
+    /// invalidates the slot's recorded [`ReadSetSignature`] takes the
+    /// last-good fallback down with it. Without this gate, a compile
+    /// that fails BECAUSE a dependency changed (e.g. an imported macro
+    /// type edited to an invalid shape) would serve the pre-edit output
+    /// instead of surfacing the failure — a stale serve of
+    /// known-invalidated semantic inputs. The override / semantic-hash
+    /// pre-filter is intentionally NOT applied here: a same-content
+    /// request whose overrides diverged is exactly the legitimate
+    /// last-good consumer, while same-canonical source edits already
+    /// clear the slot eagerly at upsert.
+    pub(crate) fn peek_last_good<F>(
         &self,
         profile_state: &ProfileState,
         profile_hash: u64,
-    ) -> Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>> {
-        profile_state
-            .compile_slot_for_node(profile_hash)
-            .and_then(|slot| slot.last_good_outputs.clone())
+        validate_facts: F,
+    ) -> Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>
+    where
+        F: FnOnce(&ReadSetSignature) -> bool,
+    {
+        let slot = profile_state.compile_slot_for_node(profile_hash)?;
+        // Carrier-defence, mirroring `lookup`: an overflowed slot must
+        // never satisfy any warm read (the producer refuses to publish
+        // them; this is the read-side half of the double-sided guard).
+        if !slot.fact_dep_signature.is_cacheable() {
+            return None;
+        }
+        if !slot.fact_dep_signature.facts.is_empty() && !validate_facts(&slot.fact_dep_signature) {
+            return None;
+        }
+        slot.last_good_outputs.clone()
     }
 
     /// Read-only access to the full set of outputs for a given

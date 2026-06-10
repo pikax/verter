@@ -847,10 +847,36 @@ impl VerterHost {
                         .get(&profile_hash)
                         .map(|o| o.layer.clone())
                 });
+                // Fact-validated like the warm-hit consult below: a
+                // cross-file edit that invalidates the slot's recorded
+                // read set suppresses the last-good fallback too, so a
+                // dependency-caused compile failure surfaces instead of
+                // serving the pre-edit output.
+                //
+                // Like the warm-hit consult, the last-good serve has NO
+                // outer publish / is_stable fence, so the validator runs
+                // ONLY against a proven-`Current` view: a known-stale
+                // `StoreViewRead::ReturnOnly` snapshot suppresses the
+                // fallback (fail-closed) rather than validating the
+                // slot's cross-file `fact_versions` against
+                // already-mutated dependency state. The store-view read
+                // happens inside the validator closure, which
+                // `peek_last_good` invokes only after its cheap
+                // slot-present + carrier + non-empty-fact-rail
+                // predicates pass — a slot miss or an empty fact rail
+                // never builds a workspace snapshot.
                 let fallback_last_good = cc_ref.as_ref().and_then(|cc| {
                     let session_node =
                         crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
-                    session_node.peek_last_good(cc, profile_hash)
+                    session_node.peek_last_good(cc, profile_hash, |sig| {
+                        #[cfg(test)]
+                        crate::resolver_store::record_compile_warm_validation_view_read();
+                        self.resolver_store_view_read()
+                            .current()
+                            .is_some_and(|current_view| {
+                                self.compile_slot_facts_validate(&current_view, sig)
+                            })
+                    })
                 });
 
                 // Style v-bind vars from raw analysis (override-independent)

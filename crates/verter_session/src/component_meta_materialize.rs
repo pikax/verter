@@ -466,7 +466,7 @@ fn finish_materialize_admission(
                 value: outcome,
                 dep_signature: empty_signature(),
                 walker_diagnostics: Arc::from([]),
-                // A2 signal-split: a ReturnOnly outcome is ALWAYS
+                // Two-signal fold: a ReturnOnly outcome is ALWAYS
                 // non-cacheable by construction (the inner memo refuses
                 // admission for the intrinsic non-cacheable reason), so
                 // `cache_suppress` is unconditionally `true` — independent
@@ -540,7 +540,7 @@ fn finish_materialize_admission(
                     value: outcome,
                     dep_signature: empty_signature(),
                     walker_diagnostics: Arc::from([]),
-                    // A2 signal-split (see the IntrinsicNonCacheable arm): a
+                    // Two-signal fold (see the IntrinsicNonCacheable arm): a
                     // self-root-refusal ReturnOnly is COMPLETE but
                     // non-shareable — `cache_suppress=true` unconditionally,
                     // `result_is_partial` carries ONLY THIS cold compute's
@@ -967,6 +967,21 @@ pub(crate) fn materialize_component_meta_structure(
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             crate::request_context::mark_request_materialization_cache_suppress();
+        }
+
+        // Test-only ADMISSION-REFUSAL injection hook: model a
+        // project-shape mutation landing inside this cold window by
+        // bumping the project generation once (a REAL bump through
+        // `ProjectTypeStore::bump_project_generation`), so the runtime's
+        // post-compute revalidation gate rejects the freshly-built entry
+        // through the exact production path. Self-disarms so nested
+        // child materialises in the same compute are not also rejected.
+        if ctx
+            .host_for_fact_tracer_install()
+            .materialize_force_mid_compute_generation_bump
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            ctx.project_type_store().bump_project_generation();
         }
 
         // Registry-route branch.
@@ -1418,15 +1433,7 @@ pub(crate) fn materialize_component_meta_structure(
                                         crate::cache_runtime::NonAdmissionReason::SelfRootConflict,
                                     );
                                     crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
-                                        crate::semantic_query::CacheRead {
-                                            value: entry.outcome,
-                                            dep_signature: empty_signature(),
-                                            walker_diagnostics: Arc::from([]),
-                                            cache_suppress: false,
-                                            // Complete result, non-cacheable
-                                            // (self-root conflict) — not a partial.
-                                            result_is_partial: false,
-                                        },
+                                        self_root_conflict_return_only(entry.outcome),
                                     )
                                 }
                             }
@@ -1504,18 +1511,31 @@ pub(crate) fn materialize_component_meta_structure(
     match result {
         Some(read) => read,
         None => {
-            // Cooperative-admission failed (compute returned `Failed`
-            // or revalidate-after-compute rejected). Return Tainted
-            // on the input id — the next call will re-attempt
-            // cooperative admission with the fresh dep-signature.
+            // Unreachable by construction. The cooperative runtime
+            // returns `None` only for a `ComputeFailed` slot — and this
+            // materialiser's compute never constructs
+            // `ComputeAdmission::Failed` (every other terminal lowers to
+            // `Cacheable` or `ReturnOnly`). An admission-REFUSED compute
+            // (post-compute revalidation rejection) returns the COMPUTED
+            // value through the node's `lower_unadmitted` hook
+            // (`cache_suppress = true`, `result_is_partial` clear), and a
+            // joiner on a panicked or admission-rejected winner forks and
+            // cold-recomputes instead of surfacing `None` — so neither
+            // path lands here. Defensive fallback only: a non-cacheable,
+            // never-partial `Tainted` child, so an unforeseen protocol
+            // regression degrades soft instead of panicking the request.
+            debug_assert!(
+                false,
+                "materialize_component_meta_structure: cooperative admission returned None — \
+                 the materialiser compute never constructs Failed and admission refusal \
+                 returns the computed value; a None here is a protocol regression"
+            );
             crate::semantic_query::CacheRead {
                 value: MaterializeOutcome::Tainted(key.base),
                 dep_signature: empty_signature(),
                 walker_diagnostics: Arc::from([]),
-                cache_suppress: false,
-                // Cooperative-admission failure surfaces a degraded
-                // (tainted) partial; the next call re-attempts cold.
-                result_is_partial: true,
+                cache_suppress: true,
+                result_is_partial: false,
             }
         }
     }
@@ -1523,6 +1543,30 @@ pub(crate) fn materialize_component_meta_structure(
 
 fn empty_signature() -> DepSignature {
     Arc::from(Vec::new().into_boxed_slice())
+}
+
+/// `ReturnOnly` carrier for a COMPLETE materialised outcome whose traced
+/// self-root facts tore against the observed self-roots (the value is
+/// valid; only its dependency fence cannot be rooted strictly).
+///
+/// Benign non-cacheable COMPLETE per the two-signal model:
+/// `result_is_partial` stays CLEAR (a torn signature is not value
+/// incompleteness), while `cache_suppress = true` carries the
+/// non-cacheability signal — the shared read boundary folds it into the
+/// enclosing build's memo non-admission, so an unrootable materialise can
+/// never leave a warm-cacheable trace in an outer entry. Consistent with
+/// the signature-overflow and Tainted `ReturnOnly` arms (every benign
+/// non-cacheable `ReturnOnly` MUST carry `cache_suppress = true`).
+fn self_root_conflict_return_only(
+    outcome: MaterializeOutcome,
+) -> crate::semantic_query::CacheRead<MaterializeOutcome> {
+    crate::semantic_query::CacheRead {
+        value: outcome,
+        dep_signature: empty_signature(),
+        walker_diagnostics: Arc::from([]),
+        cache_suppress: true,
+        result_is_partial: false,
+    }
 }
 
 /// Graph-native package-ref policy predicate.
@@ -2170,8 +2214,8 @@ export type GetItemKeys<T> = (keyof T & string) | DotPathKeys<T>
         let host = project.host();
         let id = a0_make_decl_identity(host, "/u.ts", "DotPathKeys");
         let mut fence = Vec::new();
-        // The recursive-helper guard predicate is the same one B1's
-        // step 4 calls (ref_root_reaches_transitive_cycle_node).
+        // The recursive-helper guard predicate is the same one the
+        // registry materialiser calls (ref_root_reaches_transitive_cycle_node).
         // Asserting it returns true on this fixture verifies the
         // gate would fire when reached through the materialiser
         // entry.
@@ -2237,7 +2281,7 @@ export type Recur = { kids: Recur[] | null }
         // Cycle guard would fire on Recur (productive recursion is
         // not flagged, but a complex-union variant is — see A0 tests).
         // Here we just verify the extraction shape; the guard fires
-        // through B1's materialiser branch in production.
+        // through the registry materialiser branch in production.
     }
 
     /// Long cyclic chain via Object hops: A_0 -> A_1 -> ... -> A_199
@@ -3393,6 +3437,177 @@ export type C<T> = A<T>
             db.peek(&key, host).is_some(),
             "MaterializeStructureDb MUST hold the complete candidate for the key \
              despite the outer sticky",
+        );
+    }
+
+    /// ADMISSION REFUSAL IS NOT A PARTIAL RESULT — the two-signal-fold
+    /// witness for the materialiser's admission-failure fallback.
+    ///
+    /// A COMPLETE cold compute whose freshly-built entry is rejected by
+    /// the runtime's post-compute revalidation (a project-shape
+    /// mutation landing inside the cold window — driven here by the
+    /// `materialize_force_mid_compute_generation_bump` knob bumping the
+    /// REAL project generation mid-compute) is refused warm-cache
+    /// ADMISSION, never re-labelled a partial: a genuine in-scope
+    /// partial routes through `ReturnOnly` with the partial bit BEFORE
+    /// admission, so the admission-failure fallback can only be reached
+    /// by a complete-by-construction compute. Labelling it
+    /// `result_is_partial=true` laundered benign non-cacheability into
+    /// the request partial sticky → `synthesis_should_suppress` → a
+    /// complete component-meta result refused final-result warm
+    /// promotion (the ChatMessages.vue false-partial class).
+    #[test]
+    fn admission_revalidation_refusal_is_not_a_partial_result() {
+        use crate::request_context::{RequestContext, RequestContextGuard};
+        use crate::semantic_query::ProjectionMode;
+
+        let project = a0_make_project();
+        project
+            .upsert_base(
+                "/m1_types.ts",
+                "export type Foo = { x: number; y: string };",
+            )
+            .unwrap();
+        let host = project.host();
+
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let decl_ref_node = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/m1_types.ts",
+                &verter_type_expr::TypeExpr::Ref {
+                    name: StdArc::from("Foo"),
+                    type_arguments: StdArc::from(Vec::new()),
+                },
+                ProjectionMode::Navigate,
+            )
+            .expect("lowering Foo via Navigate must succeed");
+        let key = MaterializeStructureCacheKey {
+            scope_canonical_id: StdArc::from("/m1_types.ts"),
+            base: decl_ref_node,
+            scope_axis: MaterializationScope::TopLevel,
+            mode: ProjectionMode::Expanded,
+        };
+        let db = host.project_type_store().materialize_structure_db();
+
+        let _bump_guard =
+            crate::for_tests::materialize_force_mid_compute_generation_bump_for_tests(host);
+        let ctx = RequestContext::new(1, StdArc::from("/m1_types.ts"), false, None);
+        let _guard = RequestContextGuard::install(ctx);
+        let read = materialize_component_meta_structure(host, key.clone());
+
+        assert!(
+            !read.result_is_partial,
+            "an admission-refused COMPLETE materialise must NOT surface \
+             result_is_partial=true — admission refusal is benign \
+             non-cacheability, not value incompleteness (the false-partial class)",
+        );
+        assert!(
+            read.cache_suppress,
+            "the admission-refused outcome must stay non-cacheable for the \
+             enclosing build (cache_suppress=true)",
+        );
+        assert!(
+            matches!(read.value, MaterializeOutcome::Value(_)),
+            "the admission-refused winner must return the COMPUTED outcome, not a \
+             fabricated Tainted(base) substitute — substituting a strictly shallower \
+             child under a complete label makes the published surface a function of \
+             admission timing / parse order (inputs that appear in no cache key), \
+             got {:?}",
+            read.value,
+        );
+        assert!(
+            db.peek(&key, host).is_none(),
+            "the rejected entry must NOT be admitted into MaterializeStructureDb",
+        );
+        assert!(
+            !crate::request_context::current_materialization_cache_suppress(),
+            "the request partial sticky must stay CLEAR — admission refusal must \
+             not gate the whole component-meta result's warm promotion",
+        );
+    }
+
+    /// First-request admission PIN for a contributor first parsed
+    /// MID-REQUEST (the view-snapshot false-stale class).
+    ///
+    /// A contributor file whose FIRST parse happens inside the cold
+    /// materialise (a lazily-loaded import the structural walk reaches)
+    /// must not fail the post-compute admission revalidation: the
+    /// freshly-built COMPLETE entry admits, `peek` hits, and the read is
+    /// fully cacheable on the very first request. A spurious staleness
+    /// rejection here would leave the entry non-cacheable on every first
+    /// request (the unadmitted-value protocol keeps the caller-visible
+    /// RESULT correct either way — the computed value flows back,
+    /// non-cacheable, never partial — but warm caching is delayed).
+    ///
+    /// The corpus-scale variant of this scenario (a `.vue` contributor
+    /// first parsed inside a live-session slot-binding synthesis) is the
+    /// named follow-up tracked in the `/component-meta` skill
+    /// ("view-snapshot false-stale admission refusal"); this hermetic pin
+    /// covers the plain host-view path.
+    #[test]
+    fn first_cold_request_admits_materialise_whose_contributor_parsed_mid_request() {
+        use crate::request_context::{RequestContext, RequestContextGuard};
+        use crate::semantic_query::ProjectionMode;
+
+        let project = a0_make_project();
+        project
+            .upsert_base(
+                "/m_falsestale_helper.ts",
+                "export interface Helper { a: number; b: string };",
+            )
+            .unwrap();
+        project
+            .upsert_base(
+                "/m_falsestale_types.ts",
+                "import type { Helper } from './m_falsestale_helper';\n\
+                 export type Foo = { x: Helper; y: string };",
+            )
+            .unwrap();
+        let host = project.host();
+
+        // Lower the root reference OUTSIDE the request: Navigate keeps the
+        // imported `Helper` as a carrier, so the helper file stays
+        // unparsed until the materialise's structural walk reaches it
+        // INSIDE the request below.
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let decl_ref_node = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/m_falsestale_types.ts",
+                &verter_type_expr::TypeExpr::Ref {
+                    name: StdArc::from("Foo"),
+                    type_arguments: StdArc::from(Vec::new()),
+                },
+                ProjectionMode::Navigate,
+            )
+            .expect("lowering Foo via Navigate must succeed");
+        let key = MaterializeStructureCacheKey {
+            scope_canonical_id: StdArc::from("/m_falsestale_types.ts"),
+            base: decl_ref_node,
+            scope_axis: MaterializationScope::TopLevel,
+            mode: ProjectionMode::Expanded,
+        };
+        let db = host.project_type_store().materialize_structure_db();
+
+        let ctx = RequestContext::new(1, StdArc::from("/m_falsestale_types.ts"), false, None);
+        let _guard = RequestContextGuard::install(ctx);
+        let read = materialize_component_meta_structure(host, key.clone());
+
+        assert!(
+            matches!(read.value, MaterializeOutcome::Value(_)),
+            "the first-request materialise must return the computed value, got {:?}",
+            read.value,
+        );
+        assert!(
+            !read.cache_suppress,
+            "a complete first-request materialise whose contributor parsed mid-request \
+             must ADMIT (cache_suppress=false) — a spurious view-snapshot staleness \
+             rejection leaves the entry non-cacheable on every first request",
+        );
+        assert!(
+            db.peek(&key, host).is_some(),
+            "the complete first-request materialise must be admitted into \
+             MaterializeStructureDb — the mid-request-parsed contributor must not \
+             fail the admission revalidation",
         );
     }
 

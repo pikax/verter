@@ -42,6 +42,7 @@ fn lookup_publish_return_only_never_publishes() {
         || None::<String>,
         || ComputeAdmission::<String, String>::ReturnOnly("winner-only".to_string()),
         |entry: &String| entry.clone(),
+        |_entry: &String| None,
         |_entry: &String| true,
         move |_entry: String| {
             publish_count_cl.fetch_add(1, Ordering::SeqCst);
@@ -76,6 +77,7 @@ fn lookup_publish_cacheable_publishes_once() {
         || None::<String>,
         || ComputeAdmission::<String, String>::Cacheable("built".to_string()),
         |entry: &String| entry.clone(),
+        |_entry: &String| None,
         |_entry: &String| true,
         move |entry: String| {
             publish_count_cl.fetch_add(1, Ordering::SeqCst);
@@ -111,6 +113,7 @@ fn lookup_publish_revalidation_failure_skips_publish() {
         || None::<String>,
         || ComputeAdmission::<String, String>::Cacheable("stale".to_string()),
         |entry: &String| entry.clone(),
+        |_entry: &String| None,
         // Revalidation rejects: a mutation invalidated the entry during
         // the cold window.
         |_entry: &String| false,
@@ -132,6 +135,144 @@ fn lookup_publish_revalidation_failure_skips_publish() {
     );
 }
 
+/// When the caller opts in via `project_unadmitted`, an admission-REFUSED
+/// winner returns its COMPUTED value (lowered by the opt-in projection)
+/// instead of `None` — nothing is published, exactly like `ReturnOnly`.
+/// Discarding the computed value would force the caller's fallback to
+/// fabricate a substitute, making the caller-visible result a function of
+/// admission timing.
+#[test]
+fn lookup_publish_admission_refusal_returns_computed_value_when_opted_in() {
+    let inflight: InflightTable<u32> = InflightTable::default();
+    let publish_count = Arc::new(AtomicUsize::new(0));
+    let publish_count_cl = Arc::clone(&publish_count);
+
+    let v = cooperative_admit_with_lookup_publish(
+        &inflight,
+        1u32,
+        || None::<String>,
+        || ComputeAdmission::<String, String>::Cacheable("computed".to_string()),
+        |entry: &String| entry.clone(),
+        // Opt-in: the unadmitted projection returns the computed entry,
+        // lowered (here: tagged) to its non-cacheable form.
+        |entry: &String| Some(format!("{entry}:unadmitted")),
+        // Revalidation rejects: a mutation invalidated the entry during
+        // the cold window.
+        |_entry: &String| false,
+        move |_entry: String| {
+            publish_count_cl.fetch_add(1, Ordering::SeqCst);
+        },
+        |_victims: ()| {},
+        None,
+    );
+
+    assert_eq!(
+        v.as_deref(),
+        Some("computed:unadmitted"),
+        "an admission-refused winner with an opted-in node must return the \
+         COMPUTED value through the unadmitted projection, never None"
+    );
+    assert_eq!(
+        publish_count.load(Ordering::SeqCst),
+        0,
+        "publish_core must still be skipped — the refused entry is never admitted"
+    );
+}
+
+/// A joiner waking on a PANICKED winner must NOT consume the slot as a
+/// value-bearing or failure-bearing outcome: the winner produced no
+/// completeness evidence, so the joiner forks and cold-recomputes for its
+/// own view. (A deterministic panic then surfaces as the joiner's OWN
+/// panic — honest — never as a fabricated complete-labelled value.)
+#[test]
+fn lookup_publish_joiner_forks_and_recomputes_after_winner_panic() {
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    let inflight: Arc<InflightTable<u32>> = Arc::new(InflightTable::default());
+
+    let (claimed_tx, claimed_rx) = mpsc::sync_channel::<()>(0);
+    let release_barrier = Arc::new(Barrier::new(2));
+
+    // Winner thread that panics inside compute.
+    let inflight_w = Arc::clone(&inflight);
+    let release_barrier_w = Arc::clone(&release_barrier);
+    let winner = thread::spawn(move || {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cooperative_admit_with_lookup_publish(
+                &inflight_w,
+                7u32,
+                || None::<String>,
+                || -> ComputeAdmission<String, String> {
+                    claimed_tx
+                        .send(())
+                        .expect("rendezvous receiver must outlive winner's compute");
+                    release_barrier_w.wait();
+                    panic!("simulated compute panic");
+                },
+                |entry: &String| entry.clone(),
+                |_entry: &String| None,
+                |_entry: &String| true,
+                |_entry: String| {},
+                |_victims: ()| {},
+                None,
+            )
+        }));
+    });
+
+    claimed_rx
+        .recv()
+        .expect("winner's compute must signal claim before panicking");
+
+    // Joiner — wakes on the panicked winner, forks, and cold-recomputes
+    // its own value.
+    let inflight_j = Arc::clone(&inflight);
+    let joiner = thread::spawn(move || {
+        cooperative_admit_with_lookup_publish(
+            &inflight_j,
+            7u32,
+            || None::<String>,
+            || ComputeAdmission::<String, String>::Cacheable("joiner recomputed".to_string()),
+            |entry: &String| entry.clone(),
+            |_entry: &String| None,
+            |_entry: &String| true,
+            |_entry: String| {},
+            |_victims: ()| {},
+            None,
+        )
+    });
+
+    // Deterministic wait: the joiner holds its own slot Arc once the
+    // strong count reaches 4 (table + winner.slot + winner.panic_guard +
+    // joiner).
+    let poll_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if inflight
+            .slot_strong_count(&7u32)
+            .is_some_and(|count| count >= 4)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < poll_deadline,
+            "joiner failed to acquire inflight slot Arc within 10s"
+        );
+        std::hint::spin_loop();
+    }
+    release_barrier.wait();
+
+    winner.join().unwrap();
+    let joiner_result = joiner.join().unwrap();
+    assert_eq!(
+        joiner_result.as_deref(),
+        Some("joiner recomputed"),
+        "a joiner observing a panicked winner must FORK and cold-recompute its own \
+         value — surfacing None here lets a caller fallback fabricate a \
+         complete-labelled substitute from a winner that produced no completeness \
+         evidence"
+    );
+}
+
 /// `evict_deferred` is invoked with the victims `publish_core` returned —
 /// the split lifecycle threads the deferred victims from the core step to
 /// the eviction step.
@@ -147,6 +288,7 @@ fn lookup_publish_threads_deferred_victims_to_evict() {
         || None::<String>,
         || ComputeAdmission::<String, String>::Cacheable("built".to_string()),
         |entry: &String| entry.clone(),
+        |_entry: &String| None,
         |_entry: &String| true,
         // publish_core returns two deferred victims.
         |_entry: String| vec![10u8, 20u8],
@@ -262,6 +404,7 @@ fn budgeted_split_publish_eviction_does_not_self_deadlock() {
                     )
                 },
                 |c: &Candidate<FactCandidateDiscriminant, String>| c.value.clone(),
+                |_c: &Candidate<FactCandidateDiscriminant, String>| None,
                 |_c: &Candidate<FactCandidateDiscriminant, String>| true,
                 {
                     let store_pub = Arc::clone(&store_inner);
@@ -370,6 +513,7 @@ fn publish_fence_spans_publish_core_through_evict_deferred() {
                 )
             },
             |c: &Candidate<FactCandidateDiscriminant, String>| c.value.clone(),
+            |_c: &Candidate<FactCandidateDiscriminant, String>| None,
             |_c: &Candidate<FactCandidateDiscriminant, String>| true,
             {
                 let store_pub = Arc::clone(&store_inner);

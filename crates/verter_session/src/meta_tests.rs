@@ -4479,21 +4479,21 @@ defineProps<ChatProps<T>>()
 ///
 /// **Scope honesty.** A conditional-bodied mapped value (the exact real
 /// `ChatMessagesSlots<T>` shape) yields `semanticMiss` downstream at
-/// hermetic scale (the separate conditional-reduction gap), so it does not
-/// flatten pre-change and cannot serve as a clean RED→GREEN discriminator.
-/// This fixture therefore uses a PLAIN function value (which DOES flatten
-/// pre-change) to make the mapped carrier-stop discriminating; the
-/// conditional-bodied open mapped storm is reproduced and gated by the
-/// external-corpus oracle (the real ChatMessages.vue / Table.vue surface).
+/// hermetic scale (the separate conditional-reduction gap), so this
+/// fixture uses a PLAIN function value to make the per-key-value carrier
+/// rule discriminating; the conditional-bodied open mapped storm is
+/// reproduced and gated by the external-corpus oracle (the real
+/// ChatMessages.vue / Table.vue surface).
 ///
-/// **Discriminating.** Pre-change `defineSlots<…>()` resolves the slots
-/// surface under a `MacroObjectSurface`/`Expanded` publication demand,
-/// which enumerates `keyof BaseSlots` and materialises the per-key value —
-/// flattening `header`/`footer` into named slots whose bindings include
-/// the deep `message` member. Post-change the mapped surface carrier-stops
-/// to a shallow `Mapped` shell: the open per-key value is NOT materialised,
-/// so no slot binding flattens `message`. The `message`-absent assertion
-/// FAILS pre-change (flatten) and PASSES post-change (carrier-stop).
+/// **Discriminating.** The empty-path Shallow surface enumerator gates on
+/// the KEY-PRODUCTION axis only: a CLOSED key domain (`keyof BaseSlots`)
+/// ENUMERATES its keys even when the per-key value body reaches the open
+/// outer `T` — but each enumerated binding's published VALUE stays the
+/// deferred CARRIER (`MessageBase<T>` stays a `Ref` reference, never a
+/// flattened object of MessageBase's members, never a both-branch Union,
+/// never a budget sentinel). An eager per-key-value materialiser flattens
+/// `items` / `current` into the binding's type and fails the carrier
+/// assertions.
 #[test]
 fn get_component_meta_open_mapped_slots_surface_carrier_stops_no_sentinel() {
     use crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel;
@@ -4557,26 +4557,58 @@ defineSlots<OpenMappedSlots<T>>()
         }
     }
 
-    // The open mapped slots value body stays SHALLOW: no slot binding
-    // flattens the per-key value's deep `message: MessageBase<T>` object
-    // member into the published surface (the carrier-stop discriminator).
-    assert!(
-        meta.slots
+    // CLOSED key domain ⇒ the keys ENUMERATE: `header` / `footer` publish
+    // as named slots (key enumeration is path-precise even when the value
+    // body is open).
+    let slot_names: Vec<&str> = meta.slots.iter().map(|s| s.name.as_str()).collect();
+    for key in ["header", "footer"] {
+        assert!(
+            slot_names.contains(&key),
+            "the closed-key mapped slots surface must enumerate `{key}`, got {slot_names:?}"
+        );
+    }
+
+    // The open per-key VALUE stays a deferred CARRIER: each enumerated
+    // slot's `message` binding publishes the `MessageBase<T>` reference
+    // carrier — structurally NOT a flattened `TypeExpr::Object`
+    // materialising MessageBase's members (`items` / `current`) and NOT a
+    // both-branch Union.
+    for slot in &meta.slots {
+        let message = slot
+            .bindings
             .iter()
-            .all(|slot| slot.bindings.iter().all(|b| b.name != "message")),
-        "the open mapped slots surface must carrier-stop — its per-key value's \
-         `message: MessageBase<T>` binding must NOT flatten into a published slot, got slots: {:?}",
-        meta.slots
-            .iter()
-            .map(|s| (
-                s.name.as_str(),
-                s.bindings
-                    .iter()
-                    .map(|b| b.name.as_str())
-                    .collect::<Vec<_>>()
-            ))
-            .collect::<Vec<_>>()
-    );
+            .find(|b| b.name == "message")
+            .unwrap_or_else(|| {
+                panic!(
+                    "slot `{}` must carry the `message` binding from the per-key \
+                     function value's first-parameter object, got bindings: {:?}",
+                    slot.name,
+                    slot.bindings.iter().map(|b| &b.name).collect::<Vec<_>>()
+                )
+            });
+        match &message.type_expr {
+            verter_type_expr::TypeExpr::Object(obj) => panic!(
+                "slot `{}`'s `message` binding must stay the MessageBase<T> carrier — it \
+                 flattened into an object surface: {obj:?}",
+                slot.name
+            ),
+            verter_type_expr::TypeExpr::Union(arms) => panic!(
+                "slot `{}`'s `message` binding must stay the MessageBase<T> carrier — it \
+                 widened into a Union: {arms:?}",
+                slot.name
+            ),
+            verter_type_expr::TypeExpr::Ref { name, .. } => assert_eq!(
+                name.as_ref(),
+                "MessageBase",
+                "slot `{}`'s `message` binding must publish the MessageBase reference carrier",
+                slot.name
+            ),
+            other => panic!(
+                "slot `{}`'s `message` binding must publish a reference carrier, got {other:?}",
+                slot.name
+            ),
+        }
+    }
 
     // POSITIVE witness — the carrier-stop is not a DROPPED surface. The
     // empty/shallow assertions above would also pass on a broken pipeline

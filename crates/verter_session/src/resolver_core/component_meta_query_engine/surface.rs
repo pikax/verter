@@ -300,6 +300,30 @@ pub(crate) fn type_expr_contains_semantic_miss(expr: &TypeExpr) -> bool {
     !dispatch_route_expr_is_materialized(expr)
 }
 
+/// Root-level (carrier-position) unmaterialised-sentinel recogniser.
+///
+/// Returns `true` when the expression IS a raise sentinel at its root
+/// (unwrapping only `Parenthesized`) — the shape produced when a
+/// published carrier is re-lowered by NAME in a scope where the name
+/// does not resolve, so the demanded reduction itself failed. Distinct
+/// from [`type_expr_contains_semantic_miss`], which also fires on
+/// genuine NESTED partial values: an unresolvable member-value
+/// reference (`element?: HTMLElement` without the DOM lib) inside an
+/// otherwise-materialised surface is a contract-conformant partial
+/// result (Macro Type Traversal — the field that transitively depends
+/// on the unresolved name publishes partially; sibling members resolve
+/// normally), not a failed reduction.
+pub(crate) fn type_expr_root_is_unmaterialized_sentinel(expr: &TypeExpr) -> bool {
+    let mut current = expr;
+    while let TypeExpr::Parenthesized(inner) = current {
+        current = inner;
+    }
+    match current {
+        TypeExpr::Unknown { .. } => !dispatch_route_expr_is_materialized(current),
+        _ => false,
+    }
+}
+
 /// Returns `true` when `expr` is the budget-exceeded sentinel
 /// (`TypeExpr::Unknown { raw }` whose `raw` starts with
 /// [`BUDGET_EXCEEDED_SENTINEL_PREFIX`]). This is the single shared

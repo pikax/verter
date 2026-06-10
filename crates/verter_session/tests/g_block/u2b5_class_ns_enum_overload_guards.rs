@@ -642,12 +642,31 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
          Instantiate(type slot) entry must be warm in the shared memo"
     );
 
-    // Static warmed the TypeOf(value_root) slot.
+    // Static warmed the TypeOf(value_root) slot — the class-surface
+    // Static side composes its constructor surface as a genuine
+    // Expanded consumer. The composed key matches the production
+    // `typeof_key_for` derivation exactly — the env-bearing
+    // `ValueRootSlotIdentity` (T/L/J from the value-root canonical's live
+    // host env) plus a `TypeOfContext` carrying the canonical's
+    // `resolve_env_hash` (R).
+    let typeof_env = host.host_view_env_hashes_for(canonical);
+    let typeof_project_identity = host.host_view_project_identity_for(canonical).fold_u32();
     let inner_typeof = SemanticQueryKey::TypeOf {
-        value_root: ValueRootKey {
-            scope: verter_session::semantic_query::ScopeId::file(Arc::from(canonical)),
-            name: Arc::from("Foo"),
-        },
+        value_root: verter_session::semantic_query::ValueRootSlotIdentity::new(
+            ValueRootKey {
+                scope: verter_session::semantic_query::ScopeId::file(Arc::from(canonical)),
+                name: Arc::from("Foo"),
+            },
+            typeof_project_identity,
+            typeof_env.type_env_hash,
+            typeof_env.lib_env_hash,
+        ),
+        context: verter_session::semantic_query::TypeOfContext::new(
+            verter_session::semantic_query::ProjectionReductionContext::published(
+                verter_session::semantic_query::ProjectionMode::Expanded,
+            ),
+            typeof_env.resolve_env_hash,
+        ),
     };
     assert!(
         graph.slot_candidate_count_for_tests(&inner_typeof) > 0,

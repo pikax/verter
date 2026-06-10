@@ -99,8 +99,21 @@ impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaReso
         dep_canonical: &str,
         resolved_name: &str,
     ) -> Option<(String, String)> {
-        self.host
-            .resolve_local_import_symbol_target(dep_canonical, resolved_name)
+        // Overlay-aware: the owner file (and its import surface) may
+        // exist only in a session overlay, so the shallow import
+        // lookup must read through the resolver context's view — the
+        // base host's shallow state has no entry for overlay-only
+        // files and would mis-classify an imported helper as
+        // owner-local.
+        let shallow = self.ctx.shallow_file_state(dep_canonical)?;
+        let import_target = shallow.import_target(resolved_name)?;
+        let next_canonical = if import_target.canonical_id.is_empty() {
+            self.ctx
+                .resolve_type_dependency_canonical(dep_canonical, &import_target.source_specifier)?
+        } else {
+            import_target.canonical_id.clone()
+        };
+        Some((next_canonical, import_target.imported_name.clone()))
     }
 
     fn resolve_local_export_symbol_target(

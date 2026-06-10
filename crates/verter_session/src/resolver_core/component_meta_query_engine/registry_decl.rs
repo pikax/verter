@@ -55,69 +55,6 @@ use crate::semantic_query::{
     SemanticQueryOutput,
 };
 
-/// Whether the Navigate-lowered registry surface `node` IS, or contains
-/// at its top-level structure (through transparent `Alias` hops and
-/// `Intersection`/`Union` arms), an OPEN `SemanticNodeData::Mapped`
-/// carrier — a mapped type whose produced surface still depends on an
-/// unbound outer generic (decided by the shared
-/// [`mapped_type_is_open_or_unknown`](crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown)
-/// predicate, no second walker) — OR the walk could not decide
-/// (open-or-unknown: budget exhaustion is UNDECIDABLE and must preserve
-/// the carrier, never fall through into Expanded materialisation).
-///
-/// The component-meta registry materialiser preserves such a carrier
-/// shallowly instead of running the Expanded `materialize_component_meta_structure`,
-/// which would distribute the mapped's open conditional value per key and
-/// explode into a combinatorially-large surface (the `ChatMessagesSlots<T>`
-/// storm). The walk is bounded and inspects only the top-level
-/// surface-composition structure (NOT member values — a member whose value
-/// is an open mapped is a deeper projection the consumer drives on demand).
-fn base_contains_open_mapped_or_unknown(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    node: SemanticNodeId,
-) -> bool {
-    use crate::semantic_query::SemanticNodeData;
-
-    let graph = ctx.project_type_store().semantic_graph();
-    // Depth-budgeted ITERATIVE worklist (no self-recursion — see the
-    // `no_unbounded_recursion_in_resolver_core` architecture guard). The
-    // node budget caps the top-level surface-composition walk; an
-    // open-mapped arm short-circuits, a closed surface exhausts the small
-    // frontier well within budget.
-    let mut budget = 64u32;
-    let mut work: Vec<SemanticNodeId> = vec![node];
-    while let Some(current) = work.pop() {
-        if budget == 0 {
-            // Budget exhausted with composition structure still
-            // unvisited: the verdict is UNDECIDABLE. This is the
-            // registry L1 mapped entrance — fail open-or-unknown and
-            // preserve the carrier; returning "no open mapped" here
-            // would fall through into the Expanded materialiser, the
-            // unsafe direction this predicate exists to stop.
-            return true;
-        }
-        budget -= 1;
-        let Some(data) = graph.node_data(current) else {
-            continue;
-        };
-        match data.as_ref() {
-            SemanticNodeData::Mapped { source, mapper } => {
-                if crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
-                    ctx, *source, mapper,
-                ) {
-                    return true;
-                }
-            }
-            SemanticNodeData::Intersection(arms) | SemanticNodeData::Union(arms) => {
-                work.extend(arms.iter().copied());
-            }
-            SemanticNodeData::Alias(target) => work.push(*target),
-            _ => {}
-        }
-    }
-    false
-}
-
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn resolve_imported_registry_symbol(
         &mut self,
@@ -475,26 +412,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         ) else {
             return expr.clone();
         };
-        // Route/mode-INDEPENDENT L1 (Shallow-By-Default), MAPPED-TYPE
-        // family — the component-meta REGISTRY materialisation route. The
-        // Navigate lowering above carrier-stops an open mapped to a
-        // `SemanticNodeData::Mapped` shell (see
-        // `raise::mapped_type_is_open_or_unknown`). Running the Expanded
-        // `materialize_component_meta_structure` below on that open-mapped
-        // shell would re-enter the empty-path Expanded expander, which
-        // distributes the mapped's open conditional value per key and
-        // explodes into a combinatorially-large materialised surface (the
-        // `ChatMessagesSlots<T>` 948 MB raised-`TypeExpr` storm the
-        // registry's `until_stable` loop then re-lowers). Preserve the
-        // shallow mapped carrier instead: raise the lowered carrier back to
-        // `TypeExpr::Mapped` and return it WITHOUT Expanded materialisation.
-        // Consumers re-resolve the carrier on demand. A CLOSED mapped (or
-        // any non-mapped surface) falls through and materialises as before.
-        if base_contains_open_mapped_or_unknown(self.ctx, base) {
-            return dispatch
-                .raise_node_to_type_expr(base)
-                .unwrap_or_else(|| expr.clone());
-        }
+        // Publication demand per scope axis, shallow-by-default. The
+        // TOP-LEVEL registry-symbol surface materialises at `Shallow` —
+        // the interpretable one-level surface whose heritage arms merge
+        // into a single Object (member names + shallow carrier values),
+        // the same contract `dispatch_root_instantiated` reads — so a
+        // registry consumer re-resolving `interface Extended extends
+        // Base` sees the flattened key set, not the raw heritage
+        // intersection. NESTED member surfaces materialise at
+        // `Navigate`: member values stay carriers the consumer
+        // re-resolves on demand. Open carriers survive either mode
+        // through the shared L1 carrier-stop predicates (no
+        // registry-local pre-walk runs here).
         let key = MaterializeStructureCacheKey {
             scope_canonical_id: std::sync::Arc::from(scope_canonical_id),
             base,
@@ -503,7 +432,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             } else {
                 MaterializationScope::TopLevel
             },
-            mode: ProjectionMode::Expanded,
+            mode: if nested_surface {
+                ProjectionMode::Navigate
+            } else {
+                ProjectionMode::Shallow
+            },
         };
         let read = materialize_component_meta_structure(self.ctx, key);
         // Dual-emit dispatch facts into BOTH downstream channels so
@@ -1068,7 +1001,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let root_inst_ctx = dispatch.instantiate_context_for(
             &root_canonical,
             crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Expanded,
+                crate::semantic_query::ProjectionMode::Shallow,
             ),
         );
         match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
@@ -1076,9 +1009,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             args: empty_semantic_args(),
             // `dispatch_root_instantiated` feeds
             // `projected_surface_from_semantic_node` which reads the
-            // root's surface members, call/construct lists, etc. Expanded
-            // is required so the surface is interpretable; Navigate
-            // would yield the lazy shell with no readable view.
+            // root's surface members, call/construct lists, etc. Shallow
+            // yields the interpretable one-level surface (member names +
+            // shallow carrier values) — decl-body lowering under Shallow
+            // is carrier-preserving and the shallow-surface synthesiser
+            // materialises exactly the demanded composition spine.
             context: root_inst_ctx,
         }) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => Some(id),
@@ -1133,8 +1068,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
                     base: root,
                     path: query_path,
+                    // Publication caller: intermediate hops navigate, the
+                    // terminal hop publishes shallow-by-default.
                     context: crate::semantic_query::ProjectionReductionContext::published(
-                        ProjectionMode::Expanded,
+                        ProjectionMode::Navigate,
                     ),
                 }) {
                     QueryResult::Value(SemanticQueryOutput { value: node, .. }) => dispatch
@@ -1192,15 +1129,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let dispatch = self.semantic_dispatch();
         let keys_node = crate::meta_resolve::build_keys_union_node(dispatch.graph(), keys);
         // Step B: instantiate the shared builtin Pick/Omit carrier on
-        // `[body, keys]` in the publication Expanded mode — the same path as a
-        // userland `Pick<…>` / `Omit<…>`, so fix-#1's public gate applies.
+        // `[body, keys]` in the publication Navigate mode — the same path as
+        // a userland `Pick<…>` / `Omit<…>`, so fix-#1's public gate applies
+        // and the L1 reducer decides closed→materialise path-precisely.
         match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
             base: dispatch.builtin_type_slot(builtin_name),
             args: std::sync::Arc::from(vec![body_id, keys_node].into_boxed_slice()),
             context: dispatch.instantiate_context_for(
                 "__builtin__",
                 crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Expanded,
+                    ProjectionMode::Navigate,
                 ),
             ),
         }) {

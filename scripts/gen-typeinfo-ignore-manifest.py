@@ -1324,16 +1324,18 @@ LIFTED_ROW_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
     # `wide_deep_projected_token_resolves_literal_union` reduces the chain THROUGH a
     # terminal `Pick<TLeaf,…> & { token }` intersection to the `token` literal
     # union. The measured trace is `[IndexedAccess, Instantiate, KeyOf, MappedType,
-    # ResolveDecl]`: the terminal `Pick` is a mapped remap, so `MappedType` (→
-    # `MappedTemplateRemap`) is the DAG-terminal OWNING producer and `IndexedAccess`
-    # (→ `IndexedAccessUnionDistribution`) + `KeyOf` (also IndexedAccess-owned) +
-    # `Instantiate`/`ResolveDecl` (→ `QueryValueDomainFoundation`) are non-owning.
+    # ProjectPath, ResolveDecl]`: the terminal `Pick` is a mapped remap, so
+    # `MappedType` (→ `MappedTemplateRemap`) is the DAG-terminal OWNING producer and
+    # `IndexedAccess` (→ `IndexedAccessUnionDistribution`) + `KeyOf` (also
+    # IndexedAccess-owned) + `ProjectPath` (the demand-point hop that resolves a
+    # carrier-shaped utility source) + `Instantiate`/`ResolveDecl` (→
+    # `QueryValueDomainFoundation`) are non-owning.
     # Hence the row MOVES from U2.INDEXED_ACCESS to U2.MAPPED_TEMPLATE in §10.4.1
     # (proof family stays IndexedAccess — the oracle family, not the block).
     ("wide_deep.rs", "wide_deep_projected_token_resolves_literal_union"): {
         "mech": "MappedTemplateRemap",
         "proof": "ProofRequirement::Ts7Oracle(OracleId::IndexedAccess)",
-        "semantic_queries": ["IndexedAccess", "Instantiate", "KeyOf", "MappedType", "ResolveDecl"],
+        "semantic_queries": ["IndexedAccess", "Instantiate", "KeyOf", "MappedType", "ProjectPath", "ResolveDecl"],
         "consumed_mechanisms": [
             "QueryValueDomainFoundation",
             "IndexedAccessUnionDistribution",

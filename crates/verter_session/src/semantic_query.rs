@@ -529,6 +529,59 @@ pub fn value_root_of(value_slot: &ResolvedDeclSlotIdentity) -> ValueRootKey {
     }
 }
 
+/// Env-bearing, content-free value-root slot identity for
+/// [`SemanticQueryKey::TypeOf`] (R6/R21).
+///
+/// The value-root analogue of [`ResolvedDeclSlotIdentity`]: `root` is the
+/// scoped value-root identity (`scope` + `name`, including the
+/// local-scope axis `build_typeof` threads into the produced node's
+/// scope), and the slot carries the slot-intrinsic env dims of the
+/// value-root scope's canonical (`type_env_hash` = `T`, `lib_env_hash` =
+/// `L`, `project_identity` = `J`). `resolve_env_hash` (`R`) rides the
+/// dedicated [`TypeOfContext`] — `build_typeof` resolves the value name
+/// through the owning file's name resolution / export tables, which
+/// depends on all four env dims, so an env-free key could warm-hit
+/// across resolve/type/lib/project envs (cache poisoning).
+///
+/// **Cache invariant (R6/R7):** the slot identity is **content-free**.
+/// No content/version hash enters the key; version-rooting lives on the
+/// cached value's `ReadSetSignature.facts` + `self_root_canonicals`,
+/// re-sourced at value-compute time from the live indexed view.
+///
+/// The single production derivation point is
+/// `ProjectSemanticDispatch::typeof_key_for`, which reads the live host
+/// env for the value-root scope canonical.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ValueRootSlotIdentity {
+    /// The scoped value-root identity (`scope` + `name`).
+    pub root: ValueRootKey,
+    /// Project identity dimension (workspace + tsconfig + provider).
+    pub project_identity: u32,
+    /// Type-env dimension (strict, noImplicitAny, target, …).
+    pub type_env_hash: HashValue,
+    /// Lib-env dimension (lib selection + typeRoots + ambient corpus).
+    pub lib_env_hash: HashValue,
+}
+
+impl ValueRootSlotIdentity {
+    /// Build an env-bearing value-root slot from the scoped root + the
+    /// three slot-intrinsic env dims.
+    #[must_use]
+    pub const fn new(
+        root: ValueRootKey,
+        project_identity: u32,
+        type_env_hash: HashValue,
+        lib_env_hash: HashValue,
+    ) -> Self {
+        Self {
+            root,
+            project_identity,
+            type_env_hash,
+            lib_env_hash,
+        }
+    }
+}
+
 /// Per-content-version payload tag for a
 /// [`ResolvedDeclSlotIdentity`]. Three fields per R7:
 ///
@@ -1209,6 +1262,69 @@ impl MacroPayloadContext {
             resolve_env_hash,
             mode,
         }
+    }
+}
+
+/// Per-key env+reduction context for [`SemanticQueryKey::TypeOf`].
+///
+/// `TypeOf`'s slot-intrinsic env dims (`type_env_hash` = `T`,
+/// `lib_env_hash` = `L`, `project_identity` = `J`) come from its
+/// `value_root: `[`ValueRootSlotIdentity`]; this dedicated context adds
+/// the one extra env dim the value-root resolution depends on —
+/// `resolve_env_hash` (`R`), because `build_typeof` resolves the value
+/// name through the owning file's name resolution / export tables —
+/// alongside the embedded [`ProjectionReductionContext`] (the `mode` /
+/// `demand` / `provenance` / `merge_role` projection-demand identity).
+///
+/// **Per-key context, not shared global (parity with
+/// [`InstantiateContext`]):** the env dim rides on this dedicated
+/// `TypeOf` context — NOT on the shared [`ProjectionReductionContext`]
+/// (which stays a pure projection-demand identity). `family_and_slot`
+/// folds `resolve_env_hash` onto
+/// [`crate::semantic_query_memo::FamilyKey::TypeOf`] (so two `typeof`
+/// resolutions differing only in `R` never warm-hit) and strips the
+/// embedded projection demand into the `ModeSlot`.
+///
+/// **R6-clean:** `resolve_env_hash` is an ENV dimension, NOT a
+/// content/version hash; the value-root slot stays content-free and the
+/// file content version is re-sourced at value-compute time from
+/// [`ResolverContext::ensure_indexed_ready`]. No `parse_stable_hash`,
+/// content hash, or `fact_dep_signature` enters this context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeOfContext {
+    /// Embedded projection-demand identity (`mode` / `demand` /
+    /// `provenance` / `merge_role`). The shared
+    /// [`ProjectionReductionContext`] stays a pure projection identity;
+    /// the env dim lives on this wrapper, never inside it.
+    pub projection_reduction: ProjectionReductionContext,
+    /// `resolve_env_hash` (`R`) — the value-root lookup resolves the
+    /// owning file's imports / export tables, so two `typeof`
+    /// resolutions of the same value root under different
+    /// module-resolution envs are distinct. Folded onto
+    /// `FamilyKey::TypeOf`. ENV hash, NOT a content/version hash
+    /// (R6-clean).
+    pub resolve_env_hash: HashValue,
+}
+
+impl TypeOfContext {
+    /// Build a `TypeOf` context from an embedded
+    /// [`ProjectionReductionContext`] plus the resolve-env dim.
+    #[must_use]
+    pub const fn new(
+        projection_reduction: ProjectionReductionContext,
+        resolve_env_hash: HashValue,
+    ) -> Self {
+        Self {
+            projection_reduction,
+            resolve_env_hash,
+        }
+    }
+
+    /// The embedded projection mode — shorthand for
+    /// `self.projection_reduction.mode`.
+    #[must_use]
+    pub const fn mode(self) -> ProjectionMode {
+        self.projection_reduction.mode
     }
 }
 
@@ -3382,8 +3498,29 @@ pub enum SemanticQueryKey {
         false_branch: SemanticNodeId,
         distributive: bool,
     },
+    /// `typeof value_root` — resolves the TYPE of a value declaration.
+    ///
+    /// `value_root` is the env-bearing, content-free
+    /// [`ValueRootSlotIdentity`] (it carries the `T` / `L` / `J` env
+    /// dims of the value-root scope's canonical; `context.
+    /// resolve_env_hash` adds `R` — `build_typeof` does env-sensitive
+    /// name/export resolution, so an env-free key would warm-hit across
+    /// envs). Version-rooting lives on the cached value's
+    /// `ReadSetSignature.facts` + `self_root_canonicals` (R6).
+    ///
+    /// `context.projection_reduction` carries the caller's
+    /// projection-reduction demand: `build_typeof` lowers the value's
+    /// annotation / object shape / signature surface / enum surface AT
+    /// that demand, so a `Skeleton` / `Navigate` / `Shallow` caller
+    /// crossing a `typeof`-typed value lowers carrier-preserving
+    /// instead of detonating an Expanded materialisation of the value's
+    /// declaration graph at build time. Parity with `Instantiate` /
+    /// `KeyOf` / `MappedType` / `ProjectPath` — the memo splits per
+    /// context (`context_to_slot`) so a transit lowering does not
+    /// poison the publication slot.
     TypeOf {
-        value_root: ValueRootKey,
+        value_root: ValueRootSlotIdentity,
+        context: TypeOfContext,
     },
     NormalizeUnion {
         members: Arc<[SemanticNodeId]>,

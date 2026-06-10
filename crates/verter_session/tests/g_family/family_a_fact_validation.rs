@@ -534,10 +534,30 @@ fn family_a_warm_hit_uses_fact_validation() {
     let node_src = read_session_source("cache_runtime/node.rs");
     let artifact_lookup = extract_fn_body(&node_src, "pub(crate) fn lookup<N: ArtifactNode>(");
     assert_one_validator_one_bubble(artifact_lookup, "cache_runtime::node::lookup<ArtifactNode>");
+    // The query-identity path carries TWO winner-side projections — the
+    // admitted projection AND the admission-REFUSED opt-in projection
+    // (`QueryNode::lower_unadmitted`): an admission-refused computed value
+    // still flows to the winner, and its traced facts must STILL bubble
+    // into the enclosing tracer so the rejected child's observations keep
+    // rooting the consuming entries' signatures (cross-file invalidation).
+    // Exactly ONE post-compute revalidator + exactly TWO bubbles: dropping
+    // either projection's bubble (2→1) or both (2→0) flips the guard RED.
     let query_lookup = extract_fn_body(&node_src, "pub(crate) fn lookup<N: QueryNode>(");
-    assert_one_validator_one_bubble(
-        query_lookup,
-        "cache_runtime::node::query::lookup<QueryNode>",
+    let query_validators = query_lookup.matches(STRICT_VALIDATOR).count();
+    assert_eq!(
+        query_validators, 1,
+        "cache_runtime::node::query::lookup<QueryNode> MUST carry EXACTLY one \
+         `{STRICT_VALIDATOR}...)` post-compute revalidator. Observed {query_validators}. \
+         Region:\n{query_lookup}"
+    );
+    let query_bubbles = query_lookup.matches(BUBBLE).count();
+    assert_eq!(
+        query_bubbles, 2,
+        "cache_runtime::node::query::lookup<QueryNode> MUST carry EXACTLY two \
+         `{BUBBLE}...)` sites — one on the admitted winner projection, one on the \
+         admission-REFUSED `lower_unadmitted` projection (the refused child's facts \
+         must still root the enclosing signatures). Observed {query_bubbles}. \
+         Region:\n{query_lookup}"
     );
 
     // The lazy free-fn `validate_fact_signature(ctx, …)` is forbidden

@@ -158,7 +158,7 @@ pub use crate::host_manage::component_meta_request_impl::{
 };
 pub(crate) use resolved_state::{
     lowered_root_reaches_transitive_cycle, lowered_root_reaches_transitive_cycle_with_fence,
-    select_imported_materialization_scope, RegistryMaterialization,
+    RegistryMaterialization,
 };
 pub use resolved_state::{ResolvedComponentMetaState, SurfaceNodeIdentities};
 pub(crate) use scoring::compare_type_expr_improvement;

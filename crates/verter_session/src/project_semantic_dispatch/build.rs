@@ -332,12 +332,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `typeof`-rooted declaration lookup. Shape mirrors [`Self::build_resolve_decl`]
     /// but routes through the shallow value-symbol space so the result is
     /// keyed by the value binding's identity.
+    ///
+    /// `context` is the caller's projection-reduction demand: the value's
+    /// annotation / object shape / signature surface / enum surface lowers
+    /// AT that demand, so a `Skeleton` / `Navigate` / `Shallow` caller gets
+    /// carrier-preserving lowering (member-value type references intern as
+    /// `DeclRef` / `InstantiationRef` carriers) while a genuine `Expanded`
+    /// caller keeps eager lowering. The overload-visibility projection rule
+    /// below is mode-independent semantics and applies in every mode.
     pub(super) fn build_typeof(
         &self,
         value_root: &ValueRootKey,
+        context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        // Telemetry for the typeof traversal site (the
-        // HIGH-confidence direction; brief site `build.rs:162`).
+        // Telemetry for the typeof traversal site.
         if let Some(observer) = verter_audit::current_observer() {
             observer.record_event(verter_audit::AuditEvent::BuildTypeofCall);
         }
@@ -477,7 +485,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Arc::from(root_identity.canonical_id.as_str());
             self.build_synthesized_vue_default_construct_object(&resolved_default_canonical, &scope)
         } else if let Some(ty_ann) = prepared.type_annotation.as_ref() {
-            self.shallow_lower_type_expr(
+            self.shallow_lower_type_expr_with_context(
                 ty_ann,
                 &empty_env,
                 &scope,
@@ -485,10 +493,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 scope_payload.as_ref(),
                 &shadowing,
                 &mut substitutions,
-                crate::semantic_query::ProjectionMode::Expanded,
+                context,
             )
         } else if let Some(shape) = prepared.object_shape.as_ref() {
-            self.shallow_lower_type_expr(
+            self.shallow_lower_type_expr_with_context(
                 &TypeExpr::Object(Arc::new(shape.clone())),
                 &empty_env,
                 &scope,
@@ -496,7 +504,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 scope_payload.as_ref(),
                 &shadowing,
                 &mut substitutions,
-                crate::semantic_query::ProjectionMode::Expanded,
+                context,
             )
         } else if !prepared.signatures.is_empty() {
             // Overload visibility (projection-time rule): a lone signature is
@@ -540,7 +548,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 })
                 .collect();
             let object_expr = ObjectExpr { properties };
-            self.shallow_lower_type_expr(
+            self.shallow_lower_type_expr_with_context(
                 &TypeExpr::Object(Arc::new(object_expr)),
                 &empty_env,
                 &scope,
@@ -548,7 +556,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 scope_payload.as_ref(),
                 &shadowing,
                 &mut substitutions,
-                crate::semantic_query::ProjectionMode::Expanded,
+                context,
             )
         } else if let Some(members) = prepared.enum_members.as_ref() {
             let object_expr = ObjectExpr {
@@ -566,7 +574,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     })
                     .collect(),
             };
-            self.shallow_lower_type_expr(
+            self.shallow_lower_type_expr_with_context(
                 &TypeExpr::Object(Arc::new(object_expr)),
                 &empty_env,
                 &scope,
@@ -574,7 +582,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 scope_payload.as_ref(),
                 &shadowing,
                 &mut substitutions,
-                crate::semantic_query::ProjectionMode::Expanded,
+                context,
             )
         } else {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
@@ -807,7 +815,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ),
             ),
         });
-        // A2 signal-split: the `.vue` instance synthesis helper returns a
+        // Two-signal fold: the `.vue` instance synthesis helper returns a
         // bare node, so a genuinely-incomplete nested `Instantiate` (budget /
         // recursion / walker-fatal) folds onto the request's sticky partial
         // flag — the component-meta / materialize warm gates consult it and
@@ -931,13 +939,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             ClassSurfaceSide::Static => {
                 // Static side = the VALUE-space half: TypeOf the value
-                // root (the constructor value).
+                // root (the constructor value). The static surface is a
+                // genuine-Expanded consumer (the registry reads the
+                // composed constructor object surface directly).
                 let value_root = crate::semantic_query::value_root_of(decl_slot);
-                self.execute_read(SemanticQueryKey::TypeOf { value_root })
+                self.execute_read(self.typeof_key_for(
+                    value_root,
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                ))
             }
         };
 
-        // A2 signal-split: fold the composed sub-query read's partiality so
+        // Two-signal fold: fold the composed sub-query read's partiality so
         // a budget/recursion/walker-fatal nested side surfaces as a partial
         // (it would otherwise return through the identity projection with
         // `result_is_partial=false`).
@@ -1224,7 +1237,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
             let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
                 (utility_result, utility_fence).into();
-            // FOLD (A2 signal-split): a mapper-utility surface whose
+            // Two-signal fold: a mapper-utility surface whose
             // nested KeyOf/MappedType subquery was genuinely incomplete
             // (budget / recursion / walker-fatal) surfaces here as a
             // complete-looking `Value` shell — carry its partiality
@@ -2479,7 +2492,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let fence = self.project_generation_signature();
         self.graph().record_instantiate();
 
-        // Two-signal taxonomy fold (A2 signal-split). The mapper-based
+        // Two-signal taxonomy fold. The mapper-based
         // utilities (`Partial` / `Required` / `Readonly` / `Record` and
         // the shared `keyof source` reification) surface their result
         // through nested `KeyOf` / `MappedType` subqueries. When such a
@@ -3078,12 +3091,75 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (QueryResult::Value(result), fence, false)
             }
 
+            // `NonNullable<T>` strips `null` / `undefined` from a
+            // SETTLED operand: a settled union filters its nullish
+            // arms (empty result ⇒ `never`); a settled non-nullable
+            // shape (function / object / literal / intersection /
+            // template literal / non-nullish primitive) passes
+            // through; nullish primitives reduce to `never`. An
+            // UNSETTLED operand (a carrier, an unresolved shape, a
+            // union with an unsettled arm) keeps the deferred
+            // `Opaque(Miss)` shell — the demand points re-dispatch
+            // once the operand settles (the conditional oracle's
+            // carrier-check materialisation relies on this arm to
+            // close `NonNullable<ChatSlots["header"]>` to the
+            // member's function shape).
+            "NonNullable" if args.len() == 1 => {
+                use crate::semantic_query::PrimitiveKind;
+                let arg = args[0];
+                let nullish = |id: SemanticNodeId| {
+                    matches!(
+                        graph.node_data(id).as_deref(),
+                        Some(SemanticNodeData::Primitive(
+                            PrimitiveKind::Null | PrimitiveKind::Undefined
+                        ))
+                    )
+                };
+                let settled_non_nullable = |id: SemanticNodeId| {
+                    matches!(
+                        graph.node_data(id).as_deref(),
+                        Some(
+                            SemanticNodeData::Function { .. }
+                                | SemanticNodeData::Object(_)
+                                | SemanticNodeData::Literal(_)
+                                | SemanticNodeData::Intersection(_)
+                                | SemanticNodeData::TemplateLiteral { .. }
+                                | SemanticNodeData::Primitive(_)
+                        )
+                    ) && !nullish(id)
+                };
+                let reduced: Option<SemanticNodeId> = match graph.node_data(arg).as_deref() {
+                    Some(SemanticNodeData::Union(arms))
+                        if arms.iter().all(|a| nullish(*a) || settled_non_nullable(*a)) =>
+                    {
+                        let survivors: Vec<SemanticNodeId> =
+                            arms.iter().copied().filter(|a| !nullish(*a)).collect();
+                        Some(match survivors.len() {
+                            0 => {
+                                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
+                            }
+                            1 => survivors[0],
+                            _ => graph.intern_node(SemanticNodeData::Union(Arc::from(
+                                survivors.into_boxed_slice(),
+                            ))),
+                        })
+                    }
+                    _ if nullish(arg) => {
+                        Some(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)))
+                    }
+                    _ if settled_non_nullable(arg) => Some(arg),
+                    _ => None,
+                };
+                let result = reduced.unwrap_or_else(|| self.opaque(QueryError::Miss));
+                record_utility_edges(result);
+                (QueryResult::Value(result), fence, false)
+            }
+
             // ---- Deferred utilities ----
-            // `NonNullable` requires recursive null/undefined filtering;
-            // `Awaited` requires recursive promise unwrapping. Each
-            // emits an `Opaque(Miss)` shell anchored to the instantiate
-            // identity so the origin walk remains coherent; full
-            // implementation requires path-precise projection upgrades.
+            // `Awaited` requires recursive promise unwrapping; unknown
+            // / not-yet-implemented utilities emit an `Opaque(Miss)`
+            // shell anchored to the instantiate identity so the origin
+            // walk remains coherent.
             _ => {
                 let result = self.opaque(QueryError::Miss);
                 record_utility_edges(result);
@@ -3478,7 +3554,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ))
             .with_observed_self_roots(observed_self_roots);
         }
-        // A2 signal-split: a `keyof` over an Intersection/Union enumerates
+        // Two-signal fold: a `keyof` over an Intersection/Union enumerates
         // its keyspace through `member_names_for_published_projection`,
         // whose underlying ProjectPath read can be genuinely incomplete
         // (budget / recursion / walker-fatal). Carry that partiality onto
@@ -3620,7 +3696,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// unaffected by this filter.
     /// Returns the source's public members for a published projection,
     /// PLUS the `result_is_partial` flag of the underlying `ProjectPath`
-    /// read (A2 signal-split). A genuinely-incomplete projection (budget /
+    /// read (two-signal fold). A genuinely-incomplete projection (budget /
     /// recursion / walker-fatal) surfaces a complete-looking member list
     /// here; the bool carries that partiality so `build_mapped_type` can
     /// taint its published surface. The fast path over an already-resolved
@@ -3823,7 +3899,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // source directly). If `source` is not an Object we can read
         // member names from, fall back to the keyspace shape — but
         // opaque keyspaces terminate the mapped dispatch cleanly.
-        // A2 signal-split partiality accumulator. Folds the partiality of
+        // Two-signal fold partiality accumulator. Folds the partiality of
         // every nested subquery this mapped-type build surfaces (the
         // source-member ProjectPath, the K-independent value hoist's
         // nested Instantiate) into the published surface so a
@@ -4234,7 +4310,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     args,
                     context: inst_ctx,
                 });
-                // A2 signal-split: per-K materialiser returns a bare node, so
+                // Two-signal fold: per-K materialiser returns a bare node, so
                 // fold a genuinely-incomplete nested Instantiate onto the
                 // request's sticky partial flag.
                 crate::request_context::observe_component_meta_read_suppress(&read);
@@ -4374,7 +4450,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     args,
                     context: inst_ctx,
                 });
-                // A2 signal-split: fold a genuinely-incomplete nested
+                // Two-signal fold: fold a genuinely-incomplete nested
                 // Instantiate onto the request's sticky partial flag.
                 crate::request_context::observe_component_meta_read_suppress(&read);
                 match read.value {
@@ -4453,7 +4529,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     args,
                     context: inst_ctx,
                 });
-                // A2 signal-split: fold a genuinely-incomplete nested
+                // Two-signal fold: fold a genuinely-incomplete nested
                 // Instantiate onto the request's sticky partial flag.
                 crate::request_context::observe_component_meta_read_suppress(&read);
                 match read.value {
@@ -4723,7 +4799,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }) {
                 let mut per_member: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
                 let mut distribution_ok = true;
-                // A2 signal-split: accumulate the partiality of every
+                // Two-signal fold: accumulate the partiality of every
                 // per-member sub-conditional so an incomplete distribution
                 // (a member whose nested resolution tripped the budget /
                 // recurred / hit a walker fatal) taints the conditional
@@ -4976,7 +5052,55 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !has_infer_position {
                     return None;
                 }
-                let check_resolved = self.evaluate_deferred_semantic_node(check?);
+                let mut check_resolved = self.evaluate_deferred_semantic_node(check?);
+                // Demand point (the relation/conditional oracle): a check
+                // riding an `InstantiationRef` carrier — the
+                // carrier-preserving lowering's shape for a builtin /
+                // generic over open-then-substituted arguments
+                // (`NonNullable<ChatSlots["header"]>` after per-key
+                // substitution) — is materialised HERE, where the
+                // function-infer pattern genuinely demands the check's
+                // shape for positional binding. The deferred-shell
+                // evaluator deliberately has no `InstantiationRef` arm
+                // (intermediate hops must stay carrier-shaped), so the
+                // oracle executes the one demanded instantiation under
+                // the structural-transit operand context and re-evaluates.
+                if let Some(SemanticNodeData::InstantiationRef { base, args }) =
+                    graph.node_data(check_resolved).as_deref()
+                {
+                    let owner_canonical = Arc::clone(&base.canonical_id);
+                    let slot = self
+                        .type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+                    let operand_context =
+                        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                            crate::semantic_query::ProjectionMode::Navigate,
+                        );
+                    // The carrier's operator-shaped arguments (the
+                    // post-substitution `ChatSlots["header"]` indexed
+                    // access) resolve through the deferred-shell
+                    // evaluator first — path-precise single hops — so
+                    // the instantiation consumes settled operands.
+                    let args: Arc<[SemanticNodeId]> = Arc::from(
+                        args.iter()
+                            .map(|arg| {
+                                self.evaluate_deferred_semantic_node_with_context(
+                                    *arg,
+                                    operand_context,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    );
+                    let read = self.execute_read(SemanticQueryKey::Instantiate {
+                        base: slot,
+                        args,
+                        context: self.instantiate_context_for(&owner_canonical, operand_context),
+                    });
+                    crate::request_context::observe_component_meta_read_suppress(&read);
+                    if let QueryResult::Value(id) = read.value {
+                        check_resolved = self.evaluate_deferred_semantic_node(id);
+                    }
+                }
                 let (check_params, check_return) = match graph.node_data(check_resolved).as_deref()
                 {
                     Some(SemanticNodeData::Function {

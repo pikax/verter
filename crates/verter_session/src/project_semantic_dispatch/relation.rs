@@ -422,15 +422,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Source-side `DeclPlaceholder` with Object body against
-    /// target-side Object that looks like a `Record<K, V>` shape.
-    /// Returns `Some(result)` when the arm applies; `None` to fall
-    /// through to the core `decide_relation` authority.
+    /// Source-side declaration identity carrier with Object body
+    /// against target-side Object that looks like a `Record<K, V>`
+    /// shape. Returns `Some(result)` when the arm applies; `None` to
+    /// fall through to the core `decide_relation` authority.
     ///
     /// Fires only when:
-    /// 1. `source` is an `Opaque(DeclPlaceholder)` whose
-    ///    `canonical_id` is outside `node_modules/` (the walker's
-    ///    package-boundary guard at `walk.rs` mirrors this).
+    /// 1. `source` is a declaration identity carrier — an
+    ///    `Opaque(DeclPlaceholder)` or a `DeclRef` (the shape
+    ///    carrier-preserving lowering interns for a bare type
+    ///    reference) — whose `canonical_id` is outside `node_modules/`
+    ///    (the walker's package-boundary guard at `walk.rs` mirrors
+    ///    this).
     /// 2. `target` normalises to a Record-shaped `Object(SurfaceView)`.
     ///    Two canonical forms are recognised:
     ///    - **Literal-key Record** (`Record<'ui', X>` /
@@ -457,6 +460,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> Option<RelationResult> {
         let graph = self.graph();
         let source_data = graph.node_data(source)?;
+        // The source is either a declaration identity carrier (the
+        // top-level conditional-check shape) or an already-concrete
+        // `Object` surface — the shape a NESTED member-value relation
+        // hands back when `relate_object_as_record` re-enters the
+        // dispatch-aware entry for a `Record` value type
+        // (`Record<U, Record<K, any>>`'s inner Record rides a carrier
+        // the free relation engine cannot demand).
         let identity = match &*source_data {
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                 canonical_id,
@@ -466,12 +476,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if self.ctx.workspace_is_package_backed(canonical_id) {
                     return None;
                 }
-                DeclIdentity {
+                Some(DeclIdentity {
                     canonical_id: Arc::clone(canonical_id),
                     whole_hash: *whole_hash,
                     decl_name: Arc::clone(name),
-                }
+                })
             }
+            SemanticNodeData::DeclRef { identity } => {
+                if self.ctx.workspace_is_package_backed(&identity.canonical_id) {
+                    return None;
+                }
+                Some(identity.clone())
+            }
+            SemanticNodeData::Object(_) => None,
             _ => return None,
         };
         drop(source_data);
@@ -485,19 +502,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `StructuralTransit/Shallow` so the unwrap reads members /
         // index / call-construct signatures off a one-level surface
         // without re-reducing nested `keyof` / `Mapped` operators.
+        // An already-concrete `Object` source skips the unwrap.
         let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
-        let unwrapped = match self.execute_type_node(SemanticQueryKey::Instantiate {
-            base: self.type_slot_for(
-                Arc::clone(&identity.canonical_id),
-                Arc::clone(&identity.decl_name),
-            ),
-            context: self.instantiate_context_for(&identity.canonical_id, transit),
-            args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        }) {
-            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => {
-                self.evaluate_deferred_semantic_node_with_context(id, transit)
-            }
-            _ => return Some(RelationResult::Unknown),
+        let unwrapped = match identity {
+            None => source,
+            Some(identity) => match self.execute_type_node(SemanticQueryKey::Instantiate {
+                base: self.type_slot_for(
+                    Arc::clone(&identity.canonical_id),
+                    Arc::clone(&identity.decl_name),
+                ),
+                context: self.instantiate_context_for(&identity.canonical_id, transit),
+                args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            }) {
+                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => {
+                    self.evaluate_deferred_semantic_node_with_context(id, transit)
+                }
+                _ => return Some(RelationResult::Unknown),
+            },
         };
         let source_view = match graph.node_data(unwrapped).as_deref() {
             Some(SemanticNodeData::Object(view)) => view.clone(),
@@ -522,21 +543,87 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// generic-key Record (single index signature, no members).
     fn record_target_shape(&self, target: SemanticNodeId) -> Option<RecordTargetShape> {
         let graph = self.graph();
-        // The Object-vs-Record arm needs the target
-        // normalised to a concrete `SemanticNodeData::Object`
-        // (literal-key members surface or generic-key index
-        // signature) to recognise a `Record<K, V>` shape — a `Mapped`
-        // shell returned under `StructuralTransit` does not match.
-        // Normalisation runs under the default `Published(Expanded)`
-        // context so `Record<U, Record<K, any>>` reduces to its
-        // Object surface for shape decision. Switching this call to
-        // `StructuralTransit` would regress Record-target recognition
-        // for `A extends Record<U, K>`-style conditionals — the
-        // `neutral` overlay-augmented member in
-        // `component_meta_host::tests::overlay_queries_reapply_owner_after_overlay_only_helper_upserts`
-        // and the two sibling `ComponentConfig` materialisation
-        // tests would stop seeing the augmented variant member.
-        let normalised = self.evaluate_deferred_semantic_node(target);
+        // A relation check is an internal transit consumer, never a
+        // publication route: every evaluation the oracle demands here
+        // is keyed under the `StructuralTransit(Navigate)` demand
+        // identity — the same context the sibling identity-carrier
+        // unwrap and function-infer check materialisation use. The
+        // oracle records zero `Published(*)`-context subqueries.
+        let oracle_demand =
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Navigate,
+            );
+        let mut normalised =
+            self.evaluate_deferred_semantic_node_with_context(target, oracle_demand);
+        // Demand point (the relation/conditional oracle): a target riding
+        // an `InstantiationRef` carrier — the shape carrier-preserving
+        // lowering interns for `Record<U, Record<K, any>>` inside a decl
+        // body — is materialised HERE, where Record-target recognition
+        // genuinely demands the target's concrete shape. The
+        // deferred-shell evaluator deliberately has no `InstantiationRef`
+        // arm (intermediate hops must stay carrier-shaped), so the oracle
+        // executes the one demanded instantiation under the transit
+        // demand identity, then re-evaluates the materialised result.
+        if let Some(SemanticNodeData::InstantiationRef { base, args }) =
+            graph.node_data(normalised).as_deref()
+        {
+            let owner_canonical = Arc::clone(&base.canonical_id);
+            let slot =
+                self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+            let args: Arc<[SemanticNodeId]> = Arc::from(
+                args.iter()
+                    .map(|arg| {
+                        self.evaluate_deferred_semantic_node_with_context(*arg, oracle_demand)
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
+            if let QueryResult::Value(SemanticQueryOutput { value: id, .. }) = self
+                .execute_type_node(SemanticQueryKey::Instantiate {
+                    base: slot,
+                    args,
+                    context: self.instantiate_context_for(&owner_canonical, oracle_demand),
+                })
+            {
+                normalised = self.evaluate_deferred_semantic_node_with_context(id, oracle_demand);
+            }
+        }
+        // Second carrier shape at the same demand point: a Record-class
+        // deferred `Mapped` carrier. Under the transit demand operators
+        // never reduce (`may_reduce_operator` is publication-gated), so
+        // the builtin `Record<K, V>` instantiation above returns its
+        // deferred `Mapped { source, mapper }` shell instead of an
+        // enumerated `Object` surface. The oracle inspects the carrier
+        // directly — the sanctioned structural-transit consumption per
+        // `build_mapped_type`'s carrier-stop contract — and derives the
+        // Record shape from the mapper: key space → `key_type`, value
+        // expression → `value_type` (`relate_object_as_record` decides
+        // literal-key, literal-union, and primitive-key forms from
+        // `key_type` and defers anything else). Conservative gates: no
+        // `as` remap, `Keep` optionality, and a binder-independent value
+        // expression (`Record`'s value never references the key binder);
+        // any other mapped shape falls through to the core relation
+        // authority.
+        if let Some(SemanticNodeData::Mapped { mapper, .. }) =
+            graph.node_data(normalised).as_deref()
+        {
+            if mapper.name_remap.is_none()
+                && matches!(
+                    mapper.optionality,
+                    crate::semantic_query::OptionalityMod::Keep
+                )
+                && !self.subtree_references_node(mapper.value_expr, mapper.parameter_node)
+            {
+                let key_space = mapper.key_space;
+                let value_type = mapper.value_expr;
+                let key_type =
+                    self.evaluate_deferred_semantic_node_with_context(key_space, oracle_demand);
+                return Some(RecordTargetShape::GenericKey {
+                    key_type,
+                    value_type,
+                });
+            }
+        }
         let data = graph.node_data(normalised)?;
         match &*data {
             SemanticNodeData::Object(view)
@@ -602,12 +689,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Primitive(PrimitiveKind::String | PrimitiveKind::Number) => {
                 // Generic-key Record<string, V> / Record<number, V>:
                 // every source member's value must be assignable to V.
+                // Member values re-enter the dispatch-aware entry: a
+                // nested `Record`-class value type rides a carrier the
+                // free relation engine cannot demand — the
+                // Object-vs-Record arm materialises it at the oracle's
+                // transit demand point.
                 drop(key_data);
                 let mut acc = RelationResult::Assignable {
                     bindings: Arc::from(Vec::new().into_boxed_slice()),
                 };
                 for member in source_view.members.iter() {
-                    let r = decide_relation(graph, member.value, value_type, bindings);
+                    let r = self.decide_relation_with_dispatch(member.value, value_type, bindings);
                     acc = result_and(acc, r);
                     if matches!(acc, RelationResult::NotAssignable) {
                         return RelationResult::NotAssignable;
@@ -629,7 +721,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             else {
                 return RelationResult::NotAssignable;
             };
-            let r = decide_relation(graph, member.value, value_type, bindings);
+            // Dispatch-aware re-entry — see the generic-key arm above.
+            let r = self.decide_relation_with_dispatch(member.value, value_type, bindings);
             acc = result_and(acc, r);
             if matches!(acc, RelationResult::NotAssignable) {
                 return RelationResult::NotAssignable;

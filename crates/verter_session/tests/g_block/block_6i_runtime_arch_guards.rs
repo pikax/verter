@@ -853,16 +853,18 @@ defineProps<{
 
     let meta = meta_for(&project, "/Comp.vue");
 
-    // The narrowed result is `Wrapped`, whose shape is
-    // `{ tag: 'primitive-string-key-admitted' }`. With the primitive-
-    // admission tier in place, the walker substitutes K = "foo" into
-    // the mapper's value expression and evaluates `Wrapped`'s body —
-    // the prop's published `type_expr` must reach the discriminator
-    // literal. Without the tier (G4.1's tri-state gate), the walker
-    // falls back to the coarse Mapped path which re-interns the
-    // unresolved shell; the prop type stays an opaque
-    // `IndexedAccess` or a Primitive(Unknown), and the discriminator
-    // never reaches the surface.
+    // The narrowed result is `Wrapped`. With the primitive-admission
+    // tier in place, the walker substitutes K = "foo" into the
+    // mapper's value expression and the prop publishes the `Wrapped`
+    // declaration — as the shallow `Ref` carrier (the publication
+    // terminal lands ON a declaration and stays the reference the
+    // consumer re-resolves on demand), or as its materialised body
+    // carrying the discriminator literal. Without the tier (G4.1's
+    // tri-state gate), the walker falls back to the coarse Mapped
+    // path which re-interns the unresolved shell; the prop type stays
+    // an opaque `IndexedAccess` or a Primitive(Unknown), and neither
+    // the `Wrapped` reference nor the discriminator ever reaches the
+    // surface.
     let resolved_prop = meta
         .props
         .iter()
@@ -870,10 +872,16 @@ defineProps<{
         .expect("resolved prop must be present");
     let mut tags: Vec<String> = Vec::new();
     collect_string_literals(&resolved_prop.type_expr, &mut tags);
+    let is_wrapped_ref = matches!(
+        &resolved_prop.type_expr,
+        verter_type_expr::TypeExpr::Ref { name, type_arguments }
+            if name.as_ref() == "Wrapped" && type_arguments.is_empty()
+    );
     assert!(
-        tags.iter().any(|t| t == "primitive-string-key-admitted"),
+        tags.iter().any(|t| t == "primitive-string-key-admitted") || is_wrapped_ref,
         "guard: {{ [K in string]: Wrapped }}['foo'] MUST resolve to Wrapped (string \
-         primitive key domain admits any string-literal segment). \
+         primitive key domain admits any string-literal segment) — either the \
+         `Wrapped` reference carrier or its materialised body. \
          type_expr: {:#?}",
         resolved_prop.type_expr,
     );

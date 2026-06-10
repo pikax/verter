@@ -305,6 +305,58 @@ fn session_peek_signature_round_trips_admitted_signature() {
     assert!(!observed.overflowed);
 }
 
+/// The last-good rail rides on the same fact-validated slot as the
+/// warm-hit candidate: a cross-file edit that invalidates the slot's
+/// recorded read set must take the last-good fallback down with it,
+/// otherwise `DevServeLastKnownGood` serves output whose semantic
+/// inputs are known-changed (stale serve).
+#[test]
+fn session_peek_last_good_misses_when_validate_facts_returns_false() {
+    let node = CompileOutputNodeFactValidatedSession::new();
+    let mut state = ProfileState::default();
+    let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::FileWholeHash {
+        canonical_id: "/dep.ts".to_string(),
+        hash: [0xAB; 16],
+    }]);
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(facts));
+    let mut v = value([0x12u8; 16]);
+    v.last_good_outputs = Some(FxHashMap::default());
+    node.publish(&mut state, 42, admission, v, 0);
+
+    let last_good = node.peek_last_good(&state, 42, |_sig| false);
+    assert!(
+        last_good.is_none(),
+        "fact-validation closure returning false MUST suppress the last-good fallback"
+    );
+
+    let last_good = node.peek_last_good(&state, 42, |_sig| true);
+    assert!(
+        last_good.is_some(),
+        "fact-validation closure returning true → last-good fallback available"
+    );
+}
+
+/// An empty fact rail validates vacuously: the slot pre-dates any
+/// cross-file observation, so the last-good fallback stays available
+/// without invoking the validator.
+#[test]
+fn session_peek_last_good_serves_on_empty_fact_rail_without_validator_call() {
+    let node = CompileOutputNodeFactValidatedSession::new();
+    let mut state = ProfileState::default();
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
+    let mut v = value([0x34u8; 16]);
+    v.last_good_outputs = Some(FxHashMap::default());
+    node.publish(&mut state, 42, admission, v, 0);
+
+    let last_good = node.peek_last_good(&state, 42, |_sig| {
+        panic!("validator must not run on an empty fact rail")
+    });
+    assert!(
+        last_good.is_some(),
+        "empty fact rail validates vacuously → last-good fallback available"
+    );
+}
+
 #[test]
 fn session_peek_output_returns_per_kind_pair() {
     let node = CompileOutputNodeFactValidatedSession::new();

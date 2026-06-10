@@ -50,7 +50,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-#[allow(dead_code, reason = "wired in B1 / I §10.8 dispatch-count assertions")]
+#[allow(dead_code, reason = "consumed by the dispatch-count assertions")]
 pub(crate) struct DispatchTraceGuard;
 
 #[cfg(test)]
@@ -61,7 +61,7 @@ impl Drop for DispatchTraceGuard {
 }
 
 #[cfg(test)]
-#[allow(dead_code, reason = "wired in B1 / I §10.8 dispatch-count assertions")]
+#[allow(dead_code, reason = "consumed by the dispatch-count assertions")]
 pub(crate) fn enable_dispatch_trace_for_test() -> DispatchTraceGuard {
     DISPATCH_TRACE.with(|t| t.borrow_mut().clear());
     DispatchTraceGuard
@@ -1279,22 +1279,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             SemanticNodeData::TypeOf { value_root, .. } => {
-                let value_root = value_root.clone();
-                self.dispatch_operator_with_recurse(
-                    node,
-                    SemanticQueryKey::TypeOf { value_root },
-                    context,
-                    state,
-                )
+                let typeof_key = self.typeof_key_for(value_root.clone(), context);
+                self.dispatch_operator_with_recurse(node, typeof_key, context, state)
             }
 
             // --- lazy carriers ---
             SemanticNodeData::DeclRef { identity } => {
-                if matches!(mode, ProjectionMode::Navigate) {
-                    // Navigate follows alias chains because aliases
-                    // are semantically transparent. Dispatch and recurse
-                    // — same as Expanded for DeclRef.
+                if matches!(mode, ProjectionMode::Navigate)
+                    && userland_instantiation_body_is_closed_object(self.ctx, identity)
+                {
+                    // A `Published(Navigate)` terminal that lands ON a
+                    // closed-object declaration (a nominal interface)
+                    // stays the declaration-reference carrier — the
+                    // published shape is identical to writing the plain
+                    // reference, and the consumer re-resolves it on
+                    // demand (shallow-by-default). This mirrors the
+                    // `InstantiationRef` closed-object carve-out below.
+                    // Alias / operator-bodied declarations still
+                    // resolve: aliases are semantically transparent and
+                    // an operator body is the demanded reduction.
+                    //
+                    // The verdict consulted the declaring file's
+                    // prepared body — root it on the active fact tracer
+                    // so a body-shape edit invalidates the published
+                    // entry.
+                    observe_closedness_walk_consult(self.ctx, identity.canonical_id.as_ref());
+                    return node;
                 }
+                // Navigate follows alias chains because aliases are
+                // semantically transparent. Dispatch and recurse — same
+                // as Expanded for DeclRef.
                 let scope = ScopeId {
                     canonical_id: Arc::clone(&identity.canonical_id),
                     local_scope: None,
@@ -3382,6 +3396,57 @@ pub(crate) fn mapped_type_is_open_or_unknown(
     source: SemanticNodeId,
     mapper: &crate::semantic_query::MapperKey,
 ) -> bool {
+    if mapped_type_key_domain_is_open_or_unknown(ctx, source, mapper) {
+        return true;
+    }
+    // VALUE BODY: does the produced value still depend on an unbound
+    // OUTER generic? The bound mapper binder `K` is closed; an intrinsic
+    // / helper over `K` (`Capitalize<K>`) or a resolution miss does NOT
+    // open it (only an outer-generic argument does).
+    OpenWalk::mapped_value_body(mapper.parameter_node).node_is_open(ctx, mapper.value_expr)
+}
+
+/// Lowering-entrance builtin argument openness: does `node` (a lowered
+/// builtin type argument) still depend on unsubstituted generic
+/// structure — an unbound `TypeParam` (including a mapper binder whose
+/// per-key substitution happens later at a demand point), an open
+/// operator carrier over one, an `Opaque` degradation, or an
+/// undecidable walk?
+///
+/// The carrier-mode lowering gate (`Navigate` / `Skeleton` / `Shallow`)
+/// consults this per argument: a builtin instantiation over an OPEN
+/// argument must intern the `InstantiationRef` carrier instead of
+/// executing eagerly — eager execution over carrier-shaped args bakes
+/// `Opaque(Miss)` into the produced structure (a
+/// `NonNullable<ChatSlots[K]>` conditional check with unbound `K`)
+/// and destroys the deferred structure the demand points need for
+/// per-key realization. Closed-argument builtins keep the eager
+/// execute, byte-for-byte.
+pub(crate) fn builtin_lowering_argument_is_open(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    OpenWalk::lowering_value_argument().node_is_open(ctx, node)
+}
+
+/// KEY-PRODUCTION axis of [`mapped_type_is_open_or_unknown`]: is the
+/// mapped type's produced KEY SET open or undecidable, judging ONLY the
+/// source / keyspace / `as`-remap (binder-bound KEY-DOMAIN policy) and
+/// never the value body?
+///
+/// The empty-path Shallow surface enumerator gates per-key enumeration
+/// on THIS axis alone: a mapped type with a CLOSED key domain and an
+/// open VALUE body (`{ [K in keyof ChatSlots]?: … MB<T> … }`) still
+/// enumerates its keys path-precisely — the per-key VALUES materialise
+/// under `StructuralTransit(Navigate)` and keep the open generic as a
+/// deferred carrier (shallow values). Value-body openness defers only
+/// the operator MATERIALISATION routes (the full predicate above), not
+/// the key enumeration.
+pub(crate) fn mapped_type_key_domain_is_open_or_unknown(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    source: SemanticNodeId,
+    mapper: &crate::semantic_query::MapperKey,
+) -> bool {
     // KEY DOMAIN: does the produced KEY SPACE depend on an unbound OUTER
     // generic (making `keyof source` non-enumerable — the storm)? A mapped
     // source / key space with NO outer generic is always enumerable at
@@ -3417,11 +3482,7 @@ pub(crate) fn mapped_type_is_open_or_unknown(
             return true;
         }
     }
-    // VALUE BODY: does the produced value still depend on an unbound
-    // OUTER generic? The bound mapper binder `K` is closed; an intrinsic
-    // / helper over `K` (`Capitalize<K>`) or a resolution miss does NOT
-    // open it (only an outer-generic argument does).
-    OpenWalk::mapped_value_body(mapper.parameter_node).node_is_open(ctx, mapper.value_expr)
+    false
 }
 
 /// Walk policy distinguishing the two openness predicates that share the
@@ -3542,6 +3603,29 @@ impl OpenWalk {
         bound_params.insert(bound_param);
         Self {
             bound_params,
+            bound_infers: FxHashMap::default(),
+            descend_value_surfaces: true,
+            outer_generic_only: true,
+            per_argument_key_domain: false,
+            position: OperandPosition::KeyDomain,
+            budget: ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET,
+            in_flight: FxHashSet::default(),
+            memo: FxHashMap::default(),
+        }
+    }
+
+    /// Builtin lowering-argument policy: asks the NARROW "does this
+    /// ARGUMENT still depend on unsubstituted generic structure"
+    /// question for the lowering-entrance builtin carrier gate. No
+    /// bound binders (every reachable `TypeParam` — including a mapper
+    /// binder whose substitution happens later at a demand point — is
+    /// unbound at lowering time), value surfaces are descended (the
+    /// builtin consumes the argument's VALUES), and an instantiation is
+    /// open iff an argument is open (`per_argument_key_domain =
+    /// false`). Conditionals are tri-state through the shared oracle.
+    fn lowering_value_argument() -> Self {
+        Self {
+            bound_params: FxHashSet::default(),
             bound_infers: FxHashMap::default(),
             descend_value_surfaces: true,
             outer_generic_only: true,

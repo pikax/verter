@@ -249,16 +249,24 @@ hashes (for query-identity caches). Signatures and version info live on the
 cached value.
 
 The `SemanticGraphStore` family memo applies R6 to its
-`SemanticQueryKey::Instantiate.base` and `SemanticQueryKey::ResolveMacroPayload.owner`
-fields (mirrored on the `FamilyKey` memo identity). These carry the
+`SemanticQueryKey::Instantiate.base`, `SemanticQueryKey::ResolveMacroPayload.owner`,
+and `SemanticQueryKey::TypeOf.value_root`
+fields (mirrored on the `FamilyKey` memo identity). The first two carry the
 env-bearing, content-free `ResolvedDeclSlotIdentity` (`defining_canonical`,
 `merged_symbol_name`, `symbol_space` + the `project_identity` / `type_env_hash`
 / `lib_env_hash` ENV dims — `Instantiate` / `ResolveMacroPayload` base/owner
-are always `symbol_space = Type`). The extra `resolve_env_hash` (`R`) dim rides
+are always `symbol_space = Type`); `TypeOf.value_root` carries the env-bearing,
+content-free `ValueRootSlotIdentity` (the scoped `ValueRootKey` root + the same
+`J`/`T`/`L` env dims — `build_typeof` does env-sensitive name/export
+resolution, so an env-free value root would warm-hit across envs). The extra
+`resolve_env_hash` (`R`) dim rides
 on a dedicated per-key `InstantiateContext { projection_reduction,
-resolve_env_hash }` / `MacroPayloadContext { resolve_env_hash, mode }` (NOT the
+resolve_env_hash }` / `MacroPayloadContext { resolve_env_hash, mode }` /
+`TypeOfContext { projection_reduction, resolve_env_hash }` (NOT the
 shared `ProjectionReductionContext`, which stays a pure projection-demand
-identity — §2.6 per-key-context rule); `provenance` + `merge_role` stay at
+identity — §2.6 per-key-context rule); the production derivation points are
+`type_slot_for` + `instantiate_context_for` / `macro_payload_context_for` /
+`typeof_key_for`; `provenance` + `merge_role` stay at
 FAMILY-IDENTITY on `FamilyKey` for EVERY context-bearing projection-reduction
 family — `Instantiate`, `KeyOf`, `MappedType`, and `ProjectPath` all thread
 both axes into their `FamilyKey`, so two `KeyOf` (or `MappedType`) queries
@@ -1393,11 +1401,14 @@ is permitted.
   types corpus) + `project_identity` because module augmentations stitch in. Lib
   dimensions are NEVER folded into `resolve_env`. See
   `### Module-Resolution Keying (CRITICAL)`.
-- **Slot-keyed `Instantiate` / `ResolveMacroPayload`.**
+- **Slot-keyed `Instantiate` / `ResolveMacroPayload` / `TypeOf`.**
   `SemanticQueryKey::Instantiate` / `ResolveMacroPayload` key their `base` /
-  `owner` on the env-bearing, content-free `ResolvedDeclSlotIdentity` (the extra
+  `owner` on the env-bearing, content-free `ResolvedDeclSlotIdentity`;
+  `SemanticQueryKey::TypeOf` keys its `value_root` on the env-bearing,
+  content-free `ValueRootSlotIdentity` (the extra
   `resolve_env_hash` rides on the per-key `InstantiateContext` /
-  `MacroPayloadContext`). The `provenance` + `merge_role` discriminators STAY at
+  `MacroPayloadContext` / `TypeOfContext`). The `provenance` + `merge_role`
+  discriminators STAY at
   FAMILY-IDENTITY level on `FamilyKey` — they are NOT demoted into a `*Context`.
 - **Discriminating guards.** The env-scoping and value-domain guards are landed:
   `every_semantic_query_key_maps_to_exactly_one_value_domain`,

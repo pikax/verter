@@ -574,17 +574,25 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
         },
-        // TypeOf { value_root } — resolves the type of a value declaration;
-        // resolves the owning file's name resolution (§2.1 tier-2: `R T L J`,
-        // no parsed-body-skeleton read at query time). No demand payload.
+        // TypeOf { value_root, context: TypeOfContext {
+        // projection_reduction, resolve_env_hash } } — resolves the type of
+        // a value declaration; resolves the owning file's name resolution
+        // (§2.1 tier-2: `R T L J`, no parsed-body-skeleton read at query
+        // time). The `value_root` is the env-bearing content-free
+        // `ValueRootSlotIdentity` slot (J/T/L); the `R` dim rides the
+        // dedicated `TypeOfContext` — mirror of `Instantiate`. The embedded
+        // `projection_reduction` carries the caller's projection-reduction
+        // demand — `build_typeof` lowers the value's annotation / shape AT
+        // that demand (parity with `KeyOf` / `MappedType`); demand/mode
+        // selection routes through `context_to_slot`.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::TypeOf,
             lifecycle: KeyLifecycle::Live,
-            context_shape: "ValueRootKey",
+            context_shape: "TypeOfContext",
             value_domain: SemanticQueryValueTag::TypeNode,
             env_dims: env_resolve(),
-            allowed_demand: AxisMask::empty(),
-            cross_context_guard: "",
+            allowed_demand: reduction_axes,
+            cross_context_guard: "typeof_same_root_different_env_or_context_do_not_warm_hit, typeof_queries_differing_only_by_provenance_do_not_warm_hit, typeof_published_and_transit_contexts_do_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
         },
         // NormalizeUnion { members } — structural union normalization over

@@ -16,15 +16,8 @@
 //! - #1 Per-component no-timeout — every component in
 //!   `NO_TIMEOUT_MANDATORY_COMPONENTS` resolves within a hard per-component
 //!   budget (a watchdog thread aborts the run if any component hangs).
-//!   `Table.vue` is here: it TERMINATES (no hang). It is NOT genuinely
-//!   complete, though — its open `Omit<CoreOptions<T>, …>` `extends`-heritage
-//!   on the structural decl-body-lowering route still trips the runaway fuse
-//!   and resolves degraded, so it is DEFERRED from the COMPLETE set (#2/#4 —
-//!   see `DEFERRED_NON_COMPLETE_SIBLINGS`). `ChatMessages.vue` is DEFERRED
-//!   from THIS set too (`DEFERRED_TIMEOUT_RESIDUAL`): its open mapped slots
-//!   surface carrier-stops, but a residual open-conditional empty-path-
-//!   Expanded distribution explosion (a separate mechanism) still trips the
-//!   budget — a tracked follow-up, not yet mandatory.
+//!   The set includes `Table.vue` and `ChatMessages.vue`, the two
+//!   heaviest open-generic components in the corpus.
 //! - #2 Warm-cache non-regression — the warm (2nd) pass COLLAPSES the
 //!   audited per-request `RequestContext.cold_builds` by ≥90% for every
 //!   GENUINELY-COMPLETE component (`COMPLETE_MANDATORY_COMPONENTS`),
@@ -32,22 +25,13 @@
 //!   and the Defect-B bisect use — NOT the
 //!   `ComponentMetaResultDb` hit counter, which is structurally always 0 for
 //!   these components (an unsatisfiable oracle). This is the direct
-//!   points-3-6 witness: complete siblings
-//!   (`Button`/`Badge`/`Avatar`/`Modal`/`Calendar`) warm cleanly. `Table.vue`
-//!   is NOT in this set — on the real corpus it stays Table-class
-//!   refused-warm (5076 cold → 5099 warm, ~0% collapse) because its open
-//!   `Omit` `extends`-heritage on the structural decl-body-lowering route
-//!   still trips the fuse (TODO(follow-up: structural extends-heritage
-//!   carrier-stop) — see `DEFERRED_NON_COMPLETE_SIBLINGS`).
+//!   points-3-6 witness: complete siblings warm cleanly.
 //! - #3 Perf-budget regression — first-pass aggregate elapsed vs a
 //!   COMMITTED post-fix baseline, ~15% threshold.
 //! - #4 No `BudgetExceeded` on a `demand: Published` key — no
 //!   GENUINELY-COMPLETE component (`COMPLETE_MANDATORY_COMPONENTS`) carries
 //!   a budget-tripped partial (`synthesis_should_suppress` OR a leaked
-//!   sentinel) on its published surface. The set is
-//!   `Button`/`Badge`/`Avatar`/`Modal`/`Calendar`. `Table.vue` and
-//!   `ChatMessages.vue` are DEFERRED (see `DEFERRED_NON_COMPLETE_SIBLINGS` /
-//!   `DEFERRED_TIMEOUT_RESIDUAL`).
+//!   sentinel) on its published surface.
 //!
 //! **Testing-Hermeticity rule (HARD).** This file is gated behind the
 //! `external-corpus` cargo feature and is therefore NOT compiled by the
@@ -75,16 +59,17 @@ use verter_workspace::{
     ProjectRank, VfsProjectConfig, WorkspaceAccess,
 };
 
-/// Components that MUST resolve without timeout (#1). `Table.vue`
-/// TERMINATES (it no longer hangs) — but it is NOT genuinely complete: its
-/// open `Omit<CoreOptions<T>, …>` `extends`-heritage on the structural
-/// decl-body-lowering route still trips the armed runaway fuse and resolves
-/// degraded (it is DEFERRED from `COMPLETE_MANDATORY_COMPONENTS` — see
-/// `DEFERRED_NON_COMPLETE_SIBLINGS`). `ChatMessages.vue` is DEFERRED from
-/// THIS set too (see `DEFERRED_TIMEOUT_RESIDUAL`) — its mapped slots surface
-/// carrier-stops but a residual open-conditional distribution explosion
-/// still trips the
-/// budget (a tracked follow-up).
+/// Components that MUST resolve without timeout (#1). The set includes
+/// the two heaviest open-generic components in the corpus: `Table.vue`
+/// (the transitive TanStack decl graph behind a closed
+/// `Omit<CoreOptions<T>, …>` heritage) and `ChatMessages.vue` (the
+/// closed-key / open-value `ChatMessagesSlots<T>` mapped slots
+/// surface). Both terminate fast on the carrier-preserving lowering +
+/// Navigate publication pipeline: decl-body lowering interns member
+/// values as carriers (no eager member-value `Instantiate` recursion
+/// over the decl graph), and publication routes demand `Navigate`
+/// (no registry Expanded materialisation storm). Both are also
+/// COMPLETE-set members — see `COMPLETE_MANDATORY_COMPONENTS`.
 const NO_TIMEOUT_MANDATORY_COMPONENTS: &[&str] = &[
     "Button.vue",
     "Badge.vue",
@@ -95,56 +80,9 @@ const NO_TIMEOUT_MANDATORY_COMPONENTS: &[&str] = &[
     // + terminating + COMPLETE on a solo cold host (no published partial),
     // so #1 (no-timeout), #3 (perf), and #4 (no published partial) cover it.
     "Calendar.vue",
-    // Open-generic `extends`-heritage: TERMINATES under the armed runaway
-    // fuse (no hang — that is what THIS set asserts) but resolves DEGRADED.
-    // Its `Omit<CoreOptions<T>, …>` structural decl-body-lowering route
-    // still trips the fuse and leaks a published `BudgetExceeded` partial,
-    // so it is NOT in `COMPLETE_MANDATORY_COMPONENTS`.
-    // TODO(follow-up: structural extends-heritage carrier-stop) — bound
-    // that route, then promote `Table.vue` into the COMPLETE set once the
-    // corpus oracle proves it warms + carries no published sentinel.
     "Table.vue",
-    // NOTE: `ChatMessages.vue` is DEFERRED (see
-    // `DEFERRED_TIMEOUT_RESIDUAL` below) — its open mapped slots surface
-    // carrier-stops at the dispatch layer, but a residual registry
-    // Expanded-materialisation explosion (the mapped value's OPEN
-    // conditional distributed per key into a combinatorially-large union)
-    // still trips the watchdog. Tracked as a follow-up; not yet mandatory.
+    "ChatMessages.vue",
 ];
-
-/// HONEST deferral: components whose open-generic storm is NOT yet fully
-/// bounded by the mapped/object-filter carrier-stop and therefore still
-/// exceed the no-timeout budget on a solo cold host. Kept OUT of
-/// `NO_TIMEOUT_MANDATORY_COMPONENTS` / `COMPLETE_MANDATORY_COMPONENTS` so
-/// the gate stays RED-honest rather than green-hollow.
-///
-/// `ChatMessages.vue`: `ChatMessagesSlots<T> = { … } & { [K in keyof
-/// ChatMessageSlots]?: NonNullable<ChatMessageSlots[K]> extends (props:
-/// infer P) => VNode[] ? (props: P & { message: MessageBase<T> }) =>
-/// VNode[] : never }`. The open mapped slots surface carrier-stops at the
-/// three dispatch entrances (lower / build / Shallow-surface synthesiser)
-/// AND at the component-meta registry materialiser
-/// (`materialize_member_surface_expr` preserves an open mapped carrier
-/// instead of Expanded-materialising it). The RESIDUAL storm is a deeper,
-/// SEPARATE mechanism: the mapped value's OPEN conditional
-/// (`… extends (props: infer P) => VNode[] ? … : never`) is distributed
-/// into a `Union(true_branch, false_branch)` at the empty-path Expanded
-/// terminal (`walk.rs` open-conditional distribution), and the true branch
-/// reaching `MessageBase<T>` over the cross-package `ChatMessageSlots`
-/// surface explodes into a ~948 MB materialised `TypeExpr` that the
-/// registry `until_stable` loop then re-lowers. Bounding that conditional-
-/// distribution explosion is OUT OF SCOPE for the mapped carrier-stop and
-/// is the tracked follow-up below.
-///
-/// TODO(follow-up: open-conditional mapped-value terminal carrier-stop) —
-/// bound the open-conditional empty-path-Expanded distribution for the
-/// mapped-value family (carrier-stop the open conditional value the same
-/// way the mapped surface carrier-stops), then promote `ChatMessages.vue`
-/// back into `NO_TIMEOUT_MANDATORY_COMPONENTS` +
-/// `COMPLETE_MANDATORY_COMPONENTS` once the corpus oracle proves it
-/// terminates + warms + carries no published `BudgetExceeded` sentinel.
-#[allow(dead_code)]
-const DEFERRED_TIMEOUT_RESIDUAL: &[&str] = &["ChatMessages.vue"];
 
 /// Components confirmed to resolve fast + COMPLETE — the set the
 /// warm-recovery (#2) and no-published-partial (#4) assertions enforce. The
@@ -153,58 +91,46 @@ const DEFERRED_TIMEOUT_RESIDUAL: &[&str] = &["ChatMessages.vue"];
 /// published surface — even if a sibling's budget-tripped partial would
 /// otherwise poison a shared cold compute through a request-wide sticky.
 ///
-/// `Table.vue` and `ChatMessages.vue` are NOT members — both are DEFERRED
-/// (see `DEFERRED_NON_COMPLETE_SIBLINGS` / `DEFERRED_TIMEOUT_RESIDUAL`).
-/// `Table.vue` terminates but its open `Omit<CoreOptions<T>, …>` heritage on
-/// the structural decl-body-lowering route still trips the armed fuse (5076
-/// cold → 5099 warm, ~0% collapse) and carries a published `BudgetExceeded`
-/// sentinel — it fails BOTH #2 (refused warm) and #4 (published partial),
-/// so it cannot be a genuinely-complete member
-/// (TODO(follow-up: structural extends-heritage carrier-stop)).
-/// `ChatMessages.vue` times out on a residual open-conditional
-/// distribution explosion
-/// (TODO(follow-up: open-conditional mapped-value terminal carrier-stop)).
-/// Keeping both OUT of this set keeps the gate honest.
-///
 /// `Calendar.vue` is corpus-validated: on the real nuxt-ui corpus its
 /// 2nd-pass `RequestContext.cold_builds` collapses ≥90% of the cold value
 /// (279→8 = 97.1%) AND it resolves COMPLETE on a solo cold host (no
 /// `BudgetExceeded` on its published surface — it passes #4), witnessing the
 /// points-3-6 fix on a real generic-heavy component.
+///
+/// `Table.vue` is a member: carrier-preserving decl-body lowering
+/// removed the eager member-value `Instantiate(StructuralTransit:
+/// Shallow)` recursion over its TanStack heritage graph, and the
+/// `TypeOf` demand axis bounds the `typeof` value-graph lane (the
+/// request's cycle BFS crossing `typeof`-typed values lowers the value
+/// graph at the ambient Skeleton demand — carriers, not an Expanded
+/// materialisation), so a solo cold resolve completes with no fuse
+/// trip and warms. Tracker: `table_resolves_complete_and_warm`.
+///
+/// `ChatMessages.vue` is a member: the Navigate-only publication
+/// pipeline removed the registry Expanded materialisation that
+/// exploded its open-conditional mapped slots surface, and the
+/// materialiser's admission-failure fallback no longer re-labels a
+/// COMPLETE nested materialise refused warm-cache admission as a
+/// partial (the false-partial class — admission refusal is benign
+/// non-cacheability; pinned by
+/// `component_meta_materialize::tests::admission_revalidation_refusal_is_not_a_partial_result`).
+/// A solo cold resolve completes with no suppress flag, no trip, and
+/// no sentinel. Tracker:
+/// `chat_messages_resolves_complete_without_false_partial`.
 const COMPLETE_MANDATORY_COMPONENTS: &[&str] = &[
     "Button.vue",
     "Badge.vue",
     "Avatar.vue",
     "Modal.vue",
     "Calendar.vue",
-    // `Table.vue` and `ChatMessages.vue` are DEFERRED from the
-    // genuinely-COMPLETE set — see `DEFERRED_NON_COMPLETE_SIBLINGS` /
-    // `DEFERRED_TIMEOUT_RESIDUAL`. The Pick/Omit + mapped carrier-stop
-    // family bounds the OPEN-MAPPED-SLOT-SURFACE enumeration class (the
-    // hermetic `OpenMappedSlots<T>` / `mapped` dispatch + meta tests), but
-    // their REAL-corpus completeness is blocked by SEPARATE deeper
-    // mechanisms still on the runaway-budget backstop: `Table.vue`'s open
-    // `Omit<CoreOptions<T>, …>` `extends`-heritage on the structural
-    // decl-body-lowering route — it terminates but trips the fuse, refuses
-    // warm, and carries a published `BudgetExceeded` sentinel
-    // (TODO(follow-up: structural extends-heritage carrier-stop)) — and
-    // `ChatMessages.vue`'s open-conditional empty-path-Expanded
-    // distribution explosion
-    // (TODO(follow-up: open-conditional mapped-value terminal carrier-stop)).
+    "Table.vue",
+    "ChatMessages.vue",
 ];
 
 /// Generic-heavy siblings probed on the real corpus that DO NOT qualify for
 /// `COMPLETE_MANDATORY_COMPONENTS` today, with the honest reason per
 /// candidate. Each fails at least one genuinely-complete gate:
 ///
-/// - `Table.vue` — TERMINATES (it is in `NO_TIMEOUT_MANDATORY_COMPONENTS`)
-///   but is Table-class refused-warm: its open `Omit<CoreOptions<T>, …>`
-///   `extends`-heritage on the structural decl-body-lowering route trips the
-///   armed fuse (5076 cold → 5099 warm, ~0% collapse — fails #2) and leaks a
-///   published `BudgetExceeded` sentinel (fails #4). The Pick/Omit + mapped
-///   carrier-stop family does not bound that route's residual.
-///   TODO(follow-up: structural extends-heritage carrier-stop) — bound it,
-///   then promote `Table.vue` per the criteria below.
 /// - `SelectMenu.vue` — collapses ≥90% on the SHARED host (394→32, 91.9%),
 ///   but on a SOLO cold host it trips the armed fuse and carries a
 ///   budget-tripped partial on its published surface (fails #4). Its #2
@@ -218,17 +144,11 @@ const COMPLETE_MANDATORY_COMPONENTS: &[&str] = &[
 ///   them would require lowering the threshold below the level that catches
 ///   the 0%-collapse regression class — forbidden (a tuned-to-pass gate).
 ///
-/// These remain non-complete for their own per-candidate reasons above (the
-/// `Table.vue` structural-route fuse-trip, a solo-host fuse trip on
-/// `SelectMenu.vue`, a warm residual just below the principled ≥90%-collapse
-/// bar on `Select.vue`/`InputMenu.vue`). `ChatMessages.vue` has its own
-/// deferred TIMEOUT residual — see `DEFERRED_TIMEOUT_RESIDUAL`. Promote a
-/// candidate only when it resolves complete on a solo host with a warm
-/// residual under `max(COLD_BUILD_RESIDUAL_FLOOR, cold *
+/// Promote a candidate only when it resolves complete on a solo host with a
+/// warm residual under `max(COLD_BUILD_RESIDUAL_FLOOR, cold *
 /// COLD_BUILD_RESIDUAL_FRACTION)` and no published `BudgetExceeded` sentinel.
 #[allow(dead_code)]
-const DEFERRED_NON_COMPLETE_SIBLINGS: &[&str] =
-    &["Table.vue", "SelectMenu.vue", "Select.vue", "InputMenu.vue"];
+const DEFERRED_NON_COMPLETE_SIBLINGS: &[&str] = &["SelectMenu.vue", "Select.vue", "InputMenu.vue"];
 
 /// Hard per-component HANG / non-termination watchdog budget. This is a
 /// non-termination detector, NOT a perf assertion — perf is assertion #3's
@@ -254,19 +174,18 @@ const PERF_REGRESSION_THRESHOLD: f64 = 0.15;
 ///
 /// This is chosen to catch the 0%-collapse regression class, NOT tuned to
 /// pass: the refused-warm bug leaves warm `cold_builds` ≈ (or, observed,
-/// slightly ABOVE) cold. `Table.vue` trips the fuse on its structural
-/// `Omit<CoreOptions<T>, …>` `extends`-heritage route and is refused warm
-/// admission — 5029+ cold → ~5099 warm (≈101% — NO collapse), which trips
-/// this bound by a ~10× margin; that is exactly why `Table.vue` stays OUT
-/// of `COMPLETE_MANDATORY_COMPONENTS` (see
-/// `DEFERRED_NON_COMPLETE_SIBLINGS`). A genuinely-warming component
-/// collapses far below 10%: on the real corpus Button 295→14 (4.7%),
-/// SelectMenu 394→32 (8.1%), Calendar 279→8 (2.9%), and Badge/Avatar/Modal
-/// reach exactly 0. The bar sits between the warm-recovering population
-/// (≤8.1% residual) and the refused-warm regression (~101% residual), so no
-/// constant in this range could be "tuned" to admit the regression class
-/// while excluding a real warming component — the two populations are an
-/// order of magnitude apart.
+/// slightly ABOVE) cold. The historical refused-warm regression measured
+/// on `Table.vue` (a fuse trip on its structural `Omit<CoreOptions<T>, …>`
+/// `extends`-heritage route refusing warm admission) held 5029+ cold →
+/// ~5099 warm (≈101% — NO collapse), tripping this bound by a ~10× margin.
+/// A genuinely-warming component collapses far below 10%: on the real
+/// corpus Button 295→14 (4.7%), SelectMenu 394→32 (8.1%), Calendar 279→8
+/// (2.9%), Table 4729→93 (2.0%), and Badge/Avatar/Modal reach exactly 0.
+/// The bar sits between the warm-recovering population (≤8.1% residual)
+/// and the refused-warm regression (~101% residual), so no constant in
+/// this range could be "tuned" to admit the regression class while
+/// excluding a real warming component — the two populations are an order
+/// of magnitude apart.
 const COLD_BUILD_RESIDUAL_FRACTION: f64 = 0.10;
 
 /// #2 absolute floor on the warm-collapse ceiling. A component with a small
@@ -733,13 +652,9 @@ fn resolve_with_hard_budget(corpus_root: &Path, basename: &str) -> ComponentOutc
 /// abandon on non-termination). Aggregates first-pass elapsed for the
 /// perf-budget check (#3).
 ///
-/// #1 (no-timeout) + #3 (perf) span `NO_TIMEOUT_MANDATORY_COMPONENTS`
-/// (which includes `Table.vue` — it terminates). #4 (no published
-/// `BudgetExceeded`) applies to the genuinely-COMPLETE set
-/// (`COMPLETE_MANDATORY_COMPONENTS` = Button/Badge/Avatar/Modal/Calendar).
-/// `Table.vue` and `ChatMessages.vue` are DEFERRED from the COMPLETE set
-/// (see `DEFERRED_NON_COMPLETE_SIBLINGS` / `DEFERRED_TIMEOUT_RESIDUAL`), so
-/// `Table.vue`'s degraded published partial does NOT fail #4.
+/// #1 (no-timeout) + #3 (perf) span `NO_TIMEOUT_MANDATORY_COMPONENTS`;
+/// #4 (no published `BudgetExceeded`) applies to the genuinely-COMPLETE
+/// set (`COMPLETE_MANDATORY_COMPONENTS`).
 #[test]
 fn mandatory_components_resolve_without_timeout_or_false_partial_and_within_perf_budget() {
     let corpus_root = locate_corpus_root();
@@ -768,12 +683,7 @@ fn mandatory_components_resolve_without_timeout_or_false_partial_and_within_perf
         // surface (props + models + events + slots). The latter catches the
         // masking case the flag misses — a sentinel riding a published
         // field while `synthesis_should_suppress` is `false`. #4 is scoped
-        // to the genuinely-complete set (Button/Badge/Avatar/Modal/Calendar).
-        // `Table.vue` and `ChatMessages.vue` are DEFERRED from that set (see
-        // `DEFERRED_NON_COMPLETE_SIBLINGS` / `DEFERRED_TIMEOUT_RESIDUAL`):
-        // `Table.vue` terminates (so it is in NO_TIMEOUT) but its structural
-        // `Omit`-heritage route still trips the fuse and carries a published
-        // partial, which is why it is NOT a complete member here.
+        // to the genuinely-complete set (`COMPLETE_MANDATORY_COMPONENTS`).
         if COMPLETE_MANDATORY_COMPONENTS.contains(&component)
             && (outcome.published_partial || outcome.published_surface_budget_exceeded)
         {
@@ -802,16 +712,20 @@ fn mandatory_components_resolve_without_timeout_or_false_partial_and_within_perf
          OR a `BudgetExceeded` sentinel leaked onto a published typed field \
          (props/models/events/slots) — on their published surface: {false_partials:?}. A \
          genuinely-complete component must NOT manufacture a partial, and no published field may \
-         carry the sentinel even when the request suppress flag is clear (the masking case). \
-         The complete set is Button/Badge/Avatar/Modal/Calendar; `Table.vue`/`ChatMessages.vue` \
-         are DEFERRED (their open-generic structural-route / conditional-distribution residuals \
-         are tracked follow-ups)."
+         carry the sentinel even when the request suppress flag is clear (the masking case)."
     );
 
     // #3 — perf-budget regression vs the committed post-fix baseline.
     let baseline_ms = read_perf_baseline_ms();
     let measured_ms = total_elapsed.as_secs_f64() * 1000.0;
     let ceiling_ms = baseline_ms * (1.0 + PERF_REGRESSION_THRESHOLD);
+    // Always surface the measured aggregate (visible under
+    // `--nocapture`) so a baseline recapture reads the number straight
+    // from an uncontended gate run instead of re-instrumenting.
+    eprintln!(
+        "#3 first-pass aggregate measured: {measured_ms:.1}ms \
+         (committed baseline {baseline_ms:.1}ms, ceiling {ceiling_ms:.1}ms)"
+    );
     assert!(
         measured_ms <= ceiling_ms,
         "#3 perf-budget regression: first-pass aggregate elapsed {measured_ms:.1}ms exceeds the \
@@ -852,15 +766,8 @@ fn mandatory_components_resolve_without_timeout_or_false_partial_and_within_perf
 /// the complete entries warm cleanly and `cold_builds` collapses.
 ///
 /// This uses ONE shared host (warm reuse is the point) and therefore does
-/// not apply the per-component watchdog — the complete set is the fast +
-/// terminating subset (Button/Badge/Avatar/Modal/Calendar). `Table.vue` is
-/// DEFERRED from this set (see `DEFERRED_NON_COMPLETE_SIBLINGS`): on the real
-/// corpus it stays Table-class refused-warm (5076 cold → 5099 warm, ≈0%
-/// collapse — exactly the regression this assertion catches) because its open
-/// `Omit` `extends`-heritage on the structural decl-body-lowering route still
-/// trips the fuse (TODO(follow-up: structural extends-heritage carrier-stop)).
-/// `ChatMessages.vue` is DEFERRED too (see `DEFERRED_TIMEOUT_RESIDUAL`) — its
-/// residual open-conditional distribution explosion still trips the budget.
+/// not apply the per-component watchdog — every member of the complete set
+/// terminates well inside the suite budget.
 #[test]
 fn warm_pass_does_zero_cold_rebuilds_for_complete_components() {
     let corpus_root = locate_corpus_root();
@@ -912,51 +819,174 @@ fn warm_pass_does_zero_cold_rebuilds_for_complete_components() {
     );
 }
 
-/// FOLLOWUP-B RED tracker — the executable form of the
-/// `DEFERRED_TIMEOUT_RESIDUAL` deferral. `ChatMessages.vue` must resolve
-/// without timeout AND without a published partial once the
-/// open-conditional mapped-value terminal carrier-stop lands; until then
-/// this stays `#[ignore]`d (it is the test the follow-up block un-ignores,
-/// then promotes `ChatMessages.vue` into
-/// `NO_TIMEOUT_MANDATORY_COMPONENTS` + `COMPLETE_MANDATORY_COMPONENTS`).
+/// Audited per-component resolve statistics for the per-component
+/// membership trackers: the request-level suppress flag, the
+/// published-surface sentinel walk, the count of `BudgetExceeded`
+/// diagnostics on the audit stream, the total projection charges
+/// observed on the audit footprint (instantiations + projections +
+/// conditional decisions — including records dropped at the capture
+/// caps — plus cold `TypeOf` dispatches, which count toward the
+/// projection fuse but carry no per-record capture list), and the
+/// per-request `cold_builds` counter.
+#[derive(Debug)]
+struct AuditedResolveStats {
+    suppress: bool,
+    surface_sentinel: bool,
+    budget_diagnostics: usize,
+    charges: u64,
+    cold_builds: u64,
+}
+
+fn resolve_audited_stats(host: &Arc<VerterHost>, canonical: &str) -> AuditedResolveStats {
+    let (meta, resolution) = host
+        .get_component_meta_with_resolution(canonical)
+        .unwrap_or_else(|| panic!("resolve of {canonical} returned None (no component meta)"));
+    let record = host
+        .take_audit_record(resolution.request_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "audit record missing for {canonical} (request_id {})",
+                resolution.request_id
+            )
+        });
+    let footprint = record.footprint.as_ref().unwrap_or_else(|| {
+        panic!("audit record for {canonical} carried no footprint (footprint_capture off?)")
+    });
+    let charges = footprint.instantiations.len() as u64
+        + footprint.truncation_counters.instantiations_truncated
+        + footprint.projections.len() as u64
+        + footprint.truncation_counters.projections_truncated
+        + footprint.conditional_decisions.len() as u64
+        + footprint
+            .truncation_counters
+            .conditional_decisions_truncated
+        + footprint.resolver_hot_path.semantic_query_typeof_cold as u64;
+    let budget_diagnostics = match &record.kind_payload {
+        verter_audit::RequestKindPayload::ComponentMeta(payload) => payload
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d.kind, verter_audit::AuditDiagnosticKind::BudgetExceeded))
+            .count(),
+        _ => 0,
+    };
+    AuditedResolveStats {
+        suppress: resolution.synthesis_should_suppress,
+        surface_sentinel: published_surface_carries_budget_exceeded(&meta),
+        budget_diagnostics,
+        charges,
+        cold_builds: footprint.cache_outcomes.cold_builds as u64,
+    }
+}
+
+/// Per-component no-timeout + bounded-resolution tracker for
+/// `ChatMessages.vue` — the executable form of its
+/// `NO_TIMEOUT_MANDATORY_COMPONENTS` membership. The Navigate-only
+/// publication pipeline removed the registry Expanded materialisation
+/// that distributed the `ChatMessagesSlots<T>` open-conditional mapped
+/// values into a combinatorially-large surface; the component resolves
+/// in seconds (measured 1.5 s cold solo, 4.9 s under the watchdog
+/// harness), with bounded projection charges (293 per cold request
+/// including cold TypeOf dispatches, vs
+/// the 2000 fuse), no budget trip on the audit stream, no published
+/// sentinel, and a warm pass that collapses to single-digit cold
+/// builds. The discriminator is never purely wall-clock: the
+/// audit-counter assertions are the primary signal and the wall is the
+/// non-termination backstop.
+///
+/// The two invariants the original tracker bundled are pinned
+/// independently: this test owns TERMINATION (the >60s hang class);
+/// the sibling `chat_messages_resolves_complete_without_false_partial`
+/// owns COMPLETENESS (the request-level `synthesis_should_suppress`
+/// flag and the published-sentinel gate), so a regression in either
+/// half is attributed to its own discriminator.
 #[test]
-#[ignore = "FOLLOWUP-B (open-conditional mapped-value terminal carrier-stop): ChatMessages.vue \
-            still exceeds the no-timeout budget on the open-conditional empty-path-Expanded \
-            distribution explosion; un-ignore when the follow-up lands and the oracle proves \
-            termination"]
 fn chat_messages_resolves_without_timeout() {
     let corpus_root = locate_corpus_root();
     let outcome = resolve_with_hard_budget(&corpus_root, "ChatMessages.vue");
     assert!(
         !outcome.timed_out,
-        "ChatMessages.vue must resolve within the {}s hard budget once the open-conditional \
-         mapped-value terminal carrier-stop lands",
+        "ChatMessages.vue must resolve within the {}s hard budget",
         PER_COMPONENT_HARD_BUDGET.as_secs()
     );
     assert!(outcome.resolved_ok, "ChatMessages.vue must resolve");
     assert!(
+        !outcome.published_surface_budget_exceeded,
+        "ChatMessages.vue must publish NO BudgetExceeded sentinel on its typed surface"
+    );
+
+    // Audit-counter criteria on a fresh audit-enabled host: no
+    // BudgetExceeded on the audit stream, no published sentinel,
+    // bounded total projection charges, warm collapse.
+    let host = build_audit_corpus_host(&corpus_root);
+    let canonical = locate_component(&corpus_root, "ChatMessages.vue")
+        .to_string_lossy()
+        .to_string();
+    let cold = resolve_audited_stats(&host, &canonical);
+    assert!(
+        !cold.surface_sentinel && cold.budget_diagnostics == 0,
+        "ChatMessages.vue cold resolve must carry NO budget trip (sentinel {} / \
+         budget diagnostics {})",
+        cold.surface_sentinel,
+        cold.budget_diagnostics
+    );
+    assert!(
+        cold.charges <= 1500,
+        "ChatMessages.vue cold projection charges must stay bounded \
+         (got {}, ceiling 1500, measured anchor 293 INCLUDING cold TypeOf dispatches — \
+         the armed fuse at 2000 must remain a backstop, not a bound)",
+        cold.charges
+    );
+    let warm = resolve_audited_stats(&host, &canonical);
+    assert!(
+        warm.cold_builds <= 8,
+        "ChatMessages.vue warm pass must collapse cold builds (cold {}, warm {})",
+        cold.cold_builds,
+        warm.cold_builds
+    );
+}
+
+/// `ChatMessages.vue` COMPLETE-set membership tracker: a solo cold
+/// resolve publishes NO partial — no suppress flag and no
+/// `BudgetExceeded` sentinel. The historical false-partial came from
+/// the materialiser's admission-failure fallback re-labelling a
+/// COMPLETE nested materialise (refused warm-cache admission because
+/// the request view's fact snapshot predated a lazily-parsed
+/// contributor — `Icon.vue`) as `result_is_partial=true`, which the
+/// slot-binding child rail folded into the request partial sticky and
+/// `synthesis_should_suppress` — with no diagnostic, no trip, and no
+/// sentinel. Admission refusal is benign non-cacheability, never a
+/// partial; the hermetic pin is
+/// `component_meta_materialize::tests::admission_revalidation_refusal_is_not_a_partial_result`.
+#[test]
+fn chat_messages_resolves_complete_without_false_partial() {
+    let corpus_root = locate_corpus_root();
+    let outcome = resolve_with_hard_budget(&corpus_root, "ChatMessages.vue");
+    assert!(!outcome.timed_out && outcome.resolved_ok);
+    assert!(
         !outcome.published_partial && !outcome.published_surface_budget_exceeded,
-        "ChatMessages.vue must publish NO budget-tripped partial (suppress flag {} / \
-         published sentinel {})",
+        "ChatMessages.vue must publish NO partial (suppress flag {} / sentinel {})",
         outcome.published_partial,
         outcome.published_surface_budget_exceeded
     );
 }
 
-/// FOLLOWUP-A RED tracker — the executable form of `Table.vue`'s
-/// `DEFERRED_NON_COMPLETE_SIBLINGS` deferral, asserting the #2 + #4
-/// genuinely-complete MEMBERSHIP CRITERIA: warm-pass `cold_builds`
-/// collapse under the shared ceiling AND no published `BudgetExceeded`
-/// partial on a solo resolve. Stays `#[ignore]`d until the structural
-/// extends-heritage carrier-stop lands (it is the test the follow-up
-/// block un-ignores, then promotes `Table.vue` into
-/// `COMPLETE_MANDATORY_COMPONENTS`).
+/// `Table.vue` COMPLETE-set membership tracker (#2 + #4 criteria).
+/// Two bounded-demand rules carry it: carrier-preserving decl-body
+/// lowering interns member values as carriers (no eager member-value
+/// `Instantiate(StructuralTransit:Shallow)` recursion compounding
+/// distinct instantiation keys across the transitive TanStack decl
+/// graph — the historical dominant sink, 94.3% of charges), and the
+/// `TypeOf` demand axis bounds the `typeof` value-graph lane (the
+/// request's cycle BFS crossing `typeof`-typed values lowers the
+/// TanStack VALUE graph at the ambient Skeleton demand — carriers, not
+/// an Expanded build-time materialisation; the historical demand-less
+/// build recorded ~1.6k `Instantiate:Published:Expanded` charges and
+/// re-tripped the armed fuse 2001/2000 solo). A solo cold resolve is
+/// COMPLETE with no fuse trip, bounded charges, and a warm pass that
+/// collapses cold builds. The hermetic discriminators live in
+/// `component_meta_publication_demand_tests.rs`
+/// (`typeof_value_graph_lowers_at_requested_demand` et al.).
 #[test]
-#[ignore = "FOLLOWUP-A (structural extends-heritage carrier-stop): Table.vue terminates but \
-            its open `Omit<CoreOptions<T>, …>` extends-heritage on the structural \
-            decl-body-lowering route still trips the armed fuse (refused warm, published \
-            BudgetExceeded partial); un-ignore when the follow-up lands and the oracle \
-            proves warm + complete"]
 fn table_resolves_complete_and_warm() {
     let corpus_root = locate_corpus_root();
 
@@ -977,22 +1007,56 @@ fn table_resolves_complete_and_warm() {
         outcome.published_surface_budget_exceeded
     );
 
-    // #2 membership criterion: the warm (2nd) pass on a shared host must
-    // collapse ≥90% of the cold builds (the same ceiling
-    // `warm_pass_does_zero_cold_rebuilds_for_complete_components` applies).
+    // #2 membership criterion + audit-counter criteria: completeness
+    // Complete on the audit stream, bounded projection charges, and a
+    // warm (2nd) pass that collapses cold builds under the shared
+    // ceiling.
     let host = build_audit_corpus_host(&corpus_root);
     let canonical = locate_component(&corpus_root, "Table.vue")
         .to_string_lossy()
         .to_string();
-    let cold = resolve_cold_builds(&host, &canonical);
-    let warm = resolve_cold_builds(&host, &canonical);
-    let ceiling =
-        COLD_BUILD_RESIDUAL_FLOOR.max((cold as f64 * COLD_BUILD_RESIDUAL_FRACTION).ceil() as u64);
+    let cold = resolve_audited_stats(&host, &canonical);
     assert!(
-        warm <= ceiling,
+        !cold.suppress && !cold.surface_sentinel && cold.budget_diagnostics == 0,
+        "Table.vue cold resolve must be COMPLETE (suppress {} / sentinel {} / \
+         budget diagnostics {})",
+        cold.suppress,
+        cold.surface_sentinel,
+        cold.budget_diagnostics
+    );
+    // Cold charge bound, anchored to the measured gate-path value:
+    // 342 charges on the uncontended cold resolve (x2 identical runs;
+    // the metric INCLUDES cold `TypeOf` dispatches — 337 of the 342
+    // are instantiation/projection/conditional records, 5 are TypeOf
+    // charges; carrier-preserving lowering + TypeOf demand axis; 2135
+    // before the typeof lane converted, 5k+ cold builds with trips in
+    // the refused-warm regression class). The 1500 ceiling gives ~4.4x
+    // headroom over the measured value while still tripping on either
+    // regression class — and a below-fuse TypeOf-heavy regression now
+    // counts against it. Recapture the anchor (the assert prints the
+    // measured value on failure) when an INTENTIONAL pipeline change
+    // moves it.
+    assert!(
+        cold.charges <= 1500,
+        "Table.vue cold projection records must stay bounded \
+         (got {}, ceiling 1500, measured anchor 342 INCLUDING cold TypeOf dispatches)",
+        cold.charges
+    );
+    let warm = resolve_audited_stats(&host, &canonical);
+    assert!(
+        warm.charges <= 300,
+        "Table.vue warm projection records must collapse (got {}, ceiling 300)",
+        warm.charges
+    );
+    let ceiling = COLD_BUILD_RESIDUAL_FLOOR
+        .max((cold.cold_builds as f64 * COLD_BUILD_RESIDUAL_FRACTION).ceil() as u64);
+    assert!(
+        warm.cold_builds <= ceiling,
         "Table.vue warm pass must collapse cold builds under the shared ceiling \
-         (cold {cold}, warm {warm}, ceiling {ceiling}) — the #2 genuinely-complete criterion \
-         (refused-warm today: ~5076 cold → ~5099 warm)",
+         (cold {}, warm {}, ceiling {ceiling}) — the #2 genuinely-complete criterion \
+         (the refused-warm regression class holds ~100% of the cold value)",
+        cold.cold_builds,
+        warm.cold_builds,
     );
 }
 

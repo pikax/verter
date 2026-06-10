@@ -6311,21 +6311,25 @@ defineProps<{ first: Inner; second: Inner }>()
     );
 }
 
-/// The registry L1 mapped entrance fails OPEN-OR-UNKNOWN: when the
-/// top-level surface-composition walk behind
-/// `materialize_member_surface_expr` exhausts its traversal budget
-/// before deciding whether the base contains an open mapped carrier,
-/// the carrier must be PRESERVED — never fall through into Expanded
-/// materialisation (the unsafe direction for the registry
-/// carrier-stop). An open mapped (`{ [K in keyof T]: T }` over the
-/// unbound `T`) hidden behind more than 64 top-level intersection arms
-/// must still carrier-stop on the registry route.
+/// The registry member-surface materialiser preserves open mapped
+/// carriers: `materialize_member_surface_expr` lowers at `Navigate`
+/// and runs the structural materialiser with `mode: Navigate`, so an
+/// OPEN mapped (`{ [K in keyof T]: T }` over the unbound `T`) survives
+/// as the deferred `Mapped` carrier via the shared L1 predicates —
+/// never falling through into Expanded materialisation, including when
+/// the carrier hides behind a composition deep enough to exhaust the
+/// bounded openness walks (whose exhaustion verdict fails
+/// OPEN-OR-UNKNOWN, the safe direction). An open mapped behind more
+/// than 64 top-level intersection arms must still carrier-stop on the
+/// registry route.
 ///
-/// **Discriminating.** A guard that returns `false` on budget
-/// exhaustion materialises the deep composition — the Mapped carrier
-/// assertion fails on that implementation (the shallow control shows
-/// the same composition WITHOUT budget pressure preserves the carrier,
-/// so the deep failure is the budget fail-direction, not the predicate).
+/// **Discriminating.** An implementation that Expanded-materialises
+/// the composition fails BOTH legs: the Mapped carrier disappears from
+/// the result, and the dispatch log records `Published(Expanded)`
+/// projection demands (the publication-pipeline ban). The shallow
+/// control shows the same composition WITHOUT depth pressure preserves
+/// the carrier, so a deep failure is the budget fail-direction, not
+/// the predicate.
 #[test]
 fn materialize_member_surface_expr_preserves_open_mapped_carrier_on_walk_budget_exhaustion() {
     use verter_type_expr::{MappedModifier, ObjectExpr, ObjectMember, ObjectProperty, TypeParam};
@@ -6390,15 +6394,17 @@ fn materialize_member_surface_expr_preserves_open_mapped_carrier_on_walk_budget_
          carrier, got {shallow:?}"
     );
 
-    // Deep composition: the open mapped sits FIRST in the arm list, so
-    // the LIFO worklist visits all 80 closed arms before reaching it and
-    // exhausts the 64-node walk budget — the undecidable verdict must
-    // PRESERVE the carrier. The carrier early-return happens BEFORE the
-    // Expanded `materialize_component_meta_structure` dispatch read and
-    // its `emit_dispatch_dep_signature_facts` dual-emit — the emission
-    // counter staying flat is the proof the Expanded materialiser never
-    // ran (the unsafe fall-through this guard exists to stop).
-    let emissions_before = provenance(&project).dispatch_dep_signature_fact_tracer_emissions;
+    // Deep composition: the open mapped sits FIRST in the arm list behind
+    // 80 closed arms — deep enough to exhaust any bounded top-level walk,
+    // whose undecidable verdict must PRESERVE the carrier. The structural
+    // materialiser runs at `Navigate`; the shared L1 predicates keep the
+    // open mapped a deferred carrier. The dispatch log staying free of
+    // `Published(Expanded)` projection demands is the proof the Expanded
+    // materialiser never ran (the unsafe fall-through this guard exists
+    // to stop).
+    let guard = crate::capture_token::CaptureToken::start_for_query(
+        "registry_open_mapped_budget_exhaustion",
+    );
     let mut deep_arms = vec![open_mapped];
     deep_arms.extend((0..80).map(closed_arm));
     let deep = query_engine.materialize_member_surface_expr(
@@ -6406,17 +6412,40 @@ fn materialize_member_surface_expr_preserves_open_mapped_carrier_on_walk_budget_
         &TypeExpr::Intersection(deep_arms.into()),
         true,
     );
+    let snapshot = guard.end();
     assert!(
         contains_mapped(&deep),
         "an open mapped carrier behind >64 top-level composition nodes must still \
          carrier-stop on the registry route (budget exhaustion fails open-or-unknown), \
          got {deep:?}"
     );
-    assert_eq!(
-        provenance(&project).dispatch_dep_signature_fact_tracer_emissions,
-        emissions_before,
-        "budget exhaustion must preserve the carrier WITHOUT falling through into the \
-         Expanded materialiser (no dispatch dep-signature dual-emit may occur)"
+    let expanded: Vec<String> = snapshot
+        .dispatch_log
+        .iter()
+        .filter(|e| {
+            let ctx = match &e.key {
+                crate::semantic_query::SemanticQueryKey::Instantiate { context, .. } => {
+                    Some(context.projection_reduction)
+                }
+                crate::semantic_query::SemanticQueryKey::KeyOf { context, .. }
+                | crate::semantic_query::SemanticQueryKey::MappedType { context, .. }
+                | crate::semantic_query::SemanticQueryKey::ProjectPath { context, .. } => {
+                    Some(*context)
+                }
+                _ => None,
+            };
+            ctx.is_some_and(|c| {
+                c.demand == crate::semantic_query::ReductionDemand::Published
+                    && c.mode == crate::semantic_query::ProjectionMode::Expanded
+            })
+        })
+        .map(|e| format!("{:?}", e.key))
+        .collect();
+    assert!(
+        expanded.is_empty(),
+        "the registry member-surface route must preserve the open mapped carrier WITHOUT \
+         falling through into Expanded materialisation — found Published(Expanded) \
+         dispatches: {expanded:?}"
     );
 }
 

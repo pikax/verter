@@ -157,7 +157,13 @@ fn root_is_explicit_selector_operator(expr: &TypeExpr) -> bool {
 ///
 /// Returns `true` when the expression carries an `IndexedAccess`,
 /// `KeyOf`, `TypeOf`, `Conditional`, `Mapped`, or `Infer` anywhere
-/// in its tree. Used by `reduce_field_type_expr_with_mode` to decide
+/// in its tree, or an applied builtin-utility reference
+/// (`Partial<EditorOptions>`, `Pick<Foo, 'bar'>`, …) — an explicit
+/// utility in the published type IS explicit consumer demand, and
+/// carrier-preserving lowering hands it to the reducer un-executed.
+/// The reducer's `Navigate` reduction then decides
+/// closed→materialise / open→carrier through the shared L1
+/// predicates. Used by `reduce_field_type_expr_with_mode` to decide
 /// whether to skip the reducer entirely.
 pub(crate) fn type_expr_contains_reducible_operator(expr: &TypeExpr) -> bool {
     use verter_type_expr::ObjectMember;
@@ -169,6 +175,12 @@ pub(crate) fn type_expr_contains_reducible_operator(expr: &TypeExpr) -> bool {
         | TypeExpr::Conditional { .. }
         | TypeExpr::Mapped { .. }
         | TypeExpr::Infer { .. } => true,
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if !type_arguments.is_empty() && BuiltinUtility::from_name(name.as_ref()).is_some() => {
+            true
+        }
         TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => {
             type_expr_contains_reducible_operator(inner)
         }

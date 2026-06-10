@@ -108,40 +108,6 @@ pub(crate) enum RegistryMaterialization {
     SkipAppend,
 }
 
-pub(crate) fn select_imported_materialization_scope(
-    expr: &verter_type_expr::TypeExpr,
-    owner_canonical: &str,
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> Option<String> {
-    use crate::resolver_core::component_meta_registry::{
-        component_meta_registry_public_indexed_access_route,
-        component_meta_registry_public_utility_route,
-    };
-    let route_root_name = component_meta_registry_public_utility_route(expr)
-        .or_else(|| component_meta_registry_public_indexed_access_route(expr))
-        .map(|(root_name, _)| root_name);
-    let root_name = match expr {
-        verter_type_expr::TypeExpr::Ref { name, .. } => name.as_ref(),
-        _ => route_root_name.as_deref()?,
-    };
-
-    let declaration = query_engine.resolve_type_declaration(owner_canonical, root_name);
-    let declaration_scope = if declaration.canonical_source.is_empty() {
-        owner_canonical.to_string()
-    } else {
-        declaration.canonical_source.clone()
-    };
-    let declaration_name = if declaration.resolved_name.is_empty() {
-        root_name.to_string()
-    } else {
-        declaration.resolved_name.clone()
-    };
-    let (final_scope, _) = query_engine
-        .resolve_final_prepared_type_target(declaration_scope.as_str(), declaration_name.as_str());
-
-    (!final_scope.is_empty() && final_scope != owner_canonical).then_some(final_scope)
-}
-
 pub(crate) fn lowered_root_reaches_transitive_cycle(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,

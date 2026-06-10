@@ -224,7 +224,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         base,
                         context: reduction_context,
                     });
-                    // A2 signal-split: the deferred-shell evaluator returns a
+                    // Two-signal fold: the deferred-shell evaluator returns a
                     // bare node (hash-cons memoised), so it folds a genuinely
                     // incomplete nested read onto the request's sticky partial
                     // flag — the component-meta / materialize warm gates
@@ -279,9 +279,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::TypeOf { value_root, path } => {
-                    let read = self.execute_read(SemanticQueryKey::TypeOf {
-                        value_root: value_root.clone(),
-                    });
+                    // The enclosing evaluation's demand rides the key —
+                    // operator recursion never widens a deferred typeof
+                    // carrier past the caller's mode.
+                    let read = self
+                        .execute_read(self.typeof_key_for(value_root.clone(), reduction_context));
                     crate::request_context::observe_component_meta_read_suppress(&read);
                     let root = match read.value {
                         QueryResult::Value(id) => id,

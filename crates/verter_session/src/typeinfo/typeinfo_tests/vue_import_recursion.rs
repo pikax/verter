@@ -289,15 +289,18 @@ fn typeof_default_construct_return_node(
 ) -> SemanticNodeId {
     use crate::resolver_core::ResolverContext;
     let _ = host;
-    let typeof_node = match dispatch.execute_type_node(SemanticQueryKey::TypeOf {
-        value_root: ValueRootKey {
+    let typeof_node = match dispatch.execute_type_node(dispatch.typeof_key_for(
+        ValueRootKey {
             scope: ScopeId {
                 canonical_id: Arc::from(canonical_id),
                 local_scope: None,
             },
             name: Arc::from("default"),
         },
-    }) {
+        crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         QueryResult::Recursive(node) => node,
         QueryResult::Error(e) => panic!("TypeOf(default) for {canonical_id} errored: {e:?}"),

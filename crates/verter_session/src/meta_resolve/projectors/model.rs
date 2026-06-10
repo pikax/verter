@@ -112,7 +112,7 @@ pub(crate) fn project_model(
         super::super::materialize::materialize_component_meta_type_expr_until_stable(
             &raised,
             file,
-            ProjectionMode::Expanded,
+            ProjectionMode::Navigate,
             query_engine,
         )
     } else {

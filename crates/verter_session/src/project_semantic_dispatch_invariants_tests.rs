@@ -1951,20 +1951,19 @@ fn relation_engine_has_exactly_one_implementation() {
 
 #[test]
 fn type_expr_lowering_has_exactly_one_path() {
-    // Demand-driven reducer spec: the lowering path now
-    // exposes TWO entry points that share ONE body —
-    // `shallow_lower_type_expr` (legacy `mode`-only wrapper) and
-    // `shallow_lower_type_expr_with_context` (context-explicit, takes
-    // the full [`ProjectionReductionContext`]). The legacy wrapper
-    // delegates to the context-explicit overload with a `Published`
-    // wrap so existing callers compile without churn. The single-
-    // body invariant the test originally encoded is preserved — both
-    // entry points route through the same context-explicit body.
+    // Demand-driven reducer spec: the lowering path exposes exactly
+    // ONE entry point — `shallow_lower_type_expr_with_context`, which
+    // takes the full [`ProjectionReductionContext`]. Every caller
+    // states its demand explicitly; a bare-`mode` wrapper that
+    // defaults the demand to `Published` is forbidden (it is exactly
+    // how a transit/skeleton caller silently lowers at a publication
+    // demand it never asked for).
     let legacy = count_def_in_crates("fn shallow_lower_type_expr(");
     let with_ctx = count_def_in_crates("fn shallow_lower_type_expr_with_context(");
     assert_eq!(
-        legacy, 1,
-        "fn shallow_lower_type_expr must have exactly one definition; got {legacy}"
+        legacy, 0,
+        "the bare-mode `fn shallow_lower_type_expr(` wrapper is retired; \
+         callers state the full ProjectionReductionContext; got {legacy}"
     );
     assert_eq!(
         with_ctx, 1,

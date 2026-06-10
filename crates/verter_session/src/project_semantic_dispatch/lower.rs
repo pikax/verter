@@ -9,7 +9,9 @@
 //! **Authority contract:** this is the *only* TypeExpr
 //! lowering path in the workspace. The §6.5 invariant test
 //! `type_expr_lowering_has_exactly_one_path` asserts exactly one
-//! `fn shallow_lower_type_expr` exists in `crates/`.
+//! `fn shallow_lower_type_expr_with_context` exists in `crates/`
+//! (and no bare-`mode` wrapper beside it — every caller states its
+//! full [`ProjectionReductionContext`] demand explicitly).
 
 use std::sync::Arc;
 
@@ -36,6 +38,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// sub-expressions are interned as references rather than recursively
     /// expanded. Deeper lowering is the caller's responsibility via
     /// [`SemanticQueryKey::ProjectPath`] sub-queries.
+    ///
+    /// Accepts the full [`ProjectionReductionContext`] so callers thread
+    /// their demand through nested lowering: a `StructuralTransit`
+    /// instantiation lowers its body with the same demand and nested
+    /// operator dispatches carrier-stop.
     ///
     /// `name_resolution` is the prepared decl's bare-name → canonical
     /// identity map; used by the walker to resolve `TypeExpr::Ref`
@@ -66,41 +73,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// `substitutions` accumulates `(param_name, arg_id)` facts for
     /// `SubstituteTypeParam` origin-edge emission at the shell level.
-    pub(crate) fn shallow_lower_type_expr(
-        &self,
-        expr: &TypeExpr,
-        env: &FxHashMap<String, SemanticNodeId>,
-        scope: &NodeScopeId,
-        name_resolution: &FxHashMap<String, ResolvedRootIdentity>,
-        scope_payload: Option<&DeclarationScopePayload>,
-        shadowing: &ScopeShadowing,
-        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        mode: ProjectionMode,
-    ) -> SemanticNodeId {
-        // Default to a publication context; the
-        // `shallow_lower_type_expr_with_context` overload threads a
-        // caller-supplied [`ProjectionReductionContext`] through so a
-        // `StructuralTransit` instantiation lowers its body with the
-        // same demand and nested operator dispatches carrier-stop.
-        let context = ProjectionReductionContext::published(mode);
-        self.shallow_lower_type_expr_with_context(
-            expr,
-            env,
-            scope,
-            name_resolution,
-            scope_payload,
-            shadowing,
-            substitutions,
-            context,
-        )
-    }
-
-    /// Context-explicit variant of [`Self::shallow_lower_type_expr`]
-    /// (demand-driven reducer spec). Accepts the full
-    /// [`ProjectionReductionContext`] so callers can thread
-    /// `StructuralTransit` through nested lowering. The legacy
-    /// `mode`-only overload above wraps `mode` in `Published` so
-    /// existing publication sites continue to compile unchanged.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn shallow_lower_type_expr_with_context(
         &self,
@@ -364,53 +336,78 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         })
                         .collect();
 
-                    // Route/mode-INDEPENDENT L1 carrier-stop (LOWERING
-                    // entrance). For the object-filter builtins (`Pick`/`Omit`)
-                    // preserve the carrier `InstantiationRef` shell WHEN either:
-                    //   - the lowering mode is `Navigate` (the reducer's L1
-                    //     decides closed→materialise downstream, and the
-                    //     materialiser's registry-route guard can apply cycle /
-                    //     package gates on the wrapped root identity BEFORE
-                    //     dispatch's `build_builtin_utility` projects), OR
-                    //   - the enumeration domain (lowered argument 0) is OPEN —
-                    //     in ANY mode (Expanded / Shallow / Skeleton /
-                    //     StructuralTransit). An open `Pick`/`Omit` must never
-                    //     build the `Instantiate` query that would materialise
-                    //     the open source (the ChatMessages.vue
-                    //     `Pick<PropsBase<T>, …>` storm / the Table.vue
-                    //     `Omit<CoreOptions<T>, …>` structural memo-cycle).
-                    // A CLOSED domain in a non-Navigate mode falls through to
-                    // execute the `Instantiate` query and materialise path-
-                    // precisely. Other utilities (Extract, Exclude, NonNullable,
-                    // Partial, Required, Readonly, Mutable, …) keep the existing
-                    // eager-resolve path — the open-domain carrier-stop is the
-                    // object-filter `Pick`/`Omit` family only, decided by the
-                    // ONE family helper (`raise::is_l1_object_filter_utility`,
-                    // backed by the `BuiltinUtility` registry — never a local
-                    // name string match, so this entrance can never diverge
-                    // from the predicate on family membership). The shared
-                    // open-domain predicate (`raise::
-                    // utility_enumeration_domain_is_open_or_unknown`) is reused —
-                    // no second walker.
-                    if crate::project_semantic_dispatch::raise::is_l1_object_filter_utility(
-                        name.as_ref(),
-                    ) {
-                        let build_carrier = mode == ProjectionMode::Navigate
+                    // Builtin carrier gate (LOWERING entrance). The
+                    // `InstantiationRef` shell is preserved WHEN any of:
+                    //   - the lowering mode is `Shallow` — for ALL builtins.
+                    //     Shallow decl-body lowering is carrier-preserving
+                    //     exactly like Navigate / Skeleton: member-value
+                    //     utilities (`Partial<Col<T>>`, `Omit<…>`, …) stay
+                    //     carriers and materialise only at a demand point
+                    //     (the shallow-surface synthesiser's carrier unwrap,
+                    //     PathWalker hops, closed object-filter surface
+                    //     reads). Eager execution here compounds
+                    //     member-value instantiation recursion across large
+                    //     transitive decl graphs (the expansion-storm
+                    //     class).
+                    //   - the mode is `Navigate` and the name is an
+                    //     object-filter builtin (`Pick`/`Omit` — the
+                    //     reducer's L1 decides closed→materialise
+                    //     downstream, and the materialiser's registry-route
+                    //     guard can apply cycle / package gates on the
+                    //     wrapped root identity BEFORE dispatch's
+                    //     `build_builtin_utility` projects), OR
+                    //   - the name is an object-filter builtin and the
+                    //     enumeration domain (lowered argument 0) is OPEN —
+                    //     in ANY mode. An open `Pick`/`Omit` must never
+                    //     build the `Instantiate` query that would
+                    //     materialise the open source (the ChatMessages.vue
+                    //     `Pick<PropsBase<T>, …>` storm class).
+                    // A CLOSED object-filter domain in `Expanded`/`Identity`
+                    // falls through to execute the `Instantiate` query and
+                    // materialise path-precisely; non-object-filter builtins
+                    // keep the eager-resolve path in those modes only.
+                    // Family membership is decided by the ONE registry
+                    // helper (`raise::is_l1_object_filter_utility`, backed
+                    // by the `BuiltinUtility` registry — never a local name
+                    // string match) and the shared open-domain predicate
+                    // (`raise::utility_enumeration_domain_is_open_or_unknown`)
+                    // is reused — no second walker.
+                    // Carrier-mode open-argument rule: under `Navigate` /
+                    // `Skeleton` a builtin over an OPEN argument (an
+                    // unbound `TypeParam` — including a mapper binder
+                    // substituted later at a demand point — or an open
+                    // carrier over one) interns the carrier too. Eagerly
+                    // executing `NonNullable<ChatSlots[K]>` with unbound
+                    // `K` bakes `Opaque(Miss)` into the produced
+                    // conditional check and destroys the structure the
+                    // per-key realization demand point needs.
+                    // Closed-argument builtins under Navigate / Skeleton
+                    // keep the eager execute, byte-for-byte.
+                    let build_carrier = mode == ProjectionMode::Shallow
+                        || (crate::project_semantic_dispatch::raise::is_l1_object_filter_utility(
+                            name.as_ref(),
+                        ) && (mode == ProjectionMode::Navigate
                             || crate::project_semantic_dispatch::raise::
                                 utility_enumeration_domain_is_open_or_unknown(
                                     self.ctx,
                                     &builtin_identity,
                                     &arg_ids,
-                                );
-                        if build_carrier {
-                            return graph.intern_node_with_scope(
-                                SemanticNodeData::InstantiationRef {
-                                    base: builtin_identity,
-                                    args: Arc::from(arg_ids.into_boxed_slice()),
-                                },
-                                scope.clone(),
-                            );
-                        }
+                                )))
+                        || (matches!(
+                            mode,
+                            ProjectionMode::Navigate | ProjectionMode::Skeleton
+                        ) && arg_ids.iter().any(|arg| {
+                            crate::project_semantic_dispatch::raise::
+                                builtin_lowering_argument_is_open(self.ctx, *arg)
+                        }));
+                    if build_carrier {
+                        return graph.intern_node_with_scope(
+                            SemanticNodeData::InstantiationRef {
+                                base: builtin_identity,
+                                args: Arc::from(arg_ids.into_boxed_slice()),
+                            },
+                            scope.clone(),
+                        );
                     }
                     return match self.execute_type_node(SemanticQueryKey::Instantiate {
                         base: self.type_slot_for(
@@ -565,7 +562,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     whole_hash,
                     decl_name: Arc::clone(&resolved_name_clone),
                 };
-                if matches!(mode, ProjectionMode::Navigate | ProjectionMode::Skeleton) {
+                if matches!(
+                    mode,
+                    ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
+                ) {
                     // Skeleton mode preserves carriers
                     // (like Navigate) so the cycle-BFS can see recursive refs
                     // as DeclRef/InstantiationRef in the lowered graph rather
@@ -577,6 +577,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // doesn't walk as a DeclRef/InstantiationRef. The
                     // carrier-preservation makes the recursive identity
                     // visible to the graph walk.
+                    //
+                    // Shallow mode preserves carriers for the same reason
+                    // Navigate does: decl-body lowering collects and
+                    // indexes, it never eagerly evaluates. Member-value
+                    // generic refs intern `DeclRef` / `InstantiationRef`
+                    // shells; the shallow-surface synthesiser, PathWalker
+                    // hops, and the relation/conditional oracle are the
+                    // demand points that materialise them. Eager
+                    // `ResolveDecl` / `Instantiate` at lowering time is
+                    // `Expanded` / `Identity` only — an eager Shallow path
+                    // is the member-value recursion storm class.
                     if type_arguments.is_empty() {
                         return graph.intern_node_with_scope(
                             SemanticNodeData::DeclRef {
@@ -1701,16 +1712,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // tail segments — terminal-mode-only expansion is the
                 // outer caller's responsibility (per CLAUDE.md "type
                 // navigation must stay narrower than expansion").
+                // The ambient lowering demand rides the `TypeOf` key: a
+                // Skeleton / Navigate / Shallow body lowering crossing a
+                // `typeof`-typed value lowers the value's declaration
+                // graph carrier-preserving instead of detonating an
+                // Expanded materialisation at build time.
                 let single_root: Arc<str> = Arc::from(value_ref.path[0].as_str());
-                let single_query = self.execute_type_node(SemanticQueryKey::TypeOf {
-                    value_root: ValueRootKey {
+                let single_query = self.execute_type_node(self.typeof_key_for(
+                    ValueRootKey {
                         scope: ScopeId {
                             canonical_id: Arc::clone(&scope_canonical_id),
                             local_scope: None,
                         },
                         name: Arc::clone(&single_root),
                     },
-                });
+                    reduction_context,
+                ));
                 let (mut result, consumed_segments) = match single_query {
                     QueryResult::Value(SemanticQueryOutput { value: id, .. }) => (id, 1usize),
                     _ if value_ref.path.len() > 1 => {
@@ -1723,15 +1740,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             "{}.{}",
                             value_ref.path[0], value_ref.path[1]
                         ));
-                        match self.execute_type_node(SemanticQueryKey::TypeOf {
-                            value_root: ValueRootKey {
+                        match self.execute_type_node(self.typeof_key_for(
+                            ValueRootKey {
                                 scope: ScopeId {
                                     canonical_id: scope_canonical_id,
                                     local_scope: None,
                                 },
                                 name: joined,
                             },
-                        }) {
+                            reduction_context,
+                        )) {
                             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => {
                                 (id, 2usize)
                             }

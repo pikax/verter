@@ -22,8 +22,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use verter_session::audited_request::AuditedRequest;
-use verter_session::types::FileKind;
-use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
 
 const NUXT_UI_BENCH: &str = ".integration-tests/repos/nuxt-ui-codex-bench";
 

@@ -621,42 +621,87 @@ pub(crate) fn resolve_macro_payload(
         return None;
     }
 
-    // Silent-miss compensation for the transit-shallow publication
-    // contract. When the macro publication boundary lowers under
-    // `Navigate` mode + `Published(Shallow)` terminal (slot path),
-    // the dispatch chain no longer eagerly resolves `DeclRef`
-    // carriers for unresolved imports — the cached payload becomes
-    // an EMPTY `Object` surface instead of an `Opaque` sentinel, so
-    // the check above silently passes. Detect the empty-surface
-    // payload and probe the macro's `parsed_type_argument` via
-    // `Published(Expanded)` lowering: an unresolved declaration
-    // surfaces as `Opaque(DeclPlaceholder)` under eager resolution
-    // and the diagnostic fires here. Legitimate empty macros
-    // (`defineProps<{}>()`) pass through because the eager lowering
-    // returns a non-`Opaque` empty Object.
+    // Silent-miss compensation for the carrier-preserving publication
+    // contract. Under `Navigate` lowering an unresolved import either
+    // collapses to an empty `Object` surface downstream or rides a
+    // `DeclRef` carrier whose declaration does not exist (the import
+    // mapping is a shallow fact; declaration existence is a resolution
+    // fact). Both shapes are indistinguishable from a legitimately
+    // empty / carrier payload without a structural probe. Probe the
+    // macro's `parsed_type_argument` at `Navigate` and discriminate
+    // STRUCTURALLY — typed-IR inspection only, no Expanded lowering of
+    // the full type argument:
+    //   - a probe node that is an `Opaque` Miss-class sentinel is
+    //     unresolved directly;
+    //   - a probe node that is a root `DeclRef` carrier resolves ONE
+    //     hop through `ResolveDecl`; a Miss-class outcome means the
+    //     name routed to a file that does not declare it.
+    // Legitimate empty macros (`defineProps<{}>()`) probe to a
+    // non-`Opaque` Object; carrier-stopped payloads (an open mapped
+    // surface) are neither empty-Object nor root-`DeclRef` shapes and
+    // never reach the probe.
+    let payload_data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, payload_node);
     let payload_is_empty_surface = matches!(
-        crate::project_semantic_dispatch::node_data_for(dispatch.ctx, payload_node).as_deref(),
+        payload_data.as_deref(),
         Some(SemanticNodeData::Object(view))
             if view.members.is_empty()
                 && view.call_signatures.is_empty()
                 && view.construct_signatures.is_empty()
                 && view.index_signatures.is_empty()
     );
-    if payload_is_empty_surface {
+    let payload_is_decl_ref_carrier = matches!(
+        payload_data.as_deref(),
+        Some(SemanticNodeData::DeclRef { .. })
+    );
+    drop(payload_data);
+    if payload_is_empty_surface || payload_is_decl_ref_carrier {
         if let Some(parsed_arg) = mac.parsed_type_argument.as_ref() {
             if let Some(probe_node) = dispatch.lower_type_expr_in_scope_with_mode(
                 file,
                 parsed_arg,
-                ProjectionMode::Expanded,
+                ProjectionMode::Navigate,
             ) {
-                if let Some(SemanticNodeData::Opaque(err)) =
-                    crate::project_semantic_dispatch::node_data_for(dispatch.ctx, probe_node)
+                let unresolved: Option<String> =
+                    match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, probe_node)
                         .as_deref()
-                {
+                    {
+                        Some(SemanticNodeData::Opaque(err)) => Some(format!("{err:?}")),
+                        Some(SemanticNodeData::DeclRef { identity }) => {
+                            let read = dispatch.execute_read(SemanticQueryKey::ResolveDecl(
+                                crate::semantic_query::ResolveDeclKey {
+                                    scope: crate::semantic_query::ScopeId {
+                                        canonical_id: std::sync::Arc::clone(&identity.canonical_id),
+                                        local_scope: None,
+                                    },
+                                    name: std::sync::Arc::clone(&identity.decl_name),
+                                },
+                            ));
+                            emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
+                            match read.value {
+                                QueryResult::Value(anchor) => {
+                                    match crate::project_semantic_dispatch::node_data_for(
+                                        dispatch.ctx,
+                                        anchor,
+                                    )
+                                    .as_deref()
+                                    {
+                                        Some(SemanticNodeData::Opaque(
+                                            err @ crate::semantic_query::QueryError::Miss,
+                                        )) => Some(format!("{err:?}")),
+                                        _ => None,
+                                    }
+                                }
+                                QueryResult::Error(err) => Some(format!("{err:?}")),
+                                QueryResult::Recursive(_) => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                if let Some(err) = unresolved {
                     diag_sink.push(macro_expansion_for_query_error(
                         macro_index,
                         expansion_kind,
-                        format!("macro-payload-decl-unresolved::{:?}", err),
+                        format!("macro-payload-decl-unresolved::{err}"),
                     ));
                     return None;
                 }
@@ -1551,43 +1596,42 @@ pub(crate) fn reduce_field_type_expr_with_mode(
         publish_mode,
         query_engine,
     );
-    let reduced = materialized.type_expr;
-    if matches!(&expr, TypeExpr::IndexedAccess { .. })
-        && matches!(
-            &reduced,
-            TypeExpr::Ref {
-                type_arguments,
-                ..
-            } if type_arguments.is_empty()
-        )
+    // No-poison at the publication reducer: the TypeExpr-start
+    // materialiser lowers `expr` in the OWNER scope, but a published
+    // value raised from the shared graph can carry carriers whose
+    // declarations live in OTHER files (a heritage member's
+    // `Feat<T>` value). Re-lowering such a carrier by NAME in the
+    // owner scope misses AT THE ROOT; replacing a sentinel-free input
+    // with a root-sentinel reduction would poison the published
+    // surface. When the demanded reduction itself failed (the
+    // materialised ROOT is the unmaterialised sentinel) and the input
+    // carried no sentinel, no reduction is available in this scope —
+    // the input carrier IS the published shape (the consumer
+    // re-resolves it through the shared resolver).
+    //
+    // The gate is ROOT-precise, not a whole-tree `contains` scan: a
+    // demanded reduction that DID execute (`Partial<EditorOptions>`
+    // materialising its finite optional surface) publishes even when
+    // a nested member VALUE carries a genuine, input-independent miss
+    // (`element?: HTMLElement` with no DOM lib registered). Per the
+    // Macro Type Traversal contract, an unresolvable name inside one
+    // member publishes that member partially while sibling members
+    // resolve normally — discarding the whole materialised surface
+    // for one nested miss would revert the explicit consumer demand
+    // to the un-reduced carrier.
+    if crate::resolver_core::type_expr_root_is_unmaterialized_sentinel(&materialized.type_expr)
+        && !crate::resolver_core::type_expr_contains_semantic_miss(&expr)
     {
-        let terminal = materialized
-            .node_id
-            .map(|node_id| {
-                super::materialize::reduce_member_value_graph_native_with_context(
-                    query_engine.ctx,
-                    scope_canonical_id,
-                    node_id,
-                    crate::semantic_query::ProjectionReductionContext::published(
-                        ProjectionMode::Expanded,
-                    ),
-                )
-                .type_expr
-            })
-            .unwrap_or_else(|| {
-                query_engine.materialize_member_surface_expr(scope_canonical_id, &reduced, true)
-            });
-        if !matches!(
-            &terminal,
-            TypeExpr::Ref {
-                type_arguments,
-                ..
-            } if type_arguments.is_empty()
-        ) {
-            return terminal;
-        }
+        return expr;
     }
-    reduced
+    // Publication terminal: a bare-Ref terminal of an explicit
+    // selector (`Theme['header']` resolving onto a declaration) IS the
+    // published shape — the declaration-reference carrier the consumer
+    // re-resolves on demand, exactly as if the member had been written
+    // as the plain reference. No terminal re-resolve runs here:
+    // forcing the terminal one level deeper re-expands what the
+    // publication boundary deliberately keeps shallow.
+    materialized.type_expr
 }
 
 /// Resolve a surface member's value to its underlying body for

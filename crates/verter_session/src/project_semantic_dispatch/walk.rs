@@ -1608,10 +1608,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 } => {
                     let value_root = value_root.clone();
                     let typeof_path = typeof_path.clone();
-                    let typeof_mode = self.mode();
-                    let mut resolved = match self
-                        .execute_read_folding_partial(SemanticQueryKey::TypeOf { value_root })
-                    {
+                    // PathWalker hop = a demand point: the typeof root
+                    // resolves under the walker's OWN full reduction
+                    // context (mode + demand + provenance + merge_role) —
+                    // a transit walk crossing `typeof` stays a transit
+                    // subquery; the trailing `ProjectPath` rides the same
+                    // context below.
+                    let typeof_context = self.context;
+                    let typeof_key = self.dispatch.typeof_key_for(value_root, typeof_context);
+                    let mut resolved = match self.execute_read_folding_partial(typeof_key) {
                         QueryResult::Value(id) => id,
                         _ => {
                             results.push(self.opaque_miss());
@@ -1630,10 +1635,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             match self.execute_read_folding_partial(SemanticQueryKey::ProjectPath {
                                 base: resolved,
                                 path: projection_path,
-                                context:
-                                    crate::semantic_query::ProjectionReductionContext::published(
-                                        typeof_mode,
-                                    ),
+                                context: typeof_context,
                             }) {
                                 QueryResult::Value(id) => id,
                                 _ => {
@@ -3260,19 +3262,23 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         }
         // Route/mode-INDEPENDENT L1 (Shallow-By-Default), MAPPED-TYPE
         // family — the empty-path Shallow surface enumerator (the slot /
-        // macro-object-surface route). A mapped type whose produced
-        // surface still depends on an unbound OUTER generic — an open
-        // source / key space, or a value body / name remap reaching the
-        // outer generic (NOT the bound mapper binder `K`) — must NOT
-        // enumerate its keys and materialise the per-key value here
-        // either (the `ChatMessagesSlots<T>` / `TableSlots<T>` slot-surface
-        // storm). Returning `None` carrier-stops: the surface stays a
-        // shallow shell (no per-key bindings) and consumers re-resolve the
-        // preserved `Mapped` carrier on demand. The SAME shared
-        // open-mapped predicate `build_mapped_type` consults decides
-        // openness (no second walker). A CLOSED mapped slots / object
-        // surface still enumerates path-precisely below.
-        if crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
+        // macro-object-surface route). A mapped type whose produced KEY
+        // SET depends on an unbound OUTER generic — an open source /
+        // key space / `as`-remap (NOT the bound mapper binder `K`) —
+        // must NOT enumerate its keys here (the `[K in keyof T]`
+        // slot-surface storm class). Returning `None` carrier-stops:
+        // the surface stays a shallow shell (no per-key bindings) and
+        // consumers re-resolve the preserved `Mapped` carrier on
+        // demand. The verdict is the KEY-PRODUCTION axis of the SAME
+        // shared open-mapped predicate `build_mapped_type` consults (no
+        // second walker). A mapped type with a CLOSED key domain still
+        // enumerates path-precisely below even when its VALUE body
+        // reaches an open outer generic (`{ [K in keyof ChatSlots]?: …
+        // MB<T> … }`): the per-key value materialisation runs under
+        // `StructuralTransit(Navigate)`, so the open generic survives
+        // as a deferred carrier on the published binding — shallow
+        // values, enumerated keys.
+        if crate::project_semantic_dispatch::raise::mapped_type_key_domain_is_open_or_unknown(
             self.dispatch.ctx,
             source,
             mapper,
@@ -3338,7 +3344,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         .mapped_surface_source_members_for_projection(source, self.context)
                     {
                         Some((members, source_is_partial)) => {
-                            // A2 signal-split: a genuinely-incomplete source
+                            // Two-signal fold: a genuinely-incomplete source
                             // projection (budget / recursion / walker-fatal)
                             // taints this synthesised mapped surface.
                             if source_is_partial {

@@ -21,8 +21,8 @@
 //!   frontier/reparse loop (the deleted `project_imported_macro_surfaces`
 //!   reparse hang source).
 //! - `expanded_instantiate_calls == CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE`
-//!   — the deterministic residual Expanded work (the canonical owner surface),
-//!   asserted EXACTLY (data over a `<=` heuristic).
+//!   — the deterministic residual Expanded work (the one carrier-stopped
+//!   open-utility dispatch), asserted EXACTLY (data over a `<=` heuristic).
 //! - Dependency-read / probe BREADTH: every `declared_dependency_files` entry is
 //!   an extension / index candidate of one of the SFC's own relative-import
 //!   roots (`CHAT_MESSAGES_DECLARED_DEPENDENCY_ROOTS`) — a per-entry structural
@@ -58,90 +58,60 @@ const CHAT_MESSAGES_VUE: &str =
 /// materialisation (or an equivalent eager reduction) regressed back in.
 const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 
-/// The EXACT request-wide `expanded_instantiate_calls` — the bounded residual
-/// Expanded work the corrected path produces resolving the canonical owner
-/// surface (NOT the deleted eager imported-macro-surface materialisation). This
-/// is deterministic for the fixture, so the gate asserts equality (data over a
-/// `<=` heuristic): a higher value means new eager expansion crept in; a lower
-/// value means the residual owner expansion changed and the gate is re-derived.
+/// The EXACT request-wide `expanded_instantiate_calls` — deterministic for
+/// the fixture, so the gate asserts equality (data over a `<=` heuristic): a
+/// higher value means new eager expansion crept in; a lower value means the
+/// bounded residual changed shape and the gate is re-derived deliberately.
 ///
-/// The value is 4 = 3 (the residual canonical-owner expansion) + 1 (one
-/// CARRIER-STOPPED Expanded `Instantiate`):
+/// The value is 1: the single CARRIER-STOPPED Expanded `Instantiate` of the
+/// route/mode-independent L1 open-domain carrier-stop. `build_instantiate`
+/// counts the dispatch BEFORE the carrier early-return, so the fixture's open
+/// `Pick` (object-filter utility over an open argument, base `__builtin__::
+/// Pick`) that stays a shallow `InstantiationRef` carrier (NO source
+/// materialisation) still increments the request-wide counter once. It is NOT
+/// eager expansion: the `synthesis_expanded_instantiate_calls == 0` and
+/// frontier/materialisation assertions below remain the eager-regression
+/// guards and stay green.
 ///
-/// **The 3-call residual owner expansion** exists because the eager
-/// macro-object materialiser is gone from the production resolution path
-/// (`compute_component_meta_state_inner` does not call
-/// `produce_macro_object_shapes_for_purpose`; `define_props`/`define_emits`/
-/// `define_slots` are owned by `projectors::define_shapes`). The
-/// materialiser ran a DUPLICATE eager Expanded-mode `Instantiate` (its
-/// `context.projection_reduction.mode = Expanded`) of
-/// the macro root (`produce_one_macro_object_shape` → the registry/projection
-/// pre-pass) over the SAME `(base, args, context)` the projector path already
-/// resolves once through `ResolveMacroPayload` / the empty-path Shallow walker.
-/// Without the materialiser, that one duplicate eager instantiate is gone,
-/// leaving exactly 3 owner-surface expansions.
+/// The canonical-owner surface contributes ZERO Expanded instantiates:
+///  - the eager macro-object materialiser is absent from the production
+///    resolution path (`compute_component_meta_state_inner` does not call
+///    `produce_macro_object_shapes_for_purpose`; `define_props`/
+///    `define_emits`/`define_slots` are owned by `projectors::define_shapes`),
+///    so no duplicate Expanded-mode `Instantiate` of the macro root fires
+///    alongside the projector's one `ResolveMacroPayload` resolution;
+///  - decl-body lowering interns `DeclRef`/`InstantiationRef` carriers for
+///    member-value type references instead of executing `ResolveDecl`/
+///    `Instantiate` eagerly, and publication demand is Navigate-only
+///    (`publication_routes_never_demand_expanded`), so owner-surface
+///    materialisation enters exclusively through Navigate-mode demand points
+///    and never charges this counter.
 ///
-/// **The +1 carrier-stopped call** is the route/mode-independent L1
-/// open-domain carrier-stop: `build_instantiate` counts the dispatch BEFORE
-/// the carrier early-return, so the fixture's open `Pick`/`Omit` that stays
-/// a shallow `InstantiationRef` carrier (NO source materialisation) still
-/// increments the request-wide counter once. It is NOT eager expansion: the
-/// `synthesis_expanded_instantiate_calls == 0` and frontier/materialisation
-/// assertions below remain the eager-regression guards and stay green.
-///
-/// Re-derivation proof (the value is pinned by these invariants):
+/// The value is pinned by these invariants:
 ///  1. member identity corpus-wide: the full component-meta suite
 ///     (`meta_tests` + `meta_resolve_tests` + `component_meta_query_engine`
 ///     tests, ~820 tests) passes — every member-identity / dedup assertion
-///     holds against the rerouted path.
-///  2. props / events / slots / slot-bindings / resolved-type dumps unchanged:
-///     the same suite asserts the published props / emits / slots / slot_bindings
-///     / registry shapes; all green post-reroute.
-///  3. dep / fact signatures unchanged or intentionally equivalent: the
-///     dep-signature counters re-homed onto the shared dispatch fan-in still
-///     report > 0 (`audit_counter_*`), and the warm-invalidation oracle
-///     (`component_meta_warm_invalidation_oracle_tests`) confirms carrier facts
-///     flow + a carrier edit invalidates the warm result.
+///     holds.
+///  2. props / events / slots / slot-bindings / resolved-type dumps: the same
+///     suite asserts the published props / emits / slots / slot_bindings /
+///     registry shapes; all green.
+///  3. dep / fact signatures: the dep-signature counters homed on the shared
+///     dispatch fan-in report > 0 (`audit_counter_*`), and the
+///     warm-invalidation oracle
+///     (`component_meta_warm_invalidation_oracle_tests`) confirms carrier
+///     facts flow + a carrier edit invalidates the warm result.
 ///  4. no lost inherited members: cross-file heritage / `Omit` / `Pick`
 ///     inheritance tests (incl. `cross_file_omit_heritage_carrier_*`,
-///     `imported_mapped_slots_*`) pass — the canonical-owner residual path
-///     (the surviving 3 owner-surface Expanded instantiates plus the one
-///     counted-then-carried open-utility dispatch) still resolves inherited
-///     members.
+///     `imported_mapped_slots_*`) pass — Navigate-mode demand-point
+///     materialisation (plus the one counted-then-carried open-utility
+///     dispatch) still resolves inherited members.
 ///  5. no overlay / base aliasing: the overlay-isolation test
 ///     (`overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base`)
 ///     proves overlay/base key on distinct hashes with no leak.
 ///  6. `synthesis_expanded_instantiate_calls == 0`: asserted directly above
-///     (the eager-path signal stays 0 — neither the removed materialiser
-///     pre-pass nor the carrier-stopped dispatch is synthesis-attributed).
-///  7. DISCRIMINATOR — the residual count reflects the materialiser pre-pass
-///     being gone, NOT the reducer mode. Two behavioural facts hold on this
-///     path: (a) the eager materialiser call is removed, and (b) the
-///     `slot_bindings` field reducer runs in `Navigate`
-///     (`published_reducer.rs::reduce_published_field_types`) rather than
-///     Expanded (`reduce_field_type_expr`). To isolate WHICH of these sets the
-///     count:
-///
-///     Reverting ONLY the `slot_bindings` reducer back to Expanded
-///     (`field.r#type = reduce_field_type_expr(query_engine,
-///     scope_canonical_id, raised);` in `reduce_published_field_types`, with
-///     the materialiser removal LEFT in place) and re-running this gate keeps
-///     `expanded_instantiate_calls == 4` — the count is INVARIANT under the
-///     reducer mode for this fixture (ChatMessages' published `slot_bindings`
-///     reduce to carrier `IndexedAccess` shells that issue no Expanded
-///     `Instantiate` in either mode). Therefore the reducer mode contributes
-///     ZERO to the residual count; the difference against the eager rail is
-///     entirely the removed materialiser pre-pass (with the one
-///     carrier-stopped dispatch accounted for separately above).
-///
-///     This is corroborated structurally by the
-///     `synthesis_expanded_instantiate_calls == 0` assertion below: the removed
-///     instantiate was Expanded but NOT synthesis-attributed, which is exactly
-///     the materialiser's `produce_one_macro_object_shape` pre-pass signature
-///     (it instantiated the macro root under the SAME `(base, args, context)`
-///     the projector path resolves once via `ResolveMacroPayload`), not a
-///     distinct resolution.
-const CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE: u64 = 4;
+///     (the eager-path signal stays 0 — the carrier-stopped dispatch is not
+///     synthesis-attributed).
+const CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE: u64 = 1;
 
 /// The declared-dependency ROOTS the audited ChatMessages resolve is allowed to
 /// touch — the SFC's own RELATIVE import targets plus the owner. Every
@@ -186,11 +156,11 @@ fn chatmessages_audit_has_no_eager_materialization_or_frontier_loop() {
         CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING,
     );
 
-    // Total Expanded work (the residual canonical-owner expansion) is
+    // Total Expanded work (the one carrier-stopped open-utility dispatch) is
     // DETERMINISTIC for this fixture — assert the EXACT value (data over
     // heuristics). A higher value means new eager expansion crept in; a LOWER
-    // value means the residual owner expansion changed shape and the gate must
-    // be re-derived deliberately.
+    // value means the bounded residual changed shape and the gate must be
+    // re-derived deliberately.
     assert_eq!(
         payload.expanded_instantiate_calls, CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE,
         "ChatMessages gate: expanded_instantiate_calls ({}) must equal the \

@@ -236,6 +236,33 @@ impl Drop for MaterializeForceInScopePartialGuard<'_> {
     }
 }
 
+/// Arm the per-host mid-compute generation-bump knob
+/// ([`crate::VerterHost::materialize_force_mid_compute_generation_bump`])
+/// and return an RAII guard that clears it on drop. The next
+/// materialiser cold compute bumps the project generation once, so the
+/// runtime's post-compute revalidation rejects the freshly-built entry
+/// through the exact production admission-refusal path.
+pub fn materialize_force_mid_compute_generation_bump_for_tests(
+    host: &crate::VerterHost,
+) -> MaterializeForceMidComputeGenerationBumpGuard<'_> {
+    host.materialize_force_mid_compute_generation_bump
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    MaterializeForceMidComputeGenerationBumpGuard { host }
+}
+
+/// Host-scoped RAII guard for the mid-compute generation-bump knob.
+pub struct MaterializeForceMidComputeGenerationBumpGuard<'h> {
+    host: &'h crate::VerterHost,
+}
+
+impl Drop for MaterializeForceMidComputeGenerationBumpGuard<'_> {
+    fn drop(&mut self) {
+        self.host
+            .materialize_force_mid_compute_generation_bump
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Arm the per-host relation-memo fact-injection knob and return an RAII
 /// guard that zeroes it on drop. Mirrors
 /// [`materialize_force_overflow_observations_for_tests`] for the relation

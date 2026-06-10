@@ -267,6 +267,12 @@ where
     /// `FnOnce` carried in a `RefCell<Option<_>>` so the `&self` `compute`
     /// method can `take()` it exactly once on the cold winner's call.
     compute: std::cell::RefCell<Option<F>>,
+    /// Winner-side lowering for an admission-REFUSED computed value (see
+    /// [`crate::cache_runtime::QueryNode::lower_unadmitted`]). `Some`
+    /// opts the cache in: the winner returns the COMPUTED value lowered
+    /// to its non-cacheable form instead of `None`. `None` keeps the
+    /// substrate's failure semantics for this cache.
+    unadmitted: Option<fn(&V) -> V>,
 }
 
 impl<'a, K, V, F> crate::cache_runtime::QueryNode for QueryCandidateNode<'a, K, V, F>
@@ -357,6 +363,10 @@ where
 
     fn evict_deferred(&self, victims: crate::cache_runtime::DeferredVictims<Self::Key>) {
         self.store.evict_deferred(victims);
+    }
+
+    fn lower_unadmitted(&self, value: &Self::Value) -> Option<Self::Value> {
+        self.unadmitted.map(|lower| lower(value))
     }
 }
 
@@ -577,6 +587,7 @@ impl ImportedRegistryDb {
             inflight: &self.inflight,
             ctx,
             compute: std::cell::RefCell::new(Some(node_compute)),
+            unadmitted: None,
         };
         crate::cache_runtime::query::lookup(&node, key.clone(), ctx)
     }
@@ -1832,6 +1843,19 @@ impl MaterializeStructureDb {
             inflight: &self.inflight,
             ctx,
             compute: std::cell::RefCell::new(Some(node_compute)),
+            // Admission refusal returns the COMPUTED outcome, lowered to
+            // its non-cacheable form: `cache_suppress = true` taints the
+            // enclosing build's memo admission; `result_is_partial` is
+            // untouched (a refused COMPLETE compute is benign
+            // non-cacheability, never a partial). Discarding the value
+            // would force the materialiser fallback to fabricate a
+            // shallower substitute, making the published surface a
+            // function of admission timing / parse order.
+            unadmitted: Some(|read| {
+                let mut read = read.clone();
+                read.cache_suppress = true;
+                read
+            }),
         };
         crate::cache_runtime::query::lookup(&node, key.clone(), ctx)
     }
@@ -2028,8 +2052,11 @@ pub struct RefCycleEntry {
 /// synchronous-compute contract), so borrow-capture of
 /// `&dyn ResolverContext` is safe — no thread-hop occurs. An overflowed /
 /// unrootable signature returns the computed bool through
-/// [`ComputeAdmission::ReturnOnly`] — the value reaches every joiner
-/// without admitting a candidate, and no second uncached BFS runs.
+/// [`ComputeAdmission::ReturnOnly`] without admitting a candidate; a
+/// `ReturnOnly` value is winner-only (it carries no view-validatable
+/// entry), so the winner alone receives it without re-running its BFS
+/// uncached, while a joiner that coalesced onto the `ReturnOnly`
+/// winner forks and cold-recomputes its own BFS against its own view.
 pub struct RefCycleResultDb {
     /// The shared reverse-indexed multi-candidate store (budgeted form).
     /// The `DeclIdentity` key embeds the file whole-hash, so each distinct
@@ -2153,6 +2180,7 @@ impl RefCycleResultDb {
             inflight: &self.inflight,
             ctx,
             compute: std::cell::RefCell::new(Some(node_compute)),
+            unadmitted: None,
         };
         crate::cache_runtime::query::lookup(&node, id.clone(), ctx)
     }
@@ -2485,10 +2513,13 @@ pub(crate) fn force_ref_cycle_return_only_for_tests() -> ForceRefCycleReturnOnly
 /// so capturing `&dyn ResolverContext` and `&DeclIdentity` directly is safe.
 ///
 /// On cooperative-admission success: bumps `live_counter`, registers
-/// the reverse-index, and returns `Some(CacheRead)`. The cold BFS runs
-/// once; an overflowed / unrootable signature returns the computed
-/// bool through [`ComputeAdmission::ReturnOnly`] without admitting the
-/// entry and **without a second uncached BFS**. `None` is returned
+/// the reverse-index, and returns `Some(CacheRead)`. The winner's cold
+/// BFS runs once; an overflowed / unrootable signature returns the
+/// computed bool through [`ComputeAdmission::ReturnOnly`] without
+/// admitting the entry and **without the winner re-running its BFS
+/// uncached** (a joiner coalesced onto a `ReturnOnly` winner forks and
+/// cold-recomputes against its own view — singleflight's winner-only
+/// `ReturnOnly` contract). `None` is returned
 /// only when cooperative admission's post-compute revalidation rejects
 /// the freshly-built entry.
 ///
@@ -2512,7 +2543,9 @@ where
     // Wrap the BFS cold-compute with `install_fact_tracer`. On `Ok`,
     // merge the traced observation set on top of the visited-identity
     // self-roots. On `Overflow`, return the computed bool via
-    // `ReturnOnly` (no second uncached BFS). The Db drives the
+    // `ReturnOnly` (winner-only; the winner does not re-run its BFS
+    // uncached, and joiners fork per the singleflight contract). The
+    // Db drives the
     // query-identity split-publish lifecycle over the shared store
     // (warm-hit lookup, revalidation, publish-core under the slot guard,
     // guard-free deferred FIFO eviction, publish fence).

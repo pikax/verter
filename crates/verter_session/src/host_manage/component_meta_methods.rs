@@ -26,13 +26,12 @@ use crate::instant::Instant;
 // resolved through `meta_resolve`'s private siblings; after the move,
 // they rewrite to `crate::meta_resolve::X` (the parent module's
 // re-exported `pub(crate)` surface).
-use crate::meta_resolve::compare_type_expr_improvement;
 use crate::meta_resolve::component_meta_registry_prefers_structural_materialization;
 use crate::meta_resolve::slot_binding_graph;
 use crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
 use crate::meta_resolve::{
-    collect_define_props_root_names, select_imported_materialization_scope,
-    slot_binding_targets_define_props_root, RegistryMaterialization, ResolvedComponentMetaState,
+    collect_define_props_root_names, slot_binding_targets_define_props_root,
+    RegistryMaterialization, ResolvedComponentMetaState,
 };
 use crate::meta_resolve::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
@@ -42,14 +41,13 @@ use crate::meta_resolve::{
     drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
 };
 use crate::meta_resolve::{
-    instantiate_local_generic_ref_via_dispatch, pick_via_dispatch_pick_helper,
-    project_expr_class_a_via_dispatch, project_expr_class_a_via_dispatch_threaded,
-    project_type_surface_expr_via_host_threaded,
-};
-use crate::meta_resolve::{
     next_component_meta_audit_request_id, request_source_performed_compute,
     should_skip_imported_registry_seed_refresh, trace_request_source, CapturedComponentMetaInputs,
     ResolvedComponentMetaComputeAudit, ResolvedTypeRegistryMeta,
+};
+use crate::meta_resolve::{
+    pick_via_dispatch_pick_helper, project_expr_class_a_via_dispatch,
+    project_expr_class_a_via_dispatch_threaded, project_type_surface_expr_via_host_threaded,
 };
 
 // Items that live in the parent shell (`crate::meta_resolve`): the
@@ -72,6 +70,7 @@ use crate::resolver_core::component_meta_registry::{
     component_meta_registry_expr_references_name,
     component_meta_registry_has_explicit_object_surface,
     component_meta_registry_has_non_object_top_level_surface,
+    component_meta_registry_has_unmerged_heritage_intersection,
     component_meta_registry_raw_member_path_surface, component_meta_registry_ref_name,
     enqueue_component_meta_registry_ref, merge_component_meta_registry_candidates,
     owner_component_meta_registry_import_root, upsert_component_meta_registry_entry,
@@ -1470,99 +1469,90 @@ impl VerterHost {
                         .iter()
                         .map(|member| match member {
                             ObjectMember::Property(property) => {
+                                // Owner-scope TYPED projection first:
+                                // `Ref{symbol}["<property>"]` binds fully in
+                                // the OWNER scope (the alias and its
+                                // substituted argument references are
+                                // owner-file names), and the shared dispatch
+                                // resolves every nested reference in its own
+                                // defining file through per-file name
+                                // resolution. A raised property value cannot
+                                // be re-lowered in any ONE scope — it mixes
+                                // the alias body's helper names (defining
+                                // file) with substituted argument names
+                                // (owner file), and an argument reference
+                                // that fails to bind leaves its conditional
+                                // contribution silently undecided. Same
+                                // route shape as the registry member-path
+                                // route below.
+                                let route_expr = build_registry_indexed_access_expr(
+                                    symbol_name,
+                                    std::slice::from_ref(&property.name),
+                                );
+                                let typed_projected = project_expr_class_a_via_dispatch_threaded(
+                                    query_engine.ctx,
+                                    Some(query_engine),
+                                    scope_canonical_id,
+                                    &route_expr,
+                                )
+                                .filter(|projected| {
+                                    !crate::resolver_core::type_expr_contains_semantic_miss(
+                                        projected,
+                                    )
+                                });
+                                // One materialise + one Navigate-mode
+                                // stabilisation per property, in the
+                                // imported alias's DEFINING scope — the
+                                // remaining carriers are the alias body's
+                                // helper references, which resolve there.
+                                // Publication demand is Navigate
+                                // (shallow-by-default); the consumer
+                                // re-resolves carriers on demand through the
+                                // shared resolver, so no per-property
+                                // re-solve or improvement pick runs here.
+                                let materialize_scope = imported_generic_alias_scope
+                                    .as_deref()
+                                    .unwrap_or(scope_canonical_id);
+                                let refine_input =
+                                    typed_projected.as_ref().unwrap_or(&property.ty);
                                 let materialized =
                                     query_engine.materialize_member_surface_expr(
-                                        scope_canonical_id,
-                                        &property.ty,
+                                        materialize_scope,
+                                        refine_input,
                                         true,
                                     );
                                 let stabilized =
                                     materialize_component_meta_type_expr_until_stable(
                                         &materialized,
-                                        scope_canonical_id,
-                                        crate::semantic_query::ProjectionMode::Expanded,
+                                        materialize_scope,
+                                        crate::semantic_query::ProjectionMode::Navigate,
                                         query_engine,
                                     );
-                                // For generic Ref members (e.g. ComponentVariants<T>),
-                                // try expanding and solving in the correct scope so
-                                // concrete args produce concrete member shapes.
-                                let solved = match &stabilized {
-                                    TypeExpr::Ref { type_arguments, .. }
-                                        if !type_arguments.is_empty() =>
-                                    {
-                                        let materialize_scope =
-                                            select_imported_materialization_scope(
-                                                &stabilized,
-                                                scope_canonical_id,
-                                                query_engine,
-                                            )
-                                            .or_else(|| imported_generic_alias_scope.clone())
-                                            .unwrap_or_else(|| {
-                                                scope_canonical_id.to_string()
-                                            });
-                                        // Migrate the
-                                        // generic-Ref instantiation to dispatch
-                                        // (sub- D-T recipe). The
-                                        // helper resolves
-                                        // `instantiate_local_generic_ref` via
-                                        // the dispatch's `Instantiate` arm
-                                        // (`SemanticQueryKey::Instantiate`).
-                                        let expanded =
-                                            instantiate_local_generic_ref_via_dispatch(
-                                                query_engine.ctx,
-                                                materialize_scope.as_str(),
-                                                &stabilized,
-                                            )
-                                            .unwrap_or_else(|| stabilized.clone());
-                                        // Migrate the
-                                        // route-loop call to the Class A
-                                        // dispatch helper. The helper covers
-                                        // the registry-route fast-path AND
-                                        // the generic ProjectPath{[],Expanded}
-                                        // dispatch; preserving the engine
-                                        // thread keeps fuse / scope-payload
-                                        // continuity for the route fast-path
-                                        // (still on the engine until
-                                        // alongside instantiate_local_generic_ref).
-                                        project_expr_class_a_via_dispatch_threaded(
-                                            query_engine.ctx,
-                                            Some(query_engine),
-                                            materialize_scope.as_str(),
-                                            &expanded,
-                                        )
-                                        .map(|solved| {
-                                            query_engine.materialize_member_surface_expr(
-                                                materialize_scope.as_str(),
-                                                &solved,
-                                                true,
-                                            )
-                                        })
-                                        .unwrap_or_else(|| stabilized.clone())
-                                    }
-                                    _ => stabilized.clone(),
+                                // No-poison: a property value raised from
+                                // the shared graph can carry carriers whose
+                                // declarations live in OTHER files; the
+                                // single-scope re-materialisation misses on
+                                // those by name. A reduction that
+                                // INTRODUCED a semantic-miss sentinel the
+                                // input did not carry is "no reduction
+                                // available here" — keep the input carrier.
+                                let ty = if crate::resolver_core::type_expr_contains_semantic_miss(
+                                    &stabilized,
+                                ) && !crate::resolver_core::type_expr_contains_semantic_miss(
+                                    refine_input,
+                                ) {
+                                    refine_input.clone()
+                                } else {
+                                    stabilized
                                 };
                                 ObjectMember::Property(ObjectProperty::with_visibility(
                                     property.name.clone(),
-                                    if compare_type_expr_improvement(&solved, &property.ty) {
-                                        solved
-                                    } else if compare_type_expr_improvement(
-                                        &stabilized,
-                                        &property.ty,
-                                    ) {
-                                        stabilized
-                                    } else if compare_type_expr_improvement(
-                                        &materialized,
-                                        &property.ty,
-                                    ) {
-                                        materialized
-                                    } else {
-                                        property.ty.clone()
-                                    },
+                                    ty,
                                     property.optional,
                                     property.readonly,
-                                    // Type improvement rebuilds an EXISTING member
-                                    // (only its value type may change): preserve
-                                    // its declared accessibility AND its spans.
+                                    // The member is rebuilt with only its value
+                                    // type changed: preserve its declared
+                                    // accessibility AND its spans.
                                     property.visibility,
                                     property.spans,
                                 ))
@@ -1573,8 +1563,18 @@ impl VerterHost {
                     TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
                 };
 
+            // Prefer-raw applies only when the raw body already IS an
+            // explicit one-level surface. An UN-MERGED heritage intersection
+            // (`interface X extends Base { ... }` lowered as
+            // `Intersection([Ref{Base}, Object{own}])`) is not — it must fall
+            // through to the shared materialisation routes, which fold base +
+            // own members into the heritage-merged shallow Object surface
+            // through the one empty-path Shallow surface walker.
             if prefer_explicit_raw_surface
-                && raw_body.is_some_and(component_meta_registry_has_explicit_object_surface)
+                && raw_body.is_some_and(|expr| {
+                    component_meta_registry_has_explicit_object_surface(expr)
+                        && !component_meta_registry_has_unmerged_heritage_intersection(expr)
+                })
             {
                 return raw_body.cloned().map(|candidate| {
                     maybe_refine_imported_generic_alias_object(candidate, query_engine)
@@ -1590,15 +1590,27 @@ impl VerterHost {
             }) {
                 return raw_body.cloned();
             }
-            // Migrate the structural-materialisation
-            // preference to the graph-native predicate. Lower the raw
-            // TypeExpr to a Navigate-mode SemanticNodeId and consult
+            // Structural-materialisation preference is the graph-native
+            // predicate: lower the raw TypeExpr to a Navigate-mode
+            // SemanticNodeId and consult
             // `component_meta_registry_prefers_structural_materialization_node`.
-            // Falls back to the legacy TypeExpr predicate when lowering
-            // fails (matches conservative "not structural" semantics
-            // when no canonical node id exists).
+            // Falls back to the TypeExpr predicate when lowering fails
+            // (matches conservative "not structural" semantics when no
+            // canonical node id exists).
             if let Some(raw) = raw_body.filter(|expr| {
                 if !component_meta_registry_has_non_object_top_level_surface(expr) {
+                    return false;
+                }
+                // An un-merged heritage intersection must NOT take the
+                // structural route: the structural materialiser preserves the
+                // compound's arm structure (it would publish
+                // `Intersection([Object, Object])`), while the registry
+                // contract for a heritage interface is the MERGED one-level
+                // Object surface. Fall through to the symbol-rooted dispatch
+                // bridge, whose compound-root composition runs the shared
+                // empty-path Shallow surface walker (the one heritage-merge
+                // engine).
+                if component_meta_registry_has_unmerged_heritage_intersection(expr) {
                     return false;
                 }
                 let host = query_engine.ctx;
@@ -1898,20 +1910,13 @@ impl VerterHost {
                             symbol_name,
                             std::slice::from_ref(member),
                         );
-                        // The alias-body fallback was
-                        //; B1's materialiser
-                        // branch handles
-                        // route shapes natively. The remaining
-                        // surface-expr fallback covers non-route
-                        // shapes.
-                        //
-                        // Migrate to dispatch
-                        // (sub- D-T recipe: RouteDemand::MemberPath
-                        // → Class A with path). The Class A helper handles
-                        // the IndexedAccess route_expr through its
-                        // registry-route fast-path internally; the previous
-                        // `project_route_surface_expr` + fallback chain
-                        // collapses to a single dispatch call.
+                        // Route shapes resolve natively through the
+                        // materialiser branch; the remaining surface-expr
+                        // fallback covers non-route shapes. The Class A
+                        // dispatch helper handles the IndexedAccess
+                        // route_expr through its registry-route fast-path
+                        // internally, so the member-path route is a single
+                        // dispatch call.
                         let _ = &member_route; // route demand carrier retained for parity
                         let projected = project_expr_class_a_via_dispatch_threaded(
                             query_engine.ctx,
@@ -1940,92 +1945,42 @@ impl VerterHost {
                                 );
                             });
                         }
+                        // One materialise + one Navigate-mode stabilisation
+                        // per routed member. Publication demand is Navigate
+                        // (shallow-by-default); carriers on the routed
+                        // member surface are re-resolved by the consumer
+                        // through the shared resolver, so no per-member
+                        // re-solve or improvement pick runs here.
                         let member_surface = query_engine.materialize_member_surface_expr(
                             scope_canonical_id,
                             &projected,
                             true,
                         );
-                        let stabilized_input = materialize_component_meta_type_expr_until_stable(
+                        let stabilized = materialize_component_meta_type_expr_until_stable(
                             &member_surface,
                             scope_canonical_id,
-                            crate::semantic_query::ProjectionMode::Expanded,
+                            crate::semantic_query::ProjectionMode::Navigate,
                             query_engine,
                         );
-                        let stabilized_surface = query_engine.materialize_member_surface_expr(
-                            scope_canonical_id,
-                            &stabilized_input,
-                            true,
-                        );
-                        let solved_surface = match &stabilized_surface {
-                            TypeExpr::Ref { type_arguments, .. } if !type_arguments.is_empty() => {
-                                let materialize_scope_canonical_id =
-                                    select_imported_materialization_scope(
-                                        &stabilized_surface,
-                                        scope_canonical_id,
-                                        query_engine,
-                                    )
-                                    .unwrap_or_else(|| scope_canonical_id.to_string());
-                                // Migrate the generic-Ref
-                                // instantiation to dispatch.
-                                let expanded = instantiate_local_generic_ref_via_dispatch(
-                                    query_engine.ctx,
-                                    materialize_scope_canonical_id.as_str(),
-                                    &stabilized_surface,
+                        // No-poison: keep the routed member surface when the
+                        // stabilisation INTRODUCED a semantic-miss sentinel
+                        // it did not carry (an owner-scope re-lowering miss
+                        // on a foreign-file carrier is "no reduction
+                        // available here", not "unknown").
+                        let ty =
+                            if crate::resolver_core::type_expr_contains_semantic_miss(&stabilized)
+                                && !crate::resolver_core::type_expr_contains_semantic_miss(
+                                    &member_surface,
                                 )
-                                .unwrap_or_else(|| stabilized_surface.clone());
-                                // Migrate the route-loop
-                                // call to the Class A dispatch helper.
-                                let solved_opt = project_expr_class_a_via_dispatch_threaded(
-                                    query_engine.ctx,
-                                    Some(query_engine),
-                                    materialize_scope_canonical_id.as_str(),
-                                    &expanded,
-                                )
-                                .or(Some(expanded));
-                                solved_opt.map(|solved| {
-                                    query_engine.materialize_member_surface_expr(
-                                        materialize_scope_canonical_id.as_str(),
-                                        &solved,
-                                        true,
-                                    )
-                                })
-                            }
-                            TypeExpr::Mapped { .. } => {
-                                // Migrate the route-loop
-                                // call to the Class A dispatch helper.
-                                let solved_opt = project_expr_class_a_via_dispatch_threaded(
-                                    query_engine.ctx,
-                                    Some(query_engine),
-                                    scope_canonical_id,
-                                    &stabilized_surface,
-                                );
-                                solved_opt.map(|solved| {
-                                    query_engine.materialize_member_surface_expr(
-                                        scope_canonical_id,
-                                        &solved,
-                                        true,
-                                    )
-                                })
-                            }
-                            _ => None,
-                        };
-                        let best_surface = if let Some(solved_surface) = solved_surface {
-                            if compare_type_expr_improvement(&solved_surface, &stabilized_surface) {
-                                solved_surface
+                            {
+                                member_surface
                             } else {
-                                stabilized_surface
-                            }
-                        } else {
-                            stabilized_surface
-                        };
+                                stabilized
+                            };
                         properties.push(ObjectMember::Property(
                             ObjectProperty::synthetic_with_visibility(
                                 member.clone(),
-                                if compare_type_expr_improvement(&best_surface, &member_surface) {
-                                    best_surface
-                                } else {
-                                    member_surface
-                                },
+                                ty,
                                 true,
                                 false,
                                 member_visibility,
@@ -2035,14 +1990,12 @@ impl VerterHost {
                     (!properties.is_empty())
                         .then(|| TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties })))
                         .or_else(|| {
-                            // Migrate route-target
-                            // (RouteDemand::Pick) via D-T recipe: dispatch
-                            // through `execute_pick` (sub- D-T).
-                            // The pick_via_dispatch_pick_helper resolves the
-                            // symbol to a base node via Class A lowering, then
-                            // dispatches `Pick<base, key_set>` through the
-                            // builtin Pick utility path; falls back to the
-                            // raw materialiser candidate for non-Object bases.
+                            // The Pick route dispatches through the builtin
+                            // Pick utility path: pick_via_dispatch_pick_helper
+                            // resolves the symbol to a base node via Class A
+                            // lowering, then dispatches `Pick<base, key_set>`;
+                            // falls back to the raw materialiser candidate for
+                            // non-Object bases.
                             pick_via_dispatch_pick_helper(
                                 query_engine,
                                 scope_canonical_id,

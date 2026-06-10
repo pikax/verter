@@ -1,7 +1,8 @@
 use super::*;
 use crate::semantic_query::{
-    IndexSignature, NodeScopeId, OriginEdgeKind, PathSegment, ProjectionMode, ScopeId,
-    SemanticNodeData, SemanticQueryOutput, SurfaceMember, SurfaceView, ValueRootKey,
+    IndexSignature, NodeScopeId, OriginEdgeKind, PathSegment, ProjectionMode,
+    ProjectionReductionContext, ScopeId, SemanticNodeData, SemanticQueryOutput, SurfaceMember,
+    SurfaceView, ValueRootKey,
 };
 use crate::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
 
@@ -1383,9 +1384,10 @@ fn type_of_resolves_value_binding() {
         },
         name: Arc::from("foo"),
     };
-    let hit = dispatch.execute_type_node(SemanticQueryKey::TypeOf {
-        value_root: value_key,
-    });
+    let hit = dispatch.execute_type_node(dispatch.typeof_key_for(
+        value_key,
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    ));
     assert!(matches!(hit, QueryResult::Value(_)));
 
     let miss_key = ValueRootKey {
@@ -1395,9 +1397,10 @@ fn type_of_resolves_value_binding() {
         },
         name: Arc::from("notThere"),
     };
-    let miss = dispatch.execute_type_node(SemanticQueryKey::TypeOf {
-        value_root: miss_key,
-    });
+    let miss = dispatch.execute_type_node(dispatch.typeof_key_for(
+        miss_key,
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    ));
     assert!(matches!(miss, QueryResult::Error(QueryError::Miss)));
 }
 
@@ -4569,11 +4572,11 @@ fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
     }
 }
 
-/// Structural utilities (Pick, Omit, Extract, Exclude, NonNullable)
-/// and function utilities (ReturnType, Parameters, etc.) without full
-/// dispatcher support return `Opaque(Miss)` shells anchored to the
-/// utility identity with an `Instantiate` edge so origin walks remain
-/// coherent.
+/// Utilities whose reduction is not handled for the given operand
+/// shape (single-argument Pick/Omit/Extract/Exclude, function
+/// utilities over a non-callable object, recursive `Awaited`) return
+/// `Opaque(Miss)` shells anchored to the utility identity with an
+/// `Instantiate` edge so origin walks remain coherent.
 #[test]
 fn deferred_utilities_return_opaque_miss_with_instantiate_edge() {
     let host = host();
@@ -4589,7 +4592,6 @@ fn deferred_utilities_return_opaque_miss_with_instantiate_edge() {
         "Omit",
         "Extract",
         "Exclude",
-        "NonNullable",
         "ReturnType",
         "Parameters",
         "ConstructorParameters",
@@ -4624,6 +4626,91 @@ fn deferred_utilities_return_opaque_miss_with_instantiate_edge() {
     }
 }
 
+/// `NonNullable<T>` reduces SETTLED operands: a settled union filters
+/// its nullish arms; a settled non-nullable shape passes through;
+/// nullish primitives reduce to `never`. An UNSETTLED operand (a
+/// carrier such as an unsubstituted `TypeParam`) keeps the deferred
+/// `Opaque(Miss)` shell. Every result still records the `Instantiate`
+/// origin edge so origin walks remain coherent.
+#[test]
+fn non_nullable_reduces_settled_operands() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let anchor = utility_identity(&graph, "NonNullable");
+    let run = |arg: SemanticNodeId| -> SemanticNodeId {
+        match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+            base: anchor.clone(),
+            args: Arc::from(vec![arg].into_boxed_slice()),
+            context: crate::semantic_query::InstantiateContext::new(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+            ),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("expected Value for NonNullable, got {other:?}"),
+        }
+    };
+
+    // Settled non-nullable object passes through unchanged.
+    let num = primitive(&graph, PrimitiveKind::Number);
+    let source = simple_object(&graph, &[("a", num)]);
+    let passthrough = run(source);
+    assert_eq!(
+        passthrough, source,
+        "NonNullable over a settled non-nullable object must pass the operand through"
+    );
+    let inst_edges = graph.origins_of_kind(passthrough, OriginEdgeKind::Instantiate);
+    assert!(
+        !inst_edges.is_empty(),
+        "settled NonNullable reduction must still record the Instantiate origin edge"
+    );
+
+    // Settled union filters nullish arms.
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let null_node = primitive(&graph, PrimitiveKind::Null);
+    let undefined_node = primitive(&graph, PrimitiveKind::Undefined);
+    let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![string_node, null_node, undefined_node].into_boxed_slice(),
+    )));
+    let filtered = run(union);
+    assert_eq!(
+        filtered, string_node,
+        "NonNullable over `string | null | undefined` must filter to `string`"
+    );
+
+    // Nullish primitive collapses to `never`.
+    let never_node = primitive(&graph, PrimitiveKind::Never);
+    assert_eq!(
+        run(null_node),
+        never_node,
+        "NonNullable over `null` must reduce to `never`"
+    );
+
+    // UNSETTLED operand (an unsubstituted TypeParam carrier) keeps the
+    // deferred Opaque(Miss) shell with the Instantiate edge.
+    let open_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let deferred = run(open_param);
+    let deferred_data = graph.node_data(deferred).expect("deferred data");
+    assert!(
+        matches!(&*deferred_data, SemanticNodeData::Opaque(_)),
+        "NonNullable over an unsettled carrier operand must stay Opaque, got {deferred_data:?}"
+    );
+    let deferred_edges = graph.origins_of_kind(deferred, OriginEdgeKind::Instantiate);
+    assert!(
+        !deferred_edges.is_empty(),
+        "deferred NonNullable shell must still emit the Instantiate edge"
+    );
+}
+
 /// `ReturnType<typeof fn>` routes purely through dispatch.
 /// `build_typeof` lowers the value to a
 /// [`SemanticNodeData::Object`] whose `call_signatures[0]` is a
@@ -4644,15 +4731,16 @@ fn return_type_of_typeof_local_fn_resolves_via_dispatch() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     // Step 1: `typeof makeLabel` → Object with single call signature.
-    let typeof_id = match dispatch.execute_type_node(SemanticQueryKey::TypeOf {
-        value_root: ValueRootKey {
+    let typeof_id = match dispatch.execute_type_node(dispatch.typeof_key_for(
+        ValueRootKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/w/fns.ts"),
                 local_scope: None,
             },
             name: Arc::from("makeLabel"),
         },
-    }) {
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected TypeOf to resolve, got {other:?}"),
     };
@@ -5667,12 +5755,15 @@ fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
     );
 }
 
-/// Pick/Omit lower as `InstantiationRef` carriers in
-/// `Navigate` mode so the materialiser registry-route guard can apply
-/// cycle / package gates BEFORE dispatch's `build_builtin_utility`
-/// projects. Other utilities (Extract, Exclude, NonNullable, Partial,
-/// Required, Readonly, Mutable) and other modes (Expanded, Identity,
-/// Shallow) keep the existing eager-resolve path.
+/// Builtin-utility lowering mode table. `Shallow` lowering interns the
+/// `InstantiationRef` carrier for ALL builtins (materialisation happens
+/// at the demand points). `Navigate` preserves the carrier for the
+/// object-filter family (Pick/Omit) ALWAYS — so the materialiser
+/// registry-route guard can apply cycle / package gates BEFORE
+/// dispatch's `build_builtin_utility` projects — and for other builtins
+/// only when an argument is OPEN; closed-argument non-Pick/Omit
+/// builtins under Navigate keep the eager-resolve path byte-for-byte.
+/// `Expanded` / `Identity` lowering still executes eagerly.
 #[test]
 fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
     use verter_type_expr::{LiteralValue, TypeExpr};
@@ -5747,8 +5838,9 @@ fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
     }
 
     // Negative: Extract / Exclude / NonNullable / Partial / Required / Readonly / Mutable
-    // in Navigate mode must NOT preserve a builtin InstantiationRef carrier — they keep
-    // the existing eager-resolve path and either project or fall through to opaque.
+    // over a CLOSED argument in Navigate mode must NOT preserve a builtin
+    // InstantiationRef carrier — closed-argument non-Pick/Omit builtins keep the
+    // eager-resolve path and either project or fall through to opaque.
     for util_name in [
         "Extract",
         "Exclude",
@@ -5780,21 +5872,126 @@ fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
         );
         assert!(
             !is_builtin_carrier,
-            "{util_name} in Navigate must NOT preserve a builtin InstantiationRef carrier \
-             (B0 narrows the short-circuit to Pick/Omit only)"
+            "{util_name} over a CLOSED argument in Navigate must NOT preserve a builtin \
+             InstantiationRef carrier — closed-argument non-Pick/Omit builtins eagerly execute"
         );
     }
 
-    // Negative: Pick<Foo, 'a'> in Expanded / Identity / Shallow modes must NOT
-    // preserve the carrier — those modes still go through dispatch's project.
-    for mode in [
-        ProjectionMode::Expanded,
-        ProjectionMode::Identity,
-        ProjectionMode::Shallow,
-    ] {
+    // Positive: a non-Pick/Omit builtin over an OPEN argument (an
+    // unsubstituted `TypeParam` shell) preserves the carrier in the
+    // carrier modes. Skeleton-instantiating `Wrap<T>` with empty args
+    // turns `T` into a `TypeParam` shell, so the member values
+    // `NonNullable<T>` / `Partial<T>` lower with a genuinely open
+    // argument — eager execution would bake `Opaque(Miss)` into the
+    // produced structure and destroy what the demand points need.
+    upsert_ts(
+        &host,
+        "/gen.ts",
+        "export type Wrap<T> = { v: NonNullable<T>; p: Partial<T> };",
+    );
+    host.shallow_file_state("/gen.ts")
+        .expect("gen.ts must have shallow file state");
+    let wrap_body = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: dispatch.type_slot_for(Arc::from("/gen.ts"), Arc::from("Wrap")),
+        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        context: crate::semantic_query::InstantiateContext::new(
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Skeleton),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("skeleton instantiate of Wrap must produce a node, got {other:?}"),
+    };
+    let graph = host.project_type_store().semantic_graph();
+    let wrap_data = graph.node_data(wrap_body).expect("Wrap body data");
+    let members = match wrap_data.as_ref() {
+        SemanticNodeData::Object(view) => view.members.clone(),
+        other => panic!("Wrap skeleton body must be an Object surface, got {other:?}"),
+    };
+    for (member_name, util_name) in [("v", "NonNullable"), ("p", "Partial")] {
+        let member = members
+            .iter()
+            .find(|m| m.name.as_ref() == member_name)
+            .unwrap_or_else(|| panic!("member `{member_name}` present on Wrap"));
+        let value_data = graph.node_data(member.value).expect("member value data");
+        match value_data.as_ref() {
+            SemanticNodeData::InstantiationRef { base, .. } => {
+                assert_eq!(
+                    base.canonical_id.as_ref(),
+                    "__builtin__",
+                    "{util_name} over an open argument keeps the builtin carrier"
+                );
+                assert_eq!(base.decl_name.as_ref(), util_name);
+            }
+            other => panic!(
+                "{util_name}<T> over an OPEN argument must lower to the \
+                 InstantiationRef carrier; got {other:?}"
+            ),
+        }
+    }
+
+    // Shallow lowering interns the carrier for ALL builtins — including a
+    // closed-argument Pick — because Shallow decl-body lowering is
+    // carrier-preserving; materialisation happens at the demand points.
+    let pick_shallow = dispatch
+        .lower_type_expr_in_scope_with_mode("/types.ts", &pick, ProjectionMode::Shallow)
+        .expect("Pick lowering in Shallow mode succeeds");
+    match host
+        .project_type_store()
+        .semantic_graph()
+        .node_data(pick_shallow)
+        .expect("memoised node")
+        .as_ref()
+    {
+        SemanticNodeData::InstantiationRef { base, args } => {
+            assert_eq!(
+                base.decl_name.as_ref(),
+                "Pick",
+                "Shallow-mode Pick preserves the builtin carrier"
+            );
+            assert_eq!(base.canonical_id.as_ref(), "__builtin__");
+            assert_eq!(args.len(), 2, "Pick<Foo, 'a'> carries [Foo, 'a']");
+        }
+        other => panic!(
+            "Pick in Shallow must preserve the builtin InstantiationRef carrier; got {other:?}"
+        ),
+    }
+    // ... and for a non-object-filter builtin over a CLOSED argument too.
+    let partial_closed = TypeExpr::Ref {
+        name: Arc::from("Partial"),
+        type_arguments: Arc::from(vec![TypeExpr::Ref {
+            name: Arc::from("Foo"),
+            type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+        }]),
+    };
+    let partial_shallow = dispatch
+        .lower_type_expr_in_scope_with_mode("/types.ts", &partial_closed, ProjectionMode::Shallow)
+        .expect("Partial lowering in Shallow mode succeeds");
+    match host
+        .project_type_store()
+        .semantic_graph()
+        .node_data(partial_shallow)
+        .expect("memoised node")
+        .as_ref()
+    {
+        SemanticNodeData::InstantiationRef { base, .. } => {
+            assert_eq!(
+                base.decl_name.as_ref(),
+                "Partial",
+                "Shallow-mode Partial preserves the builtin carrier"
+            );
+        }
+        other => panic!(
+            "Partial in Shallow must preserve the builtin InstantiationRef carrier; got {other:?}"
+        ),
+    }
+
+    // Negative: Pick<Foo, 'a'> in Expanded / Identity modes must NOT preserve
+    // the carrier — eager lowering-time execution remains Expanded/Identity only.
+    for mode in [ProjectionMode::Expanded, ProjectionMode::Identity] {
         let lowered = dispatch
             .lower_type_expr_in_scope_with_mode("/types.ts", &pick, mode)
-            .expect("Pick lowering in non-Navigate mode succeeds");
+            .expect("Pick lowering in eager mode succeeds");
         let data = host
             .project_type_store()
             .semantic_graph()
@@ -5808,7 +6005,7 @@ fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
         assert!(
             !is_builtin_carrier,
             "Pick in {mode:?} must NOT preserve a builtin InstantiationRef carrier — \
-             the B0 short-circuit fires only in Navigate mode",
+             eager lowering-time execution remains Expanded/Identity only",
         );
     }
 }
@@ -5910,30 +6107,27 @@ fn open_pick_omit_carrier_stops_in_expanded_and_structural_transit() {
 
 /// Route/mode-INDEPENDENT L1 at the LOWERING entrance (`lower.rs`). An
 /// OPEN-domain `Pick`/`Omit` preserves the `InstantiationRef` carrier in
-/// EVERY lowering mode (Navigate, Expanded, Shallow, Skeleton); a CLOSED
+/// EVERY lowering mode (Navigate, Expanded, Shallow, Skeleton). A CLOSED
 /// domain still materialises (dispatches the `Instantiate` query) in the
-/// non-Navigate modes.
-///
-/// **Discriminating.** Pre-change the lowering carrier short-circuit fires
-/// ONLY in `Navigate` mode, so an OPEN `Pick<OpenAlias, 'a'>` lowered in
-/// Expanded / Shallow / Skeleton dispatches `Instantiate` and does NOT
-/// preserve the builtin carrier — this test's OPEN-in-non-Navigate
-/// assertions FAIL pre-change and PASS post-change. The CLOSED-still-
-/// materialises arms guard against the carrier-stop over-firing on a finite
-/// surface.
+/// eager modes (Expanded, Skeleton); `Shallow` decl-body lowering is
+/// carrier-preserving for ALL builtins, so a CLOSED Pick lowers to the
+/// carrier there too — the materialisation guarantee lives at the demand
+/// point: an empty-path `Published(Shallow)` surface read over the
+/// Shallow-lowered carrier still materialises the picked key
+/// path-precisely (picked key present, omitted key absent).
 #[test]
 fn open_pick_lowering_preserves_carrier_all_modes_closed_still_materializes() {
     use verter_type_expr::{LiteralValue, TypeExpr};
 
     let host = host();
-    // CLOSED source `Foo = { a }`; OPEN source `OpenAlias<T> = T extends
+    // CLOSED source `Foo = { a, b }`; OPEN source `OpenAlias<T> = T extends
     // string ? { a: T } : { b: T }` — a conditional-bodied generic alias
     // whose enumeration domain stays open (the bounded alias-chain walk
     // terminates at a Conditional, not a finite object surface).
     upsert_ts(
         &host,
         "/types.ts",
-        "export type Foo = { a: string };\n\
+        "export type Foo = { a: string; b: number };\n\
          export type OpenAlias<T> = T extends string ? { a: T } : { b: T };",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -5987,17 +6181,20 @@ fn open_pick_lowering_preserves_carrier_all_modes_closed_still_materializes() {
              (route/mode-independent L1)"
         );
 
-        // CLOSED domain → in non-Navigate modes it must NOT preserve the
-        // carrier (it materialises path-precisely); Navigate always carries
-        // (the reducer decides closed→materialise downstream).
+        // CLOSED domain → in the eager modes (Expanded, Skeleton) it must
+        // NOT preserve the carrier (it materialises path-precisely);
+        // Navigate always carries (the reducer decides closed→materialise
+        // downstream) and Shallow decl-body lowering is carrier-preserving
+        // for ALL builtins (the demand point materialises — asserted
+        // below).
         let closed_lowered = dispatch
             .lower_type_expr_in_scope_with_mode("/types.ts", &closed_pick, mode)
             .expect("closed Pick lowering succeeds");
-        if matches!(mode, ProjectionMode::Navigate) {
+        if matches!(mode, ProjectionMode::Navigate | ProjectionMode::Shallow) {
             assert!(
                 is_builtin_carrier(closed_lowered),
-                "CLOSED Pick<Foo, 'a'> in Navigate still lowers to the carrier (the \
-                 reducer materialises it downstream)"
+                "CLOSED Pick<Foo, 'a'> in {mode:?} still lowers to the carrier (the \
+                 demand point materialises it)"
             );
         } else {
             assert!(
@@ -6006,6 +6203,45 @@ fn open_pick_lowering_preserves_carrier_all_modes_closed_still_materializes() {
                  over-fire on a finite surface)"
             );
         }
+    }
+
+    // Demand-point guarantee: the empty-path `Published(Shallow)` surface
+    // read over the Shallow-lowered CLOSED Pick carrier materialises the
+    // picked key path-precisely — `a` present, the omitted `b` absent.
+    let shallow_carrier = dispatch
+        .lower_type_expr_in_scope_with_mode("/types.ts", &closed_pick, ProjectionMode::Shallow)
+        .expect("closed Pick lowering in Shallow succeeds");
+    assert!(
+        is_builtin_carrier(shallow_carrier),
+        "precondition: the Shallow-lowered closed Pick is the builtin carrier"
+    );
+    let surface = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base: shallow_carrier,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Shallow,
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("empty-path Shallow surface read must succeed, got {other:?}"),
+    };
+    match graph.node_data(surface).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+            assert!(
+                names.contains(&"a"),
+                "the demand-point read over the closed Pick carrier must materialise \
+                 the picked key `a`, got {names:?}"
+            );
+            assert!(
+                !names.contains(&"b"),
+                "the omitted key `b` must NOT enter the picked surface, got {names:?}"
+            );
+        }
+        other => panic!(
+            "the empty-path Shallow surface read over the closed Pick carrier must \
+             materialise an Object surface, got {other:?}"
+        ),
     }
 }
 
@@ -12665,5 +12901,32 @@ fn projection_budget_counts_instantiate_and_conditional() {
     assert!(
         super::semantic_query_counts_toward_projection_budget(&mapped),
         "the original projection-operator kinds must still count"
+    );
+
+    // `TypeOf` is a demand-bearing projection reducer: `build_typeof`
+    // lowers a value's declaration graph at the requested demand, so a
+    // typeof-dominated storm (a wide value graph crossed repeatedly
+    // through `typeof` roots) is the same expansion-storm shape as
+    // `Instantiate` / `Conditional`. Excluding it would leave the new
+    // reducer outside the armed 2000-op fuse.
+    let type_of = SemanticQueryKey::TypeOf {
+        value_root: crate::semantic_query::ValueRootSlotIdentity::new(
+            crate::semantic_query::ValueRootKey {
+                scope: crate::semantic_query::ScopeId::file(Arc::from("/budget/value.ts")),
+                name: Arc::from("sample"),
+            },
+            0,
+            HashValue::default(),
+            HashValue::default(),
+        ),
+        context: crate::semantic_query::TypeOfContext::new(
+            ProjectionReductionContext::structural_transit(),
+            HashValue::default(),
+        ),
+    };
+    assert!(
+        super::semantic_query_counts_toward_projection_budget(&type_of),
+        "TypeOf carries projection demand and must count toward the request work budget \
+         (fail-closed backstop)"
     );
 }

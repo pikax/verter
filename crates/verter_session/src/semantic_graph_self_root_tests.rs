@@ -149,15 +149,18 @@ fn typeof_same_canonical_edit_rejects_warm_entry() {
     let c = "/sg_self_root/typeof.ts";
     upsert(&host, c, "export const val = { a: 1 };\n");
     let dispatch = host.semantic_dispatch();
-    let key = SemanticQueryKey::TypeOf {
-        value_root: crate::semantic_query::ValueRootKey {
+    let key = dispatch.typeof_key_for(
+        crate::semantic_query::ValueRootKey {
             scope: ScopeId {
                 canonical_id: Arc::from(c),
                 local_scope: None,
             },
             name: Arc::from("val"),
         },
-    };
+        crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    );
 
     let primed = dispatch.execute_type_node(key.clone());
     assert!(

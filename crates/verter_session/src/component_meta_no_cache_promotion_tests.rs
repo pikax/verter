@@ -307,13 +307,102 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
     );
 }
 
-/// Non-projection-op queries (Conditional, Instantiate, ResolveDecl,
-/// TypeOf, NormalizeUnion, NormalizeIntersection, ResolvedNamedType,
-/// Relate, ResolveMacroPayload) MUST be unaffected by the post-trip
+/// The post-trip early-exit ATTRIBUTION must mirror EVERY kind the
+/// aggregate work-budget gate counts — including the demand-bearing
+/// `TypeOf`. A post-trip `TypeOf` dispatch takes the early-exit (it
+/// counts toward the projection budget) and must bump the same
+/// per-kind cold counter the slow path bumps
+/// (`SemanticQueryTypeOfCold`); a missing arm silently under-counts
+/// post-trip typeof dispatches and loses the typeof-storm signal in
+/// bench attribution.
+#[test]
+fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
+    use crate::semantic_query::{ScopeId, TypeOfContext, ValueRootKey, ValueRootSlotIdentity};
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 1,
+        ..HostConfig::default()
+    }));
+    let bases: Vec<SemanticNodeId> = (0..2)
+        .map(|i| intern_single_member_object(&host, if i == 0 { "t0" } else { "t1" }))
+        .collect();
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+
+    let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/post-trip-typeof.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        host.config.projection_op_budget,
+    );
+    let _ctx_guard = RequestContextGuard::install(ctx);
+    let dispatch = host.semantic_dispatch();
+
+    // Trip the projection-op fuse: 1st KeyOf lands within budget,
+    // 2nd trips it.
+    let first = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
+        base: bases[0],
+        context,
+    });
+    assert!(
+        matches!(first, QueryResult::Value(_)),
+        "1st keyof within budget should succeed (got {first:?})"
+    );
+    let second = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
+        base: bases[1],
+        context,
+    });
+    assert!(
+        matches!(second, QueryResult::Error(QueryError::BudgetExceeded(_))),
+        "2nd keyof should trip the budget (got {second:?})"
+    );
+
+    // Post-trip TypeOf dispatch: counts toward the budget, so it takes
+    // the early-exit — which must attribute to the TypeOf cold counter.
+    let live_ctx = crate::request_context::current_request_context()
+        .expect("request context installed for this test");
+    let typeof_cold_before = live_ctx
+        .semantic_query_typeof_cold
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let typeof_key = SemanticQueryKey::TypeOf {
+        value_root: ValueRootSlotIdentity::new(
+            ValueRootKey {
+                scope: ScopeId::file(Arc::from("/post-trip-typeof.ts")),
+                name: Arc::from("sample"),
+            },
+            0,
+            Default::default(),
+            Default::default(),
+        ),
+        context: TypeOfContext::new(context, Default::default()),
+    };
+    let result = dispatch.execute_type_node(typeof_key);
+    assert!(
+        matches!(result, QueryResult::Error(QueryError::BudgetExceeded(_))),
+        "post-trip TypeOf must take the budget early-exit (got {result:?})"
+    );
+    let typeof_cold_after = live_ctx
+        .semantic_query_typeof_cold
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        typeof_cold_after,
+        typeof_cold_before + 1,
+        "the post-trip early-exit must attribute the TypeOf dispatch to \
+         SemanticQueryTypeOfCold — a missing attribution arm silently \
+         under-counts post-trip typeof dispatches"
+    );
+}
+
+/// Non-projection-op queries (ResolveDecl, NormalizeUnion,
+/// NormalizeIntersection, ResolvedNamedType, Relate,
+/// ResolveMacroPayload) MUST be unaffected by the post-trip
 /// fast-path early-exit — the projection-op fuse only bounds the
-/// projection-op subset of the dispatch surface, and a request that
+/// budget-counted subset of the dispatch surface, and a request that
 /// trips the projection-op cap must still be able to complete any
-/// non-projection work on its way to publishing a partial result.
+/// non-budgeted work on its way to publishing a partial result.
 ///
 /// Discriminator: trip the projection-op budget, then dispatch a
 /// `NormalizeUnion` query on the post-trip request. The query MUST

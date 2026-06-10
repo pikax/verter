@@ -149,14 +149,17 @@ defineProps<{
 /// Positive case: `Button['slots']` where `slots: ButtonSlots` is a
 /// non-empty object surface (`{ default?: ..., prepend?: ... }`).
 ///
-/// Architectural contract: path-precise materialisation. Indexed
-/// access through a workspace-owned alias loads ONLY the indexed
-/// path's terminal value (`Button.slots` here, expanded to its
-/// `ButtonSlots` object). Other members of `Button` stay shallow —
-/// the consumer never observes them through this surface.
+/// Architectural contract: path-precise navigation, shallow-by-default
+/// publication. The indexed path navigates ONLY the `slots` hop; the
+/// `Published(Navigate)` terminal lands on the closed-object
+/// declaration `ButtonSlots` and stays the declaration-reference
+/// carrier — the consumer re-resolves `ButtonSlots` through the shared
+/// resolver on demand. Other members of `Button` never load, and the
+/// terminal is NOT eagerly flattened into an object surface at
+/// publication time.
 #[test]
 fn concrete_slots_object_props_skip_define_props_member_route_projection() {
-    use verter_type_expr::{ObjectMember, TypeExpr};
+    use verter_type_expr::TypeExpr;
 
     let host = build_workspace_host(&[
         ("/workspace/src/button-types.ts", POSITIVE_BUTTON_TS),
@@ -172,33 +175,86 @@ fn concrete_slots_object_props_skip_define_props_member_route_projection() {
         .find(|p| p.name == "ui")
         .expect("Button's defineProps publishes the `ui` prop");
 
-    // The indexed path Button['slots'] resolves to the ButtonSlots
-    // object surface (default + prepend members).
-    let TypeExpr::Object(slots_obj) = &ui_prop.type_expr else {
-        panic!(
-            "ui prop's published type should be an object surface from \
-             `Button['slots']`, got {:?}",
-            ui_prop.type_expr
-        );
+    // The indexed path Button['slots'] navigates to the terminal
+    // ButtonSlots declaration and publishes the reference carrier —
+    // NOT an eagerly flattened object surface, and NOT the unresolved
+    // `Button['slots']` indexed-access (the hop itself must resolve).
+    match &ui_prop.type_expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            assert_eq!(
+                name.as_ref(),
+                "ButtonSlots",
+                "the Published(Navigate) terminal must land on the ButtonSlots \
+                 declaration-reference carrier"
+            );
+            assert!(
+                type_arguments.is_empty(),
+                "ButtonSlots is not generic — the carrier carries no type arguments"
+            );
+        }
+        TypeExpr::Object(obj) => panic!(
+            "ui prop must stay the ButtonSlots declaration-reference carrier \
+             (shallow-by-default publication) — it was eagerly flattened: {obj:?}"
+        ),
+        other => panic!(
+            "ui prop's published type should be the ButtonSlots reference carrier \
+             from `Button['slots']`, got {other:?}"
+        ),
+    }
+
+    // Re-resolvability witness: the carrier is not a dead end — the
+    // shared dispatch resolves the ButtonSlots declaration to its
+    // closed object surface (default + prepend) on demand.
+    use crate::semantic_query::SemanticQueryApi;
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+    let resolved = match dispatch.execute_type_node(
+        crate::semantic_query::SemanticQueryKey::ResolveDecl(
+            crate::semantic_query::ResolveDeclKey {
+                scope: crate::semantic_query::ScopeId {
+                    canonical_id: Arc::from("/workspace/src/button-types.ts"),
+                    local_scope: None,
+                },
+                name: Arc::from("ButtonSlots"),
+            },
+        ),
+    ) {
+        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+            value,
+            ..
+        }) => value,
+        other => panic!("ButtonSlots must re-resolve through the shared dispatch, got {other:?}"),
     };
-    let slot_names: Vec<&str> = slots_obj
-        .properties
-        .iter()
-        .filter_map(|m| match m {
-            ObjectMember::Property(p) => Some(p.name.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        slot_names.contains(&"default"),
-        "Button['slots'] should expose the `default` slot member \
-         (got {slot_names:?})"
-    );
-    assert!(
-        slot_names.contains(&"prepend"),
-        "Button['slots'] should expose the `prepend` slot member \
-         (got {slot_names:?})"
-    );
+    let surface =
+        match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
+            base: resolved,
+            path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Shallow,
+            ),
+        }) {
+            crate::semantic_query::QueryResult::Value(
+                crate::semantic_query::SemanticQueryOutput { value, .. },
+            ) => value,
+            other => panic!("ButtonSlots surface read must succeed, got {other:?}"),
+        };
+    let graph = host.project_type_store().semantic_graph();
+    match graph.node_data(surface).as_deref() {
+        Some(crate::semantic_query::SemanticNodeData::Object(view)) => {
+            let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+            assert!(
+                names.contains(&"default") && names.contains(&"prepend"),
+                "the re-resolved ButtonSlots surface must expose `default` and `prepend`, \
+                 got {names:?}"
+            );
+        }
+        other => panic!(
+            "the re-resolved ButtonSlots declaration must surface its object members, \
+             got {other:?}"
+        ),
+    }
 }
 
 // ── Counterfixture #1: conditional indexed root takes slow path ──

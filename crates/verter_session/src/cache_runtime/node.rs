@@ -342,6 +342,23 @@ pub(crate) trait QueryNode {
     /// identity-scoped by `(key, admission_seq)`. Default: no-op (a node
     /// with no retention budget returns no victims). Winner-only.
     fn evict_deferred(&self, _victims: DeferredVictims<Self::Key>) {}
+
+    /// Winner-side lowering for a freshly-COMPUTED value whose admission
+    /// was REFUSED by post-compute revalidation (a mutation landed in the
+    /// cold window / the winner's view snapshot went stale).
+    ///
+    /// `Some(lowered)` opts the node in: the winner returns the computed
+    /// value as a non-cacheable `ReturnOnly`-style outcome (nothing
+    /// published; joiners fork and cold-recompute for their own view).
+    /// The node marks the lowered value non-cacheable in its own domain
+    /// (e.g. `cache_suppress = true` on a `CacheRead`) so the enclosing
+    /// build refuses memo admission. `None` (the default) keeps failure
+    /// semantics: the winner returns `None` and the caller's fallback
+    /// owns the substitute — only correct for nodes whose callers can
+    /// tolerate a discarded complete value.
+    fn lower_unadmitted(&self, _value: &Self::Value) -> Option<Self::Value> {
+        None
+    }
 }
 
 /// Query-identity cooperative lookup + publish entry points.
@@ -432,13 +449,26 @@ pub(crate) mod query {
                     CacheAdmission::Failed { .. } => ComputeAdmission::Failed,
                 }
             },
-            // Winner-side projection bubbles the admitted signature into
-            // the outer tracer (the warm/joiner `lookup_candidate` path
-            // bubbles separately); the cold winner must deliver its facts
-            // too.
+            // Winner-side projections bubble the candidate's signature
+            // into the outer tracer (the warm/joiner `lookup_candidate`
+            // path bubbles separately); the cold winner must deliver its
+            // facts too. ONE bubble site shared by the admitted and the
+            // admission-REFUSED projections — the refused child's
+            // observations must keep rooting the enclosing entries'
+            // signatures so cross-file invalidation of the consuming
+            // result keeps working.
             |candidate: &Candidate<N::Discriminant, N::Value>| {
                 candidate.signature.bubble(resolver);
                 candidate.value.clone()
+            },
+            // Winner-side projection for an admission-REFUSED computed
+            // candidate (post-compute revalidation rejected it). When the
+            // node opts in, the computed value still flows to the winner
+            // (non-cacheable; joiners fork) with its facts bubbled.
+            |candidate: &Candidate<N::Discriminant, N::Value>| {
+                node.lower_unadmitted(&candidate.value).inspect(|_| {
+                    candidate.signature.bubble(resolver);
+                })
             },
             |candidate: &Candidate<N::Discriminant, N::Value>| {
                 candidate.validated_at_generation

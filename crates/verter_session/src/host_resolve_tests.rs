@@ -436,6 +436,68 @@ fn invalid_imported_define_props_type_keeps_object_like_error() {
 }
 
 #[test]
+fn macro_type_dependency_edit_to_invalid_props_type_surfaces_object_like_error() {
+    // Default config (dev_mode + DevServeLastKnownGood) mirrors the NAPI
+    // host the typescript-plugin constructs.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let source = "<script setup lang=\"ts\">\nimport type { Props } from './types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.label }}</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+    let routes = vec![crate::DependencyResolution {
+        specifier: "./types".to_string(),
+        resolved_canonical_id: Some("/src/types.ts".to_string()),
+        possible_canonical_ids: Vec::new(),
+    }];
+    host.set_import_dependencies("/src/Comp.vue", routes.clone());
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Props { label: string }",
+    );
+
+    let first = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect("first compile against the object-shaped Props should succeed");
+    assert!(
+        !first.diagnostics.has_errors,
+        "first compile should be clean, got: {:?}",
+        first.diagnostics.diagnostics
+    );
+
+    // Caller-driven hydration re-supplies the same routes before re-upserting
+    // the edited dependency (LSP plugin flow).
+    host.set_import_dependencies("/src/Comp.vue", routes);
+    upsert_non_sfc(&host, "/src/types.ts", "export type Props = string");
+
+    let second = host.get_virtual_file(VirtualQuery {
+        raw_id: None,
+        canonical_id: Some("/src/Comp.vue".to_string()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile(),
+    });
+    let diagnostics = match second {
+        Err(HostError::CompileError(failure)) => failure.diagnostics,
+        Err(other) => panic!("expected compile error, got {other:?}"),
+        Ok(result) => panic!(
+            "expected compile error after the dependency edit, got successful response with diagnostics {:?}",
+            result.diagnostics.diagnostics
+        ),
+    };
+    let invalid = find_diag(&diagnostics, "XInvalidMacroType");
+    assert!(
+        invalid.message.contains(
+            "defineProps() type argument 'Props' must resolve to an object-like props type."
+        ),
+        "expected object-like props diagnostic after the dependency edit, got: {}",
+        invalid.message
+    );
+}
+
+#[test]
 fn invalid_imported_define_emits_type_keeps_emits_shape_error() {
     let host = strict_host();
     let source = "<script setup lang=\"ts\">\nimport type { Emits } from './types'\nconst emit = defineEmits<Emits>()\n</script>\n<template><div/></template>";

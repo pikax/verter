@@ -107,7 +107,7 @@ pub(crate) use surface::{
     projected_surface_from_semantic_node, projected_surface_to_expanded_shape,
     projected_surface_to_type_expr, semantic_query_error_raw, surface_view_to_projected_surface,
     type_expr_contains_semantic_miss, type_expr_is_budget_exceeded_sentinel,
-    type_expr_is_expanded_surface,
+    type_expr_is_expanded_surface, type_expr_root_is_unmaterialized_sentinel,
 };
 
 // Predicate/utility helpers (route-expr surface keys,

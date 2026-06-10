@@ -1177,6 +1177,14 @@ export type ComponentConfig<
             "expected Button.variants.color to include neutral, got {:?}",
             color_member
         );
+        // The deferred arm must stay NON-POISONING: no semantic-miss
+        // sentinel may leak into the published variants surface.
+        assert!(
+            !crate::resolver_core::type_expr_contains_semantic_miss(variants_member),
+            "the GetComponentAppConfig arm must not poison the published \
+             variants surface with a semantic-miss sentinel, got {:?}",
+            variants_member
+        );
     }
 
     /// A wide finite import/heritage fan-out (`Props extends T0..Tn`,

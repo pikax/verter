@@ -1201,6 +1201,44 @@ pub(crate) fn component_meta_registry_has_explicit_object_surface(
     }
 }
 
+/// Is `expr` an UN-MERGED heritage intersection — the analyzer body of
+/// `interface X extends Base { ... }`, lowered as
+/// `Intersection([Ref{Base}, Object{own members}])` (heritage carrier
+/// arms alongside an explicit own-member Object arm)?
+///
+/// Such a body is NOT an explicit one-level surface the registry may
+/// publish raw: a registry consumer reads the entry as a member surface,
+/// and an intersection mixing symbolic heritage arms with an Object arm
+/// carries no interpretable key set. The candidate materialiser must fold
+/// it through the shared empty-path Shallow surface walker (heritage
+/// merge) instead of returning the raw body.
+///
+/// A homogeneous compound (`Object & Object`, `Object | Object`) is NOT
+/// flagged — it is already an explicit surface. A heritage-only
+/// intersection (`Ref & Ref`) is not flagged either: it has no explicit
+/// Object arm, so the prefer-raw branch never applies to it.
+pub(crate) fn component_meta_registry_has_unmerged_heritage_intersection(
+    expr: &verter_type_expr::TypeExpr,
+) -> bool {
+    use verter_type_expr::TypeExpr;
+
+    let mut current = expr;
+    while let TypeExpr::Parenthesized(inner) = current {
+        current = inner;
+    }
+    match current {
+        TypeExpr::Intersection(types) => {
+            types
+                .iter()
+                .any(component_meta_registry_has_explicit_object_surface)
+                && types
+                    .iter()
+                    .any(component_meta_registry_has_non_object_top_level_surface)
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn component_meta_registry_raw_member_path_surface(
     expr: &verter_type_expr::TypeExpr,
     path: &[String],

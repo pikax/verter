@@ -427,6 +427,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
         crate::semantic_query::MacroPayloadContext::new(self.resolve_env_hash_for(canonical), mode)
     }
 
+    /// Build the full [`SemanticQueryKey::TypeOf`] key for the value root
+    /// `root` under the projection-reduction context `prc`.
+    ///
+    /// This is the SINGLE production derivation point for a `TypeOf`
+    /// key: it reads the value-root scope canonical's per-canonical env
+    /// (`type_env_hash` = `T`, `lib_env_hash` = `L`), folds the project
+    /// identity (`J`) from `host_view_project_identity_for` onto the
+    /// env-bearing [`ValueRootSlotIdentity`](crate::semantic_query::ValueRootSlotIdentity),
+    /// and rides `resolve_env_hash` (`R`) on the dedicated
+    /// [`TypeOfContext`](crate::semantic_query::TypeOfContext) — mirror
+    /// of [`Self::type_slot_for`] + [`Self::instantiate_context_for`].
+    /// The slot stays content-free (R6); the file content version is
+    /// re-sourced at value-compute time.
+    #[must_use]
+    pub(crate) fn typeof_key_for(
+        &self,
+        root: crate::semantic_query::ValueRootKey,
+        prc: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticQueryKey {
+        let host = self.ctx.host_for_fact_tracer_install();
+        let canonical = root.scope.canonical_id.as_ref();
+        let env = host.host_view_env_hashes_for(canonical);
+        let project_identity = host.host_view_project_identity_for(canonical).fold_u32();
+        SemanticQueryKey::TypeOf {
+            value_root: crate::semantic_query::ValueRootSlotIdentity::new(
+                root,
+                project_identity,
+                env.type_env_hash,
+                env.lib_env_hash,
+            ),
+            context: crate::semantic_query::TypeOfContext::new(prc, env.resolve_env_hash),
+        }
+    }
+
     /// Push `identity` onto the active-instantiation stack. Returns `true`
     /// when the identity was not already present (caller MUST pair with
     /// `pop_instantiate_active` on the same identity). Returns `false`
@@ -988,9 +1022,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // The check is gated on `semantic_query_counts_toward_projection_budget`,
         // the aggregate work-budget gate: the projection operators PLUS
         // `Instantiate` / `Conditional` (the generic-expansion-storm
-        // kinds). Kinds outside that set (ResolveDecl, NormalizeUnion,
-        // TypeOf, …) bypass the early-exit — their cost is not what the
-        // work budget bounds.
+        // kinds) and the demand-bearing `TypeOf`. Kinds outside that
+        // set (ResolveDecl, NormalizeUnion, …) bypass the early-exit —
+        // their cost is not what the work budget bounds.
         if semantic_query_counts_toward_projection_budget(&key) {
             if let Some(budget) = crate::request_context::current_request_budget() {
                 if budget.is_exhausted() {
@@ -1038,6 +1072,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             }
                             SemanticQueryKey::Conditional { .. } => {
                                 Some(AuditEvent::SemanticQueryConditionalCold)
+                            }
+                            SemanticQueryKey::TypeOf { .. } => {
+                                Some(AuditEvent::SemanticQueryTypeOfCold)
                             }
                             _ => None,
                         };
@@ -1112,7 +1149,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             match &key_for_build {
                 SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key),
-                SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root),
+                SemanticQueryKey::TypeOf {
+                    value_root,
+                    context,
+                } => self.build_typeof(&value_root.root, context.projection_reduction),
                 SemanticQueryKey::Instantiate {
                     base,
                     args,
@@ -1574,6 +1614,13 @@ fn finalise_traced_build_output(
 /// applies its own per-call product-width cap — `TEMPLATE_LITERAL_KEYSPACE_CAP`
 /// — which bounds a SINGLE reduction; this gate bounds the aggregate dispatch
 /// count across the request.)
+///
+/// `TypeOf` counts too: it is a demand-bearing projection reducer
+/// (`build_typeof` lowers a value's declaration graph at the requested
+/// demand), so a typeof-dominated storm — a wide value graph crossed
+/// repeatedly through `typeof` roots — is the same expansion-storm shape.
+/// Its child `Instantiate` / `ProjectPath` work counting alone would leave
+/// the reducer itself outside the fuse.
 fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> bool {
     matches!(
         key,
@@ -1585,6 +1632,7 @@ fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> boo
             | SemanticQueryKey::Instantiate { .. }
             | SemanticQueryKey::Conditional { .. }
             | SemanticQueryKey::TemplateLiteralReduce { .. }
+            | SemanticQueryKey::TypeOf { .. }
     )
 }
 

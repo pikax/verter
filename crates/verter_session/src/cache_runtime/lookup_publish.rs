@@ -80,7 +80,8 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use super::singleflight::{
-    retire_slot_if_current, ComputeAdmission, InflightPanicGuard, InflightSlot, InflightTable,
+    retire_slot_if_current, ComputeAdmission, InflightFailureKind, InflightPanicGuard,
+    InflightSlot, InflightTable,
 };
 
 #[cfg(test)]
@@ -143,6 +144,16 @@ fn fire_post_publish_core_pre_evict_hook() {
 /// with the split publish lifecycle under a retention fence. See the
 /// module docs for the full contract.
 ///
+/// `project_unadmitted` is the winner-side projection for a freshly
+/// computed `Cacheable` entry whose admission was REFUSED by
+/// `revalidate_after_compute`. `Some(value)` returns the COMPUTED value
+/// to the winner as a non-cacheable `ReturnOnly`-style outcome (no
+/// publish; joiners fork and cold-recompute for their own view) — the
+/// honest shape: the winner computed a complete value and substituting
+/// anything else would make the caller-visible result a function of
+/// admission timing. `None` keeps failure semantics for the winner
+/// (`AdmissionRejected`; the winner returns `None` and its joiners fork).
+///
 /// `allow(dead_code)`: the query-identity `query::lookup` entry point
 /// lowers here; it is exercised by the `cache_runtime` tests and is the
 /// substrate the query-identity cache families route through.
@@ -156,6 +167,7 @@ pub(crate) fn cooperative_admit_with_lookup_publish<
     Lookup,
     Compute,
     Project,
+    ProjectUnadmitted,
     Revalidate,
     PublishCore,
     EvictDeferred,
@@ -165,6 +177,7 @@ pub(crate) fn cooperative_admit_with_lookup_publish<
     mut lookup: Lookup,
     compute: Compute,
     project: Project,
+    project_unadmitted: ProjectUnadmitted,
     mut revalidate_after_compute: Revalidate,
     publish_core: PublishCore,
     evict_deferred: EvictDeferred,
@@ -177,6 +190,7 @@ where
     Lookup: FnMut() -> Option<V>,
     Compute: FnOnce() -> ComputeAdmission<V, Entry>,
     Project: FnOnce(&Entry) -> V,
+    ProjectUnadmitted: FnOnce(&Entry) -> Option<V>,
     Revalidate: FnMut(&Entry) -> bool,
     PublishCore: FnOnce(Entry) -> Victims,
     EvictDeferred: FnOnce(Victims),
@@ -187,6 +201,7 @@ where
     // where THIS caller becomes the cold winner.
     let mut compute = Some(compute);
     let mut project = Some(project);
+    let mut project_unadmitted = Some(project_unadmitted);
     let mut publish_core = Some(publish_core);
     let mut evict_deferred = Some(evict_deferred);
     loop {
@@ -208,8 +223,26 @@ where
         if state.claimed {
             // Joiner — wait for the winner to publish or fail.
             slot.ready.wait_while(&mut state, |s| !s.completed);
-            if state.failed {
-                return None;
+            match state.failure {
+                // Deterministic compute failure — surface `None` (the
+                // caller's fallback owns retry policy).
+                Some(InflightFailureKind::ComputeFailed) => return None,
+                // The winner produced NO completeness evidence (panic),
+                // or computed a value its own view could not admit
+                // (admission rejection). Neither outcome is consumable by
+                // this joiner as a value — fork and cold-recompute for
+                // this joiner's OWN view, exactly like the cross-view
+                // stale-reject fork below. A panicked winner's bug
+                // surfaces as the joiner's own panic on recompute, never
+                // as a fabricated value-bearing result.
+                Some(InflightFailureKind::WinnerPanicked)
+                | Some(InflightFailureKind::AdmissionRejected) => {
+                    drop(state);
+                    retire_slot_if_current(&inflight.table, &flight_key, &slot);
+                    drop(slot);
+                    continue;
+                }
+                None => {}
             }
             // A `ReturnOnly` winner published nothing the joiner can
             // view-validate against its own view, so it forks and
@@ -259,18 +292,35 @@ where
                 let _retention = publish_fence.map(parking_lot::RwLock::read);
                 // Post-compute revalidation BEFORE admitting the candidate.
                 // A mutation landing in the cold window rejects the entry
-                // here and no candidate is published.
+                // here and no candidate is published. The COMPUTED value is
+                // still the winner's honest result: when the caller opts in
+                // (`project_unadmitted` returns `Some`), return it
+                // `ReturnOnly`-style — non-cacheable, nothing published,
+                // joiners fork — instead of discarding it (a discarded
+                // complete value forces the caller to fabricate a
+                // substitute, making the caller-visible result a function
+                // of admission timing). A `None` opt-out keeps failure
+                // semantics (`AdmissionRejected`; joiners fork).
                 if !revalidate_after_compute(&entry) {
+                    let unadmitted = project_unadmitted
+                        .take()
+                        .expect("project_unadmitted is taken exactly once by the cold winner")(
+                        &entry,
+                    );
                     {
                         let mut state = slot.state.lock();
                         state.completed = true;
-                        state.failed = true;
+                        if unadmitted.is_some() {
+                            state.non_cacheable_winner = true;
+                        } else {
+                            state.failure = Some(InflightFailureKind::AdmissionRejected);
+                        }
                     }
                     slot.ready.notify_all();
                     panic_guard.mark_finished();
                     drop(panic_guard);
                     retire_slot_if_current(&inflight.table, &flight_key, &slot);
-                    return None;
+                    return unadmitted;
                 }
                 let value = project
                     .take()
@@ -328,7 +378,7 @@ where
                 {
                     let mut state = slot.state.lock();
                     state.completed = true;
-                    state.failed = true;
+                    state.failure = Some(InflightFailureKind::ComputeFailed);
                 }
                 slot.ready.notify_all();
                 None

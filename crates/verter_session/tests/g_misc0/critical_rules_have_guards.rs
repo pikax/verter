@@ -170,6 +170,12 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
     (
         "Macro Type Traversal Rule",
         &[
+            // Genuine-Expanded root conditional distribution: a
+            // query-root unbound conditional surfaces both branches;
+            // the nested-position carrier rule is pinned by the
+            // ignored tracker
+            // `nested_open_conditional_not_distributed_under_expanded`.
+            "root_conditional_still_distributes",
             "no_macro_string_heuristics_in_resolver_core",
             "no_text_based_macro_surface_projection_helpers",
             "no_role_inference_from_name_suffix",
@@ -210,6 +216,17 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
     (
         "Component-Meta Shallow-By-Default Rule",
         &[
+            // Carrier-preserving Shallow decl-body lowering: member
+            // values stay typed-IR carriers under Shallow (eagerness
+            // ceiling + heritage-key enumeration + warm collapse).
+            "decl_body_lowering_keeps_member_value_refs_as_carriers",
+            // Publication-demands-Navigate behavioural guard: a full
+            // get_component_meta records ZERO Published(Expanded)
+            // projection contexts on the dispatch stream.
+            "publication_routes_never_demand_expanded",
+            // Registry publication path carries no per-property
+            // improvement pick (consumer-local second resolution path).
+            "component_meta_methods_has_no_improvement_pick_call_sites",
             "audit_publishes_member_edge_with_published_field_provenance_at_macro_boundaries",
             "pattern_a_non_slot_mapped_publication_does_not_leak_inherited_library_members",
             "pattern_b_generic_parameter_substitution_does_not_leak_inherited_library_members",
@@ -233,6 +250,17 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
     (
         "Shallow-By-Default Rule",
         &[
+            // Carrier-preserving Shallow decl-body lowering: member
+            // values stay typed-IR carriers under Shallow (eagerness
+            // ceiling + heritage-key enumeration + warm collapse).
+            "decl_body_lowering_keeps_member_value_refs_as_carriers",
+            // Publication-demands-Navigate behavioural guard: a full
+            // get_component_meta records ZERO Published(Expanded)
+            // projection contexts on the dispatch stream.
+            "publication_routes_never_demand_expanded",
+            // Registry publication path carries no per-property
+            // improvement pick (consumer-local second resolution path).
+            "component_meta_methods_has_no_improvement_pick_call_sites",
             "audit_publishes_member_edge_with_published_field_provenance_at_macro_boundaries",
             "pattern_a_non_slot_mapped_publication_does_not_leak_inherited_library_members",
             "pattern_b_generic_parameter_substitution_does_not_leak_inherited_library_members",

@@ -75,7 +75,7 @@ pub use component_meta_query_engine::ComponentMetaQueryEngine;
 pub(crate) use component_meta_query_engine::{
     projected_surface_from_semantic_node, projected_surface_to_expanded_shape,
     projected_surface_to_type_expr, type_expr_contains_semantic_miss,
-    type_expr_is_expanded_surface,
+    type_expr_is_expanded_surface, type_expr_root_is_unmaterialized_sentinel,
 };
 pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};
 pub use declaration_metadata::{

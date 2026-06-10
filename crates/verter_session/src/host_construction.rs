@@ -12,7 +12,9 @@
 //! Construction wires the scheduler, workspace, project-type-store, and
 //! resolver runtime so they share `Arc` handles for the route /
 //! imported-roots databases. The fields of `VerterHost` itself live on
-//! the struct definition in `lib.rs`.
+//! the struct definition in `lib.rs`; the construction-time substrate
+//! types ([`HostResolverState`], [`WorkspaceSourceLoader`],
+//! [`next_host_instance_id`]) live here.
 
 use std::sync::Arc;
 
@@ -22,9 +24,79 @@ use crate::shared::default_shared;
 use crate::types::HostConfig;
 #[cfg(feature = "session_metrics")]
 use crate::types::HostMetrics;
-use crate::{
-    host_executor, next_host_instance_id, HostResolverState, VerterHost, WorkspaceSourceLoader,
-};
+use crate::{host_executor, VerterHost};
+
+pub(crate) fn next_host_instance_id() -> u64 {
+    static NEXT_HOST_INSTANCE_ID: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1);
+    NEXT_HOST_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Consolidated resolver state: bundles the unified sub-node resolver runtime
+/// with host-level top caches and singleflight groups.
+///
+/// Replaces the 4 individual cache/singleflight fields that were previously
+/// scattered across `VerterHost`.
+pub(crate) struct HostResolverState {
+    /// Unified sub-node resolver runtime (symbol + fallthrough subsystems).
+    pub runtime: crate::resolver_core::resolver_runtime::UnifiedResolverRuntime<
+        crate::meta_resolve::ResolvedComponentMetaState,
+        crate::types::FallthroughResolution,
+    >,
+}
+
+impl HostResolverState {
+    /// Construct a `HostResolverState` whose
+    /// inner [`UnifiedResolverRuntime`](crate::resolver_core::resolver_runtime::UnifiedResolverRuntime)
+    /// shares its `RouteDb` / `ImportedRootDb` authority with the host's
+    /// [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore)
+    /// via `Arc` clones supplied by the host at construction time.
+    fn new(
+        routes: Arc<crate::resolver_core::RouteDb>,
+        imported_roots: Arc<crate::resolver_core::ImportedRootDb>,
+    ) -> Self {
+        Self {
+            runtime: crate::resolver_core::resolver_runtime::UnifiedResolverRuntime::new(
+                routes,
+                imported_roots,
+            ),
+        }
+    }
+
+    pub(crate) fn reset_all(&self) {
+        self.runtime.clear_caches();
+    }
+}
+
+/// SourceLoader that delegates to the host's current workspace.
+///
+/// Holds a reference to the host's `RwLock<Arc<dyn WorkspaceAccess>>`
+/// so it always reads through the latest workspace, even after
+/// `set_workspace()` swaps it.
+pub(crate) struct WorkspaceSourceLoader(
+    pub(crate) Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
+);
+
+impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
+    fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
+        self.0.read().read_file(canonical_id)
+    }
+
+    fn exists(&self, canonical_id: &str) -> bool {
+        self.0.read().file_exists(canonical_id)
+    }
+
+    fn classify(&self, canonical_id: &str) -> verter_scheduler::source_loader::FileKind {
+        match self.0.read().classify_file(canonical_id) {
+            verter_workspace::FileKind::VueSfc => verter_scheduler::source_loader::FileKind::VueSfc,
+            verter_workspace::FileKind::NonSfc => verter_scheduler::source_loader::FileKind::NonSfc,
+        }
+    }
+
+    fn realpath(&self, canonical_id: &str) -> Option<String> {
+        self.0.read().realpath(canonical_id)
+    }
+}
 
 impl VerterHost {
     /// Read-only access to the host's configuration.
@@ -238,6 +310,9 @@ impl VerterHost {
             compile_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
             materialize_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
             materialize_force_in_scope_partial: std::sync::atomic::AtomicBool::new(false),
+            materialize_force_mid_compute_generation_bump: std::sync::atomic::AtomicBool::new(
+                false,
+            ),
             relation_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
             compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize::new(0),
             signature_overflow_at_install: std::sync::atomic::AtomicU64::new(0),
