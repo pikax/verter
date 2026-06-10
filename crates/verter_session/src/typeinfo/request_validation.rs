@@ -70,20 +70,41 @@ pub const MAX_EXPANSION_DEPTH_BUDGET: u32 = 256;
 pub const MIN_TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 2;
 
 /// Closed set of schema versions this validator accepts. Any wire
-/// version outside this set (below MIN or above the current server
-/// version) is rejected with
+/// version outside this set is rejected with
 /// [`TypeInfoRequestError::UnknownSchemaVersion`].
 ///
-/// The set is single-sourced from
-/// [`TYPEINFO_GRAPH_SCHEMA_VERSION`]: bumping the server schema
-/// adds the new version here and removes obsolete ones in the same
-/// commit. A future-version request (e.g. a newer client talking to
-/// an older server) MUST fail validation rather than reach
-/// dispatch, because the dispatcher's payload arms are only
-/// type-checked against the supported set; an unrecognised version
-/// silently passing through would let a malformed payload reach
-/// semantic execution.
-pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS: &[u32] = &[TYPEINFO_GRAPH_SCHEMA_VERSION];
+/// The set holds every version SOME operation still accepts. Schema
+/// 2 is legacy-operations-only: every pre-existing operation accepts
+/// `[2, 3]`, while the framework-surface operation requires 3.
+/// Per-operation minimums live in
+/// [`validate_schema_version_for_operation`] — global membership in
+/// this set is checked first, then the operation's minimum. Versions
+/// leave this set only when no operation accepts them any more.
+///
+/// A future-version request (e.g. a newer client talking to an older
+/// server) MUST fail validation rather than reach dispatch, because
+/// the dispatcher's payload arms are only type-checked against the
+/// supported set; an unrecognised version silently passing through
+/// would let a malformed payload reach semantic execution.
+///
+/// This constant is also the single supported-set advertisement
+/// source: the `UnknownSchemaVersion` error payload's
+/// `server_supported_versions` field is populated from it via
+/// `wire_error_unknown_schema_version`.
+pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS: &[u32] = &[
+    MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+    TYPEINFO_GRAPH_SCHEMA_VERSION,
+];
+
+/// Minimum schema version the framework-surface operation accepts.
+/// The `framework_surface` RESPONSE arm exists only from schema 3 —
+/// a v2 framework-surface request would pass generic validation yet
+/// receive a response arm its decoder cannot see, so the operation
+/// rejects anything below 3 with
+/// [`TypeInfoRequestError::MalformedPayload`] (NOT
+/// `UnknownSchemaVersion`: v2 stays globally supported for the
+/// legacy operations).
+pub const FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION: u32 = 3;
 
 /// Maximum recursion depth allowed when walking a
 /// [`StructuredTypeExpression`] tree during shape validation. Trees
@@ -129,6 +150,7 @@ pub fn validate_type_info_graph_request(
 ) -> Result<ValidatedTypeInfoGraphRequest, TypeInfoRequestError> {
     validate_schema_version(request.schema_version)?;
     let operation = decode_operation(request.operation).ok_or_else(invalid_mode_error)?;
+    validate_schema_version_for_operation(operation, request.schema_version)?;
     let payload = request
         .payload
         .as_ref()
@@ -155,6 +177,17 @@ pub fn validate_type_info_graph_request(
             validate_expand_graph_around_request(r)?;
         }
         (WireOperation::FrameworkSurfaces, wire_request::Payload::FrameworkSurface(r)) => {
+            // The framework-surface payload echoes the schema version;
+            // an envelope/payload mismatch is malformed (the payload
+            // version decides which response arms the client can
+            // decode, so a divergent echo is a client bug).
+            if r.schema_version != request.schema_version {
+                return Err(malformed_payload_error_with_string_detail(format!(
+                    "framework-surface payload schema_version {} mismatches envelope \
+                     schema_version {}",
+                    r.schema_version, request.schema_version,
+                )));
+            }
             validate_framework_surface_request(r)?;
         }
         (WireOperation::Relate, _) | (_, _) => {
@@ -171,6 +204,51 @@ pub fn validate_type_info_graph_request(
     Ok(ValidatedTypeInfoGraphRequest {
         request: request.clone(),
     })
+}
+
+/// Validate a schema version against the global supported set AND the
+/// per-operation minimum. Global membership is checked first — a
+/// version outside [`SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS`] is
+/// [`TypeInfoRequestError::UnknownSchemaVersion`] regardless of the
+/// operation. A version inside the set but below the operation's
+/// minimum is [`TypeInfoRequestError::MalformedPayload`] with detail —
+/// NOT `UnknownSchemaVersion` (the version stays globally supported
+/// for the legacy operations) and NOT a new error oneof arm (clients
+/// at the older version could not decode one).
+///
+/// Schema 2 is legacy-operations-only: every pre-existing operation
+/// accepts `[2, 3]`; the framework-surface operation requires
+/// [`FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION`]. The match below is
+/// EXHAUSTIVE with no wildcard arm — adding a future operation fails
+/// to compile until its op-minimum row is decided here.
+///
+/// # Errors
+///
+/// Returns `UnknownSchemaVersion` for a version outside the global
+/// supported set, or `MalformedPayload` for a globally-supported
+/// version below the operation's minimum.
+pub fn validate_schema_version_for_operation(
+    operation: WireOperation,
+    version: u32,
+) -> Result<(), TypeInfoRequestError> {
+    validate_schema_version(version)?;
+    let minimum = match operation {
+        WireOperation::ResolveSymbol
+        | WireOperation::EvaluateExpression
+        | WireOperation::ProjectPath
+        | WireOperation::Relate
+        | WireOperation::ExpandAround
+        | WireOperation::FlowNarrowingAt
+        | WireOperation::ContextualTypeAt => MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+        WireOperation::FrameworkSurfaces => FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION,
+    };
+    if version < minimum {
+        return Err(malformed_payload_error_with_string_detail(format!(
+            "operation {operation:?} requires schema version >= {minimum}, got {version} \
+             (schema {version} is accepted for legacy operations only)",
+        )));
+    }
+    Ok(())
 }
 
 /// Validate a `ResolveSymbolGraphRequest`. See module docs for
@@ -308,10 +386,16 @@ pub fn validate_expand_graph_around_request(
 
 /// Validate a `FrameworkSurfaceRequest`.
 ///
+/// The payload's `schema_version` runs through the per-operation gate
+/// ([`validate_schema_version_for_operation`]) — the framework-surface
+/// operation requires [`FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION`], so a
+/// v2 payload is rejected with `MalformedPayload` here, before any
+/// adapter lookup or semantic dispatch.
+///
 /// # Errors
 ///
 /// As [`validate_resolve_symbol_graph_request`], plus selector-
-/// presence and schema-version cross-check.
+/// presence and the per-operation schema-version gate.
 pub fn validate_framework_surface_request(
     request: &FrameworkSurfaceRequest,
 ) -> Result<(), TypeInfoRequestError> {
@@ -330,7 +414,10 @@ pub fn validate_framework_surface_request(
     validate_projection_reduction_context(request.context.as_ref())?;
     validate_closure_policy(request.closure.as_ref())?;
     validate_display_policy(request.display_policy.as_ref())?;
-    validate_schema_version(request.schema_version)?;
+    validate_schema_version_for_operation(
+        WireOperation::FrameworkSurfaces,
+        request.schema_version,
+    )?;
     Ok(())
 }
 
@@ -1123,6 +1210,16 @@ fn malformed_payload_error_with_detail(detail: &'static str) -> impl Fn() -> Typ
     move || TypeInfoRequestError {
         kind: Some(type_info_request_error::Kind::MalformedPayload(
             wire::wire_error_malformed_payload(detail),
+        )),
+    }
+}
+
+/// `MalformedPayload` with a runtime-formatted detail (the static
+/// variant above covers the fixed messages).
+fn malformed_payload_error_with_string_detail(detail: String) -> TypeInfoRequestError {
+    TypeInfoRequestError {
+        kind: Some(type_info_request_error::Kind::MalformedPayload(
+            wire::wire_error_malformed_payload(&detail),
         )),
     }
 }

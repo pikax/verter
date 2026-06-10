@@ -27,7 +27,7 @@ pub use mcp::McpToolPayload;
 pub use semantic::SemanticAnalysisPayload;
 pub use type_resolution::TypeResolutionPayload;
 pub use typeinfo_graph::{
-    ExactnessTag, GraphClosurePolicyTag, GraphOperationTag, ReductionDemandTag,
-    TypeInfoDegradationReasonTag, TypeInfoGraphPayload,
+    ExactnessTag, FrameworkSurfaceKindSupportTag, GraphClosurePolicyTag, GraphOperationTag,
+    ReductionDemandTag, TypeInfoDegradationReasonTag, TypeInfoGraphPayload,
 };
 pub use workspace::{WorkspaceOp, WorkspacePayload};

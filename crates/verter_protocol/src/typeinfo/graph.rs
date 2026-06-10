@@ -57,6 +57,7 @@ pub use wire::EvaluateTypeExpressionGraphRequest;
 pub use wire::ExpandGraphAroundRequest;
 pub use wire::FlowNarrowingRequest;
 pub use wire::FrameworkSurfaceKindEntry;
+pub use wire::FrameworkSurfaceKindStatus;
 pub use wire::FrameworkSurfaceMember;
 pub use wire::FrameworkSurfacePayload;
 pub use wire::FrameworkSurfaceRequest;
@@ -155,6 +156,7 @@ pub use wire::GraphTypeNodeRef as TypeNodeRef;
 // -------------------------------------------------------------------------
 
 pub use wire::FrameworkSurfaceKind;
+pub use wire::FrameworkSurfaceKindSupport;
 pub use wire::FrameworkTag;
 pub use wire::GraphAccessibility as Accessibility;
 pub use wire::GraphBudgetDomain as BudgetDomain;
@@ -251,7 +253,15 @@ pub use wire::TypePredicateExpr;
 /// favour of the env-BEARING `GraphResolvedDeclSlotIdentity`
 /// (`GraphQueryIdentity.resolved_roots`); the retired `roots` tag/name
 /// are reserved at message scope.
-pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 2;
+///
+/// v3 added the `framework_surface` response arm on
+/// `TypeInfoGraphResponse` plus the per-kind
+/// `FrameworkSurfaceKindStatus` (with the closed
+/// `FrameworkSurfaceKindSupport` enum) on
+/// `FrameworkSurfaceKindEntry`. Schema 2 stays accepted for the
+/// legacy operations; the framework-surface operation requires 3
+/// (see `verter_session::typeinfo::request_validation`).
+pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 3;
 
 // -------------------------------------------------------------------------
 // Typed constructor helpers for the request-error variants. The

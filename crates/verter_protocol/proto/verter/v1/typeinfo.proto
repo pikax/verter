@@ -688,10 +688,15 @@ message GraphStringTable {
 // TypeInfoGraphResponse — wrapper distinguishing successful payloads
 // from typed validation / execution errors. Audit envelope is carried
 // separately by the host runtime; this DTO does not duplicate it.
+// The `framework_surface` arm (schema 3) carries the framework
+// component-surface payload produced by the framework-surfaces
+// operation; the framework-surface operation requires schema 3, while
+// schema 2 stays accepted for the legacy operations.
 message TypeInfoGraphResponse {
   oneof kind {
     SemanticTypeGraph graph = 1;
     TypeInfoRequestError error = 2;
+    FrameworkSurfacePayload framework_surface = 3;
   }
 }
 
@@ -841,6 +846,9 @@ message TypeInfoCapabilityHandshakeResponse {
 
 // ----------- Framework surface payload -----------
 
+// FrameworkSurfacePayload — the framework component-surface response
+// (schema 3). A v3 framework-surface response carries EXACTLY ONE
+// `FrameworkSurfaceKindEntry` per known `FrameworkSurfaceKind`.
 message FrameworkSurfacePayload {
   uint32 schema_version = 1;
   ComponentSelector selector = 2;
@@ -854,6 +862,26 @@ message FrameworkSurfacePayload {
 message FrameworkSurfaceKindEntry {
   FrameworkSurfaceKind kind = 1;
   repeated FrameworkSurfaceMember members = 2;
+  // Per-kind support status (schema 3). Decides how `members` reads:
+  // an empty member list under SUPPORTED is supported-empty, never
+  // implicit unsupport.
+  FrameworkSurfaceKindStatus status = 3;
+}
+
+// FrameworkSurfaceKindStatus — per-kind status semantics:
+// - SUPPORTED: `members` is authoritative (empty = supported-empty);
+// - UNSUPPORTED: `members` is empty, `exactness` is
+//   GRAPH_EXACTNESS_UNSUPPORTED, and at least one diagnostic explains
+//   the unsupport;
+// - PARTIAL: `members` is a usable subset; diagnostics explain what
+//   is missing;
+// - UNSPECIFIED: invalid in server-produced v3 payloads.
+// Reuses the existing `GraphExactness` and `GraphDiagnostic`
+// vocabulary — no parallel diagnostic taxonomy.
+message FrameworkSurfaceKindStatus {
+  FrameworkSurfaceKindSupport support = 1;
+  GraphExactness exactness = 2;
+  repeated GraphDiagnostic diagnostics = 3;
 }
 
 message FrameworkSurfaceMember {
@@ -1082,6 +1110,11 @@ enum GraphDiagnosticSeverity {
   GRAPH_DIAGNOSTIC_SEVERITY_ERROR = 2;
 }
 
+// FrameworkTag — wire identifier for a framework a component surface
+// belongs to. A `FrameworkTag` value's existence is NOT a support
+// guarantee; support is asserted only by a registered adapter, and is
+// surfaced per-request via `FrameworkSurfaceKindStatus`; new tag
+// values land only together with their adapter's vertical.
 enum FrameworkTag {
   FRAMEWORK_TAG_NONE = 0;
   FRAMEWORK_TAG_VUE = 1;
@@ -1089,6 +1122,16 @@ enum FrameworkTag {
   FRAMEWORK_TAG_REACT = 3;
   FRAMEWORK_TAG_SOLID = 4;
   FRAMEWORK_TAG_OPEN_CANONICAL = 5;
+}
+
+// FrameworkSurfaceKindSupport — per-kind support discriminator carried
+// by `FrameworkSurfaceKindStatus`. UNSPECIFIED is invalid in
+// server-produced v3 payloads.
+enum FrameworkSurfaceKindSupport {
+  FRAMEWORK_SURFACE_KIND_SUPPORT_UNSPECIFIED = 0;
+  FRAMEWORK_SURFACE_KIND_SUPPORT_SUPPORTED = 1;
+  FRAMEWORK_SURFACE_KIND_SUPPORT_UNSUPPORTED = 2;
+  FRAMEWORK_SURFACE_KIND_SUPPORT_PARTIAL = 3;
 }
 
 enum FrameworkSurfaceKind {

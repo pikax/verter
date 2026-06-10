@@ -239,9 +239,179 @@ fn assert_proto_ts_parity(
     );
 }
 
+/// Slice the proto source from the opening `enum <name> {` to its
+/// matching closing brace and return the `(NAME, tag)` value pairs,
+/// comments stripped.
+fn proto_enum_values(source: &str, enum_name: &str) -> Vec<(String, i32)> {
+    let needle = format!("enum {enum_name} {{");
+    let start_idx = source
+        .find(&needle)
+        .unwrap_or_else(|| panic!("typeinfo.proto must define `enum {enum_name} {{`"));
+    let body_start = start_idx + needle.len();
+    let rest = &source[body_start..];
+    let end = rest
+        .find('}')
+        .unwrap_or_else(|| panic!("`enum {enum_name}` must terminate"));
+    let stripped = strip_proto_comments(&rest[..end]);
+
+    let mut values = Vec::new();
+    for raw_stmt in stripped.split(';') {
+        let stmt = raw_stmt.trim();
+        if stmt.is_empty() || stmt.starts_with("reserved") || stmt.starts_with("option") {
+            continue;
+        }
+        if let Some((name, tag)) = stmt.split_once('=') {
+            let name = name.trim().to_string();
+            let tag: i32 = tag
+                .trim()
+                .parse()
+                .unwrap_or_else(|e| panic!("`enum {enum_name}` value `{name}` tag: {e}"));
+            values.push((name, tag));
+        }
+    }
+    values
+}
+
 #[test]
 fn type_node_taxonomy_proto_ts_parity() {
     assert_proto_ts_parity("GraphTypeNode", "GraphTypeNode", "kind", 32);
+}
+
+#[test]
+fn type_info_graph_response_taxonomy_proto_ts_parity() {
+    // The response wrapper's closed oneof: `graph`, `error`, and the
+    // schema-3 `framework_surface` payload arm.
+    assert_proto_ts_parity("TypeInfoGraphResponse", "TypeInfoGraphResponse", "kind", 3);
+}
+
+#[test]
+fn framework_tag_variant_set_is_unchanged() {
+    // NEGATIVE pin: NO new `FrameworkTag` values land in this program —
+    // a tag lands only together with its adapter's vertical. The live
+    // set stays exactly NONE/VUE/SVELTE/REACT/SOLID/OPEN_CANONICAL on
+    // the existing tags 0..=5; a stray tag addition (or a renumber)
+    // fails this guard.
+    let proto = read_workspace_file("crates/verter_protocol/proto/verter/v1/typeinfo.proto");
+    let values = proto_enum_values(&proto, "FrameworkTag");
+    let expected: Vec<(String, i32)> = [
+        ("FRAMEWORK_TAG_NONE", 0),
+        ("FRAMEWORK_TAG_VUE", 1),
+        ("FRAMEWORK_TAG_SVELTE", 2),
+        ("FRAMEWORK_TAG_REACT", 3),
+        ("FRAMEWORK_TAG_SOLID", 4),
+        ("FRAMEWORK_TAG_OPEN_CANONICAL", 5),
+    ]
+    .iter()
+    .map(|(n, t)| ((*n).to_string(), *t))
+    .collect();
+    assert_eq!(
+        values, expected,
+        "the `FrameworkTag` enum must stay exactly the six existing values \
+         on their existing tags — new tags land only with their adapter's vertical",
+    );
+
+    // The tag-semantics doc comment is pinned on the wire: a tag's
+    // existence is NOT a support guarantee. Comment lines are joined
+    // before matching so the sentence may wrap freely.
+    let tag_decl_idx = proto
+        .find("enum FrameworkTag {")
+        .expect("FrameworkTag must exist");
+    let preceding: String = proto[tag_decl_idx.saturating_sub(1200)..tag_decl_idx]
+        .lines()
+        .map(|l| l.trim_start().trim_start_matches("//").trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        preceding.contains("NOT a support guarantee"),
+        "the `FrameworkTag` enum must carry the doc comment pinning that a \
+         tag value's existence is NOT a support guarantee",
+    );
+}
+
+#[test]
+fn framework_surface_kind_support_is_a_closed_four_value_enum() {
+    let proto = read_workspace_file("crates/verter_protocol/proto/verter/v1/typeinfo.proto");
+    let values = proto_enum_values(&proto, "FrameworkSurfaceKindSupport");
+    let expected: Vec<(String, i32)> = [
+        ("FRAMEWORK_SURFACE_KIND_SUPPORT_UNSPECIFIED", 0),
+        ("FRAMEWORK_SURFACE_KIND_SUPPORT_SUPPORTED", 1),
+        ("FRAMEWORK_SURFACE_KIND_SUPPORT_UNSUPPORTED", 2),
+        ("FRAMEWORK_SURFACE_KIND_SUPPORT_PARTIAL", 3),
+    ]
+    .iter()
+    .map(|(n, t)| ((*n).to_string(), *t))
+    .collect();
+    assert_eq!(
+        values, expected,
+        "`FrameworkSurfaceKindSupport` must be the closed four-value enum \
+         (UNSPECIFIED / SUPPORTED / UNSUPPORTED / PARTIAL)",
+    );
+
+    // TS parity for the new enum + status message: the generated TS
+    // bindings carry both declarations (drift fails here before the
+    // byte-pin runs).
+    let ts = read_workspace_file("packages/proto/src/gen/verter/v1/typeinfo_pb.ts");
+    assert!(
+        ts.contains("export enum FrameworkSurfaceKindSupport"),
+        "typeinfo_pb.ts must declare the `FrameworkSurfaceKindSupport` enum",
+    );
+    assert!(
+        ts.contains("export const FrameworkSurfaceKindStatusSchema"),
+        "typeinfo_pb.ts must declare the `FrameworkSurfaceKindStatus` message schema",
+    );
+}
+
+#[test]
+fn framework_surface_kind_entry_field_numbers_are_stable() {
+    // Wire-compat negative: the two pre-existing `FrameworkSurfaceKindEntry`
+    // fields keep their numbers; the per-kind status lands as the NEW
+    // tag 3 (never a recycled one). The status message reuses the
+    // EXISTING `GraphExactness` + `GraphDiagnostic` vocabulary — no
+    // parallel diagnostic taxonomy.
+    let proto = read_workspace_file("crates/verter_protocol/proto/verter/v1/typeinfo.proto");
+    let entry = proto_message_body(&proto, "FrameworkSurfaceKindEntry");
+    assert!(
+        entry.contains("FrameworkSurfaceKind kind = 1;"),
+        "`FrameworkSurfaceKindEntry.kind` must stay field 1",
+    );
+    assert!(
+        entry.contains("repeated FrameworkSurfaceMember members = 2;"),
+        "`FrameworkSurfaceKindEntry.members` must stay field 2",
+    );
+    assert!(
+        entry.contains("FrameworkSurfaceKindStatus status = 3;"),
+        "`FrameworkSurfaceKindEntry.status` must be the new field 3",
+    );
+
+    let status = proto_message_body(&proto, "FrameworkSurfaceKindStatus");
+    assert!(
+        status.contains("FrameworkSurfaceKindSupport support = 1;"),
+        "`FrameworkSurfaceKindStatus.support` must be field 1",
+    );
+    assert!(
+        status.contains("GraphExactness exactness = 2;"),
+        "`FrameworkSurfaceKindStatus.exactness` must reuse the existing `GraphExactness` (field 2)",
+    );
+    assert!(
+        status.contains("repeated GraphDiagnostic diagnostics = 3;"),
+        "`FrameworkSurfaceKindStatus.diagnostics` must reuse the existing `GraphDiagnostic` (field 3)",
+    );
+
+    // The response wrapper's pre-existing arms keep their numbers; the
+    // framework-surface arm is the NEW tag 3.
+    let response = proto_message_body(&proto, "TypeInfoGraphResponse");
+    assert!(
+        response.contains("SemanticTypeGraph graph = 1;"),
+        "`TypeInfoGraphResponse.graph` must stay field 1",
+    );
+    assert!(
+        response.contains("TypeInfoRequestError error = 2;"),
+        "`TypeInfoGraphResponse.error` must stay field 2",
+    );
+    assert!(
+        response.contains("FrameworkSurfacePayload framework_surface = 3;"),
+        "`TypeInfoGraphResponse.framework_surface` must be the new field 3",
+    );
 }
 
 #[test]

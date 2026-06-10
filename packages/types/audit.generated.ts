@@ -900,6 +900,15 @@ lower_ms?: number | null, };
 export type FileRole = "Entry" | "DirectImport" | "TransitiveImport" | "TypeDep" | "IndexedReadyBuild" | "NotLoaded" | "ResolverWalk";
 
 /**
+ * Closed mirror of the per-kind framework-surface support
+ * discriminator (`FrameworkSurfaceKindSupport` on the typeinfo
+ * wire). Producers map the wire enum to this tag at the audit
+ * emission boundary, keeping the substrate decoupled from
+ * `verter_protocol`.
+ */
+export type FrameworkSurfaceKindSupportTag = "Unspecified" | "Supported" | "Unsupported" | "Partial";
+
+/**
  * Closed mirror of the typeinfo graph closure policy. The wire
  * substrate carries the full policy (with budgets); the audit
  * surface keeps only the discriminator because consumers aggregate
@@ -3033,7 +3042,22 @@ degraded: boolean,
  * Degradation reasons observed during the request. Sorted /
  * deduplicated by producers. Empty on clean success.
  */
-degradation_reasons?: Array<TypeInfoDegradationReasonTag>, };
+degradation_reasons?: Array<TypeInfoDegradationReasonTag>,
+/**
+ * Number of `FrameworkSurfaceKindEntry` items in the
+ * framework-surface response payload. Zero (the default) for
+ * every non-framework-surface operation — additive coverage for
+ * `GraphOperationTag::FrameworkSurfaces`.
+ */
+framework_surface_entry_count: number,
+/**
+ * Per-support-status counts of the framework-surface response's
+ * kind entries, keyed by [`FrameworkSurfaceKindSupportTag`].
+ * Absent statuses count as zero; the populated sum equals
+ * [`Self::framework_surface_entry_count`]. Empty (the default)
+ * for every non-framework-surface operation.
+ */
+framework_surface_support_counts?: { [key in FrameworkSurfaceKindSupportTag]?: number }, };
 
 /**
  * Type-resolution request payload. Producers in
