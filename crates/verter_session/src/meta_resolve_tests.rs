@@ -6309,6 +6309,115 @@ defineProps<{ first: Inner; second: Inner }>()
     );
 }
 
+/// The registry L1 mapped entrance fails OPEN-OR-UNKNOWN: when the
+/// top-level surface-composition walk behind
+/// `materialize_member_surface_expr` exhausts its traversal budget
+/// before deciding whether the base contains an open mapped carrier,
+/// the carrier must be PRESERVED — never fall through into Expanded
+/// materialisation (the unsafe direction for the registry
+/// carrier-stop). An open mapped (`{ [K in keyof T]: T }` over the
+/// unbound `T`) hidden behind more than 64 top-level intersection arms
+/// must still carrier-stop on the registry route.
+///
+/// **Discriminating.** A guard that returns `false` on budget
+/// exhaustion materialises the deep composition — the Mapped carrier
+/// assertion fails on that implementation (the shallow control shows
+/// the same composition WITHOUT budget pressure preserves the carrier,
+/// so the deep failure is the budget fail-direction, not the predicate).
+#[test]
+fn materialize_member_surface_expr_preserves_open_mapped_carrier_on_walk_budget_exhaustion() {
+    use verter_type_expr::{MappedModifier, ObjectExpr, ObjectMember, ObjectProperty, TypeParam};
+
+    let project = make_project();
+    project
+        .upsert_base("/src/types.ts", "export interface Anchor { id: string }\n")
+        .unwrap();
+
+    let host = project.host();
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+
+    let open_t = TypeExpr::TypeParameter(TypeParam {
+        name: "T".to_string(),
+        constraint: None,
+        default: None,
+    });
+    // `{ [K in keyof T]: T }` over the unbound outer `T` — an OPEN mapped
+    // carrier (open key space AND open value body).
+    let open_mapped = TypeExpr::Mapped {
+        parameter: "K".to_string(),
+        source: Arc::new(TypeExpr::KeyOf(Arc::new(open_t.clone()))),
+        value: Arc::new(open_t),
+        optional: MappedModifier::None,
+        readonly: MappedModifier::None,
+        name_type: None,
+    };
+    let closed_arm = |i: usize| {
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
+                format!("a{i}"),
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+                false,
+                false,
+            ))],
+        }))
+    };
+    fn contains_mapped(expr: &TypeExpr) -> bool {
+        match expr {
+            TypeExpr::Mapped { .. } => true,
+            TypeExpr::Intersection(arms) | TypeExpr::Union(arms) => {
+                arms.iter().any(contains_mapped)
+            }
+            TypeExpr::Parenthesized(inner) => contains_mapped(inner),
+            _ => false,
+        }
+    }
+
+    // Control (no budget pressure): a small composition with the open
+    // mapped carrier-stops — the predicate itself sees the carrier.
+    let mut shallow_arms = vec![open_mapped.clone()];
+    shallow_arms.extend((0..2).map(closed_arm));
+    let shallow = query_engine.materialize_member_surface_expr(
+        "/src/types.ts",
+        &TypeExpr::Intersection(shallow_arms.into()),
+        true,
+    );
+    assert!(
+        contains_mapped(&shallow),
+        "control: a shallow composition with an open mapped must preserve the Mapped \
+         carrier, got {shallow:?}"
+    );
+
+    // Deep composition: the open mapped sits FIRST in the arm list, so
+    // the LIFO worklist visits all 80 closed arms before reaching it and
+    // exhausts the 64-node walk budget — the undecidable verdict must
+    // PRESERVE the carrier. The carrier early-return happens BEFORE the
+    // Expanded `materialize_component_meta_structure` dispatch read and
+    // its `emit_dispatch_dep_signature_facts` dual-emit — the emission
+    // counter staying flat is the proof the Expanded materialiser never
+    // ran (the unsafe fall-through this guard exists to stop).
+    let emissions_before = provenance(&project).dispatch_dep_signature_fact_tracer_emissions;
+    let mut deep_arms = vec![open_mapped];
+    deep_arms.extend((0..80).map(closed_arm));
+    let deep = query_engine.materialize_member_surface_expr(
+        "/src/types.ts",
+        &TypeExpr::Intersection(deep_arms.into()),
+        true,
+    );
+    assert!(
+        contains_mapped(&deep),
+        "an open mapped carrier behind >64 top-level composition nodes must still \
+         carrier-stop on the registry route (budget exhaustion fails open-or-unknown), \
+         got {deep:?}"
+    );
+    assert_eq!(
+        provenance(&project).dispatch_dep_signature_fact_tracer_emissions,
+        emissions_before,
+        "budget exhaustion must preserve the carrier WITHOUT falling through into the \
+         Expanded materialiser (no dispatch dep-signature dual-emit may occur)"
+    );
+}
+
 #[test]
 fn component_meta_query_engine_can_resolve_registry_symbols_filters_builtins() {
     let project = make_project();

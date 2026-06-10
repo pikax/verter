@@ -65,8 +65,11 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 /// `<=` heuristic): a higher value means new eager expansion crept in; a lower
 /// value means the residual owner expansion changed and the gate is re-derived.
 ///
-/// The value is 3 because the eager macro-object materialiser is gone
-/// from the production resolution path
+/// The value is 4 = 3 (the residual canonical-owner expansion) + 1 (one
+/// CARRIER-STOPPED Expanded `Instantiate`):
+///
+/// **The 3-call residual owner expansion** exists because the eager
+/// macro-object materialiser is gone from the production resolution path
 /// (`compute_component_meta_state_inner` does not call
 /// `produce_macro_object_shapes_for_purpose`; `define_props`/`define_emits`/
 /// `define_slots` are owned by `projectors::define_shapes`). The
@@ -75,8 +78,16 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 /// the macro root (`produce_one_macro_object_shape` → the registry/projection
 /// pre-pass) over the SAME `(base, args, context)` the projector path already
 /// resolves once through `ResolveMacroPayload` / the empty-path Shallow walker.
-/// Without the materialiser, that one duplicate eager instantiate is gone, so
-/// the residual owner-surface expansion is exactly 3.
+/// Without the materialiser, that one duplicate eager instantiate is gone,
+/// leaving exactly 3 owner-surface expansions.
+///
+/// **The +1 carrier-stopped call** is the route/mode-independent L1
+/// open-domain carrier-stop: `build_instantiate` counts the dispatch BEFORE
+/// the carrier early-return, so the fixture's open `Pick`/`Omit` that stays
+/// a shallow `InstantiationRef` carrier (NO source materialisation) still
+/// increments the request-wide counter once. It is NOT eager expansion: the
+/// `synthesis_expanded_instantiate_calls == 0` and frontier/materialisation
+/// assertions below remain the eager-regression guards and stay green.
 ///
 /// Re-derivation proof (the value is pinned by these invariants):
 ///  1. member identity corpus-wide: the full component-meta suite
@@ -94,14 +105,15 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 ///  4. no lost inherited members: cross-file heritage / `Omit` / `Pick`
 ///     inheritance tests (incl. `cross_file_omit_heritage_carrier_*`,
 ///     `imported_mapped_slots_*`) pass — the canonical-owner residual path
-///     (the surviving 3 Expanded instantiates) still resolves inherited
+///     (the surviving 3 owner-surface Expanded instantiates plus the one
+///     counted-then-carried open-utility dispatch) still resolves inherited
 ///     members.
 ///  5. no overlay / base aliasing: the overlay-isolation test
 ///     (`overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base`)
 ///     proves overlay/base key on distinct hashes with no leak.
 ///  6. `synthesis_expanded_instantiate_calls == 0`: asserted directly above
-///     (the eager-path signal stays 0 — the removed instantiate was NOT
-///     synthesis-attributed; it was the materialiser pre-pass).
+///     (the eager-path signal stays 0 — neither the removed materialiser
+///     pre-pass nor the carrier-stopped dispatch is synthesis-attributed).
 ///  7. DISCRIMINATOR — the residual count reflects the materialiser pre-pass
 ///     being gone, NOT the reducer mode. Two behavioural facts hold on this
 ///     path: (a) the eager materialiser call is removed, and (b) the
@@ -114,12 +126,13 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 ///     (`field.r#type = reduce_field_type_expr(query_engine,
 ///     scope_canonical_id, raised);` in `reduce_published_field_types`, with
 ///     the materialiser removal LEFT in place) and re-running this gate keeps
-///     `expanded_instantiate_calls == 3` — the count is INVARIANT under the
+///     `expanded_instantiate_calls == 4` — the count is INVARIANT under the
 ///     reducer mode for this fixture (ChatMessages' published `slot_bindings`
 ///     reduce to carrier `IndexedAccess` shells that issue no Expanded
 ///     `Instantiate` in either mode). Therefore the reducer mode contributes
-///     ZERO to the residual count; the entire difference is the removed
-///     materialiser pre-pass.
+///     ZERO to the residual count; the difference against the eager rail is
+///     entirely the removed materialiser pre-pass (with the one
+///     carrier-stopped dispatch accounted for separately above).
 ///
 ///     This is corroborated structurally by the
 ///     `synthesis_expanded_instantiate_calls == 0` assertion below: the removed
@@ -128,7 +141,7 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 ///     (it instantiated the macro root under the SAME `(base, args, context)`
 ///     the projector path resolves once via `ResolveMacroPayload`), not a
 ///     distinct resolution.
-const CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE: u64 = 3;
+const CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE: u64 = 4;
 
 /// The declared-dependency ROOTS the audited ChatMessages resolve is allowed to
 /// touch — the SFC's own RELATIVE import targets plus the owner. Every

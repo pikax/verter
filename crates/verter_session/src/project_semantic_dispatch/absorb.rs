@@ -52,8 +52,12 @@ use super::ProjectSemanticDispatch;
 const ALIAS_PEEK_HOPS: usize = 8;
 
 /// A lattice-extreme operand the §22 absorption table reacts to.
+/// `pub(super)` so the shared conditional branch-selection oracle
+/// (`build.rs::conditional_branch_selection`) can route `any` / `error`
+/// checks — which semantically use BOTH branches / dominate — to
+/// `Deferred` instead of letting the relation table select a branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SpecialKind {
+pub(super) enum SpecialKind {
     Any,
     Never,
     Unknown,
@@ -67,7 +71,7 @@ impl ProjectSemanticDispatch<'_> {
     /// resolved node id (so an `error` operand can be reused verbatim as the
     /// absorbed result, preserving its `QueryError` payload + node identity —
     /// the error CARRIER).
-    fn peek_special(&self, id: SemanticNodeId) -> Option<(SpecialKind, SemanticNodeId)> {
+    pub(super) fn peek_special(&self, id: SemanticNodeId) -> Option<(SpecialKind, SemanticNodeId)> {
         let mut cur = id;
         // At most ALIAS_PEEK_HOPS hops; a longer chain / alias cycle → None.
         // bounded-loop: ALIAS_PEEK_HOPS transparent Alias redirects.

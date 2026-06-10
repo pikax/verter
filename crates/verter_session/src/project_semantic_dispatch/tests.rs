@@ -5813,6 +5813,3408 @@ fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
     }
 }
 
+/// Route/mode-INDEPENDENT L1 open-domain carrier-stop at the
+/// `Instantiate`-EXECUTION entrance (`build.rs`). A builtin object-filter
+/// utility (`Pick`/`Omit`) whose enumeration domain (argument 0) is OPEN
+/// must NOT route into `build_builtin_utility` (which would materialise the
+/// open source — the Table.vue structural memo-cycle / the ChatMessages.vue
+/// storm). The cold `Instantiate` build returns the `InstantiationRef`
+/// carrier verbatim under EVERY demand context — `Published(Expanded)` AND
+/// `StructuralTransit` — not just `Navigate`.
+///
+/// **Discriminating.** Pre-change the Expanded / StructuralTransit
+/// `Instantiate` execution falls through to `build_builtin_utility`, which
+/// cannot read an `Object` surface off a bare `TypeParam` source and yields
+/// `Opaque(Miss)` — NOT the carrier. This test FAILS on the pre-change tree
+/// (no carrier) and PASSES post-change.
+#[test]
+fn open_pick_omit_carrier_stops_in_expanded_and_structural_transit() {
+    use crate::semantic_query::{
+        DeclIdentity, InstantiateContext, LiteralValue, ProjectionReductionContext,
+        ResolvedDeclSlotIdentity,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // OPEN enumeration domain: a bare unsubstituted type parameter. The
+    // openness walk's `TypeParam` arm classifies this open, independent of
+    // any seeded declaration (fully hermetic).
+    let open_domain = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let key_literal = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "a".to_string(),
+    )));
+    let args: Arc<[SemanticNodeId]> = Arc::from(vec![open_domain, key_literal].into_boxed_slice());
+
+    for util in ["Pick", "Omit"] {
+        for (label, reduction) in [
+            (
+                "Published(Expanded)",
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            ),
+            (
+                "StructuralTransit",
+                ProjectionReductionContext::structural_transit(),
+            ),
+        ] {
+            let base = ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("__builtin__"),
+                Arc::from(util),
+            );
+            let result = dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+                base,
+                args: args.clone(),
+                context: InstantiateContext::new(reduction, Default::default()),
+            });
+            let value = match result {
+                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+                other => panic!("{util} under {label}: expected a Value carrier, got {other:?}"),
+            };
+            let data = graph
+                .node_data(value)
+                .expect("Instantiate result must intern a node");
+            match data.as_ref() {
+                SemanticNodeData::InstantiationRef { base, .. } => {
+                    assert_eq!(
+                        base.decl_name.as_ref(),
+                        util,
+                        "{util} under {label}: open-domain carrier must preserve the \
+                         {util} identity (route/mode-independent L1)"
+                    );
+                    assert_eq!(
+                        base.canonical_id.as_ref(),
+                        "__builtin__",
+                        "{util} under {label}: carrier base must stay the builtin utility"
+                    );
+                }
+                SemanticNodeData::Opaque(_) => panic!(
+                    "{util} under {label}: open-domain `Instantiate` execution materialised \
+                     to Opaque instead of carrier-stopping — the open source was expanded \
+                     (the Table/ChatMessages runaway class)"
+                ),
+                other => panic!(
+                    "{util} under {label}: expected the {util} InstantiationRef carrier, got \
+                     {other:?}"
+                ),
+            }
+        }
+    }
+}
+
+/// Route/mode-INDEPENDENT L1 at the LOWERING entrance (`lower.rs`). An
+/// OPEN-domain `Pick`/`Omit` preserves the `InstantiationRef` carrier in
+/// EVERY lowering mode (Navigate, Expanded, Shallow, Skeleton); a CLOSED
+/// domain still materialises (dispatches the `Instantiate` query) in the
+/// non-Navigate modes.
+///
+/// **Discriminating.** Pre-change the lowering carrier short-circuit fires
+/// ONLY in `Navigate` mode, so an OPEN `Pick<OpenAlias, 'a'>` lowered in
+/// Expanded / Shallow / Skeleton dispatches `Instantiate` and does NOT
+/// preserve the builtin carrier — this test's OPEN-in-non-Navigate
+/// assertions FAIL pre-change and PASS post-change. The CLOSED-still-
+/// materialises arms guard against the carrier-stop over-firing on a finite
+/// surface.
+#[test]
+fn open_pick_lowering_preserves_carrier_all_modes_closed_still_materializes() {
+    use verter_type_expr::{LiteralValue, TypeExpr};
+
+    let host = host();
+    // CLOSED source `Foo = { a }`; OPEN source `OpenAlias<T> = T extends
+    // string ? { a: T } : { b: T }` — a conditional-bodied generic alias
+    // whose enumeration domain stays open (the bounded alias-chain walk
+    // terminates at a Conditional, not a finite object surface).
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export type Foo = { a: string };\n\
+         export type OpenAlias<T> = T extends string ? { a: T } : { b: T };",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let key_lit = TypeExpr::Literal(LiteralValue::String("a".to_string()));
+    let closed_pick = TypeExpr::Ref {
+        name: Arc::from("Pick"),
+        type_arguments: Arc::from(vec![
+            TypeExpr::Ref {
+                name: Arc::from("Foo"),
+                type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+            },
+            key_lit.clone(),
+        ]),
+    };
+    // `OpenAlias` referenced bare (under-applied generic) → its prepared
+    // body is a Conditional over the unbound `T` → OPEN domain.
+    let open_pick = TypeExpr::Ref {
+        name: Arc::from("Pick"),
+        type_arguments: Arc::from(vec![
+            TypeExpr::Ref {
+                name: Arc::from("OpenAlias"),
+                type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+            },
+            key_lit,
+        ]),
+    };
+
+    let is_builtin_carrier = |node: SemanticNodeId| {
+        matches!(
+            graph.node_data(node).as_deref(),
+            Some(SemanticNodeData::InstantiationRef { base, .. })
+                if base.canonical_id.as_ref() == "__builtin__"
+        )
+    };
+
+    for mode in [
+        ProjectionMode::Navigate,
+        ProjectionMode::Expanded,
+        ProjectionMode::Shallow,
+        ProjectionMode::Skeleton,
+    ] {
+        // OPEN domain → carrier preserved in EVERY mode.
+        let open_lowered = dispatch
+            .lower_type_expr_in_scope_with_mode("/types.ts", &open_pick, mode)
+            .expect("open Pick lowering succeeds");
+        assert!(
+            is_builtin_carrier(open_lowered),
+            "OPEN Pick<OpenAlias, 'a'> in {mode:?} must PRESERVE the builtin carrier \
+             (route/mode-independent L1)"
+        );
+
+        // CLOSED domain → in non-Navigate modes it must NOT preserve the
+        // carrier (it materialises path-precisely); Navigate always carries
+        // (the reducer decides closed→materialise downstream).
+        let closed_lowered = dispatch
+            .lower_type_expr_in_scope_with_mode("/types.ts", &closed_pick, mode)
+            .expect("closed Pick lowering succeeds");
+        if matches!(mode, ProjectionMode::Navigate) {
+            assert!(
+                is_builtin_carrier(closed_lowered),
+                "CLOSED Pick<Foo, 'a'> in Navigate still lowers to the carrier (the \
+                 reducer materialises it downstream)"
+            );
+        } else {
+            assert!(
+                !is_builtin_carrier(closed_lowered),
+                "CLOSED Pick<Foo, 'a'> in {mode:?} must MATERIALISE (no carrier-stop \
+                 over-fire on a finite surface)"
+            );
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Route/mode-INDEPENDENT L1 open-domain carrier-stop: the MAPPED-TYPE
+// family (`{ [K in S]: V }` over an open outer generic).
+// ──────────────────────────────────────────────────────────────────
+
+/// Intern a one-parameter `Function` node `(p: param_ty) => return_ty`
+/// for the mapped value-body fixtures.
+fn unary_function(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    param_ty: SemanticNodeId,
+    return_ty: SemanticNodeId,
+) -> SemanticNodeId {
+    use crate::semantic_query::FunctionParam;
+    graph.intern_node(SemanticNodeData::Function {
+        params: Arc::from(
+            vec![FunctionParam {
+                name: Some(Arc::from("p")),
+                ty: param_ty,
+                optional: false,
+                rest: false,
+                span: None,
+            }]
+            .into_boxed_slice(),
+        ),
+        return_type: return_ty,
+        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    })
+}
+
+/// Route/mode-INDEPENDENT L1 for the MAPPED family. A mapped type
+/// `{ [K in keyof Closed]?: <conditional value reaching outer T> }` —
+/// the `ChatMessagesSlots<T>` shape — whose KEYS are enumerable (the
+/// source key space is a finite closed surface) but whose VALUE BODY is
+/// a conditional reaching the open outer generic `T` (NOT the bound
+/// mapper binder `K`) must carrier-stop into a deferred
+/// `SemanticNodeData::Mapped` shell under EVERY publication demand —
+/// `Published(Expanded)` AND `MacroObjectSurface` — instead of
+/// enumerating the keys and materialising the per-key conditional value
+/// (the combinatorial storm across `node_modules`).
+///
+/// **Discriminating.** Pre-change `build_mapped_type` reaches the
+/// key-enumeration path under both demands (`may_reduce_operator` is
+/// true), enumerates the source key (`header`) and materialises the
+/// conditional value per key, producing an `Object` surface. Post-change
+/// it carrier-stops to a `Mapped` shell with NO produced members (no
+/// `ProjectMember` edges). The `Mapped`-not-`Object` + no-member-edge
+/// assertions FAIL pre-change and PASS post-change.
+#[test]
+fn open_mapped_value_body_carrier_stops_in_expanded_and_macro_object_surface() {
+    use crate::semantic_query::{
+        DeclIdentity, IndexKey, MapperKey, MapperKind, OptionalityMod, ProjectionReductionContext,
+        ReadonlyMod, SurfaceProvenanceContext,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // Outer SFC generic `T` (OPEN — must open the value body) vs the
+    // mapper binder `K` (BOUND — must NOT open).
+    let t_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let k_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+
+    // Closed source with one enumerable key `header`; closed key space.
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let source = simple_object(&graph, &[("header", string_ty)]);
+    let key_space = string_ty;
+
+    // value body: `<closed> extends <closed>
+    //   ? (p: { m: Base<T> }) => string : never`
+    // The true branch reaches the OPEN outer `T` through a function
+    // parameter object member — only a deep value walk that descends
+    // functions/objects AND inspects conditional branches finds it.
+    let base_inst = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: DeclIdentity::synthetic("Base"),
+        args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+    let inner_obj = simple_object(&graph, &[("m", base_inst)]);
+    let true_fn = unary_function(&graph, inner_obj, string_ty);
+    let never_ty = primitive(&graph, PrimitiveKind::Never);
+    // A closed check/extends (`Closed[K] extends string`): K is the
+    // bound binder, so the check does NOT open the domain.
+    let check = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: source,
+        index: IndexKey::TypeNode(k_param),
+    });
+    let value_expr = graph.intern_node(SemanticNodeData::Conditional {
+        check,
+        extends: string_ty,
+        true_branch_ref: true_fn,
+        false_branch_ref: never_ty,
+        distributive: false,
+    });
+
+    let mapper = MapperKey {
+        parameter_node: k_param,
+        key_space,
+        value_expr,
+        optionality: OptionalityMod::Add,
+        readonly: ReadonlyMod::Keep,
+        name_remap: None,
+        kind: MapperKind::Computed,
+    };
+
+    for (label, context) in [
+        (
+            "Published(Expanded)",
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        ),
+        (
+            "MacroObjectSurface(Expanded)",
+            ProjectionReductionContext::macro_object_surface(
+                ProjectionMode::Expanded,
+                SurfaceProvenanceContext::Structural,
+            ),
+        ),
+    ] {
+        let result = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
+            source,
+            mapper: mapper.clone(),
+            context,
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("{label}: expected Value, got {other:?}"),
+        };
+        let data = graph.node_data(result).expect("mapped result data");
+        match data.as_ref() {
+            SemanticNodeData::Mapped { .. } => {}
+            SemanticNodeData::Object(view) => panic!(
+                "{label}: open mapped value body must carrier-stop to a Mapped shell, but \
+                 the keys were ENUMERATED into an Object with {} member(s) — the per-key \
+                 conditional value was materialised (the ChatMessages storm class)",
+                view.members.len()
+            ),
+            other => panic!("{label}: expected a Mapped carrier shell, got {other:?}"),
+        }
+        // The carrier-stop emits NO per-member `ProjectMember` edges —
+        // the per-key value loop never ran.
+        assert!(
+            graph
+                .origins_of_kind(result, OriginEdgeKind::ProjectMember)
+                .is_empty(),
+            "{label}: the open mapped carrier must NOT emit per-member ProjectMember edges \
+             (no per-key value materialisation)"
+        );
+    }
+}
+
+/// CLOSED mapped CONTROLS still enumerate path-precisely under
+/// `Published(Expanded)` — the carrier-stop must NOT over-fire on a
+/// finite, outer-generic-free mapped type (the `Partial`/`Required`/
+/// `Readonly` / `{ [K in keyof Closed]: Closed[K] }` family).
+///
+/// **Discriminating.** If the mapped open-walk over-fired (e.g. treating
+/// the bound binder `K` or a finite value surface as open), these closed
+/// mapped types would carrier-stop to a `Mapped` shell instead of an
+/// enumerated `Object` — the `Object`-not-`Mapped` assertions FAIL on an
+/// over-firing predicate and PASS on the correct one.
+#[test]
+fn closed_mapped_controls_still_enumerate_no_carrier_over_fire() {
+    use crate::semantic_query::{
+        DeclIdentity, MapperKey, MapperKind, OptionalityMod, ProjectionReductionContext,
+        ReadonlyMod,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let num = primitive(&graph, PrimitiveKind::Number);
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let source = simple_object(&graph, &[("a", num), ("b", num)]);
+    let key_space = string_ty;
+    let k_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+
+    // (1) identity `{ [K in keyof T]: T[K] }` (Partial/Required/Readonly).
+    let identity_mapper = MapperKey {
+        parameter_node: k_param,
+        key_space,
+        value_expr: num,
+        optionality: OptionalityMod::Add,
+        readonly: ReadonlyMod::Keep,
+        name_remap: None,
+        kind: MapperKind::Identity,
+    };
+    // (2) K-only value `{ [K in keyof T]: K }` — references the BOUND
+    // binder only; no outer generic ⇒ CLOSED.
+    let k_only_mapper = MapperKey {
+        parameter_node: k_param,
+        key_space,
+        value_expr: k_param,
+        optionality: OptionalityMod::Keep,
+        readonly: ReadonlyMod::Keep,
+        name_remap: None,
+        kind: MapperKind::Computed,
+    };
+
+    for (label, mapper) in [("identity", identity_mapper), ("k-only", k_only_mapper)] {
+        let result = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
+            source,
+            mapper,
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+            other => panic!("{label}: expected Value, got {other:?}"),
+        };
+        let data = graph.node_data(result).expect("mapped result data");
+        match data.as_ref() {
+            SemanticNodeData::Object(view) => assert_eq!(
+                view.members.len(),
+                2,
+                "{label}: closed mapped must enumerate both keys path-precisely"
+            ),
+            SemanticNodeData::Mapped { .. } => panic!(
+                "{label}: closed mapped CONTROL carrier-stopped — the open-walk OVER-FIRED on \
+                 a finite, outer-generic-free mapped type"
+            ),
+            other => panic!("{label}: expected an enumerated Object, got {other:?}"),
+        }
+    }
+}
+
+/// Binder discrimination: the SAME source/key-space mapped type carriers
+/// when its value reaches the outer generic `T` and enumerates when its
+/// value references only the bound binder `K`.
+///
+/// **Discriminating.** This isolates the binder-bound rule: `{ [K in
+/// keyof Closed]: Foo<T> }` (open via outer `T`) must carrier-stop while
+/// `{ [K in keyof Closed]: K }` (closed — `K` is bound) must enumerate.
+/// A predicate that treated `K` as open would carrier-stop both (the
+/// k-only arm FAILS); one that ignored outer `T` in the value would
+/// enumerate both (the `Foo<T>` arm FAILS).
+#[test]
+fn mapped_binder_bound_outer_generic_open_value_discrimination() {
+    use crate::semantic_query::{
+        DeclIdentity, MapperKey, MapperKind, OptionalityMod, ProjectionReductionContext,
+        ReadonlyMod,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let num = primitive(&graph, PrimitiveKind::Number);
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let source = simple_object(&graph, &[("a", num)]);
+    let key_space = string_ty;
+    let k_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let t_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let foo_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: DeclIdentity::synthetic("Foo"),
+        args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+
+    let make_mapper = |value_expr| MapperKey {
+        parameter_node: k_param,
+        key_space,
+        value_expr,
+        optionality: OptionalityMod::Keep,
+        readonly: ReadonlyMod::Keep,
+        name_remap: None,
+        kind: MapperKind::Computed,
+    };
+
+    // CLOSED: value references only the bound binder `K`.
+    let closed = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
+        source,
+        mapper: make_mapper(k_param),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("k-only: expected Value, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            graph.node_data(closed).as_deref(),
+            Some(SemanticNodeData::Object(_))
+        ),
+        "k-only value (bound binder) must ENUMERATE, got {:?}",
+        graph.node_data(closed)
+    );
+
+    // OPEN: value reaches the outer generic `T`.
+    let open = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
+        source,
+        mapper: make_mapper(foo_of_t),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("Foo<T>: expected Value, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            graph.node_data(open).as_deref(),
+            Some(SemanticNodeData::Mapped { .. })
+        ),
+        "Foo<T> value (outer generic) must CARRIER-STOP, got {:?}",
+        graph.node_data(open)
+    );
+}
+
+/// Intern an unsubstituted outer `TypeParam` for the openness fixtures.
+fn outer_type_param(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    name: &str,
+) -> SemanticNodeId {
+    use crate::semantic_query::DeclIdentity;
+    graph.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity::synthetic(name),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from(name),
+    })
+}
+
+/// Per-dimension discriminators for `mapped_type_is_open_or_unknown`: each
+/// of the four mapped inputs — SOURCE, KEYSPACE, NAME-REMAP, VALUE BODY —
+/// must independently open the predicate, and the K-only / fully-closed
+/// controls must stay closed. Deleting any single input check in
+/// `mapped_type_is_open_or_unknown` fails exactly one OPEN arm here while
+/// the controls keep the arms honest against over-fire.
+#[test]
+fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
+    use crate::semantic_query::{MapperKey, MapperKind, OptionalityMod, ReadonlyMod};
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let closed_source = simple_object(&graph, &[("a", string_ty)]);
+    let k_param = outer_type_param(&graph, "K");
+    let t_param = outer_type_param(&graph, "T");
+
+    let mapper_with = |key_space, value_expr, name_remap| MapperKey {
+        parameter_node: k_param,
+        key_space,
+        value_expr,
+        optionality: OptionalityMod::Keep,
+        readonly: ReadonlyMod::Keep,
+        name_remap,
+        kind: MapperKind::Computed,
+    };
+    let template_over = |interpolant: SemanticNodeId| {
+        graph.intern_node(SemanticNodeData::TemplateLiteral {
+            quasis: Arc::from(
+                vec![Arc::<str>::from("on"), Arc::<str>::from("")].into_boxed_slice(),
+            ),
+            expressions: Arc::from(vec![interpolant].into_boxed_slice()),
+        })
+    };
+
+    // SOURCE dimension: a bare outer `TypeParam` source opens.
+    assert!(
+        super::raise::mapped_type_is_open_or_unknown(
+            &host,
+            t_param,
+            &mapper_with(string_ty, string_ty, None),
+        ),
+        "source = outer TypeParam must OPEN the mapped predicate (source check)"
+    );
+
+    // KEYSPACE dimension: an outer `TypeParam` key space opens.
+    assert!(
+        super::raise::mapped_type_is_open_or_unknown(
+            &host,
+            closed_source,
+            &mapper_with(t_param, string_ty, None),
+        ),
+        "key_space = outer TypeParam must OPEN the mapped predicate (key_space check)"
+    );
+
+    // NAME-REMAP dimension: a template remap interpolating the outer `T`
+    // opens — even with closed source / keyspace / value.
+    assert!(
+        super::raise::mapped_type_is_open_or_unknown(
+            &host,
+            closed_source,
+            &mapper_with(string_ty, string_ty, Some(template_over(t_param))),
+        ),
+        "name_remap = TemplateLiteral(...outer T...) must OPEN the mapped predicate \
+         (name_remap check)"
+    );
+
+    // VALUE-BODY dimension: a value reaching the outer `T` opens.
+    assert!(
+        super::raise::mapped_type_is_open_or_unknown(
+            &host,
+            closed_source,
+            &mapper_with(string_ty, t_param, None),
+        ),
+        "value_expr reaching the outer TypeParam must OPEN the mapped predicate \
+         (value_expr check)"
+    );
+
+    // CONTROL: a K-only remap over closed source/keyspace/value stays
+    // CLOSED — the bound binder is not an open interpolant.
+    assert!(
+        !super::raise::mapped_type_is_open_or_unknown(
+            &host,
+            closed_source,
+            &mapper_with(string_ty, k_param, Some(template_over(k_param))),
+        ),
+        "a K-only transform (binder-only remap + binder-only value) over closed \
+         source/keyspace must stay CLOSED"
+    );
+
+    // CONTROL: fully closed mapped stays CLOSED.
+    assert!(
+        !super::raise::mapped_type_is_open_or_unknown(
+            &host,
+            closed_source,
+            &mapper_with(string_ty, string_ty, None),
+        ),
+        "a fully closed mapped type must stay CLOSED"
+    );
+}
+
+/// Per-argument KEY-DOMAIN rule for the MAPPED family (the same rule as
+/// `Pick`/`Omit`): `{ [K in keyof Foo<T>]: string }` over a FIXED-KEY
+/// `interface Foo<T> { label?: string; items?: T }` — the open `T` is
+/// confined to member VALUE positions, so the produced KEY SET is closed
+/// and the mapped type must ENUMERATE; the same shape whose VALUE body
+/// reaches `T` (`Foo<T>[K]`-class) still carrier-stops.
+///
+/// **Discriminating.** A mapped key-domain walk that treats ANY open type
+/// argument as opening the key domain judges `keyof Foo<T>` open and
+/// carrier-stops the closed-key case — the first assertion fails on that
+/// implementation and passes on the per-argument rule.
+#[test]
+fn mapped_key_domain_judges_instantiations_per_argument_not_by_arg_openness() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, MapperKey, MapperKind, OptionalityMod, ProjectionReductionContext,
+        ReadonlyMod,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export interface Foo<T> { label?: string; items?: T }",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let k_param = outer_type_param(&graph, "K");
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let foo_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: DeclIdentity {
+            canonical_id: Arc::from("/types.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Foo"),
+        },
+        args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+    let keyof_foo_of_t = graph.intern_node(SemanticNodeData::KeyOf { base: foo_of_t });
+
+    let mapper_with_value = |value_expr| MapperKey {
+        parameter_node: k_param,
+        key_space: keyof_foo_of_t,
+        value_expr,
+        optionality: OptionalityMod::Keep,
+        readonly: ReadonlyMod::Keep,
+        name_remap: None,
+        kind: MapperKind::Computed,
+    };
+
+    // CLOSED key domain: `T` appears only in `items?: T` (a member VALUE
+    // position) — the key set {label, items} is fixed, so the predicate
+    // must NOT carrier-stop.
+    assert!(
+        !super::raise::mapped_type_is_open_or_unknown(
+            &host,
+            foo_of_t,
+            &mapper_with_value(string_ty),
+        ),
+        "{{ [K in keyof Foo<T>]: string }} over a FIXED-KEY Foo<T> (T value-position-only) \
+         must NOT carrier-stop — the per-argument key-domain rule keeps the key set CLOSED"
+    );
+
+    // OPEN value body: the same source/keyspace with a VALUE reaching the
+    // outer `T` (through the instantiation argument) still carrier-stops.
+    assert!(
+        super::raise::mapped_type_is_open_or_unknown(&host, foo_of_t, &mapper_with_value(foo_of_t),),
+        "{{ [K in keyof Foo<T>]: Foo<T> }} (value reaching the outer T) must still \
+         carrier-stop — value-body openness keeps the any-outer-generic rule"
+    );
+
+    // Dispatch-level witness for the closed-key case: the MappedType build
+    // must ENUMERATE — the result is a materialised `Object` surface
+    // carrying BOTH keys, and specifically NOT the deferred `Mapped`
+    // carrier the L1 carrier-stop would publish. A non-Object result is a
+    // hard failure (a witness that can vacuously pass is half a witness).
+    let result = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
+        source: foo_of_t,
+        mapper: mapper_with_value(string_ty),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("closed-key mapped over Foo<T>: expected Value, got {other:?}"),
+    };
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+            assert!(
+                names.contains(&"label") && names.contains(&"items"),
+                "closed-key mapped over Foo<T> must enumerate label/items, got {names:?}"
+            );
+        }
+        Some(SemanticNodeData::Mapped { .. }) => panic!(
+            "closed-key mapped over Foo<T> returned the deferred Mapped carrier — the \
+             L1 carrier-stop fired on a CLOSED key domain"
+        ),
+        other => panic!(
+            "closed-key mapped over Foo<T> must materialise an Object surface, got {other:?}"
+        ),
+    }
+}
+
+/// Hash-consed repeated open node: `Pick<Foo<T, T>, …>` interns BOTH type
+/// arguments as the SAME `TypeParam` node id. The per-argument openness
+/// collect must see `open_args = [true, true]` — a visited-set walk that
+/// returns `false` ("no new signal") on the revisit yields
+/// `[true, false]`, and a body placing the SECOND parameter in a
+/// key-reachable position (`type Foo<A, B> = { x: A } & B`) is then
+/// wrongly proven CLOSED — the storm class materialises behind the fuse.
+///
+/// **Discriminating.** Fails on the visited-set implementation (predicate
+/// returns CLOSED), passes on memoized verdicts (predicate returns OPEN).
+#[test]
+fn repeated_open_type_param_argument_stays_open_on_revisit() {
+    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+
+    let host = host();
+    upsert_ts(&host, "/types.ts", "export type Foo<A, B> = { x: A } & B;");
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let foo_t_t = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: DeclIdentity {
+            canonical_id: Arc::from("/types.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Foo"),
+        },
+        args: Arc::from(vec![t_param, t_param].into_boxed_slice()),
+    });
+    let key_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "x".to_string(),
+    )));
+    let builtin_pick = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Pick"),
+    };
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_pick,
+            &[foo_t_t, key_lit],
+        ),
+        "Pick<Foo<T, T>, …> over `type Foo<A, B> = {{ x: A }} & B` must be OPEN — the \
+         intersection arm `B` is bound to the open T; a revisit of the hash-consed T \
+         node must NOT report a false-CLOSED verdict into the per-argument vector"
+    );
+}
+
+/// KEY-DOMAIN classifier vs mapped VALUE positions and userland mapped
+/// helpers (both directions):
+///
+/// - `Omit<KeyFixed<T>, 'a'>` over `type KeyFixed<T> = { [K in 'a' | 'b']:
+///   T }` — the key set {a, b} is FIXED; the open `T` lives in the mapped
+///   VALUE position and must NOT open the enumeration domain.
+/// - `Pick<MyPartial<Concrete>, 'a'>` over the userland
+///   `type MyPartial<T> = { [P in keyof T]?: T[P] }` instantiated with a
+///   CLOSED arg — the mapped binder `P` is a bound local, not an
+///   unresolved free ref; the domain is CLOSED.
+///
+/// **Discriminating.** A classifier that descends mapped VALUE positions
+/// judges `KeyFixed<T>` open (first arm fails); one that does not bind the
+/// mapped binder judges `MyPartial<Concrete>` open via the bare-`P`
+/// unresolved-ref rule (second arm fails).
+#[test]
+fn key_domain_classifier_ignores_mapped_value_positions_and_binds_mapper_binder() {
+    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export type KeyFixed<T> = { [K in 'a' | 'b']: T };\n\
+         export type MyPartial<T> = { [P in keyof T]?: T[P] };\n\
+         export interface Concrete { a: string; b: number }",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let key_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "a".to_string(),
+    )));
+    let decl = |name: &str| DeclIdentity {
+        canonical_id: Arc::from("/types.ts"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from(name),
+    };
+    let builtin = |name: &str| DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from(name),
+    };
+
+    // Direction 1: open arg confined to the mapped VALUE position of a
+    // fixed-key mapped body keeps the key domain CLOSED.
+    let key_fixed_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: decl("KeyFixed"),
+        args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin("Omit"),
+            &[key_fixed_of_t, key_lit],
+        ),
+        "Omit<KeyFixed<T>, 'a'> over `{{ [K in 'a' | 'b']: T }}` must be CLOSED — the \
+         fixed key set {{a, b}} does not depend on the open T in VALUE position"
+    );
+
+    // Direction 2: a userland mapped helper over a CLOSED arg is CLOSED —
+    // the mapped binder `P` is bound, not an unresolved free ref.
+    let concrete_ref = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: decl("Concrete"),
+    });
+    let my_partial_concrete = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: decl("MyPartial"),
+        args: Arc::from(vec![concrete_ref].into_boxed_slice()),
+    });
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin("Pick"),
+            &[my_partial_concrete, key_lit],
+        ),
+        "Pick<MyPartial<Concrete>, 'a'> over `{{ [P in keyof T]?: T[P] }}` must be CLOSED \
+         — the mapped binder P is a bound local, not an unresolved free ref"
+    );
+}
+
+/// Index-signature KEY types are key-domain reachable (both directions):
+/// a `Pick`/`Omit` domain whose object surface carries an index signature
+/// keyed by an UNBOUND outer generic has an undecidable key set ⇒ OPEN;
+/// a concrete `[k: string]` index signature is the bounded Record-class
+/// signature surface and does NOT disqualify finite enumeration of the
+/// named members ⇒ CLOSED (the documented decision).
+#[test]
+fn index_signature_key_type_opens_domain_concrete_key_stays_closed() {
+    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let t_param = outer_type_param(&graph, "T");
+    let key_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "a".to_string(),
+    )));
+    let builtin_pick = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Pick"),
+    };
+
+    let object_with_index_key = |key_type: SemanticNodeId| {
+        graph.intern_node(SemanticNodeData::Object(SurfaceView {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(
+                vec![IndexSignature {
+                    key_type,
+                    value_type: string_ty,
+                    readonly: false,
+                    spans: Default::default(),
+                    declaration_origin: None,
+                }]
+                .into_boxed_slice(),
+            ),
+            keyspace: None,
+            has_index_signature: true,
+        }))
+    };
+
+    // OPEN: the index-signature KEY depends on the unbound outer T.
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_pick,
+            &[object_with_index_key(t_param), key_lit],
+        ),
+        "an object domain whose index-signature KEY reaches an unbound outer generic \
+         must be OPEN — the produced key set is undecidable"
+    );
+
+    // CLOSED: a concrete `[k: string]` signature does not disqualify the
+    // (fixed) named-member enumeration.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_pick,
+            &[object_with_index_key(string_ty), key_lit],
+        ),
+        "an object domain with a concrete `[k: string]` index signature must stay CLOSED \
+         — the Record-class signature surface is bounded"
+    );
+}
+
+/// Per-argument KEY-DOMAIN rule through NESTED instantiation wrappers
+/// (the prepared-body `Ref`-with-arguments arm): `type AliasOuter<T> =
+/// Foo<T>` and `interface HeritageOuter<T> extends Foo<T> {}` over the
+/// FIXED-KEY `interface Foo<T> { label?: string; items?: T }` — the open
+/// `T` flows through the wrapper as an instantiation ARGUMENT but stays
+/// confined to member VALUE positions of `Foo`, so `Omit<AliasOuter<T>,
+/// 'items'>` / `Omit<HeritageOuter<T>, 'items'>` keep a CLOSED key
+/// domain and must enumerate `label` path-precisely. A wrapper that
+/// places `T` in a KEY-reachable position (`Foo<T> & T`) stays OPEN.
+///
+/// **Discriminating.** A body walk that rejects a nested `Ref<...>` as
+/// soon as ANY type argument is open (instead of recursing with the
+/// per-argument vector) judges both wrappers OPEN — the two CLOSED
+/// assertions fail on that implementation and pass on the per-argument
+/// recursion.
+#[test]
+fn nested_instantiation_wrappers_apply_per_argument_key_domain_rule() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
+        ResolvedDeclSlotIdentity,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export interface Foo<T> { label?: string; items?: T }\n\
+         export type AliasOuter<T> = Foo<T>;\n\
+         export interface HeritageOuter<T> extends Foo<T> {}\n\
+         export type KeyReachingOuter<T> = Foo<T> & T;",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let items_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "items".to_string(),
+    )));
+    let builtin_omit = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Omit"),
+    };
+    let wrapper_of_t = |name: &str| {
+        graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                canonical_id: Arc::from("/types.ts"),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from(name),
+            },
+            args: Arc::from(vec![t_param].into_boxed_slice()),
+        })
+    };
+
+    // CLOSED: the alias wrapper forwards T into Foo's VALUE positions only.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[wrapper_of_t("AliasOuter"), items_lit],
+        ),
+        "Omit<AliasOuter<T>, 'items'> over `type AliasOuter<T> = Foo<T>` (T \
+         value-position-only in Foo) must be CLOSED — the per-argument rule recurses \
+         through the wrapper body"
+    );
+
+    // CLOSED: the extends-heritage wrapper (body lowers to a heritage
+    // Intersection arm `Foo<T>`).
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[wrapper_of_t("HeritageOuter"), items_lit],
+        ),
+        "Omit<HeritageOuter<T>, 'items'> over `interface HeritageOuter<T> extends \
+         Foo<T> {{}}` must be CLOSED — the heritage arm is judged per-argument, not \
+         by bare arg openness"
+    );
+
+    // OPEN control: the wrapper places T itself in a KEY-reachable
+    // position (an intersection arm IS the open param).
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[wrapper_of_t("KeyReachingOuter"), items_lit],
+        ),
+        "Omit<KeyReachingOuter<T>, 'items'> over `Foo<T> & T` must stay OPEN — the \
+         open T is an intersection arm (key-reachable), not a value-position argument"
+    );
+
+    // Dispatch-level witness (strict): the CLOSED alias wrapper must
+    // MATERIALISE path-precisely — an Object surface carrying `label` and
+    // NOT `items`, and specifically NOT the builtin InstantiationRef
+    // carrier the L1 carrier-stop would publish.
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("__builtin__"),
+            Arc::from("Omit"),
+        ),
+        args: Arc::from(vec![wrapper_of_t("AliasOuter"), items_lit].into_boxed_slice()),
+        context: InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("Omit<AliasOuter<T>, 'items'> must produce a Value, got {other:?}"),
+    };
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+            assert!(
+                names.contains(&"label"),
+                "Omit<AliasOuter<T>, 'items'> must materialise `label`, got {names:?}"
+            );
+            assert!(
+                !names.contains(&"items"),
+                "Omit<AliasOuter<T>, 'items'> must EXCLUDE `items`, got {names:?}"
+            );
+        }
+        other => panic!(
+            "Omit<AliasOuter<T>, 'items'> over a CLOSED wrapper must materialise an \
+             Object surface (NOT the builtin carrier), got {other:?}"
+        ),
+    }
+}
+
+/// K-only `as`-remapped mapped declarations on the PREPARED-DECL route:
+/// `type Remapped = {{ [K in 'a' | 'b' as `on${{K}}`]: string }}` reached
+/// through a bare `DeclRef` (no instantiation environment) is a finite
+/// K-only transform — the mapper binder is BOUND in the TypeExpr-layer
+/// walk and the template-literal remap closes over it, so a `Pick` over
+/// it must enumerate the REMAPPED keys. The same shape whose remap
+/// interpolates an unbound OUTER `T` still carrier-stops.
+///
+/// **Discriminating.** A prepared-decl-route classifier that cannot bind
+/// the mapper binder (or has no `TemplateLiteral` arm) judges `Remapped`
+/// OPEN via the bare-unresolved-`Ref` / unmodelled-shape rule — the
+/// CLOSED assertions fail on that implementation.
+#[test]
+fn k_only_remapped_mapped_alias_closes_on_prepared_decl_route() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
+        ResolvedDeclSlotIdentity,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export type Remapped = { [K in 'a' | 'b' as `on${K}`]: string };\n\
+         export type RemappedOuter<T> = { [K in 'a' | 'b' as `on${T}`]: string };",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let ona_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "ona".to_string(),
+    )));
+    let builtin_pick = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Pick"),
+    };
+    let remapped_ref = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: DeclIdentity {
+            canonical_id: Arc::from("/types.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Remapped"),
+        },
+    });
+
+    // CLOSED: the K-only remap over a finite keyspace, judged on the
+    // PREPARED-DECL route (bare DeclRef — the TypeExpr-layer walk).
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_pick,
+            &[remapped_ref, ona_lit],
+        ),
+        "Pick<Remapped, 'ona'> over a K-only `as`-remapped mapped alias must be \
+         CLOSED on the prepared-decl route — the binder is bound and the template \
+         remap closes over it"
+    );
+
+    // OPEN control: the remap interpolating the unbound OUTER `T` (through
+    // the instantiation argument) still carrier-stops.
+    let remapped_outer_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: DeclIdentity {
+            canonical_id: Arc::from("/types.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("RemappedOuter"),
+        },
+        args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_pick,
+            &[remapped_outer_of_t, ona_lit],
+        ),
+        "Pick<RemappedOuter<T>, 'ona'> (remap interpolating the open outer T) must \
+         stay OPEN — the produced keys depend on the unbound generic"
+    );
+
+    // Dispatch-level witness (strict): `Pick<Remapped, 'ona'>` must
+    // MATERIALISE the remapped key — an Object surface carrying `ona`,
+    // NOT the builtin carrier.
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("__builtin__"),
+            Arc::from("Pick"),
+        ),
+        args: Arc::from(vec![remapped_ref, ona_lit].into_boxed_slice()),
+        context: InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("Pick<Remapped, 'ona'> must produce a Value, got {other:?}"),
+    };
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+            assert!(
+                names.contains(&"ona"),
+                "Pick<Remapped, 'ona'> must materialise the REMAPPED key `ona`, got {names:?}"
+            );
+        }
+        other => panic!(
+            "Pick<Remapped, 'ona'> over a CLOSED K-only remapped alias must \
+             materialise an Object surface (NOT the builtin carrier), got {other:?}"
+        ),
+    }
+}
+
+/// Builtin OBJECT-FILTER key-domain semantics for NESTED builtin
+/// `InstantiationRef`s on the dispatch-predicate route: a `__builtin__`
+/// base has no prepared decl, so without family-aware handling a closed
+/// nested carrier (`Pick<Pick<{a, b}, 'a' | 'b'>, 'a'>`) is judged OPEN.
+/// A nested builtin `Pick`/`Omit` over a closed source + closed key
+/// selection is CLOSED; one over an open source stays OPEN; a
+/// non-object-filter builtin (`Partial`) over all-closed arguments is
+/// CLOSED under the route-independent registry rule.
+///
+/// **Discriminating.** An `InstantiationRef` arm that routes every base
+/// to `prepared_instantiation_key_domain_is_closed` (which cannot prove
+/// `__builtin__` closed) fails the first assertion.
+#[test]
+fn nested_builtin_object_filter_key_domain_judged_by_family_semantics() {
+    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let t_param = outer_type_param(&graph, "T");
+    let source = simple_object(&graph, &[("a", string_ty), ("b", string_ty)]);
+    let lit = |s: &str| {
+        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            s.to_string(),
+        )))
+    };
+    let keys_ab = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![lit("a"), lit("b")].into_boxed_slice(),
+    )));
+    let builtin = |name: &str| DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from(name),
+    };
+    let nested = |base_name: &str, args: Vec<SemanticNodeId>| {
+        graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: builtin(base_name),
+            args: Arc::from(args.into_boxed_slice()),
+        })
+    };
+
+    // CLOSED: a nested builtin Pick over a closed source + closed keys.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin("Pick"),
+            &[nested("Pick", vec![source, keys_ab]), lit("a")],
+        ),
+        "Pick<Pick<{{a, b}}, 'a' | 'b'>, 'a'> must be CLOSED — a nested builtin \
+         object-filter over a closed source + closed selection has a closed key domain"
+    );
+
+    // OPEN control: the nested filter's SOURCE is the unbound outer T.
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin("Pick"),
+            &[nested("Pick", vec![t_param, lit("a")]), lit("a")],
+        ),
+        "Pick<Pick<T, 'a'>, 'a'> over the unbound outer T must stay OPEN"
+    );
+
+    // Registry-rule control: a MAPPED utility (`Partial`) with a closed
+    // source is CLOSED on this route too — the registry-owned helper
+    // gives every builtin per-utility OUTPUT-KEY semantics shared by the
+    // node route and the TypeExpr route (see
+    // `builtin_key_domain_verdict_is_route_independent` and
+    // `builtin_key_domain_is_judged_per_utility_output_key_semantics`).
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin("Pick"),
+            &[nested("Partial", vec![source]), lit("a")],
+        ),
+        "Pick<Partial<{{a, b}}>, 'a'> must be CLOSED — a builtin whose arguments all \
+         close has an argument-derived (closed) key domain on every route"
+    );
+}
+
+/// Tri-state conditional KEY-DOMAIN closedness via the SHARED
+/// branch-selection oracle: a conditional whose check/extends the shared
+/// relation path can DECIDE classifies ONLY the selected branch — an open
+/// losing branch must not false-OPEN the domain. `type Source<T> =
+/// true extends true ? { label: string } : T` selects TRUE, so
+/// `Omit<Source<T>, 'x'>` is CLOSED and materialises `label`; the
+/// false-selection twin (`string extends never ? T : { label: string }`)
+/// is CLOSED through the FALSE branch; an undecidable check
+/// (`T extends string`) stays OPEN through both branches. The node route
+/// obeys the same selection rule: a relation-decided FALSE selection
+/// whose false branch IS the open `T` is OPEN — the selected branch IS
+/// the key domain.
+///
+/// **Discriminating.** A TypeExpr classifier that requires BOTH branches
+/// closed (the all-four-operands over-approximation) judges `Source<T>` /
+/// `SourceFalse<T>` OPEN — the two CLOSED assertions and the dispatch
+/// witness fail on that implementation. A node walk that never
+/// classifies branches judges the FALSE-selected open-branch conditional
+/// CLOSED — the node-route OPEN assertion fails on that implementation.
+#[test]
+fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
+        ResolvedDeclSlotIdentity,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export type Source<T> = true extends true ? { label: string } : T;\n\
+         export type SourceFalse<T> = string extends never ? T : { label: string };\n\
+         export type SourceDeferred<T> = T extends string ? T : { label: string };",
+    );
+    upsert_ts(
+        &host,
+        "/shapes.ts",
+        "export interface A { a1: string }\nexport interface XReq { items: number }",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let x_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "x".to_string(),
+    )));
+    let builtin_omit = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Omit"),
+    };
+    let source_of_t = |name: &str| {
+        graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                canonical_id: Arc::from("/types.ts"),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from(name),
+            },
+            args: Arc::from(vec![t_param].into_boxed_slice()),
+        })
+    };
+
+    // TRUE selection: the open `T` lives only in the UNSELECTED false
+    // branch — the key domain is the true branch's `{ label }` ⇒ CLOSED.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[source_of_t("Source"), x_lit],
+        ),
+        "Omit<Source<T>, 'x'> over `true extends true ? {{ label: string }} : T` must \
+         be CLOSED — the oracle selects TRUE and the open false branch is dead"
+    );
+
+    // FALSE selection: `string extends never` is NotAssignable — the open
+    // `T` lives only in the UNSELECTED true branch ⇒ CLOSED.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[source_of_t("SourceFalse"), x_lit],
+        ),
+        "Omit<SourceFalse<T>, 'x'> over `string extends never ? T : {{ label: string }}` \
+         must be CLOSED — the oracle selects FALSE and the open true branch is dead"
+    );
+
+    // DEFERRED control: an open check (`T extends string`) cannot select,
+    // and the open `T` true branch keeps the domain OPEN.
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[source_of_t("SourceDeferred"), x_lit],
+        ),
+        "Omit<SourceDeferred<T>, 'x'> over `T extends string ? T : …` must stay OPEN — \
+         an undecidable selection classifies both branches and T is open"
+    );
+
+    // NODE-route selection: a relation-decided FALSE selection whose
+    // false branch IS the open `T` — the conditional reduces to `T`, so
+    // the domain is OPEN even though check/extends are both closed (an
+    // operand-only walk that never classifies branches wrongly judges
+    // this CLOSED).
+    let decl_ref = |name: &str| {
+        graph.intern_node(SemanticNodeData::DeclRef {
+            identity: DeclIdentity {
+                canonical_id: Arc::from("/shapes.ts"),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from(name),
+            },
+        })
+    };
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let false_selected_open = graph.intern_node(SemanticNodeData::Conditional {
+        check: decl_ref("A"),
+        extends: decl_ref("XReq"),
+        true_branch_ref: simple_object(&graph, &[("k", string_ty)]),
+        false_branch_ref: t_param,
+        distributive: false,
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[false_selected_open, x_lit],
+        ),
+        "a node-route conditional whose oracle-selected FALSE branch is the open T must \
+         be OPEN — the selected branch IS the key domain"
+    );
+
+    // Dispatch-level witness (strict): the TRUE-selected source must
+    // MATERIALISE — an Object surface carrying `label`, NOT the builtin
+    // carrier the L1 carrier-stop would publish, and NOT any other shape.
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("__builtin__"),
+            Arc::from("Omit"),
+        ),
+        args: Arc::from(vec![source_of_t("Source"), x_lit].into_boxed_slice()),
+        context: InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("Omit<Source<T>, 'x'> must produce a Value, got {other:?}"),
+    };
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+            assert!(
+                names.contains(&"label"),
+                "Omit<Source<T>, 'x'> must materialise `label`, got {names:?}"
+            );
+        }
+        other => panic!(
+            "Omit<Source<T>, 'x'> over a TRUE-selected conditional must materialise an \
+             Object surface (NOT the builtin carrier), got {other:?}"
+        ),
+    }
+}
+
+/// Position-sensitive operand policy: an instantiation sitting under a
+/// VALUE-SENSITIVE operand position (`Conditional.check` /
+/// `Conditional.extends`, `IndexedAccess.object`) is judged by
+/// ANY-open-argument — the per-argument key-domain rule applies only in
+/// genuine KEY-DOMAIN positions. `Wrap<T>['a']` (member `a: BigOpen<T>`)
+/// IS `BigOpen<T>` — an open surface — even though `Wrap<T>`'s own key
+/// set is fixed; `Foo<T> extends XReq ? A : B` selects on `Foo<T>`'s
+/// VALUES. Both must carrier-stop under `Pick`/`Omit`, on the TypeExpr
+/// route (through alias wrappers) AND the node route (interned operator
+/// nodes). The key-domain-position control (`Omit<Wrap<T>, 'a'>`) keeps
+/// the per-argument rule pinned where it belongs.
+///
+/// **Discriminating.** A walk that judges every instantiation by the
+/// per-argument key-domain rule regardless of position judges `Wrap<T>`
+/// and `Foo<T>` CLOSED (T is value-position-confined) and materialises
+/// an open surface — every OPEN assertion and the carrier witness fail
+/// on that implementation.
+#[test]
+fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, IndexKey, InstantiateContext, LiteralValue,
+        ProjectionReductionContext, ResolvedDeclSlotIdentity,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export interface BigOpen<T> { value: T }\n\
+         export interface Wrap<T> { a: BigOpen<T> }\n\
+         export type Sel<T> = Wrap<T>['a'];\n\
+         export interface Foo<T> { label: string; items: T }\n\
+         export interface XReq { items: number }\n\
+         export interface A { a1: string }\n\
+         export interface B { b1: string }\n\
+         export type CondSel<T> = Foo<T> extends XReq ? A : B;",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let lit = |s: &str| {
+        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            s.to_string(),
+        )))
+    };
+    let decl = |name: &str| DeclIdentity {
+        canonical_id: Arc::from("/types.ts"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from(name),
+    };
+    let builtin = |name: &str| DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from(name),
+    };
+    let inst = |name: &str, args: Vec<SemanticNodeId>| {
+        graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: decl(name),
+            args: Arc::from(args.into_boxed_slice()),
+        })
+    };
+
+    // TypeExpr route, IndexedAccess.object: `Omit<Sel<T>, 'x'>` over
+    // `type Sel<T> = Wrap<T>['a']` — `Wrap<T>['a']` IS `BigOpen<T>`.
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin("Omit"),
+            &[inst("Sel", vec![t_param]), lit("x")],
+        ),
+        "Omit<Sel<T>, 'x'> over `Wrap<T>['a']` (a: BigOpen<T>) must be OPEN — the \
+         IndexedAccess OBJECT operand is value-sensitive: any open argument opens it"
+    );
+
+    // TypeExpr route, Conditional.check: `Pick<CondSel<T>, 'a1'>` over
+    // `Foo<T> extends XReq ? A : B` — selection depends on Foo<T>'s VALUES.
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin("Pick"),
+            &[inst("CondSel", vec![t_param]), lit("a1")],
+        ),
+        "Pick<CondSel<T>, 'a1'> over `Foo<T> extends XReq ? A : B` must be OPEN — the \
+         conditional CHECK operand is value-sensitive: any open argument opens it"
+    );
+
+    // Node route, IndexedAccess.object: the interned operator node.
+    let wrap_of_t = inst("Wrap", vec![t_param]);
+    let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: wrap_of_t,
+        index: IndexKey::String(Arc::from("a")),
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin("Pick"),
+            &[indexed, lit("x")],
+        ),
+        "Pick<Wrap<T>['a'], 'x'> (node route) must be OPEN — the IndexedAccess OBJECT \
+         operand is value-sensitive on the node walk too"
+    );
+
+    // Node route, Conditional.check: the interned conditional node.
+    let cond = graph.intern_node(SemanticNodeData::Conditional {
+        check: inst("Foo", vec![t_param]),
+        extends: graph.intern_node(SemanticNodeData::DeclRef {
+            identity: decl("XReq"),
+        }),
+        true_branch_ref: graph.intern_node(SemanticNodeData::DeclRef {
+            identity: decl("A"),
+        }),
+        false_branch_ref: graph.intern_node(SemanticNodeData::DeclRef {
+            identity: decl("B"),
+        }),
+        distributive: false,
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin("Pick"),
+            &[cond, lit("a1")],
+        ),
+        "Pick<Foo<T> extends XReq ? A : B, 'a1'> (node route) must be OPEN — the \
+         conditional CHECK operand is value-sensitive on the node walk too"
+    );
+
+    // KEY-DOMAIN control: the SAME open instantiation in a genuine
+    // key-domain position keeps the per-argument rule — `Omit<Wrap<T>,
+    // 'a'>` is CLOSED (T confined to Wrap's member VALUE position).
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin("Omit"),
+            &[wrap_of_t, lit("a")],
+        ),
+        "Omit<Wrap<T>, 'a'> must stay CLOSED — the per-argument key-domain rule still \
+         governs genuine key-domain positions"
+    );
+
+    // Dispatch-level witness (strict): `Omit<Sel<T>, 'x'>` must publish
+    // the SHALLOW builtin carrier, not materialise the open `BigOpen<T>`
+    // surface.
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("__builtin__"),
+            Arc::from("Omit"),
+        ),
+        args: Arc::from(vec![inst("Sel", vec![t_param]), lit("x")].into_boxed_slice()),
+        context: InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("Omit<Sel<T>, 'x'> must produce a Value, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::InstantiationRef { base, .. })
+                if base.canonical_id.as_ref() == "__builtin__"
+        ),
+        "Omit<Sel<T>, 'x'> over a value-sensitive-OPEN domain must publish the shallow \
+         builtin carrier, got {:?}",
+        graph.node_data(result)
+    );
+}
+
+/// Builtin KEY-DOMAIN semantics are ROUTE-INDEPENDENT: ONE registry-owned
+/// helper decides `__builtin__` instantiation closedness identically on
+/// the node-level `InstantiationRef` arm and the TypeExpr-layer
+/// unresolved-`Ref` fallback — all-closed arguments close EVERY registry
+/// utility's key domain (no utility is marked non-enumerable today), so
+/// `Pick<Partial<{a, b}>, 'a'>` is CLOSED on BOTH routes; an open
+/// argument keeps BOTH routes OPEN.
+///
+/// **Discriminating.** The pre-unification node arm kept
+/// non-object-filter builtins conservatively OPEN while the TypeExpr
+/// fallback closed them (a route-dependent verdict): the node-route
+/// CLOSED assertion fails on that implementation.
+#[test]
+fn builtin_key_domain_verdict_is_route_independent() {
+    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export type PartialAB = Partial<{ a: string; b: string }>;\n\
+         export type PartialOpen<T> = Partial<T>;",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let t_param = outer_type_param(&graph, "T");
+    let source = simple_object(&graph, &[("a", string_ty), ("b", string_ty)]);
+    let lit_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "a".to_string(),
+    )));
+    let decl = |name: &str| DeclIdentity {
+        canonical_id: Arc::from("/types.ts"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from(name),
+    };
+    let builtin_pick = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Pick"),
+    };
+
+    // NODE route: a `__builtin__` Partial InstantiationRef over a closed
+    // object — CLOSED under the unified registry rule.
+    let node_route_closed = !super::raise::utility_enumeration_domain_is_open_or_unknown(
+        &host,
+        &builtin_pick,
+        &[
+            graph.intern_node(SemanticNodeData::InstantiationRef {
+                base: DeclIdentity {
+                    canonical_id: Arc::from("__builtin__"),
+                    whole_hash: HashValue::default(),
+                    decl_name: Arc::from("Partial"),
+                },
+                args: Arc::from(vec![source].into_boxed_slice()),
+            }),
+            lit_a,
+        ],
+    );
+
+    // TYPEEXPR route: the SAME shape reached through a bare DeclRef whose
+    // prepared body is `Partial<{a, b}>` (the unresolved-Ref builtin
+    // fallback in the TypeExpr classifier).
+    let type_expr_route_closed = !super::raise::utility_enumeration_domain_is_open_or_unknown(
+        &host,
+        &builtin_pick,
+        &[
+            graph.intern_node(SemanticNodeData::DeclRef {
+                identity: decl("PartialAB"),
+            }),
+            lit_a,
+        ],
+    );
+
+    assert!(
+        node_route_closed,
+        "Pick<Partial<{{a, b}}>, 'a'> must be CLOSED on the NODE route — all-closed \
+         builtin arguments close the produced key domain"
+    );
+    assert!(
+        type_expr_route_closed,
+        "Pick<Partial<{{a, b}}>, 'a'> must be CLOSED on the TYPEEXPR route — all-closed \
+         builtin arguments close the produced key domain"
+    );
+    assert_eq!(
+        node_route_closed, type_expr_route_closed,
+        "the builtin key-domain verdict must be ROUTE-INDEPENDENT"
+    );
+
+    // OPEN control, both routes: an OPEN argument keeps the builtin open.
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_pick,
+            &[
+                graph.intern_node(SemanticNodeData::InstantiationRef {
+                    base: DeclIdentity {
+                        canonical_id: Arc::from("__builtin__"),
+                        whole_hash: HashValue::default(),
+                        decl_name: Arc::from("Partial"),
+                    },
+                    args: Arc::from(vec![t_param].into_boxed_slice()),
+                }),
+                lit_a,
+            ],
+        ),
+        "Pick<Partial<T>, 'a'> (node route) must stay OPEN — an open builtin argument \
+         opens the produced key domain"
+    );
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_pick,
+            &[
+                graph.intern_node(SemanticNodeData::InstantiationRef {
+                    base: decl("PartialOpen"),
+                    args: Arc::from(vec![t_param].into_boxed_slice()),
+                }),
+                lit_a,
+            ],
+        ),
+        "Pick<PartialOpen<T>, 'a'> (TypeExpr route) must stay OPEN — an open builtin \
+         argument opens the produced key domain"
+    );
+}
+
+/// The shared oracle owns the FULL branch-selection path, INCLUDING the
+/// pre-relation infer-pattern cases `build_conditional` selects before
+/// any relation query: `T extends infer X ? A : B` ALWAYS selects the
+/// TRUE branch (an infer pattern matches anything), with `X := check`.
+/// The classifiers must see the same selection — an open LOSING branch
+/// behind a bare-infer extends is dead and must not false-OPEN the key
+/// domain — and must bind the selected branch's infer name to the
+/// check's own identity/openness, so `? X : …` with an open check stays
+/// honestly OPEN.
+///
+/// **Discriminating.** An oracle without the pre-relation infer cases
+/// returns `Deferred` for an `Infer` extends, classifies the check
+/// value-sensitively (open `T` ⇒ OPEN) — the CLOSED assertions and the
+/// materialisation witness fail on that implementation. The
+/// closed-check/bound-branch assertion fails on any implementation that
+/// selects TRUE but leaves the branch's infer name unbound-open or
+/// blindly closed.
+#[test]
+fn bare_infer_extends_selects_true_through_the_shared_oracle() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
+        ResolvedDeclSlotIdentity,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export type InferSel<T> = T extends infer X ? { label: string } : T;\n\
+         export type InferSelOpenWin<T> = T extends infer X ? T : { label: string };",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let x_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "x".to_string(),
+    )));
+    let builtin_omit = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Omit"),
+    };
+    let inst = |name: &str| {
+        graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                canonical_id: Arc::from("/types.ts"),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from(name),
+            },
+            args: Arc::from(vec![t_param].into_boxed_slice()),
+        })
+    };
+
+    // TypeExpr route: bare-infer extends selects TRUE — the open `T`
+    // false branch is dead, the key domain is `{ label }` ⇒ CLOSED.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst("InferSel"), x_lit],
+        ),
+        "Omit<InferSel<T>, 'x'> over `T extends infer X ? {{ label: string }} : T` must \
+         be CLOSED — the bare-infer pattern selects TRUE and the open false branch is dead"
+    );
+
+    // Control: the same pattern with the OPEN branch WINNING stays OPEN.
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst("InferSelOpenWin"), x_lit],
+        ),
+        "Omit<InferSelOpenWin<T>, 'x'> over `T extends infer X ? T : …` must stay OPEN — \
+         the selected TRUE branch is the open T"
+    );
+
+    // Node route: the interned conditional with a bare `Infer` extends.
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let infer_x = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("X"),
+    });
+    let label_obj = simple_object(&graph, &[("label", string_ty)]);
+    let node_cond = graph.intern_node(SemanticNodeData::Conditional {
+        check: t_param,
+        extends: infer_x,
+        true_branch_ref: label_obj,
+        false_branch_ref: t_param,
+        distributive: false,
+    });
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[node_cond, x_lit],
+        ),
+        "the node-route bare-infer conditional must be CLOSED — same selection as \
+         build_conditional, route-independently"
+    );
+
+    // Node route, branch BINDS the infer name: `string extends infer X ?
+    // X : T` — TRUE selected with `X := string` (closed) ⇒ CLOSED.
+    let bound_closed = graph.intern_node(SemanticNodeData::Conditional {
+        check: string_ty,
+        extends: infer_x,
+        true_branch_ref: infer_x,
+        false_branch_ref: t_param,
+        distributive: false,
+    });
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[bound_closed, x_lit],
+        ),
+        "`string extends infer X ? X : T` must be CLOSED — X binds the CLOSED check"
+    );
+
+    // Control: `T extends infer X ? X : { label }` — TRUE selected with
+    // `X := T` (open) ⇒ the selected branch IS the open T ⇒ OPEN.
+    let bound_open = graph.intern_node(SemanticNodeData::Conditional {
+        check: t_param,
+        extends: infer_x,
+        true_branch_ref: infer_x,
+        false_branch_ref: label_obj,
+        distributive: false,
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[bound_open, x_lit],
+        ),
+        "`T extends infer X ? X : …` must stay OPEN — X binds the OPEN check"
+    );
+
+    // Dispatch-level witness (strict): the TRUE-selected source must
+    // MATERIALISE `label`, not the builtin carrier.
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("__builtin__"),
+            Arc::from("Omit"),
+        ),
+        args: Arc::from(vec![inst("InferSel"), x_lit].into_boxed_slice()),
+        context: InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("Omit<InferSel<T>, 'x'> must produce a Value, got {other:?}"),
+    };
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+            assert!(
+                names.contains(&"label"),
+                "Omit<InferSel<T>, 'x'> must materialise `label`, got {names:?}"
+            );
+        }
+        other => panic!(
+            "Omit<InferSel<T>, 'x'> over a bare-infer TRUE-selected conditional must \
+             materialise an Object surface (NOT the builtin carrier), got {other:?}"
+        ),
+    }
+}
+
+/// VALUE-SENSITIVE operands judge VALUE openness, not just bare-argument
+/// openness: a compound argument hiding the outer generic inside a value
+/// surface (an object member, a function parameter/return, a tuple
+/// element) — and an inline literal operand with an open member value —
+/// must OPEN a `Conditional.check`/`extends` or `IndexedAccess.object`
+/// operand on BOTH routes. Closed compounds stay CLOSED (no over-fire).
+///
+/// **Discriminating.** A position policy that judges instantiations by
+/// bare-argument openness only — the TypeExpr `Object` arm ignoring
+/// property values, the node walk not descending value surfaces at
+/// `ValueSensitive` — judges `Wrap2<{ nested: T }>` and
+/// `{ a: BigOpen2<T> }` CLOSED: every OPEN assertion fails on that
+/// implementation.
+#[test]
+fn value_sensitive_operands_descend_compound_value_surfaces() {
+    use crate::semantic_query::{DeclIdentity, FunctionParam, HashValue, IndexKey, LiteralValue};
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export interface BigOpen2<T> { value: T }\n\
+         export interface Wrap2<T> { a: T }\n\
+         export type SelNested<T> = Wrap2<{ nested: T }>['a'];\n\
+         export type SelInline<T> = { a: BigOpen2<T> }['a'];\n\
+         export type SelNestedClosed = Wrap2<{ nested: string }>['a'];\n\
+         export type SelFnClosed = Wrap2<() => string>['a'];",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let x_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "x".to_string(),
+    )));
+    let decl = |name: &str| DeclIdentity {
+        canonical_id: Arc::from("/types.ts"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from(name),
+    };
+    let builtin_omit = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Omit"),
+    };
+    let inst = |name: &str, args: Vec<SemanticNodeId>| {
+        graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: decl(name),
+            args: Arc::from(args.into_boxed_slice()),
+        })
+    };
+
+    // TypeExpr route: the outer T hides inside an OBJECT-VALUED argument
+    // of the value-sensitive IndexedAccess object.
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst("SelNested", vec![t_param]), x_lit],
+        ),
+        "Omit<SelNested<T>, 'x'> over `Wrap2<{{ nested: T }}>['a']` must be OPEN — a \
+         value-sensitive operand's compound argument is judged by VALUE openness"
+    );
+
+    // TypeExpr route: an INLINE object literal operand with an open
+    // member value.
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst("SelInline", vec![t_param]), x_lit],
+        ),
+        "Omit<SelInline<T>, 'x'> over `{{ a: BigOpen2<T> }}['a']` must be OPEN — an \
+         inline literal operand's member VALUES are value-sensitive"
+    );
+
+    // TypeExpr route controls: closed compounds (object-valued and
+    // function-valued) stay CLOSED — no over-fire.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[
+                graph.intern_node(SemanticNodeData::DeclRef {
+                    identity: decl("SelNestedClosed"),
+                }),
+                x_lit,
+            ],
+        ),
+        "Omit<SelNestedClosed, 'x'> over `Wrap2<{{ nested: string }}>['a']` must stay \
+         CLOSED — a closed compound argument does not open the operand"
+    );
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[
+                graph.intern_node(SemanticNodeData::DeclRef {
+                    identity: decl("SelFnClosed"),
+                }),
+                x_lit,
+            ],
+        ),
+        "Omit<SelFnClosed, 'x'> over `Wrap2<() => string>['a']` must stay CLOSED — a \
+         closed function-valued argument does not open the operand"
+    );
+
+    // Node route: the same shapes as interned operator nodes.
+    let nested_obj = simple_object(&graph, &[("nested", t_param)]);
+    let node_nested = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: inst("Wrap2", vec![nested_obj]),
+        index: IndexKey::String(Arc::from("a")),
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[node_nested, x_lit],
+        ),
+        "Omit<Wrap2<{{ nested: T }}>['a'], 'x'> (node route) must be OPEN — the node \
+         walk descends value surfaces at ValueSensitive"
+    );
+    let inline_obj = simple_object(&graph, &[("a", inst("BigOpen2", vec![t_param]))]);
+    let node_inline = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: inline_obj,
+        index: IndexKey::String(Arc::from("a")),
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[node_inline, x_lit],
+        ),
+        "Omit<{{ a: BigOpen2<T> }}['a'], 'x'> (node route) must be OPEN — an inline \
+         literal operand's member VALUES are value-sensitive on the node walk too"
+    );
+
+    // Node route, FUNCTION value surface: `Wrap2<() => T>['a']` is OPEN,
+    // the `() => string` twin CLOSED.
+    let fn_open = graph.intern_node(SemanticNodeData::Function {
+        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        return_type: t_param,
+        type_parameters: Arc::from(
+            Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
+        ),
+        signature_span: None,
+        return_type_span: None,
+    });
+    let node_fn_open = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: inst("Wrap2", vec![fn_open]),
+        index: IndexKey::String(Arc::from("a")),
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[node_fn_open, x_lit],
+        ),
+        "Omit<Wrap2<() => T>['a'], 'x'> (node route) must be OPEN — function \
+         params/returns are value surfaces at ValueSensitive"
+    );
+    let fn_closed = graph.intern_node(SemanticNodeData::Function {
+        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        return_type: string_ty,
+        type_parameters: Arc::from(
+            Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
+        ),
+        signature_span: None,
+        return_type_span: None,
+    });
+    let node_fn_closed = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: inst("Wrap2", vec![fn_closed]),
+        index: IndexKey::String(Arc::from("a")),
+    });
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[node_fn_closed, x_lit],
+        ),
+        "Omit<Wrap2<() => string>['a'], 'x'> (node route) must stay CLOSED — a closed \
+         function value does not open the operand"
+    );
+}
+
+/// A MISSING type argument binds its parameter to the DEFAULT's actual
+/// identity — not an identity-free `ClosedAbstract` — so a conditional
+/// whose check references a defaulted parameter can select through the
+/// shared oracle: `Use = true` selects `Use extends true` TRUE and the
+/// open losing branch is dead. A default referencing an EARLIER
+/// parameter FORWARDS that parameter's binding.
+///
+/// **Discriminating.** An environment that binds unfilled params
+/// `ClosedAbstract` (validating the default for closedness only) cannot
+/// resolve the check operand ⇒ `Deferred` ⇒ the open false branch
+/// false-OPENs the domain: both CLOSED assertions and the witness fail
+/// on that implementation.
+#[test]
+fn defaulted_type_parameters_bind_their_default_identity() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
+        ResolvedDeclSlotIdentity,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export type SourceDefault<T, Use = true> = Use extends true ? { label: string } : T;\n\
+         export type SourceFwd<T, A, B = A> = B extends string ? { label: string } : T;\n\
+         export type SourceDefaultOpen<T, Use = T> = Use extends true ? { label: string } : T;",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let lit = |s: &str| {
+        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            s.to_string(),
+        )))
+    };
+    let builtin_omit = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Omit"),
+    };
+    let inst = |name: &str, args: Vec<SemanticNodeId>| {
+        graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                canonical_id: Arc::from("/types.ts"),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from(name),
+            },
+            args: Arc::from(args.into_boxed_slice()),
+        })
+    };
+
+    // The closed environment-free default selects TRUE; the open losing
+    // branch is dead ⇒ CLOSED.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst("SourceDefault", vec![t_param]), lit("x")],
+        ),
+        "Omit<SourceDefault<T>, 'x'> must be CLOSED — the `Use = true` default carries \
+         its identity into the oracle and selects TRUE"
+    );
+
+    // A param-ref default FORWARDS the referenced binding: `B = A` with
+    // `A := 'q'` ⇒ `B extends string` selects TRUE.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst("SourceFwd", vec![t_param, lit("q")]), lit("x")],
+        ),
+        "Omit<SourceFwd<T, 'q'>, 'x'> must be CLOSED — the `B = A` default forwards A's \
+         concrete binding into the oracle"
+    );
+
+    // Control: an OPEN default keeps the instantiation OPEN.
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst("SourceDefaultOpen", vec![t_param]), lit("x")],
+        ),
+        "Omit<SourceDefaultOpen<T>, 'x'> must stay OPEN — the `Use = T` default is open"
+    );
+
+    // Dispatch-level witness (strict): materialise `label`.
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("__builtin__"),
+            Arc::from("Omit"),
+        ),
+        args: Arc::from(vec![inst("SourceDefault", vec![t_param]), lit("x")].into_boxed_slice()),
+        context: InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("Omit<SourceDefault<T>, 'x'> must produce a Value, got {other:?}"),
+    };
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+            assert!(
+                names.contains(&"label"),
+                "Omit<SourceDefault<T>, 'x'> must materialise `label`, got {names:?}"
+            );
+        }
+        other => panic!(
+            "Omit<SourceDefault<T>, 'x'> over a default-selected conditional must \
+             materialise an Object surface (NOT the builtin carrier), got {other:?}"
+        ),
+    }
+}
+
+/// A CLOSED NAMED actual (a bare type reference used as an instantiation
+/// argument) reaches the shared oracle as an interned `DeclRef` node
+/// resolved in ITS OWN originating scope — so a conditional check bound
+/// to it can select, and the open dead branch stays dead. Resolution
+/// uses the prepared decl's own `name_resolution` (the same identity
+/// machinery the closedness walk hops aliases with) — never a foreign
+/// scope's name table.
+///
+/// **Discriminating.** An environment that collapses scope-dependent
+/// closed actuals to `ClosedAbstract` (and bridges only
+/// literals/primitives/bound params to the oracle) cannot resolve the
+/// check ⇒ `Deferred` ⇒ the open `T` branch false-OPENs: both CLOSED
+/// assertions and the witness fail on that implementation.
+#[test]
+fn closed_named_ref_operands_select_through_the_shared_oracle() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
+        ResolvedDeclSlotIdentity,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export interface Marker { kind: 'm' }\n\
+         export type SourceNamed<U, T> = U extends Marker ? { label: string } : T;\n\
+         export type OuterNamed<T> = SourceNamed<Marker, T>;",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let x_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "x".to_string(),
+    )));
+    let decl = |name: &str| DeclIdentity {
+        canonical_id: Arc::from("/types.ts"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from(name),
+    };
+    let builtin_omit = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Omit"),
+    };
+    let inst = |name: &str, args: Vec<SemanticNodeId>| {
+        graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: decl(name),
+            args: Arc::from(args.into_boxed_slice()),
+        })
+    };
+
+    // Node-route actual: the argument is an interned DeclRef; the
+    // EXTENDS named ref (`Marker` in SourceNamed's body) must resolve in
+    // SourceNamed's own scope for the oracle to relate them.
+    let marker_ref = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: decl("Marker"),
+    });
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst("SourceNamed", vec![marker_ref, t_param]), x_lit],
+        ),
+        "Omit<SourceNamed<Marker, T>, 'x'> must be CLOSED — the closed named check \
+         operand selects TRUE through the oracle and the open T branch is dead"
+    );
+
+    // TypeExpr-route actual: the SAME named argument written inside a
+    // wrapper decl body — `normalise_closed_arg_binding` must carry the
+    // named ref's resolved identity, not degrade it to ClosedAbstract.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst("OuterNamed", vec![t_param]), x_lit],
+        ),
+        "Omit<OuterNamed<T>, 'x'> must be CLOSED — the wrapper-body `Marker` actual \
+         resolves in its own scope and selects TRUE"
+    );
+
+    // Control: an OPEN check operand still defers and the open branch
+    // keeps the domain OPEN.
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst("SourceNamed", vec![t_param, t_param]), x_lit],
+        ),
+        "Omit<SourceNamed<T, T>, 'x'> must stay OPEN — an open check cannot select"
+    );
+
+    // Dispatch-level witness (strict): materialise `label`.
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("__builtin__"),
+            Arc::from("Omit"),
+        ),
+        args: Arc::from(vec![inst("OuterNamed", vec![t_param]), x_lit].into_boxed_slice()),
+        context: InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("Omit<OuterNamed<T>, 'x'> must produce a Value, got {other:?}"),
+    };
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+            assert!(
+                names.contains(&"label"),
+                "Omit<OuterNamed<T>, 'x'> must materialise `label`, got {names:?}"
+            );
+        }
+        other => panic!(
+            "Omit<OuterNamed<T>, 'x'> over a named-ref-selected conditional must \
+             materialise an Object surface (NOT the builtin carrier), got {other:?}"
+        ),
+    }
+}
+
+/// The mapped `as`-clause NAME REMAP is KEY-PRODUCTION, not a value
+/// body: it is judged by the binder-bound KEY-DOMAIN policy (the
+/// per-argument rule for instantiations — `as keyof Foo<T>` over a
+/// fixed-key `Foo` is CLOSED), matching the TypeExpr route's
+/// `name_type` arm. Direct outer-generic remaps and value-sensitive
+/// conditional operands inside the remap stay OPEN.
+///
+/// **Discriminating.** A remap walked with the VALUE-BODY policy judges
+/// the `keyof Foo<T>` instantiation by any-open-argument ⇒ OPEN — the
+/// first assertion and the route-parity assertion fail on that
+/// implementation.
+#[test]
+fn mapped_name_remap_is_judged_by_key_domain_policy() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, LiteralValue, MapperKey, MapperKind, OptionalityMod, ReadonlyMod,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export interface FooFix<T> { label?: string; items?: T }\n\
+         export type RemapDecl<T> = { [K in 'a' | 'b' as keyof FooFix<T> & string]: number };",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let k_param = outer_type_param(&graph, "K");
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let closed_source = simple_object(&graph, &[("a", string_ty)]);
+    let lit = |s: &str| {
+        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            s.to_string(),
+        )))
+    };
+    let mapper_with = |name_remap| MapperKey {
+        parameter_node: k_param,
+        key_space: string_ty,
+        value_expr: string_ty,
+        optionality: OptionalityMod::Keep,
+        readonly: ReadonlyMod::Keep,
+        name_remap: Some(name_remap),
+        kind: MapperKind::Computed,
+    };
+    let foo_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: DeclIdentity {
+            canonical_id: Arc::from("/types.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("FooFix"),
+        },
+        args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+
+    // `as keyof Foo<T>` — Foo's key set is fixed (T value-confined) ⇒
+    // the remap's produced keys are key-domain CLOSED.
+    let keyof_foo = graph.intern_node(SemanticNodeData::KeyOf { base: foo_of_t });
+    assert!(
+        !super::raise::mapped_type_is_open_or_unknown(
+            &host,
+            closed_source,
+            &mapper_with(keyof_foo)
+        ),
+        "`as keyof FooFix<T>` over a fixed-key FooFix must NOT open the mapped \
+         predicate — the remap is a key-domain position (per-argument rule)"
+    );
+
+    // Control: a DIRECT outer-generic remap stays OPEN.
+    assert!(
+        super::raise::mapped_type_is_open_or_unknown(&host, closed_source, &mapper_with(t_param)),
+        "`as T` (a direct outer-generic remap) must OPEN the mapped predicate"
+    );
+
+    // Control: a finite K-only conditional remap stays CLOSED — the bound
+    // binder is not an open operand, the branches are literals.
+    let k_cond = graph.intern_node(SemanticNodeData::Conditional {
+        check: k_param,
+        extends: lit("a"),
+        true_branch_ref: lit("x"),
+        false_branch_ref: lit("y"),
+        distributive: false,
+    });
+    assert!(
+        !super::raise::mapped_type_is_open_or_unknown(&host, closed_source, &mapper_with(k_cond)),
+        "a finite K-conditional remap (`K extends 'a' ? 'x' : 'y'`) must stay CLOSED"
+    );
+
+    // Route parity: the SAME `as keyof FooFix<T>` shape through the
+    // TypeExpr route (the prepared `RemapDecl` body's `name_type` arm)
+    // must agree with the node-route mapped predicate above.
+    let builtin_omit = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Omit"),
+    };
+    let remap_decl_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: DeclIdentity {
+            canonical_id: Arc::from("/types.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("RemapDecl"),
+        },
+        args: Arc::from(vec![t_param].into_boxed_slice()),
+    });
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[remap_decl_of_t, lit("a")],
+        ),
+        "Omit<RemapDecl<T>, 'a'> (TypeExpr route, `as keyof FooFix<T> & string`) must be \
+         CLOSED — the two routes agree on remap key-domain semantics"
+    );
+}
+
+/// Tuple/array ELEMENTS are VALUE positions: a tuple's KEY domain (its
+/// indices) does not depend on element values, so the TypeExpr
+/// classifier must treat elements as closed leaves at `KeyDomain`
+/// (matching the node walk) and descend them only under
+/// `ValueSensitive`.
+///
+/// **Discriminating.** A TypeExpr classifier that descends tuple/array
+/// elements at `KeyDomain` judges `[T]` / `T[]` OPEN while the node
+/// route judges them CLOSED — the TypeExpr CLOSED assertions and the
+/// parity assertion fail on that implementation. The node-route
+/// ValueSensitive assertion fails on a walk that keeps tuples closed
+/// leaves under value-sensitive operands.
+#[test]
+fn tuple_and_array_elements_are_value_positions_on_both_routes() {
+    use crate::semantic_query::{DeclIdentity, HashValue, IndexKey, LiteralValue, TupleElement};
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export type TupleSrc<T> = [T];\n\
+         export type ArraySrc<T> = T[];",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let lit = |s: &str| {
+        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            s.to_string(),
+        )))
+    };
+    let builtin_omit = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Omit"),
+    };
+    let inst = |name: &str| {
+        graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                canonical_id: Arc::from("/types.ts"),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from(name),
+            },
+            args: Arc::from(vec![t_param].into_boxed_slice()),
+        })
+    };
+
+    // TypeExpr route: `[T]` / `T[]` key domains are their INDICES —
+    // CLOSED regardless of the open element value.
+    let type_expr_tuple_closed = !super::raise::utility_enumeration_domain_is_open_or_unknown(
+        &host,
+        &builtin_omit,
+        &[inst("TupleSrc"), lit("0")],
+    );
+    assert!(
+        type_expr_tuple_closed,
+        "Omit<TupleSrc<T>, '0'> over `[T]` must be CLOSED — tuple elements are value \
+         positions at KeyDomain"
+    );
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst("ArraySrc"), lit("x")],
+        ),
+        "Omit<ArraySrc<T>, 'x'> over `T[]` must be CLOSED — array elements are value \
+         positions at KeyDomain"
+    );
+
+    // Node route parity: the interned tuple node is CLOSED at KeyDomain
+    // (the node walk's existing leaf rule) — both routes must agree.
+    let tuple_node = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![TupleElement {
+                label: None,
+                value: t_param,
+                optional: false,
+                rest: false,
+            }]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    let node_tuple_closed = !super::raise::utility_enumeration_domain_is_open_or_unknown(
+        &host,
+        &builtin_omit,
+        &[tuple_node, lit("0")],
+    );
+    assert!(
+        node_tuple_closed,
+        "Omit<[T], '0'> (node route) must be CLOSED — tuple elements are value positions \
+         at KeyDomain"
+    );
+    assert_eq!(
+        type_expr_tuple_closed, node_tuple_closed,
+        "the tuple key-domain verdict must be ROUTE-INDEPENDENT"
+    );
+
+    // ValueSensitive: a tuple OPERAND descends its elements — `[T][0]`
+    // IS the open T (node route; the TypeExpr route descends already).
+    let tuple_indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: tuple_node,
+        index: IndexKey::Number(0),
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[tuple_indexed, lit("x")],
+        ),
+        "Omit<[T][0], 'x'> (node route) must be OPEN — tuple elements are descended \
+         under ValueSensitive operands"
+    );
+}
+
+/// The binding-identity selection path's motivating shapes: a
+/// conditional whose check is a bound PARAMETER reference resolved
+/// through its identity binding selects through the oracle — directly
+/// (`S<T, 'x'>`) and through a wrapper hop that FORWARDS the binding
+/// (`Outer<T, 'x'>` over `type Outer<T, U> = S<T, U>`).
+///
+/// **Discriminating.** Both fail on an identity-free binding environment
+/// (a bool-only `open_args` vector): the check operand cannot resolve ⇒
+/// `Deferred` ⇒ the open `T` losing branch false-OPENs the domain.
+#[test]
+fn binding_identity_selects_conditionals_through_concrete_arguments() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
+        ResolvedDeclSlotIdentity,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export type SBind<T, U> = U extends string ? { label: string } : T;\n\
+         export type OuterBind<T, U> = SBind<T, U>;",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let lit = |s: &str| {
+        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            s.to_string(),
+        )))
+    };
+    let builtin_omit = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Omit"),
+    };
+    let inst = |name: &str, args: Vec<SemanticNodeId>| {
+        graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                canonical_id: Arc::from("/types.ts"),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from(name),
+            },
+            args: Arc::from(args.into_boxed_slice()),
+        })
+    };
+
+    // Direct: the check param `U` is bound to the concrete `'x'`.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst("SBind", vec![t_param, lit("x")]), lit("k")],
+        ),
+        "Omit<SBind<T, 'x'>, 'k'> must be CLOSED — the bound param check resolves \
+         through its identity binding and selects TRUE"
+    );
+
+    // Wrapper-forwarded twin: `Outer<T, 'x'>` forwards `'x'` through the
+    // wrapper hop into SBind's check.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst("OuterBind", vec![t_param, lit("x")]), lit("k")],
+        ),
+        "Omit<OuterBind<T, 'x'>, 'k'> must be CLOSED — the wrapper hop forwards the \
+         concrete binding into the inner conditional's check"
+    );
+
+    // Dispatch-level witness (strict): materialise `label`.
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("__builtin__"),
+            Arc::from("Omit"),
+        ),
+        args: Arc::from(
+            vec![inst("OuterBind", vec![t_param, lit("x")]), lit("k")].into_boxed_slice(),
+        ),
+        context: InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("Omit<OuterBind<T, 'x'>, 'k'> must produce a Value, got {other:?}"),
+    };
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+            assert!(
+                names.contains(&"label"),
+                "Omit<OuterBind<T, 'x'>, 'k'> must materialise `label`, got {names:?}"
+            );
+        }
+        other => panic!(
+            "Omit<OuterBind<T, 'x'>, 'k'> over a binding-selected conditional must \
+             materialise an Object surface (NOT the builtin carrier), got {other:?}"
+        ),
+    }
+}
+
+/// `keyof`'s value IS its base's KEY SET: the node-level `KeyOf` arm
+/// resets the walk to `KeyDomain` even under a value-sensitive operand
+/// (matching the TypeExpr arm), so `keyof Foo<T>` over a fixed-key Foo
+/// inside a deferred conditional CHECK stays CLOSED.
+///
+/// **Discriminating.** A node walk whose `KeyOf` arm retains the
+/// surrounding ValueSensitive position judges `Foo<T>` by
+/// any-open-argument ⇒ OPEN — the CLOSED assertion fails on that
+/// implementation.
+#[test]
+fn node_keyof_operand_resets_to_key_domain_position() {
+    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export interface FooFix2<T> { label?: string; items?: T }\n\
+         export interface AFix { a1: string }\n\
+         export interface BFix { b1: string }",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let lit_a1 = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "a1".to_string(),
+    )));
+    let decl = |name: &str| DeclIdentity {
+        canonical_id: Arc::from("/types.ts"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from(name),
+    };
+    let decl_ref = |name: &str| {
+        graph.intern_node(SemanticNodeData::DeclRef {
+            identity: decl(name),
+        })
+    };
+    let builtin_pick = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Pick"),
+    };
+
+    // A deferred conditional whose CHECK is `keyof FooFix2<T>`: the
+    // keyof base re-enters KeyDomain, the per-argument rule keeps the
+    // fixed-key Foo closed, and both branches are closed ⇒ CLOSED.
+    let keyof_foo = graph.intern_node(SemanticNodeData::KeyOf {
+        base: graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: decl("FooFix2"),
+            args: Arc::from(vec![t_param].into_boxed_slice()),
+        }),
+    });
+    let cond = graph.intern_node(SemanticNodeData::Conditional {
+        check: keyof_foo,
+        extends: decl_ref("AFix"),
+        true_branch_ref: decl_ref("AFix"),
+        false_branch_ref: decl_ref("BFix"),
+        distributive: false,
+    });
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_pick,
+            &[cond, lit_a1],
+        ),
+        "Pick<keyof FooFix2<T> extends AFix ? AFix : BFix, 'a1'> (node route) must be \
+         CLOSED — keyof resets its base to the KeyDomain position"
+    );
+}
+
+/// At a VALUE-SENSITIVE operand with ALL-CLOSED arguments, the node
+/// walk's `InstantiationRef` verdict is gated on BASE RESOLVABILITY
+/// (prepared-decl lookup or `__builtin__` registry), mirroring the
+/// TypeExpr arm — an unresolvable base is an undecidable surface, not a
+/// concrete one.
+///
+/// **Discriminating.** A walk that returns `any_open` unconditionally
+/// judges the unresolvable `Ghost<string>` check CLOSED and materialises
+/// into the semanticMiss/fuse envelope — the OPEN assertion fails on
+/// that implementation; the resolvable control keeps it honest against
+/// over-fire.
+#[test]
+fn value_sensitive_all_closed_instantiation_requires_resolvable_base() {
+    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export interface FooFix3<T> { label?: string; items?: T }\n\
+         export interface AFix2 { a1: string }\n\
+         export interface BFix2 { b1: string }",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let lit_a1 = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "a1".to_string(),
+    )));
+    let decl = |name: &str| DeclIdentity {
+        canonical_id: Arc::from("/types.ts"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from(name),
+    };
+    let decl_ref = |name: &str| {
+        graph.intern_node(SemanticNodeData::DeclRef {
+            identity: decl(name),
+        })
+    };
+    let builtin_pick = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Pick"),
+    };
+    let cond_with_check = |check: SemanticNodeId| {
+        graph.intern_node(SemanticNodeData::Conditional {
+            check,
+            extends: decl_ref("AFix2"),
+            true_branch_ref: decl_ref("AFix2"),
+            false_branch_ref: decl_ref("BFix2"),
+            distributive: false,
+        })
+    };
+
+    // UNRESOLVABLE base, all-closed args, value-sensitive position ⇒ the
+    // operand is undecidable ⇒ OPEN.
+    let ghost_check = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: decl("GhostFix"),
+        args: Arc::from(vec![string_ty].into_boxed_slice()),
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_pick,
+            &[cond_with_check(ghost_check), lit_a1],
+        ),
+        "Pick<Ghost<string> extends AFix2 ? … , 'a1'> (node route) must be OPEN — an \
+         unresolvable all-closed-args base is undecidable at a value-sensitive operand"
+    );
+
+    // Control: a RESOLVABLE base with all-closed args stays CLOSED.
+    let real_check = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: decl("FooFix3"),
+        args: Arc::from(vec![string_ty].into_boxed_slice()),
+    });
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_pick,
+            &[cond_with_check(real_check), lit_a1],
+        ),
+        "Pick<FooFix3<string> extends AFix2 ? …, 'a1'> (node route) must stay CLOSED — \
+         a resolvable concrete instantiation is a decidable operand"
+    );
+}
+
+/// Per-utility builtin OUTPUT-KEY semantics: a builtin utility's produced
+/// key domain is judged by the ARGUMENTS THAT ACTUALLY PRODUCE ITS OUTPUT
+/// KEYS (`BuiltinUtility::key_domain_argument_positions`), never by a
+/// blanket all-args rule. `Record<K, V>`'s key domain IS `K` — the value
+/// argument never opens it, so `Omit<Record<'a', T>, 'x'>` over an open
+/// `T` is CLOSED and materialises through the filter. A VALUE-PRODUCING utility
+/// (`ReturnType`, `InstanceType`, `Awaited`, …) makes NO closed-key
+/// claim: its produced surface is computed from its argument's VALUE
+/// structure, which the key-domain argument walk never inspects — it
+/// stays conservatively not-provably-closed (carrier preserved) until a
+/// per-utility output classification exists.
+///
+/// **Discriminating.** The blanket "all args closed ⇒ closed" rule
+/// judges `Record<'a', T>` OPEN (the open value arg) — both CLOSED
+/// assertions and the materialisation witness fail — and judges
+/// `ReturnType<() => T>` CLOSED on the node route (a function is a
+/// closed leaf at `KeyDomain`) — the node-route OPEN assertion fails.
+#[test]
+fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
+    use crate::semantic_query::{
+        DeclIdentity, FunctionParam, HashValue, InstantiateContext, LiteralValue,
+        ProjectionReductionContext, ResolvedDeclSlotIdentity, TypeParamDecl,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export type RecOf<T> = Record<'a', T>;\n\
+         export type RetOf<T> = ReturnType<() => T>;",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let lit = |s: &str| {
+        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            s.to_string(),
+        )))
+    };
+    let builtin = |name: &str| DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from(name),
+    };
+    let builtin_omit = builtin("Omit");
+    let inst = |base: DeclIdentity, args: Vec<SemanticNodeId>| {
+        graph.intern_node(SemanticNodeData::InstantiationRef {
+            base,
+            args: Arc::from(args.into_boxed_slice()),
+        })
+    };
+
+    // NODE route: `Record<'a', T>` — the open VALUE argument does not
+    // produce output keys; the key domain is the closed `'a'`.
+    let record_of_t = inst(builtin("Record"), vec![lit("a"), t_param]);
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[record_of_t, lit("x")],
+        ),
+        "Omit<Record<'a', T>, 'x'> (node route) must be CLOSED — Record's value \
+         argument never opens its key domain"
+    );
+
+    // TYPEEXPR route: the SAME shape through a prepared generic alias
+    // body (`Record` resolves through the unresolved-Ref builtin
+    // fallback of the TypeExpr classifier).
+    let rec_decl = |name: &str| DeclIdentity {
+        canonical_id: Arc::from("/types.ts"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from(name),
+    };
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst(rec_decl("RecOf"), vec![t_param]), lit("x")],
+        ),
+        "Omit<RecOf<T>, 'x'> (TypeExpr route, `Record<'a', T>`) must be CLOSED — \
+         Record's value argument never opens its key domain"
+    );
+
+    // NODE route: `ReturnType<() => T>` — a value-producing utility makes
+    // no closed-key claim. The function argument is a closed LEAF at
+    // `KeyDomain`, so an all-args rule would wrongly prove the produced
+    // key domain (the open `T`!) closed.
+    let fn_to_t = graph.intern_node(SemanticNodeData::Function {
+        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        return_type: t_param,
+        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst(builtin("ReturnType"), vec![fn_to_t]), lit("x")],
+        ),
+        "Omit<ReturnType<() => T>, 'x'> (node route) must stay OPEN — a value-producing \
+         utility's produced key domain is not argument-key-derived"
+    );
+
+    // Even with an ALL-CLOSED argument, a value-producing utility stays
+    // not-provably-closed: the produced keys come from the argument's
+    // VALUE structure the key-domain walk never proved finite.
+    let fn_to_obj = graph.intern_node(SemanticNodeData::Function {
+        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        return_type: simple_object(&graph, &[("a", string_ty)]),
+        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst(builtin("ReturnType"), vec![fn_to_obj]), lit("x")],
+        ),
+        "Omit<ReturnType<() => {{a}}>, 'x'> (node route) must stay not-provably-closed — \
+         no per-utility output classification exists for ReturnType yet"
+    );
+
+    // TYPEEXPR route parity for the value-producing family.
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst(rec_decl("RetOf"), vec![t_param]), lit("x")],
+        ),
+        "Omit<RetOf<T>, 'x'> (TypeExpr route, `ReturnType<() => T>`) must stay OPEN — \
+         the two routes agree on value-producing utilities"
+    );
+
+    // Dispatch-level witness (strict): the Record-sourced filter must
+    // MATERIALISE THROUGH — an Object surface, NOT the published Omit
+    // builtin carrier (`InstantiationRef`) the blanket rule's
+    // carrier-stop would publish, and NOT an opaque miss.
+    //
+    // The produced surface does not yet ENUMERATE the key `a`: a
+    // closed-key mapped source whose VALUE body is open (`Record<'a',
+    // T>` carrier-stops to a `Mapped` shell under the mapped-family L1)
+    // reads as an EMPTY surface through the empty-path Shallow reader —
+    // a pre-existing downstream materialisation gap shared verbatim by
+    // the userland twin `Omit<{ [K in 'a' | 'b']: T }, 'x'>` (whose key
+    // domain mainline already judged CLOSED), in the same residual
+    // class as the documented conditional-reduction `semanticMiss` gap.
+    // NOT an L1 predicate concern — tracked as a follow-up
+    // (closed-key/open-value mapped enumeration in the shared Shallow
+    // surface reader).
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("__builtin__"),
+            Arc::from("Omit"),
+        ),
+        args: Arc::from(vec![record_of_t, lit("x")].into_boxed_slice()),
+        context: InstantiateContext::new(
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            Default::default(),
+        ),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("Omit<Record<'a', T>, 'x'> must produce a Value, got {other:?}"),
+    };
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Object(_)) => {}
+        other => panic!(
+            "Omit<Record<'a', T>, 'x'> must materialise THROUGH the filter (an Object \
+             surface — not the published builtin carrier, not an opaque miss), got \
+             {other:?}"
+        ),
+    }
+}
+
+/// Mapped ROLE-SPLIT: the mapped `source` / `key_space` / `name_remap`
+/// are ALWAYS key-production — walked pinned at `KeyDomain` regardless
+/// of the surrounding operand position (a value-sensitive parent must
+/// not false-OPEN a fixed-key mapped source) — while the mapped VALUE
+/// body is walked when the surrounding policy consumes values (a
+/// `ValueSensitive` operand or a value-body-descending walk):
+/// `{ [K in 'a']: T }['a']` IS the open `T`, so an object filter over it
+/// must carrier-stop.
+///
+/// **Discriminating.** A node arm that walks the mapped source at the
+/// surrounding position false-OPENs `{ [K in Keys<T>]: string }['a']`
+/// (the CLOSED assertions fail); an arm (either route) that never walks
+/// the mapped value false-CLOSES `{ [K in 'a']: T }['a']` (the OPEN
+/// assertions fail).
+#[test]
+fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, IndexKey, LiteralValue, MapperKey, MapperKind, OptionalityMod,
+        ReadonlyMod,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export type KeysFix<T> = 'a' | 'b';\n\
+         export type SVal<T> = { [K in 'a']: T }['a'];\n\
+         export type SFix<T> = { [K in KeysFix<T>]: string }['a'];",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let k_param = outer_type_param(&graph, "K");
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let lit = |s: &str| {
+        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            s.to_string(),
+        )))
+    };
+    let builtin_omit = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Omit"),
+    };
+    let mapper = |key_space, value_expr| MapperKey {
+        parameter_node: k_param,
+        key_space,
+        value_expr,
+        optionality: OptionalityMod::Keep,
+        readonly: ReadonlyMod::Keep,
+        name_remap: None,
+        kind: MapperKind::Computed,
+    };
+    let decl = |name: &str| DeclIdentity {
+        canonical_id: Arc::from("/types.ts"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from(name),
+    };
+    let inst_of_t = |name: &str| {
+        graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: decl(name),
+            args: Arc::from(vec![t_param].into_boxed_slice()),
+        })
+    };
+
+    // NODE route, value direction: `{ [K in 'a']: T }['a']` IS the open
+    // `T` — the indexed access puts the mapped in a VALUE-SENSITIVE
+    // position, so its value body must be walked and must OPEN.
+    let mapped_open_value = graph.intern_node(SemanticNodeData::Mapped {
+        source: lit("a"),
+        mapper: mapper(lit("a"), t_param),
+    });
+    let open_value_access = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: mapped_open_value,
+        index: IndexKey::String(Arc::from("a")),
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[open_value_access, lit("x")],
+        ),
+        "Omit<{{ [K in 'a']: T }}['a'], 'x'> (node route) must stay OPEN — a \
+         value-sensitive operand consumes the mapped VALUE body"
+    );
+
+    // NODE route, key-production direction: the SAME value-sensitive
+    // parent over a mapped whose source is a FIXED-KEY instantiation
+    // (`KeysFix<T>` = 'a' | 'b', T unused in key production) and whose
+    // value is closed `string` — the source is key-production, pinned at
+    // `KeyDomain` (per-argument rule), so the access stays CLOSED.
+    let mapped_fixed_keys = graph.intern_node(SemanticNodeData::Mapped {
+        source: inst_of_t("KeysFix"),
+        mapper: mapper(inst_of_t("KeysFix"), string_ty),
+    });
+    let fixed_keys_access = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: mapped_fixed_keys,
+        index: IndexKey::String(Arc::from("a")),
+    });
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[fixed_keys_access, lit("x")],
+        ),
+        "Omit<{{ [K in KeysFix<T>]: string }}['a'], 'x'> (node route) must be CLOSED — \
+         mapped source/keyspace are key-production, pinned at KeyDomain even under a \
+         value-sensitive parent"
+    );
+
+    // TYPEEXPR route, value direction: the prepared `SVal<T>` body is the
+    // same `{ [K in 'a']: T }['a']` shape — the mapped VALUE must open it.
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst_of_t("SVal"), lit("x")],
+        ),
+        "Omit<SVal<T>, 'x'> (TypeExpr route, `{{ [K in 'a']: T }}['a']`) must stay OPEN — \
+         the mapped value body is consumed value-sensitively"
+    );
+
+    // TYPEEXPR route, key-production direction (parity control): the
+    // prepared `SFix<T>` body keeps its fixed-key source CLOSED under the
+    // same value-sensitive parent.
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst_of_t("SFix"), lit("x")],
+        ),
+        "Omit<SFix<T>, 'x'> (TypeExpr route, `{{ [K in KeysFix<T>]: string }}['a']`) must \
+         be CLOSED — both routes pin mapped key-production at KeyDomain"
+    );
+}
+
+/// Variadic-tuple KEY domains: a `rest` element (`[string, ...T]`) makes
+/// the tuple's index key set depend on the rest type's ARITY — the rest
+/// element is judged at `KeyDomain` in BOTH key-domain tuple arms (an
+/// open rest element opens the domain), while non-rest elements stay
+/// undescended closed leaves (`[string, number]`, `[T]` keep fixed
+/// index domains). No general tuple-arity algebra: a rest element whose
+/// type closes at `KeyDomain` (`...string[]`) conservatively keeps the
+/// domain closed.
+///
+/// **Discriminating.** A tuple arm that ignores the `rest` flag at
+/// `KeyDomain` judges `[string, ...T]` CLOSED on both routes — both OPEN
+/// assertions fail on that implementation.
+#[test]
+fn variadic_tuple_rest_elements_open_the_key_domain_on_both_routes() {
+    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue, TupleElement};
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export type VarTup<T extends unknown[]> = [string, ...T];\n\
+         export type FixTup<T> = [string, number];\n\
+         export type RestArr<T> = [string, ...string[]];",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t_param = outer_type_param(&graph, "T");
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let lit = |s: &str| {
+        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            s.to_string(),
+        )))
+    };
+    let builtin_omit = DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: HashValue::default(),
+        decl_name: Arc::from("Omit"),
+    };
+    let inst_of_t = |name: &str| {
+        graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                canonical_id: Arc::from("/types.ts"),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from(name),
+            },
+            args: Arc::from(vec![t_param].into_boxed_slice()),
+        })
+    };
+
+    // TYPEEXPR route: `[string, ...T]` has a T-arity-dependent index
+    // domain ⇒ OPEN; the fixed tuple control stays CLOSED; a rest element
+    // that itself closes at KeyDomain (`...string[]`) stays CLOSED (the
+    // conservative bound — no arity algebra).
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst_of_t("VarTup"), lit("0")],
+        ),
+        "Omit<[string, ...T], '0'> (TypeExpr route) must stay OPEN — the rest element \
+         makes the index key domain depend on T's arity"
+    );
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst_of_t("FixTup"), lit("0")],
+        ),
+        "Omit<[string, number], '0'> (TypeExpr route) must be CLOSED — a fixed-arity \
+         tuple keeps a fixed index domain"
+    );
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[inst_of_t("RestArr"), lit("0")],
+        ),
+        "Omit<[string, ...string[]], '0'> (TypeExpr route) must be CLOSED — a rest \
+         element judged closed at KeyDomain keeps the conservative closed verdict"
+    );
+
+    // NODE route: the interned `[string, ...T]` twin must agree.
+    let tuple_el = |value, rest| TupleElement {
+        label: None,
+        value,
+        optional: false,
+        rest,
+    };
+    let variadic_tuple = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![tuple_el(string_ty, false), tuple_el(t_param, true)].into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    assert!(
+        super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[variadic_tuple, lit("0")],
+        ),
+        "Omit<[string, ...T], '0'> (node route) must stay OPEN — rest elements are \
+         judged at KeyDomain"
+    );
+    let no_rest_tuple = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![tuple_el(string_ty, false), tuple_el(t_param, false)].into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    assert!(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
+            &host,
+            &builtin_omit,
+            &[no_rest_tuple, lit("0")],
+        ),
+        "Omit<[string, T], '0'> (node route) must stay CLOSED — non-rest elements remain \
+         undescended value positions at KeyDomain"
+    );
+}
+
+/// Cross-file invalidation of the openness VERDICT: the L1 carrier /
+/// materialise decision reads OTHER files (the prepared decl bodies the
+/// closedness walk consults), so the published entry's fact rail must
+/// carry those reads — an edit that flips the dependency's closedness
+/// must reject the warm entry and flip the published shape on the NEXT
+/// query of the SAME key (read-side-authoritative cache rule).
+///
+/// **Discriminating.** Without the walk's consult facts the carrier entry
+/// roots only on its arg nodes (no `/dep.ts` association): the post-edit
+/// query warm-hits the stale carrier and the second assertion fails.
+#[test]
+fn open_pick_carrier_invalidates_when_cross_file_closedness_dependency_flips() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
+        ResolvedDeclSlotIdentity,
+    };
+
+    let host = host();
+    // OPEN body: an alias to an UNRESOLVED name — the bounded closedness
+    // walk cannot prove a finite key domain (a concrete-operand
+    // conditional would be CLOSED under the unified key-domain
+    // classifier, so an undecidable free reference is the open fixture).
+    upsert_ts(&host, "/dep.ts", "export type Source = NotDefinedAnywhere;");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // Content-free domain identity: the SAME interned node — and therefore
+    // the SAME `Instantiate` query key — spans the edits below, so
+    // staleness must be caught by the entry's fact rail, never by a key
+    // change.
+    let domain = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: DeclIdentity {
+            canonical_id: Arc::from("/dep.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Source"),
+        },
+    });
+    let key_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "bar".to_string(),
+    )));
+    let args: Arc<[SemanticNodeId]> = Arc::from(vec![domain, key_lit].into_boxed_slice());
+    let run = || {
+        let base = ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("__builtin__"),
+            Arc::from("Pick"),
+        );
+        match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+            base,
+            args: args.clone(),
+            context: InstantiateContext::new(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+            ),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+            other => panic!("Pick<Source, 'bar'> must produce a Value, got {other:?}"),
+        }
+    };
+    let is_carrier = |node: SemanticNodeId| {
+        matches!(
+            graph.node_data(node).as_deref(),
+            Some(SemanticNodeData::InstantiationRef { base, .. })
+                if base.canonical_id.as_ref() == "__builtin__"
+        )
+    };
+
+    // 1. OPEN dependency body ⇒ the carrier publishes.
+    assert!(
+        is_carrier(run()),
+        "Pick over the OPEN unresolved-bodied /dep.ts#Source must carrier-stop"
+    );
+
+    // 2. Edit /dep.ts so the domain becomes CLOSED: the SAME query key
+    //    must MISS the warm carrier (the walk's /dep.ts consult is on the
+    //    entry's fact rail) and recompute to the materialise path.
+    upsert_ts(&host, "/dep.ts", "export type Source = { bar: string };");
+    assert!(
+        !is_carrier(run()),
+        "after the dependency flipped CLOSED, the same query must NOT serve the stale \
+         carrier — the openness walk's /dep.ts read must be on the published entry's \
+         fact rail"
+    );
+
+    // 3. Reverse flip (CLOSED → OPEN): the stale MATERIALISED entry must
+    //    not be served either.
+    upsert_ts(&host, "/dep.ts", "export type Source = NotDefinedAnywhere;");
+    assert!(
+        is_carrier(run()),
+        "after the dependency flipped back OPEN, the same query must NOT serve the stale \
+         materialised entry — it must carrier-stop again"
+    );
+}
+
+/// `build_mapped_type` self-roots its memo entry on the FULL mapped
+/// contribution set — including the `as`-clause `name_remap` node — and
+/// records the remap on the structural `Normalize` origin edge. A
+/// remap-only edit (the remap node's origin file changing content) must
+/// reject the warm entry on the strict self-root validator; omitting the
+/// remap from the observed roots is the R6/R21 invalidation hole this
+/// pins shut.
+#[test]
+fn mapped_type_self_roots_and_origin_edges_include_name_remap() {
+    use crate::semantic_query::{
+        MapperKey, MapperKind, OptionalityMod, ProjectionReductionContext, ReadonlyMod,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string_ty = primitive(&graph, PrimitiveKind::String);
+    let source = simple_object(&graph, &[("a", string_ty)]);
+    let k_param = outer_type_param(&graph, "K");
+    // The remap node carries a FILE origin scope (the file its `as` clause
+    // was lowered from). Unique payload ⇒ fresh intern ⇒ the sidecar
+    // records this scope.
+    let remap_origin: Arc<str> = Arc::from("/remap-origin.ts");
+    let remap_hash: crate::semantic_query::HashValue = [7u8; 16];
+    let remap = graph.intern_node_with_scope(
+        SemanticNodeData::TemplateLiteral {
+            quasis: Arc::from(
+                vec![
+                    Arc::<str>::from("uniqueRemapOriginOn"),
+                    Arc::<str>::from(""),
+                ]
+                .into_boxed_slice(),
+            ),
+            expressions: Arc::from(vec![k_param].into_boxed_slice()),
+        },
+        NodeScopeId::File {
+            canonical_id: Arc::clone(&remap_origin),
+            whole_hash: remap_hash,
+            local_scope: None,
+        },
+    );
+    let mapper = MapperKey {
+        parameter_node: k_param,
+        key_space: string_ty,
+        value_expr: string_ty,
+        optionality: OptionalityMod::Keep,
+        readonly: ReadonlyMod::Keep,
+        name_remap: Some(remap),
+        kind: MapperKind::Computed,
+    };
+
+    let output = dispatch.build_mapped_type(
+        source,
+        &mapper,
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
+
+    assert!(
+        output
+            .observed_self_roots
+            .iter()
+            .any(
+                |(canonical, hash)| canonical.as_ref() == remap_origin.as_ref()
+                    && *hash == remap_hash
+            ),
+        "build_mapped_type must observe the name_remap node's file origin as a self-root \
+         (remap-only edits must reject the warm entry); observed: {:?}",
+        output.observed_self_roots
+    );
+
+    let QueryResult::Value(node) = output.result else {
+        panic!("mapped build must produce a Value, got {:?}", output.result);
+    };
+    let normalize_edges = graph.origins_of_kind(node, OriginEdgeKind::Normalize);
+    assert!(
+        normalize_edges
+            .iter()
+            .any(|edge| edge.sources.contains(&remap)),
+        "the mapped result's Normalize origin edge must include the name_remap node in its \
+         contribution set"
+    );
+}
+
 /// Path-prefix peek + backfill contract.
 ///
 /// **Discriminating contract.** A `ProjectPath { base, [variants,

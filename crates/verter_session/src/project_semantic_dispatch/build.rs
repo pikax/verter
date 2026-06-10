@@ -14,8 +14,8 @@ use verter_type_expr::{FunctionExpr, ObjectExpr, ObjectMember, ObjectProperty, T
 
 use super::walk::PathWalker;
 use super::{
-    empty_signature, utility_param_names, DispatchHost, ProjectSemanticDispatch,
-    SessionDispatchHost, ShallowRelation,
+    empty_signature, utility_param_names, ConditionalBranchSelection, DispatchHost,
+    InferPatternSelection, ProjectSemanticDispatch, SessionDispatchHost, ShallowRelation,
 };
 use crate::semantic_query::demand::{Demand, MaterializedPoint, MaterializedSet, ProjectionPath};
 use crate::semantic_query::{
@@ -1141,6 +1141,57 @@ impl<'a> ProjectSemanticDispatch<'a> {
             adapter.utility_source(base, decl_name.as_ref()),
             UtilitySource::Builtin
         ) {
+            // Route/mode-INDEPENDENT L1 carrier-stop (Instantiate-EXECUTION
+            // entrance). An object-filter builtin (`Pick`/`Omit`) whose
+            // enumeration domain (argument 0) is OPEN must NOT route into
+            // `build_builtin_utility` — that helper materialises argument 0's
+            // source surface, which degenerates into full cross-file generic
+            // expansion of an open source (the Table.vue
+            // `Omit<CoreOptions<T>, …>` structural decl-body-lowering
+            // memo-cycle). Instead return the COMPLETE `InstantiationRef`
+            // carrier verbatim. The shared open-domain predicate decides
+            // openness (no second walker); a CLOSED domain falls through to
+            // `build_builtin_utility` and materialises path-precisely.
+            let builtin_identity = crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::clone(decl_canonical),
+                whole_hash: decl_whole_hash,
+                decl_name: Arc::clone(decl_name),
+            };
+            if crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
+                self.ctx,
+                &builtin_identity,
+                args.as_ref(),
+            ) {
+                let carrier = self.graph().intern_node_with_scope(
+                    SemanticNodeData::InstantiationRef {
+                        base: builtin_identity,
+                        args: Arc::clone(args),
+                    },
+                    scope.clone(),
+                );
+                // Mirror `build_builtin_utility`'s `Instantiate` origin edge so
+                // origin-walks resolve through the carrier: sources are the
+                // builtin base node + each arg.
+                let fence = self.project_generation_signature();
+                let mut inst_sources: Vec<SemanticNodeId> = Vec::with_capacity(args.len() + 1);
+                inst_sources.push(base);
+                inst_sources.extend(args.iter().copied());
+                self.graph().record_origin_edge(
+                    carrier,
+                    OriginEdgeKind::Instantiate,
+                    Arc::from(inst_sources.into_boxed_slice()),
+                    OriginMeta::None,
+                    Arc::clone(&fence),
+                );
+                // Root the carrier value on the same file-derived arg set the
+                // materialised builtin would (an edit to a file-derived arg
+                // rejects this entry on the strict warm-read validator).
+                let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
+                let output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                    (QueryResult::Value(carrier), fence).into();
+                return output.with_observed_self_roots(observed_self_roots);
+            }
+
             // A built-in utility instantiation (`Pick<X, K>`, `Omit<X, K>`,
             // `ReturnType<F>`, …) inspects its argument nodes to form the
             // result — `build_builtin_utility` reads `X`'s Object surface,
@@ -3662,12 +3713,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let graph = self.graph();
         let fence = self.project_generation_signature();
-        // Self-version rooting: the mapped result depends on the
-        // `source` surface, the `key_space`, and the `value_expr` — all
-        // already-interned nodes. Root the memo entry on the file
-        // content version each file-derived input was lowered from.
+        // Mapped contribution set: the `source` surface, the `key_space`,
+        // the `value_expr` — plus the `as`-clause `name_remap` when
+        // present. The remap is a first-class decision input (the
+        // open-mapped carrier-stop consults it; the per-key remap
+        // evaluation consumes it), so it participates in BOTH the memo
+        // entry's observed self-roots (a remap-only edit must reject the
+        // warm entry on the read-side validator — the R6/R21 invalidation
+        // rail) AND the structural `Normalize` origin edges below.
+        let contribution_nodes: Vec<SemanticNodeId> = [source, mapper.key_space, mapper.value_expr]
+            .into_iter()
+            .chain(mapper.name_remap)
+            .collect();
+        // Self-version rooting: all contribution nodes are
+        // already-interned. Root the memo entry on the file content
+        // version each file-derived input was lowered from.
         let observed_self_roots =
-            self.observed_self_roots_from_nodes([source, mapper.key_space, mapper.value_expr]);
+            self.observed_self_roots_from_nodes(contribution_nodes.iter().copied());
 
         // demand-driven reducer carrier-stop: outside a
         // publication-mode-Expanded demand the build returns a
@@ -3690,7 +3752,43 @@ impl<'a> ProjectSemanticDispatch<'a> {
             graph.record_origin_edge(
                 node,
                 OriginEdgeKind::Normalize,
-                Arc::from(vec![source, mapper.key_space, mapper.value_expr].into_boxed_slice()),
+                Arc::from(contribution_nodes.clone().into_boxed_slice()),
+                OriginMeta::None,
+                Arc::clone(&fence),
+            );
+            return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(node),
+                fence,
+            ))
+            .with_observed_self_roots(observed_self_roots);
+        }
+
+        // Route/mode-INDEPENDENT L1 (Shallow-By-Default), MAPPED-TYPE
+        // family. Under a publication demand (`Published` /
+        // `MacroObjectSurface`, where `may_reduce_operator` is true) a
+        // mapped type whose produced surface still depends on an unbound
+        // OUTER generic — an open source / key space, or a value body /
+        // name remap reaching the outer generic (NOT the bound mapper
+        // binder `K`) — must NOT enumerate its keys and materialise the
+        // per-key value. That per-key value loop over an open value body
+        // is the `ChatMessagesSlots<T>` / `TableSlots<T>` storm across
+        // `node_modules`. Instead return the COMPLETE deferred `Mapped`
+        // carrier verbatim (a shallow shell preserving source / key space
+        // / value / name-remap); consumers re-resolve on demand. A CLOSED
+        // mapped type (`Partial`/`Required`/`Readonly`, `{ [K in keyof
+        // Closed]: Closed[K] }`, a K-only transform, a finite keyspace)
+        // falls through to enumerate path-precisely.
+        if crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
+            self.ctx, source, mapper,
+        ) {
+            let node = graph.intern_node(SemanticNodeData::Mapped {
+                source,
+                mapper: mapper.clone(),
+            });
+            graph.record_origin_edge(
+                node,
+                OriginEdgeKind::Normalize,
+                Arc::from(contribution_nodes.clone().into_boxed_slice()),
                 OriginMeta::None,
                 Arc::clone(&fence),
             );
@@ -3757,7 +3855,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             graph.record_origin_edge(
                 node,
                 OriginEdgeKind::Normalize,
-                Arc::from(vec![source, mapper.key_space, mapper.value_expr].into_boxed_slice()),
+                Arc::from(contribution_nodes.clone().into_boxed_slice()),
                 OriginMeta::None,
                 Arc::clone(&fence),
             );
@@ -3987,7 +4085,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             graph.record_origin_edge(
                 node,
                 OriginEdgeKind::Normalize,
-                Arc::from(vec![source, mapper.key_space, mapper.value_expr].into_boxed_slice()),
+                Arc::from(contribution_nodes.clone().into_boxed_slice()),
                 OriginMeta::None,
                 Arc::clone(&fence),
             );
@@ -4012,12 +4110,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let node = graph.intern_node(SemanticNodeData::Object(view));
 
         // 3. Emit origin edges.
-        //    - Normalize: result ← [source, key_space, value_expr].
+        //    - Normalize: result ← [source, key_space, value_expr,
+        //      name_remap?] (the full contribution set).
         //    - ProjectMember per produced member.
         graph.record_origin_edge(
             node,
             OriginEdgeKind::Normalize,
-            Arc::from(vec![source, mapper.key_space, mapper.value_expr].into_boxed_slice()),
+            Arc::from(contribution_nodes.clone().into_boxed_slice()),
             OriginMeta::None,
             Arc::clone(&fence),
         );
@@ -4660,36 +4759,64 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
-        // Single-infer conditional `T extends infer X ? X : ...`.
-        // When `extends` is a bare [`SemanticNodeData::Infer`], bind
-        // the infer name to `check` on the true branch and emit an
-        // `InferBind` origin edge carrying the binding name. The
-        // true-branch substitution picks the Infer up symmetrically
-        // with TypeParam via `substitute_semantic_type_param`.
-        //
-        // Multi-infer (`T extends [infer A, infer B] ? ...`) and
-        // template-literal-infer patterns stay deferred; they require
-        // the full relation-engine bindings integration still pending
-        // per TODO below.
-        if let Some(SemanticNodeData::Infer { name }) = graph.node_data(extends).as_deref() {
-            let infer_name: Arc<str> = Arc::clone(name);
-            // Intern the Infer node so it has a stable
-            // `SemanticNodeId`, then substitute by node id. (The
-            // `infer X` binding occupies a separate name-slot
-            // mechanism from regular type parameters; the substitute
-            // helper's Infer arm matches by display_name to bridge
-            // that boundary.)
-            let infer_node = graph.intern_node(SemanticNodeData::Infer {
-                name: Arc::clone(&infer_name),
-            });
-            let result = self.substitute_semantic_type_param(true_branch, infer_node, check);
-            graph.record_origin_edge(
-                result,
-                OriginEdgeKind::InferBind,
-                Arc::from(vec![check, extends].into_boxed_slice()),
-                OriginMeta::SubstitutedParam(infer_name),
-                Arc::clone(&fence),
-            );
+        // Conditionals route through the shared relation authority via
+        // the tri-state branch-selection oracle
+        // ([`Self::conditional_branch_selection`]) — the SAME
+        // helper the key-domain closedness classifiers in `raise.rs`
+        // consult, so build-time reduction and predicate-time
+        // classification cannot diverge on which branch a conditional
+        // takes. The oracle owns the FULL selection path, INCLUDING the
+        // pre-relation infer-pattern cases
+        // ([`Self::pre_relation_infer_selection`]); this build path owns
+        // only the selection's SUBSTITUTION side-effects (binding the
+        // selected infer names into the true branch + `InferBind` origin
+        // edges).
+        let (selection, infer) = self.conditional_branch_selection(check, extends);
+        if let Some(selected) = infer {
+            // An infer-pattern selection is always TRUE: substitute the
+            // payload's bindings into the true branch. (The `infer X`
+            // binding occupies a separate name-slot mechanism from
+            // regular type parameters; the substitute helper's Infer arm
+            // matches by display_name to bridge that boundary.)
+            // Multi-infer (`T extends [infer A, infer B] ? ...`) and
+            // template-literal-infer patterns are NOT selected by the
+            // oracle and stay deferred; they require the full
+            // relation-engine bindings integration still pending per the
+            // TODO in `conditional_branch_selection`.
+            let result = match selected {
+                InferPatternSelection::BareInfer { name } => {
+                    let infer_node = graph.intern_node(SemanticNodeData::Infer {
+                        name: Arc::clone(&name),
+                    });
+                    let result =
+                        self.substitute_semantic_type_param(true_branch, infer_node, check);
+                    graph.record_origin_edge(
+                        result,
+                        OriginEdgeKind::InferBind,
+                        Arc::from(vec![check, extends].into_boxed_slice()),
+                        OriginMeta::SubstitutedParam(name),
+                        Arc::clone(&fence),
+                    );
+                    result
+                }
+                InferPatternSelection::FunctionInfer { bindings } => {
+                    let mut result = true_branch;
+                    for (name, bound) in bindings {
+                        let infer_node = graph.intern_node(SemanticNodeData::Infer {
+                            name: Arc::clone(&name),
+                        });
+                        result = self.substitute_semantic_type_param(result, infer_node, bound);
+                        graph.record_origin_edge(
+                            result,
+                            OriginEdgeKind::InferBind,
+                            Arc::from(vec![check, extends].into_boxed_slice()),
+                            OriginMeta::SubstitutedParam(name),
+                            Arc::clone(&fence),
+                        );
+                    }
+                    result
+                }
+            };
             graph.record_conditional_decided();
             graph.record_branch_selection_true();
             return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
@@ -4698,154 +4825,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ))
             .with_observed_self_roots(observed_self_roots.clone());
         }
-
-        // Nested-infer in Function types. TypeScript patterns of the
-        // form
-        // `T extends (x: infer U, y: infer V) => infer R ? true_branch : false_branch`
-        // bind each `infer` binding to the corresponding position in
-        // `check`'s signature, then substitute those bindings into the
-        // true branch. The relation engine's Function arm
-        // short-circuits to `Unknown` in the presence of Infer
-        // positions (it does not currently emit infer bindings — see
-        // the TODO on the Assignable branch below), so the bindings
-        // are extracted directly from the lowered shapes here and the
-        // true-branch substitution surfaces the concrete result.
-        //
-        // `check` is first materialised via `evaluate_deferred_semantic_node`
-        // so `PricingPlanSlots["badge"]` / mapped-type references resolve
-        // to their underlying Function before position-wise binding.
-        //
-        // This evaluator does not propagate the caller's publication
-        // (`Navigate`) demand — it uses the default expanded evaluator.
-        // That is sound for this narrowly-gated arm (a `Function`-typed
-        // `extends` with `infer` positions): the recursive resolution it
-        // triggers dispatches `Conditional` / `Instantiate`, both of
-        // which count toward the aggregate request work budget, so an
-        // open-generic storm reaching here still fails closed to a typed
-        // partial rather than running unbounded.
-        if let Some(SemanticNodeData::Function {
-            params: extends_params,
-            return_type: extends_return,
-            ..
-        }) = graph.node_data(extends).as_deref()
-        {
-            let extends_params = Arc::clone(extends_params);
-            let extends_return = *extends_return;
-            let has_infer_position = extends_params.iter().any(|p| {
-                matches!(
-                    graph.node_data(p.ty).as_deref(),
-                    Some(SemanticNodeData::Infer { .. })
-                )
-            }) || matches!(
-                graph.node_data(extends_return).as_deref(),
-                Some(SemanticNodeData::Infer { .. })
-            );
-            if has_infer_position {
-                let check_resolved = self.evaluate_deferred_semantic_node(check);
-                if let Some(SemanticNodeData::Function {
-                    params: check_params,
-                    return_type: check_return,
-                    ..
-                }) = graph.node_data(check_resolved).as_deref()
-                {
-                    let check_params = Arc::clone(check_params);
-                    let check_return = *check_return;
-                    let mut result = true_branch;
-                    let mut any_bound = false;
-                    for (e_param, c_param) in extends_params.iter().zip(check_params.iter()) {
-                        if let Some(SemanticNodeData::Infer { name }) =
-                            graph.node_data(e_param.ty).as_deref()
-                        {
-                            let infer_name: Arc<str> = Arc::clone(name);
-                            let infer_node = graph.intern_node(SemanticNodeData::Infer {
-                                name: Arc::clone(&infer_name),
-                            });
-                            result =
-                                self.substitute_semantic_type_param(result, infer_node, c_param.ty);
-                            graph.record_origin_edge(
-                                result,
-                                OriginEdgeKind::InferBind,
-                                Arc::from(vec![check, extends].into_boxed_slice()),
-                                OriginMeta::SubstitutedParam(infer_name),
-                                Arc::clone(&fence),
-                            );
-                            any_bound = true;
-                        }
-                    }
-                    if let Some(SemanticNodeData::Infer { name }) =
-                        graph.node_data(extends_return).as_deref()
-                    {
-                        let infer_name: Arc<str> = Arc::clone(name);
-                        let infer_node = graph.intern_node(SemanticNodeData::Infer {
-                            name: Arc::clone(&infer_name),
-                        });
-                        result =
-                            self.substitute_semantic_type_param(result, infer_node, check_return);
-                        graph.record_origin_edge(
-                            result,
-                            OriginEdgeKind::InferBind,
-                            Arc::from(vec![check, extends].into_boxed_slice()),
-                            OriginMeta::SubstitutedParam(infer_name),
-                            Arc::clone(&fence),
-                        );
-                        any_bound = true;
-                    }
-                    if any_bound {
-                        graph.record_conditional_decided();
-                        graph.record_branch_selection_true();
-                        return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                            QueryResult::Value(result),
-                            fence,
-                        ))
-                        .with_observed_self_roots(observed_self_roots.clone());
-                    }
-                }
-            }
-        }
-
-        // Conditionals route through the shared relation authority. The
-        // shallow path handles the trivial primitive/identity cases
-        // inline for hot-path efficiency; any non-trivial pair falls
-        // through to the full relation engine for memoised
-        // assignability. `relate_nodes` internally guards cyclic
-        // re-entry and bounds structural descent with an iterative
-        // heap-backed worklist plus a graph-size work budget
-        // (`10 × graph.node_count()`, 4096 floor) that yields `Unknown`
-        // on runaway — there is no per-frame recursion cap.
-        let relation = self.shallow_relation_check(check, extends);
-        let (result, branch, is_deferred) = match relation {
-            ShallowRelation::Assignable => (true_branch, BranchSelection::True, false),
-            ShallowRelation::NotAssignable => (false_branch, BranchSelection::False, false),
-            ShallowRelation::Unknown => {
-                // Full relation authority. `bindings` from a successful
-                // Assignable result become infer bindings on the true
-                // branch; `relate_nodes` memoises all three outcomes
-                // with dep-signature fencing.
-                match self.relate_nodes(check, extends).0 {
-                    crate::semantic_query::RelationResult::Assignable { bindings: _ } => {
-                        // TODO: substitute infer
-                        // bindings into `true_branch` via
-                        // `substitute_semantic_type_param` and emit
-                        // `InferBind` origin edges for non-empty
-                        // bindings. Infer-bearing conditionals lower
-                        // to the deferred shell today; see §6.3 test
-                        // `relate_result_assignable_carries_infer_bindings_into_conditional`.
-                        (true_branch, BranchSelection::True, false)
-                    }
-                    crate::semantic_query::RelationResult::NotAssignable => {
-                        (false_branch, BranchSelection::False, false)
-                    }
-                    crate::semantic_query::RelationResult::Unknown => {
-                        let node = graph.intern_node(SemanticNodeData::Conditional {
-                            check,
-                            extends,
-                            true_branch_ref: true_branch,
-                            false_branch_ref: false_branch,
-                            distributive,
-                        });
-                        (node, BranchSelection::Deferred, true)
-                    }
-                }
+        let (result, branch, is_deferred) = match selection {
+            ConditionalBranchSelection::True => (true_branch, BranchSelection::True, false),
+            ConditionalBranchSelection::False => (false_branch, BranchSelection::False, false),
+            ConditionalBranchSelection::Deferred => {
+                let node = graph.intern_node(SemanticNodeData::Conditional {
+                    check,
+                    extends,
+                    true_branch_ref: true_branch,
+                    false_branch_ref: false_branch,
+                    distributive,
+                });
+                (node, BranchSelection::Deferred, true)
             }
         };
         graph.record_origin_edge(
@@ -4910,6 +4901,184 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => ShallowRelation::Unknown,
         }
+    }
+
+    /// Pre-relation INFER-PATTERN selection — the structural cases that
+    /// select a branch BEFORE any relation query, factored out of
+    /// `build_conditional`'s former inline arms so the key-domain
+    /// closedness classifiers see the SAME selection (the oracle owns
+    /// the FULL selection path, not just its relation tail):
+    ///
+    /// - **Bare `Infer` extends** (`T extends infer X`) — an infer
+    ///   pattern matches anything ⇒ TRUE selected with `X := check`,
+    ///   for ANY check (`check` is not consulted; `None` is accepted, so
+    ///   the TypeExpr classifier can select even when its check operand
+    ///   does not resolve to a node).
+    /// - **Function-typed extends with `infer` positions**
+    ///   (`T extends (x: infer U, y: infer V) => infer R`) — the check
+    ///   is materialised via [`Self::evaluate_deferred_semantic_node`]
+    ///   (so `PricingPlanSlots["badge"]` / mapped-type references
+    ///   resolve to their underlying Function before position-wise
+    ///   binding); if it resolves to a Function and at least one infer
+    ///   position binds the corresponding check position, TRUE is
+    ///   selected with those `name := node` bindings. The relation
+    ///   engine's Function arm short-circuits to `Unknown` in the
+    ///   presence of Infer positions (it does not currently emit infer
+    ///   bindings), so without this case those conditionals would
+    ///   defer. The evaluator does not propagate the caller's
+    ///   publication demand — sound because the recursive resolution it
+    ///   triggers dispatches `Conditional` / `Instantiate`, both
+    ///   counted toward the aggregate request work budget.
+    ///
+    /// Everything else — multi-infer tuples, template-literal-infer —
+    /// returns `None` and the relation ladder decides (those patterns
+    /// stay deferred today).
+    pub(super) fn pre_relation_infer_selection(
+        &self,
+        check: Option<SemanticNodeId>,
+        extends: SemanticNodeId,
+    ) -> Option<InferPatternSelection> {
+        let graph = self.graph();
+        match graph.node_data(extends).as_deref() {
+            Some(SemanticNodeData::Infer { name }) => Some(InferPatternSelection::BareInfer {
+                name: Arc::clone(name),
+            }),
+            Some(SemanticNodeData::Function {
+                params: extends_params,
+                return_type: extends_return,
+                ..
+            }) => {
+                let extends_params = Arc::clone(extends_params);
+                let extends_return = *extends_return;
+                let has_infer_position = extends_params.iter().any(|p| {
+                    matches!(
+                        graph.node_data(p.ty).as_deref(),
+                        Some(SemanticNodeData::Infer { .. })
+                    )
+                }) || matches!(
+                    graph.node_data(extends_return).as_deref(),
+                    Some(SemanticNodeData::Infer { .. })
+                );
+                if !has_infer_position {
+                    return None;
+                }
+                let check_resolved = self.evaluate_deferred_semantic_node(check?);
+                let (check_params, check_return) = match graph.node_data(check_resolved).as_deref()
+                {
+                    Some(SemanticNodeData::Function {
+                        params,
+                        return_type,
+                        ..
+                    }) => (Arc::clone(params), *return_type),
+                    _ => return None,
+                };
+                let mut bindings: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+                for (e_param, c_param) in extends_params.iter().zip(check_params.iter()) {
+                    if let Some(SemanticNodeData::Infer { name }) =
+                        graph.node_data(e_param.ty).as_deref()
+                    {
+                        bindings.push((Arc::clone(name), c_param.ty));
+                    }
+                }
+                if let Some(SemanticNodeData::Infer { name }) =
+                    graph.node_data(extends_return).as_deref()
+                {
+                    bindings.push((Arc::clone(name), check_return));
+                }
+                if bindings.is_empty() {
+                    return None;
+                }
+                Some(InferPatternSelection::FunctionInfer { bindings })
+            }
+            _ => None,
+        }
+    }
+
+    /// Tri-state conditional branch selection — THE shared oracle for
+    /// every consumer that must decide which branch a conditional
+    /// semantically takes: [`Self::build_conditional`]'s reduction path
+    /// AND the key-domain closedness classifiers in `raise.rs` (the
+    /// TypeExpr-layer `Conditional` arm and the node-level `OpenWalk`
+    /// arm), which invoke it for selected-branch-only classification
+    /// instead of reimplementing assignability or privately
+    /// materialising branches. Returns the selection PLUS the
+    /// infer-pattern payload when the selection came from a
+    /// pre-relation infer case, so `build_conditional` can perform the
+    /// binding substitution and the classifiers can bind branch infer
+    /// names to the same check-derived identities.
+    ///
+    /// Decision order mirrors `build_conditional`'s historical ladder
+    /// exactly:
+    ///
+    /// 1. an `error` check DOMINATES the whole conditional — no branch
+    ///    is selected ⇒ `Deferred` (in `build_conditional` this row is
+    ///    pre-absorbed by `absorb_conditional`; the guard makes the
+    ///    oracle safe for classifier callers, which have no absorber in
+    ///    front of them);
+    /// 2. the pre-relation infer-pattern cases
+    ///    ([`Self::pre_relation_infer_selection`]) — an infer pattern
+    ///    matches anything, so even an `any` check selects TRUE with
+    ///    `X := any`;
+    /// 3. an `any` check semantically uses BOTH branches
+    ///    (`any extends T ? X : Y` ⇒ `X | Y`) ⇒ `Deferred` (likewise
+    ///    pre-absorbed in build for non-infer extends);
+    /// 4. [`Self::shallow_relation_check`] (the hot-path
+    ///    primitive/identity table), then the full memoised
+    ///    [`Self::relate_nodes`] relation engine; `Unknown` ⇒
+    ///    `Deferred`. `relate_nodes` internally guards cyclic re-entry
+    ///    and bounds structural descent with an iterative heap-backed
+    ///    worklist plus a graph-size work budget
+    ///    (`10 × graph.node_count()`, 4096 floor) that yields `Unknown`
+    ///    on runaway — there is no per-frame recursion cap.
+    pub(super) fn conditional_branch_selection(
+        &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+    ) -> (ConditionalBranchSelection, Option<InferPatternSelection>) {
+        if matches!(
+            self.peek_special(check),
+            Some((super::absorb::SpecialKind::Error, _))
+        ) {
+            return (ConditionalBranchSelection::Deferred, None);
+        }
+        if let Some(selected) = self.pre_relation_infer_selection(Some(check), extends) {
+            return (ConditionalBranchSelection::True, Some(selected));
+        }
+        if matches!(
+            self.peek_special(check),
+            Some((super::absorb::SpecialKind::Any, _))
+        ) {
+            return (ConditionalBranchSelection::Deferred, None);
+        }
+        let selection = match self.shallow_relation_check(check, extends) {
+            ShallowRelation::Assignable => ConditionalBranchSelection::True,
+            ShallowRelation::NotAssignable => ConditionalBranchSelection::False,
+            ShallowRelation::Unknown => {
+                // Full relation authority. `relate_nodes` memoises all
+                // three outcomes with dep-signature fencing.
+                match self.relate_nodes(check, extends).0 {
+                    // TODO: in `build_conditional`, substitute infer
+                    // bindings carried by the RELATION result into
+                    // `true_branch` via `substitute_semantic_type_param`
+                    // and emit `InferBind` origin edges for non-empty
+                    // bindings (the pre-relation cases above cover the
+                    // bare-infer and function-infer patterns only).
+                    // Infer-bearing conditionals beyond those lower to
+                    // the deferred shell today; see §6.3 test
+                    // `relate_result_assignable_carries_infer_bindings_into_conditional`.
+                    crate::semantic_query::RelationResult::Assignable { bindings: _ } => {
+                        ConditionalBranchSelection::True
+                    }
+                    crate::semantic_query::RelationResult::NotAssignable => {
+                        ConditionalBranchSelection::False
+                    }
+                    crate::semantic_query::RelationResult::Unknown => {
+                        ConditionalBranchSelection::Deferred
+                    }
+                }
+            }
+        };
+        (selection, None)
     }
 
     /// Union normalization. Structurally sorts + dedups the supplied members

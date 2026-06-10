@@ -4153,6 +4153,417 @@ defineProps<ColorModeSelectProps>()
     );
 }
 
+/// Route/mode-INDEPENDENT L1: a Table.vue-shaped HERMETIC SFC. A generic
+/// SFC (`generic="T"`) whose props interface `extends Omit<CoreOptions<T>,
+/// 'data'>` — an open object-filter over the OPEN `CoreOptions<T>` heritage,
+/// the structural decl-body-lowering route that ran away on the real
+/// Table.vue. The carrier-stop keeps the open `Omit` a shallow carrier while
+/// the enclosing decl still materialises its OWN closed members.
+///
+/// The source's KEY DOMAIN is genuinely open: `CoreOptions<T>` intersects
+/// the unbound outer `T` (`{ … } & T`), so the enumerable member-name set
+/// depends on `T`. A fixed-key generic body with `T` confined to member
+/// VALUE positions is the CLOSED key-domain class — it materialises
+/// path-precisely (`Omit<Foo<T>, 'items'>` publishes `label`) and is pinned
+/// by `omit_wrapped_sfc_generic_param_via_wildcard_resolves`; this fixture
+/// pins the complementary OPEN class on the structural route.
+///
+/// **Discriminating.** Pre-change the structural heritage `Omit<CoreOptions<T>,
+/// 'data'>` MATERIALISES its source, flattening `columns`/`rowCount` into the
+/// published surface (and the runaway budget can leak a sentinel). Post-change
+/// it carrier-stops: the open-domain members do NOT flatten, the enclosing
+/// `caption`/`sticky` still publish, and the named `options` field publishes as
+/// an `Omit` carrier `Ref`. The `columns`/`rowCount`-absent + no-sentinel
+/// assertions FAIL pre-change and PASS post-change.
+#[test]
+fn get_component_meta_table_shaped_open_omit_heritage_carrier_stops_complete() {
+    use crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Table.vue",
+            r#"<script lang="ts">
+export type CoreOptions<T> = {
+  data: T
+  columns: number
+  rowCount: number
+} & T
+
+export interface TableProps<T> extends Omit<CoreOptions<T>, 'data'> {
+  caption?: string
+  sticky?: boolean
+  options?: Omit<CoreOptions<T>, 'data'>
+}
+</script>
+
+<script setup lang="ts" generic="T">
+defineProps<TableProps<T>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/Table.vue");
+    let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+
+    // Own closed members of the enclosing decl materialise.
+    assert!(
+        prop_names.contains(&"caption"),
+        "the enclosing decl's own closed `caption` prop must publish, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"sticky"),
+        "the enclosing decl's own closed `sticky` prop must publish, got: {prop_names:?}"
+    );
+
+    // The open `Omit<CoreOptions<T>, 'data'>` heritage carrier-stops: its
+    // members (`columns`, `rowCount`) do NOT flatten into the surface
+    // (shallow-by-default over an OPEN enumeration domain).
+    assert!(
+        !prop_names.contains(&"columns") && !prop_names.contains(&"rowCount"),
+        "the OPEN `Omit<CoreOptions<T>, 'data'>` heritage must carrier-stop — its members \
+         must NOT flatten into the published surface, got: {prop_names:?}"
+    );
+    // `data` is omitted by the filter and is never reachable regardless.
+    assert!(
+        !prop_names.contains(&"data"),
+        "`data` is omitted by the Omit filter and must never publish, got: {prop_names:?}"
+    );
+
+    // The named `options` field publishes as a shallow `Omit` carrier `Ref`.
+    let options = meta
+        .props
+        .iter()
+        .find(|p| p.name == "options")
+        .expect("`options` prop must publish");
+    match &options.type_expr {
+        TypeExpr::Ref { name, .. } => assert_eq!(
+            name.as_ref(),
+            "Omit",
+            "the open `options: Omit<CoreOptions<T>, 'data'>` field must publish as an \
+             `Omit` carrier Ref"
+        ),
+        other => panic!("`options` must be an `Omit` carrier Ref, got {other:?}"),
+    }
+
+    // No published field may carry a budget-tripped partial sentinel — the
+    // result must be COMPLETE, not a degraded budget partial.
+    for p in &meta.props {
+        assert!(
+            !type_expr_is_budget_exceeded_sentinel(&p.type_expr),
+            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {:?}",
+            p.name,
+            p.type_expr
+        );
+    }
+}
+
+/// Route/mode-INDEPENDENT L1: a ChatMessages.vue-shaped HERMETIC SFC. A
+/// generic SFC whose named props interface `extends Pick<MessageProps<T>, …>`
+/// — an open object-filter (`Pick`) over the OPEN generic source
+/// `MessageProps<T>` imported cross-file. The heritage flows through the
+/// structural materialise (Expanded) route — the same route the real
+/// ChatMessages.vue storms on — NOT the inline-object Navigate projector
+/// (which already carrier-stops named-member open Picks at hermetic scale).
+///
+/// **Scope honesty.** The real ChatMessages.vue Pick source is a *chained
+/// conditional* (`PropsBase<T> = MessageBase<T> extends … ? … : never`); a
+/// hermetic conditional source yields `semanticMiss` downstream pre-change
+/// (the separate conditional-reduction gap), so it does not flatten and
+/// cannot serve as a clean RED→GREEN discriminator. This fixture therefore
+/// uses a PLAIN (non-conditional) Pick source whose KEY DOMAIN is genuinely
+/// open — `MessageProps<T>` intersects the unbound outer `T`, so the
+/// enumerable member-name set depends on `T` (a fixed-key body with `T`
+/// confined to VALUE positions is the CLOSED class and materialises
+/// path-precisely instead). The conditional-source Expanded registry-route
+/// storm is reproduced and gated by the external-corpus gate (the real
+/// oracle).
+///
+/// **Discriminating.** Pre-change the structural heritage `Pick<MessageProps<T>,
+/// 'icon' | 'avatar'>` MATERIALISES the open generic source, flattening
+/// `icon`/`avatar` into the published surface. Post-change it carrier-stops:
+/// those open-domain members do NOT flatten, the own `caption` still publishes,
+/// and no published field carries a budget sentinel. The `icon`/`avatar`-absent
+/// + no-sentinel assertions FAIL pre-change and PASS post-change.
+#[test]
+fn get_component_meta_chat_messages_shaped_open_pick_intersection_carrier_stops() {
+    use crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/chat-types.ts",
+            r#"export type MessageProps<T> = {
+  icon?: string
+  avatar?: string
+  side?: 'left' | 'right'
+} & T
+
+// A NAMED generic props interface whose HERITAGE is an open Pick over the
+// open generic source. `defineProps<ChatProps<T>>()` resolves this through
+// the structural materialise (Expanded) route.
+export interface ChatProps<T> extends Pick<MessageProps<T>, 'icon' | 'avatar'> {
+  caption?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/ChatMessages.vue",
+            r#"<script setup lang="ts" generic="T extends unknown[]">
+import type { ChatProps } from './chat-types'
+
+defineProps<ChatProps<T>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/ChatMessages.vue");
+    let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+
+    // The enclosing decl's own closed member materialises.
+    assert!(
+        prop_names.contains(&"caption"),
+        "the enclosing decl's own `caption` prop must publish, got: {prop_names:?}"
+    );
+
+    // The open `Pick<MessageProps<T>, 'icon' | 'avatar'>` heritage
+    // carrier-stops: its picked members do NOT flatten into the surface
+    // (shallow-by-default over an OPEN intersection-widened enumeration
+    // domain — the `& T` arm makes the key set depend on the unbound `T`).
+    // Materialising the open generic source is the ChatMessages.vue storm
+    // class this prevents.
+    assert!(
+        !prop_names.contains(&"icon") && !prop_names.contains(&"avatar"),
+        "the OPEN `Pick<MessageProps<T>, …>` heritage must carrier-stop — its picked members must \
+         NOT flatten into the published surface, got: {prop_names:?}"
+    );
+
+    // No published field may carry a budget-tripped partial sentinel.
+    for p in &meta.props {
+        assert!(
+            !type_expr_is_budget_exceeded_sentinel(&p.type_expr),
+            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {:?}",
+            p.name,
+            p.type_expr
+        );
+    }
+}
+
+/// Route/mode-INDEPENDENT L1 for the MAPPED family: a hermetic SFC with
+/// `defineSlots<OpenMappedSlots<T>>()` where `OpenMappedSlots<T>` is a
+/// `{ [K in keyof BaseSlots]?: (props: { message: MessageBase<T> }) =>
+/// VNode[] }` mapped type — the `ChatMessagesSlots<T>` / `TableSlots<T>`
+/// family. The keys are enumerable (`keyof BaseSlots` is a finite closed
+/// surface) but the per-key value body reaches the OPEN outer generic `T`
+/// (NOT the bound mapper binder `K`) through a function-parameter object
+/// member.
+///
+/// **Scope honesty.** A conditional-bodied mapped value (the exact real
+/// `ChatMessagesSlots<T>` shape) yields `semanticMiss` downstream at
+/// hermetic scale (the separate conditional-reduction gap), so it does not
+/// flatten pre-change and cannot serve as a clean RED→GREEN discriminator.
+/// This fixture therefore uses a PLAIN function value (which DOES flatten
+/// pre-change) to make the mapped carrier-stop discriminating; the
+/// conditional-bodied open mapped storm is reproduced and gated by the
+/// external-corpus oracle (the real ChatMessages.vue / Table.vue surface).
+///
+/// **Discriminating.** Pre-change `defineSlots<…>()` resolves the slots
+/// surface under a `MacroObjectSurface`/`Expanded` publication demand,
+/// which enumerates `keyof BaseSlots` and materialises the per-key value —
+/// flattening `header`/`footer` into named slots whose bindings include
+/// the deep `message` member. Post-change the mapped surface carrier-stops
+/// to a shallow `Mapped` shell: the open per-key value is NOT materialised,
+/// so no slot binding flattens `message`. The `message`-absent assertion
+/// FAILS pre-change (flatten) and PASSES post-change (carrier-stop).
+#[test]
+fn get_component_meta_open_mapped_slots_surface_carrier_stops_no_sentinel() {
+    use crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/OpenMappedSlots.vue",
+            r#"<script lang="ts">
+type VNode = { __isVNode: true }
+
+interface BaseSlots {
+  header(props: { title: string }): VNode[]
+  footer(props: { note: string }): VNode[]
+}
+
+interface MessageBase<T> {
+  items: T
+  current: T
+}
+
+// Open mapped slots surface: the keys (`header` / `footer`) are
+// enumerable from the closed `BaseSlots`, but each per-key value reaches
+// the OPEN outer generic `T` through a function-parameter object member.
+export type OpenMappedSlots<T> = {
+  [K in keyof BaseSlots]?: (props: { message: MessageBase<T> }) => VNode[]
+}
+</script>
+
+<script setup lang="ts" generic="T">
+defineSlots<OpenMappedSlots<T>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    // The resolution must TERMINATE and publish a COMPLETE result.
+    let meta = get_meta(&project, "/OpenMappedSlots.vue");
+
+    // No published prop / slot binding may carry a budget-tripped partial
+    // sentinel — the open mapped slots surface carrier-stopped to a
+    // shallow shell instead of materialising the per-key value loop.
+    for p in &meta.props {
+        assert!(
+            !type_expr_is_budget_exceeded_sentinel(&p.type_expr),
+            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {:?}",
+            p.name,
+            p.type_expr
+        );
+    }
+    for slot in &meta.slots {
+        for binding in &slot.bindings {
+            assert!(
+                !type_expr_is_budget_exceeded_sentinel(&binding.type_expr),
+                "no slot binding may carry a BudgetExceeded sentinel; slot `{}` binding `{}` \
+                 did: {:?} — the open mapped slots value body was materialised (the storm)",
+                slot.name,
+                binding.name,
+                binding.type_expr
+            );
+        }
+    }
+
+    // The open mapped slots value body stays SHALLOW: no slot binding
+    // flattens the per-key value's deep `message: MessageBase<T>` object
+    // member into the published surface (the carrier-stop discriminator).
+    assert!(
+        meta.slots
+            .iter()
+            .all(|slot| slot.bindings.iter().all(|b| b.name != "message")),
+        "the open mapped slots surface must carrier-stop — its per-key value's \
+         `message: MessageBase<T>` binding must NOT flatten into a published slot, got slots: {:?}",
+        meta.slots
+            .iter()
+            .map(|s| (
+                s.name.as_str(),
+                s.bindings
+                    .iter()
+                    .map(|b| b.name.as_str())
+                    .collect::<Vec<_>>()
+            ))
+            .collect::<Vec<_>>()
+    );
+
+    // POSITIVE witness — the carrier-stop is not a DROPPED surface. The
+    // empty/shallow assertions above would also pass on a broken pipeline
+    // that simply lost the slots payload, so three positive facts pin the
+    // consumed-and-carried shape:
+    //
+    //  (a) the analyzer consumed `defineSlots<OpenMappedSlots<T>>()`;
+    //  (b) the slots macro-payload expansion ran to COMPLETION and
+    //      published its (shallow) shape — a dropped payload has no
+    //      `define_slots` entry, a stormed one is not `Completed`;
+    //  (c) the shared dispatch route the registry / macro-payload
+    //      consumers resolve through yields the PRESERVED `Mapped`
+    //      carrier for `OpenMappedSlots<T>` (the carrier IS the published
+    //      value and stays re-resolvable on demand).
+    let resolved = project
+        .host()
+        .resolve_component_meta(
+            "/OpenMappedSlots.vue",
+            crate::types::ProjectionMode::Expanded,
+        )
+        .expect("resolved component meta should exist");
+    assert!(
+        resolved.snapshot.macros.iter().any(|m| {
+            matches!(
+                m.kind,
+                verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
+            ) && m.type_references.iter().any(|r| r == "OpenMappedSlots")
+        }),
+        "the analyzer must consume `defineSlots<OpenMappedSlots<T>>()`, got macros: {:?}",
+        resolved.snapshot.macros
+    );
+    let evaluated = resolved
+        .evaluated_types
+        .as_ref()
+        .expect("Expanded-mode resolution must carry evaluated types");
+    assert_eq!(
+        evaluated.define_slots.len(),
+        1,
+        "the slots macro payload must publish exactly one expanded shape (a missing entry \
+         means the slots surface was DROPPED, not carrier-stopped), got {:?}",
+        evaluated.define_slots
+    );
+    assert!(
+        matches!(
+            evaluated.define_slots[0].result.execution_status,
+            verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed
+        ),
+        "the carrier-stopped slots payload must complete (not storm / trip a budget), got {:?}",
+        evaluated.define_slots[0].result.execution_status
+    );
+
+    // (c) — the preserved `Mapped` carrier is reachable through the shared
+    // dispatch (the same route the registry materialiser and the macro
+    // payload resolve through): instantiating `OpenMappedSlots<T>` with an
+    // open `T` yields the deferred `Mapped` shell, not an enumerated
+    // Object and not an Opaque miss.
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(project.host());
+    let graph = Arc::clone(project.host().project_type_store().semantic_graph());
+    let t_param = graph.intern_node(crate::semantic_query::SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let carrier = match dispatch
+        .execute_read(crate::semantic_query::SemanticQueryKey::Instantiate {
+            base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("/OpenMappedSlots.vue"),
+                Arc::from("OpenMappedSlots"),
+            ),
+            args: Arc::from(vec![t_param].into_boxed_slice()),
+            context: crate::semantic_query::InstantiateContext::new(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+                Default::default(),
+            ),
+        })
+        .value
+    {
+        crate::semantic_query::QueryResult::Value(node) => node,
+        other => panic!("OpenMappedSlots<T> must resolve to a Value carrier, got {other:?}"),
+    };
+    let mut node = carrier;
+    for _ in 0..4 {
+        match graph.node_data(node).as_deref() {
+            Some(crate::semantic_query::SemanticNodeData::Alias(inner)) => node = *inner,
+            _ => break,
+        }
+    }
+    assert!(
+        matches!(
+            graph.node_data(node).as_deref(),
+            Some(crate::semantic_query::SemanticNodeData::Mapped { .. })
+        ),
+        "instantiating OpenMappedSlots<T> through the shared dispatch must preserve the \
+         `Mapped` carrier shell (the published value), got {:?}",
+        graph.node_data(node)
+    );
+}
+
 // @ai-generated - Reproduces Pick<VueButtonHTMLAttributes, ...> form attrs disappearing when the source alias comes from a package import.
 #[test]
 fn get_component_meta_keeps_picked_package_button_form_attrs_through_generic_wrapper_omits() {

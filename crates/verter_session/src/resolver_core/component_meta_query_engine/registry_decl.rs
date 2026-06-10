@@ -55,6 +55,69 @@ use crate::semantic_query::{
     SemanticQueryOutput,
 };
 
+/// Whether the Navigate-lowered registry surface `node` IS, or contains
+/// at its top-level structure (through transparent `Alias` hops and
+/// `Intersection`/`Union` arms), an OPEN `SemanticNodeData::Mapped`
+/// carrier — a mapped type whose produced surface still depends on an
+/// unbound outer generic (decided by the shared
+/// [`mapped_type_is_open_or_unknown`](crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown)
+/// predicate, no second walker) — OR the walk could not decide
+/// (open-or-unknown: budget exhaustion is UNDECIDABLE and must preserve
+/// the carrier, never fall through into Expanded materialisation).
+///
+/// The component-meta registry materialiser preserves such a carrier
+/// shallowly instead of running the Expanded `materialize_component_meta_structure`,
+/// which would distribute the mapped's open conditional value per key and
+/// explode into a combinatorially-large surface (the `ChatMessagesSlots<T>`
+/// storm). The walk is bounded and inspects only the top-level
+/// surface-composition structure (NOT member values — a member whose value
+/// is an open mapped is a deeper projection the consumer drives on demand).
+fn base_contains_open_mapped_or_unknown(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+
+    let graph = ctx.project_type_store().semantic_graph();
+    // Depth-budgeted ITERATIVE worklist (no self-recursion — see the
+    // `no_unbounded_recursion_in_resolver_core` architecture guard). The
+    // node budget caps the top-level surface-composition walk; an
+    // open-mapped arm short-circuits, a closed surface exhausts the small
+    // frontier well within budget.
+    let mut budget = 64u32;
+    let mut work: Vec<SemanticNodeId> = vec![node];
+    while let Some(current) = work.pop() {
+        if budget == 0 {
+            // Budget exhausted with composition structure still
+            // unvisited: the verdict is UNDECIDABLE. This is the
+            // registry L1 mapped entrance — fail open-or-unknown and
+            // preserve the carrier; returning "no open mapped" here
+            // would fall through into the Expanded materialiser, the
+            // unsafe direction this predicate exists to stop.
+            return true;
+        }
+        budget -= 1;
+        let Some(data) = graph.node_data(current) else {
+            continue;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Mapped { source, mapper } => {
+                if crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
+                    ctx, *source, mapper,
+                ) {
+                    return true;
+                }
+            }
+            SemanticNodeData::Intersection(arms) | SemanticNodeData::Union(arms) => {
+                work.extend(arms.iter().copied());
+            }
+            SemanticNodeData::Alias(target) => work.push(*target),
+            _ => {}
+        }
+    }
+    false
+}
+
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn resolve_imported_registry_symbol(
         &mut self,
@@ -412,6 +475,26 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         ) else {
             return expr.clone();
         };
+        // Route/mode-INDEPENDENT L1 (Shallow-By-Default), MAPPED-TYPE
+        // family — the component-meta REGISTRY materialisation route. The
+        // Navigate lowering above carrier-stops an open mapped to a
+        // `SemanticNodeData::Mapped` shell (see
+        // `raise::mapped_type_is_open_or_unknown`). Running the Expanded
+        // `materialize_component_meta_structure` below on that open-mapped
+        // shell would re-enter the empty-path Expanded expander, which
+        // distributes the mapped's open conditional value per key and
+        // explodes into a combinatorially-large materialised surface (the
+        // `ChatMessagesSlots<T>` 948 MB raised-`TypeExpr` storm the
+        // registry's `until_stable` loop then re-lowers). Preserve the
+        // shallow mapped carrier instead: raise the lowered carrier back to
+        // `TypeExpr::Mapped` and return it WITHOUT Expanded materialisation.
+        // Consumers re-resolve the carrier on demand. A CLOSED mapped (or
+        // any non-mapped surface) falls through and materialises as before.
+        if base_contains_open_mapped_or_unknown(self.ctx, base) {
+            return dispatch
+                .raise_node_to_type_expr(base)
+                .unwrap_or_else(|| expr.clone());
+        }
         let key = MaterializeStructureCacheKey {
             scope_canonical_id: std::sync::Arc::from(scope_canonical_id),
             base,

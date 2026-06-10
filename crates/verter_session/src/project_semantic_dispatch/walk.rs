@@ -3258,6 +3258,27 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         if !crate::semantic_query::may_reduce_operator(self.context) {
             return None;
         }
+        // Route/mode-INDEPENDENT L1 (Shallow-By-Default), MAPPED-TYPE
+        // family — the empty-path Shallow surface enumerator (the slot /
+        // macro-object-surface route). A mapped type whose produced
+        // surface still depends on an unbound OUTER generic — an open
+        // source / key space, or a value body / name remap reaching the
+        // outer generic (NOT the bound mapper binder `K`) — must NOT
+        // enumerate its keys and materialise the per-key value here
+        // either (the `ChatMessagesSlots<T>` / `TableSlots<T>` slot-surface
+        // storm). Returning `None` carrier-stops: the surface stays a
+        // shallow shell (no per-key bindings) and consumers re-resolve the
+        // preserved `Mapped` carrier on demand. The SAME shared
+        // open-mapped predicate `build_mapped_type` consults decides
+        // openness (no second walker). A CLOSED mapped slots / object
+        // surface still enumerates path-precisely below.
+        if crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
+            self.dispatch.ctx,
+            source,
+            mapper,
+        ) {
+            return None;
+        }
         // Prefer the explicit `key_space` for fast literal-union
         // collection; fall back to the shared key-name enumerator on
         // the SOURCE so the Shallow walker enumerates member names

@@ -73,6 +73,51 @@ impl BuiltinUtility {
         }
     }
 
+    /// Type-argument positions that produce this utility's OUTPUT KEY
+    /// domain, or `None` when the utility makes no argument-derived
+    /// closed-key claim.
+    ///
+    /// This is the registry-owned per-utility OUTPUT-KEY semantics the
+    /// key-domain closedness classifiers consume (see
+    /// `verter_session::project_semantic_dispatch::raise::builtin_utility_key_domain_is_closed`):
+    /// a utility's produced key set is provably closed iff every listed
+    /// argument's key domain is closed — arguments NOT listed (e.g.
+    /// `Record`'s value argument) never open the produced key domain.
+    ///
+    /// - Object filters (`Pick` / `Omit`): the filtered SOURCE's key
+    ///   domain (argument 0) plus the key-selection argument (argument
+    ///   1) both produce output keys.
+    /// - Mapped utilities (`Partial` / `Required` / `Readonly`): the
+    ///   output keys mirror the SOURCE's keys (argument 0).
+    /// - `Record<K, V>`: the output key domain IS `K` (argument 0); the
+    ///   value argument `V` never opens it.
+    /// - Value-producing utilities (`ReturnType`, `InstanceType`,
+    ///   `Awaited`, `NonNullable`, the union/extraction and string
+    ///   utilities, `NoInfer`, …) compute their output from the
+    ///   argument's VALUE structure, which a key-domain argument walk
+    ///   never inspects — they make NO closed-key claim (`None`) and
+    ///   stay conservatively not-provably-closed until a per-utility
+    ///   output classification exists.
+    pub fn key_domain_argument_positions(self) -> Option<&'static [usize]> {
+        match self {
+            Self::Pick | Self::Omit => Some(&[0, 1]),
+            Self::Partial | Self::Required | Self::Readonly | Self::Record => Some(&[0]),
+            Self::Extract
+            | Self::Exclude
+            | Self::NonNullable
+            | Self::ReturnType
+            | Self::Parameters
+            | Self::ConstructorParameters
+            | Self::InstanceType
+            | Self::Awaited
+            | Self::Uppercase
+            | Self::Lowercase
+            | Self::Capitalize
+            | Self::Uncapitalize
+            | Self::NoInfer => None,
+        }
+    }
+
     /// Whether this is a compiler intrinsic that cannot be shadowed by user code.
     pub fn is_compiler_intrinsic(self) -> bool {
         matches!(

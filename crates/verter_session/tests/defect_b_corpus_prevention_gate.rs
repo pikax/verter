@@ -16,32 +16,38 @@
 //! - #1 Per-component no-timeout — every component in
 //!   `NO_TIMEOUT_MANDATORY_COMPONENTS` resolves within a hard per-component
 //!   budget (a watchdog thread aborts the run if any component hangs).
-//!   `Table.vue` is here: it trips the armed fuse and resolves
-//!   degraded-but-terminating (~5s), which #1 requires.
+//!   `Table.vue` is here: it TERMINATES (no hang). It is NOT genuinely
+//!   complete, though — its open `Omit<CoreOptions<T>, …>` `extends`-heritage
+//!   on the structural decl-body-lowering route still trips the runaway fuse
+//!   and resolves degraded, so it is DEFERRED from the COMPLETE set (#2/#4 —
+//!   see `DEFERRED_NON_COMPLETE_SIBLINGS`). `ChatMessages.vue` is DEFERRED
+//!   from THIS set too (`DEFERRED_TIMEOUT_RESIDUAL`): its open mapped slots
+//!   surface carrier-stops, but a residual open-conditional empty-path-
+//!   Expanded distribution explosion (a separate mechanism) still trips the
+//!   budget — a tracked follow-up, not yet mandatory.
 //! - #2 Warm-cache non-regression — the warm (2nd) pass COLLAPSES the
 //!   audited per-request `RequestContext.cold_builds` by ≥90% for every
 //!   GENUINELY-COMPLETE component (`COMPLETE_MANDATORY_COMPONENTS`),
 //!   measured on the same `cold_builds` axis the `bench:meta:ui` accounts
-//!   and the Defect-B bisect use (Table 0→5101) — NOT the
+//!   and the Defect-B bisect use — NOT the
 //!   `ComponentMetaResultDb` hit counter, which is structurally always 0 for
-//!   these components on both this branch and af35 (an unsatisfiable
-//!   oracle). This is the direct points-3-6 witness: a complete sibling
-//!   warms despite the open-generic siblings tripping the fuse on the same
-//!   host.
+//!   these components (an unsatisfiable oracle). This is the direct
+//!   points-3-6 witness: complete siblings
+//!   (`Button`/`Badge`/`Avatar`/`Modal`/`Calendar`) warm cleanly. `Table.vue`
+//!   is NOT in this set — on the real corpus it stays Table-class
+//!   refused-warm (5076 cold → 5099 warm, ~0% collapse) because its open
+//!   `Omit` `extends`-heritage on the structural decl-body-lowering route
+//!   still trips the fuse (TODO(follow-up: structural extends-heritage
+//!   carrier-stop) — see `DEFERRED_NON_COMPLETE_SIBLINGS`).
 //! - #3 Perf-budget regression — first-pass aggregate elapsed vs a
 //!   COMMITTED post-fix baseline, ~15% threshold.
 //! - #4 No `BudgetExceeded` on a `demand: Published` key — no
 //!   GENUINELY-COMPLETE component (`COMPLETE_MANDATORY_COMPONENTS`) carries
 //!   a budget-tripped partial (`synthesis_should_suppress` OR a leaked
-//!   sentinel) on its published surface.
-//!
-//! `Table.vue` is DEFERRED from #2/#4: under the armed fuse it is
-//! degraded-but-terminating and legitimately carries
-//! `Partial(BUDGET_EXCEEDED)` on its published surface until the
-//! route/mode-INDEPENDENT L1 open-domain carrier-stop lands as a
-//! tracked structural follow-up — see the `TODO(structural-block)`
-//! on `COMPLETE_MANDATORY_COMPONENTS`. Asserting Table satisfies #2/#4
-//! today would be a hollow/false gate.
+//!   sentinel) on its published surface. The set is
+//!   `Button`/`Badge`/`Avatar`/`Modal`/`Calendar`. `Table.vue` and
+//!   `ChatMessages.vue` are DEFERRED (see `DEFERRED_NON_COMPLETE_SIBLINGS` /
+//!   `DEFERRED_TIMEOUT_RESIDUAL`).
 //!
 //! **Testing-Hermeticity rule (HARD).** This file is gated behind the
 //! `external-corpus` cargo feature and is therefore NOT compiled by the
@@ -69,69 +75,136 @@ use verter_workspace::{
     ProjectRank, VfsProjectConfig, WorkspaceAccess,
 };
 
-/// Components that MUST resolve without timeout (#1) under the
-/// armed-by-default runaway fuse. `Table.vue` belongs here: it is an
-/// open-generic surface that trips the fuse and resolves
-/// degraded-but-terminating (~5s) — the genuine termination backstop. It
-/// does NOT belong to the genuinely-complete set below (its degraded
-/// result legitimately carries `Partial(BUDGET_EXCEEDED)` until the
-/// route/mode-independent L1 open-domain carrier-stop lands as a tracked
-/// structural follow-up). `ChatMessages.vue` is
-/// intentionally ABSENT — it is an Expanded-route storm case
-/// that is EXPECTED to still hang; see
-/// `chat_messages_no_timeout_is_deferred_to_defect_a`.
+/// Components that MUST resolve without timeout (#1). `Table.vue`
+/// TERMINATES (it no longer hangs) — but it is NOT genuinely complete: its
+/// open `Omit<CoreOptions<T>, …>` `extends`-heritage on the structural
+/// decl-body-lowering route still trips the armed runaway fuse and resolves
+/// degraded (it is DEFERRED from `COMPLETE_MANDATORY_COMPONENTS` — see
+/// `DEFERRED_NON_COMPLETE_SIBLINGS`). `ChatMessages.vue` is DEFERRED from
+/// THIS set too (see `DEFERRED_TIMEOUT_RESIDUAL`) — its mapped slots surface
+/// carrier-stops but a residual open-conditional distribution explosion
+/// still trips the
+/// budget (a tracked follow-up).
 const NO_TIMEOUT_MANDATORY_COMPONENTS: &[&str] = &[
     "Button.vue",
     "Badge.vue",
     "Avatar.vue",
     "Modal.vue",
-    // Corpus-validated warm-recovering generic-heavy sibling (promoted into
-    // the complete set — see `COMPLETE_MANDATORY_COMPONENTS`). Resolves fast
+    // Corpus-validated warm-recovering generic-heavy sibling (also in the
+    // complete set — see `COMPLETE_MANDATORY_COMPONENTS`). Resolves fast
     // + terminating + COMPLETE on a solo cold host (no published partial),
     // so #1 (no-timeout), #3 (perf), and #4 (no published partial) cover it.
     "Calendar.vue",
+    // Open-generic `extends`-heritage: TERMINATES under the armed runaway
+    // fuse (no hang — that is what THIS set asserts) but resolves DEGRADED.
+    // Its `Omit<CoreOptions<T>, …>` structural decl-body-lowering route
+    // still trips the fuse and leaks a published `BudgetExceeded` partial,
+    // so it is NOT in `COMPLETE_MANDATORY_COMPONENTS`.
+    // TODO(follow-up: structural extends-heritage carrier-stop) — bound
+    // that route, then promote `Table.vue` into the COMPLETE set once the
+    // corpus oracle proves it warms + carries no published sentinel.
     "Table.vue",
+    // NOTE: `ChatMessages.vue` is DEFERRED (see
+    // `DEFERRED_TIMEOUT_RESIDUAL` below) — its open mapped slots surface
+    // carrier-stops at the dispatch layer, but a residual registry
+    // Expanded-materialisation explosion (the mapped value's OPEN
+    // conditional distributed per key into a combinatorially-large union)
+    // still trips the watchdog. Tracked as a follow-up; not yet mandatory.
 ];
 
-/// Components confirmed to resolve fast + COMPLETE under the armed fuse —
-/// the set the warm-recovery (#2) and no-published-partial (#4)
-/// assertions enforce. The partial-taint SCOPING invariant guarantees a
-/// genuinely-complete sibling warms with
-/// zero cold rebuilds and carries no `BudgetExceeded` on its published
-/// surface — even if a sibling's budget-tripped partial would otherwise
-/// poison a shared cold compute through a request-wide sticky.
+/// HONEST deferral: components whose open-generic storm is NOT yet fully
+/// bounded by the mapped/object-filter carrier-stop and therefore still
+/// exceed the no-timeout budget on a solo cold host. Kept OUT of
+/// `NO_TIMEOUT_MANDATORY_COMPONENTS` / `COMPLETE_MANDATORY_COMPONENTS` so
+/// the gate stays RED-honest rather than green-hollow.
 ///
-/// `Table.vue` is DEFERRED from #2/#4: under the armed fuse it is
-/// degraded-but-terminating and legitimately carries
-/// `Partial(BUDGET_EXCEEDED)` on its published surface, so it neither
-/// warms nor stays free of the sentinel today. It is promoted into this
-/// set only when the route/mode-independent L1 carrier-stop lands (mirrors
-/// the ChatMessages Expanded-route-storm deferral).
+/// `ChatMessages.vue`: `ChatMessagesSlots<T> = { … } & { [K in keyof
+/// ChatMessageSlots]?: NonNullable<ChatMessageSlots[K]> extends (props:
+/// infer P) => VNode[] ? (props: P & { message: MessageBase<T> }) =>
+/// VNode[] : never }`. The open mapped slots surface carrier-stops at the
+/// three dispatch entrances (lower / build / Shallow-surface synthesiser)
+/// AND at the component-meta registry materialiser
+/// (`materialize_member_surface_expr` preserves an open mapped carrier
+/// instead of Expanded-materialising it). The RESIDUAL storm is a deeper,
+/// SEPARATE mechanism: the mapped value's OPEN conditional
+/// (`… extends (props: infer P) => VNode[] ? … : never`) is distributed
+/// into a `Union(true_branch, false_branch)` at the empty-path Expanded
+/// terminal (`walk.rs` open-conditional distribution), and the true branch
+/// reaching `MessageBase<T>` over the cross-package `ChatMessageSlots`
+/// surface explodes into a ~948 MB materialised `TypeExpr` that the
+/// registry `until_stable` loop then re-lowers. Bounding that conditional-
+/// distribution explosion is OUT OF SCOPE for the mapped carrier-stop and
+/// is the tracked follow-up below.
 ///
-/// `Calendar.vue` is corpus-validated and promoted: on the real nuxt-ui
-/// corpus its 2nd-pass `RequestContext.cold_builds` collapses ≥90% of the
-/// cold value (279→8 = 97.1%) AND it resolves COMPLETE on a solo cold host
-/// (no `BudgetExceeded` on its published surface — it passes #4), witnessing
-/// the points-3-6 fix on a real generic-heavy component.
+/// TODO(follow-up: open-conditional mapped-value terminal carrier-stop) —
+/// bound the open-conditional empty-path-Expanded distribution for the
+/// mapped-value family (carrier-stop the open conditional value the same
+/// way the mapped surface carrier-stops), then promote `ChatMessages.vue`
+/// back into `NO_TIMEOUT_MANDATORY_COMPONENTS` +
+/// `COMPLETE_MANDATORY_COMPONENTS` once the corpus oracle proves it
+/// terminates + warms + carries no published `BudgetExceeded` sentinel.
+#[allow(dead_code)]
+const DEFERRED_TIMEOUT_RESIDUAL: &[&str] = &["ChatMessages.vue"];
+
+/// Components confirmed to resolve fast + COMPLETE — the set the
+/// warm-recovery (#2) and no-published-partial (#4) assertions enforce. The
+/// partial-taint SCOPING invariant guarantees a genuinely-complete sibling
+/// warms with zero cold rebuilds and carries no `BudgetExceeded` on its
+/// published surface — even if a sibling's budget-tripped partial would
+/// otherwise poison a shared cold compute through a request-wide sticky.
 ///
-/// TODO(structural-block): promote `Table.vue` into the #2/#4
-/// genuinely-complete set once the route/mode-INDEPENDENT L1 open-domain
-/// carrier-stop covering the structural decl-body-lowering memo-cycle
-/// route (`raise.rs` / `lower.rs`) lands — the separate escalated block
-/// (`/tmp/mom/REGFIXB/ESCALATION.md`), sequenced with/after MappedTemplate.
+/// `Table.vue` and `ChatMessages.vue` are NOT members — both are DEFERRED
+/// (see `DEFERRED_NON_COMPLETE_SIBLINGS` / `DEFERRED_TIMEOUT_RESIDUAL`).
+/// `Table.vue` terminates but its open `Omit<CoreOptions<T>, …>` heritage on
+/// the structural decl-body-lowering route still trips the armed fuse (5076
+/// cold → 5099 warm, ~0% collapse) and carries a published `BudgetExceeded`
+/// sentinel — it fails BOTH #2 (refused warm) and #4 (published partial),
+/// so it cannot be a genuinely-complete member
+/// (TODO(follow-up: structural extends-heritage carrier-stop)).
+/// `ChatMessages.vue` times out on a residual open-conditional
+/// distribution explosion
+/// (TODO(follow-up: open-conditional mapped-value terminal carrier-stop)).
+/// Keeping both OUT of this set keeps the gate honest.
+///
+/// `Calendar.vue` is corpus-validated: on the real nuxt-ui corpus its
+/// 2nd-pass `RequestContext.cold_builds` collapses ≥90% of the cold value
+/// (279→8 = 97.1%) AND it resolves COMPLETE on a solo cold host (no
+/// `BudgetExceeded` on its published surface — it passes #4), witnessing the
+/// points-3-6 fix on a real generic-heavy component.
 const COMPLETE_MANDATORY_COMPONENTS: &[&str] = &[
     "Button.vue",
     "Badge.vue",
     "Avatar.vue",
     "Modal.vue",
     "Calendar.vue",
+    // `Table.vue` and `ChatMessages.vue` are DEFERRED from the
+    // genuinely-COMPLETE set — see `DEFERRED_NON_COMPLETE_SIBLINGS` /
+    // `DEFERRED_TIMEOUT_RESIDUAL`. The Pick/Omit + mapped carrier-stop
+    // family bounds the OPEN-MAPPED-SLOT-SURFACE enumeration class (the
+    // hermetic `OpenMappedSlots<T>` / `mapped` dispatch + meta tests), but
+    // their REAL-corpus completeness is blocked by SEPARATE deeper
+    // mechanisms still on the runaway-budget backstop: `Table.vue`'s open
+    // `Omit<CoreOptions<T>, …>` `extends`-heritage on the structural
+    // decl-body-lowering route — it terminates but trips the fuse, refuses
+    // warm, and carries a published `BudgetExceeded` sentinel
+    // (TODO(follow-up: structural extends-heritage carrier-stop)) — and
+    // `ChatMessages.vue`'s open-conditional empty-path-Expanded
+    // distribution explosion
+    // (TODO(follow-up: open-conditional mapped-value terminal carrier-stop)).
 ];
 
 /// Generic-heavy siblings probed on the real corpus that DO NOT qualify for
 /// `COMPLETE_MANDATORY_COMPONENTS` today, with the honest reason per
-/// candidate. None are Table-class refused-warm on the shared host, but each
-/// fails at least one genuinely-complete gate:
+/// candidate. Each fails at least one genuinely-complete gate:
 ///
+/// - `Table.vue` — TERMINATES (it is in `NO_TIMEOUT_MANDATORY_COMPONENTS`)
+///   but is Table-class refused-warm: its open `Omit<CoreOptions<T>, …>`
+///   `extends`-heritage on the structural decl-body-lowering route trips the
+///   armed fuse (5076 cold → 5099 warm, ~0% collapse — fails #2) and leaks a
+///   published `BudgetExceeded` sentinel (fails #4). The Pick/Omit + mapped
+///   carrier-stop family does not bound that route's residual.
+///   TODO(follow-up: structural extends-heritage carrier-stop) — bound it,
+///   then promote `Table.vue` per the criteria below.
 /// - `SelectMenu.vue` — collapses ≥90% on the SHARED host (394→32, 91.9%),
 ///   but on a SOLO cold host it trips the armed fuse and carries a
 ///   budget-tripped partial on its published surface (fails #4). Its #2
@@ -145,12 +218,17 @@ const COMPLETE_MANDATORY_COMPONENTS: &[&str] = &[
 ///   them would require lowering the threshold below the level that catches
 ///   the 0%-collapse regression class — forbidden (a tuned-to-pass gate).
 ///
-/// TODO(structural-block): re-probe and promote once the route/mode-
-/// INDEPENDENT L1 open-domain carrier-stop lands and these surfaces resolve
-/// complete on a solo host with a warm residual under
-/// `max(COLD_BUILD_RESIDUAL_FLOOR, cold * COLD_BUILD_RESIDUAL_FRACTION)`.
+/// These remain non-complete for their own per-candidate reasons above (the
+/// `Table.vue` structural-route fuse-trip, a solo-host fuse trip on
+/// `SelectMenu.vue`, a warm residual just below the principled ≥90%-collapse
+/// bar on `Select.vue`/`InputMenu.vue`). `ChatMessages.vue` has its own
+/// deferred TIMEOUT residual — see `DEFERRED_TIMEOUT_RESIDUAL`. Promote a
+/// candidate only when it resolves complete on a solo host with a warm
+/// residual under `max(COLD_BUILD_RESIDUAL_FLOOR, cold *
+/// COLD_BUILD_RESIDUAL_FRACTION)` and no published `BudgetExceeded` sentinel.
 #[allow(dead_code)]
-const DEFERRED_NON_COMPLETE_SIBLINGS: &[&str] = &["SelectMenu.vue", "Select.vue", "InputMenu.vue"];
+const DEFERRED_NON_COMPLETE_SIBLINGS: &[&str] =
+    &["Table.vue", "SelectMenu.vue", "Select.vue", "InputMenu.vue"];
 
 /// Hard per-component HANG / non-termination watchdog budget. This is a
 /// non-termination detector, NOT a perf assertion — perf is assertion #3's
@@ -158,12 +236,11 @@ const DEFERRED_NON_COMPLETE_SIBLINGS: &[&str] = &["SelectMenu.vue", "Select.vue"
 /// deliberately GENEROUS: a genuine hang or stack-overflow regression (the
 /// Expanded-route storm class) either aborts the process instantly or blows
 /// ANY finite budget, so the exact value never decides whether a true hang
-/// is caught — it only governs how much slack a slow-but-TERMINATING
-/// degraded cold build (e.g. `Table.vue`'s armed-fuse path, thousands of
-/// cold builds) is given before a false #1 timeout under CI / concurrent
-/// build load. 60s gives ample headroom over the observed isolated worst
-/// case while still tripping on genuine non-termination. Do NOT tune this
-/// down to chase perf — that is #3's committed baseline.
+/// is caught — it only governs how much slack a slow-but-TERMINATING cold
+/// build is given before a false #1 timeout under CI / concurrent build
+/// load. 60s gives ample headroom over the observed isolated worst case
+/// while still tripping on genuine non-termination. Do NOT tune this down to
+/// chase perf — that is #3's committed baseline.
 const PER_COMPONENT_HARD_BUDGET: Duration = Duration::from_secs(60);
 
 /// Perf-budget regression threshold (#3): first-pass aggregate elapsed
@@ -176,16 +253,20 @@ const PERF_REGRESSION_THRESHOLD: f64 = 0.15;
 /// may carry at most 10% of the cold `RequestContext.cold_builds`.
 ///
 /// This is chosen to catch the 0%-collapse regression class, NOT tuned to
-/// pass: the Table-class refused-warm bug leaves warm `cold_builds` ≈ (or,
-/// observed, slightly ABOVE) cold — Table on the real corpus is 5029 cold →
-/// 5099 warm (≈101% — NO collapse), which trips this bound by a ~10×
-/// margin. A genuinely-warming component collapses far below 10%: on the
-/// real corpus Button 295→14 (4.7%), SelectMenu 394→32 (8.1%), Calendar
-/// 279→8 (2.9%), and Badge/Avatar/Modal reach exactly 0. The bar sits
-/// between the warm-recovering population (≤8.1% residual) and the
-/// refused-warm regression (~101% residual), so no constant in this range
-/// could be "tuned" to admit Table while excluding a real warming
-/// component — the two populations are an order of magnitude apart.
+/// pass: the refused-warm bug leaves warm `cold_builds` ≈ (or, observed,
+/// slightly ABOVE) cold. `Table.vue` trips the fuse on its structural
+/// `Omit<CoreOptions<T>, …>` `extends`-heritage route and is refused warm
+/// admission — 5029+ cold → ~5099 warm (≈101% — NO collapse), which trips
+/// this bound by a ~10× margin; that is exactly why `Table.vue` stays OUT
+/// of `COMPLETE_MANDATORY_COMPONENTS` (see
+/// `DEFERRED_NON_COMPLETE_SIBLINGS`). A genuinely-warming component
+/// collapses far below 10%: on the real corpus Button 295→14 (4.7%),
+/// SelectMenu 394→32 (8.1%), Calendar 279→8 (2.9%), and Badge/Avatar/Modal
+/// reach exactly 0. The bar sits between the warm-recovering population
+/// (≤8.1% residual) and the refused-warm regression (~101% residual), so no
+/// constant in this range could be "tuned" to admit the regression class
+/// while excluding a real warming component — the two populations are an
+/// order of magnitude apart.
 const COLD_BUILD_RESIDUAL_FRACTION: f64 = 0.10;
 
 /// #2 absolute floor on the warm-collapse ceiling. A component with a small
@@ -653,12 +734,12 @@ fn resolve_with_hard_budget(corpus_root: &Path, basename: &str) -> ComponentOutc
 /// perf-budget check (#3).
 ///
 /// #1 (no-timeout) + #3 (perf) span `NO_TIMEOUT_MANDATORY_COMPONENTS`
-/// (incl. `Table.vue`, which trips the armed fuse but terminates). #4
-/// (no published `BudgetExceeded`) applies ONLY to the
-/// genuinely-COMPLETE set (`COMPLETE_MANDATORY_COMPONENTS`) — `Table.vue`
-/// legitimately carries a degraded `Partial(BUDGET_EXCEEDED)` on its
-/// published surface today and is DEFERRED from #4 to the structural
-/// block.
+/// (which includes `Table.vue` — it terminates). #4 (no published
+/// `BudgetExceeded`) applies to the genuinely-COMPLETE set
+/// (`COMPLETE_MANDATORY_COMPONENTS` = Button/Badge/Avatar/Modal/Calendar).
+/// `Table.vue` and `ChatMessages.vue` are DEFERRED from the COMPLETE set
+/// (see `DEFERRED_NON_COMPLETE_SIBLINGS` / `DEFERRED_TIMEOUT_RESIDUAL`), so
+/// `Table.vue`'s degraded published partial does NOT fail #4.
 #[test]
 fn mandatory_components_resolve_without_timeout_or_false_partial_and_within_perf_budget() {
     let corpus_root = locate_corpus_root();
@@ -687,9 +768,12 @@ fn mandatory_components_resolve_without_timeout_or_false_partial_and_within_perf
         // surface (props + models + events + slots). The latter catches the
         // masking case the flag misses — a sentinel riding a published
         // field while `synthesis_should_suppress` is `false`. #4 is scoped
-        // to the genuinely-complete set: `Table.vue` is degraded under the
-        // armed fuse and is DEFERRED from #4 (it legitimately carries the
-        // sentinel until the structural block lands).
+        // to the genuinely-complete set (Button/Badge/Avatar/Modal/Calendar).
+        // `Table.vue` and `ChatMessages.vue` are DEFERRED from that set (see
+        // `DEFERRED_NON_COMPLETE_SIBLINGS` / `DEFERRED_TIMEOUT_RESIDUAL`):
+        // `Table.vue` terminates (so it is in NO_TIMEOUT) but its structural
+        // `Omit`-heritage route still trips the fuse and carries a published
+        // partial, which is why it is NOT a complete member here.
         if COMPLETE_MANDATORY_COMPONENTS.contains(&component)
             && (outcome.published_partial || outcome.published_surface_budget_exceeded)
         {
@@ -702,7 +786,7 @@ fn mandatory_components_resolve_without_timeout_or_false_partial_and_within_perf
         timeouts.is_empty(),
         "#1 per-component no-timeout: components exceeded the {}s hard budget (timeout / \
          non-termination): {:?}. `Table.vue` here means it no longer terminates degraded under \
-         the armed fuse (a regression below the af35 backstop).",
+         the armed fuse (a regression below the armed-runaway-fuse backstop).",
         PER_COMPONENT_HARD_BUDGET.as_secs(),
         timeouts
     );
@@ -719,7 +803,9 @@ fn mandatory_components_resolve_without_timeout_or_false_partial_and_within_perf
          (props/models/events/slots) — on their published surface: {false_partials:?}. A \
          genuinely-complete component must NOT manufacture a partial, and no published field may \
          carry the sentinel even when the request suppress flag is clear (the masking case). \
-         `Table.vue` is intentionally excluded from #4 (deferred to the structural block)."
+         The complete set is Button/Badge/Avatar/Modal/Calendar; `Table.vue`/`ChatMessages.vue` \
+         are DEFERRED (their open-generic structural-route / conditional-distribution residuals \
+         are tracked follow-ups)."
     );
 
     // #3 — perf-budget regression vs the committed post-fix baseline.
@@ -744,9 +830,9 @@ fn mandatory_components_resolve_without_timeout_or_false_partial_and_within_perf
 ///
 /// Why `cold_builds`, not the final-result hit counter: the
 /// `ComponentMetaResultDb` final-result cache is consulted once at the top
-/// of `get_component_meta` and ALWAYS MISSES for these components on BOTH
-/// this branch and the af35 baseline (the entry's read-set revalidates
-/// against the live `StoreView` and the fall-through cold resolver runs).
+/// of `get_component_meta` and ALWAYS MISSES for these components (the
+/// entry's read-set revalidates against the live `StoreView` and the
+/// fall-through cold resolver runs).
 /// Its hit-delta is therefore structurally 0 on every pass for every
 /// component here — a hit-delta oracle is unsatisfiable and proves nothing
 /// about warmth. The faithful warmth signal is the per-request
@@ -767,13 +853,14 @@ fn mandatory_components_resolve_without_timeout_or_false_partial_and_within_perf
 ///
 /// This uses ONE shared host (warm reuse is the point) and therefore does
 /// not apply the per-component watchdog — the complete set is the fast +
-/// terminating subset. `Table.vue` is EXCLUDED: under the armed fuse it is
-/// degraded-but-terminating and its result is correctly refused warm
-/// admission (the no-poison invariant), so its 2nd-pass `cold_builds` does
-/// NOT collapse (real corpus: 5029 cold → 5099 warm, ≈0% collapse — exactly
-/// the regression this assertion catches) until the structural block lands
-/// (see the `TODO(structural-block)` on `COMPLETE_MANDATORY_COMPONENTS`).
-/// `ChatMessages.vue` is excluded too — it is the Expanded-route storm class.
+/// terminating subset (Button/Badge/Avatar/Modal/Calendar). `Table.vue` is
+/// DEFERRED from this set (see `DEFERRED_NON_COMPLETE_SIBLINGS`): on the real
+/// corpus it stays Table-class refused-warm (5076 cold → 5099 warm, ≈0%
+/// collapse — exactly the regression this assertion catches) because its open
+/// `Omit` `extends`-heritage on the structural decl-body-lowering route still
+/// trips the fuse (TODO(follow-up: structural extends-heritage carrier-stop)).
+/// `ChatMessages.vue` is DEFERRED too (see `DEFERRED_TIMEOUT_RESIDUAL`) — its
+/// residual open-conditional distribution explosion still trips the budget.
 #[test]
 fn warm_pass_does_zero_cold_rebuilds_for_complete_components() {
     let corpus_root = locate_corpus_root();
@@ -825,32 +912,87 @@ fn warm_pass_does_zero_cold_rebuilds_for_complete_components() {
     );
 }
 
-/// `ChatMessages.vue` no-timeout is DEFERRED to the route/mode-independent
-/// L1 open-domain carrier-stop (the Expanded route-candidate storm in
-/// `raise.rs`). It is EXPECTED to still hang under the armed-fuse-only
-/// backstop, so this entry is `#[ignore]`d and must NOT gate the suite.
-/// When that carrier-stop lands, remove the `#[ignore]` and fold
-/// `ChatMessages.vue` into `NO_TIMEOUT_MANDATORY_COMPONENTS`.
-///
-/// TODO(l1-route-independent): un-ignore + add `ChatMessages.vue` to the
-/// mandatory set
-/// once the Expanded-route storm fix lands (the route/mode-independent L1
-/// carrier-stop touching `project_semantic_dispatch/raise.rs`, `lower.rs`,
-/// and the Expanded route-candidate path).
+/// FOLLOWUP-B RED tracker — the executable form of the
+/// `DEFERRED_TIMEOUT_RESIDUAL` deferral. `ChatMessages.vue` must resolve
+/// without timeout AND without a published partial once the
+/// open-conditional mapped-value terminal carrier-stop lands; until then
+/// this stays `#[ignore]`d (it is the test the follow-up block un-ignores,
+/// then promotes `ChatMessages.vue` into
+/// `NO_TIMEOUT_MANDATORY_COMPONENTS` + `COMPLETE_MANDATORY_COMPONENTS`).
 #[test]
-#[ignore = "deferred: ChatMessages.vue Expanded-route storm still hangs; \
-            un-ignore when the raise.rs/L1-carrier-stop fix lands"]
-fn chat_messages_no_timeout_is_deferred_to_defect_a() {
+#[ignore = "FOLLOWUP-B (open-conditional mapped-value terminal carrier-stop): ChatMessages.vue \
+            still exceeds the no-timeout budget on the open-conditional empty-path-Expanded \
+            distribution explosion; un-ignore when the follow-up lands and the oracle proves \
+            termination"]
+fn chat_messages_resolves_without_timeout() {
     let corpus_root = locate_corpus_root();
     let outcome = resolve_with_hard_budget(&corpus_root, "ChatMessages.vue");
     assert!(
-        !outcome.timed_out && outcome.resolved_ok && !outcome.published_partial,
-        "ChatMessages.vue must resolve without timeout or false partial once the \
-         route/mode-independent L1 carrier-stop lands \
-         (timed_out={}, resolved_ok={}, published_partial={})",
+        !outcome.timed_out,
+        "ChatMessages.vue must resolve within the {}s hard budget once the open-conditional \
+         mapped-value terminal carrier-stop lands",
+        PER_COMPONENT_HARD_BUDGET.as_secs()
+    );
+    assert!(outcome.resolved_ok, "ChatMessages.vue must resolve");
+    assert!(
+        !outcome.published_partial && !outcome.published_surface_budget_exceeded,
+        "ChatMessages.vue must publish NO budget-tripped partial (suppress flag {} / \
+         published sentinel {})",
+        outcome.published_partial,
+        outcome.published_surface_budget_exceeded
+    );
+}
+
+/// FOLLOWUP-A RED tracker — the executable form of `Table.vue`'s
+/// `DEFERRED_NON_COMPLETE_SIBLINGS` deferral, asserting the #2 + #4
+/// genuinely-complete MEMBERSHIP CRITERIA: warm-pass `cold_builds`
+/// collapse under the shared ceiling AND no published `BudgetExceeded`
+/// partial on a solo resolve. Stays `#[ignore]`d until the structural
+/// extends-heritage carrier-stop lands (it is the test the follow-up
+/// block un-ignores, then promotes `Table.vue` into
+/// `COMPLETE_MANDATORY_COMPONENTS`).
+#[test]
+#[ignore = "FOLLOWUP-A (structural extends-heritage carrier-stop): Table.vue terminates but \
+            its open `Omit<CoreOptions<T>, …>` extends-heritage on the structural \
+            decl-body-lowering route still trips the armed fuse (refused warm, published \
+            BudgetExceeded partial); un-ignore when the follow-up lands and the oracle \
+            proves warm + complete"]
+fn table_resolves_complete_and_warm() {
+    let corpus_root = locate_corpus_root();
+
+    // #4 membership criterion: a solo cold resolve publishes NO
+    // budget-tripped partial.
+    let outcome = resolve_with_hard_budget(&corpus_root, "Table.vue");
+    assert!(
+        !outcome.timed_out && outcome.resolved_ok,
+        "Table.vue must resolve within budget (timed_out {} / resolved {})",
         outcome.timed_out,
-        outcome.resolved_ok,
-        outcome.published_partial
+        outcome.resolved_ok
+    );
+    assert!(
+        !outcome.published_partial && !outcome.published_surface_budget_exceeded,
+        "Table.vue must publish NO budget-tripped partial (suppress flag {} / published \
+         sentinel {}) — the #4 genuinely-complete criterion",
+        outcome.published_partial,
+        outcome.published_surface_budget_exceeded
+    );
+
+    // #2 membership criterion: the warm (2nd) pass on a shared host must
+    // collapse ≥90% of the cold builds (the same ceiling
+    // `warm_pass_does_zero_cold_rebuilds_for_complete_components` applies).
+    let host = build_audit_corpus_host(&corpus_root);
+    let canonical = locate_component(&corpus_root, "Table.vue")
+        .to_string_lossy()
+        .to_string();
+    let cold = resolve_cold_builds(&host, &canonical);
+    let warm = resolve_cold_builds(&host, &canonical);
+    let ceiling =
+        COLD_BUILD_RESIDUAL_FLOOR.max((cold as f64 * COLD_BUILD_RESIDUAL_FRACTION).ceil() as u64);
+    assert!(
+        warm <= ceiling,
+        "Table.vue warm pass must collapse cold builds under the shared ceiling \
+         (cold {cold}, warm {warm}, ceiling {ceiling}) — the #2 genuinely-complete criterion \
+         (refused-warm today: ~5076 cold → ~5099 warm)",
     );
 }
 

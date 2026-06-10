@@ -764,6 +764,44 @@ enum ShallowRelation {
     Unknown,
 }
 
+/// Tri-state outcome of
+/// [`ProjectSemanticDispatch::conditional_branch_selection`] — the ONE
+/// shared conditional branch-selection oracle, factored out of
+/// `build_conditional`'s relation path (the pre-relation infer-pattern
+/// cases, then `shallow_relation_check`, then the full memoised
+/// `relate_nodes` engine) and reused by the key-domain closedness
+/// classifiers in `raise.rs` for selected-branch-only classification.
+/// `Deferred` covers a genuinely undecidable relation (`Unknown`) AND
+/// the lattice-extreme checks that semantically use both branches
+/// (`any`) or dominate (`error`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConditionalBranchSelection {
+    True,
+    False,
+    Deferred,
+}
+
+/// Payload of a PRE-RELATION infer-pattern branch selection
+/// ([`ProjectSemanticDispatch::pre_relation_infer_selection`]) — the
+/// structural cases that select the TRUE branch before any relation
+/// query, owned by the shared oracle so `build_conditional`'s reduction
+/// and the `raise.rs` closedness classifiers cannot diverge on them.
+/// The payload carries what the selection BINDS: `build_conditional`
+/// substitutes the bindings into the true branch; the classifiers bind
+/// the branch's infer names to the same check-derived identities.
+#[derive(Debug, Clone)]
+pub(super) enum InferPatternSelection {
+    /// `check extends infer X ? T : F` — an infer pattern matches
+    /// anything ⇒ TRUE selected with `X := check`, for ANY check.
+    BareInfer { name: Arc<str> },
+    /// `check extends (x: infer U, …) => infer R ? T : F` — TRUE
+    /// selected with the positional `name := node` bindings extracted
+    /// from the materialised check signature (params zip + return).
+    FunctionInfer {
+        bindings: Vec<(Arc<str>, SemanticNodeId)>,
+    },
+}
+
 /// Map a [`PrimitiveName`] from the parser's IR onto the semantic-graph
 /// [`PrimitiveKind`]. Kept colocated with `build_instantiate` because no
 /// other dispatch builder produces primitive nodes from `TypeExpr`.

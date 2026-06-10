@@ -364,30 +364,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         })
                         .collect();
 
-                    // In `Navigate` mode, Pick/Omit
-                    // preserve the carrier `InstantiationRef` shell so the
-                    // materialiser's registry-route guard can apply
-                    // cycle / package gates on the wrapped root identity
-                    // BEFORE dispatch's `build_builtin_utility` projects.
-                    // Other utilities (Extract, Exclude, NonNullable,
-                    // Partial, Required, Readonly, Mutable, …) keep the
-                    // existing eager-resolve path so they still reduce
-                    // through dispatch as before. closes the
-                    // literal-type reduction for `Extract` / `Exclude`
-                    // through `build_builtin_utility`; the eager-resolve
-                    // path here remains unchanged because the lowering
-                    // contract (build the InstantiationRef carrier vs
-                    // dispatch the Instantiate query) is independent of
-                    // the utility's body evaluator.
-                    if mode == ProjectionMode::Navigate && matches!(name.as_ref(), "Pick" | "Omit")
-                    {
-                        return graph.intern_node_with_scope(
-                            SemanticNodeData::InstantiationRef {
-                                base: builtin_identity,
-                                args: Arc::from(arg_ids.into_boxed_slice()),
-                            },
-                            scope.clone(),
-                        );
+                    // Route/mode-INDEPENDENT L1 carrier-stop (LOWERING
+                    // entrance). For the object-filter builtins (`Pick`/`Omit`)
+                    // preserve the carrier `InstantiationRef` shell WHEN either:
+                    //   - the lowering mode is `Navigate` (the reducer's L1
+                    //     decides closed→materialise downstream, and the
+                    //     materialiser's registry-route guard can apply cycle /
+                    //     package gates on the wrapped root identity BEFORE
+                    //     dispatch's `build_builtin_utility` projects), OR
+                    //   - the enumeration domain (lowered argument 0) is OPEN —
+                    //     in ANY mode (Expanded / Shallow / Skeleton /
+                    //     StructuralTransit). An open `Pick`/`Omit` must never
+                    //     build the `Instantiate` query that would materialise
+                    //     the open source (the ChatMessages.vue
+                    //     `Pick<PropsBase<T>, …>` storm / the Table.vue
+                    //     `Omit<CoreOptions<T>, …>` structural memo-cycle).
+                    // A CLOSED domain in a non-Navigate mode falls through to
+                    // execute the `Instantiate` query and materialise path-
+                    // precisely. Other utilities (Extract, Exclude, NonNullable,
+                    // Partial, Required, Readonly, Mutable, …) keep the existing
+                    // eager-resolve path — the open-domain carrier-stop is the
+                    // object-filter `Pick`/`Omit` family only, decided by the
+                    // ONE family helper (`raise::is_l1_object_filter_utility`,
+                    // backed by the `BuiltinUtility` registry — never a local
+                    // name string match, so this entrance can never diverge
+                    // from the predicate on family membership). The shared
+                    // open-domain predicate (`raise::
+                    // utility_enumeration_domain_is_open_or_unknown`) is reused —
+                    // no second walker.
+                    if crate::project_semantic_dispatch::raise::is_l1_object_filter_utility(
+                        name.as_ref(),
+                    ) {
+                        let build_carrier = mode == ProjectionMode::Navigate
+                            || crate::project_semantic_dispatch::raise::
+                                utility_enumeration_domain_is_open_or_unknown(
+                                    self.ctx,
+                                    &builtin_identity,
+                                    &arg_ids,
+                                );
+                        if build_carrier {
+                            return graph.intern_node_with_scope(
+                                SemanticNodeData::InstantiationRef {
+                                    base: builtin_identity,
+                                    args: Arc::from(arg_ids.into_boxed_slice()),
+                                },
+                                scope.clone(),
+                            );
+                        }
                     }
                     return match self.execute_type_node(SemanticQueryKey::Instantiate {
                         base: self.type_slot_for(
@@ -1294,6 +1317,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     name_remap,
                     kind,
                 };
+
+                // Route/mode-INDEPENDENT L1 carrier-stop (LOWERING
+                // entrance), MAPPED-TYPE family. A mapped type whose
+                // produced surface still depends on an unbound OUTER
+                // generic — an open source / key space, or a value body /
+                // name remap reaching the outer generic (NOT the bound
+                // mapper binder `K`) — preserves the deferred
+                // `SemanticNodeData::Mapped` carrier shell in ANY mode
+                // (Navigate / Expanded / Shallow / Skeleton /
+                // StructuralTransit) WITHOUT dispatching the `MappedType`
+                // query that would enumerate the keys and materialise the
+                // per-key value (the `ChatMessagesSlots<T>` /
+                // `TableSlots<T>` storm). The shells (`source_sem` /
+                // `key_space_sem` / `value_sem` / `name_remap`) are
+                // preserved verbatim. A CLOSED mapped type falls through
+                // to the `MappedType` dispatch and materialises
+                // path-precisely under a publication demand. The shared
+                // open-mapped predicate decides openness (no second
+                // walker).
+                if crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
+                    self.ctx, source_sem, &mapper,
+                ) {
+                    return graph.intern_node_with_scope(
+                        SemanticNodeData::Mapped {
+                            source: source_sem,
+                            mapper,
+                        },
+                        scope.clone(),
+                    );
+                }
 
                 match self.execute_type_node(SemanticQueryKey::MappedType {
                     source: source_sem,
