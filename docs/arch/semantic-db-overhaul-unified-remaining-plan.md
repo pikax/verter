@@ -2052,6 +2052,168 @@ plan transcribes (§2); do not reorder.
 
 ---
 
+### XP — nuxt-ui component-meta parity gaps (tracked, not yet scheduled)
+
+Three CURRENT-pipeline component-meta parity defects, observed as typecheck
+divergences against the `vue-component-meta` baseline on the real nuxt-ui corpus.
+These are TRACKED FOLLOW-UPS, not scheduled blocks: no critical-path insertion, no
+deps-graph edges, no sequencing claim beyond "not yet scheduled". They are NOT
+U14-adapter-rebuild scope — U14's "4 known Vue mismatch cases" (Popover
+`SlotProps<M>`, theme-alias display, `Button["variants"]["color"]` indexed-access,
+ContentSearch intersection) are a different, adapter-era list; do not merge these
+into it. A fix landing before U14 binds U14's regression bar — the rebuilt
+adapter must reproduce the fixed behavior. (U14's actual bar is its 4
+mismatch-case regression tests plus its stated existing-corpus regression-risk
+prose — "regression risk against the existing corpus is greatest here"; U14
+names NO standing existing-corpus regression guard.) A
+fourth observed defect from the same corpus diff (the Accordion `update:modelValue`
+emit payload) maps to an EXISTING ignored manifest row and gets NO item here — see
+the real-corpus manifestation note in the U2 block below.
+
+The family counts cited below (253 missing members / 224 empty-description /
+154 tags / 111 default-value, 81 of them quoting-only) come from the defining
+artifact for these families: the diff of verter's component-meta output against
+the `vue-component-meta` baseline over the real nuxt-ui corpus (the comparison
+the `bench:meta:ui` harness's expected-backend mode drives;
+`packages/benchmark/src/meta-ui-bench.ts`, corpus at
+`.integration-tests/repos/nuxt-ui`). No in-repo artifact pins these counts —
+the families are re-derived by re-running that comparison.
+
+**Severity order is XP.1 > XP.2 > XP.3, and why:** XP.1 is member-PRESENCE loss —
+the picked heritage members never surface at all, accounting for most of the 253
+missing members in the corpus diff; XP.2 is metadata loss at scale on members that
+DO surface (224 empty-description / 154 tags mismatch families); XP.3 is a
+cosmetic display divergence (quoting-only default-value text), type-semantics
+harmless — display/source-fidelity only: default-value text fidelity is what
+distinguishes a string literal from an identifier in the published API — but
+baseline-divergent at volume.
+
+#### XP.1 — Heritage `Pick` / `Partial<Pick>` member contribution dropped on the real corpus (severity 1)
+
+- **Defect:** members contributed through heritage `Pick<...>` /
+  `Partial<Pick<...>>` clauses are dropped from the published prop surface on the
+  real nuxt-ui corpus — most of the 253 missing members in the baseline diff.
+  `ChatPromptProps extends Pick<TextareaProps, 'rows' | 'autofocus' | … |
+  'loading'>` loses ALL 11 picked props; the same family reproduces on
+  CommandPalette, ContentSearch, DashboardSearch, and the three `Editor*Menu`
+  components (`extends Partial<Pick<EditorMenuOptions<T>, …>>`).
+- **Refuted attribution:** this is NOT the tracked
+  `Pick<PropsBase<UIMessage[]>,'icon'>` chained-conditional `semanticMiss`
+  reduction gap — `TextareaProps` is a CONCRETE fixed-key generic interface with
+  defaulted parameters (vendored fixture
+  `crates/verter_session/tests/component_meta_audit_corpus/fixtures/Textarea.vue:15-54`),
+  not conditional-bodied.
+- **Owner layer:** reducer — the L1 key-domain closedness classifier and its
+  cross-file resolution hops
+  (`crates/verter_session/src/project_semantic_dispatch/raise.rs`), judging
+  real-corpus closed-in-TS sources OPEN-or-UNKNOWN (or failing to resolve a hop),
+  so the by-design open-domain carrier-stop suppresses the picked members.
+- **Candidate sub-mechanisms (both untracked elsewhere):** (a) the bounded
+  key-domain walk budget `KEY_DOMAIN_TYPE_EXPR_WALK_BUDGET = 256`
+  (`raise.rs:2052-2058`; exhaustion ⇒ conservatively OPEN) exhausted by the huge
+  real heritage graphs (`TextareaProps` → `Omit<TextareaHTMLAttributes, …>` → the
+  full HTML-attributes graph; reka-ui heritage chains; tiptap-backed
+  `EditorMenuOptions`); (b) an unresolved hop in the closedness walk through the
+  nuxt-ui `'../types'` barrel re-exporting types from `.vue` modules
+  (undecidable ⇒ OPEN).
+- **Why the default gate never sees it:** hermetic `extends Pick<Concrete, keys>`
+  coverage is GREEN on the current tree
+  (`crates/verter_session/src/meta_tests.rs:11618-11671` and siblings), and the
+  OPEN-judged carrier-stop is pinned as correct (`meta_tests.rs:4404-4469`) — the
+  gap manifests only at real-corpus scale/import-shape: the vendored corpus audit
+  tests tolerate `ResolutionFailed`, and the external-corpus gate is feature-gated
+  out of the canonical run.
+- **Lineage (plausible, UNVERIFIED):** before the L1 open-domain carrier-stop
+  landed (CARRIERSTOP `54d394e5b`, follow-up METAFOLLOWUP `1860d6655`), these
+  heritage Picks plausibly flattened eagerly — the carrier-stop traded eager
+  flattening for conservatism — so the fix may be hunting a
+  regression-by-conservatism rather than a never-worked; this lineage is
+  unverified, so bisect before assuming greenfield.
+- **Acceptance (discriminating):** the picked heritage members surface on the
+  affected components' prop meta on the real nuxt-ui corpus (e.g. ChatPrompt
+  publishes all 11 picked `TextareaProps` members), verified on the real
+  nuxt-ui corpus run (the feature-gated `external-corpus` /
+  `bench:meta:ui`-class real-component run), not a hermetic fixture; the fix
+  names which open-or-unknown predicate fired (budget vs unresolved-hop) and
+  lands a discriminating regression at that scale/shape.
+
+#### XP.2 — Per-member JSDoc loss across the cross-file publication path (severity 2)
+
+- **Defect:** 224 of the 253 description mismatches in the baseline diff are
+  verter publishing an EMPTY description where the source member carries a doc
+  comment; 154 `tags` mismatches are the same family — on members that DO
+  surface.
+- **Owner layer:** the shared shallow-surface JSDoc span supply PRIMARY, with
+  the component-meta publication repair as a SEPARATE, narrower mechanism. TWO
+  cross-file doc paths exist on the current tree — do not conflate them:
+  (i) the span-carrying macro DTO path — `component_meta_resolved_macros`
+  (`crates/verter_session/src/resolver_core/component_meta/mod.rs:149`) feeds
+  `ResolvedMacroInput` props/emits/slots from `vue_macro_dtos`, whose surface
+  slices JSDoc from the typeinfo spans for props, emits, AND slots
+  (`crates/verter_session/src/typeinfo/adapters/vue/surface.rs:798`, `:989`,
+  `:1257`); and (ii) the post-hoc, prop-only, name-keyed doc repair in
+  `crates/verter_session/src/host_manage/component_meta_extract.rs` (~:878-985,
+  call site :1571), which categorically excludes events/slots/exposed. The
+  failure mechanism is therefore NOT a missing cross-file doc path: it is the
+  lost members not participating in path (i) for their doc supply, and/or path
+  (i)'s span supply losing source — semantic-graph-materialised members are
+  built with EMPTY JSDoc spans
+  (`crates/verter_session/src/typeinfo/surface.rs:464-470`) and rely on the
+  host-layer `with_member_jsdoc_spans` enrichment (`surface.rs:306-420`), whose
+  per-member fail-arm silently keeps the empty spans (members
+  `surface.rs:348-355`, signatures `:393-400`) — loss whenever the member
+  carries no `origin.canonical_file` or no `name_span` (synthetic /
+  multi-origin members), or the declaring file's source
+  (`IndexedReady.raw_source` via `source_for`) is unavailable to the
+  enrichment closure.
+- **Architectural fix direction:** JSDoc rides the materialised member through
+  publication for ALL member kinds (props, events, slots, exposed), deleting the
+  post-hoc name-scan repair — NOT a third recovery heuristic layered on top of
+  the existing two mechanisms.
+- **Acceptance (discriminating):** a surfaced member whose source declaration
+  carries a doc comment publishes its description across props, events, slots,
+  and exposed, and its tags across props, events, and slots, on the real corpus
+  (the 224-description / 154-tags families go to zero modulo genuine baseline
+  divergences). Exposed TAGS are an explicit API-extension requirement, not a
+  repair: the published shape carries `description` but NO `tags` field for
+  exposed today (`ExposedMeta`, `packages/component-meta/src/types.ts:213`;
+  `ExposedAnalysis`,
+  `crates/verter_semantic/src/analysis/component_meta.rs:232`) — adding it is
+  in scope only as a named shape change.
+
+#### XP.3 — Default-value quoting divergence (severity 3)
+
+- **Defect:** 81 of the 111 default-value mismatches in the baseline diff are
+  quoting-only — verter prints `vertical` where the baseline prints `"vertical"`.
+- **Root cause (verified):** `extract_default_value_text`
+  (`crates/verter_semantic/src/analysis/macros.rs:2381-2405`) special-cases
+  `Expression::StringLiteral(s) => s.value.to_string()` — the unquoted inner
+  value — while every other expression kind returns the verbatim source slice.
+- **Owner layer:** producer (the `verter_semantic` analyzer); the display layers
+  pass the text through. The fix locus is the producer (return the
+  source-faithful text). The compat layer must NOT infer quoting from descriptor
+  string-compatibility — that is the forbidden recover-meaning-at-display
+  heuristic (Typed-IR-Only Resolver Rule).
+- **Adjacency (cited as adjacency, NOT existing tracking):**
+  `TODO(typed-default-values)`
+  (`docs/arch/typed-ir-cutover/compat-heuristic-mapping.md:120`) and the `S5.B5`
+  normalizer "defaults must not lose distinctions" compatibility matrix (§3.1.1)
+  are adjacent surfaces; neither covers this producer-side text fidelity defect.
+- **Acceptance (discriminating):** string-literal defaults publish source-faithful
+  quoted text (`'vertical'` stays quoted) with the producer returning the
+  verbatim source slice; the 81 quoting-only rows reconcile against the baseline.
+  Because the baseline prints the TS-printer-normalized form (`"vertical"`)
+  while the verbatim slice may be single-quoted (`'vertical'`), the parity
+  comparison may still need quote-style normalization vs the baseline's printed
+  form — an item-text detail, not a layer change: LOSSLESS quote-STYLE
+  normalization of an already-string-literal value at the
+  parity-comparison/display boundary (string-literal-in → string-literal-out,
+  no type-driven inference) is permitted, and is distinct from the forbidden
+  recover-meaning-at-display heuristic, which would INFER string-ness from
+  descriptor type compatibility.
+
+---
+
 ### U0 — Finish Typeinfo Contract Gaps  **(U0-FINISH-A + U0-FINISH-B substrate landed — current state derives from §1.1)**
 
 - **Source track:** semantic-graph (R-0a).
@@ -2415,6 +2577,36 @@ plan transcribes (§2); do not reorder.
      (`FileArtifactKey`, `ResolvedImportFactsKey`, `CompileOutputKey`,
      `CompileOutputSlotKey`, `AnalysisSlotKey`, `AnalysisCandidate`,
      `ResolvedDeclSlotIdentity`).
+- **Real-corpus manifestation note (`U2RelationInfer` row
+  `relation_semantics.rs::relation_distributive_conditional_over_union_emits_branch_union`
+  — the row NAME is the durable key; it lives in the auto-generated manifest
+  `crates/verter_session/tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs`
+  (`:287` at the time of writing — a convenience anchor only; the file is
+  generated and the line drifts on regeneration); ignored test
+  `crates/verter_session/src/typeinfo/typeinfo_tests/relation_semantics.rs:417`):**
+  on the real nuxt-ui corpus, Accordion's `update:modelValue` emit payload
+  collapses to `string[] | undefined`, losing the `string` branch of reka-ui's
+  single/multiple generic conditional — a component-meta manifestation of this
+  row's False-branch-only selection (row unblocker, verbatim: "typeinfo
+  currently selects only the False branch (`"no"`) for
+  `IsStringDistributive<string | number>` instead of distributing the union
+  across the conditional and emitting `"yes" | "no"`; keep as the future
+  bare-type-parameter distribution contract"): one type-resolution engine, so
+  the same shared-oracle bug is observed through the emit surface. Two
+  consequences bind the row lift: (i) the lift's acceptance must include the
+  emit/model payload surface on the real nuxt-ui corpus run (the feature-gated
+  `external-corpus` / `bench:meta:ui`-class real-component run), not only the
+  hermetic relation fixture; and (ii) the falsifier — the observed
+  `string[]`-only output matches the row's False-branch-only signature for a
+  `T extends 'single' ? string : string[]` arm order; that arm-order spelling
+  is package knowledge (reka-ui is NOT vendored in-tree, so the spelling is
+  unverifiable here), and ANY fix-time repro showing the payload source is NOT
+  a bare-type-parameter conditional with this arm order — reversed arms with
+  TRUE-branch selection, or a non-conditional spelling such as an
+  indexed-access map — means the mechanism is NOT covered by this row and the
+  mapping must be reopened. No new tracked item —
+  the manifest row is the tracking (see also §4 XP, which tracks the three
+  genuinely-new nuxt-ui parity gaps and excludes this one).
 - **Deps:** U0; B2 + B3 (landed); pre-existing `SemanticGraphStore` /
   `ProjectSemanticDispatch` / `execute_cooperative` (landed).
 - **Parallelism:** U1 (B7d) may run beside it. NOTHING downstream of the gate
