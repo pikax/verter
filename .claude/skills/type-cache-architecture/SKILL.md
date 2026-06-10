@@ -181,7 +181,17 @@ warm-read validator decides how strictly that self-root is checked:
   `WholeHash` that conflicts with the observed base self-root, routes the value
   through `ComputeAdmission::ReturnOnly` (valid result, no shared admission).
   `RefCycleResultDb` has no generation-equal fast return — every `peek`
-  validates strictly. `route_owned_shallow` is a route-only artifact cache, not
+  validates strictly. Its cold path is the transitive-cycle BFS for
+  parameterized generic helpers (`ref_root_reaches_transitive_cycle_node`),
+  gated by `ComputeAdmission` cooperative admission: an overflowed/unrootable
+  signature returns the computed bool through `ComputeAdmission::ReturnOnly`
+  WITHOUT admitting and WITHOUT a second uncached BFS. The BFS dispatches
+  `Instantiate { base, args: [], context: InstantiateContext {
+  projection_reduction, resolve_env_hash } }` with
+  `context.projection_reduction.mode = ProjectionMode::Skeleton`
+  (Skeleton-mode instantiation, empty args) so unbound type parameters become
+  `TypeParam` shells — preserving Conditional branches that would otherwise
+  collapse to `never` for unbound generics. `route_owned_shallow` is a route-only artifact cache, not
   a self-rooted query-identity cache; its `route_owned_entry_is_fresh` tiered
   gate stays the route-owned cache's freshness check and
   `current_route_surface_hash` is the single route-fact production helper
@@ -1081,7 +1091,9 @@ OVERLAY-AWARE across two layers with deliberately DIFFERENT key discipline:
   legitimately keys this slot because the index is a content-addressed compute
   cache — the fingerprint IS part of its content view identity, and it
   self-invalidates when overlay content/membership changes (new fingerprint →
-  fresh scan).
+  fresh scan). A `Session` slot is overlay ∪ base, distinct from `Base` without
+  poisoning it; a base augmenter change invalidates the `Session` entries that
+  include it.
 - The **query-identity** `EffectiveExportSetKey` (on `RouteDb`) is keyed by the
   CONTENT-FREE `session_scope: EffectiveExportSetScope {Base,
   Session(session_scope_id)}` — the `StoreViewCompatToken::session` (R6: the
@@ -1159,7 +1171,7 @@ composition table. Summary:
 
 | Layer | Family | Key dimensions |
 |---|---|---|
-| `FileArtifactStore` | Content-addressed | `canonical, content_hash, parse_env_hash, parser_version` |
+| `FileArtifactStore` | Content-addressed | `canonical, content_hash, parse_env_hash, parser_version` — the authoritative per-file storage layer; stores `IndexedReady`, `FileFacts`, `ParsedEdges`, `parse_stable_hash`, `augmentations` |
 | `ModuleAugmentationIndex` (on `FileArtifactStore`) | Content-addressed | `project_identity, resolve_env_hash, lib_env_hash, population, target` (`population: AugmentationPopulation {Base, Session(overlay-set fingerprint)}`) |
 | `ResolvedImportFacts` | Content-addressed | `canonical, content_hash, parse_env_hash, resolve_env_hash, resolver_version` (**no `lib_env_hash`** — R21) |
 | Typed-IR resolve | Content-addressed | `canonical, content_hash, parse_env_hash, type_env_hash, lib_env_hash, parser_version` |
@@ -1169,7 +1181,13 @@ composition table. Summary:
 | `RouteDb` effective barrel surface | Query-identity (multi-candidate) | `provider_canonical, resolve_env_hash, lib_env_hash, resolver_version` |
 | `MaterializeStructureDb` | Query-identity (multi-candidate) | `MaterializationCacheKey { decl: ResolvedDeclSlotIdentity, projection_path, projection_mode, normalized_type_args, options_hash }` |
 | `RefCycleResultDb`, `SemanticGraphStore` query nodes | Query-identity (multi-candidate) | `ResolvedDeclSlotIdentity` (slot) + `VersionedDeclIdentity` inside value |
+| `ShapeCacheDb` per-member slot | Query-identity | `ShapeCacheKey::semantic_node_whole(scope, member SemanticNodeId, mode)` (`ShapeSubject::SemanticNode`); writes record `ReadSetSignature.facts` + `validated_at_generation` |
 | `ComponentMetaResultDb` | Query-identity (multi-candidate) | Owner identity (per R8) |
+
+The split `MaterializeMemoDb`/`MemberShapeCacheDb` shape stores are RETIRED in
+favour of `ShapeCacheDb`; the static guard
+`crates/verter_session/tests/block_6i_static_guards.rs::shape_cache_db_replaces_split_caches`
+asserts neither may be re-introduced.
 
 ## Two-phase emission map (R28)
 
@@ -1277,7 +1295,9 @@ The discrimination matrix:
   `MemberDisplayFactStore`, `MemberDisplayFactKey`, `make_member_display_fact`,
   `member_display_fact_key`.
 - `crates/verter_session/src/parse_stable_hash.rs` —
-  `compute_parse_stable_hash(&IndexedReady) -> Hash16`.
+  `compute_parse_stable_hash(&IndexedReady) -> Hash16`. `parse_stable_hash` is
+  a structural hash over the post-shallow-analysis decl skeleton, invariant
+  under cosmetic edits.
 - `crates/verter_session/src/resolver_core/mod.rs` — `ValidatedFactCache`,
   `FactVersionRef` (legacy + `Parse`/`ResolveImports`/`RouteSurface` per-domain
   variants), `ParseFactRef`, `ResolveImportsFactRef`, `RouteSurfaceFactRef`,

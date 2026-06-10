@@ -18,6 +18,11 @@ Use this as the neutral entry point. Reuse the shared sources below instead of c
 - `.claude/skills/testing/SKILL.md` — Rust + TypeScript test patterns, TDD workflow, sourcemap checks, test execution hygiene.
 - `.claude/skills/e2e-vscode-testing.md` — VS Code extension E2E fixtures, helpers API, warm-session rules, adding new extension/LSP tests.
 - `.claude/skills/rust-performance/SKILL.md` — Rust optimization guidance, allocation patterns, `CodeTransform` usage notes.
+- `.claude/skills/audit-infrastructure/SKILL.md` — audit substrate (`verter_audit`), `HostAuditRuntime`, audited entry-points, footprint miner, structured events.
+- `.claude/skills/scheduler/SKILL.md` — scheduler submission/admission APIs, CPU/I-O pool routing, batch atomic admission.
+- `.claude/skills/debug-tooling/SKILL.md` — backtrace watchdog, LLDB attach wrapper, release-dbg profile for hang/slow-path diagnosis.
+- `.claude/skills/agent-prompts/SKILL.md` — copy-pasteable implementation/continuation/review/fix prompts for driving separate sessions.
+- `.claude/skills/wsl-e2e-testing.md` — WSL E2E tests reproducing Linux/CI failures, fixture matrix.
 - `docs/` — user-facing and contributor-facing documentation.
 
 ## Neutrality Rules
@@ -31,8 +36,8 @@ Use this as the neutral entry point. Reuse the shared sources below instead of c
 ## Working Rules
 
 - Follow TDD for code changes: failing tests first, minimum fix, rerun, then refactor.
-- Default Rust verification command: `cargo test --workspace --tests --verbose`.
-- Do not run bare `cargo test --workspace` unless the user explicitly asks for doctests or you changed rustdoc examples — it also runs doctests and example builds, substantially slower than the normal agent verification loop.
+- Default Rust verification gate is the canonical PAIR: `cargo nextest run --workspace` (completeness — runs every workspace test target including the ~25 verter_session integration binaries) plus `cargo test -p verter_session --tests` (shared-process surface). Bare `cargo test --workspace --tests` SILENTLY SKIPS the verter_session integration suite (feature unification drops those binaries) and must NOT be the sole Rust gate.
+- Do not run bare `cargo test --workspace` (no `--tests`) unless the user explicitly asks for doctests or you changed rustdoc examples — it also runs doctests and example builds, substantially slower than the normal agent verification loop.
 - Do not provide time estimates unless the user explicitly asks. Plans are executed fully in one pass; do not use estimated effort or duration as a reason to skip, defer, or partially implement approved work.
 - The codebase expects the best architecture for the problem. Time constraints, breaking-change avoidance, migration breadth, or "a lot of work" are not valid reasons to weaken the design or deviate from an approved plan.
 - Update the **owning** documentation when public behavior, module paths, or APIs change. Update the relevant skill, not CLAUDE.md, unless summaries or pointers change.
@@ -58,4 +63,9 @@ Use this as the neutral entry point. Reuse the shared sources below instead of c
 - Test design or verification planning: `/testing`.
 - VS Code extension or LSP E2E verification: `/e2e-vscode-testing`.
 - Rust hot paths or allocation-sensitive work: `/rust-performance`.
+- Audit records, per-request observability, footprint capture: `/audit-infrastructure`.
+- Scheduler submission, batching, CPU-pool coordination: `/scheduler`.
+- Hangs, unexpectedly slow paths, stack snapshots: `/debug-tooling`.
+- Generating prompts for separate implementation/review sessions: `/agent-prompts`.
+- Reproducing Linux/CI-only failures: `/wsl-e2e-testing`.
 - Driving a large multi-block plan, refactor, migration, or cutover autonomously (orchestrator + sub-agents + dual review): `/multi-agent-orchestration`.

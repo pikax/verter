@@ -372,6 +372,23 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "Cross-Platform Portability",
+        &[
+            // Guard-enforced half: `git ls-files -z` walk pinning
+            // UTF-8 validity, NTFS-legal components, no trailing
+            // dot/space, no reserved device basenames, no
+            // case-insensitive path collisions (lowercase-fold
+            // approximation of NTFS/APFS folding, not the exact
+            // filesystem fold tables), ≤200-byte relative paths.
+            // The generated-name-sanitization / separator /
+            // CRLF-normalization / binary-discovery / temp-path
+            // clauses are review-enforced (the guard walks tracked
+            // paths only, so a generated name is caught once
+            // committed, not at generation time).
+            "tracked_paths_are_portable",
+        ],
+    ),
+    (
         "Stub Prevention",
         &[
             "macro_impacting_constructs_fail_lowering_not_silent_skip",
