@@ -3474,7 +3474,7 @@ const count: number = 42;
             canonical_id: Some("App.vue".to_string()),
             input_id: "App.vue".to_string(),
             source: std::sync::Arc::from(vue_source),
-            file_kind: verter_session::FileKind::VueSfc,
+            file_language: verter_session::FileLanguage::vue(),
             aliases: vec![],
         });
 
@@ -3773,7 +3773,7 @@ const count: number = 42;
             canonical_id: Some(file_id.clone()),
             input_id: file_id.clone(),
             source: std::sync::Arc::from(vue_source),
-            file_kind: verter_session::FileKind::VueSfc,
+            file_language: verter_session::FileLanguage::vue(),
             aliases: vec![],
         });
         let profile = verter_session::CompileProfile {
@@ -3839,7 +3839,7 @@ const count: number = 42;
             canonical_id: Some(file_id.clone()),
             input_id: file_id.clone(),
             source: std::sync::Arc::from(vue_source),
-            file_kind: verter_session::FileKind::VueSfc,
+            file_language: verter_session::FileLanguage::vue(),
             aliases: vec![],
         });
         let profile = verter_session::CompileProfile {

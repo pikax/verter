@@ -220,7 +220,7 @@ export interface HostUpsertRequest {
   inputId: string;
   /** SFC source code. Accepts a string or a Buffer (UTF-8 bytes from `fs.readFileSync(path)`). */
   source: string | Buffer;
-  fileKind?: "vue" | "sfc" | "vue_sfc" | "non_sfc" | "text" | "file";
+  fileKind?: "vue" | "sfc" | "vue_sfc" | "svelte" | "non_sfc" | "text" | "file";
   aliases?: string[];
 }
 

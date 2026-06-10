@@ -206,6 +206,26 @@ pub fn committed_binding_matches_current(
     committed.owner_binding == *current
 }
 
+/// Resolve the [`verter_session::FileLanguage`] for a non-Vue
+/// provider-sync target.
+///
+/// `Some(language)` for plain-script rows — the target upserts and
+/// syncs to the type provider as that script language (the SAME row the
+/// workspace-scan and editor ingresses resolve for the path, via the
+/// host's language classifier). `None` for framework-carrier rows: a
+/// carrier dependency must never be upserted and synced to the provider
+/// as a raw script — the Vue carrier syncs through the dedicated Vue
+/// public-api path, and a carrier without a registered implementation
+/// produces no provider sync state at all (its own requests surface the
+/// typed unsupported-language error).
+pub fn provider_script_language(
+    host: &verter_session::VerterHost,
+    canonical_id: &str,
+) -> Option<verter_session::FileLanguage> {
+    let language = host.language_classifier().classify(canonical_id);
+    (!language.is_framework_carrier()).then_some(language)
+}
+
 pub fn non_vue_sync_state_for_source(
     resolver: &NativeProjectResolver,
     source_id: &str,

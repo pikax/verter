@@ -9,12 +9,56 @@ use std::sync::Arc;
 use crate::cache_id::SchedulerCacheId;
 use crate::cancellation::CancellationToken;
 use crate::dag::{Hash16, PinId};
-use crate::node::{AnalysisSnapshot, ArtifactSnapshot, FileKind, SourceSnapshot};
+use verter_language::{FileLanguage, FrameworkAdapterId};
+
+use crate::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot};
 
 /// Errors from stage execution.
 #[derive(Debug, Clone)]
 pub struct StageError {
     pub message: String,
+    /// Typed discriminant for failures consumers must distinguish
+    /// structurally (never by parsing `message`).
+    pub kind: StageErrorKind,
+}
+
+/// Typed stage-failure discriminant.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum StageErrorKind {
+    /// An ordinary execution failure described by `message`.
+    #[default]
+    Generic,
+    /// The file's language row has no registered carrier implementation
+    /// behind it (a known-but-unsupported framework language, e.g. a
+    /// registry row that landed ahead of its vertical). Dispatch
+    /// surfaces this typed state instead of a silent empty result.
+    UnsupportedLanguage {
+        /// The adapter id of the carrier-less language row.
+        adapter_id: FrameworkAdapterId,
+    },
+}
+
+impl StageError {
+    /// An ordinary stage failure.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: StageErrorKind::Generic,
+        }
+    }
+
+    /// Typed known-but-unsupported language failure: the language row
+    /// classified the file, but no carrier implementation is registered
+    /// for its adapter.
+    pub fn unsupported_language(adapter_id: FrameworkAdapterId) -> Self {
+        Self {
+            message: format!(
+                "no carrier implementation is registered for framework language \
+                 adapter '{adapter_id}'"
+            ),
+            kind: StageErrorKind::UnsupportedLanguage { adapter_id },
+        }
+    }
 }
 
 impl std::fmt::Display for StageError {
@@ -56,7 +100,7 @@ pub trait StageExecutor: Send + Sync + 'static {
     fn execute_source(
         &self,
         _canonical_id: &str,
-        _file_kind: FileKind,
+        _file_language: FileLanguage,
         content: Arc<str>,
         generation: u64,
     ) -> Result<SourceSnapshot, StageError> {
@@ -143,11 +187,10 @@ pub trait StageExecutor: Send + Sync + 'static {
         _snapshot_pin_id: PinId,
         _cancellation: &CancellationToken,
     ) -> Result<(), StageError> {
-        Err(StageError {
-            message: "execute_cache_node is not implemented by this StageExecutor — \
-                      cache-node dispatch requires an executor that overrides it"
-                .to_string(),
-        })
+        Err(StageError::new(
+            "execute_cache_node is not implemented by this StageExecutor — \
+             cache-node dispatch requires an executor that overrides it",
+        ))
     }
 }
 

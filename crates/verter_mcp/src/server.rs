@@ -365,18 +365,14 @@ impl VerterMcpServer {
                     .ok_or_else(|| mcp_err(format!("Cannot read {} via workspace", canonical)))?
             }
         };
-        let file_kind = if canonical.ends_with(".vue") {
-            verter_session::FileKind::VueSfc
-        } else {
-            verter_session::FileKind::NonSfc
-        };
+        let file_language = self.host.language_classifier().classify(&canonical);
         let result = self
             .host
             .upsert(verter_session::UpsertRequest {
                 canonical_id: Some(canonical.clone()),
                 input_id: canonical.clone(),
                 source,
-                file_kind,
+                file_language,
                 aliases: vec![],
             })
             .map_err(|e| mcp_err(e.to_string()))?;
@@ -648,7 +644,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_vue())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -835,7 +831,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_vue())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -891,7 +887,7 @@ impl VerterMcpServer {
         }
 
         let response = serde_json::json!({
-            "files_checked": files.iter().filter(|(_, k)| *k == verter_session::FileKind::VueSfc).count(),
+            "files_checked": files.iter().filter(|(_, k)| k.is_vue()).count(),
             "summary": {
                 "errors": total_errors,
                 "warnings": total_warnings,
@@ -1089,7 +1085,7 @@ impl VerterMcpServer {
         let root_resolved = params.root.as_ref().map(|r| self.resolve(r));
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_vue())
             .filter(|(id, _)| {
                 root_resolved
                     .as_ref()
@@ -1134,7 +1130,7 @@ impl VerterMcpServer {
         let files = self.host.list_files();
         let vue_files: HashSet<String> = files
             .iter()
-            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_vue())
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -1199,7 +1195,7 @@ impl VerterMcpServer {
         let mut injects: HashMap<String, Vec<String>> = HashMap::new();
 
         for (id, kind) in &files {
-            if *kind != verter_session::FileKind::VueSfc {
+            if !kind.is_vue() {
                 continue;
             }
             let _ = ensure_loaded(&self.host, id);
@@ -1270,7 +1266,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_vue())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -1315,7 +1311,7 @@ impl VerterMcpServer {
 
         // Check prop usage against definitions
         for (id, kind) in &files {
-            if *kind != verter_session::FileKind::VueSfc {
+            if !kind.is_vue() {
                 continue;
             }
             if let Some(path) = &params.path {
@@ -1561,10 +1557,7 @@ impl VerterMcpServer {
     )]
     async fn get_project_stats(&self) -> Result<CallToolResult, ErrorData> {
         let files = self.host.list_files();
-        let vue_files: Vec<_> = files
-            .iter()
-            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
-            .collect();
+        let vue_files: Vec<_> = files.iter().filter(|(_, k)| k.is_vue()).collect();
 
         let mut quality_scores: Vec<(String, u32)> = Vec::new();
         let mut total_errors = 0usize;
@@ -1649,7 +1642,7 @@ impl VerterMcpServer {
             "overview": {
                 "total_files": files.len(),
                 "vue_files": vue_files.len(),
-                "script_deps": files.iter().filter(|(_, k)| *k == verter_session::FileKind::NonSfc).count(),
+                "script_deps": files.iter().filter(|(_, k)| !k.is_framework_carrier()).count(),
             },
             "component_stats": {
                 "avg_quality_score": avg_score,
@@ -2003,7 +1996,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_vue())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2079,7 +2072,7 @@ impl VerterMcpServer {
         let mut targets: Vec<serde_json::Value> = Vec::new();
 
         for (id, kind) in &files {
-            if *kind != verter_session::FileKind::VueSfc {
+            if !kind.is_vue() {
                 continue;
             }
             if let Some(path) = &params.path {
@@ -2415,7 +2408,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_vue())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2482,7 +2475,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_vue())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2534,7 +2527,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_vue())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2783,7 +2776,7 @@ impl VerterMcpServer {
         let files = self.host.list_files();
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_vue())
             .map(|(id, _)| id.as_str())
             .collect();
 
@@ -2824,7 +2817,7 @@ impl VerterMcpServer {
         let filter_id = params.path.as_ref().map(|p| self.resolve(p));
 
         for (id, kind) in &files {
-            if *kind != verter_session::FileKind::VueSfc {
+            if !kind.is_vue() {
                 continue;
             }
             if let Some(ref filter) = filter_id {
@@ -2893,7 +2886,7 @@ impl VerterMcpServer {
         let mut used_callees: HashSet<String> = HashSet::new();
 
         for (id, kind) in &files {
-            if *kind != verter_session::FileKind::VueSfc {
+            if !kind.is_vue() {
                 continue;
             }
             let _ = ensure_loaded(&self.host, id);
@@ -2959,7 +2952,7 @@ impl VerterMcpServer {
         let mut consumer_files: Vec<serde_json::Value> = Vec::new();
 
         for (id, kind) in &files {
-            if *kind != verter_session::FileKind::VueSfc {
+            if !kind.is_vue() {
                 continue;
             }
             let _ = ensure_loaded(&self.host, id);
@@ -3072,7 +3065,7 @@ impl VerterMcpServer {
         let files = self.host.list_files();
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_vue())
             .map(|(id, _)| id.as_str())
             .collect();
 
@@ -3432,7 +3425,7 @@ mod tests {
             canonical_id: Some(id.to_string()),
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: verter_session::FileKind::VueSfc,
+            file_language: verter_session::FileLanguage::vue(),
             aliases: vec![],
         });
     }

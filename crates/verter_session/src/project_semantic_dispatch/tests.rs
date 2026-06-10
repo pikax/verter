@@ -4,7 +4,7 @@ use crate::semantic_query::{
     ProjectionReductionContext, ScopeId, SemanticNodeData, SemanticQueryOutput, SurfaceMember,
     SurfaceView, ValueRootKey,
 };
-use crate::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
+use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
@@ -20,7 +20,7 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -10239,7 +10239,9 @@ fn resolve_macro_payload_dedups_via_interning() {
             canonical_id: None,
             input_id: "/c.vue".to_string(),
             source: Arc::from("<script setup lang=\"ts\">defineProps<{ x: string }>()</script>\n"),
-            file_kind: FileKind::from_path("/c.vue"),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static("/c.vue")
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -10546,7 +10548,9 @@ fn resolve_macro_payload_rematerializes_evicted_but_current_owner_artifact() {
             canonical_id: None,
             input_id: c.to_string(),
             source: Arc::from("<script setup lang=\"ts\">defineEmits<{ ping: [] }>()</script>\n"),
-            file_kind: FileKind::from_path(c),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(c)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -10627,7 +10631,9 @@ fn resolve_macro_payload_resolves_against_current_owner_content_via_content_free
             canonical_id: None,
             input_id: c.to_string(),
             source: Arc::from("<script setup lang=\"ts\">defineEmits<{ ping: [] }>()</script>\n"),
-            file_kind: FileKind::from_path(c),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(c)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -10669,7 +10675,9 @@ fn resolve_macro_payload_resolves_against_current_owner_content_via_content_free
             source: Arc::from(
                 "<script setup lang=\"ts\">defineEmits<{ ping: []; pong: [] }>()</script>\n",
             ),
-            file_kind: FileKind::from_path(c),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(c)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .unwrap();

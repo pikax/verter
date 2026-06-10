@@ -4290,6 +4290,17 @@ mod foundations_guards {
         // content-addressed file artifact store + per-file structural
         // hash, both consumed by tests and by future-stage host paths.
         "pub mod file_artifact_store",
+        // Framework adapter substrate: host-level language
+        // classification (`HostLanguageClassifier` composing the static
+        // `LanguageRegistry` with the `ProjectCapabilitySnapshot`).
+        // Consumed by host construction, the scheduler SourceLoader
+        // seam, and session-level classification call sites.
+        "pub mod framework",
+        // The open language descriptor surface re-exported from the
+        // leaf routing authority so host-API consumers (UpsertRequest
+        // construction, FFI conversion, LSP/MCP) name one definition
+        // without a direct `verter_language` dependency.
+        "pub use verter_language::",
         "pub mod parse_stable_hash",
         // Parse-time fact-emission producer (R10–R16, R28, R29) —
         // walks `IndexedReady.shallow_state` and populates the
@@ -4533,7 +4544,7 @@ mod foundations_guards {
         "pub mod test_only",
         // ─── public re-exports ─────────────────────────────────────
         // re-exports the canonical data types (HostConfig, VerterHost,
-        // UpsertRequest, FileKind, CompileProfile, CompileErrorPolicy,
+        // UpsertRequest, FileLanguage, CompileProfile, CompileErrorPolicy,
         // DependencyResolution, DiagnosticsSnapshot, HostDiagnostic,
         // HostSeverity, FileAnalysisSnapshot, ...) — universally used.
         "pub use types::*",

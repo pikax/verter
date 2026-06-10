@@ -21,7 +21,7 @@ use std::sync::Arc;
 use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
 
 use crate::types::HostConfig;
-use crate::{FileKind, UpsertRequest, VerterHost};
+use crate::{FileLanguage, UpsertRequest, VerterHost};
 
 fn build_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig {
@@ -30,13 +30,13 @@ fn build_host() -> Arc<VerterHost> {
     }))
 }
 
-fn upsert(host: &VerterHost, id: &str, source: &str, kind: FileKind) {
+fn upsert(host: &VerterHost, id: &str, source: &str, kind: FileLanguage) {
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: kind,
+            file_language: kind,
             aliases: Vec::new(),
         })
         .expect("upsert");
@@ -63,7 +63,7 @@ fn cold_resolution_records_carrier_facts_into_cached_entry() {
         &host,
         "/types.ts",
         "export interface Props { a: string; b: number }",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
@@ -73,7 +73,7 @@ import type { Props } from './types'
 defineProps<Props>()
 </script>
 <template><div /></template>"#,
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let _ = host
@@ -111,7 +111,7 @@ fn carrier_edit_invalidates_warm_component_meta_result() {
         &host,
         "/types.ts",
         "export interface Props { a: string; b: number }",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
@@ -121,7 +121,7 @@ import type { Props } from './types'
 defineProps<Props>()
 </script>
 <template><div /></template>"#,
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let first = host
@@ -149,7 +149,7 @@ defineProps<Props>()
         &host,
         "/types.ts",
         "export interface Props { renamed: string; c: boolean }",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     let after = host

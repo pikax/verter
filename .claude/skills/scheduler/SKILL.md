@@ -485,9 +485,9 @@ The scheduler routes (Block 7 design target):
 
 - `TaskKind::Load { canonical }` → I/O pool (pure I/O — reads bytes off
   disk; no executor dispatch, the source loader drives the I/O directly).
-- `TaskKind::Parse { canonical, source, file_kind }` → stage CPU pool
-  (pure CPU; payload carries `file_kind` so `execute_source` classifies
-  without re-deriving from path).
+- `TaskKind::Parse { canonical, source, file_language }` → stage CPU pool
+  (pure CPU; payload carries the resolved `verter_language::FileLanguage`
+  row so `execute_source` dispatches without re-classifying the path).
 - `TaskKind::Analysis { canonical, source_snapshot }` →
   `SchedulerCpuPool::submit`. Dispatch destructures `canonical` off the
   payload and passes the snapshot reference to `execute_analysis`. The

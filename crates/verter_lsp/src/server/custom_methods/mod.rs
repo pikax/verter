@@ -35,13 +35,6 @@ impl VerterLanguageServer {
     pub async fn on_did_change_ts_or_js_file(&self, params: OnDidChangeTsOrJsFileParams) {
         tracing::info!("onDidChangeTsOrJsFile ENTER {}", params.uri);
 
-        // Skip .vue files — they are synced to the type provider via TSX compilation
-        // in sync_ide_to_provider(). Sending raw Vue SFC source to TSGO (which
-        // expects TypeScript) corrupts its internal state.
-        if params.uri.ends_with(".vue") {
-            return;
-        }
-
         // For non-Vue files tracked by the extension (TS/JS), keep the host and
         // provider in sync. Exact `.vue` imports are rewritten to `.vue.ts`
         // before syncing so the provider resolves through Verter-managed files.
@@ -55,6 +48,17 @@ impl VerterLanguageServer {
                 params.uri.clone()
             };
 
+            // Skip framework carriers — `.vue` files sync to the type
+            // provider via TSX compilation in sync_ide_to_provider()
+            // (sending raw SFC source to TSGO, which expects TypeScript,
+            // corrupts its internal state), and a carrier-less row
+            // (`.svelte`) produces no provider sync state at all.
+            let Some(file_language) =
+                crate::provider_sync::provider_script_language(&self.documents.host, &path)
+            else {
+                return;
+            };
+
             let module_references = self
                 .documents
                 .host
@@ -62,7 +66,7 @@ impl VerterLanguageServer {
                     canonical_id: Some(path.clone()),
                     input_id: path.clone(),
                     source: Arc::from(last.text.as_str()),
-                    file_kind: verter_session::FileKind::NonSfc,
+                    file_language,
                     aliases: Vec::new(),
                 })
                 .map(|result| result.module_references)
@@ -456,16 +460,13 @@ impl VerterLanguageServer {
         let mut total_components = 0usize;
         let mut files_with_scoped_styles = 0usize;
 
-        for (canonical_id, file_kind) in &file_list {
-            let kind = match file_kind {
-                verter_session::FileKind::VueSfc => "vue",
-                verter_session::FileKind::NonSfc => {
-                    if canonical_id.ends_with(".ts") || canonical_id.ends_with(".tsx") {
-                        "ts"
-                    } else {
-                        "js"
-                    }
-                }
+        for (canonical_id, file_language) in &file_list {
+            let kind = if file_language.is_vue() {
+                "vue"
+            } else if canonical_id.ends_with(".ts") || canonical_id.ends_with(".tsx") {
+                "ts"
+            } else {
+                "js"
             };
 
             files.push(ProjectOverviewFile {
@@ -473,7 +474,7 @@ impl VerterLanguageServer {
                 kind,
             });
 
-            if *file_kind == verter_session::FileKind::VueSfc {
+            if file_language.is_vue() {
                 total_vue_files += 1;
 
                 // Get analysis for component graph
@@ -529,8 +530,8 @@ impl VerterLanguageServer {
         // Collect template components from all Vue SFC analyses
         let file_list = self.documents.host.list_files();
         let mut template_components = Vec::new();
-        for (canonical_id, file_kind) in &file_list {
-            if *file_kind == verter_session::FileKind::VueSfc {
+        for (canonical_id, file_language) in &file_list {
+            if file_language.is_vue() {
                 if let Some(analysis) = self.documents.host.get_analysis(canonical_id) {
                     if let Some(template) = &analysis.template {
                         template_components
@@ -649,18 +650,15 @@ impl VerterLanguageServer {
 
         let file_list = self.documents.host.list_files();
         let mut parents = Vec::new();
-        let vue_count = file_list
-            .iter()
-            .filter(|(_, k)| *k == verter_session::FileKind::VueSfc)
-            .count();
+        let vue_count = file_list.iter().filter(|(_, k)| k.is_vue()).count();
         tracing::info!(
             "getComponentParents: target='{}' scanning {} vue files",
             target_normalized,
             vue_count
         );
 
-        for (canonical_id, file_kind) in &file_list {
-            if *file_kind != verter_session::FileKind::VueSfc {
+        for (canonical_id, file_language) in &file_list {
+            if !file_language.is_vue() {
                 continue;
             }
             // Skip the target file itself

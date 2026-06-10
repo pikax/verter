@@ -49,7 +49,7 @@ use crate::semantic_query::{
     SemanticQueryKey,
 };
 use crate::semantic_query_memo::{semantic_graph_read_set_signature, SemanticGraphStore};
-use crate::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use crate::{HostConfig, UpsertRequest, VerterHost};
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -70,7 +70,9 @@ fn upsert(host: &VerterHost, path: &str, source: &str) {
             canonical_id: Some(path.to_string()),
             input_id: path.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::from_path(path),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(path)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert succeeds");

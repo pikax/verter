@@ -192,7 +192,7 @@ fn run_pipeline(host: &VerterHost, count: usize, dir: &Path) {
             canonical_id: Some(id.clone()),
             input_id: id.clone(),
             source: Arc::from(content.as_str()),
-            file_kind: verter_session::FileKind::VueSfc,
+            file_language: verter_session::FileLanguage::vue(),
             aliases: Vec::new(),
         };
         let _ = host.upsert(req);

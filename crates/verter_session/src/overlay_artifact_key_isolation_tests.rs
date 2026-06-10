@@ -50,7 +50,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use crate::session_view::{OverlaidView, SessionView};
-use crate::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use crate::{HostConfig, UpsertRequest, VerterHost};
 
 /// Base owner SFC-free `.ts` file. It imports `./helper`, which is NOT
 /// upserted into the workspace — so the base `ensure_indexed_ready`
@@ -68,7 +68,9 @@ fn host_with_owner() -> (Arc<VerterHost>, [u8; 16]) {
             canonical_id: Some("/owner.ts".to_string()),
             input_id: "/owner.ts".to_string(),
             source: Arc::from(OWNER_SOURCE),
-            file_kind: FileKind::from_path("/owner.ts"),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static("/owner.ts")
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("owner upsert succeeds");

@@ -50,7 +50,7 @@ use verter_session::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
     SemanticQueryKey, SemanticQueryOutput,
 };
-use verter_session::{for_tests, FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{for_tests, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
 
 /// K-INDEPENDENT VALUE — every key's value is `number`. After
@@ -143,7 +143,9 @@ fn k_independent_value_collapses_to_shared_node_id_under_hoist() {
         canonical_id: Some("/source.ts".to_string()),
         input_id: "/source.ts".to_string(),
         source: Arc::from(K_INDEPENDENT_TS),
-        file_kind: FileKind::from_path("/source.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/source.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 
@@ -206,7 +208,9 @@ fn k_dependent_value_keeps_per_k_materialiser_with_distinct_ids() {
         canonical_id: Some("/source.ts".to_string()),
         input_id: "/source.ts".to_string(),
         source: Arc::from(K_DEPENDENT_TS),
-        file_kind: FileKind::from_path("/source.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/source.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 
@@ -264,7 +268,9 @@ fn k_dependent_value_with_infer_keeps_per_k_materialiser() {
         canonical_id: Some("/source.ts".to_string()),
         input_id: "/source.ts".to_string(),
         source: Arc::from(K_DEPENDENT_INFER_TS),
-        file_kind: FileKind::from_path("/source.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/source.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

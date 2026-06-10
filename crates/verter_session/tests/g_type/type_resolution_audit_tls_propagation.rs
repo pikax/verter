@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
 use verter_session::tests::audit_tls_harness::assert_observer_reaches;
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 const TYPES_TS: &str = r#"
 export type Outer = {
@@ -47,7 +47,9 @@ fn build_host(audit_enabled: bool) -> Arc<VerterHost> {
         canonical_id: Some("/types.ts".to_string()),
         input_id: "/types.ts".to_string(),
         source: Arc::from(TYPES_TS),
-        file_kind: FileKind::from_path("/types.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/types.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
     host

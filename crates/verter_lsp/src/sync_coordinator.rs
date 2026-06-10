@@ -465,7 +465,7 @@ mod tests {
     use crate::tsgo::mock::{MockCall, MockTypeProvider};
     use crate::ProjectSyncMode;
     use tower_lsp_server::{LspService, Server};
-    use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+    use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
     #[derive(Default)]
     struct NoopLanguageServer;
@@ -852,7 +852,7 @@ defineProps<{ msg: string }>()
 </script>
 <template><div>{{ msg }}</div></template>"#,
             ),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         });
         let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));

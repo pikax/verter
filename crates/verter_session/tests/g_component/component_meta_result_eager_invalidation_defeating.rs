@@ -30,7 +30,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Mutex;
 
 use verter_session::component_meta_host::ComponentMetaHost;
-use verter_session::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest};
+use verter_session::{CompileErrorPolicy, HostConfig, UpsertRequest};
 
 /// The eager-invalidation-defeating test mutates the
 /// host-level fact registry via a plain `upsert` of the dep, then
@@ -101,7 +101,9 @@ fn fact_validation_alone_invalidates_warm_hit_without_eviction() {
         canonical_id: Some("/src/types.ts".to_string()),
         input_id: "/src/types.ts".to_string(),
         source: std::sync::Arc::from("export interface Foo { a: string; }\n"),
-        file_kind: FileKind::from_path("/src/types.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/src/types.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     };
     let _ = mh.host().upsert(req).expect("ts re-upsert");

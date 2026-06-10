@@ -41,7 +41,7 @@ use verter_semantic::analysis::type_expand::ExpansionExactness;
 use verter_type_expr::{ObjectMember, TypeExpr};
 
 use crate::audited_request::AuditedRequest;
-use crate::types::FileKind;
+use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
 // ---------------------------------------------------------------------------
@@ -58,7 +58,7 @@ fn upsert_vue(host: &VerterHost, id: &str, src: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert vue");
@@ -70,7 +70,7 @@ fn upsert_ts(host: &VerterHost, id: &str, src: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert ts");

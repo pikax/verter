@@ -17,10 +17,9 @@ use std::sync::Arc;
 use std::thread;
 
 use verter_audit::WorkerPool;
+use verter_language::FileLanguage as SchedFileKind;
 use verter_scheduler::executor::{StageError, StageExecutor};
-use verter_scheduler::node::{
-    AnalysisSnapshot, ArtifactSnapshot, FileKind as SchedFileKind, SourceSnapshot,
-};
+use verter_scheduler::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot};
 use verter_scheduler::request_context::{OpaqueRequestContext, RequestContextLike};
 use verter_scheduler::scheduler::{Request, Scheduler, SchedulerConfig};
 use verter_scheduler::source_loader::{MemorySourceLoader, SourceLoader};
@@ -41,7 +40,7 @@ impl StageExecutor for PassthroughExecutor {
     fn execute_source(
         &self,
         _canonical_id: &str,
-        _file_kind: SchedFileKind,
+        _file_language: SchedFileKind,
         content: Arc<str>,
         generation: u64,
     ) -> Result<SourceSnapshot, StageError> {
@@ -113,7 +112,7 @@ fn scheduler_audit_records_non_empty_worker_thread_id_and_known_pool_under_load(
                     target: TargetStage::Artifact { profile_hash: 1 },
                     priority: Priority::Interactive,
                     source: Some(Arc::from("<template>z</template>")),
-                    file_kind: None,
+                    file_language: None,
                     request_context: Some(opaque),
                 });
                 h.wait();
@@ -203,7 +202,7 @@ fn submission_without_request_context_does_not_pollute_unrelated_contexts() {
         target: TargetStage::Source,
         priority: Priority::Interactive,
         source: Some(Arc::from("<template>z</template>")),
-        file_kind: None,
+        file_language: None,
         request_context: None,
     });
     handle.wait();

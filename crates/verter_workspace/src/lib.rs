@@ -154,9 +154,9 @@ pub use traits::{
     WorkspaceResourceSnapshot,
 };
 pub use types::{
-    ExactResolution, ExactResolutionResult, FileKind, PackageManifest, ParsedEdge,
-    ProjectOwnership, ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase,
-    ResolveRequest, ResolveRequestKind, ResolveResult, VfsProvenanceSnapshot,
+    ExactResolution, ExactResolutionResult, PackageManifest, ParsedEdge, ProjectOwnership,
+    ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase, ResolveRequest,
+    ResolveRequestKind, ResolveResult, VfsProvenanceSnapshot,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use vite_config::{

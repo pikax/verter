@@ -1408,7 +1408,7 @@ fn relation_memo_fences_on_transitive_imported_fact_edit() {
                 canonical_id: None,
                 input_id: "/w/dep.ts".to_string(),
                 source: Arc::from(source),
-                file_kind: crate::FileKind::NonSfc,
+                file_language: crate::FileLanguage::script_ts(),
                 aliases: Vec::new(),
             })
             .expect("upsert /w/dep.ts");

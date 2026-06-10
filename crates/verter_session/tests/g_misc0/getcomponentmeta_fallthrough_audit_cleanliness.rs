@@ -38,7 +38,7 @@
 use std::sync::Arc;
 
 use verter_session::audited_request::AuditedRequest;
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 /// Build a host with audit recording fully enabled. The records store
@@ -72,7 +72,7 @@ fn seed_fallthrough_sfc(host: &VerterHost) {
              </script>\
              <template><button>{{ label }}</button></template>",
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
 }

@@ -22,7 +22,7 @@
 use std::sync::Arc;
 
 use verter_session::tests::audit_tls_harness::assert_observer_reaches;
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 const SFC: &str = r#"<script setup lang="ts">
@@ -47,7 +47,7 @@ fn analyze_with_audit_propagates_observer_through_calling_thread() {
         canonical_id: Some("/probe.vue".to_string()),
         input_id: "/probe.vue".to_string(),
         source: Arc::from(SFC),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     });
 

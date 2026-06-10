@@ -1,15 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Classification of a file by its role in the VFS.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FileKind {
-    /// Vue Single File Component (.vue).
-    VueSfc,
-    /// Non-Vue source file (.ts, .tsx, .js, .jsx, .d.ts, etc.).
-    NonSfc,
-}
-
 /// Ownership information for a file within a project.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectOwnership {

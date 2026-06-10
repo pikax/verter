@@ -57,7 +57,7 @@ use crate::semantic_query::{
     ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeId, SemanticQueryApi,
     SemanticQueryKey, SemanticQueryOutput,
 };
-use crate::types::{FileKind, UpsertRequest};
+use crate::types::UpsertRequest;
 use crate::VerterHost;
 
 /// Name of the synthetic alias produced by the scratch file. The
@@ -341,13 +341,12 @@ fn evaluate_inner(
 
     // Upsert the scratch file. The canonical id is the URI; aliases
     // remain empty — typeinfo URIs do not appear in user-visible
-    // alias maps. `FileKind::from_path` on a `.ts` URI returns
-    // `NonSfc`.
+    // alias maps. A `.ts` URI classifies as a plain script.
     let upsert_result = host.upsert(UpsertRequest {
         canonical_id: Some(scratch_uri.to_string()),
         input_id: scratch_uri.to_string(),
         source: Arc::from(source.as_str()),
-        file_kind: FileKind::from_path(scratch_uri),
+        file_language: host.language_classifier().classify(scratch_uri),
         aliases: Vec::new(),
     });
     if upsert_result.is_err() {

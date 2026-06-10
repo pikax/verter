@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use verter_audit::store::CacheLayerBreakdown;
 use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 /// Sum cache misses across every layer in the breakdown — keeps the
 /// test forward-compatible with new layer fields landing on
@@ -57,7 +57,9 @@ fn type_resolution_audit_repeated_query_uses_warm_cache() {
         canonical_id: Some("/types.ts".to_string()),
         input_id: "/types.ts".to_string(),
         source: Arc::from(TYPES_TS),
-        file_kind: FileKind::from_path("/types.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/types.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

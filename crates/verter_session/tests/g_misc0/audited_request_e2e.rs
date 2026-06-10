@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use verter_session::audited_request::AuditedRequest;
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess, WorkspaceRead};
 
 fn setup_host() -> Arc<VerterHost> {
@@ -39,7 +39,7 @@ fn setup_host() -> Arc<VerterHost> {
             "<script setup lang=\"ts\">defineProps<{label: string}>()</script>\
              <template><div>{{ label }}</div></template>",
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
     host

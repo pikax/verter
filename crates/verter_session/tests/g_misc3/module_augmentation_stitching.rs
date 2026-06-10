@@ -115,6 +115,7 @@ fn insert_artifact_from_fixture(
         content_hash,
         parse_env_hash: [0u8; 16],
         parser_version: LEGACY_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
     };
     store.insert_artifacts(key.clone(), artifacts);
     key
@@ -143,6 +144,7 @@ fn insert_artifact_with_raw_source(
         content_hash,
         parse_env_hash: [0u8; 16],
         parser_version: LEGACY_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id(canonical),
     };
     store.insert_artifacts(key.clone(), artifacts);
     key
@@ -1166,6 +1168,7 @@ fn effective_export_set_session_view_stitches_overlay_augmenter() {
         content_hash: [99u8; 16],
         parse_env_hash: overlay_discriminator,
         parser_version: LEGACY_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id("/aug-overlay.ts"),
     };
     store.insert_artifacts(
         overlay_key,
@@ -1313,6 +1316,7 @@ fn session_overlay_augmenter_isolated_from_base_index() {
         content_hash: [99u8; 16],
         parse_env_hash: overlay_discriminator,
         parser_version: LEGACY_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id("/aug-overlay.ts"),
     };
     store.insert_artifacts(
         overlay_key,
@@ -1945,6 +1949,7 @@ fn seed_base_and_overlay_augmenters(
         content_hash: [99u8; 16],
         parse_env_hash: overlay_discriminator,
         parser_version: LEGACY_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id("/aug-overlay.ts"),
     };
     store.insert_artifacts(
         overlay_key,
@@ -2473,6 +2478,9 @@ fn relative_augmenter_resolver_runs_off_artifacts_guard() {
                 },
                 parse_env_hash: [0u8; 16],
                 parser_version: 1,
+                file_language_id: FileArtifactKey::derived_file_language_id(
+                    format!("/dir/reentrant-{n}-{j}.ts").as_str(),
+                ),
             };
             store.insert_artifacts(key, Arc::clone(&reentrant_payload));
         }

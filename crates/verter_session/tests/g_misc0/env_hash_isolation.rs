@@ -96,12 +96,14 @@ fn lib_env_change_does_not_change_file_artifact_key() {
         content_hash,
         parse_env_hash: parse_env_hash_a,
         parser_version,
+        file_language_id: FileArtifactKey::derived_file_language_id("/ws/proj/src/foo.ts"),
     };
     let key_b = FileArtifactKey {
         canonical,
         content_hash,
         parse_env_hash: parse_env_hash_b,
         parser_version,
+        file_language_id: FileArtifactKey::derived_file_language_id("/ws/proj/src/foo.ts"),
     };
     assert_eq!(
         key_a, key_b,
@@ -177,12 +179,14 @@ fn paths_edit_changes_augmentation_target_key_but_not_file_artifact_key() {
         content_hash,
         parse_env_hash: parse_a,
         parser_version,
+        file_language_id: FileArtifactKey::derived_file_language_id("/ws/proj/src/foo.ts"),
     };
     let file_key_b = FileArtifactKey {
         canonical,
         content_hash,
         parse_env_hash: parse_b,
         parser_version,
+        file_language_id: FileArtifactKey::derived_file_language_id("/ws/proj/src/foo.ts"),
     };
     assert_eq!(
         file_key_a, file_key_b,
@@ -227,12 +231,14 @@ fn two_project_envs_coexist_for_same_canonical() {
         content_hash,
         parse_env_hash: cfg_a.parse_env_hash(&inputs),
         parser_version: 1,
+        file_language_id: FileArtifactKey::derived_file_language_id(&canonical),
     };
     let key_b = FileArtifactKey {
         canonical,
         content_hash,
         parse_env_hash: cfg_b.parse_env_hash(&inputs),
         parser_version: 1,
+        file_language_id: FileArtifactKey::derived_file_language_id("/ws/proj/src/foo.ts"),
     };
     // Two configs with identical parser flags but different paths produce
     // the SAME parse_env_hash (parse is independent of resolve / paths).
@@ -250,6 +256,9 @@ fn two_project_envs_coexist_for_same_canonical() {
         content_hash,
         parse_env_hash: cfg_a.parse_env_hash(&inputs_b),
         parser_version: 1,
+        file_language_id: FileArtifactKey::derived_file_language_id(&std::sync::Arc::from(
+            "/ws/proj/src/foo.ts",
+        )),
     };
     assert_ne!(
         key_a, key_c,

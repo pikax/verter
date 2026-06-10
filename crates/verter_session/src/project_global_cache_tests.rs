@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
+use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
@@ -47,7 +47,7 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -59,7 +59,7 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();

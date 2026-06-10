@@ -61,7 +61,9 @@ fn host_with_ts(path: &str, source: &str) -> (VerterHost, [u8; 16]) {
             canonical_id: Some(path.to_string()),
             input_id: path.to_string(),
             source: Arc::from(source),
-            file_kind: crate::FileKind::from_path(path),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(path)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("seed upsert succeeds");

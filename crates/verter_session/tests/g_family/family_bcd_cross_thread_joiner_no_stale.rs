@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::thread;
 
 use verter_session::for_tests::app_config_no_override_proof_get_or_compute_for_tests;
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 fn make_host_with_file(canonical: &str, source: &str) -> Arc<VerterHost> {
@@ -28,7 +28,7 @@ fn make_host_with_file(canonical: &str, source: &str) -> Arc<VerterHost> {
         canonical_id: Some(canonical.to_string()),
         input_id: canonical.to_string(),
         source: Arc::from(source),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.analyze_with_audit(canonical);

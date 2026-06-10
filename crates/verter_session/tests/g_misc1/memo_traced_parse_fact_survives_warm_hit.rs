@@ -61,7 +61,7 @@ use verter_session::for_tests::{
 };
 use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef, ParseFactRef};
 use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
-use verter_session::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 // Serialise this test against any concurrent test that arms the same
 // process-global Parse-fact injection slot.
@@ -81,7 +81,7 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();

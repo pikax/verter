@@ -94,7 +94,7 @@ fn request_context_constructed_under_installed_parent_records_parent_request_id(
 #[test]
 fn audited_sub_request_under_installed_parent_publishes_parent_request_id_in_record() {
     use verter_session::audited_request::AuditedRequest;
-    use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+    use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
     use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
     let workspace: Arc<dyn WorkspaceAccess> =
@@ -114,7 +114,7 @@ fn audited_sub_request_under_installed_parent_publishes_parent_request_id_in_rec
             "<script setup lang=\"ts\">defineProps<{label: string}>()</script>\
              <template><div>{{ label }}</div></template>",
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
 
@@ -161,7 +161,7 @@ fn audited_sub_request_under_installed_parent_publishes_parent_request_id_in_rec
 #[test]
 fn audited_resolve_without_parent_context_publishes_none_parent_request_id() {
     use verter_session::audited_request::AuditedRequest;
-    use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+    use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
     use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
     let workspace: Arc<dyn WorkspaceAccess> =
@@ -181,7 +181,7 @@ fn audited_resolve_without_parent_context_publishes_none_parent_request_id() {
             "<script setup lang=\"ts\">defineProps<{label: string}>()</script>\
              <template><div>{{ label }}</div></template>",
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
 

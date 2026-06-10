@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use verter_compiler::compile::CompileTarget;
 use verter_session::tests::audit_tls_harness::assert_observer_reaches;
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 fn build_host(audit_enabled: bool) -> Arc<VerterHost> {
@@ -42,7 +42,7 @@ fn build_host(audit_enabled: bool) -> Arc<VerterHost> {
             "<script setup lang=\"ts\">\nconst greeting = 'hello';\n</script>\n\
              <template><div>{{ greeting }}</div></template>",
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     });
     host

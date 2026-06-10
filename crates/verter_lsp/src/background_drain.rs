@@ -1059,6 +1059,12 @@ pub(super) async fn sync_pending_non_vue_provider_file(
     let Some(source) = documents.host.get_source(canonical_id) else {
         return false;
     };
+    // Framework carriers never sync to the provider as raw scripts.
+    let Some(file_language) =
+        crate::provider_sync::provider_script_language(&documents.host, canonical_id)
+    else {
+        return false;
+    };
     let module_references = block_in_place_if_available(|| {
         documents
             .host
@@ -1066,7 +1072,7 @@ pub(super) async fn sync_pending_non_vue_provider_file(
                 canonical_id: Some(canonical_id.to_string()),
                 input_id: canonical_id.to_string(),
                 source: source.clone(),
-                file_kind: verter_session::FileKind::NonSfc,
+                file_language,
                 aliases: Vec::new(),
             })
             .map(|result| result.module_references)

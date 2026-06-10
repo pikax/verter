@@ -29,7 +29,7 @@ use oxc_allocator::Allocator;
 use rayon::prelude::*;
 use tempfile::TempDir;
 use verter_compiler::compile::{CodegenOptions, CompileTarget, VerterCompileOptions};
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 use crate::error_map::map_tsc_position;
 use crate::reporter::{self, Diagnostic, TscDiagnostic};
@@ -273,7 +273,7 @@ pub fn run(
             canonical_id: Some(canonical_id.clone()),
             input_id: canonical_id,
             source: std::sync::Arc::<str>::from(source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         });
     }
@@ -2553,7 +2553,7 @@ defineProps<{ msg: string }>()
                 canonical_id: Some(canonical_id.clone()),
                 input_id: canonical_id.clone(),
                 source: std::sync::Arc::<str>::from(source),
-                file_kind: FileKind::VueSfc,
+                file_language: FileLanguage::vue(),
                 aliases: Vec::new(),
             })
             .unwrap();
@@ -2687,7 +2687,7 @@ defineProps<{ msg: string }>()
                 canonical_id: Some(canonical_id.clone()),
                 input_id: canonical_id,
                 source: std::sync::Arc::<str>::from(source),
-                file_kind: FileKind::VueSfc,
+                file_language: FileLanguage::vue(),
                 aliases: Vec::new(),
             })
             .unwrap();

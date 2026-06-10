@@ -3847,6 +3847,7 @@ dependencies = [
 name = "verter_ffi"
 version = "0.0.1-beta.1"
 dependencies = [
+ "log",
  "serde",
  "verter_actions",
  "verter_diagnostics",
@@ -3856,6 +3857,10 @@ dependencies = [
  "verter_span",
  "verter_type_expr",
 ]
+
+[[package]]
+name = "verter_language"
+version = "0.0.1-beta.1"
 
 [[package]]
 name = "verter_lsp"
@@ -4018,6 +4023,7 @@ dependencies = [
  "rayon",
  "rustc-hash 2.1.2",
  "verter_audit",
+ "verter_language",
  "verter_span",
  "web-time",
 ]
@@ -4087,6 +4093,7 @@ dependencies = [
  "uuid",
  "verter_audit",
  "verter_compiler",
+ "verter_language",
  "verter_parser",
  "verter_protocol",
  "verter_scheduler",
@@ -4217,6 +4224,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "verter_audit",
+ "verter_language",
  "verter_scheduler",
  "walkdir",
  "xxhash-rust",

@@ -1563,7 +1563,7 @@ fn projectpath_over_instantiationref_budget_trip_surfaces_value_partial_and_does
 #[test]
 fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_refuses_memo() {
     use crate::request_context::current_materialization_cache_suppress;
-    use crate::{FileKind, UpsertRequest};
+    use crate::{FileLanguage, UpsertRequest};
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
@@ -1581,7 +1581,7 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
                 "export type Box = { a: number; b: string; c: boolean }\n\
                  export type Deep = keyof Partial<Required<Box>>\n",
             ),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert lower_chain.ts");

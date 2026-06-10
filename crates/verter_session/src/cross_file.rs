@@ -247,7 +247,7 @@ mod tests {
                 canonical_id: None,
                 input_id: id.to_string(),
                 source: Arc::from(src),
-                file_kind: FileKind::VueSfc,
+                file_language: crate::FileLanguage::vue(),
                 aliases: Vec::new(),
             })
             .unwrap();

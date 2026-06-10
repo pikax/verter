@@ -42,7 +42,7 @@
 use std::sync::Arc;
 
 use verter_session::audited_request::AuditedRequest;
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 #[allow(deprecated)]
@@ -709,7 +709,7 @@ fn upsert_text_file(host: &VerterHost, canonical: &str, source: &str) {
         canonical_id: Some(canonical.into()),
         input_id: canonical.into(),
         source: Arc::from(source),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
 }

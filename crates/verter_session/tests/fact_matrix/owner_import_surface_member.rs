@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 #[test]
@@ -22,7 +22,7 @@ fn owner_import_surface_producer_counter_advances_on_nested_member_imports() {
         canonical_id: Some("/types.ts".into()),
         input_id: "/types.ts".into(),
         source: Arc::from("export interface OwnerNested { nested: { id: string } }"),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.upsert(UpsertRequest {
@@ -34,7 +34,7 @@ fn owner_import_surface_producer_counter_advances_on_nested_member_imports() {
              defineProps<OwnerNested>();\
              </script>",
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
 

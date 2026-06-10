@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{
     ExactResolution, MemoryOptions, MemoryWorkspace, ParsedEdge, ResolvePhase, ResolveRequestKind,
     WorkspaceAccess, WorkspaceRead,
@@ -52,7 +52,9 @@ fn build_host_and_seed() -> Arc<VerterHost> {
             canonical_id: Some("/src/Comp.vue".to_string()),
             input_id: "/src/Comp.vue".to_string(),
             source: Arc::from(COMP_SOURCE),
-            file_kind: FileKind::from_path("/src/Comp.vue"),
+            file_language: verter_session::LanguageRegistry::global()
+                .classify_static("/src/Comp.vue")
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("seed upsert");

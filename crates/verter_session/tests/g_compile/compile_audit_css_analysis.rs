@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use verter_compiler::compile::CompileTarget;
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 const SFC_WITH_STYLE: &str = "<script setup lang=\"ts\">\n\
@@ -42,7 +42,7 @@ fn host_with(canonical: &str, source: &'static str) -> Arc<VerterHost> {
         canonical_id: Some(canonical.into()),
         input_id: canonical.into(),
         source: Arc::from(source),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     });
     host

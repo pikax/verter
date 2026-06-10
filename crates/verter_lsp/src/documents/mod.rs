@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use dashmap::DashMap;
 use tower_lsp_server::ls_types::*;
 use verter_session::{
-    CompileProfile, FileKind, HostUpdateResult, IdeResponse, StyleOverrideEntry,
+    CompileProfile, FileLanguage, HostUpdateResult, IdeResponse, StyleOverrideEntry,
     StyleOverrideRequest, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 
@@ -87,6 +87,26 @@ impl DocumentRegistry {
         self.encoding.read().clone()
     }
 
+    /// Resolve the [`FileLanguage`] row for an editor document.
+    ///
+    /// The client's `language_id` is authoritative for the Vue carrier
+    /// (an in-memory Vue document may not carry a `.vue` path); every
+    /// other document classifies by canonical path through the host's
+    /// language classifier — the same authority the workspace-scan
+    /// ingress uses, so one file resolves one `FileLanguage` row
+    /// regardless of which ingress loaded it. A registered carrier row
+    /// without a parser behind it (`.svelte`) resolves to its framework
+    /// row here, and the host upsert surfaces the typed
+    /// unsupported-language error instead of silently parsing the
+    /// document as a plain script.
+    fn document_file_language(&self, language_id: &str, canonical_id: &str) -> FileLanguage {
+        if language_id == "vue" {
+            FileLanguage::vue()
+        } else {
+            self.host.language_classifier().classify(canonical_id)
+        }
+    }
+
     /// Handle a document being opened in the editor.
     pub fn did_open(&self, params: &TextDocumentItem) -> HostUpdateResult {
         let uri_str = params.uri.as_str().to_string();
@@ -110,23 +130,20 @@ impl DocumentRegistry {
         let canonical_id = uri_to_canonical_id(&params.uri);
         let source: Arc<str> = Arc::from(params.text.as_str());
 
-        let file_kind = if params.language_id == "vue" {
-            FileKind::VueSfc
-        } else {
-            FileKind::NonSfc
-        };
+        let file_language = self.document_file_language(&params.language_id, &canonical_id);
+        let is_vue = file_language.is_vue();
 
         let result = self.host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.clone()),
             input_id: canonical_id.clone(),
             source: source.clone(),
-            file_kind,
+            file_language,
             aliases: vec![],
         });
 
         // Trigger compilation to populate TSX cache (upsert only parses).
         // ensure_compiled() compiles lazily and caches TSX + source map.
-        if file_kind == FileKind::VueSfc {
+        if is_vue {
             let _ = self
                 .host
                 .ensure_compiled(&canonical_id, &self.tsx_profile.read());
@@ -136,7 +153,7 @@ impl DocumentRegistry {
         // Always build on did_open — even if the host reports `changed: false`
         // (e.g., because scan_workspace already loaded the same content), we still
         // need the mapper for hover/definition/diagnostics.
-        let position_mapper = if file_kind == FileKind::VueSfc {
+        let position_mapper = if is_vue {
             self.host
                 .get_ide(&canonical_id, &self.tsx_profile.read())
                 .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok())
@@ -184,24 +201,20 @@ impl DocumentRegistry {
         let canonical_id = uri_to_canonical_id(uri);
         let source: Arc<str> = Arc::from(text);
 
-        let file_kind = self
+        let stored_language_id = self
             .documents
             .get(&uri_str)
-            .map(|d| {
-                if d.language_id == "vue" {
-                    FileKind::VueSfc
-                } else {
-                    FileKind::NonSfc
-                }
-            })
-            .unwrap_or(FileKind::NonSfc);
+            .map(|d| d.language_id.clone())
+            .unwrap_or_default();
+        let file_language = self.document_file_language(&stored_language_id, &canonical_id);
+        let is_vue = file_language.is_vue();
 
         let upsert_start = std::time::Instant::now();
         let result = self.host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.clone()),
             input_id: canonical_id.clone(),
             source: source.clone(),
-            file_kind,
+            file_language,
             aliases: vec![],
         });
         tracing::info!(
@@ -217,7 +230,7 @@ impl DocumentRegistry {
         self.host.notify_upsert(&canonical_id, source.clone());
 
         // Trigger re-compilation for Vue SFCs
-        if file_kind == FileKind::VueSfc {
+        if is_vue {
             let compile_start = std::time::Instant::now();
             let _ = self
                 .host
@@ -862,6 +875,105 @@ mod tests {
             registry.get_position_mapper(&uri).is_some(),
             "mapper should be lazily rebuilt on fast path cache hit"
         );
+    }
+
+    /// A known-but-unsupported framework carrier (`.svelte`) opened in
+    /// the editor must route through the language classifier: the host
+    /// rejects the upsert with the typed unsupported-language error
+    /// instead of silently parsing the document as a plain TypeScript
+    /// script.
+    #[test]
+    fn did_open_svelte_rejects_typed_instead_of_misparsing_as_script() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        let uri: Uri = "file:///home/user/App.svelte".parse().unwrap();
+
+        registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "svelte".to_string(),
+            version: 1,
+            text: "<script>let x = 1;</script>".to_string(),
+        });
+
+        // The editor document stays tracked…
+        assert!(
+            registry.open_uris().contains(&uri.as_str().to_string()),
+            "the opened document must stay tracked in the registry"
+        );
+        // …but the host must NOT hold a silently-misparsed script
+        // artifact: the carrier-without-parser upsert fails with the
+        // typed unsupported-language error and produces no source
+        // snapshot.
+        assert!(
+            registry
+                .host()
+                .get_source("/home/user/App.svelte")
+                .is_none(),
+            "a known-but-unsupported carrier must not be parsed as a plain script"
+        );
+    }
+
+    /// Plain-script documents keep parsing exactly as before: the
+    /// classifier resolves the script row for the canonical path and
+    /// the upsert succeeds.
+    #[test]
+    fn did_open_script_document_still_parses() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        let uri: Uri = "file:///home/user/util.ts".parse().unwrap();
+
+        registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "typescript".to_string(),
+            version: 1,
+            text: "export const x = 1;".to_string(),
+        });
+
+        assert!(
+            registry.host().get_source("/home/user/util.ts").is_some(),
+            "a plain script document must parse through the script path"
+        );
+    }
+
+    /// The editor ingress and the workspace-scan ingress resolve the
+    /// SAME `FileLanguage` row for the same path: both route through the
+    /// host's language classifier. `language_id == "vue"` stays
+    /// authoritative for the Vue carrier (an in-memory Vue document may
+    /// not carry a `.vue` path).
+    #[test]
+    fn document_language_agrees_with_host_classifier() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(Arc::clone(&host));
+
+        assert_eq!(
+            registry.document_file_language("vue", "/x/App.vue"),
+            FileLanguage::vue()
+        );
+        for path in ["/x/a.ts", "/x/a.js", "/x/a.svelte", "/x/notes.md"] {
+            assert_eq!(
+                registry.document_file_language("plaintext", path),
+                host.language_classifier().classify(path),
+                "editor ingress must agree with the scan ingress for {path}"
+            );
+        }
+        // The classifier (not a hard-coded TypeScript fallback) decides:
+        // a `.js` path resolves the JS script row.
+        assert_eq!(
+            registry.document_file_language("javascript", "/x/a.js"),
+            FileLanguage::script(verter_session::ScriptSourceType::Js)
+        );
+        // A `.svelte` path resolves its framework carrier row — never
+        // the Vue row, never a plain script.
+        let svelte = registry.document_file_language("svelte", "/x/a.svelte");
+        assert!(svelte.is_framework_carrier());
+        assert!(!svelte.is_vue());
+        assert_ne!(svelte, FileLanguage::script_ts());
     }
 
     /// get_ide() fast path should not overwrite an existing position mapper.

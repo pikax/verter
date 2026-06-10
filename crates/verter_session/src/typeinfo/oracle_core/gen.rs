@@ -52,7 +52,7 @@ use verter_type_runtime::tsgo::ipc::{find_tsgo_binary, TsgoTypeProvider};
 use verter_type_runtime::{path_to_file_uri_string, TypeProvider};
 
 use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext};
-use crate::types::{FileKind, HostConfig, UpsertRequest};
+use crate::types::{FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
 
 use super::admission::{self, AdmissionVerdict, SourceContributor, SourceWalkResult};
@@ -660,7 +660,9 @@ fn build_source_host(spec: &QuerySpec) -> Arc<VerterHost> {
             canonical_id: Some(f.path.to_string()),
             input_id: f.path.to_string(),
             source: Arc::from(f.source),
-            file_kind: FileKind::from_path(f.path),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(f.path)
+                .static_resolution(),
             aliases: Vec::new(),
         });
     }

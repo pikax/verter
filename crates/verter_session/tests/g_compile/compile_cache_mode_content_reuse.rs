@@ -18,8 +18,8 @@
 //! fact-validates Content mode.
 
 use verter_session::{
-    CompileCacheMode, CompileErrorPolicy, CompileProfile, DowngradeReason, FileKind, HostConfig,
-    UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
+    CompileCacheMode, CompileErrorPolicy, CompileProfile, DowngradeReason, FileLanguage,
+    HostConfig, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 use verter_workspace::{ExactResolution, ResolvePhase, ResolveRequestKind};
 
@@ -44,7 +44,7 @@ fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: source.into(),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert ts");
@@ -56,7 +56,7 @@ fn upsert_vue(host: &VerterHost, canonical: &str, source: &str) {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: source.into(),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert vue");

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use verter_semantic::facts::registry::SymbolSpace;
 use verter_session::session_view::{HostView, SessionView};
 use verter_session::{
-    CompileErrorPolicy, DependencyResolution, FileKind, HostConfig, UpsertRequest, VerterHost,
+    CompileErrorPolicy, DependencyResolution, FileLanguage, HostConfig, UpsertRequest, VerterHost,
 };
 
 #[test]
@@ -35,7 +35,7 @@ fn namespace_import_admits_namespace_space_fact() {
             canonical_id: None,
             input_id: "/lib.ts".to_string(),
             source: Arc::from("export const x = 1;\nexport const y = 2;"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("lib upsert");
@@ -48,7 +48,7 @@ fn namespace_import_admits_namespace_space_fact() {
             source: Arc::from(
                 "import * as lib from './lib';\nexport const total = lib.x + lib.y;\n",
             ),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("ns_owner upsert");

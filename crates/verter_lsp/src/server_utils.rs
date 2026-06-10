@@ -37,9 +37,17 @@ pub(super) fn is_config_file(path: &str) -> bool {
     false
 }
 
-/// Check whether a canonical ID (or URI string) refers to a `.vue` file.
-pub(super) fn is_vue_file(path: &str) -> bool {
-    path.ends_with(".vue")
+/// Registry-backed carrier classification for a canonical ID (or URI
+/// string): `Some(language)` when the path classifies as a framework
+/// CARRIER row (`.vue`, `.svelte`, …), `None` for plain scripts and
+/// unknown extensions. A carrier row without a registered carrier
+/// implementation still classifies here — its requests surface the
+/// typed unsupported-language error and produce no provider sync state.
+pub(super) fn carrier_language_for(path: &str) -> Option<verter_session::FileLanguage> {
+    let language = verter_session::LanguageRegistry::global()
+        .classify_static(path)
+        .static_resolution();
+    language.is_framework_carrier().then_some(language)
 }
 
 /// When `only` is `None` (no filter), all kinds are wanted.
@@ -76,7 +84,7 @@ pub(super) fn build_workspace_components(
 
     for (file_id, kind) in &files {
         // Only .vue files
-        if *kind != verter_session::FileKind::VueSfc {
+        if !kind.is_vue() {
             continue;
         }
         // Skip the current file

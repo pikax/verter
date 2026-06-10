@@ -457,7 +457,12 @@ impl VerterHost {
                         canonical_id: canonical.clone(),
                     }
                 })?;
-                if hd.file_kind == FileKind::NonSfc {
+                // Vue-only gate, matching the sibling gates in this
+                // pipeline: the compile path behind this validator is the
+                // Vue carrier's. A non-Vue carrier never reaches it — its
+                // source execution rejects with the typed
+                // unsupported-language error first.
+                if !hd.file_language.is_vue() {
                     return Ok(());
                 }
                 // TOP-LEVEL warm validator: a compile warm hit returns
@@ -1494,13 +1499,13 @@ impl VerterHost {
             return None;
         }
 
-        let (source, file_kind, macro_type_deps, script_imports, cached_extract, whole_hash) = {
+        let (source, file_language, macro_type_deps, script_imports, cached_extract, whole_hash) = {
             let efs = self.effective_file_state(&canonical, profile_hash)?;
-            let file_kind = self.scheduler.try_get_source(&canonical).and_then(|snap| {
+            let file_language = self.scheduler.try_get_source(&canonical).and_then(|snap| {
                 snap.downcast_data::<crate::host_executor::HostSourceData>()
-                    .map(|hd| hd.file_kind)
+                    .map(|hd| hd.file_language.clone())
             })?;
-            if file_kind != FileKind::VueSfc {
+            if !file_language.is_vue() {
                 return None;
             }
             // cached_tsc_extract lives on DerivedRawState (D48 split).
@@ -1515,7 +1520,7 @@ impl VerterHost {
             });
             (
                 efs.source,
-                file_kind,
+                file_language,
                 efs.script_analysis.macro_type_deps.clone(),
                 efs.script_analysis.imports.clone(),
                 cached,
@@ -1523,7 +1528,7 @@ impl VerterHost {
             )
         };
 
-        if file_kind != FileKind::VueSfc {
+        if !file_language.is_vue() {
             return None;
         }
         // Derive component name from canonical_id: last path segment, strip .vue extension.

@@ -54,7 +54,6 @@
 use std::sync::Arc;
 
 use crate::resolver_core::{DerivedFactKind, StoreView};
-use crate::types::FileKind;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
 fn upsert(host: &VerterHost, path: &str, source: &str) {
@@ -63,7 +62,9 @@ fn upsert(host: &VerterHost, path: &str, source: &str) {
             canonical_id: Some(path.to_string()),
             input_id: path.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::from_path(path),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(path)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .unwrap_or_else(|e| panic!("upsert {path} failed: {e:?}"));

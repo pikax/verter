@@ -27,7 +27,7 @@ use std::convert::Infallible;
 use verter_audit::{AuditCaptureState, RequestKind, RequestKindPayload};
 use verter_compiler::compile::CompileTarget;
 use verter_session::host_mcp_audit::McpToolSuccess;
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 const SFC: &str = "<script setup lang=\"ts\">\n\
@@ -51,7 +51,7 @@ fn build_host(audit_enabled: bool) -> Arc<VerterHost> {
         canonical_id: Some("/m.vue".into()),
         input_id: "/m.vue".into(),
         source: Arc::from(SFC),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     });
     host

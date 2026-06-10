@@ -389,14 +389,6 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         self.engine.read_package_manifest(self, canonical_id)
     }
 
-    fn classify_file(&self, canonical_id: &str) -> crate::types::FileKind {
-        if canonical_id.ends_with(".vue") {
-            crate::types::FileKind::VueSfc
-        } else {
-            crate::types::FileKind::NonSfc
-        }
-    }
-
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn resolve_import(
         &self,

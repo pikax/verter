@@ -9337,7 +9337,7 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
             canonical_id: None,
             input_id: SFC.to_string(),
             source: Arc::from(base_src),
-            file_kind: crate::FileKind::VueSfc,
+            file_language: crate::FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -9462,7 +9462,7 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
             canonical_id: None,
             input_id: SFC.to_string(),
             source: Arc::from(base_src),
-            file_kind: crate::FileKind::VueSfc,
+            file_language: crate::FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -9587,16 +9587,16 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
          </script>";
     for (id, src) in [(SLOTS_TS, base_slots), (SFC, sfc_src)] {
         let kind = if id.ends_with(".vue") {
-            crate::FileKind::VueSfc
+            crate::FileLanguage::vue()
         } else {
-            crate::FileKind::NonSfc
+            crate::FileLanguage::script_ts()
         };
         let _ = host
             .upsert(crate::UpsertRequest {
                 canonical_id: None,
                 input_id: id.to_string(),
                 source: Arc::from(src),
-                file_kind: kind,
+                file_language: kind,
                 aliases: Vec::new(),
             })
             .expect("upsert succeeds");

@@ -444,9 +444,18 @@ impl VerterLanguageServer {
         let mut seen = HashSet::new();
 
         while let Some(canonical_id) = pending.pop() {
-            if !seen.insert(canonical_id.clone()) || canonical_id.ends_with(".vue") {
+            if !seen.insert(canonical_id.clone()) {
                 continue;
             }
+            // Framework carriers never sync through the non-Vue graph
+            // as raw scripts: `.vue` targets sync through the Vue
+            // public-api path, and a carrier-less row (`.svelte`)
+            // produces no provider sync state.
+            let Some(file_language) =
+                crate::provider_sync::provider_script_language(&self.documents.host, &canonical_id)
+            else {
+                continue;
+            };
 
             let Some(source) = reader.read_file(&canonical_id) else {
                 continue;
@@ -459,7 +468,7 @@ impl VerterLanguageServer {
                     canonical_id: Some(canonical_id.clone()),
                     input_id: canonical_id.clone(),
                     source: Arc::clone(&source),
-                    file_kind: verter_session::FileKind::NonSfc,
+                    file_language,
                     aliases: Vec::new(),
                 })
                 .map(|result| result.module_references)
@@ -1028,12 +1037,18 @@ impl VerterLanguageServer {
             let Some(source) = host.get_source(barrel_id) else {
                 continue;
             };
+            // Framework carriers never sync as raw scripts.
+            let Some(file_language) =
+                crate::provider_sync::provider_script_language(host, barrel_id)
+            else {
+                continue;
+            };
             let module_references = block_in_place_if_available(|| {
                 host.upsert(verter_session::UpsertRequest {
                     canonical_id: Some(barrel_id.clone()),
                     input_id: barrel_id.clone(),
                     source: source.clone(),
-                    file_kind: verter_session::FileKind::NonSfc,
+                    file_language,
                     aliases: Vec::new(),
                 })
                 .map(|result| result.module_references)

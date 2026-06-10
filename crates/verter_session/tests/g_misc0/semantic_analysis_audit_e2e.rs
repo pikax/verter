@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use verter_audit::RequestKind;
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 const SFC: &str = r#"<script setup lang="ts">
@@ -66,7 +66,9 @@ fn setup_host_with_sfc(canonical: &str, source: &str) -> Arc<VerterHost> {
         canonical_id: Some(canonical.to_string()),
         input_id: canonical.to_string(),
         source: Arc::from(source),
-        file_kind: FileKind::from_path(canonical),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
         aliases: Vec::new(),
     });
     host

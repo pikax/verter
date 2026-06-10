@@ -142,7 +142,12 @@ impl VerterHost {
                 return st;
             }
         }
-        crate::parse::imported_eval_source_type(canonical_id, raw_source, cached_parse)
+        crate::parse::imported_eval_source_type(
+            &self.language_classifier.classify(canonical_id),
+            canonical_id,
+            raw_source,
+            cached_parse,
+        )
     }
 
     /// View-aware variant of [`Self::read_analysis_source`].
@@ -338,7 +343,8 @@ impl VerterHost {
     ///
     /// `EvalEnv` is a pure parse artifact, so its cache identity is
     /// the same `(canonical, content_hash, parse_env_hash,
-    /// parser_version)` quadruple every other parse artifact uses.
+    /// parser_version, file_language_id)` key every other parse
+    /// artifact uses.
     /// `parse_env_hash` is the canonical's per-project parse-env
     /// dimension; `parser_version` is the live-path parser version
     /// (the `FileArtifactStore` legacy surface uses the same
@@ -356,6 +362,9 @@ impl VerterHost {
             content_hash,
             parse_env_hash: self.host_view_env_hashes_for(canonical).parse_env_hash,
             parser_version: crate::file_artifact_store::LEGACY_PARSER_VERSION,
+            file_language_id: crate::file_artifact_store::FileArtifactKey::derived_file_language_id(
+                canonical,
+            ),
         }
     }
 

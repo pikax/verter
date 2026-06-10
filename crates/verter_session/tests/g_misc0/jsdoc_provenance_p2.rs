@@ -30,7 +30,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 /// Build a hermetic host with `files` injected into the workspace AND upserted
@@ -51,16 +51,16 @@ fn build_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
         ws,
     ));
     for (path, source) in files {
-        let file_kind = if path.ends_with(".vue") {
-            FileKind::VueSfc
+        let file_language = if path.ends_with(".vue") {
+            FileLanguage::vue()
         } else {
-            FileKind::NonSfc
+            FileLanguage::script_ts()
         };
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some((*path).into()),
             input_id: (*path).into(),
             source: Arc::from(*source),
-            file_kind,
+            file_language,
             aliases: vec![],
         });
     }

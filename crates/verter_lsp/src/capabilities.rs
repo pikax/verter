@@ -4,6 +4,20 @@ use tower_lsp_server::ls_types::*;
 /// Build the server capabilities to advertise during initialization.
 ///
 /// `encoding` is the negotiated position encoding to announce to the client.
+/// Watcher glob covering every registered framework-carrier extension,
+/// built from `LanguageRegistry::carrier_extensions()` (e.g.
+/// `**/*.{svelte,vue}`). Carrier rows without a registered carrier
+/// implementation widen the glob too — their watched events are inert
+/// (no virtual-file wiring exists for them), so watching is harmless
+/// and the glob stays registry-derived rather than hand-enumerated.
+pub(crate) fn carrier_watch_glob() -> String {
+    let extensions = verter_session::LanguageRegistry::global().carrier_extensions();
+    match extensions.as_slice() {
+        [single] => format!("**/*.{single}"),
+        many => format!("**/*.{{{}}}", many.join(",")),
+    }
+}
+
 pub fn server_capabilities(encoding: &PositionEncodingKind) -> ServerCapabilities {
     ServerCapabilities {
         position_encoding: Some(encoding.clone()),
@@ -160,7 +174,7 @@ pub fn server_capabilities(encoding: &PositionEncodingKind) -> ServerCapabilitie
                     filters: vec![FileOperationFilter {
                         scheme: Some("file".to_string()),
                         pattern: FileOperationPattern {
-                            glob: "**/*.vue".to_string(),
+                            glob: carrier_watch_glob(),
                             matches: None,
                             options: None,
                         },
@@ -170,7 +184,7 @@ pub fn server_capabilities(encoding: &PositionEncodingKind) -> ServerCapabilitie
                     filters: vec![FileOperationFilter {
                         scheme: Some("file".to_string()),
                         pattern: FileOperationPattern {
-                            glob: "**/*.vue".to_string(),
+                            glob: carrier_watch_glob(),
                             matches: None,
                             options: None,
                         },

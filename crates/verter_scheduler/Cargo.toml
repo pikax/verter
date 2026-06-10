@@ -27,6 +27,7 @@ rustc-hash = { workspace = true }
 dashmap = "6.2"
 crossbeam-channel = "0.5.15"
 verter_audit = { path = "../verter_audit" }
+verter_language = { path = "../verter_language" }
 verter_span = { path = "../verter_span" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

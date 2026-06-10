@@ -39,7 +39,7 @@
 //! post-fix it recomputes and resolves the new file.
 use std::sync::Arc;
 
-use crate::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use crate::{HostConfig, UpsertRequest, VerterHost};
 
 /// Upsert a `.ts` file into a standalone host.
 fn upsert(host: &VerterHost, path: &str, source: &str) {
@@ -48,7 +48,9 @@ fn upsert(host: &VerterHost, path: &str, source: &str) {
             canonical_id: Some(path.to_string()),
             input_id: path.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::from_path(path),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(path)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .unwrap_or_else(|e| panic!("upsert {path} failed: {e:?}"));
@@ -110,7 +112,9 @@ fn negative_import_route_reopens_after_target_file_appears() {
             canonical_id: Some(late_dep.to_string()),
             input_id: late_dep.to_string(),
             source: Arc::from("export type LateType = { resolved: true };\n"),
-            file_kind: FileKind::from_path(late_dep),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(late_dep)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("late_dep upsert");

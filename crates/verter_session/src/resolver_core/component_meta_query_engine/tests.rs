@@ -2928,7 +2928,7 @@ export interface SourceProps {
 }
 "#,
         ),
-        file_kind: crate::FileKind::NonSfc,
+        file_language: crate::FileLanguage::script_ts(),
         aliases: vec![],
     });
 

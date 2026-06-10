@@ -25,7 +25,7 @@
 
 #![cfg(test)]
 
-use verter_session::{CompileProfile, FileKind};
+use verter_session::{CompileProfile, FileLanguage};
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use crate::canary_harness::{
@@ -77,7 +77,7 @@ fn negative_result_recovers_when_missing_dependency_appears() {
          defineProps<{ ui: typeof theme }>()\n\
          </script>\n\
          <template><div /></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     // First evaluation — `./theme` is missing, so `ui` is a
@@ -103,7 +103,7 @@ fn negative_result_recovers_when_missing_dependency_appears() {
         &host,
         "/src/theme.ts",
         "export default {\n  item: \"item\",\n  body: \"body\",\n}\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     // The consumer must recover: the stale negative result is
@@ -191,7 +191,12 @@ fn evicted_owner_reloads_to_authoritative_state_after_dep_edit() {
         "/workspace/src/types.ts".into(),
         std::sync::Arc::from(edited),
     );
-    upsert(&host, "/workspace/src/types.ts", edited, FileKind::NonSfc);
+    upsert(
+        &host,
+        "/workspace/src/types.ts",
+        edited,
+        FileLanguage::script_ts(),
+    );
     host.evict("/workspace/src/Comp.vue");
 
     // The evicted owner must reload to authoritative state and reflect
@@ -234,7 +239,7 @@ fn unrelated_file_upsert_keeps_compile_slot_warm() {
         &host,
         "/src/types.ts",
         "export interface MyType { foo: string }\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     upsert(
         &host,
@@ -244,7 +249,7 @@ fn unrelated_file_upsert_keeps_compile_slot_warm() {
          defineProps<MyType>()\n\
          </script>\n\
          <template><div/></template>\n",
-        FileKind::VueSfc,
+        FileLanguage::vue(),
     );
 
     let profile = CompileProfile::default();
@@ -259,7 +264,7 @@ fn unrelated_file_upsert_keeps_compile_slot_warm() {
         &host,
         "/src/unrelated.ts",
         "export const x = 1;\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     assert!(
         host.compile_slot_is_warm("/src/Comp.vue", &profile),
@@ -272,7 +277,7 @@ fn unrelated_file_upsert_keeps_compile_slot_warm() {
         &host,
         "/src/unrelated.ts",
         "export const x = 2;\n",
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
     assert!(
         host.compile_slot_is_warm("/src/Comp.vue", &profile),
@@ -358,7 +363,7 @@ fn unrelated_file_upsert_keeps_component_meta_warm() {
         &host,
         "/workspace/src/other.ts",
         unrelated,
-        FileKind::NonSfc,
+        FileLanguage::script_ts(),
     );
 
     // The owner's warm result MUST survive: the next query HITS the

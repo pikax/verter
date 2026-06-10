@@ -7,31 +7,10 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use thiserror::Error;
+pub use verter_language::FileLanguage;
 
 /// 128-bit hash (xxh3) stored as a byte array, used for content and semantic hashing.
 pub type Hash16 = [u8; 16];
-
-/// Discriminates between Vue Single File Components and other file types
-/// (e.g. `.ts` files tracked for cross-file type resolution).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FileKind {
-    /// A `.vue` Single File Component — parsed into script/template/style blocks.
-    VueSfc,
-    /// A non-SFC file (`.ts`, `.js`, etc.) — tracked for dependency and export signatures.
-    NonSfc,
-}
-
-impl FileKind {
-    /// Infer file kind from a file path's extension.
-    /// Files ending in `.vue` are `VueSfc`; everything else is `NonSfc`.
-    pub fn from_path(path: &str) -> Self {
-        if path.ends_with(".vue") {
-            Self::VueSfc
-        } else {
-            Self::NonSfc
-        }
-    }
-}
 
 /// Hot Module Replacement strategy injected into the assembled main module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1420,8 +1399,8 @@ pub struct UpsertRequest {
     pub input_id: String,
     /// Full source text of the file.
     pub source: Arc<str>,
-    /// Whether this is a Vue SFC or a non-SFC dependency.
-    pub file_kind: FileKind,
+    /// The file's language (framework carrier vs. plain script).
+    pub file_language: FileLanguage,
     /// Additional path aliases that should resolve to this file.
     pub aliases: Vec<String>,
 }

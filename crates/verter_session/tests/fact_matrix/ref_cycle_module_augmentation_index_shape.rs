@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 #[test]
@@ -24,7 +24,7 @@ fn ref_cycle_producer_counter_monotonic_under_module_augmentation_fixture() {
         canonical_id: Some("/aug.ts".into()),
         input_id: "/aug.ts".into(),
         source: Arc::from("declare module 'pkg' { interface Pkg { extra: string } }"),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.upsert(UpsertRequest {
@@ -36,7 +36,7 @@ fn ref_cycle_producer_counter_monotonic_under_module_augmentation_fixture() {
              defineProps<{ root: Tree }>();\
              </script>",
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
 

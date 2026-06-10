@@ -21,7 +21,10 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use tokio::sync::mpsc;
-use verter_session::{CompileProfile, FileKind, UpsertRequest, VerterHost};
+use verter_session::{CompileProfile, UpsertRequest, VerterHost};
+
+#[cfg(test)]
+use verter_session::FileLanguage;
 
 use crate::provider_sync::{
     commit_sync_transition, genuinely_stale_after_sync, prepare_sync_transition,
@@ -588,6 +591,12 @@ async fn sync_non_vue_file_to_provider(
         return Vec::new();
     };
 
+    // Framework carriers never sync to the provider as raw scripts.
+    let Some(file_language) = crate::provider_sync::provider_script_language(host, canonical_id)
+    else {
+        return Vec::new();
+    };
+
     // Upsert + prepare non-Vue sync (CPU-bound parsing + disk I/O for import resolution)
     let host_clone = Arc::clone(host);
     let snap_clone = snapshot.clone();
@@ -599,7 +608,7 @@ async fn sync_non_vue_file_to_provider(
                 canonical_id: Some(id_clone.clone()),
                 input_id: id_clone.clone(),
                 source: source_clone.clone(),
-                file_kind: FileKind::NonSfc,
+                file_language,
                 aliases: Vec::new(),
             })
             .map(|result| result.module_references)
@@ -1149,7 +1158,7 @@ mod tests {
             canonical_id: Some(canonical_id.to_string()),
             input_id: canonical_id.to_string(),
             source: Arc::<str>::from("<template><div>App</div></template>"),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         });
         let profile = CompileProfile {
@@ -1218,7 +1227,7 @@ mod tests {
             canonical_id: Some(canonical_id.to_string()),
             input_id: canonical_id.to_string(),
             source: Arc::<str>::from("<template><div>Tool</div></template>"),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         });
         let profile = CompileProfile {
@@ -1294,7 +1303,7 @@ import Child from './Child.vue'
 </script>
 <template><Child msg="hi" /></template>"#,
             ),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         });
         let _ = host.upsert(UpsertRequest {
@@ -1306,7 +1315,7 @@ defineProps<{ msg: string }>()
 </script>
 <template><div>{{ msg }}</div></template>"#,
             ),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         });
         let profile = CompileProfile {
@@ -1391,7 +1400,7 @@ import Child from '@/Child.vue'
 </script>
 <template><div /></template>"#,
             ),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         });
         let profile = CompileProfile {
@@ -1788,7 +1797,7 @@ defineProps<{ msg: string }>()
 </script>
 <template><div>{{ msg }}</div></template>"#,
             ),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         });
         let profile = CompileProfile {

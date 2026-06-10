@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 #[test]
@@ -19,7 +19,7 @@ fn materialize_structure_producer_advances_counter_on_cross_file_import_walk() {
         canonical_id: Some("/types.ts".into()),
         input_id: "/types.ts".into(),
         source: Arc::from("export interface ImportedProps { id: string }"),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.upsert(UpsertRequest {
@@ -31,7 +31,7 @@ fn materialize_structure_producer_advances_counter_on_cross_file_import_walk() {
              defineProps<ImportedProps>();\
              </script>",
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
 

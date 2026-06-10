@@ -6,7 +6,7 @@ use verter_workspace::WorkspaceRead;
 #[cfg(target_arch = "wasm32")]
 use crate::shared::read_lock;
 use crate::{
-    BlockOverrideEntry, BlockOverrideRequest, CompileErrorPolicy, CompileProfile, FileKind,
+    BlockOverrideEntry, BlockOverrideRequest, CompileErrorPolicy, CompileProfile, FileLanguage,
     HostConfig, HostDiagnostic, HostError, HostSeverity, PreprocessorBlockType, PublicApiMode,
     UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
@@ -28,7 +28,7 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -40,7 +40,7 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, source: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -3130,7 +3130,7 @@ const height = ref('100px')
             canonical_id: None,
             input_id: "/src/Regression.vue".to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert should succeed");
@@ -3976,7 +3976,7 @@ fn macro_type_dep_resolves_types_only_package_exports() {
             canonical_id: None,
             input_id: "/workspace/src/Popup.vue".to_string(),
             source: Arc::from(popup_source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert should succeed");
@@ -4446,7 +4446,7 @@ fn resolve_prepared_decl_target_returns_unchanged_for_same_file_decl() {
         canonical_id: None,
         input_id: "/src/decl.ts".to_string(),
         source: Arc::from("export interface LocalProps { a: number; b: string }\n"),
-        file_kind: crate::FileKind::NonSfc,
+        file_language: crate::FileLanguage::script_ts(),
         aliases: Vec::new(),
     });
     // The helper takes a "scope canonical, name" pair. For a
@@ -4497,7 +4497,7 @@ fn resolve_decl_in_scope_with_reexport_chain_returns_declaring_decl_identity() {
         canonical_id: None,
         input_id: "/src/lib.ts".to_string(),
         source: Arc::from("export interface ChildProps { x: number; y: string }\n"),
-        file_kind: crate::FileKind::NonSfc,
+        file_language: crate::FileLanguage::script_ts(),
         aliases: Vec::new(),
     });
     let identity = host

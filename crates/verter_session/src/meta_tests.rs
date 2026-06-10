@@ -2231,7 +2231,7 @@ defineProps<{
   body: "body",
 }"#,
             ),
-            file_kind: crate::FileKind::NonSfc,
+            file_language: crate::FileLanguage::script_ts(),
             aliases: vec![],
         })
         .unwrap();
@@ -7141,7 +7141,9 @@ fn non_scheduler_upsert_reflects_updated_source_in_subsequent_analysis() {
             canonical_id: Some("/App.vue".to_string()),
             input_id: "/App.vue".to_string(),
             source: Arc::from(updated.as_str()),
-            file_kind: crate::types::FileKind::from_path("/App.vue"),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static("/App.vue")
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .unwrap();

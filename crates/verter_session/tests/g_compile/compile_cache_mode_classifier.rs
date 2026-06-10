@@ -20,7 +20,7 @@
 //! would fail those rows.
 
 use verter_session::{
-    CompileCacheMode, CompileErrorPolicy, CompileProfile, FileKind, HostConfig, UpsertRequest,
+    CompileCacheMode, CompileErrorPolicy, CompileProfile, FileLanguage, HostConfig, UpsertRequest,
     VerterHost, VirtualNodeKind, VirtualQuery,
 };
 
@@ -43,7 +43,7 @@ fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: source.into(),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert ts");
@@ -55,7 +55,7 @@ fn upsert_vue(host: &VerterHost, canonical: &str, source: &str) {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: source.into(),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert vue");

@@ -80,6 +80,14 @@ fn host_error(err: host::HostError) -> Error {
         host::HostError::InvalidQuery
         | host::HostError::MissingSource { .. }
         | host::HostError::MissingVirtualNode { .. } => Status::InvalidArg,
+        // Typed unsupported-language failure: the request named a
+        // language row with no registered implementation — same status
+        // family as the classify errors (the caller's input names a
+        // language the host cannot serve), distinguishable from a
+        // generic internal failure.
+        host::HostError::Scheduler(
+            verter_scheduler::job::SchedulerError::UnsupportedLanguage { .. },
+        ) => Status::InvalidArg,
         host::HostError::CompileError(_) => Status::GenericFailure,
         #[allow(unreachable_patterns)]
         _ => Status::GenericFailure,
@@ -1407,8 +1415,9 @@ impl NapiVerterHost {
     ///
     /// - `request.inputId` — the file path used for import resolution.
     /// - `request.source` — SFC source as a UTF-8 `Buffer`.
-    /// - `request.fileKind` — optional override (`"vue"` or `"ts"`); inferred
-    ///   from extension when `None`.
+    /// - `request.fileKind` — optional explicit kind (`"vue"`/`"sfc"`/
+    ///   `"vue_sfc"`, `"svelte"`, or `"non_sfc"`/`"text"`/`"file"`);
+    ///   classified from the canonical path when `None`.
     ///
     /// Returns an error if the source is not valid UTF-8 or if the file kind
     /// is unrecognised.
@@ -2826,6 +2835,27 @@ pub struct NapiCompileBatchEntry {
 mod tests {
     use super::*;
 
+    /// The typed unsupported-language failure surfaces at the NAPI
+    /// boundary in the SAME status family as the classify errors
+    /// (`InvalidArg` — the request named a language the host cannot
+    /// serve), not as a generic failure. DISCRIMINATING: the catch-all
+    /// arm maps it to `GenericFailure`.
+    #[test]
+    fn unsupported_language_maps_to_invalid_arg_status() {
+        let err = host_error(host::HostError::Scheduler(
+            verter_scheduler::job::SchedulerError::UnsupportedLanguage {
+                file_id: "/src/Box.svelte".to_string(),
+                adapter_id: verter_session::FrameworkAdapterId::svelte(),
+            },
+        ));
+        assert_eq!(err.status, Status::InvalidArg);
+        assert!(
+            err.reason.contains("svelte"),
+            "the message names the adapter: {}",
+            err.reason
+        );
+    }
+
     #[test]
     fn host_update_to_napi_exposes_module_references() {
         let result = host_update_to_napi(
@@ -2869,7 +2899,7 @@ mod tests {
                 source: std::sync::Arc::from(
                     "export { default as Button } from './Button.vue';\nexport type { Props } from './types';",
                 ),
-                file_kind: host::FileKind::NonSfc,
+                file_language: host::FileLanguage::script_ts(),
                 aliases: Vec::new(),
             })
             .unwrap();
@@ -2904,7 +2934,7 @@ mod tests {
                 source: std::sync::Arc::from(
                     "export function greet() {}\nexport type Color = string;",
                 ),
-                file_kind: host::FileKind::NonSfc,
+                file_language: host::FileLanguage::script_ts(),
                 aliases: Vec::new(),
             })
             .unwrap();

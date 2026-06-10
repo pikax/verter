@@ -17,6 +17,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use verter_language::FileLanguage;
+
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 
@@ -168,15 +170,6 @@ impl std::fmt::Debug for ArtifactSnapshot {
     }
 }
 
-/// Classification of a file by its role.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FileKind {
-    /// Vue Single File Component (.vue).
-    VueSfc,
-    /// Non-Vue source file (.ts, .tsx, .js, .jsx, .d.ts, etc.).
-    NonSfc,
-}
-
 /// Per-file state node. All snapshots are immutable + Arc-wrapped.
 /// Replacement is atomic via ArcSwap.
 ///
@@ -186,8 +179,8 @@ pub enum FileKind {
 pub struct FileNode {
     /// Canonical file identifier.
     pub canonical_id: String,
-    /// File classification.
-    pub file_kind: FileKind,
+    /// File language (the resolved classification row).
+    pub file_language: FileLanguage,
     /// Monotonically increasing generation counter.
     /// Bumped on each source update.
     pub(crate) generation: AtomicU64,
@@ -204,10 +197,10 @@ pub struct FileNode {
 
 impl FileNode {
     /// Create a new file node with generation 0.
-    pub fn new(canonical_id: String, file_kind: FileKind) -> Self {
+    pub fn new(canonical_id: String, file_language: FileLanguage) -> Self {
         Self {
             canonical_id,
-            file_kind,
+            file_language,
             generation: AtomicU64::new(0),
             source: ArcSwap::new(Arc::new(None)),
             analysis: ArcSwap::new(Arc::new(None)),
@@ -290,7 +283,7 @@ mod tests {
 
     #[test]
     fn file_node_generation_monotonic() {
-        let node = FileNode::new("test.vue".into(), FileKind::VueSfc);
+        let node = FileNode::new("test.vue".into(), FileLanguage::vue());
         assert_eq!(node.generation(), 0);
 
         let g1 = node.bump_generation();
@@ -304,13 +297,13 @@ mod tests {
 
     #[test]
     fn current_source_returns_none_when_empty() {
-        let node = FileNode::new("test.vue".into(), FileKind::VueSfc);
+        let node = FileNode::new("test.vue".into(), FileLanguage::vue());
         assert!(node.current_source().is_none());
     }
 
     #[test]
     fn current_source_returns_some_when_generation_matches() {
-        let node = FileNode::new("test.vue".into(), FileKind::VueSfc);
+        let node = FileNode::new("test.vue".into(), FileLanguage::vue());
         let gen = node.bump_generation();
 
         let snap = Arc::new(SourceSnapshot::new_empty(Arc::from("hello"), gen));
@@ -323,7 +316,7 @@ mod tests {
 
     #[test]
     fn current_source_returns_none_when_generation_stale() {
-        let node = FileNode::new("test.vue".into(), FileKind::VueSfc);
+        let node = FileNode::new("test.vue".into(), FileLanguage::vue());
         let gen = node.bump_generation();
 
         let snap = Arc::new(SourceSnapshot::new_empty(Arc::from("hello"), gen));
@@ -336,7 +329,7 @@ mod tests {
 
     #[test]
     fn current_analysis_coherence() {
-        let node = FileNode::new("test.vue".into(), FileKind::VueSfc);
+        let node = FileNode::new("test.vue".into(), FileLanguage::vue());
         let gen = node.bump_generation();
 
         // No source → analysis must be None
@@ -363,7 +356,7 @@ mod tests {
 
     #[test]
     fn current_artifact_coherence() {
-        let node = FileNode::new("test.vue".into(), FileKind::VueSfc);
+        let node = FileNode::new("test.vue".into(), FileLanguage::vue());
         let gen = node.bump_generation();
         let ph: u64 = 0xABCD;
 

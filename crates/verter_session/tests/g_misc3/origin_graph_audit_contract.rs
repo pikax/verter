@@ -28,7 +28,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 const FIXTURE_VUE: &str = "<script setup lang=\"ts\">\n\
@@ -62,14 +62,14 @@ fn host_with(audit_enabled: bool, footprint_capture: bool) -> Arc<VerterHost> {
         canonical_id: Some("/props.ts".into()),
         input_id: "/props.ts".into(),
         source: Arc::from(FIXTURE_PROPS_TS),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/Component.vue".into()),
         input_id: "/Component.vue".into(),
         source: Arc::from(FIXTURE_VUE),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
     host

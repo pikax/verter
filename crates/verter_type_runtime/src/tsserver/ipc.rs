@@ -2182,7 +2182,7 @@ mod tests {
     use std::sync::Arc;
 
     use verter_session::{
-        CompileProfile, CompileTarget, FileKind, HostConfig, UpsertRequest, VerterHost,
+        CompileProfile, CompileTarget, FileLanguage, HostConfig, UpsertRequest, VerterHost,
         VirtualNodeKind, VirtualQuery,
     };
 
@@ -3183,14 +3183,14 @@ const outerLabel = 'outer'
             canonical_id: Some(child_id.to_string()),
             input_id: child_id.to_string(),
             source: Arc::from(child_source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         });
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some(parent_id.to_string()),
             input_id: parent_id.to_string(),
             source: Arc::from(parent_source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         });
 
@@ -3362,14 +3362,14 @@ const outerLabel = 'outer'
             canonical_id: Some(child_id.to_string()),
             input_id: child_id.to_string(),
             source: Arc::from(child_source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         });
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some(parent_id.to_string()),
             input_id: parent_id.to_string(),
             source: Arc::from(parent_source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         });
 
@@ -3507,14 +3507,14 @@ const outerLabel = 'outer'
             canonical_id: Some(child_id.to_string()),
             input_id: child_id.to_string(),
             source: Arc::from(child_source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         });
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some(parent_id.to_string()),
             input_id: parent_id.to_string(),
             source: Arc::from(parent_source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         });
 
@@ -3650,7 +3650,7 @@ const outerLabel = 'outer'
             canonical_id: Some(app_id.to_string()),
             input_id: app_id.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         });
 

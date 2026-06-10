@@ -34,7 +34,7 @@ use std::sync::Arc;
 use crate::resolver_core::{
     CanonicalCompletionOverlay, DerivedFactKind, RequestStoreView, StoreView,
 };
-use crate::types::FileKind;
+use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
 fn small_host_with_one_component() -> (VerterHost, String) {
@@ -55,7 +55,7 @@ defineProps<ButtonProps>()
 <template><button :disabled="disabled">{{ label }}</button></template>
 "#,
             ),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert Button.vue must succeed");

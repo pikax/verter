@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 use crate::server::PublishedResolverSnapshot;
 use crate::test_utils::make_test_vfs_workspace_from_registry;
@@ -1506,7 +1506,7 @@ fn provider_path_helpers_round_trip_through_resolver() {
         canonical_id: Some("/workspace/src/App.vue".to_string()),
         input_id: "/workspace/src/App.vue".to_string(),
         source: "<template><div/></template>".into(),
-        file_kind: verter_session::FileKind::VueSfc,
+        file_language: verter_session::FileLanguage::vue(),
         aliases: Vec::new(),
     })
     .unwrap();
@@ -1562,7 +1562,7 @@ fn vue_tsx_virtual_file_resolves() {
         canonical_id: Some("/workspace/src/App.vue".to_string()),
         input_id: "/workspace/src/App.vue".to_string(),
         source: "<template><div/></template>".into(),
-        file_kind: verter_session::FileKind::VueSfc,
+        file_language: verter_session::FileLanguage::vue(),
         aliases: Vec::new(),
     })
     .unwrap();
@@ -8764,7 +8764,7 @@ defineProps<{ msg: string }>()
 </script>
 <template><div>{{ msg }}</div></template>"#,
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     });
 
@@ -9117,12 +9117,38 @@ fn test_materialize_skips_real_installed_package() {
 }
 
 #[test]
-fn test_is_vue_file() {
-    assert!(is_vue_file("file:///project/src/App.vue"));
-    assert!(is_vue_file("C:/project/src/App.vue"));
-    assert!(!is_vue_file("file:///project/src/utils.ts"));
-    assert!(!is_vue_file("file:///project/tsconfig.json"));
-    assert!(!is_vue_file("file:///project/vue.config.js"));
+fn test_carrier_language_for() {
+    assert_eq!(
+        carrier_language_for("file:///project/src/App.vue"),
+        Some(verter_session::FileLanguage::vue())
+    );
+    assert_eq!(
+        carrier_language_for("C:/project/src/App.vue"),
+        Some(verter_session::FileLanguage::vue())
+    );
+    // `.svelte` is a KNOWN carrier row (no carrier implementation is
+    // registered behind it — watched events stay inert, requests
+    // surface the typed unsupported-language error).
+    assert_eq!(
+        carrier_language_for("file:///project/src/Box.svelte"),
+        Some(verter_session::FileLanguage::svelte())
+    );
+    assert!(carrier_language_for("file:///project/src/utils.ts").is_none());
+    assert!(carrier_language_for("file:///project/tsconfig.json").is_none());
+    assert!(carrier_language_for("file:///project/vue.config.js").is_none());
+}
+
+/// The watcher glob is registry-derived: it covers every carrier row,
+/// including `.svelte` (whose row has no registered carrier behind it).
+/// Watching `.svelte` is INERT by construction — `resync` routes the
+/// event through `ensure_compiled`, which fails with the typed
+/// unsupported-language error before any provider sync state is
+/// created (see `tests/g_misc0/known_but_unsupported_language.rs` for
+/// the host half).
+#[test]
+fn test_carrier_watch_glob_covers_registry_carrier_rows() {
+    let glob = crate::capabilities::carrier_watch_glob();
+    assert_eq!(glob, "**/*.{svelte,vue}");
 }
 
 #[test]
@@ -9175,7 +9201,7 @@ fn compute_verter_diagnostics_ignores_plain_typescript_files() {
 /// host's `diagnostics_generation` changes (even if the document version hasn't).
 #[test]
 fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
-    use verter_session::{CompileErrorPolicy, FileKind, UpsertRequest};
+    use verter_session::{CompileErrorPolicy, FileLanguage, UpsertRequest};
 
     let host = Arc::new(VerterHost::new_standalone(verter_session::HostConfig {
         dev_mode: false,
@@ -9212,7 +9238,7 @@ fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
         canonical_id: None,
         input_id: "/workspace/src/types.ts".to_string(),
         source: Arc::from("export interface Props { msg: string }"),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
 
@@ -10546,5 +10572,100 @@ fn standalone_host_cannot_resolve_disk_files() {
     assert!(
         host.get_analysis(&file_id).is_none(),
         "standalone host should have no analysis for disk-only files"
+    );
+}
+
+/// Watcher-glob inertness at the LSP routing layer: the watcher glob
+/// includes `.svelte` (a registered carrier extension), so a watched
+/// `.svelte` change routes through the carrier resync path — and stays
+/// completely inert. No provider sync state is created, nothing syncs
+/// to the type provider, and no IDE virtual-file state exists: a
+/// carrier without a registered implementation produces no provider
+/// sync state (its compile gate fails with the typed
+/// unsupported-language error), and only direct requests surface that
+/// typed error.
+#[tokio::test]
+async fn watched_svelte_change_produces_no_provider_sync_state() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(mock.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let canonical = "/workspace/src/Box.svelte";
+    crate::server::lifecycle::handle_did_change_watched_files(
+        server,
+        DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: format!("file://{canonical}").parse().expect("valid uri"),
+                typ: FileChangeType::CHANGED,
+            }],
+        },
+    )
+    .await;
+
+    assert!(
+        server.provider_sync_state_for_source(canonical).is_none(),
+        "a watched .svelte change must create no provider sync state"
+    );
+    assert!(
+        mock.file_sync_calls().is_empty(),
+        "a watched .svelte change must sync nothing to the type provider"
+    );
+    let profile = server.documents.tsx_profile.read().clone();
+    assert!(
+        server
+            .documents
+            .host()
+            .get_ide(canonical, &profile)
+            .is_none(),
+        "a watched .svelte change must leave no IDE virtual-file state"
+    );
+}
+
+/// Watcher inertness on the owner-UNRESOLVED branch: a watched `.svelte`
+/// change whose canonical falls outside every project root must not
+/// enter the Vue resync path's unresolved-owner reconciliation — no
+/// queued snapshot provider sync, no provider sync state, no provider
+/// calls. DISCRIMINATING: when the routing layer admits every carrier
+/// row into the Vue resync, the unresolved-owner branch queues a
+/// snapshot provider sync for the carrier-less file.
+#[tokio::test]
+async fn watched_svelte_outside_project_roots_queues_no_provider_sync() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(mock.clone());
+    let server = service.inner();
+    // Resolver rooted elsewhere: the watched file is owner-unresolved.
+    install_test_resolver_for_root(server, "/elsewhere", Some("/elsewhere/tsconfig.json"));
+
+    let canonical = "/workspace/src/Box.svelte";
+    crate::server::lifecycle::handle_did_change_watched_files(
+        server,
+        DidChangeWatchedFilesParams {
+            changes: vec![
+                FileEvent {
+                    uri: format!("file://{canonical}").parse().expect("valid uri"),
+                    typ: FileChangeType::CHANGED,
+                },
+                FileEvent {
+                    uri: format!("file://{canonical}").parse().expect("valid uri"),
+                    typ: FileChangeType::DELETED,
+                },
+            ],
+        },
+    )
+    .await;
+
+    assert!(
+        !server.pending_snapshot_provider_sync.contains(canonical),
+        "a carrier-less watched file must not queue a snapshot provider sync"
+    );
+    assert!(
+        server.provider_sync_state_for_source(canonical).is_none(),
+        "a carrier-less watched file must create no provider sync state"
+    );
+    assert!(
+        mock.calls().is_empty(),
+        "a carrier-less watched file must trigger no provider calls, got {:?}",
+        mock.calls()
     );
 }

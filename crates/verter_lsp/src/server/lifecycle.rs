@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
-use crate::capabilities::server_capabilities;
+use crate::capabilities::{carrier_watch_glob, server_capabilities};
 use crate::documents::uri_to_canonical_id;
 use crate::provider_sync::ProviderPathKind;
 
@@ -353,7 +353,12 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
             register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
                 watchers: vec![
                     FileSystemWatcher {
-                        glob_pattern: GlobPattern::String("**/*.vue".to_string()),
+                        // Carrier-file watcher glob, built from the
+                        // registry's carrier rows. Includes carrier
+                        // rows without a registered implementation
+                        // (`.svelte`): their events produce no provider
+                        // sync state until a carrier lands.
+                        glob_pattern: GlobPattern::String(carrier_watch_glob()),
                         kind: watch_kind,
                     },
                     FileSystemWatcher {
@@ -801,11 +806,22 @@ pub(super) async fn handle_did_change_watched_files(
             tracing::debug!("did_change_watched_files: config file changed: {canonical_id}");
             // Config files also trigger vite dep check below, but the
             // registry rebuild is the primary action.
-        } else if is_vue_file(&canonical_id) {
-            if event.typ == FileChangeType::DELETED {
-                vue_delete_ids.push((canonical_id, event.uri.as_str().to_string()));
-            } else {
-                vue_resync_ids.push(canonical_id);
+        } else if let Some(language) = carrier_language_for(&canonical_id) {
+            // Only the Vue carrier has a registered compile + provider
+            // sync implementation behind it; its events route to the
+            // Vue resync/delete paths. Every OTHER carrier row is
+            // inert AT THE ROUTING LAYER: no host state can exist for
+            // a carrier-less language (its upserts fail with the typed
+            // unsupported-language error before any snapshot
+            // publishes), so a watched event for it schedules no
+            // resync, queues no provider sync, and touches no provider
+            // paths — on every owner-resolution branch.
+            if language.is_vue() {
+                if event.typ == FileChangeType::DELETED {
+                    vue_delete_ids.push((canonical_id, event.uri.as_str().to_string()));
+                } else {
+                    vue_resync_ids.push(canonical_id);
+                }
             }
         } else {
             // TS/JS source file

@@ -43,7 +43,7 @@ use crate::semantic_query::{
     ValueRootKey,
 };
 use crate::typeinfo::types::TypeInfoQueryLevel;
-use crate::types::{FileKind, HostConfig, UpsertRequest};
+use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 
 fn make_host_with_files(files: &[(&str, &str)]) -> Arc<VerterHost> {
@@ -69,7 +69,9 @@ fn make_host_with_files(files: &[(&str, &str)]) -> Arc<VerterHost> {
             canonical_id: Some((*path).to_string()),
             input_id: (*path).to_string(),
             source: Arc::from(*source),
-            file_kind: FileKind::from_path(path),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(path)
+                .static_resolution(),
             aliases: Vec::new(),
         });
         host.ensure_indexed_ready(path);

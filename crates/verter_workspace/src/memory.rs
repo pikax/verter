@@ -320,14 +320,6 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
         self.engine.read_package_manifest(self, canonical_id)
     }
 
-    fn classify_file(&self, canonical_id: &str) -> crate::types::FileKind {
-        if canonical_id.ends_with(".vue") {
-            crate::types::FileKind::VueSfc
-        } else {
-            crate::types::FileKind::NonSfc
-        }
-    }
-
     fn resolve_import(
         &self,
         importer_id: &str,

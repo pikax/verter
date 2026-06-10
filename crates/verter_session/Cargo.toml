@@ -63,6 +63,7 @@ hotpath = [
 
 [dependencies]
 verter_audit = { path = "../verter_audit" }
+verter_language = { path = "../verter_language" }
 verter_compiler = { path = "../verter_compiler" }
 verter_protocol = { path = "../verter_protocol" }
 prost = "0.14.3"

@@ -109,7 +109,7 @@ fn upsert_vue(host: &VerterHost, id: &str, src: &str) -> HostUpdateResult {
         canonical_id: None,
         input_id: id.to_string(),
         source: Arc::from(src),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     })
     .unwrap()
@@ -125,7 +125,7 @@ fn get_source_returns_source_for_canonical_and_alias() {
             canonical_id: None,
             input_id: "Comp.vue".to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec!["AliasComp.vue".to_string()],
         })
         .unwrap();
@@ -575,7 +575,7 @@ fn file_kind_change_vue_to_nonsfc() {
             canonical_id: None,
             input_id: "Comp.vue".to_string(),
             source: Arc::from("export default {}"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -946,7 +946,7 @@ fn tier3_property_added_invalidates() {
             canonical_id: None,
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export interface MyType { foo: string }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -978,7 +978,7 @@ fn tier3_property_added_invalidates() {
             canonical_id: None,
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export interface MyType { foo: string; bar: number }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1010,7 +1010,7 @@ fn tier3_property_type_changed_invalidates() {
             canonical_id: None,
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export interface MyType { foo: string }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1039,7 +1039,7 @@ fn tier3_property_type_changed_invalidates() {
             canonical_id: None,
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export interface MyType { foo: number }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1070,7 +1070,7 @@ fn tier3_unrelated_file_upsert_keeps_compile_slot_warm() {
             canonical_id: None,
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export interface MyType { foo: string }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1096,7 +1096,7 @@ fn tier3_unrelated_file_upsert_keeps_compile_slot_warm() {
             canonical_id: None,
             input_id: "/src/unrelated.ts".to_string(),
             source: Arc::from("export const x = 1;"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1154,7 +1154,7 @@ fn session_compile_warm_hit_is_suppressed_when_store_view_is_not_current() {
             canonical_id: None,
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export interface MyType { foo: string }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1251,7 +1251,7 @@ fn transitive_workspace_macro_type_dep_change_invalidates_owner() {
             canonical_id: None,
             input_id: "/src/nested.ts".to_string(),
             source: Arc::from("export type Nested = number"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -1941,7 +1941,7 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -2606,7 +2606,7 @@ fn workspace_resolution_is_phase_0_primary() {
             canonical_id: None,
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export type Foo = string;"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -2665,7 +2665,7 @@ fn smart_invalidation_reads_workspace_reverse_deps() {
             canonical_id: None,
             input_id: "/src/types.ts".to_string(),
             source: Arc::from("export interface Props { name: string }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -2721,7 +2721,7 @@ mod scheduler_tests {
                 target: verter_scheduler::stage::TargetStage::Analysis,
                 priority: verter_scheduler::stage::Priority::Interactive,
                 source: Some(Arc::from(src)),
-                file_kind: None,
+                file_language: None,
                 request_context: None,
             });
         handle.wait();
@@ -2809,7 +2809,7 @@ const count = ref(0)
                 canonical_id: None,
                 input_id: "/src/types.ts".to_string(),
                 source: Arc::from(src),
-                file_kind: FileKind::NonSfc,
+                file_language: FileLanguage::script_ts(),
                 aliases: Vec::new(),
             })
             .unwrap();
@@ -3021,7 +3021,7 @@ mod phase1_structural_tests {
                 canonical_id: None,
                 input_id: "/src/types.ts".to_string(),
                 source: Arc::from("export interface Foo { bar: string }"),
-                file_kind: FileKind::NonSfc,
+                file_language: FileLanguage::script_ts(),
                 aliases: Vec::new(),
             })
             .unwrap();
@@ -3049,7 +3049,7 @@ mod phase1_structural_tests {
                 canonical_id: None,
                 input_id: "/src/types.ts".to_string(),
                 source: Arc::from("export type A = string"),
-                file_kind: FileKind::NonSfc,
+                file_language: FileLanguage::script_ts(),
                 aliases: Vec::new(),
             })
             .unwrap();
@@ -3058,11 +3058,11 @@ mod phase1_structural_tests {
 
         let vue_snap = host.scheduler_source("/src/App.vue").unwrap();
         let vue_hd = vue_snap.downcast_data::<HostSourceData>().unwrap();
-        assert_eq!(vue_hd.file_kind, FileKind::VueSfc);
+        assert_eq!(vue_hd.file_language, FileLanguage::vue());
 
         let ts_snap = host.scheduler_source("/src/types.ts").unwrap();
         let ts_hd = ts_snap.downcast_data::<HostSourceData>().unwrap();
-        assert_eq!(ts_hd.file_kind, FileKind::NonSfc);
+        assert_eq!(ts_hd.file_language, FileLanguage::script_ts());
     }
 
     #[test]
@@ -3223,7 +3223,7 @@ mod upsert_compile_cache_tests {
         // HostSourceData must be populated
         let hd = snap.downcast_data::<HostSourceData>().unwrap();
         assert!(hd.cached_parse.is_some());
-        assert_eq!(hd.file_kind, FileKind::VueSfc);
+        assert_eq!(hd.file_language, FileLanguage::vue());
     }
 
     #[test]
@@ -3461,7 +3461,7 @@ mod upsert_compile_cache_tests {
                 target: verter_scheduler::stage::TargetStage::Analysis,
                 priority: verter_scheduler::stage::Priority::Interactive,
                 source: None,
-                file_kind: None,
+                file_language: None,
                 request_context: None,
             });
 
@@ -3484,7 +3484,7 @@ mod upsert_compile_cache_tests {
                 canonical_id: Some("/src/App.vue".to_string()),
                 input_id: "/src/App.vue".to_string(),
                 source: Arc::from(src),
-                file_kind: FileKind::VueSfc,
+                file_language: FileLanguage::vue(),
                 aliases: Vec::new(),
             })
             .expect("byte-identical upsert should succeed");

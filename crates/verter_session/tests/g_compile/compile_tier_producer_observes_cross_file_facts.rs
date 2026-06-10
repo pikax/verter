@@ -26,7 +26,8 @@ use verter_semantic::facts::registry::FactKey;
 use verter_session::resolver_core::{FactVersionRef, ParseFactRef};
 use verter_session::ReadSetSignature;
 use verter_session::{
-    CompileProfile, FileKind, HostConfig, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
+    CompileProfile, FileLanguage, HostConfig, UpsertRequest, VerterHost, VirtualNodeKind,
+    VirtualQuery,
 };
 
 fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
@@ -35,7 +36,7 @@ fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: source.into(),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert ts");
@@ -47,7 +48,7 @@ fn upsert_vue(host: &VerterHost, canonical: &str, source: &str) {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: source.into(),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert vue");
@@ -301,7 +302,7 @@ fn compile_slot_invalidates_on_runtime_import_body_edit() {
             canonical_id: Some("/src/utils.ts".to_string()),
             input_id: "/src/utils.ts".to_string(),
             source: "export function helper() { return 2; }\n".into(),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("dep upsert");
@@ -381,7 +382,7 @@ fn ensure_compiled_warm_path_validates_compile_slot_fact_signature() {
             canonical_id: Some("/src/types.ts".to_string()),
             input_id: "/src/types.ts".to_string(),
             source: "export interface Foo { a: string; }\n".into(),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("dep upsert");
@@ -477,7 +478,7 @@ fn compile_slot_invalidates_on_external_src_template_edit() {
             canonical_id: Some("/src/tpl.html".to_string()),
             input_id: "/src/tpl.html".to_string(),
             source: "<section>B</section>\n".into(),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("external dep upsert");
@@ -566,7 +567,7 @@ fn compile_slot_invalidates_on_side_effect_import_body_edit() {
             canonical_id: Some("/src/setup.ts".to_string()),
             input_id: "/src/setup.ts".to_string(),
             source: "globalThis.__verter_setup = 2;\n".into(),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("dep upsert");

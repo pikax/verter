@@ -73,28 +73,32 @@ impl HostResolverState {
 /// Holds a reference to the host's `RwLock<Arc<dyn WorkspaceAccess>>`
 /// so it always reads through the latest workspace, even after
 /// `set_workspace()` swaps it.
-pub(crate) struct WorkspaceSourceLoader(
-    pub(crate) Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
-);
+///
+/// This impl is the session-implemented trait seam through which
+/// HOST-GATED classification reaches the scheduler: `classify` routes
+/// through the host's [`crate::framework::HostLanguageClassifier`]
+/// (static registry × project capability snapshot), not the pure
+/// static fallback the scheduler's built-in loaders use.
+pub(crate) struct WorkspaceSourceLoader {
+    pub(crate) workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
+    pub(crate) language_classifier: crate::framework::HostLanguageClassifier,
+}
 
 impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
     fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.0.read().read_file(canonical_id)
+        self.workspace.read().read_file(canonical_id)
     }
 
     fn exists(&self, canonical_id: &str) -> bool {
-        self.0.read().file_exists(canonical_id)
+        self.workspace.read().file_exists(canonical_id)
     }
 
-    fn classify(&self, canonical_id: &str) -> verter_scheduler::source_loader::FileKind {
-        match self.0.read().classify_file(canonical_id) {
-            verter_workspace::FileKind::VueSfc => verter_scheduler::source_loader::FileKind::VueSfc,
-            verter_workspace::FileKind::NonSfc => verter_scheduler::source_loader::FileKind::NonSfc,
-        }
+    fn classify(&self, canonical_id: &str) -> verter_language::FileLanguage {
+        self.language_classifier.classify(canonical_id)
     }
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
-        self.0.read().realpath(canonical_id)
+        self.workspace.read().realpath(canonical_id)
     }
 }
 
@@ -107,6 +111,15 @@ impl VerterHost {
     #[must_use]
     pub fn config(&self) -> &HostConfig {
         &self.config
+    }
+
+    /// The host-level language classification authority (static
+    /// registry × project capability snapshot). Session-level consumers
+    /// resolve a path's [`verter_language::FileLanguage`] through this,
+    /// never through ad-hoc extension checks.
+    #[must_use]
+    pub fn language_classifier(&self) -> &crate::framework::HostLanguageClassifier {
+        &self.language_classifier
     }
 
     /// Create a new host backed by the given workspace.
@@ -147,12 +160,23 @@ impl VerterHost {
 
         let workspace_lock = Arc::new(parking_lot::RwLock::new(workspace));
 
+        // The host's language classification authority. The capability
+        // snapshot is empty: no capability producer exists in the
+        // session yet, so host-gated classification equals the static
+        // registry resolution until one lands.
+        let language_classifier = crate::framework::HostLanguageClassifier::with_built_in_registry(
+            crate::framework::ProjectCapabilitySnapshot::empty(),
+        );
+
         let scheduler = {
             let executor = Arc::new(host_executor::HostStageExecutor::new(
                 config.clone(),
                 Arc::clone(&workspace_lock),
             ));
-            let loader = Arc::new(WorkspaceSourceLoader(Arc::clone(&workspace_lock)));
+            let loader = Arc::new(WorkspaceSourceLoader {
+                workspace: Arc::clone(&workspace_lock),
+                language_classifier: language_classifier.clone(),
+            });
             // Native spawns a driver thread; WASM uses sync mode
             // (wait_or_drive on the host drives stages inline).
             #[cfg(not(target_arch = "wasm32"))]
@@ -266,6 +290,7 @@ impl VerterHost {
         Self {
             instance_id: next_host_instance_id(),
             config,
+            language_classifier,
             workspace: workspace_lock,
             alias_to_canonical: default_shared(FxHashMap::default()),
             tick: std::sync::atomic::AtomicU64::new(1),

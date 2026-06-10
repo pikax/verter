@@ -15,8 +15,8 @@ pub fn workspace_symbols(host: &VerterHost, query: &str) -> Vec<SymbolInformatio
     let file_list = host.list_files();
     let mut symbols = Vec::new();
 
-    for (canonical_id, file_kind) in &file_list {
-        if *file_kind != verter_session::FileKind::VueSfc {
+    for (canonical_id, file_language) in &file_list {
+        if !file_language.is_vue() {
             continue;
         }
 

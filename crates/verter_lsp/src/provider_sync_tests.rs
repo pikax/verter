@@ -1205,3 +1205,38 @@ fn open_unresolved_commit_prior_owned_diff_ext_sync_ok_drops_api_and_closes_old_
         "the orphaned prior live .jsx is closed after the new .tsx syncs"
     );
 }
+
+/// Non-Vue provider sync routes ONLY plain-script rows; framework
+/// carriers are never upserted and synced to the type provider as raw
+/// scripts. DISCRIMINATING: with the retired hard-coded
+/// `script_ts()` routing, a `.svelte` dependency reached the provider
+/// as garbage TypeScript.
+#[test]
+fn provider_script_language_skips_framework_carriers() {
+    let host = verter_session::VerterHost::new_standalone(verter_session::HostConfig::default());
+
+    // Plain scripts route with their classified row — the same row the
+    // workspace-scan ingress resolves for the same path.
+    assert_eq!(
+        provider_script_language(&host, "/x/a.ts"),
+        Some(verter_session::FileLanguage::script(
+            verter_session::ScriptSourceType::Ts
+        ))
+    );
+    assert_eq!(
+        provider_script_language(&host, "/x/a.js"),
+        Some(verter_session::FileLanguage::script(
+            verter_session::ScriptSourceType::Js
+        ))
+    );
+    // Unknown extensions keep the plain-script fallback.
+    assert_eq!(
+        provider_script_language(&host, "/x/notes.md"),
+        Some(verter_session::FileLanguage::script_ts())
+    );
+    // Framework carriers never sync as raw scripts: the Vue carrier
+    // syncs through the dedicated Vue public-api path, and a
+    // carrier-less row (`.svelte`) produces no provider sync state.
+    assert_eq!(provider_script_language(&host, "/x/Box.svelte"), None);
+    assert_eq!(provider_script_language(&host, "/x/App.vue"), None);
+}

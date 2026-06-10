@@ -27,7 +27,7 @@ use verter_session::semantic_query::{
     ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId,
     SemanticQueryKey,
 };
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
@@ -39,7 +39,9 @@ fn upsert(host: &VerterHost, path: &str, source: &str) {
             canonical_id: Some(path.to_string()),
             input_id: path.to_string(),
             source: Arc::from(source),
-            file_kind: FileKind::from_path(path),
+            file_language: verter_session::LanguageRegistry::global()
+                .classify_static(path)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert succeeds");

@@ -207,6 +207,20 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // shape assertion that never landed; CLAUDE.md "Don't add features
     // beyond what the task requires" forbids carrying it as scaffolding.
     "assert_route_union_surface",
+    // File-language routing authority: the duplicated per-crate
+    // file-kind enums (session / scheduler source_loader / scheduler
+    // node / workspace), the resolver-core export-graph clone, the
+    // FFI kind parser with its silent `"vue"` default, and the LSP
+    // path sniffing helper are all replaced by
+    // `verter_language::FileLanguage` + `LanguageRegistry`
+    // classification. Re-introducing any of these names would revive
+    // a second language-kind definition next to the single routing
+    // authority (see also
+    // `single_language_classifier.rs::single_language_classifier`).
+    "FileKind",
+    "ExportGraphFileKind",
+    "ffi_file_kind_to_host",
+    "is_vue_file",
     // String-resolver eradication: the typed-IR-only
     // resolver rule deletes every hand-rolled type-text splitter,
     // source-slicing helper, `parse_type_annotation` reparse fallback,

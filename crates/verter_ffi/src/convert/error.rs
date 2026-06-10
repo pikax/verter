@@ -16,6 +16,13 @@ pub enum FfiConversionError {
     InvalidDelimiters(usize),
     /// Invalid `file_kind` string.
     InvalidFileKind(String),
+    /// `file_kind` was absent and the request carried no canonical path
+    /// to classify.
+    MissingFileLanguagePath,
+    /// The path's extension is a project-gated candidate row; FFI-time
+    /// classification is static-only, so an explicit `file_kind` string
+    /// is required.
+    GatedFileLanguageRequiresExplicitKind(String),
     /// Invalid virtual node `kind` string.
     InvalidNodeKind(String),
     /// Invalid `target` string.
@@ -53,6 +60,15 @@ impl std::fmt::Display for FfiConversionError {
                 write!(f, "delimiters must have exactly 2 elements, got {len}")
             }
             Self::InvalidFileKind(v) => write!(f, "invalid file_kind '{v}'"),
+            Self::MissingFileLanguagePath => write!(
+                f,
+                "file_kind absent and no canonical path available to classify the file language"
+            ),
+            Self::GatedFileLanguageRequiresExplicitKind(path) => write!(
+                f,
+                "'{path}' matches a project-gated language row; FFI classification is \
+                 static-only, pass an explicit file_kind"
+            ),
             Self::InvalidNodeKind(v) => write!(f, "invalid virtual node kind '{v}'"),
             Self::InvalidTarget(v) => write!(
                 f,

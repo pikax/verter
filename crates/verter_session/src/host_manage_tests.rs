@@ -38,7 +38,7 @@ fn upsert_vue(host: &VerterHost, id: &str, src: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -50,7 +50,7 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -154,7 +154,7 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         self.inner.read_package_manifest(canonical_id)
     }
 
-    fn classify_file(&self, canonical_id: &str) -> verter_workspace::FileKind {
+    fn classify_file(&self, canonical_id: &str) -> verter_language::FileLanguage {
         self.inner.classify_file(canonical_id)
     }
 
@@ -3071,7 +3071,7 @@ fn get_export_span_ts_file() {
             canonical_id: None,
             input_id: "utils.ts".to_string(),
             source: Arc::from("export function helper() { return 1; }"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -3159,7 +3159,7 @@ fn upsert_ts(host: &VerterHost, id: &str, src: &str) {
             canonical_id: None,
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -3725,7 +3725,7 @@ fn upsert_ts_result(host: &VerterHost, id: &str, src: &str) -> crate::HostUpdate
         canonical_id: None,
         input_id: id.to_string(),
         source: Arc::from(src),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: Vec::new(),
     })
     .unwrap()
@@ -4303,7 +4303,7 @@ fn resolve_imported_type_from_vue_dep_without_vue_suffix_uses_file_kind() {
             source: Arc::from(
                 "<script setup lang=\"ts\">export interface Props { label: string }</script>\n<template><div /></template>",
             ),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .unwrap();
@@ -11557,7 +11557,7 @@ mod imported_root_trace_dedup_tests {
             canonical_id: Some("/props.ts".into()),
             input_id: "/props.ts".into(),
             source: Arc::from("export interface Props { label: string; }\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: vec![],
         });
         let _ = host.upsert(UpsertRequest {
@@ -11570,7 +11570,7 @@ mod imported_root_trace_dedup_tests {
                  </script>\n\
                  <template><div /></template>\n",
             ),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: vec![],
         });
         host

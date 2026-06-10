@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 #[test]
@@ -18,14 +18,14 @@ fn ref_cycle_producer_counter_monotonic_on_barrel_route_recursion() {
         canonical_id: Some("/leaf.ts".into()),
         input_id: "/leaf.ts".into(),
         source: Arc::from("export interface Tree { children: Tree[] }"),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/barrel.ts".into()),
         input_id: "/barrel.ts".into(),
         source: Arc::from("export * from './leaf';"),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     let _ = host.upsert(UpsertRequest {
@@ -37,7 +37,7 @@ fn ref_cycle_producer_counter_monotonic_on_barrel_route_recursion() {
              defineProps<{ root: Tree }>();\
              </script>",
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: vec![],
     });
 

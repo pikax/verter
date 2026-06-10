@@ -56,7 +56,7 @@
 
 use std::sync::Arc;
 
-use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 /// Number of files in the consumer's declaration graph:
@@ -104,21 +104,27 @@ fn ensure_loaded_count_stays_within_declaration_graph_budget() {
         canonical_id: Some("/inner.ts".to_string()),
         input_id: "/inner.ts".to_string(),
         source: Arc::from(INNER_TS),
-        file_kind: FileKind::from_path("/inner.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/inner.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/outer.ts".to_string()),
         input_id: "/outer.ts".to_string(),
         source: Arc::from(OUTER_TS),
-        file_kind: FileKind::from_path("/outer.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/outer.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/owner.vue".to_string()),
         input_id: "/owner.vue".to_string(),
         source: Arc::from(OWNER_VUE),
-        file_kind: FileKind::from_path("/owner.vue"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/owner.vue")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

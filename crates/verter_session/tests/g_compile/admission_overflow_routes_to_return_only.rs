@@ -16,7 +16,8 @@
 
 use verter_session::for_tests::compile_force_overflow_observations_for_tests;
 use verter_session::{
-    CompileProfile, FileKind, HostConfig, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
+    CompileProfile, FileLanguage, HostConfig, UpsertRequest, VerterHost, VirtualNodeKind,
+    VirtualQuery,
 };
 
 fn upsert_vue(host: &VerterHost, canonical: &str, source: &str) {
@@ -25,7 +26,7 @@ fn upsert_vue(host: &VerterHost, canonical: &str, source: &str) {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: source.into(),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert vue");

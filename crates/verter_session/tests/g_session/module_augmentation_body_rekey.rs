@@ -32,7 +32,7 @@
 use std::sync::Arc;
 
 use verter_session::meta::MetaProject;
-use verter_session::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 fn workspace_project(files: &[(&str, &str)]) -> (Arc<MetaProject>, Arc<MemoryWorkspace>) {
@@ -150,7 +150,7 @@ fn merged_decl_body_stitch_self_heals_rekeyed_augmenter() {
         canonical_id: Some("/workspace/src/aug.ts".into()),
         input_id: "/workspace/src/aug.ts".into(),
         source: Arc::from(AUG_POST_COSMETIC),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
     // Force the owner to recompute its meta so the body stitch re-runs against

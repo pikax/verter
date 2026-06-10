@@ -52,7 +52,7 @@ use rustc_hash::FxHashMap;
 
 use verter_session::session_view::{OverlaidView, SessionView};
 use verter_session::{
-    CompileErrorPolicy, DependencyResolution, FileKind, HostConfig, UpsertRequest, VerterHost,
+    CompileErrorPolicy, DependencyResolution, FileLanguage, HostConfig, UpsertRequest, VerterHost,
 };
 
 // ---------------------------------------------------------------------------
@@ -72,7 +72,7 @@ fn overlay_view_with_unrelated_overlay_observes_admitted_facts_for_base_owner() 
             canonical_id: None,
             input_id: "/dep.ts".to_string(),
             source: Arc::from("export const used = 1;"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("dep upsert");
@@ -82,7 +82,7 @@ fn overlay_view_with_unrelated_overlay_observes_admitted_facts_for_base_owner() 
             canonical_id: None,
             input_id: "/owner.ts".to_string(),
             source: Arc::from("import { used } from './dep';\nexport const o = used;\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("owner upsert");
@@ -154,7 +154,7 @@ fn later_set_import_dependencies_replaces_prior_known_miss_in_view() {
             canonical_id: None,
             input_id: "/owner.ts".to_string(),
             source: Arc::from(owner_source),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("owner upsert");
@@ -194,7 +194,7 @@ fn later_set_import_dependencies_replaces_prior_known_miss_in_view() {
             canonical_id: None,
             input_id: "/target.ts".to_string(),
             source: Arc::from("export const Used = 1;\n"),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("target upsert");

@@ -140,7 +140,9 @@ fn production_audited_entry_point_populates_active_registry_and_records_store() 
         canonical_id: Some(canonical.to_string()),
         input_id: canonical.to_string(),
         source: Arc::from(SFC),
-        file_kind: verter_session::FileKind::from_path(canonical),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

@@ -66,13 +66,15 @@ fn tracked_macro_owner(
     host: &VerterHost,
     canonical: &str,
 ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
             input_id: canonical.to_string(),
             source: Arc::from("<script setup lang=\"ts\">defineProps<{ x: string }>()</script>\n"),
-            file_kind: FileKind::from_path(canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("owner SFC upsert succeeds");
@@ -179,7 +181,7 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
 #[test]
 fn cache_discipline_materialize_surface_repeated_keys_warm() {
     use crate::component_meta_materialize::{MaterializationScope, MaterializeStructureCacheKey};
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
 
     let host = build_test_host();
     // Load both scope files so the materialiser's dispatch reads have
@@ -194,7 +196,9 @@ fn cache_discipline_materialize_surface_repeated_keys_warm() {
                 canonical_id: None,
                 input_id: scope.to_string(),
                 source: Arc::from("<script setup lang=\"ts\">const x = 1;</script>\n"),
-                file_kind: FileKind::from_path(scope),
+                file_language: crate::LanguageRegistry::global()
+                    .classify_static(scope)
+                    .static_resolution(),
                 aliases: Vec::new(),
             })
             .expect("scope upsert succeeds");

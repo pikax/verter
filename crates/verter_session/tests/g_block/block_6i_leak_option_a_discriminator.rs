@@ -60,7 +60,7 @@ use verter_session::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
     SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
 };
-use verter_session::{for_tests, FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{for_tests, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::{
     LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
 };
@@ -179,7 +179,9 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
         canonical_id: Some("/slots.ts".to_string()),
         input_id: "/slots.ts".to_string(),
         source: Arc::from(SLOTS_TS),
-        file_kind: FileKind::from_path("/slots.ts"),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/slots.ts")
+            .static_resolution(),
         aliases: Vec::new(),
     });
 

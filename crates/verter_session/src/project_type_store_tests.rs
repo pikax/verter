@@ -244,12 +244,14 @@ fn eval_env_cache_legacy_env_keyed_by_full_env_dimensions() {
         content_hash,
         parse_env_hash: [1u8; 16],
         parser_version: LEGACY_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id(&canonical),
     };
     let key_parse_env_b = FileArtifactKey {
         canonical: Arc::clone(&canonical),
         content_hash,
         parse_env_hash: [2u8; 16],
         parser_version: LEGACY_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id(&canonical),
     };
 
     let env_a = Arc::new(EvalEnv::default());
@@ -289,6 +291,7 @@ fn eval_env_cache_legacy_env_keyed_by_full_env_dimensions() {
         content_hash: [9u8; 16],
         parse_env_hash: [1u8; 16],
         parser_version: LEGACY_PARSER_VERSION,
+        file_language_id: FileArtifactKey::derived_file_language_id(&canonical),
     };
     assert!(
         db.legacy_env_for(&key_other_content).is_none(),

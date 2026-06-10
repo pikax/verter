@@ -14,7 +14,7 @@ use std::sync::Arc;
 use verter_session::host_compile::{CompileBatchInput, CompileBatchOptions};
 use verter_session::{
     BlockOverrideEntry, BlockOverrideRequest, CompileCacheMode, CompileErrorPolicy, CompileProfile,
-    DowngradeReason, FileKind, HostConfig, PreprocessorBlockType, UpsertRequest, VerterHost,
+    DowngradeReason, FileLanguage, HostConfig, PreprocessorBlockType, UpsertRequest, VerterHost,
     VirtualNodeKind, VirtualQuery,
 };
 
@@ -37,7 +37,7 @@ fn upsert_vue(host: &VerterHost, canonical: &str, source: &str) {
             canonical_id: Some(canonical.to_string()),
             input_id: canonical.to_string(),
             source: source.into(),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert vue");

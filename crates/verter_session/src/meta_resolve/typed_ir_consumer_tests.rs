@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use verter_type_expr::{FunctionParam, ObjectMember, PrimitiveName, TypeExpr};
 
-use crate::types::FileKind;
+use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
 use super::projectors::define_shapes::slot_field_function_type_expr;
@@ -192,7 +192,7 @@ fn reduce_published_field_types_uses_shallow_typed_form_authoritatively() {
             canonical_id: None,
             input_id: "/c.vue".to_string(),
             source: Arc::from(PARTIAL_SOURCE_VUE),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert /c.vue");
@@ -283,7 +283,7 @@ fn registry_walker_collects_imported_ref_via_typed_shallow_form() {
             canonical_id: None,
             input_id: "/button-types.ts".to_string(),
             source: Arc::from(REGISTRY_SHALLOW_TYPES_TS),
-            file_kind: FileKind::NonSfc,
+            file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
         .expect("upsert /button-types.ts");
@@ -293,7 +293,7 @@ fn registry_walker_collects_imported_ref_via_typed_shallow_form() {
             canonical_id: None,
             input_id: "/c.vue".to_string(),
             source: Arc::from(REGISTRY_SHALLOW_OWNER_VUE),
-            file_kind: FileKind::VueSfc,
+            file_language: FileLanguage::vue(),
             aliases: Vec::new(),
         })
         .expect("upsert /c.vue");

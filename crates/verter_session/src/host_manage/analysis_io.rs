@@ -25,6 +25,7 @@ use crate::resolver_core::{
 use crate::shared::write_lock;
 use crate::types::*;
 use crate::VerterHost;
+use verter_language::FileLanguage;
 
 use super::{
     component_meta_debug, component_meta_debug_enabled,
@@ -169,7 +170,7 @@ impl VerterHost {
                 let Some(hd) = snap.downcast_data::<HostSourceData>() else {
                     return;
                 };
-                if hd.file_kind != FileKind::VueSfc {
+                if !hd.file_language.is_vue() {
                     return;
                 }
                 (
@@ -382,12 +383,12 @@ impl VerterHost {
                 ));
             };
             let hd = source_snap.downcast_data::<HostSourceData>()?;
-            let file_kind = hd.file_kind;
+            let file_language = hd.file_language.clone();
             let source = source_snap.source.clone();
             let cached_parse = hd.cached_parse.clone();
 
             let scope = self.config.effective_scope();
-            if file_kind == FileKind::VueSfc
+            if file_language.is_vue()
                 && (!scope.needs_script_analysis() || !scope.needs_style_analysis())
             {
                 // This branch builds an OWNED, mutated snapshot (it calls
@@ -1045,7 +1046,7 @@ impl VerterHost {
             }
             let snap = self.scheduler.try_get_source(&canonical)?;
             let hd = snap.downcast_data::<HostSourceData>()?;
-            if hd.file_kind != FileKind::VueSfc {
+            if !hd.file_language.is_vue() {
                 return None;
             }
             // Use pre-built AnalysisArcs for cheap pointer clone instead of Vec clone
@@ -1718,8 +1719,8 @@ impl VerterHost {
         self.bump_store_view_epoch();
     }
 
-    /// Returns all known canonical file IDs and their file kinds.
-    pub fn list_files(&self) -> Vec<(String, FileKind)> {
+    /// Returns all known canonical file IDs and their file languages.
+    pub fn list_files(&self) -> Vec<(String, FileLanguage)> {
         {
             use crate::host_executor::HostSourceData;
             self.scheduler
@@ -1731,7 +1732,7 @@ impl VerterHost {
                     }
                     let snap = self.scheduler.try_get_source(&id)?;
                     let hd = snap.downcast_data::<HostSourceData>()?;
-                    Some((id, hd.file_kind))
+                    Some((id, hd.file_language.clone()))
                 })
                 .collect()
         }
@@ -1748,7 +1749,7 @@ impl VerterHost {
             }
             let source_snap = self.scheduler.try_get_source(canonical)?;
             let hd = source_snap.downcast_data::<HostSourceData>()?;
-            if hd.file_kind != FileKind::VueSfc {
+            if !hd.file_language.is_vue() {
                 return None;
             }
             drop(source_snap);
@@ -1882,7 +1883,7 @@ impl VerterHost {
         &self,
         canonical_or_alias: &str,
     ) -> Option<(
-        FileKind,
+        FileLanguage,
         Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
         Vec<verter_semantic::analysis::ExportSignature>,
     )> {
@@ -1901,13 +1902,14 @@ impl VerterHost {
                     self.scheduler.try_get_source(&canonical),
                     self.scheduler.try_get_analysis(&canonical),
                 ) {
-                    let file_kind = source_snap
+                    let file_language = source_snap
                         .downcast_data::<crate::host_executor::HostSourceData>()?
-                        .file_kind;
+                        .file_language
+                        .clone();
                     let analysis =
                         analysis_snap.downcast_data::<crate::host_executor::HostAnalysisData>()?;
                     return Some((
-                        file_kind,
+                        file_language,
                         Arc::clone(&analysis.script_analysis),
                         analysis.export_signatures.clone(),
                     ));
@@ -1921,11 +1923,7 @@ impl VerterHost {
                 facts.export_signatures.as_ref(),
             ) {
                 return Some((
-                    if canonical.ends_with(".vue") {
-                        FileKind::VueSfc
-                    } else {
-                        FileKind::NonSfc
-                    },
+                    self.language_classifier.classify(&canonical),
                     Arc::clone(script_analysis),
                     export_signatures.as_ref().clone(),
                 ));
@@ -1957,14 +1955,14 @@ impl VerterHost {
             }
             let source_snap = self.scheduler.try_get_source(&canonical)?;
             let hd = source_snap.downcast_data::<HostSourceData>()?;
-            let file_kind = hd.file_kind;
+            let file_language = hd.file_language.clone();
             drop(source_snap);
 
             let analysis_snap = self.scheduler.try_get_analysis(&canonical)?;
             let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
 
             Self::find_export_span(
-                file_kind,
+                &file_language,
                 &ad.script_analysis,
                 &ad.export_signatures,
                 binding_name,
@@ -1974,12 +1972,12 @@ impl VerterHost {
 
     /// Shared logic for finding an export span from analysis data.
     pub(super) fn find_export_span(
-        file_kind: FileKind,
+        file_language: &FileLanguage,
         script_analysis: &verter_semantic::analysis::ScriptAnalysisSnapshot,
         export_signatures: &[verter_semantic::analysis::ExportSignature],
         binding_name: &str,
     ) -> Option<(u32, u32)> {
-        if file_kind == FileKind::VueSfc {
+        if file_language.is_vue() {
             if let Some(binding) = script_analysis
                 .bindings
                 .iter()

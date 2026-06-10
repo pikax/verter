@@ -9,8 +9,8 @@ use std::sync::{Arc, OnceLock};
 use crate::id::canonicalize_id;
 use crate::instant::Instant;
 use crate::resolver_core::{
-    fallthrough_cache_key, DynamicRootCandidate, ExportGraphFileKind, ExportGraphResolver,
-    ExportSurface, FallthroughComputeHost, FallthroughRequestHost, FallthroughResolutionView,
+    fallthrough_cache_key, DynamicRootCandidate, ExportGraphResolver, ExportSurface,
+    FallthroughComputeHost, FallthroughRequestHost, FallthroughResolutionView,
     FallthroughResolverHost, ImportedRuntimeValueResolver, ResolvedConsumedBindings, StoreView,
 };
 use crate::types::*;
@@ -1285,13 +1285,10 @@ pub(in crate::host_manage) struct HostExportGraphResolver<'a> {
 
 impl ExportGraphResolver for HostExportGraphResolver<'_> {
     fn export_surface(&self, canonical_id: &str) -> Option<ExportSurface> {
-        let (file_kind, _, export_signatures) =
+        let (file_language, _, export_signatures) =
             self.host.load_export_graph_analysis(canonical_id)?;
         Some(ExportSurface {
-            file_kind: match file_kind {
-                FileKind::VueSfc => ExportGraphFileKind::VueSfc,
-                FileKind::NonSfc => ExportGraphFileKind::NonSfc,
-            },
+            file_language,
             export_signatures,
         })
     }
@@ -1301,10 +1298,10 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         canonical_id: &str,
         binding_name: &str,
     ) -> Option<verter_span::Span> {
-        let (file_kind, script_analysis, export_signatures) =
+        let (file_language, script_analysis, export_signatures) =
             self.host.load_export_graph_analysis(canonical_id)?;
         VerterHost::find_export_span(
-            file_kind,
+            &file_language,
             &script_analysis,
             &export_signatures,
             binding_name,

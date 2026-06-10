@@ -127,12 +127,17 @@ pub(crate) fn non_sfc_source_type(canonical_id: &str) -> SourceType {
 /// [`crate::VerterHost::authoritative_source_type_for`] instead of recomputing
 /// from `(canonical_id, raw_source, cached_parse)` — a pair that is unstable
 /// when `cached_parse` is dropped mid-resolution.
+///
+/// Dispatches on the file's resolved [`FileLanguage`] row: the Vue
+/// carrier reads its `<script lang>` from the parsed SFC; plain scripts
+/// derive from the canonical path.
 pub(crate) fn imported_eval_source_type(
+    file_language: &verter_language::FileLanguage,
     canonical_id: &str,
     raw_source: &str,
     cached_parse: Option<&ParsedSfc>,
 ) -> SourceType {
-    if canonical_id.ends_with(".vue") {
+    if file_language.is_vue() {
         cached_parse
             .map(|parsed| sfc_script_source_type(parsed, raw_source))
             .unwrap_or_else(SourceType::ts)

@@ -6141,7 +6141,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
 #[test]
 fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
     use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     use std::sync::mpsc;
     use std::thread;
 
@@ -6155,7 +6155,9 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
             canonical_id: Some(keyed_canonical.to_string()),
             input_id: keyed_canonical.to_string(),
             source: Arc::from("export interface Target { base: number; }\n"),
-            file_kind: FileKind::from_path(keyed_canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(keyed_canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert of the keyed file succeeds");
@@ -6391,7 +6393,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
     use crate::fact_signature_helpers::ReadSetSignature;
     use crate::resolver_core::{FactVersionRef, SessionResolverContext};
     use crate::session_view::OverlaidViewRef;
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     use rustc_hash::FxHashMap;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -6407,7 +6409,9 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
             source: Arc::from(
                 "export interface Keyed { base: number; }\nexport const keyed = 1;\n",
             ),
-            file_kind: FileKind::from_path(keyed_canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(keyed_canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert of the keyed file succeeds");
@@ -6609,7 +6613,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
 fn same_view_joiner_still_coalesces_onto_winner() {
     use crate::fact_signature_helpers::ReadSetSignature;
     use crate::resolver_core::FactVersionRef;
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
@@ -6623,7 +6627,9 @@ fn same_view_joiner_still_coalesces_onto_winner() {
             source: Arc::from(
                 "export interface Keyed { base: number; }\nexport const keyed = 1;\n",
             ),
-            file_kind: FileKind::from_path(keyed_canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(keyed_canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert of the keyed file succeeds");
@@ -6789,7 +6795,7 @@ fn same_view_joiner_still_coalesces_onto_winner() {
 fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
     use crate::resolver_core::SessionResolverContext;
     use crate::session_view::OverlaidViewRef;
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     use rustc_hash::FxHashMap;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -6803,7 +6809,9 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
             canonical_id: Some(keyed_canonical.to_string()),
             input_id: keyed_canonical.to_string(),
             source: Arc::from("export interface Keyed { base: number; }\n"),
-            file_kind: FileKind::from_path(keyed_canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(keyed_canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert of the keyed file succeeds");
@@ -7047,7 +7055,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
     use crate::fact_signature_helpers::ReadSetSignature;
     use crate::resolver_core::{FactVersionRef, SessionResolverContext};
     use crate::session_view::OverlaidViewRef;
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     use rustc_hash::FxHashMap;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -7061,7 +7069,9 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
             canonical_id: Some(keyed_canonical.to_string()),
             input_id: keyed_canonical.to_string(),
             source: Arc::from("export interface Keyed { base: number; }\n"),
-            file_kind: FileKind::from_path(keyed_canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(keyed_canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert of the keyed file succeeds");
@@ -7333,7 +7343,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
     use crate::fact_signature_helpers::ReadSetSignature;
     use crate::resolver_core::{FactVersionRef, SessionResolverContext};
     use crate::session_view::OverlaidViewRef;
-    use crate::{FileKind, UpsertRequest};
+    use crate::UpsertRequest;
     use rustc_hash::FxHashMap;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -7347,7 +7357,9 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
             canonical_id: Some(keyed_canonical.to_string()),
             input_id: keyed_canonical.to_string(),
             source: Arc::from("export interface Other { base: number; }\n"),
-            file_kind: FileKind::from_path(keyed_canonical),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(keyed_canonical)
+                .static_resolution(),
             aliases: Vec::new(),
         })
         .expect("upsert of the keyed file succeeds");

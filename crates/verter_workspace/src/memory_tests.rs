@@ -4,7 +4,7 @@ use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
 use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
 use crate::types::{
-    ExactResolution, FileKind, ParsedEdge, ProjectOwnership, ResolutionContext, ResolvePhase,
+    ExactResolution, ParsedEdge, ProjectOwnership, ResolutionContext, ResolvePhase,
     ResolveRequestKind,
 };
 
@@ -201,39 +201,37 @@ fn file_exists_in_overlay() {
 #[test]
 fn classify_file_vue() {
     let ws = MemoryWorkspace::new(MemoryOptions::default());
-    let kind = ws.classify_file("d:/project/src/foo.vue");
-    assert_eq!(kind, FileKind::VueSfc);
-    assert_ne!(
-        kind,
-        FileKind::NonSfc,
-        ".vue file must not be classified as NonSfc"
+    let lang = ws.classify_file("d:/project/src/foo.vue");
+    assert_eq!(lang, verter_language::FileLanguage::vue());
+    assert!(
+        lang.is_framework_carrier(),
+        ".vue file must classify as a framework carrier"
     );
 }
 
 #[test]
 fn classify_file_non_vue() {
+    use verter_language::{FileLanguage, ScriptSourceType};
     let ws = MemoryWorkspace::new(MemoryOptions::default());
-    let kind_ts = ws.classify_file("d:/project/src/utils.ts");
-    assert_eq!(kind_ts, FileKind::NonSfc);
-    assert_ne!(
-        kind_ts,
-        FileKind::VueSfc,
-        ".ts file must not be classified as VueSfc"
+    let lang_ts = ws.classify_file("d:/project/src/utils.ts");
+    assert_eq!(lang_ts, FileLanguage::script(ScriptSourceType::Ts));
+    assert!(
+        !lang_ts.is_framework_carrier(),
+        ".ts file must not classify as a framework carrier"
     );
 
     assert_eq!(
         ws.classify_file("d:/project/src/utils.tsx"),
-        FileKind::NonSfc
+        FileLanguage::script(ScriptSourceType::Tsx)
     );
     assert_eq!(
         ws.classify_file("d:/project/src/utils.js"),
-        FileKind::NonSfc
+        FileLanguage::script(ScriptSourceType::Js)
     );
-    // Negative: .vue should never return NonSfc
-    assert_ne!(
-        ws.classify_file("d:/project/src/comp.vue"),
-        FileKind::NonSfc
-    );
+    // Negative: .vue should never classify as a plain script.
+    assert!(ws
+        .classify_file("d:/project/src/comp.vue")
+        .is_framework_carrier());
 }
 
 // ── MemoryWorkspace::realpath ──

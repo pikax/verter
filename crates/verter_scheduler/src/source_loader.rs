@@ -9,11 +9,19 @@
 //! **Note**: This trait mirrors [`verter_workspace::SourceLoader`] but is defined
 //! separately to keep `verter_scheduler` free of VFS dependencies. The VFS
 //! trait is the canonical definition; this is a scheduler-local copy.
+//!
+//! Classification authority: the built-in loaders classify through the
+//! PURE static extension registry (`verter_language`). Host-gated
+//! classification (project-capability-resolved rows) reaches the
+//! scheduler exclusively through the session-implemented [`SourceLoader`]
+//! seam.
 
 use std::sync::Arc;
 
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
+
+use verter_language::FileLanguage;
 
 use crate::overlay::OverlayMap;
 
@@ -28,29 +36,12 @@ pub trait SourceLoader: Send + Sync {
     /// Check whether a file exists.
     fn exists(&self, canonical_id: &str) -> bool;
 
-    /// Classify a file by extension.
-    fn classify(&self, canonical_id: &str) -> FileKind;
+    /// Classify a file. Built-in loaders use the static extension
+    /// registry; the session's loader composes host-gated rows.
+    fn classify(&self, canonical_id: &str) -> FileLanguage;
 
     /// Resolve symlinks to real path.
     fn realpath(&self, canonical_id: &str) -> Option<String>;
-}
-
-/// File classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FileKind {
-    VueSfc,
-    NonSfc,
-}
-
-impl FileKind {
-    /// Classify by extension.
-    pub fn from_path(path: &str) -> Self {
-        if path.ends_with(".vue") {
-            FileKind::VueSfc
-        } else {
-            FileKind::NonSfc
-        }
-    }
 }
 
 /// In-memory source loader. Checks overlay first, then the injected files map.
@@ -111,8 +102,10 @@ impl SourceLoader for MemorySourceLoader {
         self.overlay.has(canonical_id) || self.files.read().contains_key(canonical_id)
     }
 
-    fn classify(&self, canonical_id: &str) -> FileKind {
-        FileKind::from_path(canonical_id)
+    fn classify(&self, canonical_id: &str) -> FileLanguage {
+        verter_language::LanguageRegistry::global()
+            .classify_static(canonical_id)
+            .static_resolution()
     }
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
@@ -168,8 +161,10 @@ impl SourceLoader for DiskSourceLoader {
         std::path::Path::new(&os_path).exists()
     }
 
-    fn classify(&self, canonical_id: &str) -> FileKind {
-        FileKind::from_path(canonical_id)
+    fn classify(&self, canonical_id: &str) -> FileLanguage {
+        verter_language::LanguageRegistry::global()
+            .classify_static(canonical_id)
+            .static_resolution()
     }
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
@@ -259,10 +254,17 @@ mod tests {
 
     #[test]
     fn memory_loader_classify() {
+        use verter_language::ScriptSourceType;
         let loader = MemorySourceLoader::new();
-        assert_eq!(loader.classify("/a.vue"), FileKind::VueSfc);
-        assert_eq!(loader.classify("/a.ts"), FileKind::NonSfc);
-        assert_eq!(loader.classify("/a.tsx"), FileKind::NonSfc);
+        assert_eq!(loader.classify("/a.vue"), FileLanguage::vue());
+        assert_eq!(
+            loader.classify("/a.ts"),
+            FileLanguage::script(ScriptSourceType::Ts)
+        );
+        assert_eq!(
+            loader.classify("/a.tsx"),
+            FileLanguage::script(ScriptSourceType::Tsx)
+        );
     }
 
     #[test]

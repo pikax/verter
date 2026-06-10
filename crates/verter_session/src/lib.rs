@@ -119,6 +119,7 @@ mod component_meta_terminal_mode_tests;
 mod component_meta_warm_invalidation_oracle_tests;
 pub mod cross_file;
 pub mod fact_emission;
+pub mod framework;
 // `fact_signature_helpers` is `pub(crate)`: the module's internals are
 // implementation detail. The only externally-needed type is
 // `ReadSetSignature` — the return type of the public inspector
@@ -307,6 +308,10 @@ pub use host_audit_runtime::{
     ActiveRegistration, AuditRequestRegistration, AuditRuntimeSnapshot, HostAuditRuntime,
 };
 pub use types::*;
+pub use verter_language::{
+    CapabilityId, FileLanguage, FrameworkAdapterId, GatedCandidate, LanguageId, LanguageRegistry,
+    LanguageRow, ScriptSourceType, StaticClassification,
+};
 
 // Per-call-site instrumentation accessors. Production-on
 // (the counter map is bumped on every `HostStoreView::from_host`
@@ -358,6 +363,12 @@ use shared::Shared;
 pub struct VerterHost {
     pub(crate) instance_id: u64,
     pub(crate) config: HostConfig,
+    /// The single host-level language classification authority:
+    /// composes the static `LanguageRegistry` with the project
+    /// capability snapshot (empty until a capability producer lands).
+    /// Session-level consumers classify through this, never through
+    /// ad-hoc extension checks.
+    pub(crate) language_classifier: crate::framework::HostLanguageClassifier,
     /// VFS workspace providing file reads, import resolution, and edge recording.
     /// Wrapped in Arc<RwLock> so the scheduler's SourceLoader can share the same
     /// lock and always read through the latest workspace after `set_workspace()`.

@@ -72,6 +72,10 @@ mod invalidation_coverage;
 mod invalidation_perf;
 #[path = "g_misc0/jsdoc_provenance_p2.rs"]
 mod jsdoc_provenance_p2;
+#[path = "g_misc0/known_but_unsupported_language.rs"]
+mod known_but_unsupported_language;
+#[path = "g_misc0/language_routing_characterization.rs"]
+mod language_routing_characterization;
 #[path = "g_misc0/legacy_dep_signature_field_gone.rs"]
 mod legacy_dep_signature_field_gone;
 #[path = "g_misc0/legacy_walker_parity_baseline.rs"]
@@ -116,6 +120,8 @@ mod semantic_analysis_audit_e2e;
 mod semantic_analysis_audit_tls_propagation;
 #[path = "g_misc0/semantic_graph_production_reads_validated.rs"]
 mod semantic_graph_production_reads_validated;
+#[path = "g_misc0/single_language_classifier.rs"]
+mod single_language_classifier;
 #[path = "g_misc0/slot_binding_graph_dual_emit_arch_guard.rs"]
 mod slot_binding_graph_dual_emit_arch_guard;
 #[path = "g_misc0/slot_binding_graph_matrix_module_aug_index_shape.rs"]
