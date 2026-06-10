@@ -185,6 +185,7 @@ decision (D-ac).
 | **D-bb** | **The D-af sweep covers `parse_sfc` PRODUCER CALL SITES, not only `ParsedSfc` type references; the confinement guard scans BOTH tokens (amends D-af).** Live-tree producer sweep (exhaustive over `verter_session` production code): `parse.rs:105` (inside `parse_vue_snapshot`, already a CONFINE row); the on-demand re-parse builders `build_script_analysis_from_source` / `build_style_analyses_from_source` (`parse.rs:752/:769`, `parse_sfc` at `:755/:773`; callers `host_manage/analysis_io.rs:424/:435`); the template-analysis cold/merged-source re-parses (`host_manage/analysis_io.rs:93/:100` in `build_template_analysis`, `:237/:244` in `compute_template_analysis_if_missing`, plus its `parse_vue_snapshot` call at `:185`); and the route-owned cold-parse producer (`host_resolve/route_owned_shallow.rs:303-306` — direct `parse_sfc` gated by `ends_with(".vue")`, local named `cached_parse`; the producing twin of the tabled `overlay_materialize.rs:354` row). B4's disposition table carries the rows (REPLACE for the route-owned local; CONFINE for the Vue builder halves — the `analysis_io.rs` halves RELOCATE behind the Vue bridge so `host_manage/**` ends `parse_sfc`-free as well as `ParsedSfc`-free); `parsed_sfc_confined_to_vue_bridge` scans BOTH the `ParsedSfc` type token AND the `parse_sfc` call token against the same allowlist. | fable P2-1: the route-owned cold-parse producer was missing from the D-af table, and a type-inferred `let parsed = parse_sfc(…)` call carries no `ParsedSfc` token — a type-reference-only scan could not catch a misplaced producer, leaving a hole exactly where the sweep's exhaustiveness claim mattered. |
 | **D-bc** | **The Svelte DTO-store key remainder is `{ source: SvelteSurfaceSource }` — the CLOSED source-family discriminant `SvelteSurfaceSource { RunesProps, LegacyExportLet, Bindable, SnippetProps, LegacySlotInventory, LegacyDispatcher, InstanceExports }` (completes D-y for B8b).** The typed `Eq + Hash` adapter remainder parallel to Vue's `{ macro_index, macro_kind }`: Vue needs an index because one SFC carries several macro sites; a Svelte component has at most ONE declaration site per source family (derived from the §9 mapping: `$props()` incl. snippet-typed, legacy `export let`, `$bindable()`, legacy `<slot>` inventory, legacy `createEventDispatcher<E>`, exported instance members), so the family discriminant alone is the minimal structural remainder. Kinds composed from two families (SLOTS = snippet-typed props + legacy `<slot>` inventory) occupy two source rows merged at normalise time — each cached bundle stays single-source and collision-free. Pinned by extending the `framework_surface_store_key_structural` whole-struct destructure test with the Svelte row in B8b. | fable P3-3: B8b consumed the generic store without pinning its adapter remainder — the one adapter-designed key column was unspecified for the program's flagship vertical, inviting an ad-hoc (or digest-shaped) key at implementation time. |
 | **D-bd** | **`FileLanguage::FrameworkTemplate` rows carry NO carrier-compiler obligation; `carrier_descriptors_have_compilers` binds `carrier_language: Some(_)` descriptors only (recorded here for traceability; carried authoritatively by `docs/arch/angular-adapter-program.md`).** "Carrier-bearing" in the guard means the descriptor's singular `carrier_language` column is populated; a `FrameworkTemplate` language never populates it. A template file is OWNER-ROUTED: it is consumed by the owning component's build (the Angular TCB sidecar is produced by `crates/verter_compiler/src/angular/ide/` dispatched off the OWNING COMPONENT through the sidecar virtual-file pipeline), never independently compiled — a registered standalone template compiler would be a second entry path into template compilation. The Angular descriptor's `carrier_language` is `None` (components are real `.ts` Script files), so the guard imposes no compiler obligation on the Angular row; the extracted program's A2 re-run asserts the guard stays green across the Angular registration and that NO `CarrierCompiler` row exists for `"angular"`. REJECTED: a typed `template_language` descriptor slot — it would create a compiler-registry obligation with no dispatch consumer (nothing compiles a `FrameworkTemplate` file standalone). | fable P3-5: the Angular doc asserted "the Angular template carrier row has its registered compiler" while the descriptor field is singular `carrier_language` and `.html` is not a carrier — the obligation was unimplementable as written; the owner-routed exemption is the structurally consistent reading. |
+| **D-be** | **Generated proto TS binding freshness is repository-wide; the drifted component-meta bindings regenerate in their own post-B1 block (B1b); the clippy stable-drift and the fresh-worktree test preflight are operational dispositions, not blocks.** Verified live (M11 investigation, 2026-06-10): `packages/proto/src/gen/verter/v1/component_meta_pb.ts` (68 diff lines) + `selective_component_meta_pb.ts` (28) were committed from protoc-gen-es v2.11.0 while the workspace locks 2.12.0 (drift class: `@generated` header version + optional message fields `?: T` → `?: T \| undefined`; no descriptor change); only `typeinfo_pb.ts` carries a byte-pin (`crates/verter_protocol/tests/typeinfo_proto_ts_freshness.rs`, byte-equal against the canonical buf+oxfmt regen — verified green). B1's whole-input-dir `pnpm proto:gen` COLLIDES with the drift: its implementer would otherwise silently mix the unpinned component-meta regen into the wire commit or `git checkout --` it away — the plan was silent on which. NEW tiny block B1b (ordered after B1, NO schema change — B1 stays the program's one wire block) regenerates the two files with the locked generator AND extends the byte-equality freshness class to EVERY committed generated binding IN THE SAME CHANGE (regen-only leaves the guard gap open; pin-before-regen violates Stub Prevention) — guard `proto_ts_bindings_byte_pinned_repo_wide` (§6), swept by B12 like every §6 guard. Separately ratified dispositions: (i) the 6-finding rust-1.96 stable-clippy drift on base (5× `collapsible_match` in `verter_compiler` — compile/mod.rs:193, ide/script/detectors.rs:169, ide/template/directives.rs:675, script/process.rs:172, strip_types/typescript.rs:235; 1× `unnecessary_sort_by` in `verter_semantic` — analysis/type_eval_build.rs:673) is an ORCHESTRATOR-OWNED out-of-program base-hygiene commit — fix the findings mechanically, do NOT pin the toolchain backward, block managers never patch unrelated crates inside a block; (ii) the fresh-worktree `pnpm test` preflight is a §7 doc note (gate-operation guidance, not product code). | codex consult (xhigh, 2026-06-10, /tmp/verter-mf/m11-consult/): "ratify D-be" — Q1 shape (c) regen+pin together; Q2 new B1b ("B12 is too late; out-of-program is wrong because B1's regen already collides with the drift"); Q3 base hygiene; Q4 §7 note. |
 
 ---
 
@@ -273,6 +274,7 @@ frameworks are filed, not fixed here):
 | `react_callback_props_not_emits` | DEFERRED (rides with B7, D-ab) | test | React adapter never classifies callback props as EMITS — lands when B7 reopens |
 | (retired-symbol gate additions) | B2/B4/B5 | static-grep | `cached_parse` (the token, workspace-wide in production — ALL SEVEN carrier fields of the D-af sweep are renamed/replaced, and the `route_owned_snapshot_cached_parse_hits` counter family is renamed, so the token retires cleanly), the four `FileKind` enums, `ExportGraphFileKind`, `ffi_file_kind_to_host` (B2/B4), `VueShallowMetadataStore` + `VueMacroDtoKey`-as-store-key (B5, migrated onto `FrameworkSurfaceDtoStore` per D-p) added to the `no_legacy_walker.rs`-pattern retired list |
 | (existing pins re-run) | B1+ | — | proto/TS taxonomy parity, byte-equal TS bindings, audit parity, request-validation closed-set — all green across the schema bump |
+| `proto_ts_bindings_byte_pinned_repo_wide` | B1b | test | the byte-equality freshness class in `crates/verter_protocol/tests/typeinfo_proto_ts_freshness.rs` covers EVERY committed generated binding under `packages/proto/src/gen/` (today: `typeinfo_pb.ts`, `component_meta_pb.ts`, `selective_component_meta_pb.ts`) — parameterized byte-compare of each committed file against the canonical workspace buf+oxfmt regen into a tempdir, PLUS file-inventory set-equality between the committed gen tree and the regen output (a generated-but-uncommitted or committed-but-orphaned binding fails); graceful skip when `buf` is absent mirrors the existing typeinfo pin (D-be) |
 
 **New CRITICAL rule** ("Framework Adapters Are Thin Projections (CRITICAL)") is added to CLAUDE.md
 + a new `/framework-adapters` skill in B5, registered in `CRITICAL_RULE_GUARDS` with
@@ -288,6 +290,7 @@ frameworks are filed, not fixed here):
 | # | Block | Depends on | Parallel-safe with |
 |---|---|---|---|
 | B1 | Wire completion (the one wire block) | — | B2, B3 |
+| B1b | Proto TS bindings regen + freshness-class completion (D-be) | B1 | B2, B3 |
 | B2 | `verter_language` + routing cutover | — | B1 |
 | B3 | Neutral script-analysis rehoming (FQ1) | — (scheduled after B2: same-crate file overlap) | B1 |
 | B4 | `FrameworkParseArtifact` carrier cutover (FQ2) | B2, B3 | — |
@@ -330,6 +333,17 @@ cargo clippy --workspace -- -D warnings
 cargo fmt --all --check
 pnpm install --frozen-lockfile
 pnpm test                                      # where TS was touched
+```
+
+**Fresh-worktree preflight (D-be)**: in a fresh per-block worktree the `pnpm test` leg fails for
+environment reasons (no `node_modules`, no native/dist artifacts) until the build chain runs.
+Before the first `pnpm test` in a fresh worktree:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm run build:native
+pnpm run build:ts                              # covers @verter/proto
+pnpm --filter @verter/component-meta build     # compat tests inspect its dist output
 ```
 
 ---
@@ -429,6 +443,54 @@ vertical; Astro/Angular tags land with their own verticals.
 **Verification.** The gate (TS touched → `pnpm test` required).
 
 **Dependencies.** None. Parallel-safe with B2/B3.
+
+---
+
+### B1b — Proto TS bindings regen + freshness-class completion (D-be)
+
+**Context.** The committed TS bindings for the two component-meta protos
+(`packages/proto/src/gen/verter/v1/component_meta_pb.ts`, `selective_component_meta_pb.ts`) were
+generated with protoc-gen-es v2.11.0 while the workspace locks 2.12.0; the canonical
+`pnpm proto:gen` pipeline (workspace `buf` + `oxfmt`) produces drift — `@generated` header version
+plus optional message fields `?: T` → `?: T | undefined` (68 and 28 diff lines respectively;
+verified byte-level, with `typeinfo_pb.ts` byte-equal, validating the pipeline). Only
+`typeinfo_pb.ts` carries a byte-pin freshness test
+(`crates/verter_protocol/tests/typeinfo_proto_ts_freshness.rs`); the other two committed generated
+bindings have NO freshness guard of any kind. B1's regen step runs the whole-input-dir
+`pnpm proto:gen` (buf.gen.yaml inputs the entire `crates/verter_protocol/proto` directory) and
+therefore collides with the drift. This block, ordered immediately after B1, owns the regen and
+completes the freshness class repository-wide (D-be). NO proto schema change — B1 stays the
+program's one wire block.
+
+**Changes.**
+- Regenerate `component_meta_pb.ts` + `selective_component_meta_pb.ts` via `pnpm proto:gen` (the
+  workspace-locked protoc-gen-es 2.12.0) and commit the regenerated files. If B1's landed commit
+  already includes them (its whole-input-dir regen step may have committed all three files), the
+  regen half is a no-op verification — the freshness extension still lands here.
+- `crates/verter_protocol/tests/typeinfo_proto_ts_freshness.rs`: extend the byte-equality class
+  with a parameterized test over EVERY committed file under `packages/proto/src/gen/` — the
+  existing tempdir regen already produces all of them; byte-compare each committed binding against
+  its regenerated+oxfmt'd counterpart, and assert file-inventory set-equality between the
+  committed gen tree and the regen output (a generated-but-uncommitted or committed-but-orphaned
+  binding fails). The typeinfo-specific structural/header tests stay as-is; the graceful
+  skip-when-`buf`-absent behavior is mirrored.
+
+**Legacy Deletions.** None (generated files replaced in place; no superseded code path).
+
+**Tests (failing first).**
+1. The parameterized byte-equality test is RED against the pre-regen tree (the two v2.11.0 files
+   drift) and GREEN after the regen — discriminating for both halves landing together (Stub
+   Prevention: pin and regen in ONE change; pin-only would be red, regen-only would leave the
+   class unguarded).
+2. Inventory set-equality half: committed gen-tree file set == regen output file set.
+3. NEGATIVE: the block's diff touches NO `.proto` file and NO Rust binding (`git diff` scope =
+   the two regenerated TS files + the freshness test); `typeinfo_pb.ts` stays byte-identical.
+4. Existing typeinfo pins re-run green (taxonomy parity, structural, header, byte-equal).
+
+**Verification.** The gate (generated TS touched → `pnpm test` required).
+
+**Dependencies.** B1 (regenerates from the post-B1 schema — no cross-block regen conflict).
+Parallel-safe with B2/B3.
 
 ---
 
@@ -1737,7 +1799,7 @@ remaining `is_vue_*` helper aliases.
 
 **Verification.** The gate (TS touched) + a full-program soak on the integration branch.
 
-**Dependencies.** All in-scope blocks (B1–B6, B8a/B8b/B8c).
+**Dependencies.** All in-scope blocks (B1, B1b, B2–B6, B8a/B8b/B8c).
 
 ---
 
